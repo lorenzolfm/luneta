@@ -1,0 +1,5 @@
+# Mirrors zellij's own pin. The flake is the source of truth on NixOS; this file
+# exists so a rustup-based machine gets the same toolchain and target.
+[toolchain]
+channel = "1.95.0"
+targets = ["wasm32-wasip1"]

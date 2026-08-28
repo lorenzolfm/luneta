@@ -1,0 +1,16 @@
+[package]
+name = "zj-picker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zellij-tile = "=0.45.0"
+# Same crates the upstream session-manager uses, at the versions zellij's own
+# workspace pins. `fuzzy-matcher` is the skim scorer behind the filter.
+fuzzy-matcher = { version = "0.3.7", default-features = false }
+unicode-width = { version = "0.2.2", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
