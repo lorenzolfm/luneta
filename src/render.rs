@@ -770,7 +770,11 @@ enum AgentFit {
 /// Deliberately the same shape as the other two — same prompt row, same table, same note and
 /// help rows in the same places — so `Tab` swaps the *contents* of a screen rather than the
 /// screen itself.
-pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize) {
+///
+/// `frame` is the animation tick, and reaches exactly one thing: the busy spinner's glyph. It
+/// is threaded down rather than read from `agents`, because it is a fact about *when we are
+/// drawing*, not about the agents — the snapshot they came from is still frozen.
+pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, frame: u64) {
     let width = budget(cols);
     let y = if rows > 4 { 1 } else { 0 };
 
@@ -785,7 +789,7 @@ pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize) {
     } else if agents.rows.is_empty() {
         print_centered(agent_empty_text(agents, term), cols, table_y + 1);
     } else {
-        render_agent_results(agents, cols, table_y, width, list_rows);
+        render_agent_results(agents, cols, table_y, width, list_rows, frame);
     }
 
     let notes_y = rows.saturating_sub(1).saturating_sub(notes.len());
@@ -795,7 +799,14 @@ pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize) {
     print_centered(agents_help(width), cols, rows.saturating_sub(1));
 }
 
-fn render_agent_results(agents: &AgentSet, cols: usize, y: usize, width: usize, list_rows: usize) {
+fn render_agent_results(
+    agents: &AgentSet,
+    cols: usize,
+    y: usize,
+    width: usize,
+    list_rows: usize,
+    frame: u64,
+) {
     let capacity = list_rows.saturating_sub(1);
     if capacity == 0 {
         return;
@@ -809,12 +820,18 @@ fn render_agent_results(agents: &AgentSet, cols: usize, y: usize, width: usize, 
     let window = &agents.rows[start..end];
 
     // Measured over the visible window only, as on both other screens: widths taken from rows
-    // you cannot see make the columns jump as you scroll.
-    let full_tag = window.iter().map(|r| agents::full_tag(&r.status).width()).max().unwrap_or(0);
+    // you cannot see make the columns jump as you scroll. And measured at the same `frame` the
+    // cells below are built at, so a width and the glyph that has to fit in it can never come
+    // from two different turns of the spinner — every spinner frame is one column wide anyway
+    // (see `agents::SPINNER`), and passing the frame is what keeps that a property of the
+    // spinner rather than an assumption made here.
+    let full_tag =
+        window.iter().map(|r| agents::full_tag(&r.status, frame).width()).max().unwrap_or(0);
     // Measured rather than assumed, unlike the directory screen's fixed `ABBR_TAG`: a glyph is
     // two columns wide and an unknown status's `[S]` fallback is three, so the narrow tag column
     // is not one width any more.
-    let abbr_width = window.iter().map(|r| agents::abbr_tag(&r.status).width()).max().unwrap_or(0);
+    let abbr_width =
+        window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
     let age_width = window
         .iter()
         .map(|r| agents::format_duration(r.age).width())
@@ -869,6 +886,7 @@ fn render_agent_results(agents: &AgentSet, cols: usize, y: usize, width: usize, 
             &fit,
             name_budget,
             cwd_budget,
+            frame,
         );
         // Measured after truncation, which is the only width the host will ever see.
         name_column = name_column.max(cells[0].content().width());
@@ -903,6 +921,7 @@ fn agent_result_row(
     fit: &AgentFit,
     name_budget: usize,
     cwd_budget: Option<usize>,
+    frame: u64,
 ) -> Vec<Text> {
     let label = truncate(&row.label(), name_budget);
     // The term was matched against the **bare** session name, so a `:pane` suffix cannot carry
@@ -912,9 +931,9 @@ fn agent_result_row(
     let indices: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible_chars).collect();
 
     let tag = if matches!(fit, AgentFit::Full) {
-        agents::full_tag(&row.status)
+        agents::full_tag(&row.status, frame)
     } else {
-        agents::abbr_tag(&row.status)
+        agents::abbr_tag(&row.status, frame)
     };
     // The one status that is spelled in the accent colour. Every other status — including ones
     // released after this was written — renders as itself, quietly.

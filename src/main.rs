@@ -56,6 +56,18 @@ const AGENTS_COMMAND: &str = "agents_command";
 /// `floating true` and needs no restart to change.
 const FLOATING: (&str, &str, &str, &str) = ("20%", "20%", "60%", "60%");
 
+/// The animation tick, in seconds — ten a second, which is what the busy spinner needs to read
+/// as motion rather than as a glyph that keeps changing its mind.
+///
+/// ⚠️ This is **not** the poll interval, and the two were the same number until the spinner
+/// arrived. The host call behind [`State::poll`] still runs once a second; see
+/// [`TICKS_PER_POLL`]. Speeding the timer up without that divisor would have quietly taken the
+/// session list from one `get_session_list` a second to ten.
+const TICK: f64 = 0.1;
+
+/// Animation ticks per session poll, so that the poll stays at its original once a second.
+const TICKS_PER_POLL: u64 = 10;
+
 /// Which screen has the keyboard. Kill-all and disconnect-others are still cut: both act on
 /// sessions you cannot see from here, which is the one thing this picker refuses to do.
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -198,6 +210,12 @@ struct State {
     /// user does that could produce a new one — never as an overlay, so it cannot eat a
     /// keystroke the way upstream's `show_error()` does.
     error: Option<String>,
+    /// Animation ticks since load, counted for the busy spinner and divided down for the poll.
+    ///
+    /// Monotonic rather than reset per screen, so the spinner is one clock the whole list reads
+    /// off: every busy row turns in step, which reads as one thing happening rather than as
+    /// several rows each doing their own.
+    frame: u64,
 }
 
 register_plugin!(State);
@@ -264,9 +282,21 @@ impl ZellijPlugin for State {
                 true
             },
             Event::Timer(_) => {
-                self.poll();
-                set_timeout(1.0);
-                true
+                set_timeout(TICK);
+                // Counted *before* the increment, so the poll rides on frame 0 — which is the
+                // very first tick after `load`'s `set_timeout(0.0)`. That is what keeps the
+                // session list populated by the first timer, as it was before the divisor;
+                // dividing the other way round would have left the first second blank.
+                let polled = self.frame.is_multiple_of(TICKS_PER_POLL);
+                if polled {
+                    self.poll();
+                }
+                self.frame = self.frame.wrapping_add(1);
+                // Nine ticks in ten now change nothing. Redrawing on them anyway would rebuild
+                // and repaint the whole table ten times a second to put back the pixels that
+                // were already there, so a tick that is neither a poll nor a spinner frame is
+                // spent by saying so.
+                polled || self.spinning()
             },
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
@@ -346,9 +376,13 @@ impl ZellijPlugin for State {
                 Screen::Dirs => {
                     render::render_dirs(&self.dirs, &self.matches.search_term, rows, cols)
                 },
-                Screen::Agents => {
-                    render::render_agents(&self.agents, &self.matches.search_term, rows, cols)
-                },
+                Screen::Agents => render::render_agents(
+                    &self.agents,
+                    &self.matches.search_term,
+                    rows,
+                    cols,
+                    self.frame,
+                ),
             },
             Mode::Rename => render::render_rename(
                 &self.rename,
@@ -395,6 +429,15 @@ impl State {
         // is which call `Enter` would make and which row is us, both of which are functions of
         // the session poll rather than of the agents.
         self.rebuild_agents(Selection::Hold);
+    }
+
+    /// Is a spinner on screen right now, and therefore is this tick worth a redraw?
+    ///
+    /// All three conditions, because a busy agent that is not being *looked at* is not a reason
+    /// to repaint: the agent screen only draws in `Search` mode, so a rename or a confirm over
+    /// the top of it hides every spinner in the list.
+    fn spinning(&self) -> bool {
+        self.mode == Mode::Search && self.screen == Screen::Agents && self.agents.any_busy()
     }
 
     /// The pane the picker was opened over, or `None` when it cannot be told.
