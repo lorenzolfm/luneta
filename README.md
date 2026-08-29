@@ -6,9 +6,10 @@ semantics — type a few characters, press `Enter`, you're there.
 It lists live and resurrectable sessions, filters them as you type, and attaches
 on `Enter` to the highlighted row — creating a session only when you ask for one.
 
-`Tab` swaps that list for the directories you actually work in, ranked by
-zoxide's frecency, so the picker answers *"where do I want to be?"* as well as
-*"which session am I already in?"*.
+`Tab` cycles through three lists: sessions, the Claude Code agents that are
+running, and the directories you actually work in (ranked by zoxide's
+frecency). So the picker answers *"which agent wants me?"* and *"where do I
+want to be?"* as well as *"which session am I already in?"*.
 
 Built against **zellij 0.45.0** (`zellij-tile = "=0.45.0"`).
 
@@ -22,10 +23,26 @@ Built against **zellij 0.45.0** (`zellij-tile = "=0.45.0"`).
          old-deploy     [RESURRECT]  1w ago
 
        you are in "my-current-session" — not listed
-  <↓↑> Nav  <ENTER> Select  <TAB> Dirs  <Ctrl r> Rename  <Del> Delete  <ESC> Close
+  <↓↑> Nav  <ENTER> Select  <TAB> Agents  <Ctrl r> Rename  <Del> Delete  <ESC> Close
 ```
 
 and, one `Tab` away:
+
+```
+              Agent: _ <ENTER> - Go to "proper-airpods-nixos"
+
+  proper-airpods-nixos   🙋 WAITING 18m misc/proper-airpods-nixos
+  claude-code-status-bar 🙋 WAITING 17m misc/claude-code-status-bar
+  wt                     ☕ IDLE    2h  misc/wt
+  scratch:0              ☕ IDLE    9m  misc/zj-picker
+  scratch:1              🐚 SHELL   6m  lorenzo/Documents
+  zellij                 🧠 BUSY    31m misc/zellij
+
+                    1 agent not in zellij — not listed
+  <↓↑> Nav  <ENTER> Go  <TAB> Directories  <ESC> Back
+```
+
+and one more `Tab` on from there:
 
 ```
          Directory: home_ <ENTER> - Create "misc-homelab"
@@ -51,6 +68,62 @@ and, one `Tab` away:
   line below the list says which session is being hidden.
 - The details column is the **age**, for both kinds of row. It is the sort key,
   so showing it is what makes the order look deliberate rather than arbitrary.
+
+### The agent screen
+
+The list comes from `claude-agents`, a separate tool on `$PATH` that joins what
+Claude Code publishes about itself (`~/.claude/sessions/<pid>.json`) to the pane
+each agent is running in. The plugin cannot do that join itself: its wasi
+sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
+`~/.claude/sessions` nor `/proc` is readable from inside it.
+
+- **Sorted attention-first** — `waiting`, then `idle`, then `busy`, then
+  anything else — with the longest-waiting first inside each group. The status
+  rank sits *above* the fuzzy score, so the boundary between "wants you" and
+  "does not" stays a fixed landmark while you narrow instead of shuffling on
+  every keystroke.
+- **Statuses are passed through verbatim**, uppercased, behind a glyph:
+
+  | | status | why |
+  |---|---|---|
+  | 🙋 | `waiting` | hand up — it asked you something and stopped |
+  | ☕ | `idle` | *finished*, waiting on you. Not asleep: an idle agent outranks a busy one in the sort, so it gets a cup rather than a 💤 |
+  | 🧠 | `busy` | thinking, which is the one thing this kind of process is doing |
+  | 🐚 | `shell` | it is a shell |
+  | 🛸 | anything else | unidentified, and visibly not one of the four |
+
+  Those four are the *whole* vocabulary of Claude Code 2.1.251 — read out of
+  the binary (`"busy","shell","idle","waiting"`) rather than inferred from
+  whatever happened to be running. That makes the table complete **today**, and
+  is not a reason to drop 🛸: the set grew by one (`shell`) between two releases
+  already.
+
+  So **the table is decoration and nothing else**: it never decides whether a
+  row is shown or where it sorts, and it never replaces the word. A status
+  invented after this was written keeps its own word, takes 🛸, and ranks last.
+  The table going stale costs a picture, never a row. In a pane too narrow for
+  the word the glyph stands alone; an unrecognised status falls back to its
+  first letter instead, because 🛸 on every unknown row would render two
+  different unknown statuses identically.
+- **The age is a duration, not a timestamp.** `35m` means "has been idle for
+  thirty-five minutes", which is the routing decision; `35m ago` would be a
+  different claim.
+- **The cwd is its last two components**, so `misc/zj-picker` rather than
+  `/home/you/Projects/misc/zj-picker`. Down a column of agents the leading
+  components are the same on every row and separate nothing. Two rather than
+  one for the reason the directory screen derives names from two: measured
+  across a real 136-path zoxide database, the last-two form collided zero
+  times where the bare basename collided nine ways.
+- **A `:pane` suffix appears only when two rows share a session name**, and it
+  is never what the search term matches — you type the bare name. It shows up
+  exactly when the session name stops identifying one target.
+- **A glance, not a watch.** The snapshot is taken when the screen opens and
+  frozen while it is up. That is what makes attention-first ordering safe:
+  nothing reorders while you read it.
+- **The agent whose pane you opened the picker from is not listed**, dropped by
+  `(session, pane)` rather than by session — a *sibling* agent in the same
+  session is a legitimate target and stays. Agents running outside zellij are
+  dropped too, and counted on the note line so they are never silently absent.
 
 ### What `Enter` does
 
@@ -221,9 +294,32 @@ What is left is the reduction ladder. Upstream's `ui/components.rs` is 1847
 lines, and most of it serves the tab and pane drill-down this picker cuts — the
 four-column layout and the five-tier width-reduction algorithm that fed it. With
 three fixed columns the reduction is a three-step ladder: full tags and age →
-`[A]`/`[R]` and age → `[A]`/`[R]` only. Column widths are measured over the
+`[A]`/`[R]` and age → `[A]`/`[R]` only. The agent screen has four columns and so
+one rung more — abbreviate the tag → drop the cwd → drop the age; age outranks
+cwd because the session name usually already names the project, while nothing
+else says how long an agent has been stuck. Column widths are measured over the
 **visible window**, not the whole list, so one very long name cannot cost every
 other row its age column.
+
+### `Enter` on an agent is two calls, not one
+
+Every other row in this picker ends in `switch_session`. An agent row cannot,
+because agents are reachable at *pane* granularity and one of the panes may be
+in the session you are already sitting in — and asking zellij to attach to your
+own session does not decline, it reaches a bare
+`panic!("You are trying to attach to the current session")`
+(`src/commands.rs:793`) and takes the client down.
+
+So the row carries which call applies:
+
+- a **different** session → `switch_session_with_focus(name, None, Some((pane, false)))`,
+  which attaches *and* lands on the pane rather than the session's default one;
+- **our own** session → `focus_terminal_pane(pane, …)`, a plain pane focus.
+
+That split also removes the need for a refusal. A directory row that resolves to
+the current session is `[HERE]` and does nothing, because there is nothing safe
+for it to do; an agent in the current session has a call that works, so it stays
+a live target.
 
 ### Centring is per element, not per screen
 
@@ -314,6 +410,43 @@ A `file:~` URL is fine — the tilde is preserved and shell-expanded
 Then point the bindings at `"zj-picker"` instead of `"session-manager"`.
 Changing the alias block **requires a zellij restart**; changing the `.wasm`
 behind it does not.
+
+### Opening straight onto a screen
+
+A key can open the picker *on* a chosen screen by pairing `LaunchOrFocusPlugin`
+with a `MessagePlugin` naming it — `sessions`, `agents` or `dirs`:
+
+```kdl
+bind "Ctrl a" {
+    LaunchOrFocusPlugin "file:/home/you/.local/share/zellij/plugins/zj-picker.wasm" {
+        floating true
+        move_to_focused_tab true
+        skip_plugin_cache true
+    }
+    MessagePlugin "file:/home/you/.local/share/zellij/plugins/zj-picker.wasm" {
+        name "screen"
+        payload "agents"
+    }
+    SwitchToMode "normal"
+}
+```
+
+Three things about that, each found the hard way:
+
+- 🔴 **Both actions need the full `file:` path, not the `zj-picker` alias.**
+  `MessagePlugin` does not resolve the alias to the running instance: it
+  launches a *second*, hidden one and messages that, leaving the visible picker
+  on whatever screen it was already showing. Mixing the two forms across
+  bindings has the same effect. Use the path everywhere, including in the
+  binding that opens the picker normally.
+- 🔴 **`MessagePlugin` alone will not do.** It launches the plugin if it is not
+  running, but launches it *hidden* and unfocused — the pane exists and you
+  cannot see or type into it. `LaunchOrFocusPlugin` first is what makes it
+  visible.
+- ⚠️ **Give every such binding its own `MessagePlugin`.** A plain
+  `LaunchOrFocusPlugin` only focuses, so once one key has moved the picker to
+  the agents it stays there, and the key that used to open the sessions no
+  longer does. When each key names its screen, each one lands where it says.
 
 ## Notes for the next change
 

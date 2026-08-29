@@ -24,6 +24,7 @@
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
+use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
 use crate::dirs::{Action, DirRow, DirSet, Status};
 use crate::sessions::{format_age, Kind, MatchSet, Row};
 use crate::{Pending, Rename};
@@ -619,7 +620,7 @@ fn search_help(width: usize) -> Text {
         &[
             ("<↓↑>", "Navigate", "Nav"),
             ("<ENTER>", "Select", "Select"),
-            ("<TAB>", "Directories", "Dirs"),
+            ("<TAB>", "Agents", "Agents"),
             ("<Ctrl r>", "Rename", "Rename"),
             ("<Del>", "Delete", "Delete"),
             ("<ESC>", "Deselect/Close", "Close"),
@@ -676,6 +677,31 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
     text
 }
 
+/// The last two components of a path: `misc/zj-picker` for
+/// `/home/you/Projects/misc/zj-picker`.
+///
+/// Down a column of agents the leading components are the same `/home/you/…` on every row, so
+/// they cost width without separating anything. What tells two agents apart is at the end.
+///
+/// Two components rather than one, for the reason [`crate::dirs`] derives session names from
+/// two: measured across a real 136-path zoxide database, the last-two form collided **zero**
+/// times where the bare basename collided nine ways (`master`, `backend`, `frontend`, `bin`,
+/// …). One component would be shorter and would routinely name two different projects the same
+/// thing, on the one screen whose job is telling agents apart.
+///
+/// ⚠️ No `…` marks the elision, unlike [`truncate_left`]. This is an abbreviation applied to
+/// every row by the same rule, not a row running out of room — a marker on all of them would
+/// be noise carrying no per-row information.
+fn short_cwd(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    match parts.as_slice() {
+        // `/` itself, or something that is not a path at all.
+        [] => path.to_string(),
+        [only] => (*only).to_string(),
+        [.., parent, base] => format!("{}/{}", parent, base),
+    }
+}
+
 /// Truncate from the **left**, keeping the tail, and report how many characters went.
 ///
 /// A path is identified by its last components; its first are `/home/you/` on every row of the
@@ -719,4 +745,255 @@ fn truncate(text: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// How much the agent row had to give up to fit the pane's width.
+///
+/// The ladder is **abbreviate the tag → drop cwd → drop age**, and that order is a judgement
+/// about what each column is for. Age outranks cwd because in the common case the session name
+/// already names the project the cwd would repeat, while nothing else on the row says how long
+/// an agent has been stuck — which is the whole routing decision.
+#[derive(PartialEq, Eq)]
+enum AgentFit {
+    /// name + [WAITING] + age + cwd
+    Full,
+    /// name + [W] + age + cwd
+    AbbrTag,
+    /// name + [W] + age
+    NoCwd,
+    /// name + [W]
+    NoAge,
+}
+
+/// The agent screen: who is running, what they are doing, and how long they have been doing it.
+///
+/// Deliberately the same shape as the other two — same prompt row, same table, same note and
+/// help rows in the same places — so `Tab` swaps the *contents* of a screen rather than the
+/// screen itself.
+pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize) {
+    let width = budget(cols);
+    let y = if rows > 4 { 1 } else { 0 };
+
+    print_centered(agent_prompt(agents, term), cols, y);
+
+    let notes = agent_note_texts(agents, width);
+    let table_y = y + 1;
+    let list_rows = rows.saturating_sub(notes.len() + 2).saturating_sub(table_y);
+
+    if list_rows == 0 {
+        // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
+    } else if agents.rows.is_empty() {
+        print_centered(agent_empty_text(agents, term), cols, table_y + 1);
+    } else {
+        render_agent_results(agents, cols, table_y, width, list_rows);
+    }
+
+    let notes_y = rows.saturating_sub(1).saturating_sub(notes.len());
+    for (i, note) in notes.into_iter().enumerate() {
+        print_centered(note, cols, notes_y + i);
+    }
+    print_centered(agents_help(width), cols, rows.saturating_sub(1));
+}
+
+fn render_agent_results(agents: &AgentSet, cols: usize, y: usize, width: usize, list_rows: usize) {
+    let capacity = list_rows.saturating_sub(1);
+    if capacity == 0 {
+        return;
+    }
+    let overflows = agents.rows.len() > capacity;
+    let visible = if overflows { capacity.saturating_sub(1) } else { capacity };
+    if visible == 0 {
+        return;
+    }
+    let (start, end) = viewport(agents.selected.unwrap_or(0), agents.rows.len(), visible);
+    let window = &agents.rows[start..end];
+
+    // Measured over the visible window only, as on both other screens: widths taken from rows
+    // you cannot see make the columns jump as you scroll.
+    let full_tag = window.iter().map(|r| agents::full_tag(&r.status).width()).max().unwrap_or(0);
+    // Measured rather than assumed, unlike the directory screen's fixed `ABBR_TAG`: a glyph is
+    // two columns wide and an unknown status's `[S]` fallback is three, so the narrow tag column
+    // is not one width any more.
+    let abbr_width = window.iter().map(|r| agents::abbr_tag(&r.status).width()).max().unwrap_or(0);
+    let age_width = window
+        .iter()
+        .map(|r| agents::format_duration(r.age).width())
+        .max()
+        .unwrap_or(0);
+    // Capped at a third of the width before anything else is decided — the name is the one
+    // column with a natural size, and letting it take what it likes is what turns four columns
+    // into two and a half.
+    let name_budget = window
+        .iter()
+        .map(|r| r.label().width())
+        .max()
+        .unwrap_or(0)
+        .min(width / 3)
+        .max(4);
+
+    // ⚠️ The host charges `max_column_width + 1` for *every* column, the last one included, and
+    // silently drops any column that pushes the running total past the width it was given. So
+    // the fixed cost of a four-column row is four, not the three gaps you can see — budgeting
+    // for the visible gaps is what costs the table its last column. See [`print_table_centered`].
+    let fit = if name_budget + full_tag + age_width + MIN_PATH + 4 <= width {
+        AgentFit::Full
+    } else if name_budget + abbr_width + age_width + MIN_PATH + 4 <= width {
+        AgentFit::AbbrTag
+    } else if name_budget + abbr_width + age_width + 3 <= width {
+        AgentFit::NoCwd
+    } else {
+        AgentFit::NoAge
+    };
+
+    let abbr = fit != AgentFit::Full;
+    let tag_width = if abbr { abbr_width } else { full_tag };
+    let cwd_budget = match fit {
+        AgentFit::Full | AgentFit::AbbrTag => {
+            Some(width.saturating_sub(name_budget + tag_width + age_width + 4))
+        },
+        _ => None,
+    };
+
+    let columns = match fit {
+        AgentFit::Full | AgentFit::AbbrTag => 4,
+        AgentFit::NoCwd => 3,
+        AgentFit::NoAge => 2,
+    };
+    let mut table = header_row(Table::new(), columns);
+    let mut name_column = 1; // the blank title cell is one column wide
+    let mut cwd_column = 0;
+    for (offset, row) in window.iter().enumerate() {
+        let cells = agent_result_row(
+            row,
+            agents.selected == Some(start + offset),
+            &fit,
+            name_budget,
+            cwd_budget,
+        );
+        // Measured after truncation, which is the only width the host will ever see.
+        name_column = name_column.max(cells[0].content().width());
+        if let Some(cwd) = cells.get(3) {
+            cwd_column = cwd_column.max(cwd.content().width());
+        }
+        table = table.add_styled_row(cells);
+    }
+
+    let mut widths = vec![name_column, tag_width];
+    if !matches!(fit, AgentFit::NoAge) {
+        widths.push(age_width);
+    }
+    if cwd_budget.is_some() {
+        widths.push(cwd_column);
+    }
+    print_table_centered(table, &widths, cols, y, list_rows);
+
+    if overflows {
+        let hidden = agents.rows.len() - window.len();
+        print_centered(
+            Text::new(format!("+{} more", hidden)).dim_all(),
+            cols,
+            y + 1 + window.len(),
+        );
+    }
+}
+
+fn agent_result_row(
+    row: &AgentRow,
+    selected: bool,
+    fit: &AgentFit,
+    name_budget: usize,
+    cwd_budget: Option<usize>,
+) -> Vec<Text> {
+    let label = truncate(&row.label(), name_budget);
+    // The term was matched against the **bare** session name, so a `:pane` suffix cannot carry
+    // a hit — and a truncated label drops the indices that fell off the end, because colouring
+    // a position that no longer exists paints the wrong character.
+    let visible_chars = label.chars().count();
+    let indices: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible_chars).collect();
+
+    let tag = if matches!(fit, AgentFit::Full) {
+        agents::full_tag(&row.status)
+    } else {
+        agents::abbr_tag(&row.status)
+    };
+    // The one status that is spelled in the accent colour. Every other status — including ones
+    // released after this was written — renders as itself, quietly.
+    let tag_level = if agents::is_waiting(&row.status) { ACCENT } else { TAG };
+
+    let mut cells = vec![
+        Text::new(&label).color_range(NAME, ..).color_indices(ACCENT, indices),
+        Text::new(tag).color_range(tag_level, ..),
+    ];
+    if !matches!(fit, AgentFit::NoAge) {
+        cells.push(Text::new(agents::format_duration(row.age)).color_range(LABEL, ..));
+    }
+    if let Some(cwd_budget) = cwd_budget {
+        // Still `truncate_left` underneath: two components are short, but not bounded — a
+        // single directory may be named anything at all.
+        let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
+        // Not highlighted: the match ran on the session name, and painting hits onto a string
+        // they were not found in would be a lie that happens to line up sometimes.
+        cells.push(Text::new(&cwd).color_range(LABEL, ..));
+    }
+    if selected {
+        cells = cells.into_iter().map(Text::selected).collect();
+    }
+    cells
+}
+
+/// The agent prompt names where `Enter` would put you — the session, and the pane when the
+/// session alone does not say which.
+fn agent_prompt(agents: &AgentSet, term: &str) -> Text {
+    let Some(row) = agents.selected_row() else {
+        return input_line("Agent:", term, None, false);
+    };
+    input_line("Agent:", term, Some(&format!("Go to \"{}\"", row.label())), false)
+}
+
+/// Agents outside zellij are not rows — `Enter` could do nothing for them. Counting them here
+/// is what keeps them from being *silently* absent: without this, an agent running in a plain
+/// terminal is a name you can type that gives a blank list and no reason.
+/// ⚠️ Every note is truncated to the pane, and that is not defensive tidiness — it is a
+/// defect this screen hit the first time it was driven into a failure. `print_centered` sizes
+/// its coordinate width to the text's *own* width, so a note wider than the pane is not
+/// clipped: it runs on until the help line — printed afterwards, on the row below — overwrites
+/// its tail mid-word. The failure reason is exactly the note that gets long, because it can
+/// carry a shell error carrying an absolute path.
+fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Text> {
+    let mut notes = Vec::new();
+    if let AgentStatus::Failed(reason) = &agents.status {
+        notes.push(Text::new(truncate(reason, width)).error_color_all());
+    }
+    let outside = match agents.outside {
+        0 => return notes,
+        1 => "1 agent not in zellij — not listed".to_string(),
+        n => format!("{} agents not in zellij — not listed", n),
+    };
+    notes.push(Text::new(truncate(&outside, width)).dim_all());
+    notes
+}
+
+fn agent_empty_text(agents: &AgentSet, term: &str) -> Text {
+    match &agents.status {
+        AgentStatus::Waiting => Text::new("looking for agents…").dim_all(),
+        // The reason is already on the note line directly below; on a pane this small, saying
+        // it twice costs more than the second copy is worth.
+        AgentStatus::Failed(_) => Text::new("no agents").dim_all(),
+        AgentStatus::Ready if term.is_empty() => Text::new("no agents running").dim_all(),
+        AgentStatus::Ready => Text::new(format!("no match for \"{}\"", term)).dim_all(),
+    }
+}
+
+/// The agent screen's keys. `Enter` does the same thing on every row, so there is only one to
+/// name — and the third screen has to fit the same 60%-of-terminal pane as the other two.
+fn agents_help(width: usize) -> Text {
+    keys_text(
+        width,
+        &[
+            ("<↓↑>", "Navigate", "Nav"),
+            ("<ENTER>", "Go to agent", "Go"),
+            ("<TAB>", "Directories", "Dirs"),
+            ("<ESC>", "Back", "Back"),
+        ],
+    )
 }

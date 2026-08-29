@@ -11,6 +11,7 @@
 //! name and the host resolves it (`src/commands.rs:752-786`) — live → attach, has a resurrection
 //! layout → resurrect, neither → create. One call, three outcomes, chosen by the name alone.
 
+mod agents;
 mod dirs;
 mod render;
 mod sessions;
@@ -19,9 +20,20 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use agents::{AgentSet, Jump};
 use dirs::{Action, DirSet};
 use sessions::{validate_name, Kind, MatchSet, Selection};
 use zellij_tile::prelude::*;
+
+/// The pipe message this plugin answers to, so that a key can open it *on* a chosen screen.
+///
+/// 🔴 A pipe rather than plugin configuration, and the difference is not stylistic. Zellij keys
+/// a plugin instance partly on its configuration, so `LaunchOrFocusPlugin` with
+/// `screen "agents"` is a *different* plugin from the one bound without it — pressing both keys
+/// leaves you with two picker panes floating over each other. Verified by construction: two
+/// launches differing only in configuration produced two panes. A pipe carries the request to
+/// the one instance that already exists instead of minting another.
+const SCREEN_PIPE: &str = "screen";
 
 /// Floating geometry, applied by the plugin to its own pane.
 ///
@@ -54,6 +66,46 @@ pub enum Screen {
     #[default]
     Sessions,
     Dirs,
+    /// The Claude Code agents that are running, and which one is waiting on you.
+    Agents,
+}
+
+impl Screen {
+    /// `Tab` cycles forward, `Shift-Tab` back. Three stops rather than two is what earns
+    /// `Shift-Tab` its place: with two screens the reverse key was the same key, and with three
+    /// the screen you want is otherwise two presses away half the time.
+    ///
+    /// The order is sessions, agents, directories, and it sorts by how attached the answer is
+    /// to something already running. Sessions and agents are both *live* things — the agent
+    /// screen is very nearly the session screen with a different reason for caring — so they sit
+    /// next to each other, one `Tab` apart. Directories are where you go when the answer is not
+    /// running yet, which makes them the far stop, and `Shift-Tab` reaches them in one press
+    /// from the sessions rather than two.
+    fn next(self) -> Self {
+        match self {
+            Screen::Sessions => Screen::Agents,
+            Screen::Agents => Screen::Dirs,
+            Screen::Dirs => Screen::Sessions,
+        }
+    }
+
+    /// The name a keybinding uses to ask for this screen. See [`State::pipe`].
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "sessions" => Some(Screen::Sessions),
+            "agents" => Some(Screen::Agents),
+            "dirs" | "directories" => Some(Screen::Dirs),
+            _ => None,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Screen::Sessions => Screen::Dirs,
+            Screen::Agents => Screen::Sessions,
+            Screen::Dirs => Screen::Agents,
+        }
+    }
 }
 
 /// The session a `Del` is aimed at, captured when the key was pressed.
@@ -107,6 +159,19 @@ struct State {
     /// The directory list, and why it is empty when it is. Populated out of band by zoxide —
     /// nothing else in here depends on it having arrived.
     dirs: DirSet,
+    /// The agent list. Populated out of band by `claude-agents`, on the same terms as `dirs`.
+    agents: AgentSet,
+    /// The last pane manifest, and which tab is focused.
+    ///
+    /// Kept for exactly one question: **which pane was focused when the picker opened.** The
+    /// picker is a floating pane, so asking the host for "the focused pane" returns the picker
+    /// itself — `get_focused_pane_info` resolves through `Screen::get_active_pane_id`, which
+    /// does not care what layer the answer is on. Tiled and floating panes keep *separate*
+    /// `active_panes` maps, though, so the terminal underneath goes on reporting `is_focused`
+    /// from its own layer while the picker holds focus in the other one. That is the pane we
+    /// came from, and it is only reachable through the manifest.
+    panes: Option<PaneManifest>,
+    active_tab: Option<usize>,
     /// The last snapshot, kept so a keystroke can re-filter without waiting for the next poll.
     live: Vec<(String, Duration)>,
     dead: Vec<(String, Duration)>,
@@ -138,9 +203,14 @@ impl ZellijPlugin for State {
             EventType::PermissionRequestResult,
             EventType::Timer,
             EventType::Key,
-            // zoxide answers here, and `Visible` is when it is worth asking again.
+            // zoxide and claude-agents both answer here, and `Visible` is when it is worth
+            // asking either of them again.
             EventType::RunCommandResult,
             EventType::Visible,
+            // Not for drawing anything: these two are the only route to the pane the picker
+            // was opened over. See `State::panes`.
+            EventType::PaneUpdate,
+            EventType::TabUpdate,
         ]);
         // NB: no privileged command here. Grants arrive asynchronously as
         // PermissionRequestResult, so anything needing one is denied if issued from load().
@@ -160,10 +230,12 @@ impl ZellijPlugin for State {
                     // Same reason, different permission: this is the first moment the host will
                     // accept a command from us.
                     self.ask_zoxide();
+                    self.ask_agents();
                 } else {
                     // The picker is dead in the water either way — the session list needs
                     // ReadApplicationState — but the directory screen is the one that can say so.
                     self.dirs.fail("permission denied");
+                    self.agents.fail("permission denied");
                 }
                 true
             },
@@ -174,25 +246,71 @@ impl ZellijPlugin for State {
             },
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                // Ours, or someone else's? This plugin issues exactly one command today, which
-                // is precisely why the check is here rather than left until it issues two.
-                if context.get(dirs::CONTEXT_KEY).map(String::as_str) != Some(dirs::CONTEXT_VALUE)
-                {
-                    return false;
+                // Ours, or someone else's — and now *which* of ours. The two screens share the
+                // context key and differ in its value; anything else on this channel belongs to
+                // another plugin and is not ours to parse.
+                match context.get(dirs::CONTEXT_KEY).map(String::as_str) {
+                    Some(dirs::CONTEXT_VALUE) => {
+                        self.dirs.ingest(exit_code, &stdout, &stderr);
+                        self.rebuild_dirs(Selection::Hold);
+                        true
+                    },
+                    Some(agents::CONTEXT_VALUE) => {
+                        self.agents.ingest(exit_code, &stdout, &stderr);
+                        self.rebuild_agents(Selection::Hold);
+                        true
+                    },
+                    _ => false,
                 }
-                self.dirs.ingest(exit_code, &stdout, &stderr);
-                self.rebuild_dirs(Selection::Hold);
-                true
+            },
+            // Neither of these redraws anything by itself — they keep the answer to "which pane
+            // did we come from" current, which decides one row's presence rather than any row's
+            // appearance.
+            Event::PaneUpdate(manifest) => {
+                self.panes = Some(manifest);
+                self.rebuild_agents(Selection::Hold);
+                false
+            },
+            Event::TabUpdate(tabs) => {
+                self.active_tab = tabs.iter().find(|t| t.active).map(|t| t.position);
+                self.rebuild_agents(Selection::Hold);
+                false
             },
             // The plugin is launched with `launch-or-focus`, so one instance outlives many
             // openings — and every `cd` in between has changed zoxide's answer. Nothing to
             // redraw yet; the reply arrives as its own event.
             Event::Visible(true) => {
                 self.ask_zoxide();
+                // 🔴 A glance, not a watch: the agent snapshot is taken here and then frozen for
+                // as long as the screen is up. That is what makes attention-first ordering safe
+                // — nothing reorders while you are reading it.
+                self.ask_agents();
                 false
             },
             _ => false,
         }
+    }
+
+    /// Open on a named screen: `MessagePlugin` with `name "screen"` and a payload of
+    /// `sessions`, `agents` or `dirs`.
+    ///
+    /// The name is checked so that an unrelated pipe — this plugin is reachable by any of them
+    /// — cannot move the screen out from under whoever is typing. An unknown payload is
+    /// likewise ignored rather than guessed at, which keeps a typo in a keybinding a no-op
+    /// instead of a surprise.
+    ///
+    /// Nothing is refreshed here. If the picker was closed, the host makes it visible and the
+    /// `Visible` handler takes the snapshot; if it was already open, it already has one, and
+    /// this screen is a glance rather than a watch.
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name != SCREEN_PIPE {
+            return false;
+        }
+        let Some(screen) = message.payload.as_deref().and_then(Screen::from_name) else {
+            return false;
+        };
+        self.screen = screen;
+        true
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
@@ -203,6 +321,9 @@ impl ZellijPlugin for State {
                 },
                 Screen::Dirs => {
                     render::render_dirs(&self.dirs, &self.matches.search_term, rows, cols)
+                },
+                Screen::Agents => {
+                    render::render_agents(&self.agents, &self.matches.search_term, rows, cols)
                 },
             },
             Mode::Rename => render::render_rename(
@@ -246,6 +367,62 @@ impl State {
         // A directory row's tag is a function of the session list, so it goes stale on exactly
         // the same tick the session list does.
         self.rebuild_dirs(Selection::Hold);
+        // The agent list is *not* re-fetched here — it is a frozen snapshot. What is recomputed
+        // is which call `Enter` would make and which row is us, both of which are functions of
+        // the session poll rather than of the agents.
+        self.rebuild_agents(Selection::Hold);
+    }
+
+    /// The pane the picker was opened over, or `None` when it cannot be told.
+    ///
+    /// Tiled first, then floating. A floating terminal that had focus loses it the moment the
+    /// picker floats above it, so that case is genuinely unanswerable — and answering it wrong
+    /// would omit a row the user can see no reason for.
+    fn origin_pane(&self) -> Option<u32> {
+        let tab = self.active_tab?;
+        let panes = self.panes.as_ref()?.panes.get(&tab)?;
+        let focused = |floating: bool| {
+            panes.iter().find(move |p| {
+                p.is_focused && !p.is_plugin && !p.is_suppressed && p.is_floating == floating
+            })
+        };
+        focused(false).or_else(|| focused(true)).map(|p| p.id)
+    }
+
+    /// Rebuild the agent rows against the current term and where we are standing.
+    ///
+    /// ⚠️ When the origin pane cannot be determined the row is **shown**, not guessed at:
+    /// omitting the wrong agent is a row that vanished for no reason the user can see, and
+    /// showing a spare one costs a line. The degraded mode is safe rather than merely honest —
+    /// an agent in our own session is a [`Jump::Focus`], so `Enter` on ourselves focuses the
+    /// pane we came from instead of reaching the self-attach panic.
+    fn rebuild_agents(&mut self, policy: Selection) {
+        let current = self.matches.current_session.clone();
+        let pane = self.origin_pane();
+        let origin = match (current.as_deref(), pane) {
+            (Some(session), Some(pane)) => Some((session, pane)),
+            _ => None,
+        };
+        self.agents
+            .rebuild(&self.matches.search_term, current.as_deref(), origin, policy);
+    }
+
+    /// Ask `claude-agents` for the list — once per answer, on the same terms as zoxide.
+    ///
+    /// Deliberately not on the 1s timer: that is the difference between a glance and a watch,
+    /// and the watch has not been shown to be worth its reordering yet.
+    fn ask_agents(&mut self) {
+        if self.agents.asking {
+            return;
+        }
+        self.agents.asking = true;
+        run_command(
+            &agents::QUERY,
+            BTreeMap::from([(
+                agents::CONTEXT_KEY.to_string(),
+                agents::CONTEXT_VALUE.to_string(),
+            )]),
+        );
     }
 
     /// Rebuild the directory rows against the current term and the current snapshot.
@@ -299,16 +476,20 @@ impl State {
             // the help line of both. It carries the search term across: type `bipa`, `Tab`, and
             // you are asking the other list the same question.
             BareKey::Tab if key.has_no_modifiers() => {
-                self.screen = match self.screen {
-                    Screen::Sessions => Screen::Dirs,
-                    Screen::Dirs => Screen::Sessions,
-                };
+                self.screen = self.screen.next();
+                true
+            },
+            // 🔴 There is no `BareKey::BackTab` — Shift-Tab arrives as `Tab` carrying the Shift
+            // modifier, so it has to be matched before nothing else claims it.
+            BareKey::Tab if key.has_modifiers(&[KeyModifier::Shift]) => {
+                self.screen = self.screen.prev();
                 true
             },
             BareKey::Enter if key.has_no_modifiers() => {
                 match self.screen {
                     Screen::Sessions => self.confirm_search(),
                     Screen::Dirs => self.confirm_dir(),
+                    Screen::Agents => self.confirm_agent(),
                 }
                 true
             },
@@ -322,7 +503,13 @@ impl State {
                 // the highlight: there is no literal-text path here for a dropped highlight to
                 // enable. A directory you have never been to is not something this list can
                 // offer you, so "no selection" would be a state with nothing in it.
-                if self.screen == Screen::Dirs {
+                // Both secondary screens back out to the sessions rather than stepping one
+                // stop around the `Tab` cycle. `Esc` means *out*, and the session list is what
+                // out is — a three-stop cycle would otherwise make `Esc` a second, slower `Tab`
+                // that happens to run backwards. Neither has a literal-text path for a dropped
+                // highlight to enable: an agent you are not running, like a directory you have
+                // never visited, is not something this list can offer you.
+                if self.screen != Screen::Sessions {
                     self.screen = Screen::Sessions;
                     return true;
                 }
@@ -382,6 +569,7 @@ impl State {
         match self.screen {
             Screen::Sessions => self.matches.move_selection(delta),
             Screen::Dirs => self.dirs.move_selection(delta),
+            Screen::Agents => self.agents.move_selection(delta),
         }
     }
 
@@ -442,6 +630,31 @@ impl State {
             switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)));
         } else {
             switch_session(Some(&row.name));
+        }
+        close_self();
+    }
+
+    /// `Enter` on an agent row — one meaning, two host calls.
+    ///
+    /// 🔴 The split is not a refinement, it is a hard constraint. Asking the host to attach to
+    /// the session we are already in does not decline: `attach_with_session_name` reaches a bare
+    /// `panic!("You are trying to attach to the current session")` (`src/commands.rs:793`) and
+    /// takes the client down. So an agent sharing our session — which is exactly the case
+    /// pane-level reachability exists for — must be a pane focus rather than a session switch.
+    ///
+    /// The upside is that the refusal the other screens need has no counterpart here. A
+    /// directory row that resolves to our own session is `[HERE]` and does nothing, because
+    /// there is nothing safe for it to do; an agent row that resolves to our own session has a
+    /// call that works, so it stays a live target.
+    fn confirm_agent(&mut self) {
+        let Some(row) = self.agents.selected_row() else {
+            return;
+        };
+        match row.jump {
+            Jump::Focus => focus_terminal_pane(row.pane, false, false),
+            Jump::Switch => {
+                switch_session_with_focus(&row.session, None, Some((row.pane, false)))
+            },
         }
         close_self();
     }
@@ -567,9 +780,10 @@ impl State {
         // Re-filters against the cached snapshot rather than calling the host: a keystroke must
         // not have to wait a poll interval to change the list.
         self.matches.set_search_term(term, &self.live, &self.dead);
-        // Both lists, whichever one you are looking at — the term is shared, so `Tab` must
+        // All three lists, whichever one you are looking at — the term is shared, so `Tab` must
         // never show you a list that has not caught up with what you typed.
         self.rebuild_dirs(Selection::SnapToTop);
+        self.rebuild_agents(Selection::SnapToTop);
     }
 }
 
