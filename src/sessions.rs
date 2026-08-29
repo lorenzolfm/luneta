@@ -56,11 +56,15 @@ pub struct Row {
 }
 
 /// What a rebuild should do with the cursor.
+///
+/// Shared with the directory screen rather than duplicated there: the two lists hold different
+/// things and sort by different keys, but the cursor rule is the same one in both — a new term
+/// snaps to the top match, a background refresh stays put.
 #[derive(Clone, Copy)]
-enum Selection {
+pub enum Selection {
     /// The search term changed: go to the top match.
     SnapToTop,
-    /// The session list was re-polled: stay on the same session if it is still there.
+    /// The list was re-polled: stay on the same entry if it is still there.
     Hold,
 }
 
@@ -210,36 +214,10 @@ impl MatchSet {
             && self.current_session.as_deref() == Some(self.search_term.as_str())
     }
 
-    /// Why the term cannot be a session name, or `None` if it can.
-    ///
-    /// 🔴 The host does **not** validate on the plugin's create path — `validate_session_name`
-    /// is wired only to the CLI and the web client — so this is the last line of defence
-    /// Upstream's plugin checks only the length and `/`; the `.`, `..` and
-    /// whitespace-only rejections are ported from the host's own validator.
-    ///
-    /// An empty term is **valid**: it means `new_session_name = None`, and the host names the
-    /// session itself.
+    /// Why the *search term* cannot be a session name, or `None` if it can. See
+    /// [`validate_name`], which the rename screen shares.
     pub fn name_error(&self) -> Option<&'static str> {
-        let term = self.search_term.as_str();
-        if term.is_empty() {
-            return None;
-        }
-        if term.trim().is_empty() {
-            return Some("name cannot be only whitespace");
-        }
-        if term == "." || term == ".." {
-            return Some("name cannot be '.' or '..'");
-        }
-        if term.contains('/') {
-            return Some("name cannot contain '/'");
-        }
-        if term.len() >= 108 {
-            return Some("name must be shorter than 108 bytes");
-        }
-        // has_forbidden_session is deliberately *not* ported: it concerns web-client-forbidden
-        // sessions, there is no web server in this config, and upstream applies it only on the
-        // typed-name path anyway. Two lines to revert if the web server is ever turned on.
-        None
+        validate_name(&self.search_term)
     }
 
     /// Move the cursor. **No wrap**: running off either end is a no-op, so the top match
@@ -250,6 +228,38 @@ impl MatchSet {
         let next = (current as isize + delta).clamp(0, last as isize) as usize;
         self.selected = Some(next);
     }
+}
+
+/// Why `name` cannot be a session name, or `None` if it can.
+///
+/// 🔴 The host does **not** validate on the plugin's create path — `validate_session_name` is
+/// wired only to the CLI and the web client — so this is the last line of defence. Upstream's
+/// plugin checks only the length and `/`; the `.`, `..` and whitespace-only rejections are
+/// ported from the host's own validator.
+///
+/// An empty name is **valid** here: on the create path it means `new_session_name = None` and
+/// the host names the session itself. Rename has no such fallback, so it rejects empty names
+/// separately, before asking.
+pub fn validate_name(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return None;
+    }
+    if name.trim().is_empty() {
+        return Some("name cannot be only whitespace");
+    }
+    if name == "." || name == ".." {
+        return Some("name cannot be '.' or '..'");
+    }
+    if name.contains('/') {
+        return Some("name cannot contain '/'");
+    }
+    if name.len() >= 108 {
+        return Some("name must be shorter than 108 bytes");
+    }
+    // has_forbidden_session is deliberately *not* ported: it concerns web-client-forbidden
+    // sessions, there is no web server in this config, and upstream applies it only on the
+    // typed-name path anyway. Two lines to revert if the web server is ever turned on.
+    None
 }
 
 impl Row {
