@@ -294,6 +294,16 @@ impl AgentSet {
         self.selected.and_then(|i| self.rows.get(i))
     }
 
+    /// Is there a spinner on this screen to turn?
+    ///
+    /// Over the whole match set rather than the scrolled-to window, which the renderer owns and
+    /// this side cannot see. The two differ only when every busy agent has been scrolled past,
+    /// and the cost of being wrong there is a redraw that paints what was already on screen —
+    /// cheaper than teaching this module how the viewport works to save it.
+    pub fn any_busy(&self) -> bool {
+        self.rows.iter().any(|row| is_busy(&row.status))
+    }
+
     /// Move the cursor. **No wrap**, as on both other screens.
     pub fn move_selection(&mut self, delta: isize) {
         let Some(current) = self.selected else { return };
@@ -333,7 +343,29 @@ pub fn is_waiting(status: &str) -> bool {
     status.eq_ignore_ascii_case("waiting")
 }
 
+/// Is this status the one whose glyph moves?
+///
+/// Asked by the plugin *before* rendering, to decide whether the next animation tick has
+/// anything to repaint — so it is a question about cost, not about correctness. Getting it
+/// wrong on a status word this build has never seen costs a still spinner nobody is looking at,
+/// which is why it is the same literal comparison [`is_waiting`] is and not a bigger idea.
+pub fn is_busy(status: &str) -> bool {
+    status.eq_ignore_ascii_case("busy")
+}
+
+/// One turn of the busy spinner, a frame per animation tick.
+///
+/// Braille rather than the ASCII `|/-\`: every frame here is **one column wide**, so the tag
+/// column keeps the width it measured as the spinner turns. A cycle whose frames disagreed
+/// about their width would resize the column ten times a second and shove the two columns to
+/// its right back and forth for the whole time an agent was busy.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// The glyph for a status, or `None` for one this build has never heard of.
+///
+/// `frame` is the animation tick, and only `busy` reads it — see [`SPINNER`]. Every other
+/// status returns the same glyph on every frame, which is what keeps this a pure function of
+/// the row rather than a thing that has to be redrawn.
 ///
 /// ⚠️ This is the lookup table the rest of this module refuses to have, and it is allowed to
 /// exist only because it is **decoration and nothing else**. It never decides whether a row is
@@ -345,7 +377,7 @@ pub fn is_waiting(status: &str) -> bool {
 /// itself (`"busy","shell","idle","waiting"`) rather than inferred from what happened to be
 /// running. 🔴 That makes the table complete **today**, and is not a reason to drop the
 /// fallback: the set grew by one — `shell` — between two releases already.
-fn glyph(status: &str) -> Option<&'static str> {
+fn glyph(status: &str, frame: u64) -> Option<&'static str> {
     Some(match status.to_ascii_lowercase().as_str() {
         // Someone with their hand up: the one status this whole screen exists to surface, and
         // literally what the agent is doing — it has asked you something and stopped.
@@ -354,8 +386,11 @@ fn glyph(status: &str) -> Option<&'static str> {
         // which is why it outranks a busy one in the sort — so it gets a cup rather than the
         // "do not disturb" of a 💤.
         "idle" => "☕",
-        // Thinking, which is the one thing this particular kind of process is doing when busy.
-        "busy" => "🧠",
+        // The one glyph that moves, because it is the one status that is *going* somewhere: a
+        // busy agent will leave this state on its own, and the spinner is the row saying so
+        // without the user having to watch the age column to find out. It replaces the static
+        // 🧠 that was here — a picture of thinking, where this is the thinking itself.
+        "busy" => SPINNER[(frame as usize) % SPINNER.len()],
         // It is a shell. There was never going to be another choice.
         "shell" => "🐚",
         _ => return None,
@@ -371,10 +406,10 @@ const UNKNOWN_GLYPH: &str = "🛸";
 /// The word stays. The glyph is what the eye scans a column for; the word is what tells you
 /// what a glyph you have never seen before actually means, and it is the only half that is
 /// guaranteed to be true of a status released after this code was.
-pub fn full_tag(status: &str) -> String {
+pub fn full_tag(status: &str, frame: u64) -> String {
     format!(
         "{} {}",
-        glyph(status).unwrap_or(UNKNOWN_GLYPH),
+        glyph(status, frame).unwrap_or(UNKNOWN_GLYPH),
         status.to_uppercase()
     )
 }
@@ -385,8 +420,8 @@ pub fn full_tag(status: &str) -> String {
 /// neutral glyph on every unknown row would render two *different* unknown statuses
 /// identically, where `[S]` and `[N]` at least stay distinct. Collisions between two unknowns
 /// sharing a letter are tolerated, as they were before there were glyphs at all.
-pub fn abbr_tag(status: &str) -> String {
-    match glyph(status) {
+pub fn abbr_tag(status: &str, frame: u64) -> String {
+    match glyph(status, frame) {
         Some(glyph) => glyph.to_string(),
         None => match status.chars().next() {
             Some(first) => format!("[{}]", first.to_uppercase()),
