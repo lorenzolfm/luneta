@@ -408,15 +408,32 @@ or by hand:
 
 ```sh
 make install
-zellij action close-pane
 zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
+    file:$HOME/.local/share/zellij/plugins/zj-picker.wasm
+zellij action start-or-reload-plugin \
     file:$HOME/.local/share/zellij/plugins/zj-picker.wasm
 ```
 
-`--skip-plugin-cache` is the load-bearing flag. Without it zellij reuses the
-compiled module it already has in memory for that path and your new bytes are
-ignored — the module is re-inserted into the cache after every load
-(`plugin_loader.rs:306`), so simply reopening the pane is not enough.
+**Nothing is closed**, and the two calls are there because neither covers both
+states alone. `launch-or-focus-plugin` is the only one that can create the
+picker when it is not running, and the only one that can say `--floating` — the
+geometry the keybinding gives it; on a picker that is already up it just takes
+focus. `start-or-reload-plugin` re-reads the `.wasm` from disk and swaps it into
+the pane that is already there, which is what actually picks up new bytes when
+the pane survived from the last loop. Focus-or-create first, so there is
+something to reload.
+
+`--skip-plugin-cache` is the load-bearing flag on the *creating* path. Without
+it zellij reuses the compiled module it already has in memory for that path and
+your new bytes are ignored — the module is re-inserted into the cache after
+every load (`plugin_loader.rs:306`), so simply reopening the pane is not enough.
+
+⚠️ Do not go back to close-and-relaunch. That version had to name the pane it
+was closing and could not: zellij documents a `plugin_<id>` on
+`launch-or-focus-plugin`'s stdout ("Returns: Plugin pane ID") but prints nothing
+at all on 0.45.1, so the guard saw an empty id and refused to run — correctly,
+since `close-pane` without an id closes whatever is *focused*, which during a
+dev loop is usually your editor. Reloading in place needs no pane id.
 
 Add `SESSION=<name>` to any recipe to drive a session other than the current one.
 
