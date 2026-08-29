@@ -36,11 +36,16 @@ pub const CONTEXT_KEY: &str = "zj-picker";
 pub const CONTEXT_VALUE: &str = "agents";
 
 /// The number of tab-separated fields `claude-agents` emits:
-/// `status age session pane name pid session_id cwd`.
+/// `status age session pane name pid session_id started_at cwd`.
 ///
 /// `cwd` is last so that it — the one field that can plausibly contain anything — is taken as
 /// the whole remainder of the line rather than as a field with a terminator.
-const FIELDS: usize = 8;
+///
+/// ⚠️ This was 8 before `claude-agents` gained `started_at`, which had to go *before* `cwd` for
+/// the reason above. The two must be upgraded together. The failure if they are not is at
+/// least quiet rather than wrong: an older tool emits 8 fields, the `< FIELDS` guard below
+/// drops every line, and the screen says no agents — it never sends `Enter` to a wrong pane.
+const FIELDS: usize = 9;
 
 /// What `Enter` on this row will do. **Not** a rendered tag: the status column already owns
 /// that slot, and from where the user sits both of these mean the same thing — *go there*.
@@ -395,7 +400,7 @@ fn parse(stdout: &str) -> (Vec<Agent>, usize) {
             continue;
         }
         let (status, age, session, pane, cwd) =
-            (fields[0], fields[1], fields[2], fields[3], fields[7]);
+            (fields[0], fields[1], fields[2], fields[3], fields[8]);
         // The tool marks an agent that is not in zellij with `-` in both join columns.
         let Ok(pane) = pane.parse::<u32>() else {
             outside += 1;
