@@ -23,12 +23,13 @@ use fuzzy_matcher::FuzzyMatcher;
 
 use crate::sessions::Selection;
 
-/// The command behind this screen.
+/// The command behind this screen, looked up on the server's `PATH` exactly as `zoxide` is
+/// (`dirs.rs:37`). No shell, no `$HOME`: this screen's tool is an ordinary optional program,
+/// and naming an install path here is what made the plugin unusable by anyone else.
 ///
-/// 🔴 Wrapped in `sh -c` for one reason: the zellij **server's** `PATH` does not contain
-/// `~/.local/bin`, so naming the tool bare finds nothing. `$HOME` is expanded by the shell
-/// rather than hardcoded, and `exec` keeps it to one process rather than two.
-pub const QUERY: [&str; 3] = ["sh", "-c", "exec \"$HOME/.local/bin/claude-agents\""];
+/// If a server `PATH` genuinely lacks it, the plugin's `agents_command` configuration key
+/// overrides this — that is the supported escape hatch, not a wrapper compiled in.
+pub const QUERY: [&str; 1] = ["claude-agents"];
 
 /// Marks our own `RunCommandResult`. Shares the key with the directory screen and differs in
 /// the value — the plugin now issues two commands and the replies are told apart here.
@@ -38,13 +39,16 @@ pub const CONTEXT_VALUE: &str = "agents";
 /// The number of tab-separated fields `claude-agents` emits:
 /// `status age session pane name pid session_id started_at cwd`.
 ///
-/// `cwd` is last so that it — the one field that can plausibly contain anything — is taken as
-/// the whole remainder of the line rather than as a field with a terminator.
+/// `cwd` is last because it is the one field that can plausibly contain anything, so it is the
+/// field a future column must never be appended after.
 ///
-/// ⚠️ This was 8 before `claude-agents` gained `started_at`, which had to go *before* `cwd` for
-/// the reason above. The two must be upgraded together. The failure if they are not is at
-/// least quiet rather than wrong: an older tool emits 8 fields, the `< FIELDS` guard below
-/// drops every line, and the screen says no agents — it never sends `Enter` to a wrong pane.
+/// ⚠️ Checked **exactly**, not as a minimum, and the difference is the whole point. This was 8
+/// before `claude-agents` gained `started_at`, which had to go *before* `cwd` for the reason
+/// above — and a `splitn(FIELDS, ..)` that tolerated a tenth column would have folded it into
+/// `cwd`, tab and all, and gone on rendering rows off a schema it no longer understood. Now
+/// either arity is a loud [`Status::Failed`] naming the count, on the same line of the screen
+/// that says the tool is missing. The two are still upgraded together; the failure in between
+/// is now visible rather than plausible.
 const FIELDS: usize = 9;
 
 /// What `Enter` on this row will do. **Not** a rendered tag: the status column already owns
@@ -151,10 +155,21 @@ impl AgentSet {
             self.outside = 0;
             return;
         }
-        let (agents, outside) = parse(&String::from_utf8_lossy(stdout));
-        self.all = agents;
-        self.outside = outside;
-        self.status = Status::Ready;
+        match parse(&String::from_utf8_lossy(stdout)) {
+            Ok((agents, outside)) => {
+                self.all = agents;
+                self.outside = outside;
+                self.status = Status::Ready;
+            },
+            // A column count this plugin does not know. Reported rather than dropped, for the
+            // same reason a non-zero exit is: an empty list would read as "no agents running",
+            // when what it means is "your `claude-agents` and your picker disagree".
+            Err(reason) => {
+                self.status = Status::Failed(reason);
+                self.all.clear();
+                self.outside = 0;
+            },
+        }
     }
 
     pub fn fail(&mut self, reason: impl Into<String>) {
@@ -386,18 +401,28 @@ pub fn abbr_tag(status: &str) -> String {
 /// zellij are dropped here rather than rendered with a placeholder session: `Enter` could do
 /// nothing for them, and rows `Enter` cannot act on do not belong on a screen whose only job
 /// is reachability. The count survives so they are never silently invisible.
-fn parse(stdout: &str) -> (Vec<Agent>, usize) {
+///
+/// The one thing that is **not** dropped is a line with the wrong number of columns. That is
+/// not a row this screen cannot use, it is evidence that [`FIELDS`] no longer describes the
+/// tool, and every later row is suspect for the same reason — so the first one ends the parse.
+fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
     let mut agents = Vec::new();
     let mut outside = 0;
-    for line in stdout.lines() {
+    for (number, line) in stdout.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        // `splitn` so that the final field — the cwd — is the rest of the line rather than a
-        // field in its own right.
-        let fields: Vec<&str> = line.splitn(FIELDS, '\t').collect();
-        if fields.len() < FIELDS {
-            continue;
+        // Plain `split`, so a tenth column is a mismatch rather than a tab quietly buried in
+        // the cwd. The cost is a cwd that contains a literal tab, which is not a path anyone
+        // has, weighed against a schema change that would otherwise go unnoticed.
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != FIELDS {
+            return Err(format!(
+                "claude-agents line {}: {} columns, expected {}",
+                number + 1,
+                fields.len(),
+                FIELDS
+            ));
         }
         let (status, age, session, pane, cwd) =
             (fields[0], fields[1], fields[2], fields[3], fields[8]);
@@ -421,7 +446,7 @@ fn parse(stdout: &str) -> (Vec<Agent>, usize) {
             cwd: cwd.to_string(),
         });
     }
-    (agents, outside)
+    Ok((agents, outside))
 }
 
 /// Compact elapsed time as a **duration** — `4s`, `35m`, `2h`.

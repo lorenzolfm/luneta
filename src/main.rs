@@ -35,6 +35,20 @@ use zellij_tile::prelude::*;
 /// the one instance that already exists instead of minting another.
 const SCREEN_PIPE: &str = "screen";
 
+/// The one plugin configuration key this picker reads: an override for
+/// [`agents::QUERY`], for a server whose `PATH` genuinely lacks `claude-agents`.
+///
+/// The value is the executable — a name or an absolute path — and nothing else. Arguments are
+/// not parsed out of it, because a path may contain a space and an argument list would make
+/// that ambiguous; wrap the tool in a script if you need one.
+///
+/// ⚠️ **Every binding must pass the same value, or none.** Zellij keys a plugin instance partly
+/// on its configuration, so two keys disagreeing about this mint two pickers and leave two
+/// floating panes stacked — the same trap that put the screen on a pipe rather than here
+/// (see [`SCREEN_PIPE`]). Leaving it unset everywhere is the ordinary case and costs nothing:
+/// a bare lookup is what the plugin does without it.
+const AGENTS_COMMAND: &str = "agents_command";
+
 /// Floating geometry, applied by the plugin to its own pane.
 ///
 /// The default floating size shows ~3 rows, which is a thin window onto a dozen sessions.
@@ -161,6 +175,9 @@ struct State {
     dirs: DirSet,
     /// The agent list. Populated out of band by `claude-agents`, on the same terms as `dirs`.
     agents: AgentSet,
+    /// [`AGENTS_COMMAND`], if a binding passed one. `None` — the ordinary case — means the
+    /// bare [`agents::QUERY`] lookup.
+    agents_command: Option<String>,
     /// The last pane manifest, and which tab is focused.
     ///
     /// Kept for exactly one question: **which pane was focused when the picker opened.** The
@@ -186,7 +203,14 @@ struct State {
 register_plugin!(State);
 
 impl ZellijPlugin for State {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
+        // Taken before the permission request, because the first `ask_agents` fires from the
+        // grant and must already know which command it is asking for.
+        self.agents_command = configuration
+            .get(AGENTS_COMMAND)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         // ⚠️ RunCommands is what the directory screen costs. It is part of the same grant as
         // the other two, so adding it re-prompts once against this plugin's cached path — and a
         // denial takes the session list down with it, since the host denies the set rather than
@@ -416,8 +440,12 @@ impl State {
             return;
         }
         self.agents.asking = true;
+        let command: [&str; 1] = match self.agents_command.as_deref() {
+            Some(command) => [command],
+            None => agents::QUERY,
+        };
         run_command(
-            &agents::QUERY,
+            &command,
             BTreeMap::from([(
                 agents::CONTEXT_KEY.to_string(),
                 agents::CONTEXT_VALUE.to_string(),
