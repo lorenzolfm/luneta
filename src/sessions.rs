@@ -263,7 +263,8 @@ pub fn validate_name(name: &str) -> Option<&'static str> {
 }
 
 impl Row {
-    fn new(
+    /// `pub(crate)` for the render tests, which need a row without a live host to get one from.
+    pub(crate) fn new(
         name: String,
         kind: Kind,
         age: Duration,

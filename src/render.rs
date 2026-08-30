@@ -1,11 +1,11 @@
 //! Drawing the picker.
 //!
-//! Everything here goes through zellij's own UI components — `Text`, `Table`, and the
-//! `print_*_with_coordinates` family — rather than hand-written SGR. That is not cosmetic
-//! preference: those components are serialized to the host as a DCS payload and coloured
-//! *there*, from the active theme's `StyleDeclaration`. So the picker picks up the user's
-//! theme (and its selected/emphasis colours) for free, with no `Styling` palette to carry and
-//! no `ModeUpdate` subscription to keep it current.
+//! Everything here goes through zellij's own `Text` component and the
+//! `print_text_with_coordinates` family rather than hand-written SGR. That is not cosmetic
+//! preference: a `Text` is serialized to the host as a DCS payload and coloured *there*, from
+//! the active theme's `StyleDeclaration`. So the picker picks up the user's theme (and its
+//! selected/emphasis colours) for free, with no `Styling` palette to carry and no `ModeUpdate`
+//! subscription to keep it current.
 //!
 //! Colour is expressed as *emphasis levels*, not colours:
 //!
@@ -13,20 +13,41 @@
 //! |-------|-------------------------------------------------|
 //! | 0     | tags — the quietest thing on the row            |
 //! | 1     | session names, chosen layout                    |
-//! | 2     | labels (`Session:`) and the age column          |
+//! | 2     | labels, box titles, the age column              |
 //! | 3     | the typed term, key caps, fuzzy-match hits      |
 //!
 //! Absolute coordinates are safe here — and are what upstream uses — because the host deletes
 //! the plugin pane's viewport before feeding it each render (`plugin_pane.rs:243`). That also
 //! retires the old "build one frame, print it with no trailing newline" dance: there is no
 //! cursor to scroll off the top any more.
+//!
+//! ## One `Text` per row
+//!
+//! Rows used to be `Table` cells, and the host measured, padded and joined them. They are now
+//! whole lines, borders included, measured here — because a bordered row is not a thing a
+//! `Table` can express, and because the padding the host applied was invisible from this side.
+//! Three things follow from the change, and they are why it was worth making:
+//!
+//! - The selected row is one `Text::selected()` spanning the full width, so the highlight is a
+//!   continuous band rather than cells with gaps between them.
+//! - A trailing column can be pushed flush against the right border, which `Table` has no way
+//!   to ask for.
+//! - The empty-cell trap is gone. A `Table` cell's text crossed the wire as a comma-separated
+//!   list of its bytes, so `""` arrived as a list with no bytes rather than as text of length
+//!   zero: the cell was dropped, and since the wire format is one flat run of cells cut into
+//!   rows by a column count, *every* cell after it slid one place left. A row that dropped a
+//!   cell ate the first cell of the row below. There are no cells now.
+//!
+//! The cost is arithmetic that used to be the host's, and roughly one `print_*` call per
+//! visible row instead of one per table. Renders are throttled to ~1/s (`main.rs`'s
+//! `polled || self.spinning()`), so that is ~30 calls a second in the ordinary case.
 
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
 use crate::dirs::{Action, DirRow, DirSet, Status};
-use crate::layout::Screen;
+use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD};
 use crate::sessions::{format_age, Kind, MatchSet, Row};
 use crate::{Pending, Rename};
 
@@ -36,17 +57,11 @@ const NAME: usize = 1;
 const LABEL: usize = 2;
 const ACCENT: usize = 3;
 
-/// The widest the content block is allowed to get, matching upstream's single screen. Past
-/// this, a full-width pane stretches three short columns across the whole terminal and the
-/// eye has to travel for nothing.
-///
-/// It is a *truncation* budget, not a position. Centring is done per element, on what that
-/// element actually renders to — see [`print_centered`]. Centring this cap instead is what
-/// upstream does, and it only works there because four columns of session detail fill it;
-/// three narrow columns do not, so it slides short text into the middle of nowhere.
-const MAX_WIDTH: usize = 90;
+/// The blank columns between two columns of a row. Two, not the one the host used to insert,
+/// because a full-width box has room for it and three columns jammed together read as one.
+const GAP: usize = 2;
 
-/// How much had to be given up to fit the pane's width.
+/// How much had to be given up to fit the box's width.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Fit {
     /// name + [ATTACH] + age
@@ -57,351 +72,393 @@ enum Fit {
     NoAge,
 }
 
+/// A note line: what it says, and whether saying it is bad news.
+struct Note {
+    text: String,
+    error: bool,
+}
+
+impl Note {
+    fn dim(text: impl Into<String>) -> Self {
+        Self { text: text.into(), error: false }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self { text: text.into(), error: true }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The screens
+// ---------------------------------------------------------------------------------------------
+
 pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: usize) {
-    let width = budget(cols);
+    let screen = Screen::new(rows, cols);
     let notes = note_texts(state, error);
-    let screen = Screen::new(rows, notes.len());
 
-    print_centered(prompt_text(state), cols, screen.prompt_y);
-
-    if screen.list_rows == 0 {
-        // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
-    } else if state.rows.is_empty() {
-        // No table means no title row, so the gap it would have supplied is spent explicitly —
-        // otherwise "no sessions" lands flush against the prompt.
-        print_centered(empty_text(state), cols, screen.table_y + 1);
-    } else {
-        render_results(state, cols, screen.table_y, width, screen.list_rows);
+    if let Some(rect) = &screen.results {
+        let body = search_body(state, rect, notes.len());
+        draw(rect, "Results", &count(state.selected, state.rows.len()), interior(rect, &notes, body));
     }
-
-    for (i, note) in notes.into_iter().enumerate() {
-        print_centered(note, cols, screen.notes_y + i);
-    }
-    print_centered(search_help(width), cols, screen.help_y);
+    draw_input(&screen, "Sessions", prompt_text(state));
+    draw_help(&screen, search_help(help_width(cols)));
 }
 
 /// The directory screen: the places you go, and what `Enter` would make of each.
 ///
-/// Deliberately the same shape as [`render_search`] — same prompt row, same table, same note
-/// and help rows in the same places — so that `Tab` swaps the *contents* of a screen rather
-/// than the screen. The columns differ because the third one answers a different question:
-/// sessions show an age because age is what they are sorted by, and directories show their
-/// path because frecency is not a thing you can print usefully.
+/// Deliberately the same shape as [`render_search`] — same two boxes, same help row, same
+/// bottom-anchored list — so that `Tab` swaps the *contents* of a screen rather than the
+/// screen. The columns differ because the second one answers a different question: sessions
+/// show an age because age is what they are sorted by, and directories show their path because
+/// frecency is not a thing you can print usefully.
 pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
-    let width = budget(cols);
+    let screen = Screen::new(rows, cols);
     let notes = dir_note_texts(dirs);
-    let screen = Screen::new(rows, notes.len());
 
-    print_centered(dir_prompt(dirs, term), cols, screen.prompt_y);
-
-    if screen.list_rows == 0 {
-        // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
-    } else if dirs.rows.is_empty() {
-        print_centered(dir_empty_text(dirs, term), cols, screen.table_y + 1);
-    } else {
-        render_dir_results(dirs, cols, screen.table_y, width, screen.list_rows);
+    if let Some(rect) = &screen.results {
+        let body = dir_body(dirs, term, rect, notes.len());
+        draw(rect, "Results", &count(dirs.selected, dirs.rows.len()), interior(rect, &notes, body));
     }
+    draw_input(&screen, "Directories", dir_prompt(dirs, term));
+    draw_help(&screen, dirs_help(help_width(cols)));
+}
 
-    for (i, note) in notes.into_iter().enumerate() {
-        print_centered(note, cols, screen.notes_y + i);
+/// The agent screen: who is running, what they are doing, and how long they have been doing it.
+///
+/// `frame` is the animation tick, and reaches exactly one thing: the busy spinner's glyph. It
+/// is threaded down rather than read from `agents`, because it is a fact about *when we are
+/// drawing*, not about the agents — the snapshot they came from is still frozen.
+pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, frame: u64) {
+    let screen = Screen::new(rows, cols);
+    let notes = agent_note_texts(agents, help_width(cols));
+
+    if let Some(rect) = &screen.results {
+        let body = agent_body(agents, term, rect, notes.len(), frame);
+        draw(
+            rect,
+            "Results",
+            &count(agents.selected, agents.rows.len()),
+            interior(rect, &notes, body),
+        );
     }
-    print_centered(dirs_help(width), cols, screen.help_y);
+    draw_input(&screen, "Agents", agent_prompt(agents, term));
+    draw_help(&screen, agents_help(help_width(cols)));
 }
 
 /// Renaming the session you are in — the only session `rename_session` can address.
 pub fn render_rename(rename: &Rename, current: Option<&str>, rows: usize, cols: usize) {
-    let width = budget(cols);
-    let y = if rows > 4 { 1 } else { 0 };
+    let screen = Screen::new(rows, cols);
 
-    print_centered(
-        input_prompt("Rename to:", &rename.input, rename.error.as_deref(), "Rename"),
-        cols,
-        y,
-    );
-    if let Some(current) = current {
-        let note = truncate(&format!("renaming \"{}\" — the session you are in", current), width);
-        print_centered(Text::new(note).dim_all(), cols, y + 2);
+    if let Some(rect) = &screen.results {
+        let notes = current
+            .map(|current| {
+                Note::dim(format!("renaming \"{}\" — the session you are in", current))
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        draw(rect, "Rename", "", interior(rect, &notes, Vec::new()));
     }
-    print_centered(
-        keys_text(width, &[("<ENTER>", "Rename", "Rename"), ("<ESC>", "Cancel", "Cancel")]),
-        cols,
-        rows.saturating_sub(1),
+    let (action, is_error) = match rename.error.as_deref() {
+        Some(error) => (error, true),
+        None => ("Rename", false),
+    };
+    draw_input(&screen, "Rename", (rename.input.clone(), Some(action.to_string()), is_error));
+    draw_help(
+        &screen,
+        keys_text(
+            help_width(cols),
+            &[("<ENTER>", "Rename", "Rename"), ("<ESC>", "Cancel", "Cancel")],
+        ),
     );
 }
 
 /// The confirm step before a session is killed or deleted. Nothing has happened at this point —
 /// this screen is what makes that true, and `Esc` backs out of it.
+///
+/// The keys live on the help row rather than in the input box, unlike every other screen: the
+/// input box here is not taking input, and printing `<ENTER> Kill` in both places would say the
+/// same thing twice on the one screen where the reader is being asked to stop and read.
 pub fn render_confirm(pending: &Pending, rows: usize, cols: usize) {
-    let width = budget(cols);
-    let y = if rows > 4 { 1 } else { 0 };
+    let screen = Screen::new(rows, cols);
 
-    let label = format!("{} session:", pending.verb());
-    let heading = format!(
-        "{} {}",
-        label,
-        truncate(&pending.name, width.saturating_sub(label.width() + 1))
-    );
-    print_centered(
-        Text::new(&heading)
-            .color_range(LABEL, ..label.chars().count())
-            .color_range(ACCENT, label.chars().count() + 1..),
-        cols,
-        y,
-    );
-    // Spelling out what survives is the whole point of the screen: "kill" and "delete" look
-    // alike on a keyboard and differ entirely in what you can get back.
-    let consequence = Text::new(truncate(pending.consequence(), width));
-    let consequence = match pending.kind {
-        Kind::Live => consequence.dim_all(),
-        Kind::Resurrectable => consequence.error_color_all(),
-    };
-    print_centered(consequence, cols, y + 2);
-
-    print_centered(
+    if let Some(rect) = &screen.results {
+        // Spelling out what survives is the whole point of the screen: "kill" and "delete" look
+        // alike on a keyboard and differ entirely in what you can get back.
+        let note = match pending.kind {
+            Kind::Live => Note::dim(pending.consequence()),
+            Kind::Resurrectable => Note::error(pending.consequence()),
+        };
+        draw(rect, pending.verb(), "", interior(rect, &[note], Vec::new()));
+    }
+    let question = format!("{} \"{}\"?", pending.verb(), pending.name);
+    draw_input(&screen, pending.verb(), (question, None, false));
+    draw_help(
+        &screen,
         keys_text(
-            width,
+            help_width(cols),
             &[("<ENTER>", pending.verb(), pending.verb()), ("<ESC>", "Cancel", "Cancel")],
         ),
-        cols,
-        rows.saturating_sub(1),
     );
 }
 
-/// The directory prompt names the session that would be made, not the directory that would be
-/// entered. That is the thing you have to be able to argue with — the path is already on the
-/// row, and the name is the part the plugin invented.
-fn dir_prompt(dirs: &DirSet, term: &str) -> Text {
-    let Some(row) = dirs.selected_row() else {
-        return input_line("Directory:", term, None, false);
-    };
-    let refused = row.action == Action::Here;
-    let action = if refused {
-        // The one row `Enter` will not act on. It belongs in the prompt rather than on a note
-        // line because it is a property of the highlight, and it has to move with it.
-        "already in this session".to_string()
+// ---------------------------------------------------------------------------------------------
+// The chrome
+// ---------------------------------------------------------------------------------------------
+
+/// What the input box holds: the text being typed, what `Enter` would do with it, and whether
+/// saying so is bad news.
+type Prompt = (String, Option<String>, bool);
+
+/// The help row is indented to line up with the content inside the boxes above it.
+fn help_width(cols: usize) -> usize {
+    cols.saturating_sub(PAD * 2)
+}
+
+fn print_at(text: Text, x: usize, y: usize, width: usize) {
+    print_text_with_coordinates(text, x, y, Some(width), None);
+}
+
+/// Draw a box: top border, interior, bottom border.
+fn draw(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) {
+    print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
+    for (i, line) in interior.into_iter().enumerate() {
+        print_at(line, rect.x, rect.inner_y() + i, rect.width);
+    }
+    print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
+}
+
+fn border_text(border: Border) -> Text {
+    let rule = border.rule_indices();
+    let Border { line, title, right } = border;
+    let mut text = Text::new(line).dim_indices(rule);
+    if let Some(range) = title {
+        text = text.color_range(LABEL, range);
+    }
+    if let Some(range) = right {
+        text = text.color_range(TAG, range);
+    }
+    text
+}
+
+/// A box's interior: blank rows, then the notes, then the body — bottom-anchored as one block,
+/// so the list hugs the prompt and the notes ride on top of the list.
+fn interior(rect: &Rect, notes: &[Note], body: Vec<Text>) -> Vec<Text> {
+    let block = anchor(rect, notes.len(), body.len());
+    let blank = rect.blank();
+    let mut lines: Vec<Text> =
+        (rect.inner_y()..block.y).map(|_| Text::new(&blank).dim_all()).collect();
+    lines.extend(notes.iter().take(block.notes).map(|note| note_line(rect, note)));
+    lines.extend(body.into_iter().take(block.rows));
+    lines
+}
+
+/// ⚠️ Notes are hard-truncated to the box. A note wider than its box would paint over the right
+/// border — the same defect that once let a long `RunCommandResult` failure reason, carrying an
+/// absolute path, run past the pane and be overwritten mid-word by the help line.
+fn note_line(rect: &Rect, note: &Note) -> Text {
+    let inner = rect.inner_width();
+    let mut line = Line::new();
+    let text = truncate(&note.text, inner);
+    if note.error {
+        line.push_error(&text);
     } else {
-        format!("{} \"{}\"", row.action.verb(), row.name)
-    };
-    input_line("Directory:", term, Some(&action), refused)
+        line.push(&text, TAG);
+    }
+    line.finish(inner)
 }
 
-/// The directory screen has three ways to be empty and they are not interchangeable. Only the
-/// failure gets a note line — the other two are self-explanatory in the list's own place.
-fn dir_note_texts(dirs: &DirSet) -> Vec<Text> {
-    match &dirs.status {
-        Status::Failed(reason) => vec![Text::new(reason).error_color_all()],
-        _ => Vec::new(),
+/// `> typed_` on the left, what `Enter` would do on the right.
+///
+/// The two are pushed apart rather than run together because they answer different questions and
+/// change at different times: the left half moves under your fingers, the right half changes
+/// when the highlight does.
+///
+/// When they will not both fit, the action is cut first and dropped below [`MIN_ACTION`]. The
+/// term you are typing is never the thing that gets cut — and when the term alone overruns the
+/// box it is truncated from the *left*, because what you just typed is at its end.
+fn input_line(rect: &Rect, prompt: Prompt) -> Text {
+    let (input, action, is_error) = prompt;
+    let inner = rect.inner_width();
+    let mut line = Line::new();
+    line.push("> ", TAG);
+
+    // Trailing `_` is a cursor stand-in: a plugin's real cursor is off by default and turning it
+    // on would mean tracking its position through every re-render.
+    let (typed, _) = truncate_left(&format!("{}_", input), inner.saturating_sub(2));
+    line.push(&typed, ACCENT);
+
+    let room = inner.saturating_sub(line.columns() + GAP);
+    if let Some(action) = action.filter(|_| room >= MIN_ACTION) {
+        let action = truncate(&format!("<ENTER> {}", action), room);
+        line.pad_to(inner - action.width());
+        if is_error {
+            line.push_error(&action);
+        } else {
+            line.push(&action, NAME);
+        }
+    }
+    line.finish(inner)
+}
+
+/// The narrowest an action clause is worth printing: `<ENTER> ` and something after it.
+const MIN_ACTION: usize = 12;
+
+fn draw_input(screen: &Screen, title: &str, prompt: Prompt) {
+    let rect = &screen.input;
+    if !screen.bordered {
+        // No room for a border. The one row left says what you are typing, which is the only
+        // thing on this screen that cannot be inferred from anything else.
+        print_at(input_line(rect, prompt), rect.x, rect.y, rect.width);
+        return;
+    }
+    draw(rect, title, "", vec![input_line(rect, prompt)]);
+}
+
+fn draw_help(screen: &Screen, help: Text) {
+    if let Some(y) = screen.help_y {
+        print_at(help, PAD, y, screen.input.width.saturating_sub(PAD));
     }
 }
 
-fn dir_empty_text(dirs: &DirSet, term: &str) -> Text {
-    match &dirs.status {
-        Status::Waiting => Text::new("asking zoxide…").dim_all(),
-        // The reason is already on the note line directly below; on a pane this small, saying
-        // it twice costs more than the second copy is worth.
-        Status::Failed(_) => Text::new("no directories").dim_all(),
-        Status::Ready if term.is_empty() => Text::new("zoxide knows nowhere yet").dim_all(),
-        Status::Ready => Text::new(format!("no match for \"{}\"", term)).dim_all(),
+/// `3/47` — where the cursor is, over how many rows matched.
+///
+/// One token answering both "how many did my search leave?" and "how far down am I?", which is
+/// what retired the `+N more` line: `1/47` says there are forty-six below without spending a
+/// row to say it. With nothing selected there is no position to report, so only the count is.
+fn count(selected: Option<usize>, total: usize) -> String {
+    match selected {
+        Some(index) if total > 0 => format!("{}/{}", index + 1, total),
+        _ if total > 0 => total.to_string(),
+        _ => String::new(),
     }
 }
+
+/// Keep the selection on screen, scrolling only when it would otherwise fall off. A centred
+/// viewport would shift every row on every keystroke; row-index stability is a non-goal, but
+/// gratuitous motion is still noise.
+fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
+    if visible >= total {
+        return (0, total);
+    }
+    let start = if selected < visible { 0 } else { (selected + 1).saturating_sub(visible) };
+    (start, (start + visible).min(total))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------------------------
+
+/// `[RESURRECT]` collapsed to `[R]`, and the width that costs.
+const ABBR_TAG: usize = 3;
 
 /// The narrowest a path column is worth having. Below this it says nothing a `…` would not, so
 /// the column is dropped and the name and tag get the room.
 const MIN_PATH: usize = 12;
 
-/// `[RESURRECT]` collapsed to `[R]`, and the width that costs.
-const ABBR_TAG: usize = 3;
-
-fn render_dir_results(dirs: &DirSet, cols: usize, y: usize, width: usize, list_rows: usize) {
-    let capacity = list_rows.saturating_sub(1);
+fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
+    if state.rows.is_empty() {
+        return vec![note_line(rect, &Note::dim(empty_text(state)))];
+    }
+    let inner = rect.inner_width();
+    let capacity = rect.inner_height().saturating_sub(notes);
     if capacity == 0 {
-        return;
+        return Vec::new();
     }
-    let overflows = dirs.rows.len() > capacity;
-    let visible = if overflows { capacity.saturating_sub(1) } else { capacity };
-    if visible == 0 {
-        return;
-    }
-    let (start, end) = viewport(dirs.selected.unwrap_or(0), dirs.rows.len(), visible);
-    let window = &dirs.rows[start..end];
+    let (start, end) = viewport(state.selected.unwrap_or(0), state.rows.len(), capacity);
+    let window = &state.rows[start..end];
 
-    // Measured over the visible window only, for [`render_results`]'s reason: widths taken from
-    // rows you cannot see make the columns jump as you scroll.
-    let full_tag = window.iter().map(|r| r.action.full_tag().width()).max().unwrap_or(0);
-    // The name is capped at a third of the width before anything else is decided. Nothing else
-    // here has a natural size — a path will happily eat a whole row — so the cap is what keeps
-    // three columns on screen instead of two and a half.
-    let name_budget = window
+    // Widths are measured over the *visible* window only. Measuring the whole list would make
+    // the name column jump as you scroll, for the sake of names you cannot see.
+    let name_width = window.iter().map(|r| r.name.width()).max().unwrap_or(0);
+    let tag_width = window.iter().map(|r| r.kind.full_tag().width()).max().unwrap_or(0);
+    let age_width = window.iter().map(|r| format_age(r.age).width()).max().unwrap_or(0);
+    let fit = choose_fit(name_width, tag_width, age_width, inner);
+    let name_budget = name_column_budget(&fit, tag_width, age_width, inner);
+    let tag_column = if matches!(fit, Fit::Full) { tag_width } else { ABBR_TAG };
+    // Measured after truncation, which is the only width that will ever be drawn.
+    let name_column =
+        window.iter().map(|r| truncate(&r.name, name_budget).width()).max().unwrap_or(0);
+
+    window
         .iter()
-        .map(|r| r.name.width())
-        .max()
-        .unwrap_or(0)
-        .min(width / 3)
-        .max(4);
-    // The tag abbreviates before the path is dropped: you can read `[C]` as easily as
-    // `[CREATE]` once you have seen one of each, and a path is not guessable that way.
-    let (tag_width, abbr) = if name_budget + GAP + full_tag + GAP + MIN_PATH <= width {
-        (full_tag, false)
-    } else {
-        (ABBR_TAG, true)
-    };
-    // ⚠️ Three, not two gaps. The host charges `max_column_width + 1` for *every* column, the
-    // last one included, and silently drops any column that pushes the running total past the
-    // width it was given — see [`print_table_centered`]. Budgeting the path to the two visible
-    // gaps makes the table an exact fit, which costs it the path column entirely.
-    let remaining = width.saturating_sub(name_budget + tag_width + 3);
-    let path_budget = (remaining >= MIN_PATH).then_some(remaining);
-
-    let mut table = header_row(Table::new(), if path_budget.is_some() { 3 } else { 2 });
-    let mut name_column = 1; // the blank title cell is one column wide
-    let mut path_column = 0;
-    for (offset, row) in window.iter().enumerate() {
-        let cells =
-            dir_result_row(row, dirs.selected == Some(start + offset), abbr, name_budget, path_budget);
-        // Measured after truncation, which is the only width the host will ever see.
-        name_column = name_column.max(cells[0].content().width());
-        if let Some(path) = cells.get(2) {
-            path_column = path_column.max(path.content().width());
-        }
-        table = table.add_styled_row(cells);
-    }
-
-    let mut widths = vec![name_column, tag_width];
-    if path_budget.is_some() {
-        widths.push(path_column);
-    }
-    print_table_centered(table, &widths, cols, y, list_rows);
-
-    if overflows {
-        let hidden = dirs.rows.len() - window.len();
-        print_centered(
-            Text::new(format!("+{} more", hidden)).dim_all(),
-            cols,
-            y + 1 + window.len(),
-        );
-    }
+        .enumerate()
+        .map(|(offset, row)| {
+            let selected = state.selected == Some(start + offset);
+            result_line(row, selected, &fit, name_budget, name_column, tag_column, inner)
+        })
+        .collect()
 }
 
-fn dir_result_row(
-    row: &DirRow,
+fn result_line(
+    row: &Row,
     selected: bool,
-    abbr: bool,
+    fit: &Fit,
     name_budget: usize,
-    path_budget: Option<usize>,
-) -> Vec<Text> {
-    let mut cells = vec![
-        // Not highlighted, because the term was never matched against it — the match ran on the
-        // path, and painting hits onto a string they were not found in would be a lie that
-        // happens to line up sometimes.
-        cell(&truncate(&row.name, name_budget)).color_range(NAME, ..),
-        cell(if abbr { row.action.abbr_tag() } else { row.action.full_tag() })
-            .color_range(TAG, ..),
-    ];
-    if let Some(path_budget) = path_budget {
-        let (path, dropped) = truncate_left(&row.path, path_budget);
-        // The indices are into the *untruncated* path. Those that fell off the left are gone;
-        // the rest shift down by what was dropped and back up by one for the `…` standing in
-        // for it.
-        let shift = if dropped > 0 { 1 } else { 0 };
-        let indices: Vec<usize> = row
-            .indices
-            .iter()
-            .filter(|i| **i >= dropped)
-            .map(|i| i - dropped + shift)
-            .collect();
-        cells.push(cell(&path).color_range(LABEL, ..).color_indices(ACCENT, indices));
+    name_column: usize,
+    tag_column: usize,
+    inner: usize,
+) -> Text {
+    let name = truncate(&row.name, name_budget);
+    // A truncated name drops the indices that fell off the end — colouring a position that no
+    // longer exists would paint the wrong character.
+    let visible = name.chars().count();
+    let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
+
+    let mut line = Line::new();
+    line.push_hits(&name, NAME, ACCENT, &hits);
+    line.pad_to(name_column);
+    line.gap(GAP);
+    line.push(
+        match fit {
+            Fit::Full => row.kind.full_tag(),
+            Fit::AbbrTag | Fit::NoAge => row.kind.abbr_tag(),
+        },
+        TAG,
+    );
+    if !matches!(fit, Fit::NoAge) {
+        line.pad_to(name_column + GAP + tag_column);
+        line.gap(GAP);
+        line.push(&format_age(row.age), LABEL);
     }
+
+    let text = line.finish(inner);
     if selected {
-        cells = cells.into_iter().map(Text::selected).collect();
+        text.selected()
+    } else {
+        text
     }
-    cells
 }
 
-/// How wide any one element may render before it is truncated.
-fn budget(cols: usize) -> usize {
-    cols.min(MAX_WIDTH)
+fn choose_fit(name_width: usize, tag_width: usize, age_width: usize, inner: usize) -> Fit {
+    if name_width + GAP + tag_width + GAP + age_width <= inner {
+        return Fit::Full;
+    }
+    if name_width + GAP + ABBR_TAG + GAP + age_width <= inner {
+        return Fit::AbbrTag;
+    }
+    Fit::NoAge
 }
 
-/// The x that puts something `content` columns wide on the pane's centre line.
-fn centre(cols: usize, content: usize) -> usize {
-    cols.saturating_sub(content) / 2
-}
-
-/// Print one line centred on its own rendered width.
-///
-/// Per element, not per screen: a single centred block would have to be as wide as its widest
-/// member — the help line — leaving the prompt and the list parked at that block's left edge,
-/// which is the offset look this replaced rather than a fix for it.
-///
-/// The cost is that a line re-centres when its own width changes, so the prompt drifts by half
-/// a column per character as you type. That is what centred input does everywhere, and it is
-/// the prompt itself moving rather than the whole screen shifting under it.
-fn print_centered(text: Text, cols: usize, y: usize) {
-    let content = text.content().width();
-    print_text_with_coordinates(text, centre(cols, content), y, Some(content), None);
+/// How many columns the name may use once the fixed columns have taken theirs. A name is
+/// truncated rather than wrapped: a wrapped name would break the one-row-per-session invariant
+/// the selection index depends on.
+fn name_column_budget(fit: &Fit, tag_width: usize, age_width: usize, inner: usize) -> usize {
+    let fixed = match fit {
+        Fit::Full => GAP + tag_width + GAP + age_width,
+        Fit::AbbrTag => GAP + ABBR_TAG + GAP + age_width,
+        Fit::NoAge => GAP + ABBR_TAG,
+    };
+    inner.saturating_sub(fixed).max(4)
 }
 
 /// The search term, with the `Enter` outcome spelled out beside it.
 ///
-/// Putting the outcome *in* the prompt rather than on a line of its own is what lets the
+/// Putting the outcome in the input box rather than on a line of its own is what lets the
 /// picker say what `Enter` does in both states — pointing at the highlighted row, or at the
 /// literal text — without the two sentences ever contradicting each other.
-///
-/// Trailing `_` is a cursor stand-in: a plugin's real cursor is off by default and turning it
-/// on would mean tracking its position through every re-render.
-fn prompt_text(state: &MatchSet) -> Text {
+fn prompt_text(state: &MatchSet) -> Prompt {
     let (action, is_error) = enter_action(state);
-    input_line("Session:", &state.search_term, action.as_deref(), is_error)
-}
-
-/// The same prompt, for a screen whose only job is to take a name: the refusal (when there is
-/// one) replaces the action, so one sentence covers both states here too.
-fn input_prompt(label: &str, input: &str, error: Option<&str>, action: &str) -> Text {
-    match error {
-        Some(error) => input_line(label, input, Some(error), true),
-        None => input_line(label, input, Some(action), false),
-    }
-}
-
-/// `Label: typed_ <ENTER> - Outcome`, with the outcome in the error colour when it is a refusal.
-///
-/// Trailing `_` is a cursor stand-in: a plugin's real cursor is off by default and turning it
-/// on would mean tracking its position through every re-render.
-fn input_line(label: &str, input: &str, action: Option<&str>, is_error: bool) -> Text {
-    let mut line = format!("{} ", label);
-    let term_start = line.chars().count();
-    line.push_str(input);
-    line.push('_');
-    let term_end = line.chars().count();
-
-    let mut key = None;
-    let mut act = None;
-    if let Some(action) = action {
-        line.push(' ');
-        let key_start = line.chars().count();
-        line.push_str("<ENTER>");
-        let key_end = line.chars().count();
-        line.push_str(" - ");
-        let act_start = line.chars().count();
-        line.push_str(action);
-        key = Some(key_start..key_end);
-        act = Some(act_start..line.chars().count());
-    }
-
-    let mut text = Text::new(&line)
-        .color_range(LABEL, ..label.chars().count())
-        .color_range(ACCENT, term_start..term_end);
-    if let Some(range) = key {
-        text = text.color_range(ACCENT, range);
-    }
-    if let Some(range) = act {
-        text = if is_error {
-            text.error_color_range(range)
-        } else {
-            text.color_range(NAME, range)
-        };
-    }
-    text
+    (state.search_term.clone(), action, is_error)
 }
 
 /// What `Enter` will do, and whether saying so is bad news.
@@ -440,183 +497,370 @@ fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
 /// It lives outside the result list on purpose: never a row, never selectable, never indexed —
 /// which is what lets it talk about the current session without putting the current session
 /// back into the match set it was deliberately taken out of.
-fn note_texts(state: &MatchSet, error: Option<&str>) -> Vec<Text> {
+fn note_texts(state: &MatchSet, error: Option<&str>) -> Vec<Note> {
     let mut notes = Vec::new();
     if let Some(error) = error {
-        notes.push(Text::new(error).error_color_all());
+        notes.push(Note::error(error));
     }
     if state.current_matches {
         if let Some(current) = state.current_session.as_ref() {
-            notes.push(Text::new(format!("you are in \"{}\" — not listed", current)).dim_all());
+            notes.push(Note::dim(format!("you are in \"{}\" — not listed", current)));
         }
     }
     notes
 }
 
-fn empty_text(state: &MatchSet) -> Text {
+fn empty_text(state: &MatchSet) -> String {
     if state.search_term.is_empty() {
-        Text::new("no sessions").dim_all()
+        "no sessions".to_string()
     } else {
-        Text::new(format!("no match for \"{}\"", state.search_term)).dim_all()
+        format!("no match for \"{}\"", state.search_term)
     }
 }
 
-fn render_results(state: &MatchSet, cols: usize, y: usize, width: usize, list_rows: usize) {
-    // The table spends one row on its own title row, which is left blank: the host styles row
-    // zero as a header whether or not you wanted one.
-    let capacity = list_rows.saturating_sub(1);
+// ---------------------------------------------------------------------------------------------
+// Directories
+// ---------------------------------------------------------------------------------------------
+
+fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
+    if dirs.rows.is_empty() {
+        return vec![note_line(rect, &Note::dim(dir_empty_text(dirs, term)))];
+    }
+    let inner = rect.inner_width();
+    let capacity = rect.inner_height().saturating_sub(notes);
     if capacity == 0 {
-        return;
+        return Vec::new();
     }
-    // And one more is kept back for "+N more" whenever the list overflows.
-    let overflows = state.rows.len() > capacity;
-    let visible = if overflows { capacity.saturating_sub(1) } else { capacity };
-    if visible == 0 {
-        return;
-    }
-    let (start, end) = viewport(state.selected.unwrap_or(0), state.rows.len(), visible);
-    let window = &state.rows[start..end];
+    let (start, end) = viewport(dirs.selected.unwrap_or(0), dirs.rows.len(), capacity);
+    let window = &dirs.rows[start..end];
 
-    // Widths are measured over the *visible* window only. Measuring the whole list would make
-    // the name column jump as you scroll, for the sake of names you cannot see. The host pads
-    // each column to its widest cell, so this only has to decide what gets *cut*.
-    let name_width = window.iter().map(|r| r.name.width()).max().unwrap_or(0);
-    let tag_width = window.iter().map(|r| r.kind.full_tag().width()).max().unwrap_or(0);
-    let age_width = window.iter().map(|r| format_age(r.age).width()).max().unwrap_or(0);
-    let fit = choose_fit(name_width, tag_width, age_width, width);
-    let name_budget = name_column_budget(&fit, tag_width, age_width, width);
-
-    let columns = if matches!(fit, Fit::NoAge) { 2 } else { 3 };
-    let mut table = header_row(Table::new(), columns);
-    let mut name_column = 1; // the blank title cell is one column wide
-    for (offset, row) in window.iter().enumerate() {
-        let cells = result_row(row, state.selected == Some(start + offset), &fit, name_budget);
-        // Measured after truncation, which is the only width the host will ever see.
-        name_column = name_column.max(cells[0].content().width());
-        table = table.add_styled_row(cells);
-    }
-
-    let tag_column = if matches!(fit, Fit::Full) { tag_width } else { 3 };
-    let mut widths = vec![name_column, tag_column];
-    if !matches!(fit, Fit::NoAge) {
-        widths.push(age_width);
-    }
-    print_table_centered(table, &widths, cols, y, list_rows);
-
-    if overflows {
-        let hidden = state.rows.len() - window.len();
-        print_centered(
-            Text::new(format!("+{} more", hidden)).dim_all(),
-            cols,
-            y + 1 + window.len(),
-        );
-    }
-}
-
-fn result_row(row: &Row, selected: bool, fit: &Fit, name_budget: usize) -> Vec<Text> {
-    let name = truncate(&row.name, name_budget);
-    // A truncated name drops the indices that fell off the end — colouring a position that no
-    // longer exists would paint the wrong character.
-    let visible_chars = name.chars().count();
-    let indices: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible_chars).collect();
-
-    let mut cells = vec![
-        cell(&name).color_range(NAME, ..).color_indices(ACCENT, indices),
-        cell(match fit {
-            Fit::Full => row.kind.full_tag(),
-            Fit::AbbrTag | Fit::NoAge => row.kind.abbr_tag(),
-        })
-        .color_range(TAG, ..),
-    ];
-    if !matches!(fit, Fit::NoAge) {
-        cells.push(cell(&format_age(row.age)).color_range(LABEL, ..));
-    }
-    if selected {
-        cells = cells.into_iter().map(Text::selected).collect();
-    }
-    cells
-}
-
-/// A blank first row. `Table` styles row zero as a title row unconditionally, so a table that
-/// does not want a header has to spend a row on an empty one — upstream does the same.
-fn header_row(table: Table, columns: usize) -> Table {
-    table.add_styled_row(vec![cell(" "); columns])
-}
-
-/// One table cell, with the empty string turned into a space.
-///
-/// ⚠️ The host cannot represent an empty cell, and does not fail loudly when handed one. A
-/// cell's text crosses as a comma-separated list of its bytes, so `""` arrives as a list with
-/// no bytes in it rather than as text of length zero — the cell is dropped, and because the
-/// wire format is one flat run of cells cut into rows by a column count, *every* cell after it
-/// slides one place left. A row that drops a cell therefore eats the first cell of the row
-/// below, and the last row on screen comes up a column short. That is what a blank token count
-/// used to do to the agent list.
-///
-/// A single space is the narrowest thing that survives the trip, and the column is padded to
-/// the width it was measured at anyway, so it still reads as the blank it was meant to be.
-fn cell(content: &str) -> Text {
-    Text::new(if content.is_empty() { " " } else { content })
-}
-
-/// Print a table centred on the width it will actually occupy.
-///
-/// `columns` are the padded widths the host will settle on — it pads every cell in a column to
-/// the widest one and puts a single space between columns, so the rendered width is their sum
-/// plus one per gap.
-///
-/// The coordinate width passed on is the whole distance from `x` to the pane's right edge, not
-/// the table's own width: the host charges `max_column_width + 1` for *every* column including
-/// the last, and drops any column that does not fit that running total. Handing it an exact fit
-/// would cost the table its last column.
-fn print_table_centered(table: Table, columns: &[usize], cols: usize, y: usize, rows: usize) {
-    let content = columns.iter().sum::<usize>() + columns.len().saturating_sub(1);
-    let x = centre(cols, content);
-    print_table_with_coordinates(table, x, y, Some(cols.saturating_sub(x)), Some(rows));
-}
-
-/// Keep the selection on screen, scrolling only when it would otherwise fall off. A centred
-/// viewport would shift every row on every keystroke; row-index stability is a non-goal, but
-/// gratuitous motion is still noise.
-fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
-    if visible >= total {
-        return (0, total);
-    }
-    let start = if selected < visible {
-        0
+    let full_tag = window.iter().map(|r| r.action.full_tag().width()).max().unwrap_or(0);
+    // The name is capped at a third of the width before anything else is decided. Nothing else
+    // here has a natural size — a path will happily eat a whole row — so the cap is what keeps
+    // three columns on screen instead of two and a half.
+    let name_column =
+        window.iter().map(|r| r.name.width()).max().unwrap_or(0).min(inner / 3).max(4);
+    // The tag abbreviates before the path is dropped: you can read `[C]` as easily as
+    // `[CREATE]` once you have seen one of each, and a path is not guessable that way.
+    let (tag_column, abbr) = if name_column + GAP + full_tag + GAP + MIN_PATH <= inner {
+        (full_tag, false)
     } else {
-        (selected + 1).saturating_sub(visible)
+        (ABBR_TAG, true)
     };
-    (start, (start + visible).min(total))
+    let remaining = inner.saturating_sub(name_column + GAP + tag_column + GAP);
+    let path_budget = (remaining >= MIN_PATH).then_some(remaining);
+
+    window
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let selected = dirs.selected == Some(start + offset);
+            dir_line(row, selected, abbr, name_column, tag_column, path_budget, inner)
+        })
+        .collect()
 }
 
-/// `Table` puts a single space between columns, so the gaps are one column each.
-const GAP: usize = 1;
+fn dir_line(
+    row: &DirRow,
+    selected: bool,
+    abbr: bool,
+    name_column: usize,
+    tag_column: usize,
+    path_budget: Option<usize>,
+    inner: usize,
+) -> Text {
+    let mut line = Line::new();
+    // Not highlighted, because the term was never matched against it — the match ran on the
+    // path, and painting hits onto a string they were not found in would be a lie that happens
+    // to line up sometimes.
+    line.push(&truncate(&row.name, name_column), NAME);
+    line.pad_to(name_column);
+    line.gap(GAP);
+    line.push(if abbr { row.action.abbr_tag() } else { row.action.full_tag() }, TAG);
+    if let Some(path_budget) = path_budget {
+        line.pad_to(name_column + GAP + tag_column);
+        line.gap(GAP);
+        let (path, dropped) = truncate_left(&row.path, path_budget);
+        // The indices are into the *untruncated* path. Those that fell off the left are gone;
+        // the rest shift down by what was dropped and back up by one for the `…` standing in
+        // for it.
+        let shift = usize::from(dropped > 0);
+        let hits: Vec<usize> =
+            row.indices.iter().filter(|i| **i >= dropped).map(|i| i - dropped + shift).collect();
+        line.push_hits(&path, LABEL, ACCENT, &hits);
+    }
 
-fn choose_fit(name_width: usize, tag_width: usize, age_width: usize, cols: usize) -> Fit {
-    if name_width + GAP + tag_width + GAP + age_width <= cols {
-        return Fit::Full;
+    let text = line.finish(inner);
+    if selected {
+        text.selected()
+    } else {
+        text
     }
-    if name_width + GAP + 3 + GAP + age_width <= cols {
-        return Fit::AbbrTag;
-    }
-    Fit::NoAge
 }
 
-/// How many columns the name may use once the fixed columns have taken theirs. A name is
-/// truncated rather than wrapped: a wrapped name would break the one-row-per-session invariant
-/// the selection index depends on.
-fn name_column_budget(fit: &Fit, tag_width: usize, age_width: usize, cols: usize) -> usize {
-    let fixed = match fit {
-        Fit::Full => GAP + tag_width + GAP + age_width,
-        Fit::AbbrTag => GAP + 3 + GAP + age_width,
-        Fit::NoAge => GAP + 3,
+/// The directory prompt names the session that would be made, not the directory that would be
+/// entered. That is the thing you have to be able to argue with — the path is already on the
+/// row, and the name is the part the plugin invented.
+fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
+    let Some(row) = dirs.selected_row() else {
+        return (term.to_string(), None, false);
     };
-    cols.saturating_sub(fixed).max(4)
+    let refused = row.action == Action::Here;
+    let action = if refused {
+        // The one row `Enter` will not act on. It belongs in the prompt rather than on a note
+        // line because it is a property of the highlight, and it has to move with it.
+        "already in this session".to_string()
+    } else {
+        format!("{} \"{}\"", row.action.verb(), row.name)
+    };
+    (term.to_string(), Some(action), refused)
 }
 
-/// The help line, in as much detail as the width allows. Below the compact form it is dropped
-/// entirely — a truncated key list is worse than none.
+/// The directory screen has three ways to be empty and they are not interchangeable. Only the
+/// failure gets a note line — the other two are self-explanatory in the list's own place.
+fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
+    match &dirs.status {
+        Status::Failed(reason) => vec![Note::error(reason)],
+        _ => Vec::new(),
+    }
+}
+
+fn dir_empty_text(dirs: &DirSet, term: &str) -> String {
+    match &dirs.status {
+        Status::Waiting => "asking zoxide…".to_string(),
+        // The reason is already on the note line directly above; on a pane this small, saying
+        // it twice costs more than the second copy is worth.
+        Status::Failed(_) => "no directories".to_string(),
+        Status::Ready if term.is_empty() => "zoxide knows nowhere yet".to_string(),
+        Status::Ready => format!("no match for \"{}\"", term),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------------------------
+
+/// How much the agent row had to give up to fit the box's width.
+///
+/// The ladder is **abbreviate the tag → drop cwd → drop age**, and that order is a judgement
+/// about what each column is for. Age outranks cwd because in the common case the label already
+/// names the project the cwd would repeat, while nothing else on the row says how long an agent
+/// has been stuck — which is the whole routing decision.
+///
+/// There was a rung above `Full` carrying a token count, dropped when `claude-ps` stopped
+/// emitting `context`: its join was a guess off a lossy cwd slug and it was that tool's only
+/// unbounded read. A rung no producer can reach is not a fallback, it is a branch that cannot
+/// be exercised.
+#[derive(PartialEq, Eq)]
+enum AgentFit {
+    /// name + [WAITING] + age + cwd
+    Full,
+    /// name + [W] + age + cwd
+    AbbrTag,
+    /// name + [W] + age
+    NoCwd,
+    /// name + [W]
+    NoAge,
+}
+
+fn agent_body(
+    agents: &AgentSet,
+    term: &str,
+    rect: &Rect,
+    notes: usize,
+    frame: u64,
+) -> Vec<Text> {
+    if agents.rows.is_empty() {
+        return vec![note_line(rect, &Note::dim(agent_empty_text(agents, term)))];
+    }
+    let inner = rect.inner_width();
+    let capacity = rect.inner_height().saturating_sub(notes);
+    if capacity == 0 {
+        return Vec::new();
+    }
+    let (start, end) = viewport(agents.selected.unwrap_or(0), agents.rows.len(), capacity);
+    let window = &agents.rows[start..end];
+
+    // Measured at the same `frame` the cells below are built at, so a width and the glyph that
+    // has to fit in it can never come from two different turns of the spinner — every spinner
+    // frame is one column wide anyway (see `agents::SPINNER`), and passing the frame is what
+    // keeps that a property of the spinner rather than an assumption made here.
+    let full_tag =
+        window.iter().map(|r| agents::full_tag(&r.status, frame).width()).max().unwrap_or(0);
+    // Measured rather than assumed, unlike the directory screen's fixed `ABBR_TAG`: a glyph is
+    // two columns wide and an unknown status's `[S]` fallback is three, so the narrow tag column
+    // is not one width any more.
+    let abbr_width =
+        window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
+    let age_width =
+        window.iter().map(|r| agents::format_duration(r.age).width()).max().unwrap_or(0);
+    // Capped at a third of the width before anything else is decided — the name is the one
+    // column with a natural size, and letting it take what it likes is what turns four columns
+    // into two and a half.
+    let name_column =
+        window.iter().map(|r| r.label().width()).max().unwrap_or(0).min(inner / 3).max(4);
+
+    let fit = if name_column + GAP + full_tag + GAP + age_width + GAP + MIN_PATH <= inner {
+        AgentFit::Full
+    } else if name_column + GAP + abbr_width + GAP + age_width + GAP + MIN_PATH <= inner {
+        AgentFit::AbbrTag
+    } else if name_column + GAP + abbr_width + GAP + age_width <= inner {
+        AgentFit::NoCwd
+    } else {
+        AgentFit::NoAge
+    };
+
+    let abbr = !matches!(fit, AgentFit::Full);
+    let tag_column = if abbr { abbr_width } else { full_tag };
+    let cwd_budget = match fit {
+        AgentFit::Full | AgentFit::AbbrTag => Some(
+            inner.saturating_sub(name_column + GAP + tag_column + GAP + age_width + GAP),
+        ),
+        _ => None,
+    };
+
+    window
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let selected = agents.selected == Some(start + offset);
+            agent_line(
+                row,
+                selected,
+                &fit,
+                name_column,
+                tag_column,
+                age_width,
+                cwd_budget,
+                inner,
+                frame,
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_line(
+    row: &AgentRow,
+    selected: bool,
+    fit: &AgentFit,
+    name_column: usize,
+    tag_column: usize,
+    age_width: usize,
+    cwd_budget: Option<usize>,
+    inner: usize,
+    frame: u64,
+) -> Text {
+    let label = truncate(&row.label(), name_column);
+    // The term was matched against the **bare** label, so a `:pane` suffix cannot carry a hit —
+    // and a truncated label drops the indices that fell off the end, because colouring a
+    // position that no longer exists paints the wrong character.
+    let visible = label.chars().count();
+    let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
+
+    let mut line = Line::new();
+    line.push_hits(&label, NAME, ACCENT, &hits);
+    line.pad_to(name_column);
+    line.gap(GAP);
+    // The one status that is spelled in the accent colour. Every other status — including ones
+    // released after this was written — renders as itself, quietly.
+    let tag_level = if agents::is_waiting(&row.status) { ACCENT } else { TAG };
+    let tag = if matches!(fit, AgentFit::Full) {
+        agents::full_tag(&row.status, frame)
+    } else {
+        agents::abbr_tag(&row.status, frame)
+    };
+    line.push(&tag, tag_level);
+
+    if !matches!(fit, AgentFit::NoAge) {
+        line.pad_to(name_column + GAP + tag_column);
+        line.gap(GAP);
+        line.push(&agents::format_duration(row.age), LABEL);
+    }
+    if let Some(cwd_budget) = cwd_budget {
+        line.pad_to(name_column + GAP + tag_column + GAP + age_width);
+        line.gap(GAP);
+        // Still `truncate_left` underneath: two components are short, but not bounded — a
+        // single directory may be named anything at all.
+        let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
+        // Not highlighted: the match ran on the row's label, and painting hits onto a string
+        // they were not found in would be a lie that happens to line up sometimes.
+        line.push(&cwd, LABEL);
+    }
+
+    let text = line.finish(inner);
+    if selected {
+        text.selected()
+    } else {
+        text
+    }
+}
+
+/// The agent prompt names where `Enter` would put you — the session, and the pane when the
+/// session alone does not say which.
+fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
+    match agents.selected_row() {
+        Some(row) => (term.to_string(), Some(format!("Go to \"{}\"", row.label())), false),
+        None => (term.to_string(), None, false),
+    }
+}
+
+/// Agents outside zellij are not rows — `Enter` could do nothing for them. Counting them here
+/// is what keeps them from being *silently* absent: without this, an agent running in a plain
+/// terminal is a name you can type that gives a blank list and no reason.
+fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
+    let mut notes = Vec::new();
+    if let AgentStatus::Failed(reason) = &agents.status {
+        notes.push(Note::error(truncate(reason, width)));
+    }
+    let outside = match agents.outside {
+        0 => return notes,
+        1 => "1 agent not in zellij — not listed".to_string(),
+        n => format!("{} agents not in zellij — not listed", n),
+    };
+    notes.push(Note::dim(outside));
+    notes
+}
+
+fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
+    match &agents.status {
+        AgentStatus::Waiting => "looking for agents…".to_string(),
+        // The reason is already on the note line directly above; on a pane this small, saying
+        // it twice costs more than the second copy is worth.
+        AgentStatus::Failed(_) => "no agents".to_string(),
+        AgentStatus::Ready if term.is_empty() => "no agents running".to_string(),
+        AgentStatus::Ready => format!("no match for \"{}\"", term),
+    }
+}
+
+/// The last two components of a path: `misc/luneta` for `/home/you/Projects/misc/luneta`.
+///
+/// Down a column of agents the leading components are the same `/home/you/…` on every row, so
+/// they cost width without separating anything. What tells two agents apart is at the end.
+///
+/// Two components rather than one, for the reason [`crate::dirs`] derives session names from
+/// two: measured across a real 136-path zoxide database, the last-two form collided **zero**
+/// times where the bare basename collided nine ways (`master`, `backend`, `frontend`, `bin`,
+/// …). One component would be shorter and would routinely name two different projects the same
+/// thing, on the one screen whose job is telling agents apart.
+///
+/// ⚠️ No `…` marks the elision, unlike `truncate_left`. This is an abbreviation applied to
+/// every row by the same rule, not a row running out of room — a marker on all of them would
+/// be noise carrying no per-row information.
+fn short_cwd(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    match parts.as_slice() {
+        // `/` itself, or something that is not a path at all.
+        [] => path.to_string(),
+        [only] => (*only).to_string(),
+        [.., parent, base] => format!("{}/{}", parent, base),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The help row
+// ---------------------------------------------------------------------------------------------
+
 fn search_help(width: usize) -> Text {
     keys_text(
         width,
@@ -646,13 +890,27 @@ fn dirs_help(width: usize) -> Text {
     )
 }
 
+/// The agent screen's keys. `Enter` does the same thing on every row, so there is only one to
+/// name — and the third screen has to fit the same 60%-of-terminal pane as the other two.
+fn agents_help(width: usize) -> Text {
+    keys_text(
+        width,
+        &[
+            ("<↓↑>", "Navigate", "Nav"),
+            ("<ENTER>", "Go to agent", "Go"),
+            ("<TAB>", "Directories", "Dirs"),
+            ("<ESC>", "Back", "Back"),
+        ],
+    )
+}
+
 /// A key and the two lengths of its description, longest first.
 type Key<'a> = (&'a str, &'a str, &'a str);
 
 /// The help line in the most detail that fits, over four spellings: `<KEY> - Description, …`,
 /// the same without the dashes, the same with short descriptions, and finally keys alone.
 ///
-/// The default floating pane is 60% of the terminal, which puts the search screen's five keys
+/// The default floating pane is 60% of the terminal, which puts the search screen's six keys
 /// past the first two spellings on any ordinary terminal — the short tier is what the user
 /// actually sees, not a rarely-hit fallback. Dropping descriptions before dropping a key is
 /// deliberate: a key you cannot see is a feature you will never find.
@@ -680,351 +938,192 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
     text
 }
 
-/// The last two components of a path: `misc/luneta` for
-/// `/home/you/Projects/misc/luneta`.
-///
-/// Down a column of agents the leading components are the same `/home/you/…` on every row, so
-/// they cost width without separating anything. What tells two agents apart is at the end.
-///
-/// Two components rather than one, for the reason [`crate::dirs`] derives session names from
-/// two: measured across a real 136-path zoxide database, the last-two form collided **zero**
-/// times where the bare basename collided nine ways (`master`, `backend`, `frontend`, `bin`,
-/// …). One component would be shorter and would routinely name two different projects the same
-/// thing, on the one screen whose job is telling agents apart.
-///
-/// ⚠️ No `…` marks the elision, unlike [`truncate_left`]. This is an abbreviation applied to
-/// every row by the same rule, not a row running out of room — a marker on all of them would
-/// be noise carrying no per-row information.
-fn short_cwd(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    match parts.as_slice() {
-        // `/` itself, or something that is not a path at all.
-        [] => path.to_string(),
-        [only] => (*only).to_string(),
-        [.., parent, base] => format!("{}/{}", parent, base),
-    }
-}
-
-/// Truncate from the **left**, keeping the tail, and report how many characters went.
-///
-/// A path is identified by its last components; its first are `/home/you/` on every row of the
-/// list. The count comes back because the caller is holding match positions into the original
-/// string and has to shift the ones that survived.
-fn truncate_left(text: &str, max: usize) -> (String, usize) {
-    if text.width() <= max {
-        return (text.to_string(), 0);
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let mut width = 0;
-    let mut kept = 0;
-    for ch in chars.iter().rev() {
-        let w = ch.to_string().width();
-        // One column is held back for the `…` that replaces everything dropped.
-        if width + w > max.saturating_sub(1) {
-            break;
-        }
-        width += w;
-        kept += 1;
-    }
-    let dropped = chars.len() - kept;
-    let mut out = String::from("…");
-    out.extend(chars[dropped..].iter());
-    (out, dropped)
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.width() <= max {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let w = ch.to_string().width();
-        if width + w > max.saturating_sub(1) {
-            break;
-        }
-        out.push(ch);
-        width += w;
-    }
-    out.push('…');
-    out
-}
-
-/// How much the agent row had to give up to fit the pane's width.
-///
-/// The ladder is **abbreviate the tag → drop cwd → drop age**, and that order is a judgement
-/// about what each column is for. Age outranks cwd because in the common case the label already
-/// names the project the cwd would repeat, while nothing else on the row says how long an agent
-/// has been stuck — which is the whole routing decision.
-///
-/// There was a rung above `Full` carrying a token count, dropped when `claude-ps` stopped
-/// emitting `context`: its join was a guess off a lossy cwd slug and it was that tool's only
-/// unbounded read. A rung no producer can reach is not a fallback, it is a branch that cannot
-/// be exercised.
-#[derive(PartialEq, Eq)]
-enum AgentFit {
-    /// name + [WAITING] + age + cwd
-    Full,
-    /// name + [W] + age + cwd
-    AbbrTag,
-    /// name + [W] + age
-    NoCwd,
-    /// name + [W]
-    NoAge,
-}
-
-/// The agent screen: who is running, what they are doing, and how long they have been doing it.
-///
-/// Deliberately the same shape as the other two — same prompt row, same table, same note and
-/// help rows in the same places — so `Tab` swaps the *contents* of a screen rather than the
-/// screen itself.
-///
-/// `frame` is the animation tick, and reaches exactly one thing: the busy spinner's glyph. It
-/// is threaded down rather than read from `agents`, because it is a fact about *when we are
-/// drawing*, not about the agents — the snapshot they came from is still frozen.
-pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, frame: u64) {
-    let width = budget(cols);
-    let notes = agent_note_texts(agents, width);
-    let screen = Screen::new(rows, notes.len());
-
-    print_centered(agent_prompt(agents, term), cols, screen.prompt_y);
-
-    if screen.list_rows == 0 {
-        // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
-    } else if agents.rows.is_empty() {
-        print_centered(agent_empty_text(agents, term), cols, screen.table_y + 1);
-    } else {
-        render_agent_results(agents, cols, screen.table_y, width, screen.list_rows, frame);
-    }
-
-    for (i, note) in notes.into_iter().enumerate() {
-        print_centered(note, cols, screen.notes_y + i);
-    }
-    print_centered(agents_help(width), cols, screen.help_y);
-}
-
-fn render_agent_results(
-    agents: &AgentSet,
-    cols: usize,
-    y: usize,
-    width: usize,
-    list_rows: usize,
-    frame: u64,
-) {
-    let capacity = list_rows.saturating_sub(1);
-    if capacity == 0 {
-        return;
-    }
-    let overflows = agents.rows.len() > capacity;
-    let visible = if overflows { capacity.saturating_sub(1) } else { capacity };
-    if visible == 0 {
-        return;
-    }
-    let (start, end) = viewport(agents.selected.unwrap_or(0), agents.rows.len(), visible);
-    let window = &agents.rows[start..end];
-
-    // Measured over the visible window only, as on both other screens: widths taken from rows
-    // you cannot see make the columns jump as you scroll. And measured at the same `frame` the
-    // cells below are built at, so a width and the glyph that has to fit in it can never come
-    // from two different turns of the spinner — every spinner frame is one column wide anyway
-    // (see `agents::SPINNER`), and passing the frame is what keeps that a property of the
-    // spinner rather than an assumption made here.
-    let full_tag =
-        window.iter().map(|r| agents::full_tag(&r.status, frame).width()).max().unwrap_or(0);
-    // Measured rather than assumed, unlike the directory screen's fixed `ABBR_TAG`: a glyph is
-    // two columns wide and an unknown status's `[S]` fallback is three, so the narrow tag column
-    // is not one width any more.
-    let abbr_width =
-        window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
-    let age_width = window
-        .iter()
-        .map(|r| agents::format_duration(r.age).width())
-        .max()
-        .unwrap_or(0);
-    // Capped at a third of the width before anything else is decided — the name is the one
-    // column with a natural size, and letting it take what it likes is what turns four columns
-    // into two and a half.
-    let name_budget = window
-        .iter()
-        .map(|r| r.label().width())
-        .max()
-        .unwrap_or(0)
-        .min(width / 3)
-        .max(4);
-
-    // ⚠️ The host charges `max_column_width + 1` for *every* column, the last one included, and
-    // silently drops any column that pushes the running total past the width it was given. So
-    // the fixed cost of a four-column row is four, not the three gaps you can see — budgeting
-    // for the visible gaps is what costs the table its last column. See [`print_table_centered`].
-    let fit = if name_budget + full_tag + age_width + MIN_PATH + 4 <= width {
-        AgentFit::Full
-    } else if name_budget + abbr_width + age_width + MIN_PATH + 4 <= width {
-        AgentFit::AbbrTag
-    } else if name_budget + abbr_width + age_width + 3 <= width {
-        AgentFit::NoCwd
-    } else {
-        AgentFit::NoAge
-    };
-
-    let abbr = !matches!(fit, AgentFit::Full);
-    let tag_width = if abbr { abbr_width } else { full_tag };
-    let cwd_budget = match fit {
-        AgentFit::Full | AgentFit::AbbrTag => {
-            Some(width.saturating_sub(name_budget + tag_width + age_width + 4))
-        },
-        _ => None,
-    };
-
-    let columns = match fit {
-        AgentFit::Full | AgentFit::AbbrTag => 4,
-        AgentFit::NoCwd => 3,
-        AgentFit::NoAge => 2,
-    };
-    let cwd_cell = 3;
-    let mut table = header_row(Table::new(), columns);
-    let mut name_column = 1; // the blank title cell is one column wide
-    let mut cwd_column = 0;
-    for (offset, row) in window.iter().enumerate() {
-        let cells = agent_result_row(
-            row,
-            agents.selected == Some(start + offset),
-            &fit,
-            name_budget,
-            cwd_budget,
-            frame,
-        );
-        // Measured after truncation, which is the only width the host will ever see.
-        name_column = name_column.max(cells[0].content().width());
-        if let Some(cwd) = cells.get(cwd_cell) {
-            cwd_column = cwd_column.max(cwd.content().width());
-        }
-        table = table.add_styled_row(cells);
-    }
-
-    let mut widths = vec![name_column, tag_width];
-    if !matches!(fit, AgentFit::NoAge) {
-        widths.push(age_width);
-    }
-    if cwd_budget.is_some() {
-        widths.push(cwd_column);
-    }
-    print_table_centered(table, &widths, cols, y, list_rows);
-
-    if overflows {
-        let hidden = agents.rows.len() - window.len();
-        print_centered(
-            Text::new(format!("+{} more", hidden)).dim_all(),
-            cols,
-            y + 1 + window.len(),
-        );
-    }
-}
-
-fn agent_result_row(
-    row: &AgentRow,
-    selected: bool,
-    fit: &AgentFit,
-    name_budget: usize,
-    cwd_budget: Option<usize>,
-    frame: u64,
-) -> Vec<Text> {
-    let label = truncate(&row.label(), name_budget);
-    // The term was matched against the **bare** label, so a `:pane` suffix cannot carry
-    // a hit — and a truncated label drops the indices that fell off the end, because colouring
-    // a position that no longer exists paints the wrong character.
-    let visible_chars = label.chars().count();
-    let indices: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible_chars).collect();
-
-    let tag = if matches!(fit, AgentFit::Full) {
-        agents::full_tag(&row.status, frame)
-    } else {
-        agents::abbr_tag(&row.status, frame)
-    };
-    // The one status that is spelled in the accent colour. Every other status — including ones
-    // released after this was written — renders as itself, quietly.
-    let tag_level = if agents::is_waiting(&row.status) { ACCENT } else { TAG };
-
-    let mut cells = vec![
-        cell(&label).color_range(NAME, ..).color_indices(ACCENT, indices),
-        cell(&tag).color_range(tag_level, ..),
-    ];
-    if !matches!(fit, AgentFit::NoAge) {
-        cells.push(cell(&agents::format_duration(row.age)).color_range(LABEL, ..));
-    }
-    if let Some(cwd_budget) = cwd_budget {
-        // Still `truncate_left` underneath: two components are short, but not bounded — a
-        // single directory may be named anything at all.
-        let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
-        // Not highlighted: the match ran on the row's label, and painting hits onto a string
-        // they were not found in would be a lie that happens to line up sometimes.
-        cells.push(cell(&cwd).color_range(LABEL, ..));
-    }
-    if selected {
-        cells = cells.into_iter().map(Text::selected).collect();
-    }
-    cells
-}
-
-/// The agent prompt names where `Enter` would put you — the session, and the pane when the
-/// session alone does not say which.
-fn agent_prompt(agents: &AgentSet, term: &str) -> Text {
-    let Some(row) = agents.selected_row() else {
-        return input_line("Agent:", term, None, false);
-    };
-    input_line("Agent:", term, Some(&format!("Go to \"{}\"", row.label())), false)
-}
-
-/// Agents outside zellij are not rows — `Enter` could do nothing for them. Counting them here
-/// is what keeps them from being *silently* absent: without this, an agent running in a plain
-/// terminal is a name you can type that gives a blank list and no reason.
-/// ⚠️ Every note is truncated to the pane, and that is not defensive tidiness — it is a
-/// defect this screen hit the first time it was driven into a failure. `print_centered` sizes
-/// its coordinate width to the text's *own* width, so a note wider than the pane is not
-/// clipped: it runs on until the help line — printed afterwards, on the row below — overwrites
-/// its tail mid-word. The failure reason is exactly the note that gets long, because it can
-/// carry a shell error carrying an absolute path.
-fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Text> {
-    let mut notes = Vec::new();
-    if let AgentStatus::Failed(reason) = &agents.status {
-        notes.push(Text::new(truncate(reason, width)).error_color_all());
-    }
-    let outside = match agents.outside {
-        0 => return notes,
-        1 => "1 agent not in zellij — not listed".to_string(),
-        n => format!("{} agents not in zellij — not listed", n),
-    };
-    notes.push(Text::new(truncate(&outside, width)).dim_all());
-    notes
-}
-
-fn agent_empty_text(agents: &AgentSet, term: &str) -> Text {
-    match &agents.status {
-        AgentStatus::Waiting => Text::new("looking for agents…").dim_all(),
-        // The reason is already on the note line directly below; on a pane this small, saying
-        // it twice costs more than the second copy is worth.
-        AgentStatus::Failed(_) => Text::new("no agents").dim_all(),
-        AgentStatus::Ready if term.is_empty() => Text::new("no agents running").dim_all(),
-        AgentStatus::Ready => Text::new(format!("no match for \"{}\"", term)).dim_all(),
-    }
-}
-
-/// The agent screen's keys. `Enter` does the same thing on every row, so there is only one to
-/// name — and the third screen has to fit the same 60%-of-terminal pane as the other two.
-fn agents_help(width: usize) -> Text {
-    keys_text(
-        width,
-        &[
-            ("<↓↑>", "Navigate", "Nav"),
-            ("<ENTER>", "Go to agent", "Go"),
-            ("<TAB>", "Directories", "Dirs"),
-            ("<ESC>", "Back", "Back"),
-        ],
-    )
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    /// A pane, rendered to the lines it would print. The picture, in other words — which is the
+    /// thing that used to be unknowable from inside this crate, because the host assembled it.
+    fn picture(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) -> Vec<String> {
+        let mut lines = vec![rect.top(title, right).line];
+        lines.extend(interior.into_iter().map(|line| line.content().to_string()));
+        lines.push(rect.bottom());
+        lines
+    }
+
+    fn session(name: &str, kind: Kind, age: u64) -> Row {
+        Row::new(name.to_string(), kind, Duration::from_secs(age), 0, vec![], false)
+    }
+
+    fn matches(rows: Vec<Row>, selected: Option<usize>) -> MatchSet {
+        let mut state = MatchSet::default();
+        state.rows = rows;
+        state.selected = selected;
+        state
+    }
+
+    const HOUR: u64 = 3600;
+
+    /// The whole frame, exactly. Two sessions in a box with room for six rows: the list is
+    /// pinned to the bottom, not the top, so it sits against the prompt below it.
+    #[test]
+    fn the_list_hugs_the_bottom_of_its_box() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 8 };
+        let state = matches(
+            vec![
+                session("luneta", Kind::Live, 2 * HOUR),
+                session("old", Kind::Resurrectable, 3 * HOUR),
+            ],
+            Some(0),
+        );
+        let body = search_body(&state, &rect, 0);
+        let right = count(state.selected, state.rows.len());
+        assert_eq!(
+            picture(&rect, "Results", &right, interior(&rect, &[], body)),
+            vec![
+                "╭─ Results ──────────── 1/2 ─╮",
+                "│                            │",
+                "│                            │",
+                "│                            │",
+                "│                            │",
+                "│ luneta  [A]  2h ago        │",
+                "│ old     [R]  3h ago        │",
+                "╰────────────────────────────╯",
+            ]
+        );
+    }
+
+    /// Notes ride on top of the list and the pair anchors as one block, so a note never lands
+    /// between the highlighted row and the caret below it.
+    #[test]
+    fn notes_ride_on_top_of_the_list() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 7 };
+        let state = matches(vec![session("luneta", Kind::Live, 2 * HOUR)], Some(0));
+        let notes = vec![Note::dim("you are in \"desp\" — not listed")];
+        let body = search_body(&state, &rect, notes.len());
+        assert_eq!(
+            picture(&rect, "Results", "", interior(&rect, &notes, body)),
+            vec![
+                "╭─ Results ──────────────────╮",
+                "│                            │",
+                "│                            │",
+                "│                            │",
+                "│ you are in \"desp\" — not l… │",
+                "│ luneta  [ATTACH]  2h ago   │",
+                "╰────────────────────────────╯",
+            ]
+        );
+    }
+
+    /// A note wider than the box is cut to fit. Letting one run on would paint over the right
+    /// border — the bordered version of the defect that used to let it be overwritten mid-word.
+    #[test]
+    fn a_long_note_never_reaches_the_border() {
+        let rect = Rect { x: 0, y: 0, width: 24, height: 5 };
+        let note = Note::error("zoxide: no such file or directory (/usr/bin/zoxide)");
+        let lines = picture(&rect, "Results", "", interior(&rect, &[note], Vec::new()));
+        for line in &lines {
+            assert_eq!(line.width(), rect.width, "{line}");
+        }
+        assert_eq!(lines[3], "│ zoxide: no such fil… │");
+    }
+
+    /// Whatever the pane's size and whatever is in it, every line of a box is exactly as wide
+    /// as the box and closed at both ends. This is the invariant a bordered layout lives or
+    /// dies by: one short line and the right-hand border develops a hole.
+    #[test]
+    fn every_line_is_exactly_the_width_of_its_box() {
+        // Rebuilt per case rather than cloned: `Row` is not `Clone`, and making it so to
+        // please a test would be the test reaching into the production type.
+        let rows = || {
+            vec![
+                session("luneta", Kind::Live, 2 * HOUR),
+                session("a-very-long-session-name-indeed", Kind::Resurrectable, 400 * HOUR),
+                // Four characters, eight columns — the case where counting characters instead
+                // of columns puts the right border in the wrong place.
+                session("日本語版", Kind::Live, 60),
+            ]
+        };
+        for width in 10..60 {
+            for height in 3..10 {
+                for notes in 0..3 {
+                    let rect = Rect { x: 0, y: 0, width, height };
+                    let state = matches(rows(), Some(1));
+                    let notes: Vec<Note> =
+                        (0..notes).map(|i| Note::dim(format!("note {i}"))).collect();
+                    let body = search_body(&state, &rect, notes.len());
+                    let interior = interior(&rect, &notes, body);
+                    assert_eq!(interior.len(), rect.inner_height(), "{width}x{height}");
+                    for line in picture(&rect, "Results", "9/9", interior) {
+                        assert_eq!(line.width(), width, "{width}x{height}: {line}");
+                        assert!(line.chars().next().is_some_and(|c| "╭╰│".contains(c)));
+                        assert!(line.chars().last().is_some_and(|c| "╮╯│".contains(c)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// An empty list still says why it is empty, in the place a row would have been.
+    #[test]
+    fn an_empty_list_explains_itself_where_the_rows_would_be() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
+        let mut state = matches(Vec::new(), None);
+        state.search_term = "desp".to_string();
+        let body = search_body(&state, &rect, 0);
+        assert_eq!(
+            picture(&rect, "Results", "", interior(&rect, &[], body)),
+            vec![
+                "╭─ Results ──────────────────╮",
+                "│                            │",
+                "│                            │",
+                "│ no match for \"desp\"        │",
+                "╰────────────────────────────╯",
+            ]
+        );
+    }
+
+    /// The caret and the term on the left, what `Enter` would do flush against the right.
+    #[test]
+    fn the_input_line_pushes_the_action_to_the_right() {
+        let rect = Rect { x: 0, y: 0, width: 40, height: 3 };
+        let line = input_line(&rect, ("desp".to_string(), Some("Attach".to_string()), false));
+        assert_eq!(line.content(), "│ > desp_               <ENTER> Attach │");
+        assert_eq!(line.content().width(), rect.width);
+    }
+
+    /// The term is never the thing that gets cut. Below the width an action clause needs, the
+    /// action goes and the term keeps the box to itself.
+    #[test]
+    fn a_narrow_box_drops_the_action_not_the_term() {
+        let rect = Rect { x: 0, y: 0, width: 18, height: 3 };
+        let line = input_line(&rect, ("despesas".to_string(), Some("Attach".to_string()), false));
+        assert_eq!(line.content(), "│ > despesas_    │");
+        assert_eq!(line.content().width(), rect.width);
+    }
+
+    /// A term longer than the box keeps its tail: what you just typed is at the end, and the
+    /// cursor stand-in has to stay next to it.
+    #[test]
+    fn an_overlong_term_is_cut_from_the_left() {
+        let rect = Rect { x: 0, y: 0, width: 16, height: 3 };
+        let line = input_line(&rect, ("a-very-long-name".to_string(), None, false));
+        assert_eq!(line.content(), "│ > …ong-name_ │");
+        assert_eq!(line.content().width(), rect.width);
+    }
+
+    /// `3/47` while something is selected, the bare count when nothing is, nothing at all when
+    /// there is nothing to count.
+    #[test]
+    fn the_counter_reports_position_over_total() {
+        assert_eq!(count(Some(2), 47), "3/47");
+        assert_eq!(count(Some(0), 1), "1/1");
+        assert_eq!(count(None, 47), "47");
+        assert_eq!(count(None, 0), "");
+        assert_eq!(count(Some(0), 0), "");
+    }
 
     /// A list that fits shows all of it, from the top, whatever is selected.
     #[test]
@@ -1038,17 +1137,14 @@ mod tests {
     /// exactly as much as it has to. Gratuitous motion is the thing being avoided.
     #[test]
     fn viewport_scrolls_only_to_keep_the_selection_on_screen() {
-        // Still inside the first window — no scroll.
         assert_eq!(viewport(2, 20, 5), (0, 5));
         assert_eq!(viewport(4, 20, 5), (0, 5));
-        // One past it — one row of scroll.
         assert_eq!(viewport(5, 20, 5), (1, 6));
-        // The last row pins the window to the end of the list.
         assert_eq!(viewport(19, 20, 5), (15, 20));
     }
 
-    /// The window is always exactly `visible` rows while there are rows to fill it, and never
-    /// reaches past the end of the list.
+    /// The window is always exactly `visible` rows while there are rows to fill it, never
+    /// reaches past the end of the list, and always contains the selection.
     #[test]
     fn viewport_windows_stay_in_bounds() {
         for total in 0..12 {
@@ -1064,54 +1160,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// Text that fits is returned untouched — no marker, no allocation-visible change.
-    #[test]
-    fn truncate_leaves_text_that_fits() {
-        assert_eq!(truncate("despesas", 8), "despesas");
-        assert_eq!(truncate("despesas", 20), "despesas");
-        assert_eq!(truncate("", 0), "");
-    }
-
-    /// The `…` is paid for out of the budget, so the result never exceeds `max`.
-    #[test]
-    fn truncate_pays_for_its_own_marker() {
-        assert_eq!(truncate("despesas", 5), "desp…");
-        assert_eq!(truncate("despesas", 1), "…");
-        for max in 0..12 {
-            assert!(truncate("despesas", max).width() <= max.max(1));
-        }
-    }
-
-    /// Wide characters are measured in columns, not chars, so a truncated CJK name still fits
-    /// the column it was cut for.
-    #[test]
-    fn truncate_counts_columns_not_characters() {
-        // Four characters, eight columns.
-        assert_eq!("日本語版".width(), 8);
-        assert_eq!(truncate("日本語版", 5), "日本…");
-        assert!(truncate("日本語版", 5).width() <= 5);
-    }
-
-    /// Keeping the tail is the whole point: a path is identified by its last components.
-    #[test]
-    fn truncate_left_keeps_the_tail() {
-        assert_eq!(truncate_left("/home/you/projects/luneta", 12), ("…ects/luneta".to_string(), 14));
-        let (out, _) = truncate_left("/home/you/projects/luneta", 12);
-        assert!(out.width() <= 12);
-    }
-
-    /// The dropped count is what the caller shifts its match indices by, so it has to be the
-    /// real number of characters removed — and zero when nothing was.
-    #[test]
-    fn truncate_left_reports_what_it_dropped() {
-        assert_eq!(truncate_left("luneta", 12), ("luneta".to_string(), 0));
-        let (out, dropped) = truncate_left("abcdefghij", 5);
-        assert_eq!(dropped, 6);
-        // `…` plus the four characters that survived.
-        assert_eq!(out, "…ghij");
-        assert_eq!(out.chars().count(), 10 - dropped + 1);
     }
 
     /// Two components, because one collides across projects. See the doc comment.
@@ -1131,9 +1179,7 @@ mod tests {
     #[test]
     fn keys_text_drops_descriptions_before_it_drops_keys() {
         let keys: &[Key] = &[("<↓↑>", "Navigate", "Nav"), ("<ENTER>", "Select", "Select")];
-        // Widest tier: dashes and long descriptions.
         assert_eq!(keys_text(60, keys).content(), "<↓↑> - Navigate, <ENTER> - Select");
-        // Then the dashes go, then the long descriptions.
         assert_eq!(keys_text(30, keys).content(), "<↓↑> Navigate  <ENTER> Select");
         assert_eq!(keys_text(24, keys).content(), "<↓↑> Nav  <ENTER> Select");
         assert_eq!(keys_text(23, keys).content(), "<↓↑> Nav <ENTER> Select");
@@ -1158,5 +1204,33 @@ mod tests {
                 assert!(line.content().width() <= width, "width {width}: {}", line.content());
             }
         }
+    }
+
+    /// Not an assertion — a way to look at a whole pane from `cargo test -- --nocapture`.
+    #[test]
+    #[ignore = "prints a pane; run with --ignored --nocapture to look at one"]
+    fn print_a_pane() {
+        let (rows, cols) = (16, 54);
+        let screen = Screen::new(rows, cols);
+        let state = matches(
+            vec![
+                session("luneta", Kind::Live, 2 * 3600),
+                session("dotfiles", Kind::Live, 5 * 3600),
+                session("despesas-old", Kind::Resurrectable, 12 * 86400),
+            ],
+            Some(0),
+        );
+        let notes = vec![Note::dim("you are in \"notes\" — not listed")];
+        let rect = screen.results.unwrap();
+        let body = search_body(&state, &rect, notes.len());
+        let right = count(state.selected, state.rows.len());
+        for line in picture(&rect, "Results", &right, interior(&rect, &notes, body)) {
+            println!("{line}");
+        }
+        let input = &screen.input;
+        println!("{}", input.top("Sessions", "").line);
+        println!("{}", input_line(input, prompt_text(&state)).content());
+        println!("{}", input.bottom());
+        println!("  {}", search_help(help_width(cols)).content());
     }
 }
