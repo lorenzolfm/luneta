@@ -124,9 +124,34 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   one for the reason the directory screen derives names from two: measured
   across a real 136-path zoxide database, the last-two form collided zero
   times where the bare basename collided nine ways.
-- **A `:pane` suffix appears only when two rows share a session name**, and it
-  is never what the search term matches — you type the bare name. It shows up
-  exactly when the session name stops identifying one target.
+- **A row is called what someone called it**, and the zellij session name only
+  when nobody did. `claude-ps` reports the name *and who chose it*, and the
+  second half is the load-bearing one: a `derived` name is the basename of the
+  cwd plus a suffix, so showing it would put the cwd on the row twice — once as
+  a name that looks chosen, once as the cwd it was copied from. Only `user` and
+  `peer` are a name a person or another agent picked.
+
+  ⚠️ A source this build does not recognise is **suppressed**, which is the exact
+  opposite of what an unrecognised *status* does. The asymmetry is deliberate on
+  both sides. Every value in the status vocabulary is a real state, so hiding one
+  hides a live agent. The name sources that carry a chosen name are a short list
+  and the machinery is the long one — Claude Code already writes `derived`,
+  `collision`, `auto` and `hook` — so a source invented tomorrow is far likelier
+  to be more machinery, and trusting it would put a generated name where a chosen
+  one belongs. An *absent* source is trusted, because that is the state before
+  the key existed rather than a word this build failed to place.
+- **A `:pane` suffix appears only when two rows are called the same thing**, and
+  it is never what the search term matches — you type the bare name. It shows up
+  exactly when the label stops identifying one target: two agents in one session
+  that carry different chosen names take no suffix, and two that fall back to the
+  session name collide exactly as they did before names were read at all.
+- **You type what you see.** The fuzzy term is matched against the row's label,
+  so an agent shown by its chosen name is reached by that name and *not* by the
+  zellij session underneath it. That is one string, deliberately: the highlight
+  is a list of character offsets into whatever the matcher ran on, so a label
+  that came from somewhere else would paint hits onto characters the term never
+  touched. `Enter` is unaffected either way — it goes to the row's own
+  `(session, pane)`, whatever the row is called.
 - **A glance, not a watch** — a frozen *list*, though, not a frozen clock. The
   snapshot is taken when the screen opens and held while it is up, which is what
   makes attention-first ordering safe: nothing reorders while you read it. The
@@ -148,7 +173,7 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   a rung of the width ladder no producer can reach.
 - 🔴 **Keys are read by name, and a document that will not deserialise is loud.**
   The wire is a JSON array; this screen names only `status`, `status_age`,
-  `zellij` and `cwd` and ignores the rest. A key it has never heard of costs
+  `zellij`, `cwd`, `name` and `name_source` and ignores the rest. A key it has never heard of costs
   nothing — which is the point, because the count used to be checked *exactly*
   and `claude-ps` gaining `started_at` was a hard failure on a screen that
   understood every other field. A key it *depends* on going missing still stops

@@ -74,6 +74,14 @@ struct Wire {
     zellij: Option<WireZellij>,
     #[serde(default)]
     cwd: Option<String>,
+    /// Claude's own label for the session. Worth showing only when someone chose it — see
+    /// [`name_is_chosen`].
+    #[serde(default)]
+    name: Option<String>,
+    /// Who chose `name`, or `null`. Optional on purpose, unlike `status_age`: `null` is a
+    /// value the producer documents rather than a key going missing.
+    #[serde(default)]
+    name_source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +108,11 @@ pub enum Jump {
 /// One agent out of `claude-ps`, already known to be inside zellij.
 struct Agent {
     session: String,
+    /// What the row is *called* — the chosen name where there is one, and the zellij session
+    /// otherwise. Decided once here, in [`parse`], because the fuzzy term is matched against it
+    /// and the hit positions are offsets into it: a label that changed after matching would
+    /// paint the highlight onto a string the matcher never saw.
+    display: String,
     pane: u32,
     status: String,
     age: Duration,
@@ -108,9 +121,12 @@ struct Agent {
 
 /// One row. As on the other two screens, this *is* one match-set entry.
 pub struct AgentRow {
-    /// The zellij session name — what `Enter` acts on, and the **bare** string the fuzzy term
-    /// was matched against.
+    /// The zellij session name. **The address, not the label** — `Enter` acts on this and on
+    /// `pane`, whatever the row happens to be called.
     pub session: String,
+    /// What the row is called: the chosen name, or the session when no one chose one. This is
+    /// the **bare** string the fuzzy term was matched against, and what `indices` indexes.
+    pub display: String,
     pub pane: u32,
     /// Claude's status, carried through **verbatim**. Never compared against a known set for
     /// the purpose of deciding whether to show it — see [`status_rank`].
@@ -124,10 +140,10 @@ pub struct AgentRow {
     /// does not want a frozen clock.
     pub age: Duration,
     pub cwd: String,
-    /// Another visible row shares this session name, so the pane has to be spelled out.
+    /// Another visible row is called the same thing, so the pane has to be spelled out.
     pub shared: bool,
     pub jump: Jump,
-    /// Character positions the fuzzy matcher hit **in `session`**, for highlighting.
+    /// Character positions the fuzzy matcher hit **in `display`**, for highlighting.
     pub indices: Vec<usize>,
     rank: u8,
     score: i64,
@@ -135,15 +151,19 @@ pub struct AgentRow {
 }
 
 impl AgentRow {
-    /// `session`, or `session:pane` when the name alone no longer picks a target out.
+    /// What the row is called, plus `:pane` when that alone no longer picks a target out.
     ///
     /// The suffix is presentation only — it is never what the term matched, because it is
     /// never something you would type.
+    ///
+    /// ⚠️ Only the **suffix** may be added here. The base is `display`, which is what the
+    /// matcher ran on and what `indices` indexes, so swapping it for something else at render
+    /// time would paint the highlight onto characters the term never hit.
     pub fn label(&self) -> String {
         if self.shared {
-            format!("{}:{}", self.session, self.pane)
+            format!("{}:{}", self.display, self.pane)
         } else {
-            self.session.clone()
+            self.display.clone()
         }
     }
 }
@@ -258,15 +278,18 @@ impl AgentSet {
             let (score, indices, is_exact) = if term.is_empty() {
                 (0, Vec::new(), false)
             } else {
-                // Matched against the **bare** session name. The `:pane` suffix is decided
-                // below, after filtering, and is not part of what anyone would type.
-                match matcher.fuzzy_indices(&agent.session, term) {
-                    Some((score, indices)) => (score, indices, agent.session == term),
+                // Matched against what the row is **called**, bare. You type what you see, so
+                // a row shown by its chosen name has to be reachable by that name. The `:pane`
+                // suffix is decided below, after filtering, and is not part of what anyone
+                // would type.
+                match matcher.fuzzy_indices(&agent.display, term) {
+                    Some((score, indices)) => (score, indices, agent.display == term),
                     None => continue,
                 }
             };
             self.rows.push(AgentRow {
                 session: agent.session.clone(),
+                display: agent.display.clone(),
                 pane: agent.pane,
                 status: agent.status.clone(),
                 age: agent.age + since,
@@ -321,18 +344,30 @@ impl AgentSet {
     /// Decide the `:pane` suffix over the rows that are actually **visible**.
     ///
     /// Computed after filtering rather than over the whole snapshot, which is what makes it
-    /// mean what it says: the suffix appears exactly when the session name has stopped picking
-    /// one row out of the list, and goes away again when narrowing restores that.
+    /// mean what it says: the suffix appears exactly when the label has stopped picking one row
+    /// out of the list, and goes away again when narrowing restores that.
     ///
-    /// When a session is shared, *every* one of its rows is suffixed — "the first one is bare"
-    /// is not a rule anyone could read off the screen.
+    /// When a label is shared, *every* one of its rows is suffixed — "the first one is bare" is
+    /// not a rule anyone could read off the screen.
+    ///
+    /// Over `display` rather than `session`, because the question is whether what you can *see*
+    /// still identifies a row. Two agents in one zellij session that carry different chosen
+    /// names are already told apart and take no suffix; two that fall back to the session name
+    /// collide exactly as they did before names were read at all.
+    ///
+    /// 🔴 The suffix disambiguates within a session and not across them, since a pane id is
+    /// per-session. Two rows in *different* sessions that a person gave the same name would
+    /// therefore both render `name:0`. That is a label a reader cannot split, and it is not an
+    /// action they can get wrong: every row carries its own `(session, pane)`, so `Enter` still
+    /// goes where the highlighted row points. Left as is rather than fixed by falling back to
+    /// the session, which would swap the base out from under `indices` — see [`AgentRow::label`].
     fn mark_shared(&mut self) {
         for i in 0..self.rows.len() {
             let shared = self
                 .rows
                 .iter()
                 .enumerate()
-                .any(|(j, other)| j != i && other.session == self.rows[i].session);
+                .any(|(j, other)| j != i && other.display == self.rows[i].display);
             self.rows[i].shared = shared;
         }
     }
@@ -509,8 +544,11 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
             outside += 1;
             continue;
         }
+        let display = chosen_name(row.name.as_deref(), row.name_source.as_deref())
+            .unwrap_or_else(|| zellij.session.clone());
         agents.push(Agent {
             session: zellij.session,
+            display,
             pane,
             status: row.status.unwrap_or_default(),
             age: Duration::from_secs(row.status_age),
@@ -518,6 +556,35 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
         });
     }
     Ok((agents, outside))
+}
+
+/// The name to show for an agent, or `None` to fall back to the zellij session.
+///
+/// `claude-ps` reports both the name and **who chose it**, and the second half is the load
+/// bearing one. A `derived` name is the basename of the cwd plus a suffix, so showing it puts
+/// the cwd on the row twice — once as a name that looks chosen and once as the cwd it was
+/// copied from. Only `user` and `peer` are a name that a person or another agent picked.
+///
+/// 🔴 An unrecognised source is **suppressed**, and that is the exact opposite of what
+/// [`status_rank`] does with an unrecognised status. The asymmetry is the producer's, and it is
+/// deliberate on both sides: the status vocabulary is open and every value in it is a real
+/// state, so hiding one hides a live agent. The name sources are open too, but the ones that
+/// carry a chosen name are a short closed list and the machinery is the long open one — Claude
+/// Code already writes `derived`, `collision`, `auto` and `hook` — so a source invented
+/// tomorrow is far likelier to be more machinery. Trusting it would put a generated name where
+/// a chosen one belongs, which reads as information and is not.
+///
+/// `None` is trusted, because it is the state before the key existed rather than a source this
+/// build failed to recognise, and an older `claude-ps` should keep working.
+fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
+    let name = name.map(str::trim).filter(|name| !name.is_empty())?;
+    let chosen = match source {
+        None => true,
+        Some(source) => {
+            source.eq_ignore_ascii_case("user") || source.eq_ignore_ascii_case("peer")
+        },
+    };
+    chosen.then(|| name.to_string())
 }
 
 /// Compact elapsed time as a **duration** — `4s`, `35m`, `2h`.

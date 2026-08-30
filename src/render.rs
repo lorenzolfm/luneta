@@ -766,9 +766,9 @@ fn truncate(text: &str, max: usize) -> String {
 /// How much the agent row had to give up to fit the pane's width.
 ///
 /// The ladder is **abbreviate the tag → drop cwd → drop age**, and that order is a judgement
-/// about what each column is for. Age outranks cwd because in the common case the session name
-/// already names the project the cwd would repeat, while nothing else on the row says how long
-/// an agent has been stuck — which is the whole routing decision.
+/// about what each column is for. Age outranks cwd because in the common case the label already
+/// names the project the cwd would repeat, while nothing else on the row says how long an agent
+/// has been stuck — which is the whole routing decision.
 ///
 /// There was a rung above `Full` carrying a token count, dropped when `claude-ps` stopped
 /// emitting `context`: its join was a guess off a lossy cwd slug and it was that tool's only
@@ -946,7 +946,7 @@ fn agent_result_row(
     frame: u64,
 ) -> Vec<Text> {
     let label = truncate(&row.label(), name_budget);
-    // The term was matched against the **bare** session name, so a `:pane` suffix cannot carry
+    // The term was matched against the **bare** label, so a `:pane` suffix cannot carry
     // a hit — and a truncated label drops the indices that fell off the end, because colouring
     // a position that no longer exists paints the wrong character.
     let visible_chars = label.chars().count();
@@ -972,7 +972,7 @@ fn agent_result_row(
         // Still `truncate_left` underneath: two components are short, but not bounded — a
         // single directory may be named anything at all.
         let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
-        // Not highlighted: the match ran on the session name, and painting hits onto a string
+        // Not highlighted: the match ran on the row's label, and painting hits onto a string
         // they were not found in would be a lie that happens to line up sometimes.
         cells.push(cell(&cwd).color_range(LABEL, ..));
     }
