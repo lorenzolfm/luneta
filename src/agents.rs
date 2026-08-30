@@ -107,7 +107,13 @@ pub struct AgentRow {
     /// Claude's status, carried through **verbatim**. Never compared against a known set for
     /// the purpose of deciding whether to show it — see [`status_rank`].
     pub status: String,
-    /// Time in the current status. A duration, not a timestamp.
+    /// Time in the current status, as of the moment this row was built: what the snapshot
+    /// said, plus how long ago the snapshot was taken. A duration, not a timestamp.
+    ///
+    /// The offset is added here rather than left to the renderer because it is the same number
+    /// on every row, and a row carrying an age it is one addition short of is a row two callers
+    /// have to remember to finish. See [`crate::State::agents_since`] for why a frozen list
+    /// does not want a frozen clock.
     pub age: Duration,
     pub cwd: String,
     /// Tokens in context at the agent's last assistant turn, or `None` where the producer had
@@ -220,11 +226,16 @@ impl AgentSet {
     /// a legitimate target; omitting by session would take the interesting case away.
     ///
     /// `current` is our session name on its own, which is known even when the pane is not.
+    ///
+    /// `since` is how long ago the snapshot was taken, added to every row's age. It is a fact
+    /// about now rather than about the agents, which is why it arrives per rebuild rather than
+    /// per ingest — the snapshot is frozen and this is what keeps the ages off it from being.
     pub fn rebuild(
         &mut self,
         term: &str,
         current: Option<&str>,
         origin: Option<(&str, u32)>,
+        since: Duration,
         policy: Selection,
     ) {
         let held = match policy {
@@ -258,7 +269,7 @@ impl AgentSet {
                 session: agent.session.clone(),
                 pane: agent.pane,
                 status: agent.status.clone(),
-                age: agent.age,
+                age: agent.age + since,
                 cwd: agent.cwd.clone(),
                 context: agent.context,
                 shared: false,
@@ -279,7 +290,9 @@ impl AgentSet {
         // narrow, instead of a line that shuffles on every keystroke.
         //
         // 🔴 Safe only because the snapshot is frozen for the life of the screen. Under a poll
-        // this ordering would move rows under the cursor as agents changed status.
+        // this ordering would move rows under the cursor as agents changed status. The ages
+        // below *do* move without a re-fetch, and are still safe here: `since` is one number
+        // added to every row, and a uniform offset cannot flip a comparison between two of them.
         self.rows.sort_by(|a, b| {
             b.is_exact
                 .cmp(&a.is_exact)
