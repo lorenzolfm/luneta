@@ -13,6 +13,8 @@
 
 mod agents;
 mod dirs;
+mod layout;
+mod panes;
 mod render;
 mod sessions;
 
@@ -21,8 +23,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agents::{AgentSet, Jump};
-use dirs::{Action, DirSet};
-use sessions::{validate_name, Kind, MatchSet, Selection};
+use dirs::{Action, DirSet, LIST};
+use panes::Peeks;
+use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection};
 use zellij_tile::prelude::*;
 
 /// The pipe message this plugin answers to, so that a key can open it *on* a chosen screen.
@@ -72,6 +75,15 @@ const TICKS_PER_SECOND: u64 = 10;
 
 /// Animation ticks per session poll, so that the poll stays at its original once a second.
 const TICKS_PER_POLL: u64 = TICKS_PER_SECOND;
+
+/// How long the cursor has to sit still on a directory before `ls` is asked what is in it, in
+/// animation ticks.
+///
+/// ⚠️ This is the whole of the debounce, and without it the preview box forks a process per
+/// keystroke: holding `↓` down a zoxide database of a hundred and thirty directories would ask
+/// about every one of them on the way past, to show you the last. Two ticks is a fifth of a
+/// second — below the point a pause reads as one, and above the rate an arrow key repeats at.
+const PREVIEW_DELAY: u64 = 2;
 
 /// Which screen has the keyboard. Kill-all and disconnect-others are still cut: both act on
 /// sessions you cannot see from here, which is the one thing this picker refuses to do.
@@ -139,6 +151,25 @@ impl Screen {
     }
 }
 
+/// What the preview box is pointed at, and therefore which cache answers for it.
+enum Target {
+    /// A directory, keyed by its path. Answered by `ls`.
+    Dir(String),
+    /// A pane, keyed by its session and its id. Answered by `zellij action dump-screen`.
+    Pane(String, u32),
+}
+
+impl Target {
+    /// How it is named in its cache — and, for a pane, in the context of the command that goes
+    /// out to ask about it.
+    fn key(&self) -> String {
+        match self {
+            Target::Dir(path) => path.clone(),
+            Target::Pane(session, pane) => panes::key(session, *pane),
+        }
+    }
+}
+
 /// The session a `Del` is aimed at, captured when the key was pressed.
 ///
 /// Captured, not looked up again on confirm: the 1s poll can reorder `rows` underneath the
@@ -147,16 +178,25 @@ impl Screen {
 pub struct Pending {
     pub name: String,
     pub kind: Kind,
+    /// Whether a second `Del` has escalated a live session's kill into a kill *and* a delete.
+    ///
+    /// Always false for a session that is already dead: there is nothing left to kill, so
+    /// `Delete` is what the first `Del` already means.
+    pub purge: bool,
 }
 
 impl Pending {
     /// Two different things wear the same key. Killing stops a running session; deleting throws
     /// away the saved layout of one that already stopped. Only the second is irreversible, and
     /// the confirm screen names which is which rather than calling both "delete".
+    ///
+    /// An escalated live session is spelled `Delete` rather than `Kill and delete`: what it
+    /// leaves behind is exactly what deleting a dead session leaves behind, and the verb is
+    /// answering "what will be left", not "how many host calls will it take".
     pub fn verb(&self) -> &'static str {
-        match self.kind {
-            Kind::Live => "Kill",
-            Kind::Resurrectable => "Delete",
+        match (self.kind, self.purge) {
+            (Kind::Live, false) => "Kill",
+            _ => "Delete",
         }
     }
 
@@ -165,10 +205,19 @@ impl Pending {
     /// entirely when `session_serialization false`), which the plugin cannot see. Promising a
     /// resurrection the host may not be able to deliver is worse than saying less.
     pub fn consequence(&self) -> &'static str {
-        match self.kind {
-            Kind::Live => "kills the running session — it comes back only if it was saved",
-            Kind::Resurrectable => "throws its saved layout away — this cannot be undone",
+        match (self.kind, self.purge) {
+            (Kind::Live, false) => "kills the running session — it comes back only if it was saved",
+            (Kind::Live, true) => {
+                "kills it and throws its saved layout away — this cannot be undone"
+            },
+            (Kind::Resurrectable, _) => "throws its saved layout away — this cannot be undone",
         }
+    }
+
+    /// Is there an escalation left to offer? Only a live session has one: the second `Del` adds
+    /// the delete that a dead session's first `Del` is already doing.
+    pub fn can_purge(&self) -> bool {
+        self.kind == Kind::Live && !self.purge
     }
 }
 
@@ -221,6 +270,12 @@ struct State {
     /// off: every busy row turns in step, which reads as one thing happening rather than as
     /// several rows each doing their own.
     frame: u64,
+    /// What each pane the cursor has rested on had on its screen. Filled out of band by
+    /// `zellij action dump-screen`, on the same terms as `dirs` and `agents`.
+    peeks: Peeks,
+    /// What the cursor is resting on, and the frame it landed there — the debounce behind the
+    /// whole preview box. See [`State::follow_preview`].
+    preview_at: Option<(String, u64)>,
     /// The frame the agent snapshot in [`State::agents`] was ingested at.
     ///
     /// The snapshot itself is frozen for the life of the screen, and its `age` field is a
@@ -303,11 +358,14 @@ impl ZellijPlugin for State {
                     self.poll();
                 }
                 self.frame = self.frame.wrapping_add(1);
+                // Called for its effect, not for its answer, so it runs before the `||` below
+                // can short-circuit past it: this is the tick the directory preview is asked on.
+                let asked = self.follow_preview();
                 // Nine ticks in ten now change nothing. Redrawing on them anyway would rebuild
                 // and repaint the whole table ten times a second to put back the pixels that
                 // were already there, so a tick that is neither a poll nor a spinner frame is
                 // spent by saying so.
-                polled || self.spinning()
+                polled || self.spinning() || asked
             },
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
@@ -319,6 +377,25 @@ impl ZellijPlugin for State {
                         self.dirs.ingest(exit_code, &stdout, &stderr);
                         self.rebuild_dirs(Selection::Hold);
                         true
+                    },
+                    // Filed by the path it went out with rather than by the cursor's position
+                    // now: replies land whenever they land, and the cursor has usually moved on.
+                    Some(dirs::PREVIEW_VALUE) => match context.get(dirs::PATH_KEY) {
+                        Some(path) => {
+                            self.dirs.ingest_listing(path.clone(), exit_code, &stdout, &stderr);
+                            true
+                        },
+                        // Ours by its key, but with nothing saying what it is about. Filing it
+                        // under a guess is the one failure this whole channel is arranged to
+                        // avoid, so it is dropped.
+                        None => false,
+                    },
+                    Some(panes::CONTEXT_VALUE) => match context.get(panes::PANE_KEY) {
+                        Some(pane) => {
+                            self.peeks.ingest(pane.clone(), exit_code, &stdout, &stderr);
+                            true
+                        },
+                        None => false,
                     },
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr);
@@ -352,6 +429,12 @@ impl ZellijPlugin for State {
             // redraw yet; the reply arrives as its own event.
             Event::Visible(true) => {
                 self.ask_zoxide();
+                // A listing or a screen from the last time the picker was open is a claim
+                // about how things were minutes ago, and the whole point of the box is that it
+                // shows you what is there. Cheaper to forget than to be confidently out of date
+                // — and a pane's screen is the fastest-moving thing the picker looks at.
+                self.dirs.forget_listings();
+                self.peeks.forget();
                 // 🔴 A glance, not a watch: the agent snapshot is taken here and then frozen for
                 // as long as the screen is up. That is what makes attention-first ordering safe
                 // — nothing reorders while you are reading it. Frozen *list*, though, not frozen
@@ -389,13 +472,20 @@ impl ZellijPlugin for State {
         match self.mode {
             Mode::Search => match self.screen {
                 Screen::Sessions => {
-                    render::render_search(&self.matches, self.error.as_deref(), rows, cols)
+                    render::render_search(
+                        &self.matches,
+                        &self.peeks,
+                        self.error.as_deref(),
+                        rows,
+                        cols,
+                    )
                 },
                 Screen::Dirs => {
                     render::render_dirs(&self.dirs, &self.matches.search_term, rows, cols)
                 },
                 Screen::Agents => render::render_agents(
                     &self.agents,
+                    &self.peeks,
                     &self.matches.search_term,
                     rows,
                     cols,
@@ -412,7 +502,13 @@ impl ZellijPlugin for State {
                 Some(pending) => render::render_confirm(pending, rows, cols),
                 // Unreachable in practice: `Confirm` is only entered with a target. Falling
                 // back to the search screen beats rendering a blank pane if it ever is.
-                None => render::render_search(&self.matches, self.error.as_deref(), rows, cols),
+                None => render::render_search(
+                    &self.matches,
+                    &self.peeks,
+                    self.error.as_deref(),
+                    rows,
+                    cols,
+                ),
             },
         }
     }
@@ -430,14 +526,23 @@ impl State {
         };
         let current_session = snapshot.live_sessions.iter().find(|s| s.is_current_session);
         let current = current_session.map(|s| s.name.clone());
+        // Filled on the way past rather than in a second pass: the snapshot is consumed here,
+        // and the preview box's contents and the list's ages have to come from the same one or
+        // the box would describe a session as it was a second before the row beside it.
+        let mut contents = BTreeMap::new();
         self.live = snapshot
             .live_sessions
             .into_iter()
             // The current session leaves the match set here, at the source, rather than in the
             // renderer — that is what keeps the rendered list equal to the match set.
             .filter(|s| !s.is_current_session)
-            .map(|s| (s.name, s.creation_time))
+            .map(|session| {
+                let row = (session.name.clone(), session.creation_time);
+                contents.insert(session.name.clone(), contents_of(session));
+                row
+            })
             .collect();
+        self.matches.contents = contents;
         self.dead = snapshot.resurrectable_sessions;
         self.matches.refresh(&self.live, &self.dead, current);
         // A directory row's tag is a function of the session list, so it goes stale on exactly
@@ -539,7 +644,102 @@ impl State {
         );
     }
 
-    /// Rebuild the directory rows against the current term and the current snapshot.
+    /// Keep the preview box pointed at the highlighted row, and ask about it once the cursor
+    /// has settled. Answers whether anything was asked, which is the only thing here that
+    /// changes what is on screen.
+    ///
+    /// The wait is the point. A cursor moving through a list passes over rows on its way
+    /// somewhere, and a preview that asked about each of them would fork a process per keystroke
+    /// to show you the answer to the last one. So the target is *noted* on the tick it changes
+    /// and *asked about* [`PREVIEW_DELAY`] ticks later, if it is still the target.
+    ///
+    /// Only in `Search` mode: a confirm or a rename over the top of it hides the box this would
+    /// be filling.
+    fn follow_preview(&mut self) -> bool {
+        if self.mode != Mode::Search {
+            return false;
+        }
+        let Some(target) = self.preview_target() else {
+            self.preview_at = None;
+            return false;
+        };
+        let key = target.key();
+        match &self.preview_at {
+            // Still where it was. Ask once it has been there long enough — the claim each cache
+            // makes below refuses the second time, so this cannot ask twice.
+            Some((at, since)) if *at == key => {
+                if self.frame.wrapping_sub(*since) < PREVIEW_DELAY {
+                    return false;
+                }
+            },
+            // Somewhere new: start the clock, ask nothing yet.
+            _ => {
+                self.preview_at = Some((key, self.frame));
+                return false;
+            },
+        }
+        match target {
+            Target::Dir(path) => {
+                if !self.dirs.begin_listing(&path) {
+                    return false;
+                }
+                // `--` because a directory may be named `-l`, and the path last because that is
+                // where `ls` takes it.
+                let mut command = LIST.to_vec();
+                command.push("--");
+                command.push(&path);
+                run_command(
+                    &command,
+                    BTreeMap::from([
+                        (dirs::CONTEXT_KEY.to_string(), dirs::PREVIEW_VALUE.to_string()),
+                        // What the reply is about, carried out and back. See [`dirs::PATH_KEY`].
+                        (dirs::PATH_KEY.to_string(), path.clone()),
+                    ]),
+                );
+            },
+            Target::Pane(session, pane) => {
+                if !self.peeks.claim(&key) {
+                    return false;
+                }
+                let id = panes::pane_id(pane);
+                let mut command = panes::DUMP.to_vec();
+                command.push(&session);
+                command.push(&id);
+                run_command(
+                    &command,
+                    BTreeMap::from([
+                        (dirs::CONTEXT_KEY.to_string(), panes::CONTEXT_VALUE.to_string()),
+                        (panes::PANE_KEY.to_string(), key.clone()),
+                    ]),
+                );
+            },
+        }
+        true
+    }
+
+    /// What the cursor is resting on, in the terms the cache that answers for it uses.
+    ///
+    /// Two of the three screens point at a pane and one points at a directory, which is the
+    /// whole of the difference between them from here. A session's pane is the focused one of
+    /// its active tab (see [`sessions::Focus`]); an agent *is* a pane, and says which.
+    fn preview_target(&self) -> Option<Target> {
+        match self.screen {
+            Screen::Dirs => self.dirs.selected_row().map(|row| Target::Dir(row.path.clone())),
+            Screen::Sessions => {
+                let row = self.matches.selected.and_then(|i| self.matches.rows.get(i))?;
+                // A dead session has no process to have a screen. Nothing to ask, and the box
+                // says so without being told.
+                let focus = self.matches.contents.get(&row.name)?.focus.as_ref()?;
+                Some(Target::Pane(row.name.clone(), focus.pane))
+            },
+            Screen::Agents => self
+                .agents
+                .selected_row()
+                .map(|row| Target::Pane(row.session.clone(), row.pane)),
+        }
+    }
+
+    /// Rebuild the directory rows against the current term and the current snapshot.    /// Rebuild the directory rows against the current term and the current snapshot.
     ///
     /// Both inputs, every time, from both callers: a keystroke changes the term and a poll
     /// changes the tags, and a row that showed the wrong one of those is a row that promises
@@ -607,33 +807,19 @@ impl State {
                 }
                 true
             },
-            // ⚠️ Esc no longer dismisses in one press when something is highlighted — it drops
-            // the highlight, and only a second Esc closes. Always-on selection otherwise makes
-            // the no-selection state unreachable, and that state is the only way to ask for a
-            // name that fuzzy-matches something existing. The hint line says which state you are
-            // in, so the intermediate step is not silent.
+            // `Esc` closes, from every screen and whatever is highlighted. One press, one
+            // meaning, no intermediate state to be in and to have to read the screen to leave.
+            //
+            // ⚠️ It used to do two other things first — back out of a secondary screen, then
+            // drop the highlight — and the second of those was load-bearing: with the selection
+            // always on, `Enter` always takes a row, and a dropped highlight was the only way to
+            // ask for a *name* that fuzzy-matches a session that already exists (`infra` while
+            // `infra-staging` is live). That path now costs a `Ctrl c`, a reopen and a name no
+            // row matches. Deliberate: a key that dismisses on the third press is a key you
+            // press three times.
             BareKey::Esc if key.has_no_modifiers() => {
-                // On the directory screen `Esc` backs out to the sessions rather than dropping
-                // the highlight: there is no literal-text path here for a dropped highlight to
-                // enable. A directory you have never been to is not something this list can
-                // offer you, so "no selection" would be a state with nothing in it.
-                // Both secondary screens back out to the sessions rather than stepping one
-                // stop around the `Tab` cycle. `Esc` means *out*, and the session list is what
-                // out is — a three-stop cycle would otherwise make `Esc` a second, slower `Tab`
-                // that happens to run backwards. Neither has a literal-text path for a dropped
-                // highlight to enable: an agent you are not running, like a directory you have
-                // never visited, is not something this list can offer you.
-                if self.screen != Screen::Sessions {
-                    self.screen = Screen::Sessions;
-                    return true;
-                }
-                if self.matches.selected.is_some() {
-                    self.matches.drop_selection();
-                    true
-                } else {
-                    close_self();
-                    false
-                }
+                close_self();
+                false
             },
             // Rename always means the session you are *in* — `rename_session` takes no target,
             // so upstream's version is renaming the current session too, whatever its list
@@ -852,7 +1038,7 @@ impl State {
             return;
         };
         self.error = None;
-        self.pending = Some(Pending { name: row.name.clone(), kind: row.kind });
+        self.pending = Some(Pending { name: row.name.clone(), kind: row.kind, purge: false });
         self.mode = Mode::Confirm;
     }
 
@@ -861,6 +1047,21 @@ impl State {
             BareKey::Enter if key.has_no_modifiers() => {
                 self.apply_delete();
                 true
+            },
+            // The second `Del` — the one that saves you killing a session, waiting for it to
+            // come back as a dead row, finding it again and deleting *that*. It escalates the
+            // question rather than answering it: the consequence line and the verb both change,
+            // and `Enter` is still what commits. Two presses to ask for the irreversible thing,
+            // one more to mean it.
+            BareKey::Delete if key.has_no_modifiers() => {
+                match self.pending.as_mut().filter(|p| p.can_purge()) {
+                    Some(pending) => {
+                        pending.purge = true;
+                        true
+                    },
+                    // Already a delete. Redrawing to say nothing changed would only flicker.
+                    None => false,
+                }
             },
             BareKey::Esc if key.has_no_modifiers() => {
                 self.pending = None;
@@ -877,10 +1078,24 @@ impl State {
             return;
         };
         let result = match pending.kind {
-            Kind::Live => kill_sessions(&[pending.name.as_str()]),
+            // Both calls block until the host has acknowledged, so the kill has finished by the
+            // time the delete runs — which is what makes the pair safe to issue back to back.
+            // The delete is skipped when the kill failed: `delete_dead_session` would throw away
+            // the saved layout of a session that is still running.
+            Kind::Live => kill_sessions(&[pending.name.as_str()])
+                .and_then(|()| match pending.purge {
+                    true => delete_dead_session(&pending.name),
+                    false => Ok(()),
+                }),
             Kind::Resurrectable => delete_dead_session(&pending.name),
         };
-        self.error = result.err().map(|e| format!("{} \"{}\": {}", pending.verb().to_lowercase(), pending.name, e));
+        // The term went with the session it was searching for. Clearing it before the error is
+        // set, not after: `set_term` treats a new term as a new question and wipes `self.error`,
+        // which would take the reason the delete failed with it.
+        self.set_term(String::new());
+        self.error = result.err().map(|e| {
+            format!("{} \"{}\": {}", pending.verb().to_lowercase(), pending.name, e)
+        });
         // Re-poll now instead of waiting out the tick. Both calls block until the host has
         // acknowledged, so the snapshot taken here already reflects them — and a row that
         // lingered for a second under the cursor is a row the next `Del` would aim at.
@@ -901,6 +1116,54 @@ impl State {
     }
 }
 
+/// Which pane of a live session to preview, out of the snapshot the ages come from.
+///
+/// The focused pane of the active tab, falling back to the first pane anywhere that has a screen
+/// worth dumping. ⚠️ The filter is `is_selectable && !is_suppressed && !is_plugin`, and every
+/// clause earns its place: the first two take out zellij's own tab and status bars, which are
+/// panes in this manifest like any other, and the third takes out plugin panes, which dump empty
+/// however much they are drawing. See [`Focus`].
+fn contents_of(session: SessionInfo) -> Contents {
+    // Destructured rather than read field by field: the pane manifest is emptied a tab at a
+    // time below, and the tab list is consumed while that happens.
+    let SessionInfo { tabs, mut panes, .. } = session;
+    let mut total = 0;
+    let mut focus = None;
+    for tab in tabs {
+        let in_tab: Vec<PaneInfo> = panes
+            .panes
+            // Removed rather than read: a tab position is in the manifest once, and taking it
+            // means the titles are moved into the summary instead of cloned into it.
+            .remove(&tab.position)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pane| pane.is_selectable && !pane.is_suppressed && !pane.is_plugin)
+            .collect();
+        total += in_tab.len();
+        // The active tab's focused pane wins outright; anything else is only ever a fallback,
+        // so a session whose active tab holds nothing dumpable still gets a preview.
+        let pick = in_tab.iter().find(|pane| pane.is_focused).or_else(|| in_tab.first());
+        if let Some(pane) = pick {
+            if focus.is_none() || tab.active {
+                focus = Some(Focus {
+                    pane: pane.id,
+                    tab: tab.name.clone(),
+                    title: pane.title.clone(),
+                });
+            }
+        }
+    }
+    Contents { panes: total, focus }
+}
+
+/// Size the picker, and take zellij's frame off it.
+///
+/// The `borderless` flag is the whole reason the picker draws only its own two boxes. Zellij
+/// frames a floating pane by default, so the picker used to sit inside a third box it did not
+/// draw and could not style — and the obvious lever, `set_pane_frame_style`, is a *session*
+/// setting that would have unframed every pane behind us too. `FloatingPaneCoordinates` carries
+/// the flag per pane, so `change_floating_panes_coordinates` — a call the picker was already
+/// making to fix its size — takes the frame off this pane and no other.
 fn resize_self(plugin_id: u32) {
     let (x, y, width, height) = FLOATING;
     let Some(coordinates) = FloatingPaneCoordinates::new(
@@ -909,9 +1172,41 @@ fn resize_self(plugin_id: u32) {
         Some(width.to_string()),
         Some(height.to_string()),
         None,
-        None,
+        Some(true),
     ) else {
         return;
     };
     change_floating_panes_coordinates(vec![(PaneId::Plugin(plugin_id), coordinates)]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(kind: Kind, purge: bool) -> Pending {
+        Pending { name: "luneta".to_string(), kind, purge }
+    }
+
+    /// The escalation is a change of *question*, not a second answer to the same one: both the
+    /// verb and the consequence have to move, or the confirm screen would go on promising a
+    /// resurrection while `Enter` threw the layout away.
+    #[test]
+    fn escalating_a_kill_renames_it_and_says_what_it_costs() {
+        let kill = pending(Kind::Live, false);
+        assert_eq!(kill.verb(), "Kill");
+        assert!(kill.consequence().contains("comes back only if it was saved"));
+
+        let purge = pending(Kind::Live, true);
+        assert_eq!(purge.verb(), "Delete");
+        assert!(purge.consequence().contains("cannot be undone"));
+    }
+
+    /// A dead session has nothing left to kill, so its `Del` is already the delete. Offering to
+    /// escalate it would put a key on the help row that does nothing.
+    #[test]
+    fn only_a_live_session_has_an_escalation_to_offer() {
+        assert!(pending(Kind::Live, false).can_purge());
+        assert!(!pending(Kind::Live, true).can_purge());
+        assert!(!pending(Kind::Resurrectable, false).can_purge());
+    }
 }

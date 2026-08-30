@@ -22,6 +22,7 @@
 //! nine ways (`master`, `backend`, `frontend`, `bin`, `nixos`, `skills`, …), which is exactly
 //! why the name is not just the basename.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -36,9 +37,29 @@ use crate::sessions::{validate_name, Selection};
 /// preopens only `/host`, `/data`, `/cache` and `/tmp`, so it cannot stat an arbitrary path.
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
+/// The command behind the preview box: one entry per line, dotfiles included, `/` on the ones
+/// that are directories.
+///
+/// The path is appended by the caller, behind a `--`, because a directory may be named `-l`.
+///
+/// ⚠️ Deliberately no `--group-directories-first`: that flag is GNU's, and the ordering it buys
+/// is applied in [`DirSet::ingest_listing`] instead, off the `/` that `-p` already puts there.
+/// The plugin cannot see whether the host's `ls` is GNU's, and a flag it may reject is a preview
+/// that fails on someone else's machine for a reason it cannot explain.
+pub const LIST: [&str; 2] = ["ls", "-1Ap"];
+
 /// Marks our own `RunCommandResult` so an unrelated one cannot be parsed as a directory list.
 pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "zoxide";
+/// The second thing this module asks the host for. Same key, different value — one channel
+/// carries both, and the reply says which by carrying the value back.
+pub const PREVIEW_VALUE: &str = "preview";
+/// Which directory a preview reply is about, carried out and back in the same context map.
+///
+/// 🔴 Not "whichever row is selected now": replies arrive whenever they arrive, and the cursor
+/// has usually moved on. Without the path on the reply, a slow `ls` would file its answer under
+/// the wrong directory — and the box would confidently show you the contents of somewhere else.
+pub const PATH_KEY: &str = "luneta_path";
 
 /// What `Enter` on this row will do — decided by the host, reported here.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,27 +77,6 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn full_tag(&self) -> &'static str {
-        match self {
-            Action::Create => "[CREATE]",
-            Action::Attach => "[ATTACH]",
-            Action::Resurrect => "[RESURRECT]",
-            Action::Here => "[HERE]",
-        }
-    }
-
-    /// The narrow forms, for the same reason the session screen has them: a floating pane can
-    /// be a few columns wider than the names it is holding.
-    pub fn abbr_tag(&self) -> &'static str {
-        match self {
-            Action::Create => "[C]",
-            Action::Attach => "[A]",
-            Action::Resurrect => "[R]",
-            Action::Here => "[·]",
-        }
-    }
-
-    /// The same thing spelled for the prompt line.
     pub fn verb(&self) -> &'static str {
         match self {
             Action::Create => "Create",
@@ -93,6 +93,36 @@ impl Action {
         matches!(self, Action::Create)
     }
 }
+
+/// What the preview box knows about one directory.
+pub enum Listing {
+    /// `ls` has been asked and has not answered.
+    Reading,
+    Ready {
+        /// Directories first, then files — see [`DirSet::ingest_listing`]. Capped at
+        /// [`MAX_ENTRIES`]; `total` is what was actually there.
+        entries: Vec<String>,
+        total: usize,
+    },
+    /// The directory could not be read. Carries what to put on screen — a directory that is
+    /// gone, or one you may not open, is a thing the preview box can say plainly.
+    Failed(String),
+}
+
+/// The most entries kept for one directory.
+///
+/// A preview box is a few dozen rows at the very most, so anything past this could never be
+/// drawn — and `node_modules` would otherwise put tens of thousands of strings in the cache to
+/// show you the first thirty of them. The count of what was dropped survives as `total`.
+const MAX_ENTRIES: usize = 128;
+
+/// How many directories' listings are worth keeping.
+///
+/// Past this the cache is dropped **whole** rather than evicted one entry at a time. There is no
+/// recency to evict by that would be worth the bookkeeping: the cost of being wrong is one `ls`
+/// on a directory you come back to, and arrowing through sixty-four directories in one sitting
+/// is not the case this cache exists for — holding the cursor still on a handful of them is.
+const MAX_LISTINGS: usize = 64;
 
 /// One directory out of zoxide, with the session name it would be given.
 struct Dir {
@@ -140,6 +170,8 @@ pub struct DirSet {
     pub selected: Option<usize>,
     /// True between asking zoxide and hearing back, so a re-focus cannot pile up processes.
     pub asking: bool,
+    /// What `ls` said about each directory the cursor has rested on, keyed by path.
+    listings: BTreeMap<String, Listing>,
     all: Vec<Dir>,
     matcher: Option<SkimMatcherV2>,
 }
@@ -247,6 +279,79 @@ impl DirSet {
         let next = (current as isize + delta).clamp(0, last as isize) as usize;
         self.selected = Some(next);
     }
+
+    /// Drop every listing. The picker is a glance rather than a watch, and a directory read
+    /// during the last one is a claim about what was there minutes ago.
+    pub fn forget_listings(&mut self) {
+        self.listings.clear();
+    }
+
+    /// What the preview box has to show for `path`, if anything has been asked yet.
+    pub fn listing(&self, path: &str) -> Option<&Listing> {
+        self.listings.get(path)
+    }
+
+    /// Claim `path` for an `ls`, or refuse because there is nothing to ask.
+    ///
+    /// The claim *is* the [`Listing::Reading`] entry: a second caller sees it and is refused,
+    /// which is what keeps one process per directory rather than one per tick. A failure stays
+    /// in the map for the same reason — a directory that could not be read will not read any
+    /// better on the next tick, and retrying it forever is how you fork `ls` ten times a second
+    /// at a path that is gone.
+    pub fn begin_listing(&mut self, path: &str) -> bool {
+        if self.listings.contains_key(path) {
+            return false;
+        }
+        if self.listings.len() >= MAX_LISTINGS {
+            self.listings.clear();
+        }
+        self.listings.insert(path.to_string(), Listing::Reading);
+        true
+    }
+
+    /// Take `ls`'s reply for one directory.
+    ///
+    /// Directories are floated to the top, in the order `ls` gave them, off the `/` that `-p`
+    /// appends — which is why the flag is worth its column. A listing is read for its shape
+    /// before it is read for its names, and a shape with the directories mixed into the files
+    /// has to be read twice.
+    pub fn ingest_listing(
+        &mut self,
+        path: String,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) {
+        if exit_code != Some(0) {
+            let reason = String::from_utf8_lossy(stderr);
+            // `ls` prefixes its own message with the path, which the box is already showing.
+            let reason = reason
+                .lines()
+                .next()
+                .unwrap_or("")
+                .rsplit(": ")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let reason = if reason.is_empty() { "cannot be read".to_string() } else { reason };
+            self.listings.insert(path, Listing::Failed(reason));
+            return;
+        }
+        let listed = String::from_utf8_lossy(stdout);
+        let mut entries: Vec<String> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+        for line in listed.lines().map(str::trim_end).filter(|line| !line.is_empty()) {
+            match line.ends_with('/') {
+                true => entries.push(line.to_string()),
+                false => files.push(line.to_string()),
+            }
+        }
+        entries.append(&mut files);
+        let total = entries.len();
+        entries.truncate(MAX_ENTRIES);
+        self.listings.insert(path, Listing::Ready { entries, total });
+    }
 }
 
 impl DirRow {
@@ -339,4 +444,102 @@ fn derive_name(path: &str) -> Option<String> {
     // — better than dropping it from the list with no explanation.
     let base = (*parts.last()?).to_string();
     validate_name(&base).is_none().then_some(base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listed(stdout: &[u8]) -> DirSet {
+        let mut dirs = DirSet::default();
+        dirs.ingest_listing("/tmp/x".to_string(), Some(0), stdout, b"");
+        dirs
+    }
+
+    fn entries(dirs: &DirSet) -> (Vec<String>, usize) {
+        match dirs.listing("/tmp/x") {
+            Some(Listing::Ready { entries, total }) => (entries.clone(), *total),
+            _ => panic!("no listing"),
+        }
+    }
+
+    /// Directories first, in the order `ls` gave them. A listing is read for its shape before
+    /// it is read for its names, and one with the directories mixed in has to be read twice.
+    #[test]
+    fn a_listing_floats_the_directories_to_the_top() {
+        let dirs = listed(b"Cargo.toml\nsrc/\nREADME.md\ntarget/\n");
+        assert_eq!(entries(&dirs).0, ["src/", "target/", "Cargo.toml", "README.md"]);
+    }
+
+    /// Blank lines are not entries, and neither is the trailing newline.
+    #[test]
+    fn a_listing_of_nothing_is_empty_rather_than_one_blank_entry() {
+        assert_eq!(entries(&listed(b"")), (Vec::new(), 0));
+        assert_eq!(entries(&listed(b"\n")), (Vec::new(), 0));
+    }
+
+    /// `node_modules` is not a preview. What is kept is capped at what could ever be drawn;
+    /// what was there is still counted, so the box can say how much it is not showing.
+    #[test]
+    fn a_long_listing_is_capped_but_still_counted() {
+        let listing: String = (0..MAX_ENTRIES * 2).map(|i| format!("file-{}\n", i)).collect();
+        let (entries, total) = entries(&listed(listing.as_bytes()));
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert_eq!(total, MAX_ENTRIES * 2);
+    }
+
+    /// A failure keeps the reason and drops `ls`'s own path prefix — the box is already showing
+    /// the path, directly above.
+    #[test]
+    fn a_failed_listing_keeps_the_reason_and_not_the_path() {
+        let mut dirs = DirSet::default();
+        dirs.ingest_listing(
+            "/tmp/x".to_string(),
+            Some(2),
+            b"",
+            b"ls: cannot open directory '/tmp/x': Permission denied\n",
+        );
+        match dirs.listing("/tmp/x") {
+            Some(Listing::Failed(reason)) => assert_eq!(reason, "Permission denied"),
+            _ => panic!("expected a failure"),
+        }
+        // A failure that said nothing still says something.
+        dirs.ingest_listing("/tmp/y".to_string(), Some(2), b"", b"");
+        match dirs.listing("/tmp/y") {
+            Some(Listing::Failed(reason)) => assert_eq!(reason, "cannot be read"),
+            _ => panic!("expected a failure"),
+        }
+    }
+
+    /// The claim is the entry, so a second caller is refused — one `ls` per directory rather
+    /// than one per tick. A failure holds its claim too: a path that could not be read will not
+    /// read any better next tick, and retrying forks a process ten times a second.
+    #[test]
+    fn a_directory_is_only_ever_asked_about_once() {
+        let mut dirs = DirSet::default();
+        assert!(dirs.begin_listing("/tmp/x"));
+        assert!(!dirs.begin_listing("/tmp/x"));
+        dirs.ingest_listing("/tmp/x".to_string(), Some(0), b"src/\n", b"");
+        assert!(!dirs.begin_listing("/tmp/x"));
+        dirs.ingest_listing("/tmp/x".to_string(), Some(2), b"", b"ls: nope: No such file");
+        assert!(!dirs.begin_listing("/tmp/x"));
+
+        // Until the picker is opened again, at which point every listing is a claim about how
+        // things were.
+        dirs.forget_listings();
+        assert!(dirs.begin_listing("/tmp/x"));
+    }
+
+    /// The cache is dropped whole rather than evicted one at a time — see [`MAX_LISTINGS`].
+    #[test]
+    fn a_full_cache_is_dropped_rather_than_grown() {
+        let mut dirs = DirSet::default();
+        for i in 0..MAX_LISTINGS {
+            assert!(dirs.begin_listing(&format!("/tmp/{}", i)));
+        }
+        assert!(dirs.listing("/tmp/0").is_some());
+        assert!(dirs.begin_listing("/tmp/one-too-many"));
+        assert!(dirs.listing("/tmp/0").is_none());
+        assert!(dirs.listing("/tmp/one-too-many").is_some());
+    }
 }

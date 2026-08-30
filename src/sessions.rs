@@ -10,6 +10,7 @@
 //!    sort before resurrectable ones, at every stage. Upstream sorts score-first with type as a
 //!    tiebreak, so its live and dead rows interleave as you type.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -21,24 +22,6 @@ pub enum Kind {
     Live,
     /// A dead session with a saved layout. The same call resolves to a resurrect.
     Resurrectable,
-}
-
-impl Kind {
-    pub fn full_tag(&self) -> &'static str {
-        match self {
-            Kind::Live => "[ATTACH]",
-            Kind::Resurrectable => "[RESURRECT]",
-        }
-    }
-
-    /// A floating pane can be as little as ~3 rows wide-open, so the narrow forms are not
-    /// decoration — they are what keeps the tag on screen at all.
-    pub fn abbr_tag(&self) -> &'static str {
-        match self {
-            Kind::Live => "[A]",
-            Kind::Resurrectable => "[R]",
-        }
-    }
 }
 
 /// One row. This *is* one match-set entry — there is no separate render-side list.
@@ -53,6 +36,42 @@ pub struct Row {
     pub indices: Vec<usize>,
     score: i64,
     is_exact: bool,
+}
+
+/// Which pane of a live session the preview box shows, and what the session is made of.
+///
+/// 🔴 Built from the *other* sessions' `SessionInfo`, which is real data and not an estimate —
+/// each zellij server writes its own tabs and panes to `session-metadata.kdl` about once a
+/// second and every other server reads them back (`zellij-utils/src/sessions.rs`,
+/// `read_live_session_states`). So the picker can pick a session's focused pane without being
+/// attached to it, and pick it from the same snapshot the ages come from.
+///
+/// A resurrectable session has none of this. Its layout is on disk in a form the host will not
+/// hand a plugin, and there is no process behind it to have a screen — see [`crate::render`].
+pub struct Contents {
+    /// Selectable panes across every tab. Counted where the filter that makes it mean anything
+    /// is applied — see [`Focus`].
+    pub panes: usize,
+    /// The pane whose screen the box shows. `None` for a session made only of plugin panes,
+    /// which have nothing to dump.
+    pub focus: Option<Focus>,
+}
+
+/// The pane the preview box reads, and where it sits.
+///
+/// The **focused** pane of the **active** tab, which is what you would be looking at a moment
+/// after `Enter` — so the box shows you the thing attaching would show you.
+///
+/// ⚠️ Chosen from the selectable, unsuppressed **terminals** only. Zellij's own tab bar and
+/// status bar are panes in that manifest like any other (`is_selectable` is the flag their doc
+/// comment names as the way to tell them apart), and a plugin pane dumps empty whatever it is
+/// drawing — so either would give the box a blank screen and no reason for it.
+pub struct Focus {
+    pub pane: u32,
+    /// The tab it is in, for the line that says which pane you are looking at.
+    pub tab: String,
+    /// The pane's own title, from the same place the tab bar takes it.
+    pub title: String,
 }
 
 /// What a rebuild should do with the cursor.
@@ -80,9 +99,13 @@ pub struct MatchSet {
     /// Does the current session fuzzy-match the term? One extra `fuzzy_indices` call per
     /// keystroke against a name that never enters `rows` — the whole cost of the hint line.
     pub current_matches: bool,
-    /// `Esc` dropped the selection, and it stays dropped until the term changes.
-    /// This is the escape hatch: no highlight means `Enter` takes the literal text.
-    dropped: bool,
+    /// Which pane to show for each live session, by name. Kept beside the rows rather than on
+    /// them: the rows are rebuilt on every keystroke and this once a poll, and carrying it on
+    /// the rows would mean rebuilding it a hundred times to use it once.
+    ///
+    /// A name that is not in here has nothing to show — a resurrectable session, or a live one
+    /// whose server has not written its metadata yet.
+    pub contents: BTreeMap<String, Contents>,
     matcher: Option<SkimMatcherV2>,
 }
 
@@ -151,19 +174,34 @@ impl MatchSet {
                     }
                 }
             }
-            // Non-empty term: exact match, then live before resurrectable, then score, then
-            // recency. Type comes *above* score deliberately — that is what stops the
+            // Non-empty term: live before resurrectable, then exact match, then score, then
+            // recency. Type comes above everything deliberately — that is what stops the
             // live/dead boundary from moving as you type.
+            //
+            // ⚠️ `is_exact` used to outrank type, which quietly broke rule 2 above: with a live
+            // `rapid` and a dead `api`, typing `api` put the dead row *first* and the list was
+            // no longer two groups but an interleaving. That was survivable while every row
+            // carried its own `[ATTACH]`/`[RESURRECT]` tag. It is not survivable now that the
+            // groups are what say which is which — a single separator cannot describe a list
+            // that is not partitioned, and drawing one anyway would file a live session under
+            // "dead".
+            //
+            // The cost is real and worth naming: typing a dead session's exact name no longer
+            // lands the cursor on it when live rows also match the term. It goes to the top of
+            // the dead group instead, and the input line says so.
             self.rows.sort_by(|a, b| {
-                b.is_exact
-                    .cmp(&a.is_exact)
-                    .then_with(|| a.kind_rank().cmp(&b.kind_rank()))
+                a.kind_rank()
+                    .cmp(&b.kind_rank())
+                    .then_with(|| b.is_exact.cmp(&a.is_exact))
                     .then_with(|| b.score.cmp(&a.score))
                     .then_with(|| a.age.cmp(&b.age))
             });
         }
 
-        self.selected = if self.rows.is_empty() || self.dropped {
+        // `None` only when there is nothing to point at. That is also the state that puts
+        // `Enter` on the literal text you typed — see [`crate::render::enter_action`] — so an
+        // empty list is not a dead end, it is the create path.
+        self.selected = if self.rows.is_empty() {
             None
         } else {
             // `Hold` keeps the cursor on the same *session*, not the same row — the row may have
@@ -188,20 +226,7 @@ impl MatchSet {
         dead: &[(String, Duration)],
     ) {
         self.search_term = term;
-        // A new term re-arms the selection: `Esc`'s drop lasts exactly until you type again.
-        self.dropped = false;
         self.rebuild(live, dead, Selection::SnapToTop);
-    }
-
-    /// `Esc`'s escape hatch: drop the highlight so `Enter` means "the literal
-    /// text I typed", not "the top match". Without this, always-on selection makes it impossible
-    /// to create `infra` while `infra-staging` is live.
-    ///
-    /// The drop is sticky — a background poll must not put the highlight back a second later —
-    /// and `set_search_term` is the only thing that lifts it.
-    pub fn drop_selection(&mut self) {
-        self.selected = None;
-        self.dropped = true;
     }
 
     /// Is the term exactly the name of the session we are sitting in?
@@ -263,7 +288,8 @@ pub fn validate_name(name: &str) -> Option<&'static str> {
 }
 
 impl Row {
-    fn new(
+    /// `pub(crate)` for the render tests, which need a row without a live host to get one from.
+    pub(crate) fn new(
         name: String,
         kind: Kind,
         age: Duration,
