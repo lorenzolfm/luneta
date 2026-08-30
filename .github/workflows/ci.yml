@@ -7,7 +7,14 @@
 #
 # So the `release` job does not build. It takes the artifact `build` produced,
 # which makes the bytes attached to a release the same bytes a PR check went
-# green on.
+# green on -- and the same bytes the provenance attestation is cut over.
+#
+# 🔴 Actions are pinned by COMMIT SHA, not by tag. `@v7` is a branch-like ref the
+# action's own repo can repoint at will, so a tag pin trusts every future commit
+# that repo ever makes. The threat model for a plugin released this way is
+# mostly this pipeline itself: whatever runs here can put bytes in front of
+# users under our name. The trailing comment names the human-readable version;
+# it is a label, and the SHA is the pin.
 
 name: ci
 
@@ -17,8 +24,7 @@ on:
     branches: [main]
     tags: ["v*"]
 
-# Read-only by default. Only `release` widens this, and only for the step that
-# has to create something.
+# Read-only by default. Only `release` widens this, and only for what it must.
 permissions:
   contents: read
 
@@ -32,9 +38,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -62,7 +68,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: luneta-wasm
           path: target/wasm32-wasip1/release/luneta.wasm
@@ -74,7 +80,9 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write # to create the release and attach the .wasm
+      contents: write # create the release, attach the assets
+      id-token: write # OIDC identity the attestation is signed against
+      attestations: write # record the provenance attestation
 
     steps:
       # The tag names the asset, and the asset name is what zellij caches
@@ -91,7 +99,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: luneta-wasm
 
@@ -103,9 +111,34 @@ jobs:
       # whichever build they happened to download first, with no way to hand
       # them a fix.
       - name: Name the asset after the version
-        run: cp luneta.wasm "luneta-${GITHUB_REF_NAME#v}.wasm"
+        run: cp luneta.wasm "luneta-${{ needs.build.outputs.version }}.wasm"
 
-      - uses: softprops/action-gh-release@v3
+      # `sha256sum -c SHA256SUMS` format, one file covering every asset -- the
+      # convention, rather than a per-file .sha256 nobody has a one-liner for.
+      #
+      # ⚠️ On its own this proves only that the download was not truncated or
+      # corrupted. It is NOT a defence against tampering: anyone who can replace
+      # the asset can replace this file beside it. The attestation below is the
+      # part that says where the bytes came from.
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          sha256sum "luneta-${{ needs.build.outputs.version }}.wasm" > SHA256SUMS
+          cat SHA256SUMS
+
+      # Keyless, via the runner's OIDC identity -- there is no private key here
+      # to guard, rotate, or leak. The claim is stronger than a signature's: not
+      # "somebody holding a key signed these bytes" but "these bytes came out of
+      # this workflow, at this commit, in this repo, on a GitHub-hosted runner".
+      #
+      #   gh attestation verify luneta-<version>.wasm -R lorenzolfm/luneta
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
-          files: luneta-${{ needs.build.outputs.version }}.wasm
+          subject-path: luneta-${{ needs.build.outputs.version }}.wasm
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          files: |
+            luneta-${{ needs.build.outputs.version }}.wasm
+            SHA256SUMS
           generate_release_notes: true
