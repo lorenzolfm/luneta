@@ -1,0 +1,67 @@
+# Tag a version, get a .wasm anyone can point zellij at.
+#
+# The install this replaces was "clone the repo and run make install", which
+# asked every user for a rust toolchain they could not get from their distro
+# (see the flake: the wasm32-wasip1 target is the whole reason it exists). A
+# release asset asks them for one config line instead.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # to create the release and attach the .wasm
+
+jobs:
+  release:
+    # The flake hardcodes `system = "x86_64-linux"`, so the runner has to be
+    # one. An arm64 or macos runner would fail in the flake, not in the build.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # The tag names the asset, and the asset name is what zellij caches
+      # against, so a tag that disagrees with Cargo.toml would ship a build
+      # labelled as a version it is not. Cheap to check, miserable to notice
+      # after the fact -- the release is already public by then.
+      - name: Check the tag agrees with Cargo.toml
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+
+      # Through the flake rather than a toolchain action, so CI builds with the
+      # exact rust the flake pins (1.95.0, the channel zellij's own
+      # rust-toolchain.toml names) and there is only one place that version is
+      # written down.
+      - name: Build
+        run: nix develop --command make build
+
+      # 🔴 The version belongs in the FILENAME, not just the tag directory.
+      # Zellij's downloader caches remote plugins by the last path segment of
+      # the URL and returns early if that file already exists -- no ETag, no
+      # timestamp, no re-fetch, ever (zellij-utils downloader.rs:88-92). Ship
+      # every release as `luneta.wasm` and each user is pinned forever to
+      # whichever build they happened to download first, with no way to hand
+      # them a fix.
+      - name: Name the asset after the version
+        run: cp target/wasm32-wasip1/release/luneta.wasm "luneta-${VERSION}.wasm"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: luneta-${{ env.VERSION }}.wasm
+          generate_release_notes: true
