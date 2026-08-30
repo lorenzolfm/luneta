@@ -423,11 +423,11 @@ install -m 0644 "luneta-$v.wasm" ~/.local/share/zellij/plugins/luneta.wasm
 then point `config.kdl` at the `file:` path instead of the URL.
 
 The published checksum for the current release, so the common case is one
-command and no download of a second file:
+command and no second file to fetch:
 
-```
-(filled in when the first release is published — until then, take it from
- SHA256SUMS on the releases page)
+```sh
+echo '70f1ecf01907b96b8371abec12b079e49e637271a4a361d5d3cb1618074137ca  luneta-0.1.0.wasm' \
+    | sha256sum -c
 ```
 
 **What each half proves**, because they are not the same claim and the
