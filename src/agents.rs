@@ -13,7 +13,7 @@
 //! 🔴 The plugin cannot read the agents itself. Its wasi sandbox preopens only `/host`,
 //! `/data`, `/cache` and `/tmp`, so neither `~/.claude/sessions/<pid>.json` nor `/proc` is
 //! reachable from in here — the join between "what Claude says it is doing" and "which pane
-//! that is" has to happen outside. `claude-agents` does it and prints TSV; this module only
+//! that is" has to happen outside. `claude-ps` does it and prints TSV; this module only
 //! parses, filters and orders.
 
 use std::time::Duration;
@@ -29,21 +29,21 @@ use crate::sessions::Selection;
 ///
 /// If a server `PATH` genuinely lacks it, the plugin's `agents_command` configuration key
 /// overrides this — that is the supported escape hatch, not a wrapper compiled in.
-pub const QUERY: [&str; 1] = ["claude-agents"];
+pub const QUERY: [&str; 1] = ["claude-ps"];
 
 /// Marks our own `RunCommandResult`. Shares the key with the directory screen and differs in
 /// the value — the plugin now issues two commands and the replies are told apart here.
 pub const CONTEXT_KEY: &str = "zj-picker";
 pub const CONTEXT_VALUE: &str = "agents";
 
-/// The number of tab-separated fields `claude-agents` emits:
+/// The number of tab-separated fields `claude-ps` emits:
 /// `status age session pane name pid session_id started_at cwd`.
 ///
 /// `cwd` is last because it is the one field that can plausibly contain anything, so it is the
 /// field a future column must never be appended after.
 ///
 /// ⚠️ Checked **exactly**, not as a minimum, and the difference is the whole point. This was 8
-/// before `claude-agents` gained `started_at`, which had to go *before* `cwd` for the reason
+/// before `claude-ps` gained `started_at`, which had to go *before* `cwd` for the reason
 /// above — and a `splitn(FIELDS, ..)` that tolerated a tenth column would have folded it into
 /// `cwd`, tab and all, and gone on rendering rows off a schema it no longer understood. Now
 /// either arity is a loud [`Status::Failed`] naming the count, on the same line of the screen
@@ -63,7 +63,7 @@ pub enum Jump {
     Focus,
 }
 
-/// One agent out of `claude-agents`, already known to be inside zellij.
+/// One agent out of `claude-ps`, already known to be inside zellij.
 struct Agent {
     session: String,
     pane: u32,
@@ -147,9 +147,9 @@ impl AgentSet {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
             self.status = Status::Failed(if reason.is_empty() {
-                "claude-agents is not available".to_string()
+                "claude-ps is not available".to_string()
             } else {
-                format!("claude-agents: {}", reason)
+                format!("claude-ps: {}", reason)
             });
             self.all.clear();
             self.outside = 0;
@@ -163,7 +163,7 @@ impl AgentSet {
             },
             // A column count this plugin does not know. Reported rather than dropped, for the
             // same reason a non-zero exit is: an empty list would read as "no agents running",
-            // when what it means is "your `claude-agents` and your picker disagree".
+            // when what it means is "your `claude-ps` and your picker disagree".
             Err(reason) => {
                 self.status = Status::Failed(reason);
                 self.all.clear();
@@ -453,7 +453,7 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() != FIELDS {
             return Err(format!(
-                "claude-agents line {}: {} columns, expected {}",
+                "claude-ps line {}: {} columns, expected {}",
                 number + 1,
                 fields.len(),
                 FIELDS

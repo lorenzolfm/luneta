@@ -71,7 +71,7 @@ and one more `Tab` on from there:
 
 ### The agent screen
 
-The list comes from `claude-agents`, a separate tool on `$PATH` that joins what
+The list comes from `claude-ps`, a separate tool on `$PATH` that joins what
 Claude Code publishes about itself (`~/.claude/sessions/<pid>.json`) to the pane
 each agent is running in. The plugin cannot do that join itself: its wasi
 sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
@@ -133,9 +133,9 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
 - 🔴 **The column count is checked exactly, and a mismatch is loud.** The wire is
   nine tab-separated fields — `status age session pane name pid session_id
   started_at cwd`. Anything else stops the parse and puts the count on the note
-  line (`claude-agents line 1: 10 columns, expected 9`), because a picker that
+  line (`claude-ps line 1: 10 columns, expected 9`), because a picker that
   tolerated an extra column would fold it into `cwd` and go on rendering rows
-  off a schema it no longer understands. So a `claude-agents` newer or older
+  off a schema it no longer understands. So a `claude-ps` newer or older
   than the picker says so instead of looking like "no agents are running".
 
 ### What `Enter` does
@@ -384,7 +384,7 @@ program on the zellij **server's** `PATH`, and neither is required:
 |---|---|---|
 | sessions | — | always works |
 | directories | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | `zoxide is not available` on the note line |
-| agents | [`claude-agents`](https://github.com/lorenzolfm/claude-agents) | `claude-agents is not available` on the note line |
+| agents | [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | `claude-ps is not available` on the note line |
 
 Both are looked up **by name**. Nothing in the source names an install path, so
 where you keep them is your business — but note it is the *server's* `PATH`, not
@@ -492,7 +492,7 @@ Three things about that, each found the hard way:
   the agents it stays there, and the key that used to open the sessions no
   longer does. When each key names its screen, each one lands where it says.
 
-### When `claude-agents` is not on the server's `PATH`
+### When `claude-ps` is not on the server's `PATH`
 
 The escape hatch is one plugin configuration key, `agents_command`, naming the
 executable to run instead:
@@ -503,7 +503,7 @@ bind "Ctrl a" {
         floating true
         move_to_focused_tab true
         skip_plugin_cache true
-        agents_command "/opt/tools/claude-agents"
+        agents_command "/opt/tools/claude-ps"
     }
     // ... the MessagePlugin, unchanged
 }
@@ -518,7 +518,7 @@ bind "Ctrl a" {
   the same trap that put the screen selection on a `MessagePlugin` rather than
   on configuration. Leaving the key out everywhere is the ordinary case.
 - There is deliberately no equivalent for `zoxide`. It is a packaged program on
-  everyone's `PATH`; `claude-agents` is one you build yourself.
+  everyone's `PATH`; `claude-ps` is one you build yourself.
 
 ## Notes for the next change
 
