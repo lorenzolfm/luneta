@@ -944,7 +944,7 @@ fn search_help(width: usize) -> Text {
             ("<TAB>", "Agents", "Agents"),
             ("<Ctrl r>", "Rename", "Rename"),
             ("<Del>", "Delete", "Delete"),
-            ("<ESC>", "Deselect/Close", "Close"),
+            ("<ESC>", "Close", "Close"),
         ],
     )
 }
@@ -959,7 +959,7 @@ fn dirs_help(width: usize) -> Text {
             ("<↓↑>", "Navigate", "Nav"),
             ("<ENTER>", "Go there", "Go"),
             ("<TAB>", "Sessions", "Sessions"),
-            ("<ESC>", "Back", "Back"),
+            ("<ESC>", "Close", "Close"),
         ],
     )
 }
@@ -973,7 +973,7 @@ fn agents_help(width: usize) -> Text {
             ("<↓↑>", "Navigate", "Nav"),
             ("<ENTER>", "Go to agent", "Go"),
             ("<TAB>", "Directories", "Dirs"),
-            ("<ESC>", "Back", "Back"),
+            ("<ESC>", "Close", "Close"),
         ],
     )
 }
@@ -1353,7 +1353,7 @@ mod tests {
             ("<↓↑>", "Navigate", "Nav"),
             ("<ENTER>", "Select", "Select"),
             ("<TAB>", "Agents", "Agents"),
-            ("<ESC>", "Deselect/Close", "Close"),
+            ("<ESC>", "Close", "Close"),
         ];
         for width in 12..80 {
             let line = keys_text(width, keys);

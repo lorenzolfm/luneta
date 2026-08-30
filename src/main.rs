@@ -626,33 +626,19 @@ impl State {
                 }
                 true
             },
-            // ⚠️ Esc no longer dismisses in one press when something is highlighted — it drops
-            // the highlight, and only a second Esc closes. Always-on selection otherwise makes
-            // the no-selection state unreachable, and that state is the only way to ask for a
-            // name that fuzzy-matches something existing. The hint line says which state you are
-            // in, so the intermediate step is not silent.
+            // `Esc` closes, from every screen and whatever is highlighted. One press, one
+            // meaning, no intermediate state to be in and to have to read the screen to leave.
+            //
+            // ⚠️ It used to do two other things first — back out of a secondary screen, then
+            // drop the highlight — and the second of those was load-bearing: with the selection
+            // always on, `Enter` always takes a row, and a dropped highlight was the only way to
+            // ask for a *name* that fuzzy-matches a session that already exists (`infra` while
+            // `infra-staging` is live). That path now costs a `Ctrl c`, a reopen and a name no
+            // row matches. Deliberate: a key that dismisses on the third press is a key you
+            // press three times.
             BareKey::Esc if key.has_no_modifiers() => {
-                // On the directory screen `Esc` backs out to the sessions rather than dropping
-                // the highlight: there is no literal-text path here for a dropped highlight to
-                // enable. A directory you have never been to is not something this list can
-                // offer you, so "no selection" would be a state with nothing in it.
-                // Both secondary screens back out to the sessions rather than stepping one
-                // stop around the `Tab` cycle. `Esc` means *out*, and the session list is what
-                // out is — a three-stop cycle would otherwise make `Esc` a second, slower `Tab`
-                // that happens to run backwards. Neither has a literal-text path for a dropped
-                // highlight to enable: an agent you are not running, like a directory you have
-                // never visited, is not something this list can offer you.
-                if self.screen != Screen::Sessions {
-                    self.screen = Screen::Sessions;
-                    return true;
-                }
-                if self.matches.selected.is_some() {
-                    self.matches.drop_selection();
-                    true
-                } else {
-                    close_self();
-                    false
-                }
+                close_self();
+                false
             },
             // Rename always means the session you are *in* — `rename_session` takes no target,
             // so upstream's version is renaming the current session too, whatever its list

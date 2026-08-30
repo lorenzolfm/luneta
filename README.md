@@ -211,12 +211,18 @@ layout → resurrect, neither → create. One call, three outcomes.
   layout picker: it was a menu answered the same way every time. The cost is that
   the create path has no confirm step — `Enter` on a name that matches nothing
   makes the session then and there.
-- **`Esc` means "I mean the literal text I typed."** It drops the highlight (and
-  does not take it back until you type again), which is how you create `infra`
-  while `infra-staging` is live: type, `Esc`, `Enter`. A second `Esc` — or `Esc`
-  when nothing is highlighted — closes the picker. `Ctrl-c` always closes.
-- **An empty name is a feature**: `Esc` `Enter` on an empty prompt gives a
-  host-named scratch session.
+- **`Esc` closes.** One press, from any of the three screens, whatever is
+  highlighted. `Ctrl-c` does the same.
+
+  ⚠️ It used to do two other things first — back out of a secondary screen, and
+  then drop the highlight — and the second of those was load-bearing. With the
+  selection always on, `Enter` always takes a row, so a dropped highlight was the
+  only way to ask for a *name* that fuzzy-matches a session that already exists:
+  `infra` while `infra-staging` is live. That is now out of reach unless nothing
+  matches. Deliberate: a key that dismisses on the third press is a key you press
+  three times.
+- **An empty name is still a feature**: `Enter` on an empty prompt with nothing
+  in the list gives a host-named scratch session.
 - Typing your own session's name is a **no-op**, not an error. The prompt says
   so rather than an overlay, because an error modal here would eat your next
   keystroke.
@@ -242,8 +248,8 @@ wired only to the CLI and the web client — so the plugin is the last line of
 defence: length, `/`, `.`/`..` and whitespace-only.
 
 Keys: type to filter, `Up`/`Down` to move (no wrap), `Backspace`, `Enter` to act,
-`Tab` to swap lists, `Ctrl-r` to rename, `Del` to kill or delete, `Esc` to drop the
-highlight then close, `Ctrl-c` to dismiss.
+`Tab` to swap lists, `Ctrl-r` to rename, `Del` to kill or delete (and `Del` again to
+do both), `Esc` or `Ctrl-c` to close.
 
 ### `Del` — kill a session, or delete a dead one
 

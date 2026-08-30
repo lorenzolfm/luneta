@@ -62,9 +62,6 @@ pub struct MatchSet {
     /// Does the current session fuzzy-match the term? One extra `fuzzy_indices` call per
     /// keystroke against a name that never enters `rows` — the whole cost of the hint line.
     pub current_matches: bool,
-    /// `Esc` dropped the selection, and it stays dropped until the term changes.
-    /// This is the escape hatch: no highlight means `Enter` takes the literal text.
-    dropped: bool,
     matcher: Option<SkimMatcherV2>,
 }
 
@@ -157,7 +154,10 @@ impl MatchSet {
             });
         }
 
-        self.selected = if self.rows.is_empty() || self.dropped {
+        // `None` only when there is nothing to point at. That is also the state that puts
+        // `Enter` on the literal text you typed — see [`crate::render::enter_action`] — so an
+        // empty list is not a dead end, it is the create path.
+        self.selected = if self.rows.is_empty() {
             None
         } else {
             // `Hold` keeps the cursor on the same *session*, not the same row — the row may have
@@ -182,20 +182,7 @@ impl MatchSet {
         dead: &[(String, Duration)],
     ) {
         self.search_term = term;
-        // A new term re-arms the selection: `Esc`'s drop lasts exactly until you type again.
-        self.dropped = false;
         self.rebuild(live, dead, Selection::SnapToTop);
-    }
-
-    /// `Esc`'s escape hatch: drop the highlight so `Enter` means "the literal
-    /// text I typed", not "the top match". Without this, always-on selection makes it impossible
-    /// to create `infra` while `infra-staging` is live.
-    ///
-    /// The drop is sticky — a background poll must not put the highlight back a second later —
-    /// and `set_search_term` is the only thing that lifts it.
-    pub fn drop_selection(&mut self) {
-        self.selected = None;
-        self.dropped = true;
     }
 
     /// Is the term exactly the name of the session we are sitting in?
