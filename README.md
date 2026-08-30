@@ -460,9 +460,19 @@ toolchain as a local `make build` — the rust version is written down once, in
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` builds, renames the artifact to
-`luneta-<version>.wasm` and attaches it to the release. The rename is
-load-bearing for the caching reason above, not cosmetic.
+`.github/workflows/ci.yml` builds on every PR and releases on a `v*` tag. The
+`release` job does **not** build: it takes the artifact the `build` job
+produced, so the bytes attached to a release are the bytes a PR check went green
+on, and the build is written down once rather than drifting between two
+pipelines.
+
+It renames that artifact to `luneta-<version>.wasm` on the way out. The rename
+is load-bearing for the caching reason above, not cosmetic.
+
+There is no `cargo test` step, because there is nothing to run — the crate has
+no test modules, and a green step asserting nothing is worse than no step. What
+CI does check is that the code still compiles for `wasm32-wasip1`, which is the
+failure a host-target build would miss.
 
 ## The edit → see-it loop
 
