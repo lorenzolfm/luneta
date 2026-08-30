@@ -65,8 +65,13 @@ const FLOATING: (&str, &str, &str, &str) = ("20%", "20%", "60%", "60%");
 /// session list from one `get_session_list` a second to ten.
 const TICK: f64 = 0.1;
 
+/// Animation ticks in one second. [`TICK`] is a tenth of a second, so ten of them — and this
+/// is what both the poll divisor below and the agent screen's age offset mean when they say
+/// "a second". They are the same number for the same reason, not by coincidence.
+const TICKS_PER_SECOND: u64 = 10;
+
 /// Animation ticks per session poll, so that the poll stays at its original once a second.
-const TICKS_PER_POLL: u64 = 10;
+const TICKS_PER_POLL: u64 = TICKS_PER_SECOND;
 
 /// Which screen has the keyboard. Kill-all and disconnect-others are still cut: both act on
 /// sessions you cannot see from here, which is the one thing this picker refuses to do.
@@ -216,6 +221,12 @@ struct State {
     /// off: every busy row turns in step, which reads as one thing happening rather than as
     /// several rows each doing their own.
     frame: u64,
+    /// The frame the agent snapshot in [`State::agents`] was ingested at.
+    ///
+    /// The snapshot itself is frozen for the life of the screen, and its `age` field is a
+    /// duration measured at the far end when `claude-ps` ran. Without an anchor for *when*
+    /// that was, the age column would be frozen with it. See [`State::agents_since`].
+    agents_taken_at: u64,
 }
 
 register_plugin!(State);
@@ -311,6 +322,12 @@ impl ZellijPlugin for State {
                     },
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr);
+                        // Where the age column counts from, stamped here rather than where the
+                        // command was issued: `age` was measured by `claude-ps` at the far end,
+                        // and the reply landing is the nearest moment to that one we can name.
+                        // The round trip is undercounted by however long the command took,
+                        // which is a fraction of the second the column is rounded to.
+                        self.agents_taken_at = self.frame;
                         self.rebuild_agents(Selection::Hold);
                         true
                     },
@@ -337,7 +354,8 @@ impl ZellijPlugin for State {
                 self.ask_zoxide();
                 // 🔴 A glance, not a watch: the agent snapshot is taken here and then frozen for
                 // as long as the screen is up. That is what makes attention-first ordering safe
-                // — nothing reorders while you are reading it.
+                // — nothing reorders while you are reading it. Frozen *list*, though, not frozen
+                // clock: the ages go on counting. See [`State::agents_since`].
                 self.ask_agents();
                 false
             },
@@ -426,8 +444,10 @@ impl State {
         // the same tick the session list does.
         self.rebuild_dirs(Selection::Hold);
         // The agent list is *not* re-fetched here — it is a frozen snapshot. What is recomputed
-        // is which call `Enter` would make and which row is us, both of which are functions of
-        // the session poll rather than of the agents.
+        // is which call `Enter` would make, which row is us, and how long ago that snapshot was
+        // taken. The first two are functions of the session poll rather than of the agents; the
+        // third is a function of the clock, and is what keeps the age column moving on a screen
+        // that is deliberately not re-fetched. See [`State::agents_since`].
         self.rebuild_agents(Selection::Hold);
     }
 
@@ -470,8 +490,31 @@ impl State {
             (Some(session), Some(pane)) => Some((session, pane)),
             _ => None,
         };
+        let since = self.agents_since();
         self.agents
-            .rebuild(&self.matches.search_term, current.as_deref(), origin, policy);
+            .rebuild(&self.matches.search_term, current.as_deref(), origin, since, policy);
+    }
+
+    /// How long ago the frozen agent snapshot was taken, off the animation clock.
+    ///
+    /// 🔴 The agent screen is a glance rather than a watch, and stays one: the snapshot is not
+    /// re-fetched while the screen is up, because a status changing under the cursor would
+    /// reorder an attention-first list while it is being read. But "the list holds still" and
+    /// "the clock holds still" are two different promises, and only the first was ever wanted.
+    /// Without this, an agent that has been waiting on you for three minutes reads `4s` for as
+    /// long as you leave the picker open — on the one column the routing decision is made on.
+    ///
+    /// Adding it to every row is safe *because* it is the same number on every row. A uniform
+    /// offset cannot change the sign of any `age` comparison, so the longest-in-status tiebreak
+    /// lands exactly where it did: the ages move and the list does not.
+    ///
+    /// Counted in ticks rather than read off a wall clock because the plugin has no wall clock
+    /// — a wasi sandbox with `/host` preopened is not a clock — and the timer is already the
+    /// one steady thing the plugin owns. It drifts with whatever the host does to the timer,
+    /// which the column's one-second granularity absorbs, and a reopen re-stamps the anchor
+    /// from `claude-ps` regardless.
+    fn agents_since(&self) -> Duration {
+        Duration::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
     }
 
     /// Ask `claude-ps` for the list — once per answer, on the same terms as zoxide.

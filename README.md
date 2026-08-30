@@ -111,9 +111,13 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   the word the glyph stands alone; an unrecognised status falls back to its
   first letter instead, because 🛸 on every unknown row would render two
   different unknown statuses identically.
-- **The age is a duration, not a timestamp.** `35m` means "has been idle for
-  thirty-five minutes", which is the routing decision; `35m ago` would be a
-  different claim.
+- **The age is a duration, not a timestamp**, and it **counts on while you
+  watch**. `35m` means "has been idle for thirty-five minutes", which is the
+  routing decision; `35m ago` would be a different claim. `claude-ps` is asked
+  once and its answer frozen (below), so the column adds how long ago that was
+  rather than re-asking — otherwise an agent that has been waiting three minutes
+  reads `4s` for as long as you leave the picker open, on the one column the
+  decision is made on.
 - **The cwd is its last two components**, so `misc/luneta` rather than
   `/home/you/Projects/misc/luneta`. Down a column of agents the leading
   components are the same on every row and separate nothing. Two rather than
@@ -123,9 +127,13 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
 - **A `:pane` suffix appears only when two rows share a session name**, and it
   is never what the search term matches — you type the bare name. It shows up
   exactly when the session name stops identifying one target.
-- **A glance, not a watch.** The snapshot is taken when the screen opens and
-  frozen while it is up. That is what makes attention-first ordering safe:
-  nothing reorders while you read it.
+- **A glance, not a watch** — a frozen *list*, though, not a frozen clock. The
+  snapshot is taken when the screen opens and held while it is up, which is what
+  makes attention-first ordering safe: nothing reorders while you read it. The
+  ages on it still move, and that costs the guarantee nothing, because the offset
+  added to them is the same number on every row — a uniform offset cannot flip a
+  comparison between two of them. Reopening takes a fresh snapshot and the clock
+  restarts from it.
 - **The agent whose pane you opened the picker from is not listed**, dropped by
   `(session, pane)` rather than by session — a *sibling* agent in the same
   session is a legitimate target and stays. Agents running outside zellij are
@@ -696,6 +704,13 @@ bind "Ctrl a" {
   once a second is correct; snapping the selection to row 0 while doing it drags
   the cursor out from under the user every second. Snap on a *search-term*
   change; hold the selected session by name on a poll.
+- **The plugin has no wall clock.** A wasi sandbox with `/host`, `/data`,
+  `/cache` and `/tmp` preopened is not a clock, so "how long ago did that
+  happen?" is answered by counting the plugin's own 10Hz animation ticks. That
+  is what lets the agent screen's ages move without re-running `claude-ps`: the
+  frame the snapshot landed on is the anchor, and the difference divided by ten
+  is the offset. It drifts with whatever the host does to the timer, which a
+  column rounded to the second absorbs.
 
 ## Driving it headlessly
 
