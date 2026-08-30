@@ -26,6 +26,7 @@ use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
 use crate::dirs::{Action, DirRow, DirSet, Status};
+use crate::layout::Screen;
 use crate::sessions::{format_age, Kind, MatchSet, Row};
 use crate::{Pending, Rename};
 
@@ -58,35 +59,25 @@ enum Fit {
 
 pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: usize) {
     let width = budget(cols);
-    let y = if rows > 4 { 1 } else { 0 };
-
-    print_centered(prompt_text(state), cols, y);
-
-    // The bottom rows are spoken for before the list gets to ask: the help line, a blank row
-    // above it, and a note line each. Taking them off the top of the budget is what keeps the
-    // list from growing into them.
     let notes = note_texts(state, error);
-    // Directly under the prompt, with no blank row of its own: the table's title row is blank
-    // and supplies the gap. This is the built-in session manager's spacing exactly — an extra
-    // blank here pushes the list one row further from the thing that filters it.
-    let table_y = y + 1;
-    let list_rows = rows.saturating_sub(notes.len() + 2).saturating_sub(table_y);
+    let screen = Screen::new(rows, notes.len());
 
-    if list_rows == 0 {
+    print_centered(prompt_text(state), cols, screen.prompt_y);
+
+    if screen.list_rows == 0 {
         // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
     } else if state.rows.is_empty() {
         // No table means no title row, so the gap it would have supplied is spent explicitly —
         // otherwise "no sessions" lands flush against the prompt.
-        print_centered(empty_text(state), cols, table_y + 1);
+        print_centered(empty_text(state), cols, screen.table_y + 1);
     } else {
-        render_results(state, cols, table_y, width, list_rows);
+        render_results(state, cols, screen.table_y, width, screen.list_rows);
     }
 
-    let notes_y = rows.saturating_sub(1).saturating_sub(notes.len());
     for (i, note) in notes.into_iter().enumerate() {
-        print_centered(note, cols, notes_y + i);
+        print_centered(note, cols, screen.notes_y + i);
     }
-    print_centered(search_help(width), cols, rows.saturating_sub(1));
+    print_centered(search_help(width), cols, screen.help_y);
 }
 
 /// The directory screen: the places you go, and what `Enter` would make of each.
@@ -98,27 +89,23 @@ pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: u
 /// path because frecency is not a thing you can print usefully.
 pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
     let width = budget(cols);
-    let y = if rows > 4 { 1 } else { 0 };
-
-    print_centered(dir_prompt(dirs, term), cols, y);
-
     let notes = dir_note_texts(dirs);
-    let table_y = y + 1;
-    let list_rows = rows.saturating_sub(notes.len() + 2).saturating_sub(table_y);
+    let screen = Screen::new(rows, notes.len());
 
-    if list_rows == 0 {
+    print_centered(dir_prompt(dirs, term), cols, screen.prompt_y);
+
+    if screen.list_rows == 0 {
         // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
     } else if dirs.rows.is_empty() {
-        print_centered(dir_empty_text(dirs, term), cols, table_y + 1);
+        print_centered(dir_empty_text(dirs, term), cols, screen.table_y + 1);
     } else {
-        render_dir_results(dirs, cols, table_y, width, list_rows);
+        render_dir_results(dirs, cols, screen.table_y, width, screen.list_rows);
     }
 
-    let notes_y = rows.saturating_sub(1).saturating_sub(notes.len());
     for (i, note) in notes.into_iter().enumerate() {
-        print_centered(note, cols, notes_y + i);
+        print_centered(note, cols, screen.notes_y + i);
     }
-    print_centered(dirs_help(width), cols, rows.saturating_sub(1));
+    print_centered(dirs_help(width), cols, screen.help_y);
 }
 
 /// Renaming the session you are in — the only session `rename_session` can address.
@@ -797,27 +784,23 @@ enum AgentFit {
 /// drawing*, not about the agents — the snapshot they came from is still frozen.
 pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, frame: u64) {
     let width = budget(cols);
-    let y = if rows > 4 { 1 } else { 0 };
-
-    print_centered(agent_prompt(agents, term), cols, y);
-
     let notes = agent_note_texts(agents, width);
-    let table_y = y + 1;
-    let list_rows = rows.saturating_sub(notes.len() + 2).saturating_sub(table_y);
+    let screen = Screen::new(rows, notes.len());
 
-    if list_rows == 0 {
+    print_centered(agent_prompt(agents, term), cols, screen.prompt_y);
+
+    if screen.list_rows == 0 {
         // Nothing left to draw the list into; the prompt alone still answers "what am I typing?"
     } else if agents.rows.is_empty() {
-        print_centered(agent_empty_text(agents, term), cols, table_y + 1);
+        print_centered(agent_empty_text(agents, term), cols, screen.table_y + 1);
     } else {
-        render_agent_results(agents, cols, table_y, width, list_rows, frame);
+        render_agent_results(agents, cols, screen.table_y, width, screen.list_rows, frame);
     }
 
-    let notes_y = rows.saturating_sub(1).saturating_sub(notes.len());
     for (i, note) in notes.into_iter().enumerate() {
-        print_centered(note, cols, notes_y + i);
+        print_centered(note, cols, screen.notes_y + i);
     }
-    print_centered(agents_help(width), cols, rows.saturating_sub(1));
+    print_centered(agents_help(width), cols, screen.help_y);
 }
 
 fn render_agent_results(
@@ -1037,4 +1020,143 @@ fn agents_help(width: usize) -> Text {
             ("<ESC>", "Back", "Back"),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A list that fits shows all of it, from the top, whatever is selected.
+    #[test]
+    fn viewport_does_not_scroll_a_list_that_fits() {
+        assert_eq!(viewport(0, 5, 10), (0, 5));
+        assert_eq!(viewport(4, 5, 5), (0, 5));
+        assert_eq!(viewport(0, 0, 10), (0, 0));
+    }
+
+    /// Scrolling starts only once the selection would fall off the bottom, and then moves by
+    /// exactly as much as it has to. Gratuitous motion is the thing being avoided.
+    #[test]
+    fn viewport_scrolls_only_to_keep_the_selection_on_screen() {
+        // Still inside the first window — no scroll.
+        assert_eq!(viewport(2, 20, 5), (0, 5));
+        assert_eq!(viewport(4, 20, 5), (0, 5));
+        // One past it — one row of scroll.
+        assert_eq!(viewport(5, 20, 5), (1, 6));
+        // The last row pins the window to the end of the list.
+        assert_eq!(viewport(19, 20, 5), (15, 20));
+    }
+
+    /// The window is always exactly `visible` rows while there are rows to fill it, and never
+    /// reaches past the end of the list.
+    #[test]
+    fn viewport_windows_stay_in_bounds() {
+        for total in 0..12 {
+            for visible in 1..8 {
+                for selected in 0..total.max(1) {
+                    let (start, end) = viewport(selected, total, visible);
+                    assert!(end <= total, "{selected}/{total}/{visible}");
+                    assert!(start <= end);
+                    assert_eq!(end - start, visible.min(total));
+                    if total > 0 {
+                        assert!((start..end).contains(&selected), "{selected}/{total}/{visible}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Text that fits is returned untouched — no marker, no allocation-visible change.
+    #[test]
+    fn truncate_leaves_text_that_fits() {
+        assert_eq!(truncate("despesas", 8), "despesas");
+        assert_eq!(truncate("despesas", 20), "despesas");
+        assert_eq!(truncate("", 0), "");
+    }
+
+    /// The `…` is paid for out of the budget, so the result never exceeds `max`.
+    #[test]
+    fn truncate_pays_for_its_own_marker() {
+        assert_eq!(truncate("despesas", 5), "desp…");
+        assert_eq!(truncate("despesas", 1), "…");
+        for max in 0..12 {
+            assert!(truncate("despesas", max).width() <= max.max(1));
+        }
+    }
+
+    /// Wide characters are measured in columns, not chars, so a truncated CJK name still fits
+    /// the column it was cut for.
+    #[test]
+    fn truncate_counts_columns_not_characters() {
+        // Four characters, eight columns.
+        assert_eq!("日本語版".width(), 8);
+        assert_eq!(truncate("日本語版", 5), "日本…");
+        assert!(truncate("日本語版", 5).width() <= 5);
+    }
+
+    /// Keeping the tail is the whole point: a path is identified by its last components.
+    #[test]
+    fn truncate_left_keeps_the_tail() {
+        assert_eq!(truncate_left("/home/you/projects/luneta", 12), ("…ects/luneta".to_string(), 14));
+        let (out, _) = truncate_left("/home/you/projects/luneta", 12);
+        assert!(out.width() <= 12);
+    }
+
+    /// The dropped count is what the caller shifts its match indices by, so it has to be the
+    /// real number of characters removed — and zero when nothing was.
+    #[test]
+    fn truncate_left_reports_what_it_dropped() {
+        assert_eq!(truncate_left("luneta", 12), ("luneta".to_string(), 0));
+        let (out, dropped) = truncate_left("abcdefghij", 5);
+        assert_eq!(dropped, 6);
+        // `…` plus the four characters that survived.
+        assert_eq!(out, "…ghij");
+        assert_eq!(out.chars().count(), 10 - dropped + 1);
+    }
+
+    /// Two components, because one collides across projects. See the doc comment.
+    #[test]
+    fn short_cwd_keeps_the_last_two_components() {
+        assert_eq!(short_cwd("/home/you/Projects/misc/luneta"), "misc/luneta");
+        assert_eq!(short_cwd("/home/you"), "home/you");
+        assert_eq!(short_cwd("/home"), "home");
+        assert_eq!(short_cwd("/"), "/");
+        assert_eq!(short_cwd(""), "");
+        // A trailing slash is not a component.
+        assert_eq!(short_cwd("/misc/luneta/"), "misc/luneta");
+    }
+
+    /// The ladder degrades by dropping detail, never by dropping a key: "a key you cannot see
+    /// is a feature you will never find."
+    #[test]
+    fn keys_text_drops_descriptions_before_it_drops_keys() {
+        let keys: &[Key] = &[("<↓↑>", "Navigate", "Nav"), ("<ENTER>", "Select", "Select")];
+        // Widest tier: dashes and long descriptions.
+        assert_eq!(keys_text(60, keys).content(), "<↓↑> - Navigate, <ENTER> - Select");
+        // Then the dashes go, then the long descriptions.
+        assert_eq!(keys_text(30, keys).content(), "<↓↑> Navigate  <ENTER> Select");
+        assert_eq!(keys_text(24, keys).content(), "<↓↑> Nav  <ENTER> Select");
+        assert_eq!(keys_text(23, keys).content(), "<↓↑> Nav <ENTER> Select");
+        // Past every tier, the keys alone survive.
+        assert_eq!(keys_text(0, keys).content(), "<↓↑>/<ENTER>");
+    }
+
+    /// Every tier that claims to fit must actually fit.
+    #[test]
+    fn keys_text_respects_the_width_it_is_given() {
+        let keys: &[Key] = &[
+            ("<↓↑>", "Navigate", "Nav"),
+            ("<ENTER>", "Select", "Select"),
+            ("<TAB>", "Agents", "Agents"),
+            ("<ESC>", "Deselect/Close", "Close"),
+        ];
+        for width in 12..80 {
+            let line = keys_text(width, keys);
+            // The last-resort spelling is allowed to overflow — there is nothing shorter that
+            // still names every key.
+            if line.content().contains(' ') {
+                assert!(line.content().width() <= width, "width {width}: {}", line.content());
+            }
+        }
+    }
 }

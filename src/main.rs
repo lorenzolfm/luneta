@@ -13,6 +13,7 @@
 
 mod agents;
 mod dirs;
+mod layout;
 mod render;
 mod sessions;
 
