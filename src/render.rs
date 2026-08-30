@@ -57,6 +57,22 @@ const NAME: usize = 1;
 const LABEL: usize = 2;
 const ACCENT: usize = 3;
 
+/// The selection gutter: one column for the caret, one for the space after it.
+///
+/// Every row pays for it, selected or not, because a gutter that appears only under the
+/// highlight would shift the whole list sideways by two columns as you arrow down it.
+const CARET: usize = 2;
+
+/// Opens a row with its selection gutter.
+///
+/// Belt and braces on purpose: the caret *and* `Text::selected`. The band alone is invisible on
+/// a theme whose selected background barely differs from its normal one, and the caret alone is
+/// a single character to find on a wide row.
+fn gutter(line: &mut Line, selected: bool) {
+    line.push(if selected { ">" } else { " " }, ACCENT);
+    line.gap(1);
+}
+
 /// The blank columns between two columns of a row. Two, not the one the host used to insert,
 /// because a full-width box has room for it and three columns jammed together read as one.
 const GAP: usize = 2;
@@ -375,16 +391,17 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         .map(|i| format_age(state.rows[*i].age).width())
         .max()
         .unwrap_or(0);
-    // Two columns now that the tag is gone, so the name gets everything the age does not need
-    // and there is nothing left to degrade — the `Full`/`AbbrTag`/`NoAge` ladder went with it.
-    let name_budget = inner.saturating_sub(GAP + age_width).max(4);
+    // Two columns now that the tag is gone, so the name gets everything the gutter and the age
+    // do not need and there is nothing left to degrade — the `Full`/`AbbrTag`/`NoAge` ladder
+    // went with it.
+    let name_budget = inner.saturating_sub(CARET + GAP + age_width).max(4);
 
     (start..end)
         .map(|line| match visible(line) {
             None => separator(inner, "🪦 Dead sessions"),
             Some(i) => {
                 let selected = state.selected == Some(i);
-                result_line(&state.rows[i], selected, name_budget, age_width, inner)
+                result_line(&state.rows[i], selected, name_budget, inner)
             },
         })
         .collect()
@@ -413,7 +430,10 @@ fn dead_from(rows: &[Row]) -> Option<usize> {
 /// anyway, and a rule that ends at the border absorbs the disagreement.
 fn separator(inner: usize, label: &str) -> Text {
     let mut line = Line::new();
-    line.push(&truncate(label, inner), LABEL);
+    // Indented past the selection gutter, so it starts where the names do rather than where the
+    // carets do.
+    line.gap(CARET);
+    line.push(&truncate(label, inner.saturating_sub(CARET)), LABEL);
     if line.columns() < inner {
         line.gap(1);
         line.push(&"─".repeat(inner - line.columns()), TAG);
@@ -421,13 +441,7 @@ fn separator(inner: usize, label: &str) -> Text {
     line.finish(inner)
 }
 
-fn result_line(
-    row: &Row,
-    selected: bool,
-    name_budget: usize,
-    age_width: usize,
-    inner: usize,
-) -> Text {
+fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> Text {
     let name = truncate(&row.name, name_budget);
     // A truncated name drops the indices that fell off the end — colouring a position that no
     // longer exists would paint the wrong character.
@@ -435,13 +449,15 @@ fn result_line(
     let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
 
     let mut line = Line::new();
+    gutter(&mut line, selected);
     line.push_hits(&name, NAME, ACCENT, &hits);
     // The age is pushed flush against the right border rather than left-packed behind the
     // longest name. Two columns in a box as wide as the pane would otherwise huddle at the left
     // with half the box empty beside them, and the age column would shift every time the
-    // longest visible name changed.
+    // longest visible name changed. Flush right rather than left-aligned in a right-hand block,
+    // so that every row's `ago` lands in the same column whatever the number in front of it.
     let age = format_age(row.age);
-    line.pad_to(inner.saturating_sub(age.width().max(age_width)));
+    line.pad_to(inner.saturating_sub(age.width()));
     line.push(&age, LABEL);
 
     let text = line.finish(inner);
@@ -540,7 +556,7 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
     // two columns on screen instead of one and a half.
     let name_column =
         window.iter().map(|r| r.name.width()).max().unwrap_or(0).min(inner / 3).max(4);
-    let path_budget = inner.saturating_sub(name_column + GAP);
+    let path_budget = inner.saturating_sub(CARET + name_column + GAP);
 
     window
         .iter()
@@ -568,14 +584,19 @@ fn dir_line(
     let level = if refused { TAG } else { NAME };
 
     let mut line = Line::new();
+    gutter(&mut line, selected);
     // Not highlighted, because the term was never matched against it — the match ran on the
     // path, and painting hits onto a string they were not found in would be a lie that happens
     // to line up sometimes.
     line.push(&truncate(&row.name, name_column), level);
-    line.pad_to(name_column);
+    line.pad_to(CARET + name_column);
     line.gap(GAP);
 
     let (path, dropped) = truncate_left(&row.path, path_budget);
+    // Flush right. A path is already elided from the left, so ending every one of them at the
+    // border puts the `…` in a ragged column and the part that identifies the directory in a
+    // straight one — which is the way round that matters.
+    line.pad_to(inner.saturating_sub(path.width()));
     if refused {
         line.push(&path, TAG);
     } else {
@@ -698,11 +719,12 @@ fn agent_body(
     let name_column =
         window.iter().map(|r| r.label().width()).max().unwrap_or(0).min(inner / 3).max(4);
 
-    let fit = if name_column + GAP + full_tag + GAP + age_width + GAP + MIN_PATH <= inner {
+    let fixed = CARET + name_column + GAP;
+    let fit = if fixed + full_tag + GAP + age_width + GAP + MIN_PATH <= inner {
         AgentFit::Full
-    } else if name_column + GAP + abbr_width + GAP + age_width + GAP + MIN_PATH <= inner {
+    } else if fixed + abbr_width + GAP + age_width + GAP + MIN_PATH <= inner {
         AgentFit::AbbrTag
-    } else if name_column + GAP + abbr_width + GAP + age_width <= inner {
+    } else if fixed + abbr_width + GAP + age_width <= inner {
         AgentFit::NoCwd
     } else {
         AgentFit::NoAge
@@ -711,9 +733,9 @@ fn agent_body(
     let abbr = !matches!(fit, AgentFit::Full);
     let tag_column = if abbr { abbr_width } else { full_tag };
     let cwd_budget = match fit {
-        AgentFit::Full | AgentFit::AbbrTag => Some(
-            inner.saturating_sub(name_column + GAP + tag_column + GAP + age_width + GAP),
-        ),
+        AgentFit::Full | AgentFit::AbbrTag => {
+            Some(inner.saturating_sub(fixed + tag_column + GAP + age_width + GAP))
+        },
         _ => None,
     };
 
@@ -728,7 +750,6 @@ fn agent_body(
                 &fit,
                 name_column,
                 tag_column,
-                age_width,
                 cwd_budget,
                 inner,
                 frame,
@@ -744,7 +765,6 @@ fn agent_line(
     fit: &AgentFit,
     name_column: usize,
     tag_column: usize,
-    age_width: usize,
     cwd_budget: Option<usize>,
     inner: usize,
     frame: u64,
@@ -757,8 +777,9 @@ fn agent_line(
     let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
 
     let mut line = Line::new();
+    gutter(&mut line, selected);
     line.push_hits(&label, NAME, ACCENT, &hits);
-    line.pad_to(name_column);
+    line.pad_to(CARET + name_column);
     line.gap(GAP);
     // The one status that is spelled in the accent colour. Every other status — including ones
     // released after this was written — renders as itself, quietly.
@@ -770,20 +791,27 @@ fn agent_line(
     };
     line.push(&tag, tag_level);
 
-    if !matches!(fit, AgentFit::NoAge) {
-        line.pad_to(name_column + GAP + tag_column);
-        line.gap(GAP);
-        line.push(&agents::format_duration(row.age), LABEL);
-    }
-    if let Some(cwd_budget) = cwd_budget {
-        line.pad_to(name_column + GAP + tag_column + GAP + age_width);
-        line.gap(GAP);
-        // Still `truncate_left` underneath: two components are short, but not bounded — a
-        // single directory may be named anything at all.
-        let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
-        // Not highlighted: the match ran on the row's label, and painting hits onto a string
-        // they were not found in would be a lie that happens to line up sometimes.
-        line.push(&cwd, LABEL);
+    // The last column of whatever survived the ladder goes flush right, as on the other two
+    // screens; the ones before it stay left-packed at the widths they were measured to.
+    let age = agents::format_duration(row.age);
+    match cwd_budget {
+        Some(cwd_budget) => {
+            line.pad_to(CARET + name_column + GAP + tag_column);
+            line.gap(GAP);
+            line.push(&age, LABEL);
+            // Still `truncate_left` underneath: two components are short, but not bounded — a
+            // single directory may be named anything at all.
+            let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
+            line.pad_to(inner.saturating_sub(cwd.width()));
+            // Not highlighted: the match ran on the row's label, and painting hits onto a
+            // string they were not found in would be a lie that happens to line up sometimes.
+            line.push(&cwd, LABEL);
+        },
+        None if !matches!(fit, AgentFit::NoAge) => {
+            line.pad_to(inner.saturating_sub(age.width()));
+            line.push(&age, LABEL);
+        },
+        None => {},
     }
 
     let text = line.finish(inner);
@@ -986,9 +1014,9 @@ mod tests {
                 "│                            │",
                 "│                            │",
                 "│                            │",
-                "│ luneta              2h ago │",
-                "│ 🪦 Dead sessions ───────── │",
-                "│ old                 3h ago │",
+                "│ > luneta            2h ago │",
+                "│   🪦 Dead sessions ─────── │",
+                "│   old               3h ago │",
                 "╰────────────────────────────╯",
             ]
         );
@@ -1018,8 +1046,8 @@ mod tests {
         let state = matches(vec![session("old", Kind::Resurrectable, HOUR)], Some(0));
         let body = search_body(&state, &rect, 0);
         assert_eq!(body.len(), 2);
-        assert!(body[0].content().starts_with("│ 🪦 Dead sessions"));
-        assert!(body[1].content().starts_with("│ old"));
+        assert!(body[0].content().starts_with("│   🪦 Dead sessions"));
+        assert!(body[1].content().starts_with("│ > old"));
     }
 
     /// The separator is a display line, so it takes a row from the window like anything else.
@@ -1061,9 +1089,12 @@ mod tests {
             let body = search_body(&matches(rows, Some(selected)), &rect, 0);
             assert_eq!(body.len(), rect.inner_height());
             let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
+            // The caret is on exactly one line, and it is the selected session's.
+            let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with("│ > ")).collect();
+            assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
             assert!(
-                shown.iter().any(|l| l.starts_with(&format!("│ {} ", names[selected]))),
-                "selected {selected} fell off: {shown:?}"
+                carets[0].starts_with(&format!("│ > {} ", names[selected])),
+                "selected {selected}: {shown:?}"
             );
         }
     }
@@ -1084,7 +1115,7 @@ mod tests {
                 "│                            │",
                 "│                            │",
                 "│ you are in \"desp\" — not l… │",
-                "│ luneta              2h ago │",
+                "│ > luneta            2h ago │",
                 "╰────────────────────────────╯",
             ]
         );
