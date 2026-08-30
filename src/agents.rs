@@ -56,6 +56,15 @@ struct Wire {
     zellij: Option<WireZellij>,
     #[serde(default)]
     cwd: Option<String>,
+    /// `null` when the producer could not find the session's transcript. Its join is a
+    /// derivation rather than a proof, so an absent count is ordinary.
+    #[serde(default)]
+    context: Option<WireContext>,
+}
+
+#[derive(Deserialize)]
+struct WireContext {
+    tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +95,7 @@ struct Agent {
     status: String,
     age: Duration,
     cwd: String,
+    context: Option<u64>,
 }
 
 /// One row. As on the other two screens, this *is* one match-set entry.
@@ -100,6 +110,14 @@ pub struct AgentRow {
     /// Time in the current status. A duration, not a timestamp.
     pub age: Duration,
     pub cwd: String,
+    /// Tokens in context at the agent's last assistant turn, or `None` where the producer had
+    /// no transcript to read.
+    ///
+    /// ⚠️ Tokens, never a percentage. The window size is not written to disk anywhere, so a
+    /// denominator would have to come from a model-name table — and unlike an unrecognised
+    /// status, which renders as itself, a wrong denominator renders as a number that looks
+    /// right.
+    pub context: Option<u64>,
     /// Another visible row shares this session name, so the pane has to be spelled out.
     pub shared: bool,
     pub jump: Jump,
@@ -242,6 +260,7 @@ impl AgentSet {
                 status: agent.status.clone(),
                 age: agent.age,
                 cwd: agent.cwd.clone(),
+                context: agent.context,
                 shared: false,
                 jump: if current == Some(agent.session.as_str()) {
                     Jump::Focus
@@ -484,9 +503,26 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
             status: row.status.unwrap_or_default(),
             age: Duration::from_secs(row.age),
             cwd: row.cwd.unwrap_or_default(),
+            context: row.context.map(|c| c.tokens),
         });
     }
     Ok((agents, outside))
+}
+
+/// A token count at a glance: `950`, `188k`, `1.2M`.
+///
+/// Rounded rather than truncated — 187,953 tokens is nearer `188k` than `187k`, and three
+/// significant figures is all this column is for. A count that rounds up to a million reads as
+/// `1.0M` rather than as `1000k`.
+pub fn format_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return format!("{}", tokens);
+    }
+    let tenths_of_m = (tokens + 50_000) / 100_000;
+    if tenths_of_m >= 10 {
+        return format!("{}.{}M", tenths_of_m / 10, tenths_of_m % 10);
+    }
+    format!("{}k", (tokens + 500) / 1_000)
 }
 
 /// Compact elapsed time as a **duration** — `4s`, `35m`, `2h`.

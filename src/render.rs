@@ -749,12 +749,16 @@ fn truncate(text: &str, max: usize) -> String {
 
 /// How much the agent row had to give up to fit the pane's width.
 ///
-/// The ladder is **abbreviate the tag → drop cwd → drop age**, and that order is a judgement
-/// about what each column is for. Age outranks cwd because in the common case the session name
-/// already names the project the cwd would repeat, while nothing else on the row says how long
-/// an agent has been stuck — which is the whole routing decision.
+/// The ladder is **drop the token count → abbreviate the tag → drop cwd → drop age**, and that
+/// order is a judgement about what each column is for. Age outranks cwd because in the common
+/// case the session name already names the project the cwd would repeat, while nothing else on
+/// the row says how long an agent has been stuck — which is the whole routing decision. The
+/// token count goes first because it informs a decision rather than making one: it tells you a
+/// session is heavy, where the other three tell you which pane to go to.
 #[derive(PartialEq, Eq)]
 enum AgentFit {
+    /// name + [WAITING] + age + ctx + cwd
+    FullCtx,
     /// name + [WAITING] + age + cwd
     Full,
     /// name + [W] + age + cwd
@@ -837,6 +841,14 @@ fn render_agent_results(
         .map(|r| agents::format_duration(r.age).width())
         .max()
         .unwrap_or(0);
+    // Zero when no visible row has a count, which is also how the widest tier is ruled out: a
+    // column every row would leave blank is a column worth its width to nobody.
+    let ctx_width = window
+        .iter()
+        .filter_map(|r| r.context)
+        .map(|tokens| agents::format_tokens(tokens).width())
+        .max()
+        .unwrap_or(0);
     // Capped at a third of the width before anything else is decided — the name is the one
     // column with a natural size, and letting it take what it likes is what turns four columns
     // into two and a half.
@@ -852,7 +864,11 @@ fn render_agent_results(
     // silently drops any column that pushes the running total past the width it was given. So
     // the fixed cost of a four-column row is four, not the three gaps you can see — budgeting
     // for the visible gaps is what costs the table its last column. See [`print_table_centered`].
-    let fit = if name_budget + full_tag + age_width + MIN_PATH + 4 <= width {
+    let fit = if ctx_width > 0
+        && name_budget + full_tag + age_width + ctx_width + MIN_PATH + 5 <= width
+    {
+        AgentFit::FullCtx
+    } else if name_budget + full_tag + age_width + MIN_PATH + 4 <= width {
         AgentFit::Full
     } else if name_budget + abbr_width + age_width + MIN_PATH + 4 <= width {
         AgentFit::AbbrTag
@@ -862,9 +878,12 @@ fn render_agent_results(
         AgentFit::NoAge
     };
 
-    let abbr = fit != AgentFit::Full;
+    let abbr = !matches!(fit, AgentFit::Full | AgentFit::FullCtx);
     let tag_width = if abbr { abbr_width } else { full_tag };
     let cwd_budget = match fit {
+        AgentFit::FullCtx => {
+            Some(width.saturating_sub(name_budget + tag_width + age_width + ctx_width + 5))
+        },
         AgentFit::Full | AgentFit::AbbrTag => {
             Some(width.saturating_sub(name_budget + tag_width + age_width + 4))
         },
@@ -872,10 +891,13 @@ fn render_agent_results(
     };
 
     let columns = match fit {
+        AgentFit::FullCtx => 5,
         AgentFit::Full | AgentFit::AbbrTag => 4,
         AgentFit::NoCwd => 3,
         AgentFit::NoAge => 2,
     };
+    // cwd is last, so the token column pushes its index along with it.
+    let cwd_cell = if matches!(fit, AgentFit::FullCtx) { 4 } else { 3 };
     let mut table = header_row(Table::new(), columns);
     let mut name_column = 1; // the blank title cell is one column wide
     let mut cwd_column = 0;
@@ -890,7 +912,7 @@ fn render_agent_results(
         );
         // Measured after truncation, which is the only width the host will ever see.
         name_column = name_column.max(cells[0].content().width());
-        if let Some(cwd) = cells.get(3) {
+        if let Some(cwd) = cells.get(cwd_cell) {
             cwd_column = cwd_column.max(cwd.content().width());
         }
         table = table.add_styled_row(cells);
@@ -899,6 +921,9 @@ fn render_agent_results(
     let mut widths = vec![name_column, tag_width];
     if !matches!(fit, AgentFit::NoAge) {
         widths.push(age_width);
+    }
+    if matches!(fit, AgentFit::FullCtx) {
+        widths.push(ctx_width);
     }
     if cwd_budget.is_some() {
         widths.push(cwd_column);
@@ -930,7 +955,7 @@ fn agent_result_row(
     let visible_chars = label.chars().count();
     let indices: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible_chars).collect();
 
-    let tag = if matches!(fit, AgentFit::Full) {
+    let tag = if matches!(fit, AgentFit::Full | AgentFit::FullCtx) {
         agents::full_tag(&row.status, frame)
     } else {
         agents::abbr_tag(&row.status, frame)
@@ -945,6 +970,12 @@ fn agent_result_row(
     ];
     if !matches!(fit, AgentFit::NoAge) {
         cells.push(Text::new(agents::format_duration(row.age)).color_range(LABEL, ..));
+    }
+    if matches!(fit, AgentFit::FullCtx) {
+        // Blank rather than a dash where the producer had no transcript: a `-` here would read
+        // as "no tokens" when what it means is "not known".
+        let text = row.context.map(agents::format_tokens).unwrap_or_default();
+        cells.push(Text::new(text).color_range(LABEL, ..));
     }
     if let Some(cwd_budget) = cwd_budget {
         // Still `truncate_left` underneath: two components are short, but not bounded — a
