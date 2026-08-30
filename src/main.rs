@@ -148,16 +148,25 @@ impl Screen {
 pub struct Pending {
     pub name: String,
     pub kind: Kind,
+    /// Whether a second `Del` has escalated a live session's kill into a kill *and* a delete.
+    ///
+    /// Always false for a session that is already dead: there is nothing left to kill, so
+    /// `Delete` is what the first `Del` already means.
+    pub purge: bool,
 }
 
 impl Pending {
     /// Two different things wear the same key. Killing stops a running session; deleting throws
     /// away the saved layout of one that already stopped. Only the second is irreversible, and
     /// the confirm screen names which is which rather than calling both "delete".
+    ///
+    /// An escalated live session is spelled `Delete` rather than `Kill and delete`: what it
+    /// leaves behind is exactly what deleting a dead session leaves behind, and the verb is
+    /// answering "what will be left", not "how many host calls will it take".
     pub fn verb(&self) -> &'static str {
-        match self.kind {
-            Kind::Live => "Kill",
-            Kind::Resurrectable => "Delete",
+        match (self.kind, self.purge) {
+            (Kind::Live, false) => "Kill",
+            _ => "Delete",
         }
     }
 
@@ -166,10 +175,19 @@ impl Pending {
     /// entirely when `session_serialization false`), which the plugin cannot see. Promising a
     /// resurrection the host may not be able to deliver is worse than saying less.
     pub fn consequence(&self) -> &'static str {
-        match self.kind {
-            Kind::Live => "kills the running session — it comes back only if it was saved",
-            Kind::Resurrectable => "throws its saved layout away — this cannot be undone",
+        match (self.kind, self.purge) {
+            (Kind::Live, false) => "kills the running session — it comes back only if it was saved",
+            (Kind::Live, true) => {
+                "kills it and throws its saved layout away — this cannot be undone"
+            },
+            (Kind::Resurrectable, _) => "throws its saved layout away — this cannot be undone",
         }
+    }
+
+    /// Is there an escalation left to offer? Only a live session has one: the second `Del` adds
+    /// the delete that a dead session's first `Del` is already doing.
+    pub fn can_purge(&self) -> bool {
+        self.kind == Kind::Live && !self.purge
     }
 }
 
@@ -853,7 +871,7 @@ impl State {
             return;
         };
         self.error = None;
-        self.pending = Some(Pending { name: row.name.clone(), kind: row.kind });
+        self.pending = Some(Pending { name: row.name.clone(), kind: row.kind, purge: false });
         self.mode = Mode::Confirm;
     }
 
@@ -862,6 +880,21 @@ impl State {
             BareKey::Enter if key.has_no_modifiers() => {
                 self.apply_delete();
                 true
+            },
+            // The second `Del` — the one that saves you killing a session, waiting for it to
+            // come back as a dead row, finding it again and deleting *that*. It escalates the
+            // question rather than answering it: the consequence line and the verb both change,
+            // and `Enter` is still what commits. Two presses to ask for the irreversible thing,
+            // one more to mean it.
+            BareKey::Delete if key.has_no_modifiers() => {
+                match self.pending.as_mut().filter(|p| p.can_purge()) {
+                    Some(pending) => {
+                        pending.purge = true;
+                        true
+                    },
+                    // Already a delete. Redrawing to say nothing changed would only flicker.
+                    None => false,
+                }
             },
             BareKey::Esc if key.has_no_modifiers() => {
                 self.pending = None;
@@ -878,10 +911,24 @@ impl State {
             return;
         };
         let result = match pending.kind {
-            Kind::Live => kill_sessions(&[pending.name.as_str()]),
+            // Both calls block until the host has acknowledged, so the kill has finished by the
+            // time the delete runs — which is what makes the pair safe to issue back to back.
+            // The delete is skipped when the kill failed: `delete_dead_session` would throw away
+            // the saved layout of a session that is still running.
+            Kind::Live => kill_sessions(&[pending.name.as_str()])
+                .and_then(|()| match pending.purge {
+                    true => delete_dead_session(&pending.name),
+                    false => Ok(()),
+                }),
             Kind::Resurrectable => delete_dead_session(&pending.name),
         };
-        self.error = result.err().map(|e| format!("{} \"{}\": {}", pending.verb().to_lowercase(), pending.name, e));
+        // The term went with the session it was searching for. Clearing it before the error is
+        // set, not after: `set_term` treats a new term as a new question and wipes `self.error`,
+        // which would take the reason the delete failed with it.
+        self.set_term(String::new());
+        self.error = result.err().map(|e| {
+            format!("{} \"{}\": {}", pending.verb().to_lowercase(), pending.name, e)
+        });
         // Re-poll now instead of waiting out the tick. Both calls block until the host has
         // acknowledged, so the snapshot taken here already reflects them — and a row that
         // lingered for a second under the cursor is a row the next `Del` would aim at.
@@ -910,9 +957,41 @@ fn resize_self(plugin_id: u32) {
         Some(width.to_string()),
         Some(height.to_string()),
         None,
-        None,
+        Some(true),
     ) else {
         return;
     };
     change_floating_panes_coordinates(vec![(PaneId::Plugin(plugin_id), coordinates)]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(kind: Kind, purge: bool) -> Pending {
+        Pending { name: "luneta".to_string(), kind, purge }
+    }
+
+    /// The escalation is a change of *question*, not a second answer to the same one: both the
+    /// verb and the consequence have to move, or the confirm screen would go on promising a
+    /// resurrection while `Enter` threw the layout away.
+    #[test]
+    fn escalating_a_kill_renames_it_and_says_what_it_costs() {
+        let kill = pending(Kind::Live, false);
+        assert_eq!(kill.verb(), "Kill");
+        assert!(kill.consequence().contains("comes back only if it was saved"));
+
+        let purge = pending(Kind::Live, true);
+        assert_eq!(purge.verb(), "Delete");
+        assert!(purge.consequence().contains("cannot be undone"));
+    }
+
+    /// A dead session has nothing left to kill, so its `Del` is already the delete. Offering to
+    /// escalate it would put a key on the help row that does nothing.
+    #[test]
+    fn only_a_live_session_has_an_escalation_to_offer() {
+        assert!(pending(Kind::Live, false).can_purge());
+        assert!(!pending(Kind::Live, true).can_purge());
+        assert!(!pending(Kind::Resurrectable, false).can_purge());
+    }
 }

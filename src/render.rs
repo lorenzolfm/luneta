@@ -16,6 +16,12 @@
 //! | 2     | labels, box titles, the age column              |
 //! | 3     | the typed term, key caps, fuzzy-match hits      |
 //!
+//! Weight is a second, blunter channel, and it has exactly one user. The host draws every
+//! character of a `Text` bold unless index level 5 says otherwise, so bold was the default and
+//! therefore said nothing. [`Line::finish`] now takes it off the content of every row, which
+//! leaves the box titles — `luneta` above, the screen name below — as the only bold text on
+//! the screen. See [`border_text`].
+//!
 //! Absolute coordinates are safe here — and are what upstream uses — because the host deletes
 //! the plugin pane's viewport before feeding it each render (`plugin_pane.rs:243`). That also
 //! retires the old "build one frame, print it with no trailing newline" dance: there is no
@@ -38,16 +44,18 @@
 //!   rows by a column count, *every* cell after it slid one place left. A row that dropped a
 //!   cell ate the first cell of the row below. There are no cells now.
 //!
-//! The cost is arithmetic that used to be the host's, and roughly one `print_*` call per
-//! visible row instead of one per table. Renders are throttled to ~1/s (`main.rs`'s
-//! `polled || self.spinning()`), so that is ~30 calls a second in the ordinary case.
+//! The cost is arithmetic that used to be the host's, and three `print_*` calls per visible row
+//! instead of one per table — a row's interior, with its two borders printed either side, so
+//! that a selected row's highlight band cannot cover them (see [`draw_row`]). Renders are
+//! throttled to ~1/s (`main.rs`'s `polled || self.spinning()`), so that is ~90 calls a second
+//! on a full pane, against a budget that was already measured in tens.
 
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
 use crate::dirs::{Action, DirRow, DirSet, Status};
-use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD};
+use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::sessions::{format_age, Kind, MatchSet, Row};
 use crate::{Pending, Rename};
 
@@ -56,6 +64,15 @@ const TAG: usize = 0;
 const NAME: usize = 1;
 const LABEL: usize = 2;
 const ACCENT: usize = 3;
+
+/// What the results box is called, on every screen that has one.
+///
+/// The picker's own name, not the screen's. It sits above an input box whose title already
+/// changes with `Tab` — a second label that changed with it would be saying the same thing
+/// twice, and the top-left corner of a floating pane is where you look to find out *what this
+/// window is*. It is also the pane name (`main.rs`'s `rename_plugin_pane`), which used to be
+/// on zellij's frame and went with it.
+const TITLE: &str = "luneta";
 
 /// The selection gutter: one column for the caret, one for the space after it.
 ///
@@ -103,7 +120,7 @@ pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: u
 
     if let Some(rect) = &screen.results {
         let body = search_body(state, rect, notes.len());
-        draw(rect, "Results", &count(state.selected, state.rows.len()), interior(rect, &notes, body));
+        draw(rect, TITLE, &count(state.selected, state.rows.len()), interior(rect, &notes, body));
     }
     draw_input(&screen, "Sessions", prompt_text(state));
     draw_help(&screen, search_help(help_width(cols)));
@@ -122,7 +139,7 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
 
     if let Some(rect) = &screen.results {
         let body = dir_body(dirs, term, rect, notes.len());
-        draw(rect, "Results", &count(dirs.selected, dirs.rows.len()), interior(rect, &notes, body));
+        draw(rect, TITLE, &count(dirs.selected, dirs.rows.len()), interior(rect, &notes, body));
     }
     draw_input(&screen, "Directories", dir_prompt(dirs, term));
     draw_help(&screen, dirs_help(help_width(cols)));
@@ -141,7 +158,7 @@ pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, fr
         let body = agent_body(agents, term, rect, notes.len(), frame);
         draw(
             rect,
-            "Results",
+            TITLE,
             &count(agents.selected, agents.rows.len()),
             interior(rect, &notes, body),
         );
@@ -197,13 +214,14 @@ pub fn render_confirm(pending: &Pending, rows: usize, cols: usize) {
     }
     let question = format!("{} \"{}\"?", pending.verb(), pending.name);
     draw_input(&screen, pending.verb(), (question, None, false));
-    draw_help(
-        &screen,
-        keys_text(
-            help_width(cols),
-            &[("<ENTER>", pending.verb(), pending.verb()), ("<ESC>", "Cancel", "Cancel")],
-        ),
-    );
+    // `Del` is on this row only while there is an escalation left to offer. Once the question
+    // is already "Delete", naming a key that would do nothing is worse than the blank space.
+    let mut keys = vec![("<ENTER>", pending.verb(), pending.verb())];
+    if pending.can_purge() {
+        keys.push(("<Del>", "Delete for good", "Delete"));
+    }
+    keys.push(("<ESC>", "Cancel", "Cancel"));
+    draw_help(&screen, keys_text(help_width(cols), &keys));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -227,11 +245,40 @@ fn print_at(text: Text, x: usize, y: usize, width: usize) {
 fn draw(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) {
     print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
     for (i, line) in interior.into_iter().enumerate() {
-        print_at(line, rect.x, rect.inner_y() + i, rect.width);
+        draw_row(rect, rect.inner_y() + i, line);
     }
     print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
+/// One interior row: the left border, the row, the right border — three `Text`s, not one.
+///
+/// ⚠️ The split is what keeps the selection band inside the box. `Text::selected()` is a
+/// property of a whole `Text` and the host paints the selected background across all of it, so
+/// while a row carried its own `│` characters the highlight covered them and the box lost both
+/// sides on the one row you were pointing at. The borders are their own `Text`s now, printed
+/// either side, and they are never the selected one.
+///
+/// The cost is three `print_*` calls per row where there used to be one. Renders are throttled
+/// to ~1/s (`main.rs`'s `polled || self.spinning()`), so that is ~90 calls a second on a full
+/// pane, against a budget that was already measured in tens.
+fn draw_row(rect: &Rect, y: usize, row: Text) {
+    let Some(inner) = rect.width.checked_sub(2) else {
+        // A box two columns wide is two borders with nothing between them. Nothing to draw.
+        return;
+    };
+    let edge = || Text::new(VERTICAL.to_string()).dim_all();
+    print_at(edge(), rect.x, y, 1);
+    print_at(row, rect.x + 1, y, inner);
+    print_at(edge(), rect.x + rect.width - 1, y, 1);
+}
+
+/// The one place on the screen that keeps its bold.
+///
+/// [`Line::finish`] unbolds every character of every row (see the ⚠️ there), so a box title is
+/// bold by being the thing that was not unbolded — which is what makes [`TITLE`] and the screen
+/// name read as headings rather than as more chrome. The right-hand count is unbolded
+/// with the rest: it is a readout, not a heading, and two bold things in one border is one too
+/// many.
 fn border_text(border: Border) -> Text {
     let rule = border.rule_indices();
     let Border { line, title, right } = border;
@@ -240,7 +287,7 @@ fn border_text(border: Border) -> Text {
         text = text.color_range(LABEL, range);
     }
     if let Some(range) = right {
-        text = text.color_range(TAG, range);
+        text = text.unbold_range(range.clone()).color_range(TAG, range);
     }
     text
 }
@@ -311,8 +358,9 @@ const MIN_ACTION: usize = 12;
 fn draw_input(screen: &Screen, title: &str, prompt: Prompt) {
     let rect = &screen.input;
     if !screen.bordered {
-        // No room for a border. The one row left says what you are typing, which is the only
-        // thing on this screen that cannot be inferred from anything else.
+        // No room for a border — and now literally none, since [`Line::finish`] stopped putting
+        // one on. The one row left says what you are typing, which is the only thing on this
+        // screen that cannot be inferred from anything else.
         print_at(input_line(rect, prompt), rect.x, rect.y, rect.width);
         return;
     }
@@ -974,7 +1022,11 @@ mod tests {
     /// thing that used to be unknowable from inside this crate, because the host assembled it.
     fn picture(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) -> Vec<String> {
         let mut lines = vec![rect.top(title, right).line];
-        lines.extend(interior.into_iter().map(|line| line.content().to_string()));
+        // The borders are put back on here because `draw_row` puts them on there: a row's own
+        // `Text` is the interior only, so that a selected one cannot highlight them.
+        lines.extend(
+            interior.into_iter().map(|line| format!("{}{}{}", VERTICAL, line.content(), VERTICAL)),
+        );
         lines.push(rect.bottom());
         lines
     }
@@ -1008,9 +1060,9 @@ mod tests {
         let body = search_body(&state, &rect, 0);
         let right = count(state.selected, state.rows.len());
         assert_eq!(
-            picture(&rect, "Results", &right, interior(&rect, &[], body)),
+            picture(&rect, TITLE, &right, interior(&rect, &[], body)),
             vec![
-                "╭─ Results ──────────── 1/2 ─╮",
+                "╭─ luneta ───────────── 1/2 ─╮",
                 "│                            │",
                 "│                            │",
                 "│                            │",
@@ -1046,8 +1098,8 @@ mod tests {
         let state = matches(vec![session("old", Kind::Resurrectable, HOUR)], Some(0));
         let body = search_body(&state, &rect, 0);
         assert_eq!(body.len(), 2);
-        assert!(body[0].content().starts_with("│   🪦 Dead sessions"));
-        assert!(body[1].content().starts_with("│ > old"));
+        assert!(body[0].content().starts_with("   🪦 Dead sessions"));
+        assert!(body[1].content().starts_with(" > old"));
     }
 
     /// The separator is a display line, so it takes a row from the window like anything else.
@@ -1090,10 +1142,10 @@ mod tests {
             assert_eq!(body.len(), rect.inner_height());
             let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
             // The caret is on exactly one line, and it is the selected session's.
-            let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with("│ > ")).collect();
+            let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with(" > ")).collect();
             assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
             assert!(
-                carets[0].starts_with(&format!("│ > {} ", names[selected])),
+                carets[0].starts_with(&format!(" > {} ", names[selected])),
                 "selected {selected}: {shown:?}"
             );
         }
@@ -1108,9 +1160,9 @@ mod tests {
         let notes = vec![Note::dim("you are in \"desp\" — not listed")];
         let body = search_body(&state, &rect, notes.len());
         assert_eq!(
-            picture(&rect, "Results", "", interior(&rect, &notes, body)),
+            picture(&rect, TITLE, "", interior(&rect, &notes, body)),
             vec![
-                "╭─ Results ──────────────────╮",
+                "╭─ luneta ───────────────────╮",
                 "│                            │",
                 "│                            │",
                 "│                            │",
@@ -1127,7 +1179,7 @@ mod tests {
     fn a_long_note_never_reaches_the_border() {
         let rect = Rect { x: 0, y: 0, width: 24, height: 5 };
         let note = Note::error("zoxide: no such file or directory (/usr/bin/zoxide)");
-        let lines = picture(&rect, "Results", "", interior(&rect, &[note], Vec::new()));
+        let lines = picture(&rect, TITLE, "", interior(&rect, &[note], Vec::new()));
         for line in &lines {
             assert_eq!(line.width(), rect.width, "{line}");
         }
@@ -1160,7 +1212,7 @@ mod tests {
                     let body = search_body(&state, &rect, notes.len());
                     let interior = interior(&rect, &notes, body);
                     assert_eq!(interior.len(), rect.inner_height(), "{width}x{height}");
-                    for line in picture(&rect, "Results", "9/9", interior) {
+                    for line in picture(&rect, TITLE, "9/9", interior) {
                         assert_eq!(line.width(), width, "{width}x{height}: {line}");
                         assert!(line.chars().next().is_some_and(|c| "╭╰│".contains(c)));
                         assert!(line.chars().last().is_some_and(|c| "╮╯│".contains(c)));
@@ -1178,9 +1230,9 @@ mod tests {
         state.search_term = "desp".to_string();
         let body = search_body(&state, &rect, 0);
         assert_eq!(
-            picture(&rect, "Results", "", interior(&rect, &[], body)),
+            picture(&rect, TITLE, "", interior(&rect, &[], body)),
             vec![
-                "╭─ Results ──────────────────╮",
+                "╭─ luneta ───────────────────╮",
                 "│                            │",
                 "│                            │",
                 "│ no match for \"desp\"        │",
@@ -1194,8 +1246,9 @@ mod tests {
     fn the_input_line_pushes_the_action_to_the_right() {
         let rect = Rect { x: 0, y: 0, width: 40, height: 3 };
         let line = input_line(&rect, ("desp".to_string(), Some("Attach".to_string()), false));
-        assert_eq!(line.content(), "│ > desp_               <ENTER> Attach │");
-        assert_eq!(line.content().width(), rect.width);
+        assert_eq!(line.content(), " > desp_               <ENTER> Attach ");
+        // The interior of the box, borders excluded — see `Line::finish`.
+        assert_eq!(line.content().width(), rect.width - 2);
     }
 
     /// The term is never the thing that gets cut. Below the width an action clause needs, the
@@ -1204,8 +1257,9 @@ mod tests {
     fn a_narrow_box_drops_the_action_not_the_term() {
         let rect = Rect { x: 0, y: 0, width: 18, height: 3 };
         let line = input_line(&rect, ("despesas".to_string(), Some("Attach".to_string()), false));
-        assert_eq!(line.content(), "│ > despesas_    │");
-        assert_eq!(line.content().width(), rect.width);
+        assert_eq!(line.content(), " > despesas_    ");
+        // The interior of the box, borders excluded — see `Line::finish`.
+        assert_eq!(line.content().width(), rect.width - 2);
     }
 
     /// A term longer than the box keeps its tail: what you just typed is at the end, and the
@@ -1214,8 +1268,9 @@ mod tests {
     fn an_overlong_term_is_cut_from_the_left() {
         let rect = Rect { x: 0, y: 0, width: 16, height: 3 };
         let line = input_line(&rect, ("a-very-long-name".to_string(), None, false));
-        assert_eq!(line.content(), "│ > …ong-name_ │");
-        assert_eq!(line.content().width(), rect.width);
+        assert_eq!(line.content(), " > …ong-name_ ");
+        // The interior of the box, borders excluded — see `Line::finish`.
+        assert_eq!(line.content().width(), rect.width - 2);
     }
 
     /// `3/47` while something is selected, the bare count when nothing is, nothing at all when
@@ -1330,7 +1385,7 @@ mod tests {
         let rect = screen.results.unwrap();
         let body = search_body(&state, &rect, notes.len());
         let right = count(state.selected, state.rows.len());
-        for line in picture(&rect, "Results", &right, interior(&rect, &notes, body)) {
+        for line in picture(&rect, TITLE, &right, interior(&rect, &notes, body)) {
             println!("{line}");
         }
         let input = &screen.input;

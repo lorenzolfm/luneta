@@ -261,6 +261,23 @@ which one you are in:
 - `[RESURRECT]` → **Delete**. Throws the saved layout away. Irreversible, and
   said so in the error colour.
 
+A **second `Del`, on the confirm screen**, escalates a live session's kill into a
+kill *and* a delete. That is the whole point of it: without it, getting rid of a
+running session for good meant killing it, waiting for it to come back into the
+list as a dead row, finding it again, and deleting *that*. The escalation changes
+the question rather than answering it — the verb becomes `Delete` and the
+consequence line becomes the irreversible one — so `Enter` is still what commits,
+and the screen you commit from is the screen that told you what it costs. On a
+row that is already dead there is nothing to escalate, so the key is not offered.
+
+The kill and the delete are two blocking host calls issued back to back, and the
+delete is skipped if the kill came back `Err` — `delete_dead_session` would
+otherwise throw away the saved layout of a session that is still running.
+
+**Either way the search term is cleared afterwards.** It was searching for a
+session that no longer exists, and leaving it in place left the list filtered by
+a name with nothing behind it.
+
 **`Del` cannot kill the session you are in** — not by a guard, but because the
 current session left the match set at the source and can never be the highlight.
 

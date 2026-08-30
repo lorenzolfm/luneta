@@ -19,18 +19,18 @@ use zellij_tile::prelude::Text;
 
 /// Rounded, unconditionally.
 ///
-/// Zellij's own frame — drawn immediately outside ours, since a plugin cannot turn off its own
-/// frame without `set_pane_frame_style` restyling every pane in the session — follows the
-/// user's `rounded_corners` setting, which is reachable only through a `ModeUpdate`
-/// subscription this plugin deliberately does not have (see [`crate::render`]'s module doc).
-/// So on `rounded_corners false` the two borders disagree by one cell. That is the price of not
-/// carrying a `Style` through every render function, and it is a cell.
+/// These used to have to agree with zellij's own frame, drawn immediately outside ours and
+/// following the user's `rounded_corners` setting — which is reachable only through a
+/// `ModeUpdate` subscription this plugin deliberately does not have (see [`crate::render`]'s
+/// module doc), so on `rounded_corners false` the two borders disagreed by one cell. There is
+/// no outer frame to disagree with any more: the picker's pane is `borderless` (see
+/// `main.rs`'s `resize_self`), so these corners are the pane's corners.
 const TOP_LEFT: char = '╭';
 const TOP_RIGHT: char = '╮';
 const BOTTOM_LEFT: char = '╰';
 const BOTTOM_RIGHT: char = '╯';
 const HORIZONTAL: char = '─';
-const VERTICAL: char = '│';
+pub const VERTICAL: char = '│';
 
 /// The narrowest a box title is worth printing. Below this it is dropped: `R…` costs the same
 /// four columns of chrome as a real title and names nothing, and a plain rule still reads as a
@@ -249,8 +249,15 @@ impl Line {
         start..self.text.chars().count()
     }
 
-    /// Wrap the row in its border and turn it into a styled `Text`, exactly `inner_width + 4`
-    /// columns wide.
+    /// Pad the row out to the width of its box's interior and turn it into a styled `Text`,
+    /// exactly `inner_width + 2` columns wide.
+    ///
+    /// ⚠️ **The borders are not in here**, and that is deliberate. A selected row is one
+    /// `Text::selected()`, and the host paints the selected background across the *whole* of a
+    /// `Text` — so a row that carried its own `│` characters put the highlight band on top of
+    /// them, and the box lost both its sides on whichever row you were pointing at. The frame
+    /// is drawn beside the row instead, by [`crate::render::draw_row`]; what is left here is
+    /// the interior, padding included, so the band fills the box without escaping it.
     ///
     /// ⚠️ The truncation here is a backstop, not the primary fit. Each screen has a ladder that
     /// decides what to drop before anything overflows, but those ladders floor the name column
@@ -267,17 +274,15 @@ impl Line {
         }
         let visible = text.chars().count();
 
-        let mut line = String::from(VERTICAL);
-        line.push(' ');
+        let mut line = String::from(" ");
         line.push_str(&text);
         line.extend(std::iter::repeat_n(' ', inner_width - columns));
         line.push(' ');
-        line.push(VERTICAL);
 
-        // The border and its padding are two single-column characters, so every content offset
-        // moves along by two — and anything the truncation above took is dropped rather than
-        // pointed at, because colouring a character that is no longer there paints another one.
-        let shift = |i: usize| i + 2;
+        // One column of padding sits before the content, so every content offset moves along by
+        // one — and anything the truncation above took is dropped rather than pointed at,
+        // because colouring a character that is no longer there paints another one.
+        let shift = |i: usize| i + 1;
         let clamp = |range: Range<usize>| {
             let start = range.start.min(visible);
             let end = range.end.min(visible);
@@ -298,7 +303,16 @@ impl Line {
         let frame: Vec<usize> =
             (0..line.chars().count()).filter(|i| !styled.contains(i)).collect();
 
-        let mut text = Text::new(&line).dim_indices(frame);
+        // ⚠️ Everything a `Text` carries is drawn **bold** by the host unless it is told
+        // otherwise (`ui/components/text.rs`: the base style is `.bold(On)`, and only index
+        // level 5 takes it off). A screen where every character is bold has no bold left to
+        // spend, which is why the box titles never read as titles. So content is unbolded here,
+        // at the one place every row passes through, and the titles in
+        // [`crate::render::border_text`] are left alone — they are the only bold thing left.
+        //
+        // Only the *styled* characters, not the frame: the host checks unbold before dim and
+        // stops at the first match, so unbolding a dimmed character would silently undim it.
+        let mut text = Text::new(&line).dim_indices(frame).unbold_indices(styled);
         for style in styles {
             text = match style {
                 Style::Level(level, range) => match clamp(range) {
@@ -558,13 +572,14 @@ mod tests {
         assert_eq!(Rect { x: 0, y: 0, width: 8, height: 5 }.top("Results", "3/47").line, "╭──────╮");
     }
 
-    /// A finished row is its content, framed, padded to exactly the box's width.
+    /// A finished row is its content, padded to exactly the box's interior — and with no
+    /// border on it, so that a selected row's highlight cannot cover one.
     #[test]
-    fn a_line_is_framed_and_padded_to_its_box() {
+    fn a_line_is_padded_to_the_interior_and_carries_no_border() {
         let mut line = Line::new();
         line.push("luneta", 1);
         assert_eq!(line.columns(), 6);
-        assert_eq!(line.finish(12).content(), "│ luneta       │");
+        assert_eq!(line.finish(12).content(), " luneta       ");
     }
 
     /// Columns, not characters. Four CJK characters are eight columns, and padding that counts
@@ -574,7 +589,7 @@ mod tests {
         let mut line = Line::new();
         line.push("日本語版", 1);
         assert_eq!(line.columns(), 8);
-        assert_eq!(line.finish(12).content().width(), 16);
+        assert_eq!(line.finish(12).content().width(), 14);
     }
 
     /// The backstop: a row built wider than its box is cut back rather than painting over the
@@ -586,8 +601,8 @@ mod tests {
         line.gap(2);
         line.push("[R]", 0);
         let text = line.finish(10);
-        assert_eq!(text.content(), "│ a-very-lo… │");
-        assert_eq!(text.content().width(), 14);
+        assert_eq!(text.content(), " a-very-lo… ");
+        assert_eq!(text.content().width(), 12);
     }
 
     /// Text that fits is returned untouched — no marker, no change.
