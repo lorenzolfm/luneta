@@ -104,6 +104,14 @@ in front of — under a line naming which pane that is, with the session's pane 
 border. The **tail** of the screen, standing on the box's floor: a terminal is read from the
 bottom, so the newest line is always in the same place whatever row you move to.
 
+🔴 **In the pane's own colours**, which is the one place the picker paints in colours it did not
+choose. Everything else here is a zellij `Text`: a string plus emphasis *levels*, coloured by
+the host from the active theme, which is what makes the picker follow your theme for free. A
+pane's line has no level it could go in — it is `nvim` syntax, a diff's red and green, a prompt's
+branch, in truecolour — so `dump-screen` is asked for `--ansi` and those rows are printed as the
+escape sequences they arrived as, positioned with the same `ESC [ y ; x H` the host uses to place
+its own components. A dump without the colours is a preview of a different screen.
+
 🔴 **Through the CLI, not the plugin API, and that is forced.** `zellij-tile` has
 `get_pane_scrollback(PaneId, bool)` — a blocking host call, no process, no temporary file — and
 it can only ever answer for *this* session's panes, because a plugin runs inside one server and
@@ -143,9 +151,11 @@ Both commands cost a process per highlighted row, so both are on the same discip
 - **Replies are filed by what they went out about**, never by where the cursor is when they
   land. `ls` and `dump-screen` answer whenever they answer and the cursor has usually moved on;
   without the key on the reply, a slow one would confidently show you somewhere else's contents.
-- Control characters are stripped where a pane's bytes come in. `dump-screen` gives plain text —
-  verified against a real pane, not assumed — but a `Text` carrying an escape sequence would put
-  a hole in the box's border.
+- **Only colour survives, of everything a pane can write.** `SGR` — `ESC [ … m` — is kept; every
+  other escape is dropped whole, and control characters with it. A cursor move, a screen clear, a
+  scroll region, an `OSC` renaming the tab would each be obeyed by the terminal drawing this
+  plugin: a pane the picker is only *looking* at would get to redraw the picker. Dropped
+  **whole** matters — a sequence walked off by one character leaves its tail behind as text.
 
 The box is **half the pane, and it goes when the pane is narrow**: below 52 columns there is no
 room for two boxes that can say anything, so the list takes the width back. Same ladder as the

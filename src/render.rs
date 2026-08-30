@@ -7,6 +7,11 @@
 //! selected/emphasis colours) for free, with no `Styling` palette to carry and no `ModeUpdate`
 //! subscription to keep it current.
 //!
+//! There is exactly one exception, and it is the preview box's screen rows: those are another
+//! pane's own bytes, and the colours in them are that pane's, not the theme's. A `Text` cannot
+//! carry them — it has four emphasis levels and the host decides what they look like — so those
+//! rows are printed as the escape sequences they arrived as. See [`PreviewRow`].
+//!
 //! Colour is expressed as *emphasis levels*, not colours:
 //!
 //! | level | used for                                        |
@@ -435,6 +440,56 @@ fn blank_line(rect: &Rect) -> Text {
     Text::new(rect.blank()).dim_all()
 }
 
+/// One row of a preview box: one the picker wrote, or one a pane did.
+///
+/// 🔴 The two cannot be the same thing, and that is forced by what a `Text` is. A `Text` is a
+/// string plus emphasis *levels*, and the host turns the levels into colours from the theme —
+/// which is exactly right for everything the picker says about a pane, and no use at all for
+/// what is on one. A pane's line already carries its own colours, as `SGR`, in truecolour: `nvim`
+/// syntax, a diff's red and green, a prompt's branch. There is no level to put those in.
+///
+/// So a pane's row is printed as the bytes it arrived as. That is safe for two reasons and only
+/// those two: [`crate::panes::sgr_only`] has already thrown away every escape that is not a
+/// colour, so the bytes cannot move the cursor or clear the screen; and the host addresses its
+/// own `Text` components with exactly the same `ESC [ y ; x H` this uses
+/// (`ui/components/component_coordinates.rs:19`), so the two are not two mechanisms — one is
+/// what the other is made of.
+enum PreviewRow {
+    /// Ours: a styled row, coloured by the theme.
+    Own(Text),
+    /// Theirs: an interior's worth of a pane's line, colours included, already cut and padded
+    /// to the width of the box by [`pane_row`].
+    Pane(String),
+}
+
+impl From<Text> for PreviewRow {
+    fn from(text: Text) -> Self {
+        PreviewRow::Own(text)
+    }
+}
+
+impl PreviewRow {
+    /// The row as characters — what the box would look like. Escapes included, for the pane's
+    /// rows: they are part of the row, they just take no columns. Only the tests read a row
+    /// back; the renderer prints it.
+    #[cfg(test)]
+    fn content(&self) -> &str {
+        match self {
+            PreviewRow::Own(text) => text.content(),
+            PreviewRow::Pane(line) => line,
+        }
+    }
+}
+
+/// A pane's line, laid out the way [`Line::finish`] lays out ours: one column of padding either
+/// side, cut to the interior and padded back out to it, so a pane's row and the picker's own are
+/// the same width and the right border stands in the same place on both.
+fn pane_row(inner: usize, line: &str) -> String {
+    let line = panes::fit(line, inner);
+    let pad = inner.saturating_sub(panes::columns(&line));
+    format!(" {}{} ", line, " ".repeat(pad))
+}
+
 /// Draw the preview box: the same chrome as any other box, with its content at the top.
 ///
 /// The box beside the list answers the question every row of every screen begs and no row has
@@ -443,8 +498,36 @@ fn blank_line(rect: &Rect) -> Text {
 /// answers it from a different place — the session preview off the same one-second snapshot the
 /// ages come from, the directory preview off an `ls` the cursor triggers, the agent preview off
 /// the row itself — so the three builders below share these two helpers and nothing else.
-fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<Text>) {
-    draw(rect, title, right, filled(rect, lines));
+///
+/// This is [`draw`] with one extra case in the middle, rather than a call to it: a pane's row
+/// does not go through `print_at` at all.
+fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
+    print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
+    for (i, row) in filled(rect, lines).into_iter().enumerate() {
+        let y = rect.inner_y() + i;
+        match row {
+            PreviewRow::Own(text) => draw_row(rect, y, text),
+            PreviewRow::Pane(line) => draw_pane_row(rect, y, &line),
+        }
+    }
+    print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
+}
+
+/// One row of a pane's screen: the box's borders either side of it, and the pane's own bytes
+/// between them.
+///
+/// ⚠️ The resets are not optional. One before, because a `Text` printed a moment ago left the
+/// terminal in whatever colour it ended on and the pane's first characters may set none of their
+/// own; one after, because the pane's line may end mid-colour and the box's right border is not
+/// the place to find that out.
+fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
+    let Some(inner) = rect.width.checked_sub(2) else {
+        return;
+    };
+    let edge = || Text::new(VERTICAL.to_string()).dim_all();
+    print_at(edge(), rect.x, y, 1);
+    print!("\u{1b}[{};{}H\u{1b}[m{}\u{1b}[m", y + 1, rect.x + 2, panes::fit(line, inner));
+    print_at(edge(), rect.x + rect.width - 1, y, 1);
 }
 
 /// A preview box's interior: content at the top, blanks under it.
@@ -458,39 +541,40 @@ fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<Text>) {
 /// does not scroll and cannot: the cursor is in the list beside it, and every key that could
 /// move it means something there. A box that cannot be scrolled had better be honest about what
 /// it is not showing.
-fn filled(rect: &Rect, mut lines: Vec<Text>) -> Vec<Text> {
+fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
     let height = rect.inner_height();
     if lines.len() > height {
         // One more than the overflow: the marker takes a row of its own, off the last one that
         // would have fitted.
         let hidden = lines.len() - height + 1;
         lines.truncate(height.saturating_sub(1));
-        lines.push(note_line(rect, &Note::dim(format!("… {} more", hidden))));
+        lines.push(note_line(rect, &Note::dim(format!("… {} more", hidden))).into());
     }
-    lines.resize_with(height, || blank_line(rect));
+    lines.resize_with(height, || blank_line(rect).into());
     lines
 }
 
-/// One line of a preview box: text at `level`, cut to the box.
-fn preview_line(inner: usize, text: &str, level: usize) -> Text {
+/// One line of a preview box: text at `level`, cut to the box. The picker's own words about a
+/// pane, which is why it comes back as a [`PreviewRow::Own`] and not as the pane's bytes.
+fn preview_line(inner: usize, text: &str, level: usize) -> PreviewRow {
     let mut line = Line::new();
     line.push(&truncate(text, inner), level);
-    line.finish(inner)
+    line.finish(inner).into()
 }
 
 /// The same, wrapped over as many lines as it takes.
-fn wrapped_lines(inner: usize, text: &str, level: usize) -> Vec<Text> {
+fn wrapped_lines(inner: usize, text: &str, level: usize) -> Vec<PreviewRow> {
     wrap(text, inner).iter().map(|line| preview_line(inner, line, level)).collect()
 }
 
 /// The same again, in the error colour.
-fn error_lines(inner: usize, text: &str) -> Vec<Text> {
+fn error_lines(inner: usize, text: &str) -> Vec<PreviewRow> {
     wrap(text, inner)
         .iter()
         .map(|text| {
             let mut line = Line::new();
             line.push_error(text);
-            line.finish(inner)
+            line.finish(inner).into()
         })
         .collect()
 }
@@ -520,7 +604,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// What a preview box says when the list beside it has no highlight to talk about.
-fn nothing_highlighted(rect: &Rect) -> (String, Vec<Text>) {
+fn nothing_highlighted(rect: &Rect) -> (String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     (
         // Not [`TITLE`]: the box beside this one is already called that, and a preview is
@@ -528,7 +612,7 @@ fn nothing_highlighted(rect: &Rect) -> (String, Vec<Text>) {
         "Preview".to_string(),
         vec![
             preview_line(inner, "nothing highlighted", TAG),
-            blank_line(rect),
+            blank_line(rect).into(),
             preview_line(inner, "Enter takes what you type", TAG),
         ],
     )
@@ -542,7 +626,11 @@ fn nothing_highlighted(rect: &Rect) -> (String, Vec<Text>) {
 ///
 /// The title is the session; the border's right-hand label is what it is made of; the body is
 /// one of its panes, live. Which pane, and why that one, is [`crate::sessions::Focus`].
-fn session_preview(state: &MatchSet, peeks: &Peeks, rect: &Rect) -> (String, String, Vec<Text>) {
+fn session_preview(
+    state: &MatchSet,
+    peeks: &Peeks,
+    rect: &Rect,
+) -> (String, String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     let Some(row) = state.selected.and_then(|i| state.rows.get(i)) else {
         let (title, lines) = nothing_highlighted(rect);
@@ -570,14 +658,14 @@ fn session_preview(state: &MatchSet, peeks: &Peeks, rect: &Rect) -> (String, Str
 }
 
 /// A live session: which pane you are looking at, then what is on it.
-fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> Vec<Text> {
+fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let Some(focus) = &contents.focus else {
         // Every pane it has is a plugin, and a plugin pane dumps empty however much it is
         // drawing. Nothing to show, and a reason rather than a blank box.
         return wrapped_lines(inner, "nothing but plugin panes — no screen to show", TAG);
     };
-    let mut lines = vec![caption(inner, &focus.tab, &focus.title), blank_line(rect)];
+    let mut lines = vec![caption(inner, &focus.tab, &focus.title).into(), blank_line(rect).into()];
     lines.extend(screen_lines(rect, peeks, &panes::key(name, focus.pane), lines.len()));
     lines
 }
@@ -611,7 +699,7 @@ const MIN_TAB: usize = 6;
 ///
 /// The three ways there is no screen are not bottom-anchored: they are the box talking about
 /// itself rather than a terminal, and they read from the top like everything else here.
-fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<Text> {
+fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let rows = rect.inner_height().saturating_sub(used);
     match peeks.get(key) {
@@ -624,11 +712,12 @@ fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<Text>
         },
         Some(Peek::Ready(screen)) => {
             let shown = screen.len().min(rows);
-            let mut lines: Vec<Text> = (shown..rows).map(|_| blank_line(rect)).collect();
+            let mut lines: Vec<PreviewRow> =
+                (shown..rows).map(|_| blank_line(rect).into()).collect();
             lines.extend(
                 screen[screen.len() - shown..]
                     .iter()
-                    .map(|line| preview_line(inner, line, LABEL)),
+                    .map(|line| PreviewRow::Pane(pane_row(inner, line))),
             );
             lines
         },
@@ -645,9 +734,9 @@ fn plural(n: usize, thing: &str) -> String {
 /// A dead session has no process, so there is no screen to look at and no panes to count.
 /// Saying `0 panes` would report that it has none rather than that there is nothing running to
 /// have any.
-fn dead_preview(rect: &Rect) -> Vec<Text> {
+fn dead_preview(rect: &Rect) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
-    let mut lines = vec![preview_line(inner, "not running", TAG), blank_line(rect)];
+    let mut lines = vec![preview_line(inner, "not running", TAG), blank_line(rect).into()];
     lines.extend(wrapped_lines(
         inner,
         "there is a saved layout to bring it back from, and nothing running to look inside",
@@ -666,7 +755,7 @@ fn dead_preview(rect: &Rect) -> Vec<Text> {
 /// ⚠️ The listing is looked up by **path**, never by row index. The cursor moves faster than
 /// `ls` answers, and a reply filed under the wrong directory would be a box confidently showing
 /// you somewhere else's contents. See [`crate::dirs::PATH_KEY`].
-fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<Text>) {
+fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     let Some(row) = dirs.selected_row() else {
         let (title, lines) = nothing_highlighted(rect);
@@ -674,7 +763,7 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<Text>) {
     };
     // From the left, as on the row: what identifies a directory is the end of its path.
     let (path, _) = truncate_left(&row.path, inner);
-    let mut lines = vec![preview_line(inner, &path, LABEL), blank_line(rect)];
+    let mut lines = vec![preview_line(inner, &path, LABEL), blank_line(rect).into()];
     let mut right = String::new();
     match dirs.listing(&row.path) {
         // Not asked yet and asked-but-unanswered are the same thing to the reader: the answer is
@@ -694,7 +783,7 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<Text>) {
 
 /// One entry of a listing. Directories are the loud ones — they are what you would `cd` into
 /// next, and `ls -p` has already marked them with the `/` that says so.
-fn entry_line(inner: usize, entry: &str) -> Text {
+fn entry_line(inner: usize, entry: &str) -> PreviewRow {
     let level = if entry.ends_with('/') { NAME } else { LABEL };
     preview_line(inner, entry, level)
 }
@@ -709,7 +798,7 @@ fn entry_line(inner: usize, entry: &str) -> Text {
 /// *waiting, for eleven minutes* is the row you go to. Under them is the agent's own pane —
 /// which, on the one screen whose whole purpose is telling you which agent wants you, is the
 /// thing that says what it wants.
-fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<Text>) {
+fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     let Some(row) = agents.selected_row() else {
         return nothing_highlighted(rect);
@@ -720,7 +809,7 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
     line.push(&truncate(&row.status, inner), level);
     line.push(" · ", TAG);
     line.push(&agents::format_duration(row.age), TAG);
-    let mut lines = vec![line.finish(inner), blank_line(rect)];
+    let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
     lines.extend(screen_lines(rect, peeks, &panes::key(&row.session, row.pane), lines.len()));
     (row.label(), lines)
 }
@@ -1350,13 +1439,18 @@ mod tests {
 
     /// A pane, rendered to the lines it would print. The picture, in other words — which is the
     /// thing that used to be unknowable from inside this crate, because the host assembled it.
-    fn picture(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) -> Vec<String> {
+    fn picture<R: Into<PreviewRow>>(
+        rect: &Rect,
+        title: &str,
+        right: &str,
+        interior: Vec<R>,
+    ) -> Vec<String> {
         let mut lines = vec![rect.top(title, right).line];
         // The borders are put back on here because `draw_row` puts them on there: a row's own
         // `Text` is the interior only, so that a selected one cannot highlight them.
-        lines.extend(
-            interior.into_iter().map(|line| format!("{}{}{}", VERTICAL, line.content(), VERTICAL)),
-        );
+        lines.extend(interior.into_iter().map(|line| {
+            format!("{}{}{}", VERTICAL, line.into().content(), VERTICAL)
+        }));
         lines.push(rect.bottom());
         lines
     }

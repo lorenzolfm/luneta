@@ -15,8 +15,18 @@
 //! file, and the CLI still returns first, so [`SCRIPT`] waits for the file to have something in
 //! it rather than reading it straight away. Measured: without the wait, every dump came back
 //! empty; with it, every one came back whole.
+//!
+//! 🔴 **`--ansi`, and the colours are the pane's own.** A dump without it is the pane's *text*,
+//! and a preview of text is a preview of a different screen: a diff without its red and green,
+//! a test run without its failure, a prompt without the git branch that is the only coloured
+//! thing on the line. So the dump keeps its styling and the renderer puts it through untouched
+//! — the one place in the picker that paints in colours it did not choose, because they are the
+//! answer to the question the box is asking. [`sgr_only`] is what makes that safe: a pane can
+//! write *anything*, and only the sequences that set colour survive contact with this module.
 
 use std::collections::BTreeMap;
+
+use unicode_width::UnicodeWidthChar;
 
 /// One pane's screen, dumped to a temporary file and read back.
 ///
@@ -30,7 +40,7 @@ use std::collections::BTreeMap;
 const SCRIPT: &str = r#"set -e
 f=$(mktemp)
 trap 'rm -f "$f"' EXIT
-zellij --session "$1" action dump-screen --pane-id "$2" --path "$f" >&2
+zellij --session "$1" action dump-screen --pane-id "$2" --ansi --path "$f" >&2
 i=0
 while [ ! -s "$f" ] && [ "$i" -lt 20 ]; do sleep 0.05; i=$((i+1)); done
 cat "$f""#;
@@ -144,25 +154,171 @@ impl Peeks {
 
 /// A dump, cut down to the lines worth drawing.
 ///
-/// ⚠️ Control characters are dropped rather than passed on. `dump-screen` gives plain text —
-/// verified against a real pane, not assumed — but a `Text` carrying an escape sequence would be
-/// a hole in the box's right border at best, so the one place a pane's own bytes enter the
-/// renderer takes them out.
+/// Each line keeps its colours and loses everything else — see [`sgr_only`], which is where the
+/// pane's bytes stop being arbitrary.
+///
+/// ⚠️ A trailing run of spaces goes, as it always did: it is what a pane leaves behind rather
+/// than something anyone can see, and [`fit`] would otherwise mark a line of blanks as cut off
+/// with a `…` at the right border. The cost is the right end of a full-width coloured bar —
+/// vim's status line, tmux's — which stops at its last word rather than at the box. `dump-screen`
+/// does not pad its lines out, so this is a guard against a pane that does it to itself.
 fn trim(dump: &str) -> Vec<String> {
-    let mut lines: Vec<String> = dump
-        .lines()
-        .map(|line| line.chars().filter(|c| !c.is_control()).collect::<String>())
-        .map(|line| line.trim_end().to_string())
-        .collect();
-    while lines.last().is_some_and(|line| line.is_empty()) {
+    let mut lines: Vec<String> = dump.lines().map(sgr_only).collect();
+    while lines.last().is_some_and(|line| columns(line) == 0) {
         lines.pop();
     }
-    let blank = lines.iter().take_while(|line| line.is_empty()).count();
+    let blank = lines.iter().take_while(|line| columns(line) == 0).count();
     lines.drain(..blank);
     if lines.len() > MAX_LINES {
         lines.drain(..lines.len() - MAX_LINES);
     }
     lines
+}
+
+/// The escape character every sequence below opens with.
+const ESC: char = '\u{1b}';
+
+/// A line of a dump, split into the characters that take a column and the escapes that do not.
+///
+/// Everything that reads a pane's line — measuring it, cutting it, stripping it — has to walk it
+/// this way, and a walk that gets the boundaries slightly differently from its neighbour is how
+/// a cut lands in the middle of a colour. So it is done once, here, and the three below are
+/// folds over the result.
+enum Part {
+    /// One character the reader can see.
+    Ch(char),
+    /// One escape sequence, whole, from the `ESC` to its last byte.
+    Escape(String),
+}
+
+fn parts(line: &str) -> Vec<Part> {
+    let mut parts = Vec::new();
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            ESC => parts.push(Part::Escape(escape(&mut chars))),
+            ch if ch.is_control() => {},
+            ch => parts.push(Part::Ch(ch)),
+        }
+    }
+    parts
+}
+
+/// The rest of one escape sequence, consumed from `chars`, `ESC` excluded.
+///
+/// Three shapes, because the terminal has three: `CSI` (`ESC [`) runs to a byte in `@`–`~`;
+/// `OSC` and its relatives run to a `BEL` or a `ST`; anything else is the escape and its
+/// intermediates. Only the first shape is ever kept, but all three have to be *measured*
+/// correctly — a sequence walked off by one character leaves its tail behind as text.
+fn escape(chars: &mut std::str::Chars) -> String {
+    let mut seq = String::new();
+    match chars.next() {
+        Some('[') => {
+            seq.push('[');
+            for ch in chars.by_ref() {
+                seq.push(ch);
+                if ('\u{40}'..='\u{7e}').contains(&ch) {
+                    break;
+                }
+            }
+        },
+        Some(ch @ (']' | 'P' | 'X' | '^' | '_')) => {
+            seq.push(ch);
+            while let Some(ch) = chars.next() {
+                if ch == '\u{7}' {
+                    break;
+                }
+                if ch == ESC {
+                    // `ST` is `ESC \`; the backslash goes with it.
+                    chars.next();
+                    break;
+                }
+            }
+        },
+        Some(ch) => {
+            seq.push(ch);
+            // An `nF` escape carries its intermediates before the byte that ends it: `ESC ( B`.
+            if ('\u{20}'..='\u{2f}').contains(&ch) {
+                for next in chars.by_ref() {
+                    seq.push(next);
+                    if !('\u{20}'..='\u{2f}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+        },
+        None => {},
+    }
+    seq
+}
+
+/// A pane's line with its colours kept and everything else thrown away.
+///
+/// 🔴 A pane can write *anything*, and this is the border it writes it across. Only `SGR` — the
+/// `ESC [ … m` that sets colour and weight — survives; a cursor move, a scroll region, a screen
+/// clear, an `OSC` that renames the tab would each be obeyed by the terminal drawing this
+/// plugin, and every one of them means a pane the picker is only *looking* at gets to redraw the
+/// picker. The rest of the line is characters, minus the control ones.
+fn sgr_only(line: &str) -> String {
+    let mut kept: Vec<Part> = parts(line)
+        .into_iter()
+        .filter(|part| match part {
+            Part::Escape(seq) => seq.starts_with('[') && seq.ends_with('m'),
+            Part::Ch(_) => true,
+        })
+        .collect();
+    while kept.last().is_some_and(|part| matches!(part, Part::Ch(' '))) {
+        kept.pop();
+    }
+    kept.iter().map(render).collect()
+}
+
+/// How many columns of a box a line would take up. Escapes take none — that is the whole point
+/// of measuring this way rather than with `UnicodeWidthStr::width`, which would count them.
+pub fn columns(line: &str) -> usize {
+    parts(line).iter().map(width).sum()
+}
+
+/// Cut a line to `max` columns, marking the cut with `…` and keeping the colours whole.
+///
+/// [`crate::layout::truncate`]'s job, done over [`parts`] instead of over characters: the marker
+/// is paid for out of the budget, so what comes back never takes more than `max` columns. Every
+/// escape is kept, including the ones past the cut — they cost nothing to draw, and dropping the
+/// tail of a line is not a reason to drop the reset that ends it.
+pub fn fit(line: &str, max: usize) -> String {
+    let parts = parts(line);
+    if parts.iter().map(width).sum::<usize>() <= max {
+        return parts.iter().map(render).collect();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    let mut cut = false;
+    for part in &parts {
+        if !cut && used + width(part) > max.saturating_sub(1) {
+            cut = true;
+            out.push('…');
+        }
+        if cut && matches!(part, Part::Ch(_)) {
+            continue;
+        }
+        used += width(part);
+        out.push_str(&render(part));
+    }
+    out
+}
+
+fn width(part: &Part) -> usize {
+    match part {
+        Part::Ch(ch) => ch.width().unwrap_or(0),
+        Part::Escape(_) => 0,
+    }
+}
+
+fn render(part: &Part) -> String {
+    match part {
+        Part::Ch(ch) => ch.to_string(),
+        Part::Escape(seq) => format!("{}{}", ESC, seq),
+    }
 }
 
 #[cfg(test)]
@@ -207,11 +363,45 @@ mod tests {
         assert_eq!(lines[MAX_LINES - 1], format!("line-{}", MAX_LINES * 2 - 1));
     }
 
-    /// A `Text` carrying an escape sequence would put a hole in the box, so the bytes are
-    /// cleaned where they come in.
+    /// Colour survives; everything else does not. `SGR` is the pane's answer to what the
+    /// preview box is asking, and a bell or a tab is not.
     #[test]
-    fn control_characters_never_reach_the_renderer() {
-        assert_eq!(ready(&dumped(b"a\x1b[31mred\x07\tb"), "k"), ["a[31mredb"]);
+    fn a_dump_keeps_its_colours_and_nothing_else() {
+        assert_eq!(ready(&dumped(b"a\x1b[31mred\x07\tb"), "k"), ["a\x1b[31mredb"]);
+    }
+
+    /// 🔴 The escapes that would let a previewed pane redraw the picker. Each is dropped
+    /// *whole*: a sequence walked off by one character leaves its tail behind as text, which is
+    /// the failure this is really guarding against.
+    #[test]
+    fn an_escape_that_is_not_a_colour_is_dropped_whole() {
+        // A cursor move, a screen clear, a scroll region, a cursor-hide.
+        assert_eq!(ready(&dumped(b"\x1b[9;9Ha\x1b[2Jb\x1b[1;5rc\x1b[?25ld"), "k"), ["abcd"]);
+        // An `OSC` that renames the tab, terminated both ways it can be.
+        assert_eq!(ready(&dumped(b"\x1b]0;title\x07a\x1b]2;more\x1b\\b"), "k"), ["ab"]);
+        // A `DCS` payload — the shape the host's own components arrive in.
+        assert_eq!(ready(&dumped(b"a\x1bPztext;1,2\x1b\\b"), "k"), ["ab"]);
+        // A two-character escape, and one carrying an intermediate.
+        assert_eq!(ready(&dumped(b"a\x1b7b\x1b(Bc"), "k"), ["abc"]);
+    }
+
+    /// Escapes take no columns, so a coloured line is measured and cut by what is on it.
+    #[test]
+    fn a_coloured_line_is_measured_by_what_can_be_seen() {
+        let line = "\x1b[31mred\x1b[m";
+        assert_eq!(columns(line), 3);
+        assert_eq!(columns("日本"), 4);
+        assert_eq!(fit(line, 3), line);
+    }
+
+    /// The cut lands between characters and keeps every colour, including the ones past it —
+    /// the reset that ends a line is what stops it bleeding into the border.
+    #[test]
+    fn a_cut_line_keeps_its_colours() {
+        assert_eq!(fit("\x1b[31mredder\x1b[m", 4), "\x1b[31mred…\x1b[m");
+        assert_eq!(columns(&fit("\x1b[31mredder\x1b[m", 4)), 4);
+        // A wide character is not split in half to make the budget.
+        assert_eq!(fit("日本語", 4), "日…");
     }
 
     /// A pane is asked about once, whatever the answer was.
