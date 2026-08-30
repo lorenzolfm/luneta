@@ -56,7 +56,8 @@ use zellij_tile::prelude::*;
 use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
 use crate::dirs::{Action, DirRow, DirSet, Listing, Status};
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
-use crate::sessions::{format_age, Contents, Kind, MatchSet, Row, Tab};
+use crate::panes::{self, Peek, Peeks};
+use crate::sessions::{format_age, Contents, Kind, MatchSet, Row};
 use crate::{Pending, Rename};
 
 /// Emphasis levels, named. See the table above.
@@ -120,7 +121,13 @@ impl Note {
 /// name of the thing you are looking at, and "Results" named the one thing on the screen that
 /// needed no naming — a box full of session names, directly above a prompt that says
 /// `Sessions`. Which list it is, is the input box's job to say.
-pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: usize) {
+pub fn render_search(
+    state: &MatchSet,
+    peeks: &Peeks,
+    error: Option<&str>,
+    rows: usize,
+    cols: usize,
+) {
     let screen = Screen::new(rows, cols);
     let notes = note_texts(state, error);
 
@@ -129,8 +136,8 @@ pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: u
         draw(rect, TITLE, &count(state.selected, state.rows.len()), interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
-        let (title, lines) = session_preview(state, rect);
-        draw_preview(rect, &title, "", lines);
+        let (title, right, lines) = session_preview(state, peeks, rect);
+        draw_preview(rect, &title, &right, lines);
     }
     draw_input(&screen, "Sessions", prompt_text(state));
     draw_help(&screen, search_help(help_width(cols)));
@@ -164,7 +171,14 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
 /// `frame` is the animation tick, and reaches exactly one thing: the busy spinner's glyph. It
 /// is threaded down rather than read from `agents`, because it is a fact about *when we are
 /// drawing*, not about the agents — the snapshot they came from is still frozen.
-pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, frame: u64) {
+pub fn render_agents(
+    agents: &AgentSet,
+    peeks: &Peeks,
+    term: &str,
+    rows: usize,
+    cols: usize,
+    frame: u64,
+) {
     let screen = Screen::new(rows, cols);
     let notes = agent_note_texts(agents, help_width(cols));
 
@@ -173,7 +187,7 @@ pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, fr
         draw(rect, TITLE, &count(agents.selected, agents.rows.len()), interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
-        let (title, lines) = agent_preview(agents, rect);
+        let (title, lines) = agent_preview(agents, peeks, rect);
         draw_preview(rect, &title, "", lines);
     }
     draw_input(&screen, "Agents", agent_prompt(agents, term));
@@ -505,18 +519,6 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// `session   despesas` — a named fact, the name quiet and the value not.
-///
-/// The column the values line up in is passed in rather than measured per line, because a
-/// handful of facts that do not line up read as a list of sentences rather than as a table.
-fn field(inner: usize, key: &str, column: usize, value: &str) -> Text {
-    let mut line = Line::new();
-    line.push(key, TAG);
-    line.pad_to(column);
-    line.push(&truncate(value, inner.saturating_sub(column)), NAME);
-    line.finish(inner)
-}
-
 /// What a preview box says when the list beside it has no highlight to talk about.
 fn nothing_highlighted(rect: &Rect) -> (String, Vec<Text>) {
     let inner = rect.inner_width();
@@ -536,54 +538,100 @@ fn nothing_highlighted(rect: &Rect) -> (String, Vec<Text>) {
 // Preview: sessions
 // ---------------------------------------------------------------------------------------------
 
-/// The columns a tab's number is given, so that its name and the pane bullets under it start in
-/// the same place.
-const TAB_COLUMN: usize = 3;
-
-/// What is inside the highlighted session — or, for a dead one, why there is nothing to be
-/// inside of.
-fn session_preview(state: &MatchSet, rect: &Rect) -> (String, Vec<Text>) {
+/// What is on the highlighted session's screen — or, for a dead one, why there is no screen.
+///
+/// The title is the session; the border's right-hand label is what it is made of; the body is
+/// one of its panes, live. Which pane, and why that one, is [`crate::sessions::Focus`].
+fn session_preview(state: &MatchSet, peeks: &Peeks, rect: &Rect) -> (String, String, Vec<Text>) {
     let inner = rect.inner_width();
     let Some(row) = state.selected.and_then(|i| state.rows.get(i)) else {
-        return nothing_highlighted(rect);
+        let (title, lines) = nothing_highlighted(rect);
+        return (title, String::new(), lines);
     };
-    let lines = match (row.kind, state.contents.get(&row.name)) {
-        (Kind::Live, Some(contents)) => live_preview(rect, contents),
-        // A live session whose server has not written its metadata yet. Rare and self-correcting
-        // — the next poll picks it up — so it says so rather than showing a plausible blank.
-        (Kind::Live, None) => wrapped_lines(inner, "no detail yet — the session has not reported what is in it", TAG),
+    let contents = state.contents.get(&row.name);
+    // Only for a live session, and only once it has said how many panes it has: a count in the
+    // border of a box explaining that there is nothing to count answers a question nobody is in
+    // a position to ask.
+    let right = match (row.kind, contents) {
+        (Kind::Live, Some(contents)) => plural(contents.panes, "pane"),
+        _ => String::new(),
+    };
+    let lines = match (row.kind, contents) {
+        (Kind::Live, Some(contents)) => live_preview(rect, peeks, &row.name, contents),
+        // A live session whose server has not written its metadata yet. Rare and
+        // self-correcting — the next poll picks it up — so it says so rather than showing a
+        // plausible blank.
+        (Kind::Live, None) => {
+            wrapped_lines(inner, "no detail yet — the session has not reported what is in it", TAG)
+        },
         (Kind::Resurrectable, _) => dead_preview(rect),
     };
-    (row.name.clone(), lines)
+    (row.name.clone(), right, lines)
 }
 
-/// A live session: what it is made of, then its tabs and the panes in them.
-fn live_preview(rect: &Rect, contents: &Contents) -> Vec<Text> {
+/// A live session: which pane you are looking at, then what is on it.
+fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> Vec<Text> {
     let inner = rect.inner_width();
-    let mut lines = vec![preview_line(inner, &summary(inner, contents), TAG), blank_line(rect)];
-    for (position, tab) in contents.tabs.iter().enumerate() {
-        lines.push(tab_line(inner, position, tab));
-        lines.extend(tab.panes.iter().map(|title| pane_line(inner, title)));
-    }
+    let Some(focus) = &contents.focus else {
+        // Every pane it has is a plugin, and a plugin pane dumps empty however much it is
+        // drawing. Nothing to show, and a reason rather than a blank box.
+        return wrapped_lines(inner, "nothing but plugin panes — no screen to show", TAG);
+    };
+    let mut lines = vec![caption(inner, &focus.tab, &focus.title), blank_line(rect)];
+    lines.extend(screen_lines(rect, peeks, &panes::key(name, focus.pane), lines.len()));
     lines
 }
 
-/// `2 tabs, 5 panes, nobody attached`, or as much of that as fits.
+/// `editor · nvim` — the tab, then the pane's own title.
 ///
-/// The client count is the clause that goes when the box is narrow. It is the only one of the
-/// three that is about *other people* rather than about the session, which makes it the one
-/// worth having and the one you can do without.
-fn summary(inner: usize, contents: &Contents) -> String {
-    let tabs = plural(contents.tabs.len(), "tab");
-    let panes = plural(contents.panes, "pane");
-    let clients = match contents.clients {
-        0 => "nobody attached".to_string(),
-        n => plural(n, "client"),
-    };
-    let long = format!("{}, {}, {}", tabs, panes, clients);
-    match long.width() <= inner {
-        true => long,
-        false => format!("{}, {}", tabs, panes),
+/// The box's title is the session, so this line is the rest of the address: which of its panes
+/// the screen below belongs to. Without it, a session with seven panes shows you one of them
+/// and does not say which.
+fn caption(inner: usize, tab: &str, title: &str) -> Text {
+    let mut line = Line::new();
+    // The tab name gives way to the pane title rather than the other way round: two panes of
+    // one tab are told apart by their titles, and it is a pane you are looking at.
+    let room = inner.saturating_sub(title.width() + 3).max(MIN_TAB);
+    line.push(&truncate(tab, room), LABEL);
+    line.push(" · ", TAG);
+    line.push(&truncate(title, inner.saturating_sub(line.columns())), TAG);
+    line.finish(inner)
+}
+
+/// The narrowest a tab name is worth printing before the pane title takes what is left.
+const MIN_TAB: usize = 6;
+
+/// The pane's screen, or why there is not one yet.
+///
+/// ⚠️ The **tail**, cut to what the box has left, and standing on the box's floor. A terminal
+/// is read from the bottom: its newest line is its last, so a preview showing the top of a pane
+/// would show you where the session had been rather than where it is — and a short screen
+/// floating in the middle of the box would put the prompt in a different place on every row you
+/// moved to. `used` is what the lines above have already spent.
+///
+/// The three ways there is no screen are not bottom-anchored: they are the box talking about
+/// itself rather than a terminal, and they read from the top like everything else here.
+fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<Text> {
+    let inner = rect.inner_width();
+    let rows = rect.inner_height().saturating_sub(used);
+    match peeks.get(key) {
+        // Not asked yet and asked-but-unanswered are the same thing to the reader: the answer
+        // is on its way. The pause between them is [`crate::PREVIEW_DELAY`].
+        None | Some(Peek::Reading) => vec![preview_line(inner, "reading…", TAG)],
+        Some(Peek::Failed(reason)) => error_lines(inner, reason),
+        Some(Peek::Ready(screen)) if screen.is_empty() => {
+            vec![preview_line(inner, "nothing on this screen", TAG)]
+        },
+        Some(Peek::Ready(screen)) => {
+            let shown = screen.len().min(rows);
+            let mut lines: Vec<Text> = (shown..rows).map(|_| blank_line(rect)).collect();
+            lines.extend(
+                screen[screen.len() - shown..]
+                    .iter()
+                    .map(|line| preview_line(inner, line, LABEL)),
+            );
+            lines
+        },
     }
 }
 
@@ -594,33 +642,9 @@ fn plural(n: usize, thing: &str) -> String {
     }
 }
 
-/// `1  editor` — the tab's number, then its name.
-///
-/// The number is the tab's position as zellij counts it, one-based as the tab bar shows it, so
-/// the preview and the session it describes agree about which tab is the second one.
-///
-/// The active tab is the accent one: it is where `Enter` puts you, which is the one fact on this
-/// side of the box that is about what the key does rather than about what is there.
-fn tab_line(inner: usize, position: usize, tab: &Tab) -> Text {
-    let mut line = Line::new();
-    line.push(&(position + 1).to_string(), TAG);
-    line.pad_to(TAB_COLUMN);
-    let level = if tab.active { ACCENT } else { LABEL };
-    line.push(&truncate(&tab.name, inner.saturating_sub(TAB_COLUMN)), level);
-    line.finish(inner)
-}
-
-/// `   · nvim` — a pane, indented under its tab.
-fn pane_line(inner: usize, title: &str) -> Text {
-    let mut line = Line::new();
-    line.gap(TAB_COLUMN);
-    line.push("· ", TAG);
-    line.push(&truncate(title, inner.saturating_sub(TAB_COLUMN + 2)), LABEL);
-    line.finish(inner)
-}
-
-/// A dead session has no panes to list, and saying "0 panes" would imply it has none rather than
-/// that there is nothing running to have them. So the box says what it is instead.
+/// A dead session has no process, so there is no screen to look at and no panes to count.
+/// Saying `0 panes` would report that it has none rather than that there is nothing running to
+/// have any.
 fn dead_preview(rect: &Rect) -> Vec<Text> {
     let inner = rect.inner_width();
     let mut lines = vec![preview_line(inner, "not running", TAG), blank_line(rect)];
@@ -679,33 +703,25 @@ fn entry_line(inner: usize, entry: &str) -> Text {
 // Preview: agents
 // ---------------------------------------------------------------------------------------------
 
-/// The column the agent facts line up in.
-const FACT_COLUMN: usize = 9;
-
-/// What the highlighted agent is doing, and where it is doing it.
+/// What the highlighted agent is doing, and what it has on its screen.
 ///
-/// The status and its age go at the top, in that order, because they are the routing decision:
-/// *waiting, for eleven minutes* is the row you go to. Everything under the blank line is the
-/// address — the same session and pane `Enter` acts on, spelled out rather than implied.
-fn agent_preview(agents: &AgentSet, rect: &Rect) -> (String, Vec<Text>) {
+/// The status and its age go first, on one line, because they are the routing decision:
+/// *waiting, for eleven minutes* is the row you go to. Under them is the agent's own pane —
+/// which, on the one screen whose whole purpose is telling you which agent wants you, is the
+/// thing that says what it wants.
+fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<Text>) {
     let inner = rect.inner_width();
     let Some(row) = agents.selected_row() else {
         return nothing_highlighted(rect);
     };
     // The same one status that is accented in the list, accented here, for the same reason.
     let level = if agents::is_waiting(&row.status) { ACCENT } else { LABEL };
-    let age = format!("{} in this status", agents::format_duration(row.age));
-    // From the left: an agent's cwd is one of a column of `/home/you/…` paths, and what tells
-    // them apart is at the end.
-    let (cwd, _) = truncate_left(&row.cwd, inner.saturating_sub(FACT_COLUMN));
-    let lines = vec![
-        preview_line(inner, &row.status, level),
-        preview_line(inner, &age, TAG),
-        blank_line(rect),
-        field(inner, "session", FACT_COLUMN, &row.session),
-        field(inner, "pane", FACT_COLUMN, &row.pane.to_string()),
-        field(inner, "cwd", FACT_COLUMN, &cwd),
-    ];
+    let mut line = Line::new();
+    line.push(&truncate(&row.status, inner), level);
+    line.push(" · ", TAG);
+    line.push(&agents::format_duration(row.age), TAG);
+    let mut lines = vec![line.finish(inner), blank_line(rect)];
+    lines.extend(screen_lines(rect, peeks, &panes::key(&row.session, row.pane), lines.len()));
     (row.label(), lines)
 }
 
@@ -1329,8 +1345,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    // Only the tests build a directory list from scratch; the renderer is handed one.
-    use crate::sessions::Selection;
+    // Only the tests build these; the renderer is handed them ready-made.
+    use crate::sessions::{Focus, Selection};
 
     /// A pane, rendered to the lines it would print. The picture, in other words — which is the
     /// thing that used to be unknowable from inside this crate, because the host assembled it.
@@ -1356,17 +1372,18 @@ mod tests {
         state
     }
 
-    fn tab(name: &str, active: bool, panes: &[&str]) -> Tab {
-        Tab {
-            name: name.to_string(),
-            active,
-            panes: panes.iter().map(|title| title.to_string()).collect(),
+    fn contents(panes: usize, tab: &str, title: &str) -> Contents {
+        Contents {
+            panes,
+            focus: Some(Focus { pane: 7, tab: tab.to_string(), title: title.to_string() }),
         }
     }
 
-    fn contents(tabs: Vec<Tab>, clients: usize) -> Contents {
-        let panes = tabs.iter().map(|tab| tab.panes.len()).sum();
-        Contents { tabs, panes, clients }
+    /// A cache holding one pane's screen, as `dump-screen` would have left it.
+    fn peeked(session: &str, pane: u32, screen: &str) -> Peeks {
+        let mut peeks = Peeks::default();
+        peeks.ingest(panes::key(session, pane), Some(0), screen.as_bytes(), b"");
+        peeks
     }
 
     /// Two boxes side by side, as the pane draws them — the preview's picture is only ever
@@ -1698,58 +1715,60 @@ mod tests {
         }
     }
 
-    /// The preview box, whole: what the session is made of, then its tabs with their panes
-    /// under them — and the overflow marker, because a box that cannot scroll has to say what
-    /// it is not showing.
+    /// The preview box, whole: which pane you are looking at, and what is on it — the tail of
+    /// it, because a terminal is read from the bottom.
     #[test]
-    fn a_session_preview_lists_its_tabs_and_panes() {
+    fn a_session_preview_shows_the_pane_it_names() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut state = matches(vec![session("dotfiles", Kind::Live, HOUR)], Some(0));
-        state.contents.insert(
-            "dotfiles".to_string(),
-            contents(
-                vec![tab("editor", true, &["nvim", "fish"]), tab("server", false, &["cargo"])],
-                1,
-            ),
-        );
-        let (title, lines) = session_preview(&state, &rect);
-        assert_eq!(title, "dotfiles");
+        state.contents.insert("dotfiles".to_string(), contents(3, "editor", "nvim"));
+        let peeks = peeked("dotfiles", 7, "one\ntwo\n> cargo test\nok\n\n\n");
+        let (title, right, lines) = session_preview(&state, &peeks, &rect);
+        assert_eq!((title.as_str(), right.as_str()), ("dotfiles", "3 panes"));
         assert_eq!(
-            picture(&rect, &title, "", filled(&rect, lines)),
+            picture(&rect, &title, &right, filled(&rect, lines)),
             vec![
-                "╭─ dotfiles ─────────────╮",
-                "│ 2 tabs, 3 panes        │",
+                "╭─ dotfiles ─── 3 panes ─╮",
+                "│ editor · nvim          │",
                 "│                        │",
-                "│ 1  editor              │",
-                "│    · nvim              │",
-                "│    · fish              │",
-                "│ … 2 more               │",
+                "│ one                    │",
+                "│ two                    │",
+                "│ > cargo test           │",
+                "│ ok                     │",
                 "╰────────────────────────╯",
             ]
         );
     }
 
-    /// The client count is the clause that goes when the box is too narrow for all three, and
-    /// comes back when it is not.
+    /// Nothing has been asked yet and the answer has not come back yet are the same thing to
+    /// the reader: it is on its way.
     #[test]
-    fn a_narrow_preview_drops_the_client_count() {
-        let one = contents(vec![tab("editor", true, &["nvim"])], 1);
-        assert_eq!(summary(40, &one), "1 tab, 1 pane, 1 client");
-        assert_eq!(summary(22, &one), "1 tab, 1 pane");
-        let empty = contents(Vec::new(), 0);
-        assert_eq!(summary(40, &empty), "0 tabs, 0 panes, nobody attached");
+    fn a_pane_says_so_while_it_is_being_read() {
+        let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
+        let mut state = matches(vec![session("dotfiles", Kind::Live, HOUR)], Some(0));
+        state.contents.insert("dotfiles".to_string(), contents(1, "editor", "nvim"));
+
+        let unasked = session_preview(&state, &Peeks::default(), &rect).2;
+        assert!(unasked[2].content().contains("reading…"));
+        let mut peeks = Peeks::default();
+        assert!(peeks.claim(&panes::key("dotfiles", 7)));
+        let asked = session_preview(&state, &peeks, &rect).2;
+        assert_eq!(asked[2].content(), unasked[2].content());
+
+        // A pane with nothing on it is an answer, not a wait.
+        let empty = peeked("dotfiles", 7, "\n\n");
+        assert!(session_preview(&state, &empty, &rect).2[2].content().contains("nothing on"));
     }
 
-    /// A dead session has no panes, and "0 panes" would say it has none rather than that there
-    /// is nothing running to have any.
+    /// A dead session has no process, so there is no screen and nothing to count.
     #[test]
     fn a_dead_session_has_nothing_to_look_inside() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let state = matches(vec![session("api-spike", Kind::Resurrectable, HOUR)], Some(0));
-        let (title, lines) = session_preview(&state, &rect);
-        assert_eq!(title, "api-spike");
+        let (title, right, lines) = session_preview(&state, &Peeks::default(), &rect);
+        assert_eq!((title.as_str(), right.as_str()), ("api-spike", ""));
         assert_eq!(
-            picture(&rect, &title, "", filled(&rect, lines)),
+            picture(&rect, &title, &right, filled(&rect, lines)),
             vec![
                 "╭─ api-spike ────────────╮",
                 "│ not running            │",
@@ -1768,7 +1787,7 @@ mod tests {
     #[test]
     fn an_empty_list_previews_nothing() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 6 };
-        let (title, lines) = session_preview(&matches(Vec::new(), None), &rect);
+        let (title, _, lines) = session_preview(&matches(Vec::new(), None), &Peeks::default(), &rect);
         assert_eq!(title, "Preview");
         assert_eq!(lines.len(), 3);
         assert!(lines[0].content().contains("nothing highlighted"));
@@ -1855,15 +1874,12 @@ mod tests {
             ],
             Some(1),
         );
-        state.contents.insert(
-            "dotfiles".to_string(),
-            contents(
-                vec![
-                    tab("editor", true, &["nvim", "fish"]),
-                    tab("server", false, &["cargo watch -x test"]),
-                ],
-                1,
-            ),
+        state.contents.insert("dotfiles".to_string(), contents(3, "editor", "nvim"));
+        let peeks = peeked(
+            "dotfiles",
+            7,
+            "  1 //! luneta — a personal zellij session picker.\n  2 \n  3 mod agents;\n\
+             \n\"src/main.rs\" 1005L, 41k\n",
         );
         let notes = vec![Note::dim("you are in \"notes\" — not listed")];
         let rect = screen.results.as_ref().unwrap();
@@ -1871,9 +1887,9 @@ mod tests {
         let right = count(state.selected, state.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
-        let (title, lines) = session_preview(&state, rect);
+        let (title, right, lines) = session_preview(&state, &peeks, rect);
         print_pane(
-            beside(list, picture(rect, &title, "", filled(rect, lines))),
+            beside(list, picture(rect, &title, &right, filled(rect, lines))),
             &screen,
             "Sessions",
             prompt_text(&state),
@@ -1889,7 +1905,8 @@ mod tests {
         let right = count(agents.selected, agents.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
-        let (title, lines) = agent_preview(&agents, rect);
+        let peeks = peeked("misc", 12, "> read the docs?\n\n  1. yes\n  2. no\n\n> _\n");
+        let (title, lines) = agent_preview(&agents, &peeks, rect);
         print_pane(
             beside(list, picture(rect, &title, "", filled(rect, lines))),
             &screen,

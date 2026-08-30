@@ -38,38 +38,40 @@ pub struct Row {
     is_exact: bool,
 }
 
-/// What is inside a live session: the preview box's whole content.
+/// Which pane of a live session the preview box shows, and what the session is made of.
 ///
 /// 🔴 Built from the *other* sessions' `SessionInfo`, which is real data and not an estimate —
 /// each zellij server writes its own tabs and panes to `session-metadata.kdl` about once a
 /// second and every other server reads them back (`zellij-utils/src/sessions.rs`,
-/// `read_live_session_states`). So the picker can say what is in a session it is not attached
-/// to, and say it from the same snapshot the ages come from.
+/// `read_live_session_states`). So the picker can pick a session's focused pane without being
+/// attached to it, and pick it from the same snapshot the ages come from.
 ///
 /// A resurrectable session has none of this. Its layout is on disk in a form the host will not
-/// hand a plugin, so the preview for a dead row says what `Enter` does and nothing it cannot
-/// know — see [`crate::render`].
+/// hand a plugin, and there is no process behind it to have a screen — see [`crate::render`].
 pub struct Contents {
-    pub tabs: Vec<Tab>,
-    /// Selectable panes across every tab. Not `panes.len()` per tab summed at render time,
-    /// because the filter that makes it meaningful is applied here — see [`Tab::panes`].
+    /// Selectable panes across every tab. Counted where the filter that makes it mean anything
+    /// is applied — see [`Focus`].
     pub panes: usize,
-    /// How many clients are attached. Zero is the ordinary case for a session you are picking
-    /// out of a list, and the one number here that changes what `Enter` means to *other people*.
-    pub clients: usize,
+    /// The pane whose screen the box shows. `None` for a session made only of plugin panes,
+    /// which have nothing to dump.
+    pub focus: Option<Focus>,
 }
 
-/// One tab of a live session, and what is in it.
-pub struct Tab {
-    pub name: String,
-    pub active: bool,
-    /// Pane titles, in the order the host reports them.
-    ///
-    /// ⚠️ Filtered to the **selectable, unsuppressed** panes. Zellij's own tab bar and status
-    /// bar are panes in this manifest like any other — `is_selectable` is the flag their doc
-    /// comment names as the way to tell them apart — and a preview that listed them would
-    /// report every tab as holding two panes it does not have.
-    pub panes: Vec<String>,
+/// The pane the preview box reads, and where it sits.
+///
+/// The **focused** pane of the **active** tab, which is what you would be looking at a moment
+/// after `Enter` — so the box shows you the thing attaching would show you.
+///
+/// ⚠️ Chosen from the selectable, unsuppressed **terminals** only. Zellij's own tab bar and
+/// status bar are panes in that manifest like any other (`is_selectable` is the flag their doc
+/// comment names as the way to tell them apart), and a plugin pane dumps empty whatever it is
+/// drawing — so either would give the box a blank screen and no reason for it.
+pub struct Focus {
+    pub pane: u32,
+    /// The tab it is in, for the line that says which pane you are looking at.
+    pub tab: String,
+    /// The pane's own title, from the same place the tab bar takes it.
+    pub title: String,
 }
 
 /// What a rebuild should do with the cursor.
@@ -97,10 +99,9 @@ pub struct MatchSet {
     /// Does the current session fuzzy-match the term? One extra `fuzzy_indices` call per
     /// keystroke against a name that never enters `rows` — the whole cost of the hint line.
     pub current_matches: bool,
-    /// What is inside each live session, by name. Kept beside the rows rather than on them:
-    /// the rows are rebuilt on every keystroke and this is rebuilt once a poll, and cloning a
-    /// session's whole pane list per character typed to keep the two together would be paying
-    /// for the join a hundred times to use it once.
+    /// Which pane to show for each live session, by name. Kept beside the rows rather than on
+    /// them: the rows are rebuilt on every keystroke and this once a poll, and carrying it on
+    /// the rows would mean rebuilding it a hundred times to use it once.
     ///
     /// A name that is not in here has nothing to show — a resurrectable session, or a live one
     /// whose server has not written its metadata yet.

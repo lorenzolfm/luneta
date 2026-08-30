@@ -16,17 +16,17 @@ Built against **zellij 0.45.0** (`zellij-tile = "=0.45.0"`).
 ## What it does
 
 ```
-╭─ luneta ───────────────────────── 2/4 ─╮╭─ dotfiles ─────────────────────────────╮
-│                                        ││ 2 tabs, 3 panes, 1 client              │
+╭─ luneta ───────────────────────── 2/4 ─╮╭─ dotfiles ─────────────────── 3 panes ─╮
+│                                        ││ editor · nvim                          │
 │                                        ││                                        │
-│                                        ││ 1  editor                              │
-│                                        ││    · nvim                              │
-│ you are in "notes" — not listed        ││    · fish                              │
-│   luneta                        2h ago ││ 2  server                              │
-│ > dotfiles                      5h ago ││    · cargo watch -x test               │
-│   🪦 Dead sessions ─────────────────── ││                                        │
+│                                        ││                                        │
+│                                        ││                                        │
+│ you are in "notes" — not listed        ││                                        │
+│   luneta                        2h ago ││   1 //! luneta — a personal zellij se… │
+│ > dotfiles                      5h ago ││   2                                    │
+│   🪦 Dead sessions ─────────────────── ││   3 mod agents;                        │
 │   despesas-old                  1w ago ││                                        │
-│   api-spike                     5w ago ││                                        │
+│   api-spike                     5w ago ││ "src/main.rs" 1005L, 41k               │
 ╰────────────────────────────────────────╯╰────────────────────────────────────────╯
 ╭─ Sessions ───────────────────────────────────────────────────────────────────────╮
 │ > _                                                               <ENTER> Attach │
@@ -38,16 +38,16 @@ and, one `Tab` away:
 
 ```
 ╭─ luneta ───────────────────────── 1/3 ─╮╭─ luneta ───────────────────────────────╮
-│                                        ││ waiting                                │
-│                                        ││ 18m in this status                     │
+│                                        ││ waiting · 18m                          │
 │                                        ││                                        │
-│                                        ││ session  misc                          │
-│                                        ││ pane     12                            │
-│                                        ││ cwd      …lorenzo/Projects/misc/luneta │
-│ 1 agent not in zellij — not listed     ││                                        │
-│ > luneta  🙋  18m          misc/luneta ││                                        │
+│                                        ││                                        │
+│                                        ││                                        │
+│                                        ││ > read the docs?                       │
+│                                        ││                                        │
+│ 1 agent not in zellij — not listed     ││   1. yes                               │
+│ > luneta  🙋  18m          misc/luneta ││   2. no                                │
 │   notes   ☕  5m     lorenzo/Documents ││                                        │
-│   bipa    ⠋   31m            Work/bipa ││                                        │
+│   bipa    ⠋   31m            Work/bipa ││ > _                                    │
 ╰────────────────────────────────────────╯╰────────────────────────────────────────╯
 ╭─ Agents ─────────────────────────────────────────────────────────────────────────╮
 │ > _                                                       <ENTER> Go to "luneta" │
@@ -94,57 +94,66 @@ Those three are drawn by the renderer itself, not by hand:
 
 ### The preview box
 
-The box on the right answers the question every row of every screen begs and no
-row has the width to answer: a session's name does not say what is running in
-it, a directory's name does not say what is in it, and an agent's label does not
-say what it is stuck on. It follows the highlight, and each screen fills it from
-a different place.
+The box on the right shows **the pane itself**, live — not a description of it. A session's name
+does not say what is running in it, a directory's name does not say what is in it, and an
+agent's label does not say what it is stuck on, and none of those questions is answerable in the
+width of a row. It follows the highlight.
 
-**A live session** shows what it is made of, then its tabs with their panes
-under them, the tab you would land on in the accent colour.
+**A live session** shows the focused pane of its active tab — the screen attaching would put you
+in front of — under a line naming which pane that is, with the session's pane count in the
+border. The **tail** of the screen, standing on the box's floor: a terminal is read from the
+bottom, so the newest line is always in the same place whatever row you move to.
 
-🔴 That is real data, not an estimate. Every zellij server writes its own tabs
-and panes to `session-metadata.kdl` about once a second, and every other server
-reads them back (`zellij-utils/src/sessions.rs`, `read_live_session_states`), so
-the picker can say what is inside a session it is not attached to — and say it
-from the same one-second snapshot the ages beside it come from. The panes are
-filtered to the **selectable, unsuppressed** ones: zellij's own tab bar and
-status bar are panes in that manifest like any other, and counting them would
-report every tab as holding two panes it does not have.
+🔴 **Through the CLI, not the plugin API, and that is forced.** `zellij-tile` has
+`get_pane_scrollback(PaneId, bool)` — a blocking host call, no process, no temporary file — and
+it can only ever answer for *this* session's panes, because a plugin runs inside one server and
+a `PaneId` means nothing to another. Every session on the list is a different session; the
+current one is dropped at the source. So `zellij --session NAME action dump-screen` it is, which
+connects to that session's own server over its socket. It also costs no new permission:
+`RunCommands` is already granted for zoxide, where `ReadPaneContents` would have re-prompted.
 
-**A resurrectable session** has none of that — its layout is on disk in a form
-the host will not hand a plugin — so the box says `not running` and what there
-is instead, rather than showing `0 panes` and implying it has none.
+⚠️ **The dump is written asynchronously, so the script waits for it.** `dump-screen` documents
+`--path` as optional and promises STDOUT without it; in 0.45.1 that prints nothing — the CLI
+returns before the server's answer arrives. With `--path` the *server* writes the file and the
+CLI still returns first, so the script waits (bounded at a second) for the file to have
+something in it. Measured: without the wait every dump came back empty, with it every one came
+back whole.
 
-**A directory** shows its path and an `ls`, directories first, with the entry
-count in the border. That is one host command per directory, so:
+**A resurrectable session** has no process to have a screen and no panes to count, so the box
+says `not running` and what there is instead — rather than `0 panes`, which would report that it
+has none rather than that there is nothing running to have any.
 
-- **It is debounced.** The cursor has to sit still for two animation ticks (a
-  fifth of a second) before anything is asked. Holding `↓` down a hundred-odd
-  zoxide entries would otherwise fork a process for every one it passed over, to
-  show you the last.
-- **It is cached by path**, and the cache is dropped whole when it fills or when
-  the picker is opened again — a listing from the last time you looked is a
-  claim about how a directory *was*.
-- **Replies are filed by the path they went out with**, never by the cursor's
-  position when they land. `ls` answers whenever it answers and the cursor has
-  usually moved on; without the path on the reply, a slow one would confidently
-  show you somewhere else's contents.
-- A directory that cannot be read says why, in the error colour.
+**An agent** shows its status and time in it on one line — the routing decision — and then its
+own pane. On the screen whose whole purpose is telling you which agent wants you, that is the
+thing that says what it wants.
 
-**An agent** shows its status and how long it has been in it — the routing
-decision, at the top — then the session and pane `Enter` would take you to, and
-its cwd in full rather than the two components the row has room for.
+**A directory** shows its path and an `ls`, directories first, with the entry count in the
+border.
 
-The box is **half the pane, and it goes when the pane is narrow**: below 52
-columns there is no room for two boxes that can say anything, so the list takes
-the width back. Same ladder as the borders and the help row. The confirm and
-rename screens keep the whole width — they are one question each and have
-nothing to preview.
+Both commands cost a process per highlighted row, so both are on the same discipline:
 
-⚠️ The preview does not scroll and cannot: the cursor is in the list beside it,
-and every key that could move it means something there. Content that overruns
-loses its tail and the last row says how much (`… 2 more`).
+- **Debounced.** The cursor has to sit still for two animation ticks (a fifth of a second)
+  before anything is asked. Holding `↓` down a hundred-odd zoxide entries would otherwise fork a
+  process for every one it passed over, to show you the last.
+- **Cached**, by path for a directory and by session-and-pane for a screen, and dropped whole
+  when the cache fills or the picker is opened again.
+- **Snapshots, and held.** A pane's screen is the fastest-moving thing the picker looks at, and
+  it is *not* re-read while you sit on the row. Same bargain the agent list makes, for the same
+  reason: re-reading under the cursor means forking a process a second per row you are reading.
+- **Replies are filed by what they went out about**, never by where the cursor is when they
+  land. `ls` and `dump-screen` answer whenever they answer and the cursor has usually moved on;
+  without the key on the reply, a slow one would confidently show you somewhere else's contents.
+- Control characters are stripped where a pane's bytes come in. `dump-screen` gives plain text —
+  verified against a real pane, not assumed — but a `Text` carrying an escape sequence would put
+  a hole in the box's border.
+
+The box is **half the pane, and it goes when the pane is narrow**: below 52 columns there is no
+room for two boxes that can say anything, so the list takes the width back. Same ladder as the
+borders and the help row. The confirm and rename screens keep the whole width — they are one
+question each and have nothing to preview.
+
+⚠️ The preview does not scroll and cannot: the cursor is in the list beside it, and every key
+that could move it means something there.
 
 ### The agent screen
 
@@ -442,8 +451,9 @@ plugin's own validator.
   instance outlives many openings, which is what `Visible` is there for.
 - **A second command, for the preview box.** `ls -1Ap -- <path>`, on the
   directory the cursor has settled on — debounced, cached by path, and asked at
-  most once per directory per opening. Same permission, no new prompt. See
-  [the preview box](#the-preview-box).
+  most once per directory per opening. Same permission, no new prompt. The
+  session and agent screens spend the same permission on `zellij action
+  dump-screen`. See [the preview box](#the-preview-box).
 - **Nothing, when it is missing.** No zoxide, or a denied grant, and the screen
   says which — `zoxide is not available` on the note line. The three ways to be
   empty (waiting, failed, nothing to show) are not collapsed into a blank list.
@@ -547,7 +557,7 @@ which is what makes a GitHub release asset work at all — those 302 to
 
 Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
 `ChangeApplicationState`. The first is the one worth reading twice: it is how
-the directory and agent screens shell out to `zoxide`, `claude-ps` and `ls`.
+the picker shells out to `zoxide`, `claude-ps`, `ls` and `zellij` itself.
 
 ### Verifying what you got
 
@@ -842,6 +852,13 @@ bind "Ctrl a" {
   anywhere and nothing accumulates. Printing `rows` lines each terminated by
   `\n` into a `rows`-tall pane, on the other hand, scrolls the first line off
   the top, silently — a plugin pane has no scrollback of its own.
+- **A plugin sees one server, so cross-session anything goes through the CLI.**
+  `get_pane_scrollback` and every `PaneId` in the API are this session's; the
+  picker's whole list is *other* sessions. `zellij --session NAME action ...`
+  connects to that session's own socket and is the only route there. ⚠️ Its
+  replies are asynchronous: `dump-screen --path` returns before the server has
+  written the file, and without `--path` the promised STDOUT is empty because the
+  CLI exits before the answer lands.
 - **A reply must carry what it was about.** `RunCommandResult` arrives with the
   context map the command went out with, and that is the only thing tying it to
   the question. The directory preview puts the *path* in there: `ls` answers
