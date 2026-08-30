@@ -130,13 +130,17 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   `(session, pane)` rather than by session — a *sibling* agent in the same
   session is a legitimate target and stays. Agents running outside zellij are
   dropped too, and counted on the note line so they are never silently absent.
-- 🔴 **The column count is checked exactly, and a mismatch is loud.** The wire is
-  nine tab-separated fields — `status age session pane name pid session_id
-  started_at cwd`. Anything else stops the parse and puts the count on the note
-  line (`claude-ps line 1: 10 columns, expected 9`), because a picker that
-  tolerated an extra column would fold it into `cwd` and go on rendering rows
-  off a schema it no longer understands. So a `claude-ps` newer or older
-  than the picker says so instead of looking like "no agents are running".
+- 🔴 **Keys are read by name, and a document that will not deserialise is loud.**
+  The wire is a JSON array; this screen names only `status`, `age`, `zellij` and
+  `cwd` and ignores the rest. A key it has never heard of costs nothing — which
+  is the point, because the count used to be checked *exactly* and `claude-ps`
+  gaining `started_at` was a hard failure on a screen that understood every other
+  field. A key it *depends* on going missing still stops the parse and puts the
+  reason on the note line, because a picker rendering half a list it cannot
+  vouch for looks exactly like "no agents are running".
+- **`zellij` is one object or `null`.** A session and its pane arrive together or
+  not at all, so there is no half-address for `Enter` to guard against; `null`
+  means the agent is outside zellij and is counted on the note line.
 
 ### What `Enter` does
 
