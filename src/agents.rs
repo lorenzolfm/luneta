@@ -274,9 +274,9 @@ impl AgentSet {
             });
         }
 
-        // Attention first, and `rank` sits **above** `score` for the session screen's reason:
-        // it keeps the boundary between "wants you" and "does not" a fixed landmark while you
-        // narrow, instead of a line that shuffles on every keystroke.
+        // Attention first, and `rank` sits **above** both `age` and `score` for the session
+        // screen's reason: it keeps the boundary between "wants you" and "does not" a fixed
+        // landmark while you narrow, instead of a line that shuffles on every keystroke.
         //
         // 🔴 Safe only because the snapshot is frozen for the life of the screen. Under a poll
         // this ordering would move rows under the cursor as agents changed status.
@@ -284,10 +284,12 @@ impl AgentSet {
             b.is_exact
                 .cmp(&a.is_exact)
                 .then_with(|| a.rank.cmp(&b.rank))
+                // Most recent first, and `age` sits **above** `score`: within one status the
+                // agent that changed into it a moment ago is the one you were just working
+                // with, and that is a stabler thing to steer by than a fuzzy score that
+                // reshuffles the block on every keystroke.
+                .then_with(|| a.age.cmp(&b.age))
                 .then_with(|| b.score.cmp(&a.score))
-                // Longest-in-status first: of two agents waiting on you, the one that has been
-                // waiting longer is the one you have kept waiting.
-                .then_with(|| b.age.cmp(&a.age))
         });
 
         self.mark_shared();
