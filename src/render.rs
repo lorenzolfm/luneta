@@ -306,8 +306,8 @@ fn dir_result_row(
         // Not highlighted, because the term was never matched against it — the match ran on the
         // path, and painting hits onto a string they were not found in would be a lie that
         // happens to line up sometimes.
-        Text::new(truncate(&row.name, name_budget)).color_range(NAME, ..),
-        Text::new(if abbr { row.action.abbr_tag() } else { row.action.full_tag() })
+        cell(&truncate(&row.name, name_budget)).color_range(NAME, ..),
+        cell(if abbr { row.action.abbr_tag() } else { row.action.full_tag() })
             .color_range(TAG, ..),
     ];
     if let Some(path_budget) = path_budget {
@@ -322,7 +322,7 @@ fn dir_result_row(
             .filter(|i| **i >= dropped)
             .map(|i| i - dropped + shift)
             .collect();
-        cells.push(Text::new(&path).color_range(LABEL, ..).color_indices(ACCENT, indices));
+        cells.push(cell(&path).color_range(LABEL, ..).color_indices(ACCENT, indices));
     }
     if selected {
         cells = cells.into_iter().map(Text::selected).collect();
@@ -534,15 +534,15 @@ fn result_row(row: &Row, selected: bool, fit: &Fit, name_budget: usize) -> Vec<T
     let indices: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible_chars).collect();
 
     let mut cells = vec![
-        Text::new(&name).color_range(NAME, ..).color_indices(ACCENT, indices),
-        Text::new(match fit {
+        cell(&name).color_range(NAME, ..).color_indices(ACCENT, indices),
+        cell(match fit {
             Fit::Full => row.kind.full_tag(),
             Fit::AbbrTag | Fit::NoAge => row.kind.abbr_tag(),
         })
         .color_range(TAG, ..),
     ];
     if !matches!(fit, Fit::NoAge) {
-        cells.push(Text::new(format_age(row.age)).color_range(LABEL, ..));
+        cells.push(cell(&format_age(row.age)).color_range(LABEL, ..));
     }
     if selected {
         cells = cells.into_iter().map(Text::selected).collect();
@@ -553,7 +553,23 @@ fn result_row(row: &Row, selected: bool, fit: &Fit, name_budget: usize) -> Vec<T
 /// A blank first row. `Table` styles row zero as a title row unconditionally, so a table that
 /// does not want a header has to spend a row on an empty one — upstream does the same.
 fn header_row(table: Table, columns: usize) -> Table {
-    table.add_styled_row(vec![Text::new(" "); columns])
+    table.add_styled_row(vec![cell(" "); columns])
+}
+
+/// One table cell, with the empty string turned into a space.
+///
+/// ⚠️ The host cannot represent an empty cell, and does not fail loudly when handed one. A
+/// cell's text crosses as a comma-separated list of its bytes, so `""` arrives as a list with
+/// no bytes in it rather than as text of length zero — the cell is dropped, and because the
+/// wire format is one flat run of cells cut into rows by a column count, *every* cell after it
+/// slides one place left. A row that drops a cell therefore eats the first cell of the row
+/// below, and the last row on screen comes up a column short. That is what a blank token count
+/// used to do to the agent list.
+///
+/// A single space is the narrowest thing that survives the trip, and the column is padded to
+/// the width it was measured at anyway, so it still reads as the blank it was meant to be.
+fn cell(content: &str) -> Text {
+    Text::new(if content.is_empty() { " " } else { content })
 }
 
 /// Print a table centred on the width it will actually occupy.
@@ -965,17 +981,17 @@ fn agent_result_row(
     let tag_level = if agents::is_waiting(&row.status) { ACCENT } else { TAG };
 
     let mut cells = vec![
-        Text::new(&label).color_range(NAME, ..).color_indices(ACCENT, indices),
-        Text::new(tag).color_range(tag_level, ..),
+        cell(&label).color_range(NAME, ..).color_indices(ACCENT, indices),
+        cell(&tag).color_range(tag_level, ..),
     ];
     if !matches!(fit, AgentFit::NoAge) {
-        cells.push(Text::new(agents::format_duration(row.age)).color_range(LABEL, ..));
+        cells.push(cell(&agents::format_duration(row.age)).color_range(LABEL, ..));
     }
     if matches!(fit, AgentFit::FullCtx) {
         // Blank rather than a dash where the producer had no transcript: a `-` here would read
         // as "no tokens" when what it means is "not known".
         let text = row.context.map(agents::format_tokens).unwrap_or_default();
-        cells.push(Text::new(text).color_range(LABEL, ..));
+        cells.push(cell(&text).color_range(LABEL, ..));
     }
     if let Some(cwd_budget) = cwd_budget {
         // Still `truncate_left` underneath: two components are short, but not bounded — a
@@ -983,7 +999,7 @@ fn agent_result_row(
         let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
         // Not highlighted: the match ran on the session name, and painting hits onto a string
         // they were not found in would be a lie that happens to line up sometimes.
-        cells.push(Text::new(&cwd).color_range(LABEL, ..));
+        cells.push(cell(&cwd).color_range(LABEL, ..));
     }
     if selected {
         cells = cells.into_iter().map(Text::selected).collect();
