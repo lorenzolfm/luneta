@@ -78,10 +78,11 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
 `~/.claude/sessions` nor `/proc` is readable from inside it.
 
 - **Sorted attention-first** — `waiting`, then `idle`, then `busy`, then
-  anything else — with the longest-waiting first inside each group. The status
-  rank sits *above* the fuzzy score, so the boundary between "wants you" and
-  "does not" stays a fixed landmark while you narrow instead of shuffling on
-  every keystroke.
+  anything else — with the most recently changed first inside each group. The
+  status rank sits *above* the fuzzy score, so the boundary between "wants you"
+  and "does not" stays a fixed landmark while you narrow instead of shuffling on
+  every keystroke, and age sits above it too: within one status the agent that
+  changed a moment ago is the one you were just working with.
 - **Statuses are passed through verbatim**, uppercased, behind a glyph:
 
   | | status | why |
@@ -124,9 +125,34 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   one for the reason the directory screen derives names from two: measured
   across a real 136-path zoxide database, the last-two form collided zero
   times where the bare basename collided nine ways.
-- **A `:pane` suffix appears only when two rows share a session name**, and it
-  is never what the search term matches — you type the bare name. It shows up
-  exactly when the session name stops identifying one target.
+- **A row is called what someone called it**, and the zellij session name only
+  when nobody did. `claude-ps` reports the name *and who chose it*, and the
+  second half is the load-bearing one: a `derived` name is the basename of the
+  cwd plus a suffix, so showing it would put the cwd on the row twice — once as
+  a name that looks chosen, once as the cwd it was copied from. Only `user` and
+  `peer` are a name a person or another agent picked.
+
+  ⚠️ A source this build does not recognise is **suppressed**, which is the exact
+  opposite of what an unrecognised *status* does. The asymmetry is deliberate on
+  both sides. Every value in the status vocabulary is a real state, so hiding one
+  hides a live agent. The name sources that carry a chosen name are a short list
+  and the machinery is the long one — Claude Code already writes `derived`,
+  `collision`, `auto` and `hook` — so a source invented tomorrow is far likelier
+  to be more machinery, and trusting it would put a generated name where a chosen
+  one belongs. An *absent* source is trusted, because that is the state before
+  the key existed rather than a word this build failed to place.
+- **A `:pane` suffix appears only when two rows are called the same thing**, and
+  it is never what the search term matches — you type the bare name. It shows up
+  exactly when the label stops identifying one target: two agents in one session
+  that carry different chosen names take no suffix, and two that fall back to the
+  session name collide exactly as they did before names were read at all.
+- **You type what you see.** The fuzzy term is matched against the row's label,
+  so an agent shown by its chosen name is reached by that name and *not* by the
+  zellij session underneath it. That is one string, deliberately: the highlight
+  is a list of character offsets into whatever the matcher ran on, so a label
+  that came from somewhere else would paint hits onto characters the term never
+  touched. `Enter` is unaffected either way — it goes to the row's own
+  `(session, pane)`, whatever the row is called.
 - **A glance, not a watch** — a frozen *list*, though, not a frozen clock. The
   snapshot is taken when the screen opens and held while it is up, which is what
   makes attention-first ordering safe: nothing reorders while you read it. The
@@ -138,29 +164,31 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   `(session, pane)` rather than by session — a *sibling* agent in the same
   session is a legitimate target and stays. Agents running outside zellij are
   dropped too, and counted on the note line so they are never silently absent.
-- **A token count, where the pane is wide enough for it.** `claude-ps` reports
-  how much context each agent was carrying at its last assistant turn, and the
-  row shows it as `188k` between the age and the cwd. It is the **first** column
-  dropped as the pane narrows, because it informs a decision rather than making
-  one — the other three tell you which pane to go to.
-
-  ⚠️ Tokens, never a percentage. The context window *size* is not written to disk
-  anywhere, so a denominator would have to come from a model-name table that goes
-  confidently wrong the day a new model ships. An unrecognised status renders as
-  itself and you can see it is unrecognised; a wrong denominator renders as a
-  number that looks right.
-
-  A row whose count is missing is left **blank**, not `-`: the producer's join
-  for this one is a path derived from `cwd` rather than a proof, so "not known"
-  is an ordinary answer and must not read as "no tokens".
+- **There is no token count.** There was one, between the age and the cwd, and
+  `claude-ps` withdrew the `context` key it came from: the transcript path was
+  built from the cwd, and Claude Code writes that path with a `-` for each `/`
+  and each `.`, so `/home/x/.config` and `/home/x-config` slug the same. The
+  count was probable rather than certain, and it was that tool's only unbounded
+  read — a 256 KiB tail of a file with no size limit, per agent, per call, from
+  a consumer that polls. The column went with the key rather than staying on as
+  a rung of the width ladder no producer can reach.
 - 🔴 **Keys are read by name, and a document that will not deserialise is loud.**
-  The wire is a JSON array; this screen names only `status`, `age`, `zellij` and
-  `cwd` and ignores the rest. A key it has never heard of costs nothing — which
-  is the point, because the count used to be checked *exactly* and `claude-ps`
-  gaining `started_at` was a hard failure on a screen that understood every other
-  field. A key it *depends* on going missing still stops the parse and puts the
-  reason on the note line, because a picker rendering half a list it cannot
-  vouch for looks exactly like "no agents are running".
+  The wire is a JSON array; this screen names only `status`, `status_age`,
+  `zellij`, `cwd`, `name` and `name_source` and ignores the rest. A key it has never heard of costs
+  nothing — which is the point, because the count used to be checked *exactly*
+  and `claude-ps` gaining `started_at` was a hard failure on a screen that
+  understood every other field. A key it *depends* on going missing still stops
+  the parse and puts the reason on the note line, because a picker rendering half
+  a list it cannot vouch for looks exactly like "no agents are running".
+
+  ⚠️ That last sentence is a promise every depended-on key has to actually keep,
+  and `status_age` did not. It was read as `age` behind a `#[serde(default)]`,
+  so when `claude-ps` renamed the key the parse did not stop — every row got a
+  default `0` and the column read `0s` for every agent, in every status, forever.
+  A silent zero is worse than a blank: it is a confident answer that happens to
+  be wrong, on the column the routing decision is made on. Tolerance is for keys
+  this screen does *not* read; the ones it does are strict, and `age` survives as
+  a serde alias so an older `claude-ps` still parses.
 - **`zellij` is one object or `null`.** A session and its pane arrive together or
   not at all, so there is no half-address for `Enter` to guard against; `null`
   means the agent is outside zellij and is counted on the note line.
