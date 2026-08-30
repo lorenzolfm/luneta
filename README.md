@@ -138,21 +138,14 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   `(session, pane)` rather than by session — a *sibling* agent in the same
   session is a legitimate target and stays. Agents running outside zellij are
   dropped too, and counted on the note line so they are never silently absent.
-- **A token count, where the pane is wide enough for it.** `claude-ps` reports
-  how much context each agent was carrying at its last assistant turn, and the
-  row shows it as `188k` between the age and the cwd. It is the **first** column
-  dropped as the pane narrows, because it informs a decision rather than making
-  one — the other three tell you which pane to go to.
-
-  ⚠️ Tokens, never a percentage. The context window *size* is not written to disk
-  anywhere, so a denominator would have to come from a model-name table that goes
-  confidently wrong the day a new model ships. An unrecognised status renders as
-  itself and you can see it is unrecognised; a wrong denominator renders as a
-  number that looks right.
-
-  A row whose count is missing is left **blank**, not `-`: the producer's join
-  for this one is a path derived from `cwd` rather than a proof, so "not known"
-  is an ordinary answer and must not read as "no tokens".
+- **There is no token count.** There was one, between the age and the cwd, and
+  `claude-ps` withdrew the `context` key it came from: the transcript path was
+  built from the cwd, and Claude Code writes that path with a `-` for each `/`
+  and each `.`, so `/home/x/.config` and `/home/x-config` slug the same. The
+  count was probable rather than certain, and it was that tool's only unbounded
+  read — a 256 KiB tail of a file with no size limit, per agent, per call, from
+  a consumer that polls. The column went with the key rather than staying on as
+  a rung of the width ladder no producer can reach.
 - 🔴 **Keys are read by name, and a document that will not deserialise is loud.**
   The wire is a JSON array; this screen names only `status`, `status_age`,
   `zellij` and `cwd` and ignores the rest. A key it has never heard of costs
