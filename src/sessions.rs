@@ -10,6 +10,7 @@
 //!    sort before resurrectable ones, at every stage. Upstream sorts score-first with type as a
 //!    tiebreak, so its live and dead rows interleave as you type.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -37,6 +38,40 @@ pub struct Row {
     is_exact: bool,
 }
 
+/// What is inside a live session: the preview box's whole content.
+///
+/// 🔴 Built from the *other* sessions' `SessionInfo`, which is real data and not an estimate —
+/// each zellij server writes its own tabs and panes to `session-metadata.kdl` about once a
+/// second and every other server reads them back (`zellij-utils/src/sessions.rs`,
+/// `read_live_session_states`). So the picker can say what is in a session it is not attached
+/// to, and say it from the same snapshot the ages come from.
+///
+/// A resurrectable session has none of this. Its layout is on disk in a form the host will not
+/// hand a plugin, so the preview for a dead row says what `Enter` does and nothing it cannot
+/// know — see [`crate::render`].
+pub struct Contents {
+    pub tabs: Vec<Tab>,
+    /// Selectable panes across every tab. Not `panes.len()` per tab summed at render time,
+    /// because the filter that makes it meaningful is applied here — see [`Tab::panes`].
+    pub panes: usize,
+    /// How many clients are attached. Zero is the ordinary case for a session you are picking
+    /// out of a list, and the one number here that changes what `Enter` means to *other people*.
+    pub clients: usize,
+}
+
+/// One tab of a live session, and what is in it.
+pub struct Tab {
+    pub name: String,
+    pub active: bool,
+    /// Pane titles, in the order the host reports them.
+    ///
+    /// ⚠️ Filtered to the **selectable, unsuppressed** panes. Zellij's own tab bar and status
+    /// bar are panes in this manifest like any other — `is_selectable` is the flag their doc
+    /// comment names as the way to tell them apart — and a preview that listed them would
+    /// report every tab as holding two panes it does not have.
+    pub panes: Vec<String>,
+}
+
 /// What a rebuild should do with the cursor.
 ///
 /// Shared with the directory screen rather than duplicated there: the two lists hold different
@@ -62,6 +97,14 @@ pub struct MatchSet {
     /// Does the current session fuzzy-match the term? One extra `fuzzy_indices` call per
     /// keystroke against a name that never enters `rows` — the whole cost of the hint line.
     pub current_matches: bool,
+    /// What is inside each live session, by name. Kept beside the rows rather than on them:
+    /// the rows are rebuilt on every keystroke and this is rebuilt once a poll, and cloning a
+    /// session's whole pane list per character typed to keep the two together would be paying
+    /// for the join a hundred times to use it once.
+    ///
+    /// A name that is not in here has nothing to show — a resurrectable session, or a live one
+    /// whose server has not written its metadata yet.
+    pub contents: BTreeMap<String, Contents>,
     matcher: Option<SkimMatcherV2>,
 }
 

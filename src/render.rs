@@ -54,9 +54,9 @@ use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
-use crate::dirs::{Action, DirRow, DirSet, Status};
+use crate::dirs::{Action, DirRow, DirSet, Listing, Status};
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
-use crate::sessions::{format_age, Kind, MatchSet, Row};
+use crate::sessions::{format_age, Contents, Kind, MatchSet, Row, Tab};
 use crate::{Pending, Rename};
 
 /// Emphasis levels, named. See the table above.
@@ -114,6 +114,12 @@ impl Note {
 // The screens
 // ---------------------------------------------------------------------------------------------
 
+/// The session screen.
+///
+/// The results box is titled [`TITLE`] rather than "Results": what goes in that corner is the
+/// name of the thing you are looking at, and "Results" named the one thing on the screen that
+/// needed no naming — a box full of session names, directly above a prompt that says
+/// `Sessions`. Which list it is, is the input box's job to say.
 pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
     let notes = note_texts(state, error);
@@ -121,6 +127,10 @@ pub fn render_search(state: &MatchSet, error: Option<&str>, rows: usize, cols: u
     if let Some(rect) = &screen.results {
         let body = search_body(state, rect, notes.len());
         draw(rect, TITLE, &count(state.selected, state.rows.len()), interior(rect, &notes, body));
+    }
+    if let Some(rect) = &screen.preview {
+        let (title, lines) = session_preview(state, rect);
+        draw_preview(rect, &title, "", lines);
     }
     draw_input(&screen, "Sessions", prompt_text(state));
     draw_help(&screen, search_help(help_width(cols)));
@@ -141,6 +151,10 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
         let body = dir_body(dirs, term, rect, notes.len());
         draw(rect, TITLE, &count(dirs.selected, dirs.rows.len()), interior(rect, &notes, body));
     }
+    if let Some(rect) = &screen.preview {
+        let (title, right, lines) = dir_preview(dirs, rect);
+        draw_preview(rect, &title, &right, lines);
+    }
     draw_input(&screen, "Directories", dir_prompt(dirs, term));
     draw_help(&screen, dirs_help(help_width(cols)));
 }
@@ -156,12 +170,11 @@ pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, fr
 
     if let Some(rect) = &screen.results {
         let body = agent_body(agents, term, rect, notes.len(), frame);
-        draw(
-            rect,
-            TITLE,
-            &count(agents.selected, agents.rows.len()),
-            interior(rect, &notes, body),
-        );
+        draw(rect, TITLE, &count(agents.selected, agents.rows.len()), interior(rect, &notes, body));
+    }
+    if let Some(rect) = &screen.preview {
+        let (title, lines) = agent_preview(agents, rect);
+        draw_preview(rect, &title, "", lines);
     }
     draw_input(&screen, "Agents", agent_prompt(agents, term));
     draw_help(&screen, agents_help(help_width(cols)));
@@ -171,7 +184,10 @@ pub fn render_agents(agents: &AgentSet, term: &str, rows: usize, cols: usize, fr
 pub fn render_rename(rename: &Rename, current: Option<&str>, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
 
-    if let Some(rect) = &screen.results {
+    // The whole row, not the half the list would have had: this screen has one question on it
+    // and nothing to preview, and half a pane of question beside half a pane of blank box would
+    // be spending the width on saying that the preview has nothing to say.
+    if let Some(rect) = &screen.full {
         let notes = current
             .map(|current| {
                 Note::dim(format!("renaming \"{}\" — the session you are in", current))
@@ -203,7 +219,8 @@ pub fn render_rename(rename: &Rename, current: Option<&str>, rows: usize, cols: 
 pub fn render_confirm(pending: &Pending, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
 
-    if let Some(rect) = &screen.results {
+    // The whole row, as on the rename screen and for the same reason.
+    if let Some(rect) = &screen.full {
         // Spelling out what survives is the whole point of the screen: "kill" and "delete" look
         // alike on a keyboard and differ entirely in what you can get back.
         let note = match pending.kind {
@@ -296,9 +313,7 @@ fn border_text(border: Border) -> Text {
 /// so the list hugs the prompt and the notes ride on top of the list.
 fn interior(rect: &Rect, notes: &[Note], body: Vec<Text>) -> Vec<Text> {
     let block = anchor(rect, notes.len(), body.len());
-    let blank = rect.blank();
-    let mut lines: Vec<Text> =
-        (rect.inner_y()..block.y).map(|_| Text::new(&blank).dim_all()).collect();
+    let mut lines: Vec<Text> = (rect.inner_y()..block.y).map(|_| blank_line(rect)).collect();
     lines.extend(notes.iter().take(block.notes).map(|note| note_line(rect, note)));
     lines.extend(body.into_iter().take(block.rows));
     lines
@@ -395,6 +410,303 @@ fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
     }
     let start = if selected < visible { 0 } else { (selected + 1).saturating_sub(visible) };
     (start, (start + visible).min(total))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The preview box
+// ---------------------------------------------------------------------------------------------
+
+/// An empty interior row.
+fn blank_line(rect: &Rect) -> Text {
+    Text::new(rect.blank()).dim_all()
+}
+
+/// Draw the preview box: the same chrome as any other box, with its content at the top.
+///
+/// The box beside the list answers the question every row of every screen begs and no row has
+/// the width to answer: a session's name does not say what is running in it, a directory's does
+/// not say what is in it, and an agent's label does not say what it is stuck on. Each screen
+/// answers it from a different place — the session preview off the same one-second snapshot the
+/// ages come from, the directory preview off an `ls` the cursor triggers, the agent preview off
+/// the row itself — so the three builders below share these two helpers and nothing else.
+fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<Text>) {
+    draw(rect, title, right, filled(rect, lines));
+}
+
+/// A preview box's interior: content at the top, blanks under it.
+///
+/// Top-anchored, where [`interior`] is bottom-anchored, and the disagreement is not an oversight
+/// — the two are read from opposite ends. The list grows up out of the prompt you are typing
+/// into; a preview is read from its first line down, and anchoring it to the floor would leave a
+/// short one stranded away from the title that says what it is.
+///
+/// ⚠️ Content that overruns the box loses its tail, and the last row says how much. The preview
+/// does not scroll and cannot: the cursor is in the list beside it, and every key that could
+/// move it means something there. A box that cannot be scrolled had better be honest about what
+/// it is not showing.
+fn filled(rect: &Rect, mut lines: Vec<Text>) -> Vec<Text> {
+    let height = rect.inner_height();
+    if lines.len() > height {
+        // One more than the overflow: the marker takes a row of its own, off the last one that
+        // would have fitted.
+        let hidden = lines.len() - height + 1;
+        lines.truncate(height.saturating_sub(1));
+        lines.push(note_line(rect, &Note::dim(format!("… {} more", hidden))));
+    }
+    lines.resize_with(height, || blank_line(rect));
+    lines
+}
+
+/// One line of a preview box: text at `level`, cut to the box.
+fn preview_line(inner: usize, text: &str, level: usize) -> Text {
+    let mut line = Line::new();
+    line.push(&truncate(text, inner), level);
+    line.finish(inner)
+}
+
+/// The same, wrapped over as many lines as it takes.
+fn wrapped_lines(inner: usize, text: &str, level: usize) -> Vec<Text> {
+    wrap(text, inner).iter().map(|line| preview_line(inner, line, level)).collect()
+}
+
+/// The same again, in the error colour.
+fn error_lines(inner: usize, text: &str) -> Vec<Text> {
+    wrap(text, inner)
+        .iter()
+        .map(|text| {
+            let mut line = Line::new();
+            line.push_error(text);
+            line.finish(inner)
+        })
+        .collect()
+}
+
+/// Break `text` into lines of at most `width` columns, at spaces.
+///
+/// The one place in the picker that wraps rather than truncates, and the exception earns itself:
+/// everywhere else a string is a *column* of a row, so a cut end costs a name and the row still
+/// reads. Here the box is a paragraph's worth of room and a sentence explaining why a session has
+/// nothing to show has nowhere to be continued to.
+///
+/// A word wider than the box is still cut, by [`truncate`]: a hard break mid-word reads as two
+/// words, which on a screen full of session names is worse than an elision that says so.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let word = truncate(word, width);
+        match lines.last_mut() {
+            Some(line) if line.width() + 1 + word.width() <= width => {
+                line.push(' ');
+                line.push_str(&word);
+            },
+            _ => lines.push(word),
+        }
+    }
+    lines
+}
+
+/// `session   despesas` — a named fact, the name quiet and the value not.
+///
+/// The column the values line up in is passed in rather than measured per line, because a
+/// handful of facts that do not line up read as a list of sentences rather than as a table.
+fn field(inner: usize, key: &str, column: usize, value: &str) -> Text {
+    let mut line = Line::new();
+    line.push(key, TAG);
+    line.pad_to(column);
+    line.push(&truncate(value, inner.saturating_sub(column)), NAME);
+    line.finish(inner)
+}
+
+/// What a preview box says when the list beside it has no highlight to talk about.
+fn nothing_highlighted(rect: &Rect) -> (String, Vec<Text>) {
+    let inner = rect.inner_width();
+    (
+        // Not [`TITLE`]: the box beside this one is already called that, and a preview is
+        // titled after the thing it is previewing — which right now is nothing.
+        "Preview".to_string(),
+        vec![
+            preview_line(inner, "nothing highlighted", TAG),
+            blank_line(rect),
+            preview_line(inner, "Enter takes what you type", TAG),
+        ],
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// Preview: sessions
+// ---------------------------------------------------------------------------------------------
+
+/// The columns a tab's number is given, so that its name and the pane bullets under it start in
+/// the same place.
+const TAB_COLUMN: usize = 3;
+
+/// What is inside the highlighted session — or, for a dead one, why there is nothing to be
+/// inside of.
+fn session_preview(state: &MatchSet, rect: &Rect) -> (String, Vec<Text>) {
+    let inner = rect.inner_width();
+    let Some(row) = state.selected.and_then(|i| state.rows.get(i)) else {
+        return nothing_highlighted(rect);
+    };
+    let lines = match (row.kind, state.contents.get(&row.name)) {
+        (Kind::Live, Some(contents)) => live_preview(rect, contents),
+        // A live session whose server has not written its metadata yet. Rare and self-correcting
+        // — the next poll picks it up — so it says so rather than showing a plausible blank.
+        (Kind::Live, None) => wrapped_lines(inner, "no detail yet — the session has not reported what is in it", TAG),
+        (Kind::Resurrectable, _) => dead_preview(rect),
+    };
+    (row.name.clone(), lines)
+}
+
+/// A live session: what it is made of, then its tabs and the panes in them.
+fn live_preview(rect: &Rect, contents: &Contents) -> Vec<Text> {
+    let inner = rect.inner_width();
+    let mut lines = vec![preview_line(inner, &summary(inner, contents), TAG), blank_line(rect)];
+    for (position, tab) in contents.tabs.iter().enumerate() {
+        lines.push(tab_line(inner, position, tab));
+        lines.extend(tab.panes.iter().map(|title| pane_line(inner, title)));
+    }
+    lines
+}
+
+/// `2 tabs, 5 panes, nobody attached`, or as much of that as fits.
+///
+/// The client count is the clause that goes when the box is narrow. It is the only one of the
+/// three that is about *other people* rather than about the session, which makes it the one
+/// worth having and the one you can do without.
+fn summary(inner: usize, contents: &Contents) -> String {
+    let tabs = plural(contents.tabs.len(), "tab");
+    let panes = plural(contents.panes, "pane");
+    let clients = match contents.clients {
+        0 => "nobody attached".to_string(),
+        n => plural(n, "client"),
+    };
+    let long = format!("{}, {}, {}", tabs, panes, clients);
+    match long.width() <= inner {
+        true => long,
+        false => format!("{}, {}", tabs, panes),
+    }
+}
+
+fn plural(n: usize, thing: &str) -> String {
+    match n {
+        1 => format!("1 {}", thing),
+        n => format!("{} {}s", n, thing),
+    }
+}
+
+/// `1  editor` — the tab's number, then its name.
+///
+/// The number is the tab's position as zellij counts it, one-based as the tab bar shows it, so
+/// the preview and the session it describes agree about which tab is the second one.
+///
+/// The active tab is the accent one: it is where `Enter` puts you, which is the one fact on this
+/// side of the box that is about what the key does rather than about what is there.
+fn tab_line(inner: usize, position: usize, tab: &Tab) -> Text {
+    let mut line = Line::new();
+    line.push(&(position + 1).to_string(), TAG);
+    line.pad_to(TAB_COLUMN);
+    let level = if tab.active { ACCENT } else { LABEL };
+    line.push(&truncate(&tab.name, inner.saturating_sub(TAB_COLUMN)), level);
+    line.finish(inner)
+}
+
+/// `   · nvim` — a pane, indented under its tab.
+fn pane_line(inner: usize, title: &str) -> Text {
+    let mut line = Line::new();
+    line.gap(TAB_COLUMN);
+    line.push("· ", TAG);
+    line.push(&truncate(title, inner.saturating_sub(TAB_COLUMN + 2)), LABEL);
+    line.finish(inner)
+}
+
+/// A dead session has no panes to list, and saying "0 panes" would imply it has none rather than
+/// that there is nothing running to have them. So the box says what it is instead.
+fn dead_preview(rect: &Rect) -> Vec<Text> {
+    let inner = rect.inner_width();
+    let mut lines = vec![preview_line(inner, "not running", TAG), blank_line(rect)];
+    lines.extend(wrapped_lines(
+        inner,
+        "there is a saved layout to bring it back from, and nothing running to look inside",
+        TAG,
+    ));
+    lines
+}
+
+// ---------------------------------------------------------------------------------------------
+// Preview: directories
+// ---------------------------------------------------------------------------------------------
+
+/// What is in the highlighted directory, as `ls` reports it — the box's title is the session
+/// name the row would create, and the count in its border is how many entries there are.
+///
+/// ⚠️ The listing is looked up by **path**, never by row index. The cursor moves faster than
+/// `ls` answers, and a reply filed under the wrong directory would be a box confidently showing
+/// you somewhere else's contents. See [`crate::dirs::PATH_KEY`].
+fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<Text>) {
+    let inner = rect.inner_width();
+    let Some(row) = dirs.selected_row() else {
+        let (title, lines) = nothing_highlighted(rect);
+        return (title, String::new(), lines);
+    };
+    // From the left, as on the row: what identifies a directory is the end of its path.
+    let (path, _) = truncate_left(&row.path, inner);
+    let mut lines = vec![preview_line(inner, &path, LABEL), blank_line(rect)];
+    let mut right = String::new();
+    match dirs.listing(&row.path) {
+        // Not asked yet and asked-but-unanswered are the same thing to the reader: the answer is
+        // on its way. The pause between them is [`crate::PREVIEW_DELAY`], and it is deliberate.
+        None | Some(Listing::Reading) => lines.push(preview_line(inner, "reading…", TAG)),
+        Some(Listing::Failed(reason)) => lines.extend(error_lines(inner, reason)),
+        Some(Listing::Ready { entries, total }) => {
+            right = total.to_string();
+            if entries.is_empty() {
+                lines.push(preview_line(inner, "empty", TAG));
+            }
+            lines.extend(entries.iter().map(|entry| entry_line(inner, entry)));
+        },
+    }
+    (row.name.clone(), right, lines)
+}
+
+/// One entry of a listing. Directories are the loud ones — they are what you would `cd` into
+/// next, and `ls -p` has already marked them with the `/` that says so.
+fn entry_line(inner: usize, entry: &str) -> Text {
+    let level = if entry.ends_with('/') { NAME } else { LABEL };
+    preview_line(inner, entry, level)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Preview: agents
+// ---------------------------------------------------------------------------------------------
+
+/// The column the agent facts line up in.
+const FACT_COLUMN: usize = 9;
+
+/// What the highlighted agent is doing, and where it is doing it.
+///
+/// The status and its age go at the top, in that order, because they are the routing decision:
+/// *waiting, for eleven minutes* is the row you go to. Everything under the blank line is the
+/// address — the same session and pane `Enter` acts on, spelled out rather than implied.
+fn agent_preview(agents: &AgentSet, rect: &Rect) -> (String, Vec<Text>) {
+    let inner = rect.inner_width();
+    let Some(row) = agents.selected_row() else {
+        return nothing_highlighted(rect);
+    };
+    // The same one status that is accented in the list, accented here, for the same reason.
+    let level = if agents::is_waiting(&row.status) { ACCENT } else { LABEL };
+    let age = format!("{} in this status", agents::format_duration(row.age));
+    // From the left: an agent's cwd is one of a column of `/home/you/…` paths, and what tells
+    // them apart is at the end.
+    let (cwd, _) = truncate_left(&row.cwd, inner.saturating_sub(FACT_COLUMN));
+    let lines = vec![
+        preview_line(inner, &row.status, level),
+        preview_line(inner, &age, TAG),
+        blank_line(rect),
+        field(inner, "session", FACT_COLUMN, &row.session),
+        field(inner, "pane", FACT_COLUMN, &row.pane.to_string()),
+        field(inner, "cwd", FACT_COLUMN, &cwd),
+    ];
+    (row.label(), lines)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1017,6 +1329,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    // Only the tests build a directory list from scratch; the renderer is handed one.
+    use crate::sessions::Selection;
 
     /// A pane, rendered to the lines it would print. The picture, in other words — which is the
     /// thing that used to be unknowable from inside this crate, because the host assembled it.
@@ -1040,6 +1354,25 @@ mod tests {
         state.rows = rows;
         state.selected = selected;
         state
+    }
+
+    fn tab(name: &str, active: bool, panes: &[&str]) -> Tab {
+        Tab {
+            name: name.to_string(),
+            active,
+            panes: panes.iter().map(|title| title.to_string()).collect(),
+        }
+    }
+
+    fn contents(tabs: Vec<Tab>, clients: usize) -> Contents {
+        let panes = tabs.iter().map(|tab| tab.panes.len()).sum();
+        Contents { tabs, panes, clients }
+    }
+
+    /// Two boxes side by side, as the pane draws them — the preview's picture is only ever
+    /// read next to the list it is previewing.
+    fn beside(left: Vec<String>, right: Vec<String>) -> Vec<String> {
+        left.into_iter().zip(right).map(|(left, right)| format!("{}{}", left, right)).collect()
     }
 
     const HOUR: u64 = 3600;
@@ -1365,33 +1698,256 @@ mod tests {
         }
     }
 
-    /// Not an assertion — a way to look at a whole pane from `cargo test -- --nocapture`.
+    /// The preview box, whole: what the session is made of, then its tabs with their panes
+    /// under them — and the overflow marker, because a box that cannot scroll has to say what
+    /// it is not showing.
     #[test]
-    #[ignore = "prints a pane; run with --ignored --nocapture to look at one"]
-    fn print_a_pane() {
-        let (rows, cols) = (16, 54);
+    fn a_session_preview_lists_its_tabs_and_panes() {
+        let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
+        let mut state = matches(vec![session("dotfiles", Kind::Live, HOUR)], Some(0));
+        state.contents.insert(
+            "dotfiles".to_string(),
+            contents(
+                vec![tab("editor", true, &["nvim", "fish"]), tab("server", false, &["cargo"])],
+                1,
+            ),
+        );
+        let (title, lines) = session_preview(&state, &rect);
+        assert_eq!(title, "dotfiles");
+        assert_eq!(
+            picture(&rect, &title, "", filled(&rect, lines)),
+            vec![
+                "╭─ dotfiles ─────────────╮",
+                "│ 2 tabs, 3 panes        │",
+                "│                        │",
+                "│ 1  editor              │",
+                "│    · nvim              │",
+                "│    · fish              │",
+                "│ … 2 more               │",
+                "╰────────────────────────╯",
+            ]
+        );
+    }
+
+    /// The client count is the clause that goes when the box is too narrow for all three, and
+    /// comes back when it is not.
+    #[test]
+    fn a_narrow_preview_drops_the_client_count() {
+        let one = contents(vec![tab("editor", true, &["nvim"])], 1);
+        assert_eq!(summary(40, &one), "1 tab, 1 pane, 1 client");
+        assert_eq!(summary(22, &one), "1 tab, 1 pane");
+        let empty = contents(Vec::new(), 0);
+        assert_eq!(summary(40, &empty), "0 tabs, 0 panes, nobody attached");
+    }
+
+    /// A dead session has no panes, and "0 panes" would say it has none rather than that there
+    /// is nothing running to have any.
+    #[test]
+    fn a_dead_session_has_nothing_to_look_inside() {
+        let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
+        let state = matches(vec![session("api-spike", Kind::Resurrectable, HOUR)], Some(0));
+        let (title, lines) = session_preview(&state, &rect);
+        assert_eq!(title, "api-spike");
+        assert_eq!(
+            picture(&rect, &title, "", filled(&rect, lines)),
+            vec![
+                "╭─ api-spike ────────────╮",
+                "│ not running            │",
+                "│                        │",
+                "│ there is a saved       │",
+                "│ layout to bring it     │",
+                "│ back from, and nothing │",
+                "│ running to look inside │",
+                "╰────────────────────────╯",
+            ]
+        );
+    }
+
+    /// With no highlight there is nothing to preview, and the box says so rather than showing
+    /// the last thing that was there.
+    #[test]
+    fn an_empty_list_previews_nothing() {
+        let rect = Rect { x: 0, y: 0, width: 26, height: 6 };
+        let (title, lines) = session_preview(&matches(Vec::new(), None), &rect);
+        assert_eq!(title, "Preview");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].content().contains("nothing highlighted"));
+    }
+
+    /// The directory preview: the path it is about, then what `ls` said was in it — the count
+    /// in the border, the directories first.
+    #[test]
+    fn a_directory_preview_lists_what_ls_said() {
+        let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
+        let mut dirs = DirSet::default();
+        dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.ingest_listing(
+            "/home/you/misc/luneta".to_string(),
+            Some(0),
+            b"Cargo.toml\nsrc/\nREADME.md\n",
+            b"",
+        );
+        let (title, right, lines) = dir_preview(&dirs, &rect);
+        assert_eq!((title.as_str(), right.as_str()), ("misc-luneta", "3"));
+        assert_eq!(
+            picture(&rect, &title, &right, filled(&rect, lines)),
+            vec![
+                "╭─ misc-luneta ────── 3 ─╮",
+                "│ /home/you/misc/luneta  │",
+                "│                        │",
+                "│ src/                   │",
+                "│ Cargo.toml             │",
+                "│ README.md              │",
+                "│                        │",
+                "╰────────────────────────╯",
+            ]
+        );
+    }
+
+    /// Nothing has been asked yet and the answer has not come back yet are the same thing to
+    /// the reader: it is on its way.
+    #[test]
+    fn a_directory_says_so_while_it_is_being_read() {
+        let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
+        let mut dirs = DirSet::default();
+        dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+
+        let unasked = dir_preview(&dirs, &rect).2;
+        assert!(unasked[2].content().contains("reading…"));
+        assert!(dirs.begin_listing("/home/you/misc/luneta"));
+        let asked = dir_preview(&dirs, &rect).2;
+        assert_eq!(asked[2].content(), unasked[2].content());
+        // No count in the border until there is something to count.
+        assert_eq!(dir_preview(&dirs, &rect).1, "");
+    }
+
+    /// Wrapping is the preview box's alone, and it breaks at spaces. A word wider than the box
+    /// is cut, because a hard break mid-word reads as two words.
+    #[test]
+    fn wrap_breaks_at_spaces_and_cuts_only_overlong_words() {
+        assert_eq!(wrap("not running yet", 20), vec!["not running yet"]);
+        assert_eq!(wrap("there is a saved layout", 12), vec!["there is a", "saved layout"]);
+        assert_eq!(wrap("/an/extremely/long/path", 10), vec!["/an/extre…"]);
+        assert!(wrap("", 10).is_empty());
+        for width in 4..40 {
+            for line in wrap("there is a saved layout to bring it back from", width) {
+                assert!(line.width() <= width, "width {width}: {line}");
+            }
+        }
+    }
+
+    /// Not an assertion — a way to look at whole panes from
+    /// `cargo test -- --ignored --nocapture`. The three screens, drawn by the renderer that
+    /// draws them for real, which is where the README's pictures come from.
+    #[test]
+    #[ignore = "prints the screens; run with --ignored --nocapture to look at them"]
+    fn print_the_screens() {
+        let (rows, cols) = (16, 84);
         let screen = Screen::new(rows, cols);
-        let state = matches(
+        let mut state = matches(
             vec![
                 session("luneta", Kind::Live, 2 * 3600),
                 session("dotfiles", Kind::Live, 5 * 3600),
-                session("notes", Kind::Live, 3 * 86400),
                 session("despesas-old", Kind::Resurrectable, 12 * 86400),
                 session("api-spike", Kind::Resurrectable, 40 * 86400),
             ],
             Some(1),
         );
+        state.contents.insert(
+            "dotfiles".to_string(),
+            contents(
+                vec![
+                    tab("editor", true, &["nvim", "fish"]),
+                    tab("server", false, &["cargo watch -x test"]),
+                ],
+                1,
+            ),
+        );
         let notes = vec![Note::dim("you are in \"notes\" — not listed")];
-        let rect = screen.results.unwrap();
-        let body = search_body(&state, &rect, notes.len());
+        let rect = screen.results.as_ref().unwrap();
+        let body = search_body(&state, rect, notes.len());
         let right = count(state.selected, state.rows.len());
-        for line in picture(&rect, TITLE, &right, interior(&rect, &notes, body)) {
+        let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
+        let rect = screen.preview.as_ref().unwrap();
+        let (title, lines) = session_preview(&state, rect);
+        print_pane(
+            beside(list, picture(rect, &title, "", filled(rect, lines))),
+            &screen,
+            "Sessions",
+            prompt_text(&state),
+            search_help(help_width(cols)),
+        );
+
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), AGENTS.as_bytes(), b"");
+        agents.rebuild("", Some("notes"), None, Duration::ZERO, Selection::SnapToTop);
+        let rect = screen.results.as_ref().unwrap();
+        let notes = agent_note_texts(&agents, help_width(cols));
+        let body = agent_body(&agents, "", rect, notes.len(), 0);
+        let right = count(agents.selected, agents.rows.len());
+        let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
+        let rect = screen.preview.as_ref().unwrap();
+        let (title, lines) = agent_preview(&agents, rect);
+        print_pane(
+            beside(list, picture(rect, &title, "", filled(rect, lines))),
+            &screen,
+            "Agents",
+            agent_prompt(&agents, ""),
+            agents_help(help_width(cols)),
+        );
+
+        let mut dirs = DirSet::default();
+        dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
+        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.ingest_listing(
+            "/home/lorenzo/Projects/misc/luneta".to_string(),
+            Some(0),
+            b"src/\ntarget/\nCargo.toml\nMakefile\nREADME.md\n",
+            b"",
+        );
+        let rect = screen.results.as_ref().unwrap();
+        let notes = dir_note_texts(&dirs);
+        let body = dir_body(&dirs, "", rect, notes.len());
+        let right = count(dirs.selected, dirs.rows.len());
+        let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
+        let rect = screen.preview.as_ref().unwrap();
+        let (title, right, lines) = dir_preview(&dirs, rect);
+        print_pane(
+            beside(list, picture(rect, &title, &right, filled(rect, lines))),
+            &screen,
+            "Directories",
+            dir_prompt(&dirs, ""),
+            dirs_help(help_width(cols)),
+        );
+    }
+
+    /// The two boxes, the prompt under them and the help row under that — the whole pane.
+    fn print_pane(boxes: Vec<String>, screen: &Screen, title: &str, prompt: Prompt, help: Text) {
+        for line in boxes {
             println!("{line}");
         }
         let input = &screen.input;
-        println!("{}", input.top("Sessions", "").line);
-        println!("{}", input_line(input, prompt_text(&state)).content());
+        println!("{}", input.top(title, "").line);
+        // Borders put back on as `draw_row` puts them on — see `picture`.
+        println!("{}{}{}", VERTICAL, input_line(input, prompt).content(), VERTICAL);
         println!("{}", input.bottom());
-        println!("  {}", search_help(help_width(cols)).content());
+        println!("  {}\n", help.content());
     }
+
+    const AGENTS: &str = r#"[
+        {"status": "waiting", "status_age": 1080, "cwd": "/home/lorenzo/Projects/misc/luneta",
+         "name": "luneta", "name_source": "user", "zellij": {"session": "misc", "pane": "12"}},
+        {"status": "busy", "status_age": 1860, "cwd": "/home/lorenzo/Projects/Work/bipa",
+         "zellij": {"session": "bipa", "pane": "3"}},
+        {"status": "idle", "status_age": 300, "cwd": "/home/lorenzo/Documents",
+         "zellij": {"session": "notes", "pane": "7"}},
+        {"status": "idle", "status_age": 60, "cwd": "/home/lorenzo"}
+    ]"#;
+
+    const ZOXIDE: &str = "9268 /home/lorenzo/Projects/misc/luneta\n\
+        4102 /home/lorenzo/Projects/misc/homelab\n\
+        1877 /home/lorenzo/Projects/Work/bipa\n\
+        18 /home/lorenzo/.local/bin\n";
 }

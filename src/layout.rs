@@ -340,8 +340,16 @@ impl Line {
 /// borders outlive the help line for the same reason in miniature. Below all of it the pane is
 /// a single row and gets the one line that matters.
 pub struct Screen {
-    /// The results box — `None` when the pane cannot hold one with anything in it.
+    /// The results box — `None` when the pane cannot hold one with anything in it. Narrowed to
+    /// the left half whenever [`Screen::preview`] is beside it.
     pub results: Option<Rect>,
+    /// The preview box, on the right — `None` on a pane too narrow to split, and on the screens
+    /// that have nothing to preview.
+    pub preview: Option<Rect>,
+    /// The results row undivided, for the screens that do not preview anything: the confirm and
+    /// rename screens are one question each, and half a pane of question beside half a pane of
+    /// nothing is worse than the whole width.
+    pub full: Option<Rect>,
     /// The input box. Always present; when [`Screen::bordered`] is false it is the bare
     /// prompt row, one row tall, with no border to draw.
     pub input: Rect,
@@ -356,6 +364,17 @@ const INPUT_HEIGHT: usize = 3;
 /// The shortest results box worth drawing: two borders and a single row of list.
 const MIN_RESULTS: usize = 3;
 
+/// The narrowest half worth splitting the results row into.
+///
+/// Applied to *both* halves, so the split needs twice this. Below it the preview goes and the
+/// list takes the whole width back — the same ladder the help row and the borders are on, and
+/// for the same reason: a preview that has room for a title and three columns of content is not
+/// a preview, and the list it was taking those columns from is the thing you came here for.
+///
+/// Twenty-six leaves twenty-two columns of content per side: a gutter, a name and an age on the
+/// left, a tab name and an indented pane title on the right.
+const MIN_HALF: usize = 26;
+
 impl Screen {
     pub fn new(rows: usize, cols: usize) -> Self {
         let help_y = (rows > INPUT_HEIGHT).then(|| rows - 1);
@@ -364,9 +383,24 @@ impl Screen {
         let input_y = rows.saturating_sub(usize::from(help_y.is_some()) + height);
         let input = Rect { x: 0, y: input_y, width: cols, height };
         // Whatever the input box and the help line left behind, if it is enough to hold a row.
-        let results = (input_y >= MIN_RESULTS)
+        let full = (input_y >= MIN_RESULTS)
             .then_some(Rect { x: 0, y: 0, width: cols, height: input_y });
-        Self { results, input, bordered, help_y }
+        // The two boxes abut rather than leaving a column between them: the border each already
+        // draws is the separation, and a gap would only be a third vertical line's worth of
+        // width taken off both. An odd column goes to the preview, which is the half whose
+        // content has no column to be flush against.
+        let split = full.filter(|rect| rect.width >= MIN_HALF * 2).map(|rect| {
+            let left = rect.width / 2;
+            (
+                Rect { width: left, ..rect },
+                Rect { x: left, width: rect.width - left, ..rect },
+            )
+        });
+        let (results, preview) = match split {
+            Some((results, preview)) => (Some(results), Some(preview)),
+            None => (full, None),
+        };
+        Self { results, preview, full, input, bordered, help_y }
     }
 }
 
@@ -453,14 +487,43 @@ mod tests {
     #[test]
     fn a_tall_pane_gets_both_boxes() {
         let screen = Screen::new(30, 80);
-        let results = screen.results.expect("a 30-row pane has room for a results box");
-        assert_eq!(results, Rect { x: 0, y: 0, width: 80, height: 26 });
+        let full = screen.full.expect("a 30-row pane has room for a results box");
+        assert_eq!(full, Rect { x: 0, y: 0, width: 80, height: 26 });
         assert_eq!(screen.input, Rect { x: 0, y: 26, width: 80, height: 3 });
         assert_eq!(screen.help_y, Some(29));
         assert!(screen.bordered);
         // Nothing overlaps, and nothing is left over.
-        assert_eq!(results.bottom_y() + 1, screen.input.y);
+        assert_eq!(full.bottom_y() + 1, screen.input.y);
         assert_eq!(screen.input.bottom_y() + 1, screen.help_y.unwrap());
+    }
+
+    /// A pane wide enough is cut down the middle: list on the left, preview on the right, the
+    /// two of them exactly covering the row the undivided box would have had.
+    #[test]
+    fn a_wide_pane_puts_a_preview_beside_the_list() {
+        let screen = Screen::new(30, 80);
+        let results = screen.results.expect("80 columns is wide enough to split");
+        let preview = screen.preview.expect("80 columns is wide enough to split");
+        assert_eq!(results, Rect { x: 0, y: 0, width: 40, height: 26 });
+        assert_eq!(preview, Rect { x: 40, y: 0, width: 40, height: 26 });
+        // Abutting, covering, and the same height — three ways of saying they tile the row.
+        assert_eq!(results.x + results.width, preview.x);
+        assert_eq!(preview.x + preview.width, screen.full.unwrap().width);
+        assert_eq!(results.height, preview.height);
+    }
+
+    /// Below twice [`MIN_HALF`] the preview goes and the list takes the width back, rather than
+    /// two boxes too narrow to say anything. An odd column goes to the preview.
+    #[test]
+    fn a_narrow_pane_keeps_the_list_whole() {
+        for cols in 0..MIN_HALF * 2 {
+            let screen = Screen::new(30, cols);
+            assert!(screen.preview.is_none(), "{cols} columns");
+            assert_eq!(screen.results, screen.full, "{cols} columns");
+        }
+        let screen = Screen::new(30, MIN_HALF * 2 + 1);
+        assert_eq!(screen.results.unwrap().width, MIN_HALF);
+        assert_eq!(screen.preview.unwrap().width, MIN_HALF + 1);
     }
 
     /// Seven rows is the shortest pane that still holds everything: two borders and one row of
@@ -471,8 +534,10 @@ mod tests {
         assert_eq!(screen.results.map(|r| r.inner_height()), Some(1));
         assert_eq!(screen.help_y, Some(6));
 
-        // At six, the results box would be borders with nothing between them, so it goes.
-        assert!(Screen::new(6, 40).results.is_none());
+        // At six, the results box would be borders with nothing between them, so it goes —
+        // and the preview, which is only ever a half of it, goes with it.
+        assert!(Screen::new(6, 80).results.is_none());
+        assert!(Screen::new(6, 80).preview.is_none());
         assert_eq!(Screen::new(6, 40).help_y, Some(5));
     }
 
@@ -508,6 +573,10 @@ mod tests {
             if let Some(results) = screen.results {
                 assert!(results.bottom_y() < screen.input.y);
                 assert!(results.inner_height() >= 1);
+            }
+            if let Some(preview) = screen.preview {
+                assert!(preview.bottom_y() < screen.input.y);
+                assert!(preview.inner_height() >= 1);
             }
         }
     }

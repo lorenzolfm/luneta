@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agents::{AgentSet, Jump};
-use dirs::{Action, DirSet};
-use sessions::{validate_name, Kind, MatchSet, Selection};
+use dirs::{Action, DirSet, LIST};
+use sessions::{validate_name, Contents, Kind, MatchSet, Selection, Tab};
 use zellij_tile::prelude::*;
 
 /// The pipe message this plugin answers to, so that a key can open it *on* a chosen screen.
@@ -73,6 +73,15 @@ const TICKS_PER_SECOND: u64 = 10;
 
 /// Animation ticks per session poll, so that the poll stays at its original once a second.
 const TICKS_PER_POLL: u64 = TICKS_PER_SECOND;
+
+/// How long the cursor has to sit still on a directory before `ls` is asked what is in it, in
+/// animation ticks.
+///
+/// ⚠️ This is the whole of the debounce, and without it the preview box forks a process per
+/// keystroke: holding `↓` down a zoxide database of a hundred and thirty directories would ask
+/// about every one of them on the way past, to show you the last. Two ticks is a fifth of a
+/// second — below the point a pause reads as one, and above the rate an arrow key repeats at.
+const PREVIEW_DELAY: u64 = 2;
 
 /// Which screen has the keyboard. Kill-all and disconnect-others are still cut: both act on
 /// sessions you cannot see from here, which is the one thing this picker refuses to do.
@@ -240,6 +249,9 @@ struct State {
     /// off: every busy row turns in step, which reads as one thing happening rather than as
     /// several rows each doing their own.
     frame: u64,
+    /// The directory the cursor is resting on, and the frame it landed there — the debounce
+    /// behind the directory preview. See [`State::follow_preview`].
+    preview_target: Option<(String, u64)>,
     /// The frame the agent snapshot in [`State::agents`] was ingested at.
     ///
     /// The snapshot itself is frozen for the life of the screen, and its `age` field is a
@@ -322,11 +334,14 @@ impl ZellijPlugin for State {
                     self.poll();
                 }
                 self.frame = self.frame.wrapping_add(1);
+                // Called for its effect, not for its answer, so it runs before the `||` below
+                // can short-circuit past it: this is the tick the directory preview is asked on.
+                let asked = self.follow_preview();
                 // Nine ticks in ten now change nothing. Redrawing on them anyway would rebuild
                 // and repaint the whole table ten times a second to put back the pixels that
                 // were already there, so a tick that is neither a poll nor a spinner frame is
                 // spent by saying so.
-                polled || self.spinning()
+                polled || self.spinning() || asked
             },
             Event::Key(key) => self.handle_key(key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
@@ -338,6 +353,18 @@ impl ZellijPlugin for State {
                         self.dirs.ingest(exit_code, &stdout, &stderr);
                         self.rebuild_dirs(Selection::Hold);
                         true
+                    },
+                    // Filed by the path it went out with rather than by the cursor's position
+                    // now: replies land whenever they land, and the cursor has usually moved on.
+                    Some(dirs::PREVIEW_VALUE) => match context.get(dirs::PATH_KEY) {
+                        Some(path) => {
+                            self.dirs.ingest_listing(path.clone(), exit_code, &stdout, &stderr);
+                            true
+                        },
+                        // Ours by its key, but with nothing saying what it is about. Filing it
+                        // under a guess is the one failure this whole channel is arranged to
+                        // avoid, so it is dropped.
+                        None => false,
                     },
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr);
@@ -371,6 +398,10 @@ impl ZellijPlugin for State {
             // redraw yet; the reply arrives as its own event.
             Event::Visible(true) => {
                 self.ask_zoxide();
+                // A listing from the last time the picker was open is a claim about a directory
+                // as it was minutes ago, and the whole point of the box is that it is showing
+                // you what is there. Cheaper to forget it than to be confidently out of date.
+                self.dirs.forget_listings();
                 // 🔴 A glance, not a watch: the agent snapshot is taken here and then frozen for
                 // as long as the screen is up. That is what makes attention-first ordering safe
                 // — nothing reorders while you are reading it. Frozen *list*, though, not frozen
@@ -449,14 +480,23 @@ impl State {
         };
         let current_session = snapshot.live_sessions.iter().find(|s| s.is_current_session);
         let current = current_session.map(|s| s.name.clone());
+        // Filled on the way past rather than in a second pass: the snapshot is consumed here,
+        // and the preview box's contents and the list's ages have to come from the same one or
+        // the box would describe a session as it was a second before the row beside it.
+        let mut contents = BTreeMap::new();
         self.live = snapshot
             .live_sessions
             .into_iter()
             // The current session leaves the match set here, at the source, rather than in the
             // renderer — that is what keeps the rendered list equal to the match set.
             .filter(|s| !s.is_current_session)
-            .map(|s| (s.name, s.creation_time))
+            .map(|session| {
+                let row = (session.name.clone(), session.creation_time);
+                contents.insert(session.name.clone(), contents_of(session));
+                row
+            })
             .collect();
+        self.matches.contents = contents;
         self.dead = snapshot.resurrectable_sessions;
         self.matches.refresh(&self.live, &self.dead, current);
         // A directory row's tag is a function of the session list, so it goes stale on exactly
@@ -556,6 +596,58 @@ impl State {
                 agents::CONTEXT_VALUE.to_string(),
             )]),
         );
+    }
+
+    /// Keep the directory preview pointed at the highlighted row, and ask `ls` about it once
+    /// the cursor has settled. Answers whether anything was asked, which is the only thing here
+    /// that changes what is on screen.
+    ///
+    /// The wait is the point. A cursor moving through the list passes over directories on its
+    /// way somewhere, and a preview that asked about each of them would fork a process per
+    /// keystroke to show you the answer to the last one. So the target is *noted* on the tick it
+    /// changes and *asked about* [`PREVIEW_DELAY`] ticks later, if it is still the target.
+    ///
+    /// Only on the directory screen, and only in `Search` mode: a confirm or a rename over the
+    /// top of it hides the box this would be filling.
+    fn follow_preview(&mut self) -> bool {
+        if self.mode != Mode::Search || self.screen != Screen::Dirs {
+            return false;
+        }
+        let Some(path) = self.dirs.selected_row().map(|row| row.path.clone()) else {
+            self.preview_target = None;
+            return false;
+        };
+        match &self.preview_target {
+            // Still where it was. Ask once it has been there long enough — `begin_listing`
+            // refuses the second time, so this cannot ask twice.
+            Some((target, since)) if *target == path => {
+                if self.frame.wrapping_sub(*since) < PREVIEW_DELAY {
+                    return false;
+                }
+            },
+            // Somewhere new: start the clock, ask nothing yet.
+            _ => {
+                self.preview_target = Some((path, self.frame));
+                return false;
+            },
+        }
+        if !self.dirs.begin_listing(&path) {
+            return false;
+        }
+        // `--` because a directory may be named `-l`, and the path last because that is where
+        // `ls` takes it.
+        let mut command = LIST.to_vec();
+        command.push("--");
+        command.push(&path);
+        run_command(
+            &command,
+            BTreeMap::from([
+                (dirs::CONTEXT_KEY.to_string(), dirs::PREVIEW_VALUE.to_string()),
+                // What the reply is about, carried out and back. See [`dirs::PATH_KEY`].
+                (dirs::PATH_KEY.to_string(), path.clone()),
+            ]),
+        );
+        true
     }
 
     /// Rebuild the directory rows against the current term and the current snapshot.
@@ -935,6 +1027,45 @@ impl State {
     }
 }
 
+/// What a live session has inside it, out of the snapshot the ages come from.
+///
+/// ⚠️ The panes are filtered to the **selectable, unsuppressed** ones. Zellij's own tab bar and
+/// status bar are panes in this manifest like any other — `is_selectable` is the flag their own
+/// doc comment names as the way to tell them apart — so an unfiltered count reports every tab as
+/// holding two panes that are not there, on a screen whose whole job is saying what is.
+fn contents_of(session: SessionInfo) -> Contents {
+    // Destructured rather than read field by field: the pane manifest is emptied a tab at a
+    // time below, and the tab list is consumed while that happens.
+    let SessionInfo { tabs, mut panes, connected_clients, .. } = session;
+    let mut total = 0;
+    let tabs = tabs
+        .into_iter()
+        .map(|tab| {
+            let panes: Vec<String> = panes
+                .panes
+                // Removed rather than read: a tab position is in the manifest once, and taking
+                // it means the titles are moved into the summary instead of cloned into it.
+                .remove(&tab.position)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|pane| pane.is_selectable && !pane.is_suppressed)
+                .map(|pane| pane.title)
+                .collect();
+            total += panes.len();
+            Tab { name: tab.name, active: tab.active, panes }
+        })
+        .collect();
+    Contents { tabs, panes: total, clients: connected_clients }
+}
+
+/// Size the picker, and take zellij's frame off it.
+///
+/// The `borderless` flag is the whole reason the picker draws only its own two boxes. Zellij
+/// frames a floating pane by default, so the picker used to sit inside a third box it did not
+/// draw and could not style — and the obvious lever, `set_pane_frame_style`, is a *session*
+/// setting that would have unframed every pane behind us too. `FloatingPaneCoordinates` carries
+/// the flag per pane, so `change_floating_panes_coordinates` — a call the picker was already
+/// making to fix its size — takes the frame off this pane and no other.
 fn resize_self(plugin_id: u32) {
     let (x, y, width, height) = FLOATING;
     let Some(coordinates) = FloatingPaneCoordinates::new(

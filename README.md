@@ -16,45 +16,68 @@ Built against **zellij 0.45.0** (`zellij-tile = "=0.45.0"`).
 ## What it does
 
 ```
-            Session: dep_ <ENTER> - Attach
-
-         api-deploy     [ATTACH]     2h ago
-         deploy-scripts [ATTACH]     3d ago
-         old-deploy     [RESURRECT]  1w ago
-
-       you are in "my-current-session" — not listed
-  <↓↑> Nav  <ENTER> Select  <TAB> Agents  <Ctrl r> Rename  <Del> Delete  <ESC> Close
+╭─ luneta ───────────────────────── 2/4 ─╮╭─ dotfiles ─────────────────────────────╮
+│                                        ││ 2 tabs, 3 panes, 1 client              │
+│                                        ││                                        │
+│                                        ││ 1  editor                              │
+│                                        ││    · nvim                              │
+│ you are in "notes" — not listed        ││    · fish                              │
+│   luneta                        2h ago ││ 2  server                              │
+│ > dotfiles                      5h ago ││    · cargo watch -x test               │
+│   🪦 Dead sessions ─────────────────── ││                                        │
+│   despesas-old                  1w ago ││                                        │
+│   api-spike                     5w ago ││                                        │
+╰────────────────────────────────────────╯╰────────────────────────────────────────╯
+╭─ Sessions ───────────────────────────────────────────────────────────────────────╮
+│ > _                                                               <ENTER> Attach │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+  <↓↑> Nav <ENTER> Select <TAB> Agents <Ctrl r> Rename <Del> Delete <ESC> Close
 ```
 
 and, one `Tab` away:
 
 ```
-              Agent: _ <ENTER> - Go to "proper-airpods-nixos"
-
-  proper-airpods-nixos   🙋 WAITING 18m misc/proper-airpods-nixos
-  claude-code-status-bar 🙋 WAITING 17m misc/claude-code-status-bar
-  wt                     ☕ IDLE    2h  misc/wt
-  scratch:0              ☕ IDLE    9m  misc/luneta
-  scratch:1              🐚 SHELL   6m  lorenzo/Documents
-  zellij                 ⠹ BUSY    31m misc/zellij
-
-                    1 agent not in zellij — not listed
-  <↓↑> Nav  <ENTER> Go  <TAB> Directories  <ESC> Back
+╭─ luneta ───────────────────────── 1/3 ─╮╭─ luneta ───────────────────────────────╮
+│                                        ││ waiting                                │
+│                                        ││ 18m in this status                     │
+│                                        ││                                        │
+│                                        ││ session  misc                          │
+│                                        ││ pane     12                            │
+│                                        ││ cwd      …lorenzo/Projects/misc/luneta │
+│ 1 agent not in zellij — not listed     ││                                        │
+│ > luneta  🙋  18m          misc/luneta ││                                        │
+│   notes   ☕  5m     lorenzo/Documents ││                                        │
+│   bipa    ⠋   31m            Work/bipa ││                                        │
+╰────────────────────────────────────────╯╰────────────────────────────────────────╯
+╭─ Agents ─────────────────────────────────────────────────────────────────────────╮
+│ > _                                                       <ENTER> Go to "luneta" │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+  <↓↑> - Navigate, <ENTER> - Go to agent, <TAB> - Directories, <ESC> - Close
 ```
 
 and one more `Tab` on from there:
 
 ```
-         Directory: home_ <ENTER> - Create "misc-homelab"
-
-  misc-homelab        [CREATE]   …renzo/Projects/misc/homelab
-  homelab-infra       [CREATE]   …Projects/misc/homelab/infra
-  Work-bipa           [ATTACH]   …me/lorenzo/Projects/Work/bipa
-  .local-bin          [CREATE]   /home/lorenzo/.local/bin
-                          +8 more
-
-      <↓↑> Nav  <ENTER> Go  <TAB> Sessions  <ESC> Back
+╭─ luneta ───────────────────────── 1/4 ─╮╭─ misc-luneta ────────────────────── 5 ─╮
+│                                        ││ /home/lorenzo/Projects/misc/luneta     │
+│                                        ││                                        │
+│                                        ││ src/                                   │
+│                                        ││ target/                                │
+│                                        ││ Cargo.toml                             │
+│                                        ││ Makefile                               │
+│ > misc-luneta   …/Projects/misc/luneta ││ README.md                              │
+│   misc-homelab  …Projects/misc/homelab ││                                        │
+│   Work-bipa     …zo/Projects/Work/bipa ││                                        │
+│   .local-bin    …me/lorenzo/.local/bin ││                                        │
+╰────────────────────────────────────────╯╰────────────────────────────────────────╯
+╭─ Directories ────────────────────────────────────────────────────────────────────╮
+│ > _                                                 <ENTER> Create "misc-luneta" │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+  <↓↑> - Navigate, <ENTER> - Go there, <TAB> - Sessions, <ESC> - Close
 ```
+
+Those three are drawn by the renderer itself, not by hand:
+`cargo test -- --ignored --nocapture print_the_screens` prints them.
 
 - **Live sessions always sort above resurrectable ones**, at every stage —
   before the search term, and after it. Upstream sorts score-first with type
@@ -68,6 +91,60 @@ and one more `Tab` on from there:
   line below the list says which session is being hidden.
 - The details column is the **age**, for both kinds of row. It is the sort key,
   so showing it is what makes the order look deliberate rather than arbitrary.
+
+### The preview box
+
+The box on the right answers the question every row of every screen begs and no
+row has the width to answer: a session's name does not say what is running in
+it, a directory's name does not say what is in it, and an agent's label does not
+say what it is stuck on. It follows the highlight, and each screen fills it from
+a different place.
+
+**A live session** shows what it is made of, then its tabs with their panes
+under them, the tab you would land on in the accent colour.
+
+🔴 That is real data, not an estimate. Every zellij server writes its own tabs
+and panes to `session-metadata.kdl` about once a second, and every other server
+reads them back (`zellij-utils/src/sessions.rs`, `read_live_session_states`), so
+the picker can say what is inside a session it is not attached to — and say it
+from the same one-second snapshot the ages beside it come from. The panes are
+filtered to the **selectable, unsuppressed** ones: zellij's own tab bar and
+status bar are panes in that manifest like any other, and counting them would
+report every tab as holding two panes it does not have.
+
+**A resurrectable session** has none of that — its layout is on disk in a form
+the host will not hand a plugin — so the box says `not running` and what there
+is instead, rather than showing `0 panes` and implying it has none.
+
+**A directory** shows its path and an `ls`, directories first, with the entry
+count in the border. That is one host command per directory, so:
+
+- **It is debounced.** The cursor has to sit still for two animation ticks (a
+  fifth of a second) before anything is asked. Holding `↓` down a hundred-odd
+  zoxide entries would otherwise fork a process for every one it passed over, to
+  show you the last.
+- **It is cached by path**, and the cache is dropped whole when it fills or when
+  the picker is opened again — a listing from the last time you looked is a
+  claim about how a directory *was*.
+- **Replies are filed by the path they went out with**, never by the cursor's
+  position when they land. `ls` answers whenever it answers and the cursor has
+  usually moved on; without the path on the reply, a slow one would confidently
+  show you somewhere else's contents.
+- A directory that cannot be read says why, in the error colour.
+
+**An agent** shows its status and how long it has been in it — the routing
+decision, at the top — then the session and pane `Enter` would take you to, and
+its cwd in full rather than the two components the row has room for.
+
+The box is **half the pane, and it goes when the pane is narrow**: below 52
+columns there is no room for two boxes that can say anything, so the list takes
+the width back. Same ladder as the borders and the help row. The confirm and
+rename screens keep the whole width — they are one question each and have
+nothing to preview.
+
+⚠️ The preview does not scroll and cannot: the cursor is in the list beside it,
+and every key that could move it means something there. Content that overruns
+loses its tail and the last row says how much (`… 2 more`).
 
 ### The agent screen
 
@@ -363,6 +440,10 @@ plugin's own validator.
   `Visible`, not on the 1s timer: that would fork a process a second to re-read
   a database that only changes when you `cd`. `launch-or-focus` means one
   instance outlives many openings, which is what `Visible` is there for.
+- **A second command, for the preview box.** `ls -1Ap -- <path>`, on the
+  directory the cursor has settled on — debounced, cached by path, and asked at
+  most once per directory per opening. Same permission, no new prompt. See
+  [the preview box](#the-preview-box).
 - **Nothing, when it is missing.** No zoxide, or a denied grant, and the screen
   says which — `zoxide is not available` on the note line. The three ways to be
   empty (waiting, failed, nothing to show) are not collapsed into a blank list.
@@ -374,23 +455,29 @@ plugin's own validator.
 
 ### The renderer is a rewrite, not a port
 
-It draws through zellij's own UI components — `Text`, `Table`, and the
-`print_*_with_coordinates` family — exactly as the built-in session manager
-does. Those are serialized to the host as a DCS payload and coloured *there*,
-from the active theme, so the picker follows your theme and its selection
-colours with no palette to carry and no `ModeUpdate` subscription to keep
-current. `Table` also pads the columns, which is most of the layout code gone.
+It draws through zellij's own `Text` component and the
+`print_*_with_coordinates` family, exactly as the built-in session manager does.
+A `Text` is serialized to the host as a DCS payload and coloured *there*, from
+the active theme, so the picker follows your theme and its selection colours
+with no palette to carry and no `ModeUpdate` subscription to keep current.
+Colour is expressed as emphasis *levels* rather than colours, and weight has
+exactly one user: the host draws every character of a `Text` bold unless told
+otherwise, so bold said nothing until the row content was unbolded — which
+leaves the box titles as the only bold text on the screen.
 
-What is left is the reduction ladder. Upstream's `ui/components.rs` is 1847
-lines, and most of it serves the tab and pane drill-down this picker cuts — the
-four-column layout and the five-tier width-reduction algorithm that fed it. With
-three fixed columns the reduction is a three-step ladder: full tags and age →
-`[A]`/`[R]` and age → `[A]`/`[R]` only. The agent screen has four columns and so
-one rung more — abbreviate the tag → drop the cwd → drop the age; age outranks
-cwd because the session name usually already names the project, while nothing
-else says how long an agent has been stuck. Column widths are measured over the
-**visible window**, not the whole list, so one very long name cannot cost every
-other row its age column.
+`Table` is not one of the components used, though it was. A row is one `Text`
+spanning the width, measured here, because a bordered row is not a thing a
+`Table` can express, because a trailing column cannot be pushed flush against
+the right border in one, and because an empty cell used to cross the wire as a
+cell that was *dropped* — sliding every cell after it one place left and letting
+a row eat the first cell of the row below.
+
+What is left of upstream's 1847-line `ui/components.rs` is the reduction ladder,
+and only the agent screen still needs one: abbreviate the tag → drop the cwd →
+drop the age. Age outranks cwd because the session name usually already names
+the project, while nothing else says how long an agent has been stuck. Column
+widths are measured over the **visible window**, not the whole list, so one very
+long name cannot cost every other row its age column.
 
 ### `Enter` on an agent is two calls, not one
 
@@ -412,21 +499,23 @@ the current session is `[HERE]` and does nothing, because there is nothing safe
 for it to do; an agent in the current session has a call that works, so it stays
 a live target.
 
-### Centring is per element, not per screen
+### The geometry is arithmetic, and it is tested
 
-Every line is centred on the width it actually renders to; the table is centred
-as a unit on the width the host will pad its columns to. Upstream instead centres
-a fixed `min(cols, 90)` block, which only looks centred because four columns of
-session detail fill it — three narrow columns leave the text parked at that
-block's left edge with a ragged right side, centred on neither.
+Where things go lives in `src/layout.rs` and touches no host call: boxes, the
+split down the middle, the bottom-anchored list, the truncation. It used to live
+inline in five render functions, where the only way to check it was to install
+the plugin and look at a floating pane. Now `cargo test` renders whole panes to
+strings and asserts on the picture — including the invariant a bordered layout
+lives or dies by, which is that *every* line of a box is exactly as wide as the
+box and closed at both ends, at every width and height the pane can be.
 
-The cost is that a line re-centres when its own width changes, so the prompt
-drifts by half a column per character as you type. That is what centred input
-does everywhere, and it is the prompt moving rather than the whole screen
-shifting under it.
-
-Styling is plain SGR (bold, dim, reverse video). That takes the terminal's own
-theme and avoids subscribing to `ModeUpdate` just to read a palette.
+The pane draws no frame of its own but the picker's. Zellij frames a floating
+pane by default, so the picker used to sit inside a third box it did not draw
+and could not style; the fix is the per-pane `borderless` flag on
+`FloatingPaneCoordinates`, which rides on the `change_floating_panes_coordinates`
+call the plugin was already making to fix its size. The obvious lever,
+`set_pane_frame_style`, is a *session* setting and would have unframed every
+pane behind it too.
 
 ## Why this repo exists standalone
 
@@ -458,7 +547,7 @@ which is what makes a GitHub release asset work at all — those 302 to
 
 Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
 `ChangeApplicationState`. The first is the one worth reading twice: it is how
-the directory and agent screens shell out to `zoxide` and `claude-ps`.
+the directory and agent screens shell out to `zoxide`, `claude-ps` and `ls`.
 
 ### Verifying what you got
 
@@ -747,10 +836,18 @@ bind "Ctrl a" {
   subscribing to `SessionUpdate`. The pushed path refreshes only the *current*
   session's age and leaves its peers frozen, so ages taken from it agree only by
   accident.
-- **A plugin pane has no scrollback of its own.** Printing `rows` lines each
-  terminated by `\n` into a `rows`-tall pane scrolls the first line off the top,
-  silently. Build the whole frame and emit it with one `print!` and no trailing
-  newline (upstream instead positions the cursor absolutely, `\e[{y};{x}H`).
+- **Absolute coordinates are safe, and newlines are not.** The host deletes the
+  plugin pane's viewport before feeding it each render
+  (`plugin_pane.rs:243`), so `print_text_with_coordinates` can place anything
+  anywhere and nothing accumulates. Printing `rows` lines each terminated by
+  `\n` into a `rows`-tall pane, on the other hand, scrolls the first line off
+  the top, silently — a plugin pane has no scrollback of its own.
+- **A reply must carry what it was about.** `RunCommandResult` arrives with the
+  context map the command went out with, and that is the only thing tying it to
+  the question. The directory preview puts the *path* in there: `ls` answers
+  whenever it answers, the cursor has usually moved on by then, and filing the
+  answer under wherever the cursor is now shows you somewhere else's contents
+  with no sign anything went wrong.
 - **A background poll must not reset the cursor.** Rebuilding the result list
   once a second is correct; snapping the selection to row 0 while doing it drags
   the cursor out from under the user every second. Snap on a *search-term*
