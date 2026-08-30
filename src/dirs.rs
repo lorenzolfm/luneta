@@ -37,7 +37,7 @@ use crate::sessions::{validate_name, Selection};
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
 /// Marks our own `RunCommandResult` so an unrelated one cannot be parsed as a directory list.
-pub const CONTEXT_KEY: &str = "zj-picker";
+pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "zoxide";
 
 /// What `Enter` on this row will do — decided by the host, reported here.

@@ -1,4 +1,4 @@
-# zj-picker
+# luneta
 
 A personal [zellij](https://zellij.dev) plugin: a session picker with telescope
 semantics — type a few characters, press `Enter`, you're there.
@@ -34,7 +34,7 @@ and, one `Tab` away:
   proper-airpods-nixos   🙋 WAITING 18m misc/proper-airpods-nixos
   claude-code-status-bar 🙋 WAITING 17m misc/claude-code-status-bar
   wt                     ☕ IDLE    2h  misc/wt
-  scratch:0              ☕ IDLE    9m  misc/zj-picker
+  scratch:0              ☕ IDLE    9m  misc/luneta
   scratch:1              🐚 SHELL   6m  lorenzo/Documents
   zellij                 ⠹ BUSY    31m misc/zellij
 
@@ -114,8 +114,8 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
 - **The age is a duration, not a timestamp.** `35m` means "has been idle for
   thirty-five minutes", which is the routing decision; `35m ago` would be a
   different claim.
-- **The cwd is its last two components**, so `misc/zj-picker` rather than
-  `/home/you/Projects/misc/zj-picker`. Down a column of agents the leading
+- **The cwd is its last two components**, so `misc/luneta` rather than
+  `/home/you/Projects/misc/luneta`. Down a column of agents the leading
   components are the same on every row and separate nothing. Two rather than
   one for the reason the directory screen derives names from two: measured
   across a real 136-path zoxide database, the last-two form collided zero
@@ -394,7 +394,7 @@ make install
 ```
 
 `make install` builds and copies the `.wasm` to
-`~/.local/share/zellij/plugins/zj-picker.wasm`.
+`~/.local/share/zellij/plugins/luneta.wasm`.
 
 That `.wasm` is the whole install. The other two screens each want one ordinary
 program on the zellij **server's** `PATH`, and neither is required:
@@ -428,9 +428,9 @@ or by hand:
 ```sh
 make install
 zellij action launch-or-focus-plugin --skip-plugin-cache --floating \
-    file:$HOME/.local/share/zellij/plugins/zj-picker.wasm
+    file:$HOME/.local/share/zellij/plugins/luneta.wasm
 zellij action start-or-reload-plugin \
-    file:$HOME/.local/share/zellij/plugins/zj-picker.wasm
+    file:$HOME/.local/share/zellij/plugins/luneta.wasm
 ```
 
 **Nothing is closed**, and the two calls are there because neither covers both
@@ -463,14 +463,14 @@ Add `SESSION=<name>` to any recipe to drive a session other than the current one
 ```kdl
 plugins {
     // ...
-    zj-picker location="file:~/.local/share/zellij/plugins/zj-picker.wasm"
+    luneta location="file:~/.local/share/zellij/plugins/luneta.wasm"
 }
 ```
 
 A `file:~` URL is fine — the tilde is preserved and shell-expanded
 (`layout.rs:605-607,619`), so an absolute path is not required.
 
-Then point the bindings at `"zj-picker"` instead of `"session-manager"`.
+Then point the bindings at `"luneta"` instead of `"session-manager"`.
 Changing the alias block **requires a zellij restart**; changing the `.wasm`
 behind it does not.
 
@@ -481,12 +481,12 @@ with a `MessagePlugin` naming it — `sessions`, `agents` or `dirs`:
 
 ```kdl
 bind "Ctrl a" {
-    LaunchOrFocusPlugin "file:/home/you/.local/share/zellij/plugins/zj-picker.wasm" {
+    LaunchOrFocusPlugin "file:/home/you/.local/share/zellij/plugins/luneta.wasm" {
         floating true
         move_to_focused_tab true
         skip_plugin_cache true
     }
-    MessagePlugin "file:/home/you/.local/share/zellij/plugins/zj-picker.wasm" {
+    MessagePlugin "file:/home/you/.local/share/zellij/plugins/luneta.wasm" {
         name "screen"
         payload "agents"
     }
@@ -496,7 +496,7 @@ bind "Ctrl a" {
 
 Three things about that, each found the hard way:
 
-- 🔴 **Both actions need the full `file:` path, not the `zj-picker` alias.**
+- 🔴 **Both actions need the full `file:` path, not the `luneta` alias.**
   `MessagePlugin` does not resolve the alias to the running instance: it
   launches a *second*, hidden one and messages that, leaving the visible picker
   on whatever screen it was already showing. Mixing the two forms across
@@ -518,7 +518,7 @@ executable to run instead:
 
 ```kdl
 bind "Ctrl a" {
-    LaunchOrFocusPlugin "file:/home/you/.local/share/zellij/plugins/zj-picker.wasm" {
+    LaunchOrFocusPlugin "file:/home/you/.local/share/zellij/plugins/luneta.wasm" {
         floating true
         move_to_focused_tab true
         skip_plugin_cache true

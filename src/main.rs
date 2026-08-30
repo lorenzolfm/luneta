@@ -1,4 +1,4 @@
-//! zj-picker — a personal zellij session picker.
+//! luneta — a personal zellij session picker.
 //!
 //! The contract, in one sentence:
 //!
@@ -267,7 +267,7 @@ impl ZellijPlugin for State {
                 if matches!(status, PermissionStatus::Granted) {
                     // Safe now, and only now: both of these need ChangeApplicationState.
                     let plugin_id = get_plugin_ids().plugin_id;
-                    rename_plugin_pane(plugin_id, "zj-picker");
+                    rename_plugin_pane(plugin_id, "luneta");
                     resize_self(plugin_id);
                     // Same reason, different permission: this is the first moment the host will
                     // accept a command from us.
