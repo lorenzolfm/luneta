@@ -34,7 +34,7 @@ pub const QUERY: [&str; 1] = ["claude-ps"];
 
 /// Marks our own `RunCommandResult`. Shares the key with the directory screen and differs in
 /// the value — the plugin now issues two commands and the replies are told apart here.
-pub const CONTEXT_KEY: &str = "zj-picker";
+pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "agents";
 
 /// One object out of `claude-ps`, before this screen has decided anything about it.

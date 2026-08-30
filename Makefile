@@ -1,11 +1,11 @@
-# zj-picker — the edit -> see-it loop.
+# luneta — the edit -> see-it loop.
 #
 # All recipes assume you are inside `nix develop` (or have direnv allowed, which
 # does it for you). The bare system rustc CANNOT build this: see flake.nix.
 
-WASM       := target/wasm32-wasip1/release/zj-picker.wasm
+WASM       := target/wasm32-wasip1/release/luneta.wasm
 INSTALL_DIR := $(HOME)/.local/share/zellij/plugins
-INSTALLED  := $(INSTALL_DIR)/zj-picker.wasm
+INSTALLED  := $(INSTALL_DIR)/luneta.wasm
 SESSION    ?=
 
 .PHONY: build install reload dev clean

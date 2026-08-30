@@ -693,8 +693,8 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
     text
 }
 
-/// The last two components of a path: `misc/zj-picker` for
-/// `/home/you/Projects/misc/zj-picker`.
+/// The last two components of a path: `misc/luneta` for
+/// `/home/you/Projects/misc/luneta`.
 ///
 /// Down a column of agents the leading components are the same `/home/you/…` on every row, so
 /// they cost width without separating anything. What tells two agents apart is at the end.

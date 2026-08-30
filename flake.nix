@@ -1,5 +1,5 @@
 {
-  description = "zj-picker — a personal zellij session picker plugin";
+  description = "luneta — a personal zellij session picker plugin";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
