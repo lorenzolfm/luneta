@@ -401,6 +401,56 @@ Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
 `ChangeApplicationState`. The first is the one worth reading twice: it is how
 the directory and agent screens shell out to `zoxide` and `claude-ps`.
 
+### Verifying what you got
+
+🔴 **Zellij does not verify plugins it downloads.** There is no checksum,
+signature or attestation check anywhere in its downloader — it fetches the URL
+and runs the bytes. So the config line above gives you TLS and GitHub's word,
+and nothing else. Everything in this section is something *you* run; none of it
+happens on its own.
+
+Every release ships a `SHA256SUMS` and a build provenance attestation. To
+actually get the guarantee, download first, check, and install from disk:
+
+```sh
+v=0.1.0
+gh release download "v$v" -R lorenzolfm/luneta -p 'luneta-*.wasm' -p SHA256SUMS
+sha256sum -c SHA256SUMS
+gh attestation verify "luneta-$v.wasm" -R lorenzolfm/luneta
+install -m 0644 "luneta-$v.wasm" ~/.local/share/zellij/plugins/luneta.wasm
+```
+
+then point `config.kdl` at the `file:` path instead of the URL.
+
+The published checksum for the current release, so the common case is one
+command and no download of a second file:
+
+```
+(filled in when the first release is published — until then, take it from
+ SHA256SUMS on the releases page)
+```
+
+**What each half proves**, because they are not the same claim and the
+difference is the whole point:
+
+- `sha256sum -c` proves the bytes are **intact** — not truncated, not corrupted
+  in transit. It proves nothing about **origin**: anyone who could replace the
+  `.wasm` could replace the `SHA256SUMS` sitting beside it.
+- `gh attestation verify` is the one that says where the bytes came from — not
+  "someone with a key signed this" but "this exact artifact was built by
+  `ci.yml`, at this commit, in this repo, on a GitHub-hosted runner". It is
+  keyless: signed against the runner's OIDC identity and recorded in a public
+  transparency log, so there is no maintainer key to guard, rotate, or lose.
+
+There is deliberately no PGP signature. For a CI-built artifact it would make a
+weaker claim than the attestation already does, while adding a private key to
+guard — and it would be guarding an artifact that, per the 🔴 above, the default
+install path never checks anyway.
+
+One consolation for the plain URL install: zellij caches by filename and never
+re-fetches (see the ⚠️ below), so a version you verified once cannot be quietly
+swapped underneath you later.
+
 ⚠️ **Upgrading is a config edit, and the version in the filename is why it
 works.** The downloader caches by the *last path segment of the URL* and
 returns early if that file already exists — no ETag, no timestamp, no re-fetch,
@@ -466,8 +516,20 @@ produced, so the bytes attached to a release are the bytes a PR check went green
 on, and the build is written down once rather than drifting between two
 pipelines.
 
-It renames that artifact to `luneta-<version>.wasm` on the way out. The rename
-is load-bearing for the caching reason above, not cosmetic.
+It renames that artifact to `luneta-<version>.wasm` on the way out, writes a
+`SHA256SUMS` over it, and cuts a keyless build provenance attestation. The
+rename is load-bearing for the caching reason above, not cosmetic.
+
+Then update the checksum printed in [Verifying what you got](#verifying-what-you-got).
+It is the one thing in the release that is not automatic, because it cannot be:
+the hash does not exist until the tag has been built.
+
+🔴 **Actions are pinned by commit SHA, not by tag.** `@v7` is a ref the action's
+own repo can repoint at any time, so pinning to it trusts every commit that repo
+will ever make. The threat model for a plugin distributed this way is mostly
+this pipeline: whatever runs here can put bytes in front of users under our
+name. The trailing `# v7` is a label for humans; the SHA is the pin. Bump both
+together, deliberately.
 
 There is no `cargo test` step, because there is nothing to run — the crate has
 no test modules, and a green step asserting nothing is worse than no step. What
