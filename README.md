@@ -380,21 +380,35 @@ changes was never going to be useful.
 The cost of that choice: upstream fixes never arrive, and a zellij upgrade means
 bumping the `zellij-tile` pin by hand and rebuilding.
 
-## Building
+## Installing
 
-The **system rustc cannot build this.** Nix ships `std` for the host triple only
-and there is no `rustup` to add targets with, so `wasm32-wasip1` fails with
-`error[E0463]: can't find crate for 'std'`. The flake solves it: it takes the
-`rust-overlay` toolchain pinned to rust 1.95.0 — the channel zellij's own
-`rust-toolchain.toml` names — with `wasm32-wasip1` added.
+One config line. Zellij fetches the plugin itself — no clone, no rust
+toolchain, no `make`:
 
-```sh
-nix develop          # or: direnv allow, once
-make install
+```kdl
+plugins {
+    // ...
+    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.1.0/luneta-0.1.0.wasm"
+}
 ```
 
-`make install` builds and copies the `.wasm` to
-`~/.local/share/zellij/plugins/luneta.wasm`.
+`http` and `https` locations parse to `RunPluginLocation::Remote`
+(`layout.rs:629`) and the downloader follows redirects (`downloader.rs:59`),
+which is what makes a GitHub release asset work at all — those 302 to
+`objects.githubusercontent.com`.
+
+Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
+`ChangeApplicationState`. The first is the one worth reading twice: it is how
+the directory and agent screens shell out to `zoxide` and `claude-ps`.
+
+⚠️ **Upgrading is a config edit, and the version in the filename is why it
+works.** The downloader caches by the *last path segment of the URL* and
+returns early if that file already exists — no ETag, no timestamp, no re-fetch,
+ever (`downloader.rs:88-92`, cached under `~/.cache/zellij/<zellij-version>/`).
+An asset named plainly `luneta.wasm` would pin you forever to whichever build
+you downloaded first. Point the line at the new release to move; expect one
+fresh permission prompt, since the cache keys on the location string and that
+string just changed.
 
 That `.wasm` is the whole install. The other two screens each want one ordinary
 program on the zellij **server's** `PATH`, and neither is required:
@@ -410,9 +424,55 @@ where you keep them is your business — but note it is the *server's* `PATH`, n
 your shell's: the server inherits it from whatever launched it, which on a
 long-lived session may be older than your current profile.
 
+## Building it yourself
+
+Only needed to hack on the plugin — to *use* it, see [Installing](#installing).
+
+The **system rustc cannot build this.** Nix ships `std` for the host triple only
+and there is no `rustup` to add targets with, so `wasm32-wasip1` fails with
+`error[E0463]: can't find crate for 'std'`. The flake solves it: it takes the
+`rust-overlay` toolchain pinned to rust 1.95.0 — the channel zellij's own
+`rust-toolchain.toml` names — with `wasm32-wasip1` added.
+
+```sh
+nix develop          # or: direnv allow, once
+make install
+```
+
+`make install` builds and copies the `.wasm` to
+`~/.local/share/zellij/plugins/luneta.wasm`, which is the `file:` path the rest
+of this README uses. A local build and a release asset are the same bytes
+reached two ways; the location string is the only thing that differs, and it
+has to be spelled the same way in every binding either way.
+
 ⚠️ **Keep that path stable.** Zellij caches granted permissions against the
 **absolute path** of the `.wasm` (`~/.cache/zellij/permissions.kdl`), so moving
 or renaming it makes zellij prompt for permissions again.
+
+### Cutting a release
+
+CI builds through the flake, so the published `.wasm` comes off the same pinned
+toolchain as a local `make build` — the rust version is written down once, in
+`flake.nix`.
+
+```sh
+# bump `version` in Cargo.toml first; the workflow refuses a tag that disagrees
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/ci.yml` builds on every PR and releases on a `v*` tag. The
+`release` job does **not** build: it takes the artifact the `build` job
+produced, so the bytes attached to a release are the bytes a PR check went green
+on, and the build is written down once rather than drifting between two
+pipelines.
+
+It renames that artifact to `luneta-<version>.wasm` on the way out. The rename
+is load-bearing for the caching reason above, not cosmetic.
+
+There is no `cargo test` step, because there is nothing to run — the crate has
+no test modules, and a green step asserting nothing is worse than no step. What
+CI does check is that the code still compiles for `wasm32-wasip1`, which is the
+failure a host-target build would miss.
 
 ## The edit → see-it loop
 
@@ -456,23 +516,33 @@ dev loop is usually your editor. Reloading in place needs no pane id.
 
 Add `SESSION=<name>` to any recipe to drive a session other than the current one.
 
-## Installing it as `Ctrl-j`
+## Binding it to `Ctrl-j`
 
-`config.kdl` needs a plugin alias plus the bindings re-pointed:
+The alias from [Installing](#installing) is half of it; the bindings have to be
+re-pointed at `"luneta"` instead of `"session-manager"`.
 
-```kdl
-plugins {
-    // ...
-    luneta location="file:~/.local/share/zellij/plugins/luneta.wasm"
-}
-```
-
-A `file:~` URL is fine — the tilde is preserved and shell-expanded
-(`layout.rs:605-607,619`), so an absolute path is not required.
-
-Then point the bindings at `"luneta"` instead of `"session-manager"`.
 Changing the alias block **requires a zellij restart**; changing the `.wasm`
 behind it does not.
+
+### Your location string
+
+Everything below writes the location out in full rather than using the alias,
+for the reason in the first 🔴 note. **Whichever form you installed with is the
+form to write** — they are interchangeable everywhere a location appears, and
+nothing else in the binding changes:
+
+```kdl
+"https://github.com/lorenzolfm/luneta/releases/download/v0.1.0/luneta-0.1.0.wasm"
+"file:/home/you/.local/share/zellij/plugins/luneta.wasm"
+```
+
+A `file:~` URL is fine too — the tilde is preserved and shell-expanded
+(`layout.rs:605-607,619`), so an absolute path is not required.
+
+🔴 **Do not mix the two forms.** Zellij keys a plugin instance on its location,
+so a `file:` binding and an `https:` binding are two different plugins: you get
+two floating panes stacked over each other, the same trap as the
+`agents_command` mismatch further down.
 
 ### Opening straight onto a screen
 

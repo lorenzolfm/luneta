@@ -1,0 +1,111 @@
+# Build on every PR; release when a tag says to.
+#
+# One workflow rather than two, for the same reason CI builds through the flake
+# rather than a toolchain action: the build should be written down once. A
+# separate release pipeline would drift from the one PRs exercise, and the drift
+# would surface as a tag that fails after the code is already merged.
+#
+# So the `release` job does not build. It takes the artifact `build` produced,
+# which makes the bytes attached to a release the same bytes a PR check went
+# green on.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+# Read-only by default. Only `release` widens this, and only for the step that
+# has to create something.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # The flake hardcodes `system = "x86_64-linux"`, so the runner has to be
+    # one. An arm64 or macos runner would fail in the flake, not in the build.
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Through the flake rather than a toolchain action, so CI builds with the
+      # exact rust the flake pins (1.95.0, the channel zellij's own
+      # rust-toolchain.toml names) and there is only one place that version is
+      # written down.
+      #
+      # There is nothing to `cargo test`: the crate is a plugin with no test
+      # modules, and a green test step that asserts nothing is worse than no
+      # test step. This checks that it compiles for wasm32-wasip1, which is the
+      # thing a host-target build would not have caught.
+      - name: Build
+        run: nix develop --command make build
+
+      - name: Read the version out of Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: luneta-wasm
+          path: target/wasm32-wasip1/release/luneta.wasm
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # to create the release and attach the .wasm
+
+    steps:
+      # The tag names the asset, and the asset name is what zellij caches
+      # against, so a tag that disagrees with Cargo.toml would ship a build
+      # labelled as a version it is not. Cheap to check, miserable to notice
+      # after the fact -- the release is already public by then.
+      - name: Check the tag agrees with Cargo.toml
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          crate="${{ needs.build.outputs.version }}"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: luneta-wasm
+
+      # 🔴 The version belongs in the FILENAME, not just the tag directory.
+      # Zellij's downloader caches remote plugins by the last path segment of
+      # the URL and returns early if that file already exists -- no ETag, no
+      # timestamp, no re-fetch, ever (zellij-utils downloader.rs:88-92). Ship
+      # every release as `luneta.wasm` and each user is pinned forever to
+      # whichever build they happened to download first, with no way to hand
+      # them a fix.
+      - name: Name the asset after the version
+        run: cp luneta.wasm "luneta-${GITHUB_REF_NAME#v}.wasm"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: luneta-${{ needs.build.outputs.version }}.wasm
+          generate_release_notes: true
