@@ -23,24 +23,6 @@ pub enum Kind {
     Resurrectable,
 }
 
-impl Kind {
-    pub fn full_tag(&self) -> &'static str {
-        match self {
-            Kind::Live => "[ATTACH]",
-            Kind::Resurrectable => "[RESURRECT]",
-        }
-    }
-
-    /// A floating pane can be as little as ~3 rows wide-open, so the narrow forms are not
-    /// decoration — they are what keeps the tag on screen at all.
-    pub fn abbr_tag(&self) -> &'static str {
-        match self {
-            Kind::Live => "[A]",
-            Kind::Resurrectable => "[R]",
-        }
-    }
-}
-
 /// One row. This *is* one match-set entry — there is no separate render-side list.
 pub struct Row {
     pub name: String,
@@ -151,13 +133,25 @@ impl MatchSet {
                     }
                 }
             }
-            // Non-empty term: exact match, then live before resurrectable, then score, then
-            // recency. Type comes *above* score deliberately — that is what stops the
+            // Non-empty term: live before resurrectable, then exact match, then score, then
+            // recency. Type comes above everything deliberately — that is what stops the
             // live/dead boundary from moving as you type.
+            //
+            // ⚠️ `is_exact` used to outrank type, which quietly broke rule 2 above: with a live
+            // `rapid` and a dead `api`, typing `api` put the dead row *first* and the list was
+            // no longer two groups but an interleaving. That was survivable while every row
+            // carried its own `[ATTACH]`/`[RESURRECT]` tag. It is not survivable now that the
+            // groups are what say which is which — a single separator cannot describe a list
+            // that is not partitioned, and drawing one anyway would file a live session under
+            // "dead".
+            //
+            // The cost is real and worth naming: typing a dead session's exact name no longer
+            // lands the cursor on it when live rows also match the term. It goes to the top of
+            // the dead group instead, and the input line says so.
             self.rows.sort_by(|a, b| {
-                b.is_exact
-                    .cmp(&a.is_exact)
-                    .then_with(|| a.kind_rank().cmp(&b.kind_rank()))
+                a.kind_rank()
+                    .cmp(&b.kind_rank())
+                    .then_with(|| b.is_exact.cmp(&a.is_exact))
                     .then_with(|| b.score.cmp(&a.score))
                     .then_with(|| a.age.cmp(&b.age))
             });

@@ -56,27 +56,6 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn full_tag(&self) -> &'static str {
-        match self {
-            Action::Create => "[CREATE]",
-            Action::Attach => "[ATTACH]",
-            Action::Resurrect => "[RESURRECT]",
-            Action::Here => "[HERE]",
-        }
-    }
-
-    /// The narrow forms, for the same reason the session screen has them: a floating pane can
-    /// be a few columns wider than the names it is holding.
-    pub fn abbr_tag(&self) -> &'static str {
-        match self {
-            Action::Create => "[C]",
-            Action::Attach => "[A]",
-            Action::Resurrect => "[R]",
-            Action::Here => "[·]",
-        }
-    }
-
-    /// The same thing spelled for the prompt line.
     pub fn verb(&self) -> &'static str {
         match self {
             Action::Create => "Create",

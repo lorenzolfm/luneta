@@ -61,17 +61,6 @@ const ACCENT: usize = 3;
 /// because a full-width box has room for it and three columns jammed together read as one.
 const GAP: usize = 2;
 
-/// How much had to be given up to fit the box's width.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum Fit {
-    /// name + [ATTACH] + age
-    Full,
-    /// name + [A] + age
-    AbbrTag,
-    /// name + [A]
-    NoAge,
-}
-
 /// A note line: what it says, and whether saying it is bad news.
 struct Note {
     text: String,
@@ -348,9 +337,6 @@ fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
 // Sessions
 // ---------------------------------------------------------------------------------------------
 
-/// `[RESURRECT]` collapsed to `[R]`, and the width that costs.
-const ABBR_TAG: usize = 3;
-
 /// The narrowest a path column is worth having. Below this it says nothing a `…` would not, so
 /// the column is dropped and the name and tag get the room.
 const MIN_PATH: usize = 12;
@@ -364,38 +350,82 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
     if capacity == 0 {
         return Vec::new();
     }
-    let (start, end) = viewport(state.selected.unwrap_or(0), state.rows.len(), capacity);
-    let window = &state.rows[start..end];
+
+    // The separator takes a row of its own, so the window is over *display lines* rather than
+    // over rows. Every index below is one or the other and never both: `row` indexes
+    // `state.rows` and is what the selection means, `line` indexes what is drawn.
+    let dead_at = dead_from(&state.rows);
+    let line_of = |row: usize| row + usize::from(dead_at.is_some_and(|at| row >= at));
+    let lines = state.rows.len() + usize::from(dead_at.is_some());
+    let selected_line = state.selected.map(line_of).unwrap_or(0);
+    let (start, end) = viewport(selected_line, lines, capacity);
 
     // Widths are measured over the *visible* window only. Measuring the whole list would make
     // the name column jump as you scroll, for the sake of names you cannot see.
-    let name_width = window.iter().map(|r| r.name.width()).max().unwrap_or(0);
-    let tag_width = window.iter().map(|r| r.kind.full_tag().width()).max().unwrap_or(0);
-    let age_width = window.iter().map(|r| format_age(r.age).width()).max().unwrap_or(0);
-    let fit = choose_fit(name_width, tag_width, age_width, inner);
-    let name_budget = name_column_budget(&fit, tag_width, age_width, inner);
-    let tag_column = if matches!(fit, Fit::Full) { tag_width } else { ABBR_TAG };
-    // Measured after truncation, which is the only width that will ever be drawn.
-    let name_column =
-        window.iter().map(|r| truncate(&r.name, name_budget).width()).max().unwrap_or(0);
-
-    window
+    let visible = |line: usize| {
+        dead_at.map_or(Some(line), |at| match line.cmp(&at) {
+            std::cmp::Ordering::Less => Some(line),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(line - 1),
+        })
+    };
+    let window: Vec<usize> = (start..end).filter_map(visible).collect();
+    let age_width = window
         .iter()
-        .enumerate()
-        .map(|(offset, row)| {
-            let selected = state.selected == Some(start + offset);
-            result_line(row, selected, &fit, name_budget, name_column, tag_column, inner)
+        .map(|i| format_age(state.rows[*i].age).width())
+        .max()
+        .unwrap_or(0);
+    // Two columns now that the tag is gone, so the name gets everything the age does not need
+    // and there is nothing left to degrade — the `Full`/`AbbrTag`/`NoAge` ladder went with it.
+    let name_budget = inner.saturating_sub(GAP + age_width).max(4);
+
+    (start..end)
+        .map(|line| match visible(line) {
+            None => separator(inner, "🪦 Dead sessions"),
+            Some(i) => {
+                let selected = state.selected == Some(i);
+                result_line(&state.rows[i], selected, name_budget, age_width, inner)
+            },
         })
         .collect()
+}
+
+/// Where the dead sessions start, when any of them do.
+///
+/// A single position, not a search per row: `MatchSet` sorts live before resurrectable at every
+/// stage (see its module doc, rule 2), so the list is always two groups and never an
+/// interleaving. If that ever stops being true this returns a boundary that files live rows
+/// under a headstone, which is why the sort keeps `kind_rank` above everything else.
+fn dead_from(rows: &[Row]) -> Option<usize> {
+    rows.iter().position(|row| row.kind == Kind::Resurrectable)
+}
+
+/// `🪦 Dead sessions ──────────────────`
+///
+/// Chrome, not a `Row`. It never enters `MatchSet.rows`, so it cannot be selected, `↑`/`↓` step
+/// over it without knowing it is there, and `selected_name()` cannot return it. It scrolls with
+/// the list like any other line: pinning it would mean `viewport` reserving a row conditionally
+/// on where the selection sits, and the input line already says `Resurrect` for the highlighted
+/// row, so scrolling it away costs the grouping, not the meaning.
+///
+/// The rule runs to the right edge rather than being centred, which also makes it self-
+/// correcting: `🪦` is East-Asian-Wide and a fair number of terminal fonts draw it in one cell
+/// anyway, and a rule that ends at the border absorbs the disagreement.
+fn separator(inner: usize, label: &str) -> Text {
+    let mut line = Line::new();
+    line.push(&truncate(label, inner), LABEL);
+    if line.columns() < inner {
+        line.gap(1);
+        line.push(&"─".repeat(inner - line.columns()), TAG);
+    }
+    line.finish(inner)
 }
 
 fn result_line(
     row: &Row,
     selected: bool,
-    fit: &Fit,
     name_budget: usize,
-    name_column: usize,
-    tag_column: usize,
+    age_width: usize,
     inner: usize,
 ) -> Text {
     let name = truncate(&row.name, name_budget);
@@ -406,20 +436,13 @@ fn result_line(
 
     let mut line = Line::new();
     line.push_hits(&name, NAME, ACCENT, &hits);
-    line.pad_to(name_column);
-    line.gap(GAP);
-    line.push(
-        match fit {
-            Fit::Full => row.kind.full_tag(),
-            Fit::AbbrTag | Fit::NoAge => row.kind.abbr_tag(),
-        },
-        TAG,
-    );
-    if !matches!(fit, Fit::NoAge) {
-        line.pad_to(name_column + GAP + tag_column);
-        line.gap(GAP);
-        line.push(&format_age(row.age), LABEL);
-    }
+    // The age is pushed flush against the right border rather than left-packed behind the
+    // longest name. Two columns in a box as wide as the pane would otherwise huddle at the left
+    // with half the box empty beside them, and the age column would shift every time the
+    // longest visible name changed.
+    let age = format_age(row.age);
+    line.pad_to(inner.saturating_sub(age.width().max(age_width)));
+    line.push(&age, LABEL);
 
     let text = line.finish(inner);
     if selected {
@@ -427,28 +450,6 @@ fn result_line(
     } else {
         text
     }
-}
-
-fn choose_fit(name_width: usize, tag_width: usize, age_width: usize, inner: usize) -> Fit {
-    if name_width + GAP + tag_width + GAP + age_width <= inner {
-        return Fit::Full;
-    }
-    if name_width + GAP + ABBR_TAG + GAP + age_width <= inner {
-        return Fit::AbbrTag;
-    }
-    Fit::NoAge
-}
-
-/// How many columns the name may use once the fixed columns have taken theirs. A name is
-/// truncated rather than wrapped: a wrapped name would break the one-row-per-session invariant
-/// the selection index depends on.
-fn name_column_budget(fit: &Fit, tag_width: usize, age_width: usize, inner: usize) -> usize {
-    let fixed = match fit {
-        Fit::Full => GAP + tag_width + GAP + age_width,
-        Fit::AbbrTag => GAP + ABBR_TAG + GAP + age_width,
-        Fit::NoAge => GAP + ABBR_TAG,
-    };
-    inner.saturating_sub(fixed).max(4)
 }
 
 /// The search term, with the `Enter` outcome spelled out beside it.
@@ -534,28 +535,19 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
     let (start, end) = viewport(dirs.selected.unwrap_or(0), dirs.rows.len(), capacity);
     let window = &dirs.rows[start..end];
 
-    let full_tag = window.iter().map(|r| r.action.full_tag().width()).max().unwrap_or(0);
     // The name is capped at a third of the width before anything else is decided. Nothing else
     // here has a natural size — a path will happily eat a whole row — so the cap is what keeps
-    // three columns on screen instead of two and a half.
+    // two columns on screen instead of one and a half.
     let name_column =
         window.iter().map(|r| r.name.width()).max().unwrap_or(0).min(inner / 3).max(4);
-    // The tag abbreviates before the path is dropped: you can read `[C]` as easily as
-    // `[CREATE]` once you have seen one of each, and a path is not guessable that way.
-    let (tag_column, abbr) = if name_column + GAP + full_tag + GAP + MIN_PATH <= inner {
-        (full_tag, false)
-    } else {
-        (ABBR_TAG, true)
-    };
-    let remaining = inner.saturating_sub(name_column + GAP + tag_column + GAP);
-    let path_budget = (remaining >= MIN_PATH).then_some(remaining);
+    let path_budget = inner.saturating_sub(name_column + GAP);
 
     window
         .iter()
         .enumerate()
         .map(|(offset, row)| {
             let selected = dirs.selected == Some(start + offset);
-            dir_line(row, selected, abbr, name_column, tag_column, path_budget, inner)
+            dir_line(row, selected, name_column, path_budget, inner)
         })
         .collect()
 }
@@ -563,24 +555,30 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
 fn dir_line(
     row: &DirRow,
     selected: bool,
-    abbr: bool,
     name_column: usize,
-    tag_column: usize,
-    path_budget: Option<usize>,
+    path_budget: usize,
     inner: usize,
 ) -> Text {
+    // The one row `Enter` will not act on, and with the `[HERE]` tag gone this is the only
+    // thing on the row that says so. Greyed out is the universal spelling of "not actionable",
+    // it costs no columns, and this is the only row on any screen where `Enter` does nothing —
+    // so there is nothing else it could be confused with. The input line still spells out
+    // `already in this session` when the highlight lands here.
+    let refused = row.action == Action::Here;
+    let level = if refused { TAG } else { NAME };
+
     let mut line = Line::new();
     // Not highlighted, because the term was never matched against it — the match ran on the
     // path, and painting hits onto a string they were not found in would be a lie that happens
     // to line up sometimes.
-    line.push(&truncate(&row.name, name_column), NAME);
+    line.push(&truncate(&row.name, name_column), level);
     line.pad_to(name_column);
     line.gap(GAP);
-    line.push(if abbr { row.action.abbr_tag() } else { row.action.full_tag() }, TAG);
-    if let Some(path_budget) = path_budget {
-        line.pad_to(name_column + GAP + tag_column);
-        line.gap(GAP);
-        let (path, dropped) = truncate_left(&row.path, path_budget);
+
+    let (path, dropped) = truncate_left(&row.path, path_budget);
+    if refused {
+        line.push(&path, TAG);
+    } else {
         // The indices are into the *untruncated* path. Those that fell off the left are gone;
         // the rest shift down by what was dropped and back up by one for the `…` standing in
         // for it.
@@ -966,8 +964,9 @@ mod tests {
 
     const HOUR: u64 = 3600;
 
-    /// The whole frame, exactly. Two sessions in a box with room for six rows: the list is
-    /// pinned to the bottom, not the top, so it sits against the prompt below it.
+    /// The whole frame, exactly: the list pinned to the bottom of its box rather than the top,
+    /// the age flush against the right border, and the headstone between the two groups doing
+    /// the job the `[ATTACH]`/`[RESURRECT]` tags used to do per row.
     #[test]
     fn the_list_hugs_the_bottom_of_its_box() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 8 };
@@ -987,12 +986,86 @@ mod tests {
                 "│                            │",
                 "│                            │",
                 "│                            │",
-                "│                            │",
-                "│ luneta  [A]  2h ago        │",
-                "│ old     [R]  3h ago        │",
+                "│ luneta              2h ago │",
+                "│ 🪦 Dead sessions ───────── │",
+                "│ old                 3h ago │",
                 "╰────────────────────────────╯",
             ]
         );
+    }
+
+    /// No dead sessions, no headstone. The separator is drawn exactly when there is a group
+    /// for it to label, so the common case — nothing dead — spends no row on saying so.
+    #[test]
+    fn an_all_live_list_gets_no_headstone() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
+        let state = matches(
+            vec![session("luneta", Kind::Live, HOUR), session("dotfiles", Kind::Live, 2 * HOUR)],
+            Some(0),
+        );
+        let body = search_body(&state, &rect, 0);
+        assert_eq!(body.len(), 2);
+        for line in &body {
+            assert!(!line.content().contains('🪦'), "{}", line.content());
+        }
+    }
+
+    /// A list that is only dead sessions still gets its headstone. Without it — and with the
+    /// tags gone — nothing on screen would say that `Enter` resurrects rather than attaches.
+    #[test]
+    fn an_all_dead_list_still_gets_one() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
+        let state = matches(vec![session("old", Kind::Resurrectable, HOUR)], Some(0));
+        let body = search_body(&state, &rect, 0);
+        assert_eq!(body.len(), 2);
+        assert!(body[0].content().starts_with("│ 🪦 Dead sessions"));
+        assert!(body[1].content().starts_with("│ old"));
+    }
+
+    /// The separator is a display line, so it takes a row from the window like anything else.
+    #[test]
+    fn the_headstone_costs_a_row_of_list() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
+        assert_eq!(rect.inner_height(), 4);
+        let rows = || {
+            vec![
+                session("live-1", Kind::Live, HOUR),
+                session("live-2", Kind::Live, HOUR),
+                session("dead-1", Kind::Resurrectable, HOUR),
+                session("dead-2", Kind::Resurrectable, HOUR),
+            ]
+        };
+        // Four rows and a separator make five display lines for four rows of box, so one row
+        // scrolls off — not all four rows plus a separator crammed into four.
+        let body = search_body(&matches(rows(), Some(0)), &rect, 0);
+        assert_eq!(body.len(), 4);
+        assert_eq!(body.iter().filter(|l| l.content().contains('🪦')).count(), 1);
+    }
+
+    /// Scrolling into the dead group keeps the selection on screen, which is the thing the
+    /// row-index/display-line split exists to get right: the two disagree by one from the
+    /// boundary onwards, and windowing on the wrong one loses the cursor.
+    #[test]
+    fn the_selection_survives_the_boundary() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
+        let names: Vec<String> = (0..10).map(|i| format!("s{i}")).collect();
+        for selected in 0..10 {
+            let rows: Vec<Row> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let kind = if i < 5 { Kind::Live } else { Kind::Resurrectable };
+                    session(name, kind, HOUR)
+                })
+                .collect();
+            let body = search_body(&matches(rows, Some(selected)), &rect, 0);
+            assert_eq!(body.len(), rect.inner_height());
+            let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
+            assert!(
+                shown.iter().any(|l| l.starts_with(&format!("│ {} ", names[selected]))),
+                "selected {selected} fell off: {shown:?}"
+            );
+        }
     }
 
     /// Notes ride on top of the list and the pair anchors as one block, so a note never lands
@@ -1011,7 +1084,7 @@ mod tests {
                 "│                            │",
                 "│                            │",
                 "│ you are in \"desp\" — not l… │",
-                "│ luneta  [ATTACH]  2h ago   │",
+                "│ luneta              2h ago │",
                 "╰────────────────────────────╯",
             ]
         );
@@ -1216,9 +1289,11 @@ mod tests {
             vec![
                 session("luneta", Kind::Live, 2 * 3600),
                 session("dotfiles", Kind::Live, 5 * 3600),
+                session("notes", Kind::Live, 3 * 86400),
                 session("despesas-old", Kind::Resurrectable, 12 * 86400),
+                session("api-spike", Kind::Resurrectable, 40 * 86400),
             ],
-            Some(0),
+            Some(1),
         );
         let notes = vec![Note::dim("you are in \"notes\" — not listed")];
         let rect = screen.results.unwrap();
