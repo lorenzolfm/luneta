@@ -78,10 +78,11 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
 `~/.claude/sessions` nor `/proc` is readable from inside it.
 
 - **Sorted attention-first** — `waiting`, then `idle`, then `busy`, then
-  anything else — with the longest-waiting first inside each group. The status
-  rank sits *above* the fuzzy score, so the boundary between "wants you" and
-  "does not" stays a fixed landmark while you narrow instead of shuffling on
-  every keystroke.
+  anything else — with the most recently changed first inside each group. The
+  status rank sits *above* the fuzzy score, so the boundary between "wants you"
+  and "does not" stays a fixed landmark while you narrow instead of shuffling on
+  every keystroke, and age sits above it too: within one status the agent that
+  changed a moment ago is the one you were just working with.
 - **Statuses are passed through verbatim**, uppercased, behind a glyph:
 
   | | status | why |

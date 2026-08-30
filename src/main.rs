@@ -505,8 +505,8 @@ impl State {
     /// long as you leave the picker open — on the one column the routing decision is made on.
     ///
     /// Adding it to every row is safe *because* it is the same number on every row. A uniform
-    /// offset cannot change the sign of any `age` comparison, so the longest-in-status tiebreak
-    /// lands exactly where it did: the ages move and the list does not.
+    /// offset cannot change the sign of any `age` comparison, so the recency ordering within a
+    /// status lands exactly where it did: the ages move and the list does not.
     ///
     /// Counted in ticks rather than read off a wall clock because the plugin has no wall clock
     /// — a wasi sandbox with `/host` preopened is not a clock — and the timer is already the
