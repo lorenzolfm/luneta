@@ -44,12 +44,30 @@ pub const CONTEXT_VALUE: &str = "agents";
 /// checked **exactly**, so `claude-ps` gaining `started_at` was a loud failure on a screen that
 /// understood every other field perfectly. A key this build has never heard of now costs
 /// nothing, and only a key it *depends* on going missing is still visible.
+///
+/// 🔴 "Still visible" is a promise every depended-on key has to actually keep. `status_age`
+/// did not — it carried a `#[serde(default)]` that turned a renamed key into a silent `0`
+/// rather than a stopped parse — and the screen showed `0s` on every row until someone
+/// happened to notice the ages never moved. Tolerance is for keys we do not read.
 #[derive(Deserialize)]
 struct Wire {
     #[serde(default)]
     status: Option<String>,
-    #[serde(default)]
-    age: u64,
+    /// Seconds in the current status.
+    ///
+    /// 🔴 **Not** `#[serde(default)]`, and that is the whole point of this field. It was, and
+    /// `claude-ps` renamed the key to `status_age` underneath it — so every row deserialised to
+    /// a default `0` and the column read `0s` for every agent, for every status, forever. A
+    /// silent zero is the worst of both worlds: it is not a blank the eye skips, it is a
+    /// confident answer that happens to be wrong, on the column the routing decision is made
+    /// on. Absent now ends the parse and puts the reason on the note line, which is what the
+    /// rest of this struct's tolerance is *for* — unknown keys cost nothing precisely so that a
+    /// key we depend on can be strict.
+    ///
+    /// The alias keeps a `claude-ps` older than the rename working, since neither side is
+    /// versioned against the other.
+    #[serde(alias = "age")]
+    status_age: u64,
     /// `null` when the agent is not inside zellij. One object rather than two fields, so there
     /// is no state where a session is known and its pane is not.
     #[serde(default)]
@@ -514,7 +532,7 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
             session: zellij.session,
             pane,
             status: row.status.unwrap_or_default(),
-            age: Duration::from_secs(row.age),
+            age: Duration::from_secs(row.status_age),
             cwd: row.cwd.unwrap_or_default(),
             context: row.context.map(|c| c.tokens),
         });

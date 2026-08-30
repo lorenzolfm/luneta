@@ -154,13 +154,22 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   for this one is a path derived from `cwd` rather than a proof, so "not known"
   is an ordinary answer and must not read as "no tokens".
 - 🔴 **Keys are read by name, and a document that will not deserialise is loud.**
-  The wire is a JSON array; this screen names only `status`, `age`, `zellij` and
-  `cwd` and ignores the rest. A key it has never heard of costs nothing — which
-  is the point, because the count used to be checked *exactly* and `claude-ps`
-  gaining `started_at` was a hard failure on a screen that understood every other
-  field. A key it *depends* on going missing still stops the parse and puts the
-  reason on the note line, because a picker rendering half a list it cannot
-  vouch for looks exactly like "no agents are running".
+  The wire is a JSON array; this screen names only `status`, `status_age`,
+  `zellij` and `cwd` and ignores the rest. A key it has never heard of costs
+  nothing — which is the point, because the count used to be checked *exactly*
+  and `claude-ps` gaining `started_at` was a hard failure on a screen that
+  understood every other field. A key it *depends* on going missing still stops
+  the parse and puts the reason on the note line, because a picker rendering half
+  a list it cannot vouch for looks exactly like "no agents are running".
+
+  ⚠️ That last sentence is a promise every depended-on key has to actually keep,
+  and `status_age` did not. It was read as `age` behind a `#[serde(default)]`,
+  so when `claude-ps` renamed the key the parse did not stop — every row got a
+  default `0` and the column read `0s` for every agent, in every status, forever.
+  A silent zero is worse than a blank: it is a confident answer that happens to
+  be wrong, on the column the routing decision is made on. Tolerance is for keys
+  this screen does *not* read; the ones it does are strict, and `age` survives as
+  a serde alias so an older `claude-ps` still parses.
 - **`zellij` is one object or `null`.** A session and its pane arrive together or
   not at all, so there is no half-address for `Enter` to guard against; `null`
   means the agent is outside zellij and is counted on the note line.
