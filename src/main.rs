@@ -36,7 +36,7 @@ use zellij_tile::prelude::*;
 const SCREEN_PIPE: &str = "screen";
 
 /// The one plugin configuration key this picker reads: an override for
-/// [`agents::QUERY`], for a server whose `PATH` genuinely lacks `claude-agents`.
+/// [`agents::QUERY`], for a server whose `PATH` genuinely lacks `claude-ps`.
 ///
 /// The value is the executable — a name or an absolute path — and nothing else. Arguments are
 /// not parsed out of it, because a path may contain a space and an argument list would make
@@ -185,7 +185,7 @@ struct State {
     /// The directory list, and why it is empty when it is. Populated out of band by zoxide —
     /// nothing else in here depends on it having arrived.
     dirs: DirSet,
-    /// The agent list. Populated out of band by `claude-agents`, on the same terms as `dirs`.
+    /// The agent list. Populated out of band by `claude-ps`, on the same terms as `dirs`.
     agents: AgentSet,
     /// [`AGENTS_COMMAND`], if a binding passed one. `None` — the ordinary case — means the
     /// bare [`agents::QUERY`] lookup.
@@ -245,7 +245,7 @@ impl ZellijPlugin for State {
             EventType::PermissionRequestResult,
             EventType::Timer,
             EventType::Key,
-            // zoxide and claude-agents both answer here, and `Visible` is when it is worth
+            // zoxide and claude-ps both answer here, and `Visible` is when it is worth
             // asking either of them again.
             EventType::RunCommandResult,
             EventType::Visible,
@@ -474,7 +474,7 @@ impl State {
             .rebuild(&self.matches.search_term, current.as_deref(), origin, policy);
     }
 
-    /// Ask `claude-agents` for the list — once per answer, on the same terms as zoxide.
+    /// Ask `claude-ps` for the list — once per answer, on the same terms as zoxide.
     ///
     /// Deliberately not on the 1s timer: that is the difference between a glance and a watch,
     /// and the watch has not been shown to be worth its reordering yet.

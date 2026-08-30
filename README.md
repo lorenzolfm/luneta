@@ -71,7 +71,7 @@ and one more `Tab` on from there:
 
 ### The agent screen
 
-The list comes from `claude-agents`, a separate tool on `$PATH` that joins what
+The list comes from `claude-ps`, a separate tool on `$PATH` that joins what
 Claude Code publishes about itself (`~/.claude/sessions/<pid>.json`) to the pane
 each agent is running in. The plugin cannot do that join itself: its wasi
 sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
@@ -130,13 +130,32 @@ sandbox preopens only `/host`, `/data`, `/cache` and `/tmp`, so neither
   `(session, pane)` rather than by session — a *sibling* agent in the same
   session is a legitimate target and stays. Agents running outside zellij are
   dropped too, and counted on the note line so they are never silently absent.
-- 🔴 **The column count is checked exactly, and a mismatch is loud.** The wire is
-  nine tab-separated fields — `status age session pane name pid session_id
-  started_at cwd`. Anything else stops the parse and puts the count on the note
-  line (`claude-agents line 1: 10 columns, expected 9`), because a picker that
-  tolerated an extra column would fold it into `cwd` and go on rendering rows
-  off a schema it no longer understands. So a `claude-agents` newer or older
-  than the picker says so instead of looking like "no agents are running".
+- **A token count, where the pane is wide enough for it.** `claude-ps` reports
+  how much context each agent was carrying at its last assistant turn, and the
+  row shows it as `188k` between the age and the cwd. It is the **first** column
+  dropped as the pane narrows, because it informs a decision rather than making
+  one — the other three tell you which pane to go to.
+
+  ⚠️ Tokens, never a percentage. The context window *size* is not written to disk
+  anywhere, so a denominator would have to come from a model-name table that goes
+  confidently wrong the day a new model ships. An unrecognised status renders as
+  itself and you can see it is unrecognised; a wrong denominator renders as a
+  number that looks right.
+
+  A row whose count is missing is left **blank**, not `-`: the producer's join
+  for this one is a path derived from `cwd` rather than a proof, so "not known"
+  is an ordinary answer and must not read as "no tokens".
+- 🔴 **Keys are read by name, and a document that will not deserialise is loud.**
+  The wire is a JSON array; this screen names only `status`, `age`, `zellij` and
+  `cwd` and ignores the rest. A key it has never heard of costs nothing — which
+  is the point, because the count used to be checked *exactly* and `claude-ps`
+  gaining `started_at` was a hard failure on a screen that understood every other
+  field. A key it *depends* on going missing still stops the parse and puts the
+  reason on the note line, because a picker rendering half a list it cannot
+  vouch for looks exactly like "no agents are running".
+- **`zellij` is one object or `null`.** A session and its pane arrive together or
+  not at all, so there is no half-address for `Enter` to guard against; `null`
+  means the agent is outside zellij and is counted on the note line.
 
 ### What `Enter` does
 
@@ -384,7 +403,7 @@ program on the zellij **server's** `PATH`, and neither is required:
 |---|---|---|
 | sessions | — | always works |
 | directories | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | `zoxide is not available` on the note line |
-| agents | [`claude-agents`](https://github.com/lorenzolfm/claude-agents) | `claude-agents is not available` on the note line |
+| agents | [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | `claude-ps is not available` on the note line |
 
 Both are looked up **by name**. Nothing in the source names an install path, so
 where you keep them is your business — but note it is the *server's* `PATH`, not
@@ -492,7 +511,7 @@ Three things about that, each found the hard way:
   the agents it stays there, and the key that used to open the sessions no
   longer does. When each key names its screen, each one lands where it says.
 
-### When `claude-agents` is not on the server's `PATH`
+### When `claude-ps` is not on the server's `PATH`
 
 The escape hatch is one plugin configuration key, `agents_command`, naming the
 executable to run instead:
@@ -503,7 +522,7 @@ bind "Ctrl a" {
         floating true
         move_to_focused_tab true
         skip_plugin_cache true
-        agents_command "/opt/tools/claude-agents"
+        agents_command "/opt/tools/claude-ps"
     }
     // ... the MessagePlugin, unchanged
 }
@@ -518,7 +537,7 @@ bind "Ctrl a" {
   the same trap that put the screen selection on a `MessagePlugin` rather than
   on configuration. Leaving the key out everywhere is the ordinary case.
 - There is deliberately no equivalent for `zoxide`. It is a packaged program on
-  everyone's `PATH`; `claude-agents` is one you build yourself.
+  everyone's `PATH`; `claude-ps` is one you build yourself.
 
 ## Notes for the next change
 

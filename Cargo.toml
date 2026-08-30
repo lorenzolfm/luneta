@@ -9,6 +9,10 @@ zellij-tile = "=0.45.0"
 # workspace pins. `fuzzy-matcher` is the skim scorer behind the filter.
 fuzzy-matcher = { version = "0.3.7", default-features = false }
 unicode-width = { version = "0.2.2", default-features = false }
+# `claude-ps` speaks JSON. Both crates are already in the tree by way of
+# `zellij-tile`, so naming them here costs a manifest line and no wasm bytes.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 opt-level = "z"

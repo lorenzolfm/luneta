@@ -13,13 +13,14 @@
 //! 🔴 The plugin cannot read the agents itself. Its wasi sandbox preopens only `/host`,
 //! `/data`, `/cache` and `/tmp`, so neither `~/.claude/sessions/<pid>.json` nor `/proc` is
 //! reachable from in here — the join between "what Claude says it is doing" and "which pane
-//! that is" has to happen outside. `claude-agents` does it and prints TSV; this module only
-//! parses, filters and orders.
+//! that is" has to happen outside. `claude-ps` does it and prints JSON; this module only
+//! deserialises, filters and orders.
 
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use serde::Deserialize;
 
 use crate::sessions::Selection;
 
@@ -29,27 +30,51 @@ use crate::sessions::Selection;
 ///
 /// If a server `PATH` genuinely lacks it, the plugin's `agents_command` configuration key
 /// overrides this — that is the supported escape hatch, not a wrapper compiled in.
-pub const QUERY: [&str; 1] = ["claude-agents"];
+pub const QUERY: [&str; 1] = ["claude-ps"];
 
 /// Marks our own `RunCommandResult`. Shares the key with the directory screen and differs in
 /// the value — the plugin now issues two commands and the replies are told apart here.
 pub const CONTEXT_KEY: &str = "zj-picker";
 pub const CONTEXT_VALUE: &str = "agents";
 
-/// The number of tab-separated fields `claude-agents` emits:
-/// `status age session pane name pid session_id started_at cwd`.
+/// One object out of `claude-ps`, before this screen has decided anything about it.
 ///
-/// `cwd` is last because it is the one field that can plausibly contain anything, so it is the
-/// field a future column must never be appended after.
-///
-/// ⚠️ Checked **exactly**, not as a minimum, and the difference is the whole point. This was 8
-/// before `claude-agents` gained `started_at`, which had to go *before* `cwd` for the reason
-/// above — and a `splitn(FIELDS, ..)` that tolerated a tenth column would have folded it into
-/// `cwd`, tab and all, and gone on rendering rows off a schema it no longer understood. Now
-/// either arity is a loud [`Status::Failed`] naming the count, on the same line of the screen
-/// that says the tool is missing. The two are still upgraded together; the failure in between
-/// is now visible rather than plausible.
-const FIELDS: usize = 9;
+/// ⚠️ Only the keys this screen reads are named, and everything else in the object is ignored
+/// on purpose. That is the whole gain over the columns this replaced: the count used to be
+/// checked **exactly**, so `claude-ps` gaining `started_at` was a loud failure on a screen that
+/// understood every other field perfectly. A key this build has never heard of now costs
+/// nothing, and only a key it *depends* on going missing is still visible.
+#[derive(Deserialize)]
+struct Wire {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    age: u64,
+    /// `null` when the agent is not inside zellij. One object rather than two fields, so there
+    /// is no state where a session is known and its pane is not.
+    #[serde(default)]
+    zellij: Option<WireZellij>,
+    #[serde(default)]
+    cwd: Option<String>,
+    /// `null` when the producer could not find the session's transcript. Its join is a
+    /// derivation rather than a proof, so an absent count is ordinary.
+    #[serde(default)]
+    context: Option<WireContext>,
+}
+
+#[derive(Deserialize)]
+struct WireContext {
+    tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct WireZellij {
+    session: String,
+    /// A string on the wire, because it comes out of an environment variable and the producer
+    /// does not pretend to know it is a number. This screen needs a `u32` for
+    /// `focus-pane-id`, so one that will not parse is an agent it cannot reach.
+    pane: String,
+}
 
 /// What `Enter` on this row will do. **Not** a rendered tag: the status column already owns
 /// that slot, and from where the user sits both of these mean the same thing — *go there*.
@@ -63,13 +88,14 @@ pub enum Jump {
     Focus,
 }
 
-/// One agent out of `claude-agents`, already known to be inside zellij.
+/// One agent out of `claude-ps`, already known to be inside zellij.
 struct Agent {
     session: String,
     pane: u32,
     status: String,
     age: Duration,
     cwd: String,
+    context: Option<u64>,
 }
 
 /// One row. As on the other two screens, this *is* one match-set entry.
@@ -84,6 +110,14 @@ pub struct AgentRow {
     /// Time in the current status. A duration, not a timestamp.
     pub age: Duration,
     pub cwd: String,
+    /// Tokens in context at the agent's last assistant turn, or `None` where the producer had
+    /// no transcript to read.
+    ///
+    /// ⚠️ Tokens, never a percentage. The window size is not written to disk anywhere, so a
+    /// denominator would have to come from a model-name table — and unlike an unrecognised
+    /// status, which renders as itself, a wrong denominator renders as a number that looks
+    /// right.
+    pub context: Option<u64>,
     /// Another visible row shares this session name, so the pane has to be spelled out.
     pub shared: bool,
     pub jump: Jump,
@@ -147,9 +181,9 @@ impl AgentSet {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
             self.status = Status::Failed(if reason.is_empty() {
-                "claude-agents is not available".to_string()
+                "claude-ps is not available".to_string()
             } else {
-                format!("claude-agents: {}", reason)
+                format!("claude-ps: {}", reason)
             });
             self.all.clear();
             self.outside = 0;
@@ -161,9 +195,9 @@ impl AgentSet {
                 self.outside = outside;
                 self.status = Status::Ready;
             },
-            // A column count this plugin does not know. Reported rather than dropped, for the
+            // A document this plugin cannot read. Reported rather than dropped, for the
             // same reason a non-zero exit is: an empty list would read as "no agents running",
-            // when what it means is "your `claude-agents` and your picker disagree".
+            // when what it means is "your `claude-ps` and your picker disagree".
             Err(reason) => {
                 self.status = Status::Failed(reason);
                 self.all.clear();
@@ -226,6 +260,7 @@ impl AgentSet {
                 status: agent.status.clone(),
                 age: agent.age,
                 cwd: agent.cwd.clone(),
+                context: agent.context,
                 shared: false,
                 jump: if current == Some(agent.session.as_str()) {
                     Jump::Focus
@@ -430,58 +465,64 @@ pub fn abbr_tag(status: &str, frame: u64) -> String {
     }
 }
 
-/// `status age session pane name pid session_id cwd`, tab separated.
+/// The JSON array `claude-ps` prints, as the agents this screen can act on.
 ///
 /// Returns the agents inside zellij, and the **count** of those outside it. Agents outside
 /// zellij are dropped here rather than rendered with a placeholder session: `Enter` could do
 /// nothing for them, and rows `Enter` cannot act on do not belong on a screen whose only job
 /// is reachability. The count survives so they are never silently invisible.
 ///
-/// The one thing that is **not** dropped is a line with the wrong number of columns. That is
-/// not a row this screen cannot use, it is evidence that [`FIELDS`] no longer describes the
-/// tool, and every later row is suspect for the same reason — so the first one ends the parse.
+/// The one thing that is **not** dropped is a document that will not deserialise. That is not a
+/// row this screen cannot use, it is evidence that the tool and this build no longer agree, and
+/// every row in it is suspect for the same reason — so it ends the parse rather than rendering
+/// a partial list that looks complete.
 fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
+    let wire: Vec<Wire> =
+        serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {}", error))?;
+
     let mut agents = Vec::new();
     let mut outside = 0;
-    for (number, line) in stdout.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        // Plain `split`, so a tenth column is a mismatch rather than a tab quietly buried in
-        // the cwd. The cost is a cwd that contains a literal tab, which is not a path anyone
-        // has, weighed against a schema change that would otherwise go unnoticed.
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != FIELDS {
-            return Err(format!(
-                "claude-agents line {}: {} columns, expected {}",
-                number + 1,
-                fields.len(),
-                FIELDS
-            ));
-        }
-        let (status, age, session, pane, cwd) =
-            (fields[0], fields[1], fields[2], fields[3], fields[8]);
-        // The tool marks an agent that is not in zellij with `-` in both join columns.
-        let Ok(pane) = pane.parse::<u32>() else {
+    for row in wire {
+        // Both arms are "not somewhere `Enter` can put you": no zellij at all, or a pane id
+        // that is not a number and so cannot be handed to `focus-pane-id`.
+        let Some(zellij) = row.zellij else {
             outside += 1;
             continue;
         };
-        if session == "-" || session.is_empty() {
+        let Ok(pane) = zellij.pane.parse::<u32>() else {
+            outside += 1;
+            continue;
+        };
+        if zellij.session.is_empty() {
             outside += 1;
             continue;
         }
-        let Ok(age) = age.parse::<u64>() else {
-            continue;
-        };
         agents.push(Agent {
-            session: session.to_string(),
+            session: zellij.session,
             pane,
-            status: status.to_string(),
-            age: Duration::from_secs(age),
-            cwd: cwd.to_string(),
+            status: row.status.unwrap_or_default(),
+            age: Duration::from_secs(row.age),
+            cwd: row.cwd.unwrap_or_default(),
+            context: row.context.map(|c| c.tokens),
         });
     }
     Ok((agents, outside))
+}
+
+/// A token count at a glance: `950`, `188k`, `1.2M`.
+///
+/// Rounded rather than truncated — 187,953 tokens is nearer `188k` than `187k`, and three
+/// significant figures is all this column is for. A count that rounds up to a million reads as
+/// `1.0M` rather than as `1000k`.
+pub fn format_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return format!("{}", tokens);
+    }
+    let tenths_of_m = (tokens + 50_000) / 100_000;
+    if tenths_of_m >= 10 {
+        return format!("{}.{}M", tenths_of_m / 10, tenths_of_m % 10);
+    }
+    format!("{}k", (tokens + 500) / 1_000)
 }
 
 /// Compact elapsed time as a **duration** — `4s`, `35m`, `2h`.
