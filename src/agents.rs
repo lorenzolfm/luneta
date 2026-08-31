@@ -14,6 +14,7 @@
 //! Something outside must join what Claude reports to the pane that runs it. `claude-ps` does
 //! that and prints JSON. This module only deserialises, filters and sorts.
 
+use std::ops::Deref;
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -45,6 +46,7 @@ pub const CONTEXT_VALUE: &str = "agents";
 /// `0s`. Tolerance is for the keys we do not read.
 #[derive(Deserialize)]
 struct Wire {
+    /// The word Claude reports, or `null`. Wide here and narrow after [`Status::parse`].
     #[serde(default)]
     status: Option<String>,
     /// Seconds in the current status.
@@ -103,7 +105,8 @@ struct Agent {
     /// string.
     display: String,
     pane: u32,
-    status: String,
+    /// `None` when `claude-ps` reported no status.
+    status: Option<Status>,
     age: Duration,
     cwd: String,
 }
@@ -117,9 +120,8 @@ pub struct AgentRow {
     /// matched this string, and `indices` are offsets into it.
     pub display: String,
     pub pane: u32,
-    /// The status from Claude, unchanged. Nothing compares it to a known set to decide whether
-    /// to show it. See [`status_rank`].
-    pub status: String,
+    /// What the agent is doing, or `None` when `claude-ps` reported nothing.
+    pub status: Option<Status>,
     /// Time in the current status when this row was built: the value in the snapshot plus the
     /// age of the snapshot. This is a duration, not a time.
     ///
@@ -155,20 +157,87 @@ impl AgentRow {
 
 /// Why the agent list is empty.
 ///
-/// This is the enum of the directory screen, for the same reason. "Still asking", "the tool is
-/// absent" and "nothing runs" are three different facts, and a blank list for all three makes a
-/// missing program look like a broken feature.
+/// This is [`crate::dirs::Status`] under another name, for the same reason. "Still asking", "the
+/// tool is absent" and "nothing runs" are three different facts, and a blank list for all three
+/// makes a missing program look like a broken feature. The name differs because on this screen
+/// `Status` is what an agent is doing. See [`Status`].
 #[derive(Default)]
-pub enum Status {
+pub enum Fetch {
     #[default]
     Waiting,
     Ready,
     Failed(String),
 }
 
+/// A status word this build cannot name, kept verbatim and never empty.
+#[derive(Clone)]
+pub struct StatusWord {
+    /// The first character, which is the narrow-column form and proves the word is not empty.
+    initial: char,
+    word: String,
+}
+
+impl StatusWord {
+    /// The trimmed word, or `None` if there is nothing left of it.
+    fn new(word: &str) -> Option<Self> {
+        Some(StatusWord {
+            initial: word.chars().next()?,
+            word: word.to_string(),
+        })
+    }
+
+    /// The first character, for a column too narrow for the word.
+    fn initial(&self) -> char {
+        self.initial
+    }
+}
+
+impl Deref for StatusWord {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.word
+    }
+}
+
+/// What one agent is doing, as Claude Code reports it.
+///
+/// The vocabulary is open and grows with the version of Claude Code, so a word from a later
+/// release is [`Status::Unknown`] rather than an error: it keeps its own text, sorts last, and
+/// still shows. Nothing here removes a row.
+#[derive(Clone)]
+pub enum Status {
+    /// The agent asked you something and stopped. The status this screen exists for.
+    Waiting,
+    /// Finished, and waiting for your next instruction.
+    Idle,
+    /// Working, and will leave this status on its own.
+    Busy,
+    /// A shell in the pane, not a turn of the agent.
+    Shell,
+    /// A word this build cannot name, carried verbatim for the screen.
+    Unknown(StatusWord),
+}
+
+impl Status {
+    /// The reported word, or `None` when nothing was reported.
+    pub fn parse(status: Option<&str>) -> Option<Self> {
+        let word = status?.trim();
+        Some(match word.to_ascii_lowercase().as_str() {
+            "waiting" => Status::Waiting,
+            "idle" => Status::Idle,
+            "busy" => Status::Busy,
+            "shell" => Status::Shell,
+            // An empty word stops here, because `StatusWord` has no empty value. Nothing
+            // reported and nothing left after the trim are one fact.
+            _ => Status::Unknown(StatusWord::new(word)?),
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct AgentSet {
-    pub status: Status,
+    pub status: Fetch,
     pub rows: Vec<AgentRow>,
     pub selected: Option<usize>,
     pub asking: bool,
@@ -190,7 +259,7 @@ impl AgentSet {
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
-            self.status = Status::Failed(if reason.is_empty() {
+            self.status = Fetch::Failed(if reason.is_empty() {
                 "claude-ps is not available".to_string()
             } else {
                 format!("claude-ps: {}", reason)
@@ -203,13 +272,13 @@ impl AgentSet {
             Ok((agents, outside)) => {
                 self.all = agents;
                 self.outside = outside;
-                self.status = Status::Ready;
+                self.status = Fetch::Ready;
             },
             // A document this plugin cannot read. It is reported, not discarded: an empty
             // list would mean that no agents run, when it means that `claude-ps` and the
             // picker disagree.
             Err(reason) => {
-                self.status = Status::Failed(reason);
+                self.status = Fetch::Failed(reason);
                 self.all.clear();
                 self.outside = 0;
             },
@@ -218,7 +287,7 @@ impl AgentSet {
 
     pub fn fail(&mut self, reason: impl Into<String>) {
         self.asking = false;
-        self.status = Status::Failed(reason.into());
+        self.status = Fetch::Failed(reason.into());
         self.all.clear();
         self.outside = 0;
     }
@@ -281,7 +350,7 @@ impl AgentSet {
                     Jump::Switch
                 },
                 indices,
-                rank: status_rank(&agent.status),
+                rank: status_rank(agent.status.as_ref()),
                 score,
                 is_exact,
             });
@@ -356,7 +425,7 @@ impl AgentSet {
     /// The two differ only when every busy agent is scrolled out of view, and the cost is one
     /// redraw of what is already on the screen.
     pub fn any_busy(&self) -> bool {
-        self.rows.iter().any(|row| is_busy(&row.status))
+        self.rows.iter().any(|row| is_busy(row.status.as_ref()))
     }
 
     /// Move the cursor. The cursor stops at both ends, as on the other screens.
@@ -370,38 +439,28 @@ impl AgentSet {
 
 /// Where a status sorts. This only ranks; it never removes a row.
 ///
-/// The set of statuses is open and changes with the version of Claude Code. This screen was
-/// built against a release that sends `waiting`, `idle`, `busy` and `shell`, which is one more
-/// than the release before it. A table that showed only known statuses would have hidden a live
-/// row on the day it was written. An unknown status therefore shows its own word and sorts
-/// last. The plugin cannot know whether a new word needs attention.
-fn status_rank(status: &str) -> u8 {
-    if status.eq_ignore_ascii_case("waiting") {
-        0
-    } else if status.eq_ignore_ascii_case("idle") {
-        1
-    } else if status.eq_ignore_ascii_case("busy") {
-        2
-    } else {
-        3
+/// A word this build cannot name sorts below the four it can, and an unreported status below
+/// that. The plugin cannot know whether a new word needs attention, so it cannot rank it above
+/// one it understands.
+fn status_rank(status: Option<&Status>) -> u8 {
+    match status {
+        Some(Status::Waiting) => 0,
+        Some(Status::Idle) => 1,
+        Some(Status::Busy) => 2,
+        Some(Status::Shell) => 3,
+        Some(Status::Unknown(_)) => 4,
+        None => 5,
     }
 }
 
 /// Is this the status the screen exists for?
-///
-/// This is the only comparison of a status word for presentation. It is safe for the reason
-/// `status_rank` is safe: an unknown status still shows, but not in the accent colour.
-pub fn is_waiting(status: &str) -> bool {
-    status.eq_ignore_ascii_case("waiting")
+pub fn is_waiting(status: Option<&Status>) -> bool {
+    matches!(status, Some(Status::Waiting))
 }
 
-/// Does the glyph of this status move?
-///
-/// The plugin asks this before it draws, to decide whether the next tick must repaint. It is a
-/// question about cost, not about correctness. A wrong answer for an unknown status costs one
-/// spinner that does not turn.
-pub fn is_busy(status: &str) -> bool {
-    status.eq_ignore_ascii_case("busy")
+/// Does the glyph of this status move? Asked before a draw, to decide whether to repaint.
+pub fn is_busy(status: Option<&Status>) -> bool {
+    matches!(status, Some(Status::Busy))
 }
 
 /// One turn of the busy spinner, one frame per animation tick.
@@ -411,63 +470,67 @@ pub fn is_busy(status: &str) -> bool {
 /// widths would move the columns to the right ten times a second.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// The glyph for a status, or `None` for a status this build does not know.
+/// The glyph for a status. `frame` is the animation tick, which only `busy` reads.
 ///
-/// `frame` is the animation tick. Only `busy` reads it. See [`SPINNER`].
-///
-/// This table is decoration only. It never decides whether a row shows, never decides where a
-/// row sorts, and never replaces the status word. A status added after this was written keeps
-/// its word, takes the neutral glyph, and still shows. A stale table thus costs a picture, not
-/// a row.
-///
-/// The four values are the full set of Claude Code 2.1.251, read from the binary
-/// (`"busy","shell","idle","waiting"`). That makes the table complete today, which is not a
-/// reason to remove the fallback: the set grew by one (`shell`) between two releases.
-fn glyph(status: &str, frame: u64) -> Option<&'static str> {
-    Some(match status.to_ascii_lowercase().as_str() {
+/// Decoration only: it never decides whether a row shows, never decides where a row sorts, and
+/// never replaces the status word.
+fn glyph(status: &Status, frame: u64) -> &'static str {
+    match status {
         // A raised hand: the agent asked you something and stopped. This is the status the
         // screen exists for.
-        "waiting" => "🙋",
+        Status::Waiting => "🙋",
         // An idle agent has finished and waits for your next instruction, so it sorts above a
         // busy one. A cup, not a 💤, because it is not asleep.
-        "idle" => "☕",
+        Status::Idle => "☕",
         // The only glyph that moves, because a busy agent leaves this status on its own. The
         // row thus shows that without the age column.
-        "busy" => SPINNER[(frame as usize) % SPINNER.len()],
-        "shell" => "🐚",
-        _ => return None,
-    })
+        Status::Busy => SPINNER[(frame as usize) % SPINNER.len()],
+        Status::Shell => "🐚",
+        // Not one of the four, so a word we cannot name cannot look like one we can.
+        Status::Unknown(_) => "🛸",
+    }
 }
 
-/// Unknown. It is not one of the four glyphs, so a status we cannot name cannot look like one
-/// we can.
-const UNKNOWN_GLYPH: &str = "🛸";
+/// Nothing was reported. Distinct from the glyph of [`Status::Unknown`], which is a word that
+/// arrived and could not be named.
+const UNREPORTED_GLYPH: &str = "❔";
 
-/// The glyph, then the status word in capitals, unchanged.
+/// The word for the status column, or a stand-in when nothing was reported.
+pub fn word(status: Option<&Status>) -> &str {
+    match status {
+        Some(Status::Waiting) => "waiting",
+        Some(Status::Idle) => "idle",
+        Some(Status::Busy) => "busy",
+        Some(Status::Shell) => "shell",
+        Some(Status::Unknown(word)) => word,
+        None => "unreported",
+    }
+}
+
+/// The glyph, then the status word in capitals.
 ///
-/// The word stays. You scan the column for the glyph, but the word explains a glyph you have
-/// not seen before. The word is also the only part that is correct for a status released after
-/// this code.
-pub fn full_tag(status: &str, frame: u64) -> String {
-    format!(
-        "{} {}",
-        glyph(status, frame).unwrap_or(UNKNOWN_GLYPH),
-        status.to_uppercase()
-    )
+/// The word stays: you scan the column for the glyph, but the word explains a glyph you have
+/// not seen before, and it is the only part that is correct for a status released after this
+/// code. An unreported status has no word, so it is the glyph alone.
+pub fn full_tag(status: Option<&Status>, frame: u64) -> String {
+    match status {
+        Some(status) => {
+            format!("{} {}", glyph(status, frame), word(Some(status)).to_uppercase())
+        },
+        None => UNREPORTED_GLYPH.to_string(),
+    }
 }
 
 /// The glyph alone, for a pane too narrow for the word.
 ///
-/// An unknown status becomes its first letter, not [`UNKNOWN_GLYPH`]. The neutral glyph would
-/// draw two different unknown statuses in the same way, where `[S]` and `[N]` stay different.
-/// Two unknown statuses with the same first letter still collide.
-pub fn abbr_tag(status: &str, frame: u64) -> String {
-    match glyph(status, frame) {
-        Some(glyph) => glyph.to_string(),
-        None => match status.chars().next() {
-            Some(first) => format!("[{}]", first.to_uppercase()),
-            None => "[?]".to_string(),
-        },
+/// An unnamed word becomes its first letter, not the neutral glyph, which would draw two
+/// different unknown statuses in the same way where `[S]` and `[N]` stay different. Two unknown
+/// statuses with the same first letter still collide.
+pub fn abbr_tag(status: Option<&Status>, frame: u64) -> String {
+    match status {
+        Some(Status::Unknown(word)) => format!("[{}]", word.initial().to_uppercase()),
+        Some(status) => glyph(status, frame).to_string(),
+        None => UNREPORTED_GLYPH.to_string(),
     }
 }
 
@@ -506,7 +569,7 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
             session: zellij.session,
             display,
             pane,
-            status: row.status.unwrap_or_default(),
+            status: Status::parse(row.status.as_deref()),
             age: Duration::from_secs(row.status_age),
             cwd: row.cwd.unwrap_or_default(),
         });
@@ -551,5 +614,88 @@ pub fn format_duration(age: Duration) -> String {
         3600..=86_399 => format!("{}h", secs / 3600),
         86_400..=604_799 => format!("{}d", secs / 86_400),
         _ => format!("{}w", secs / 604_800),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(json: &str) -> Option<Status> {
+        let (agents, _) = parse(json).expect("the document should parse");
+        agents.into_iter().next().expect("one agent").status
+    }
+
+    fn one(status: &str) -> String {
+        format!(
+            r#"[{{"status":{},"status_age":4,"zellij":{{"session":"s","pane":"0"}}}}]"#,
+            status
+        )
+    }
+
+    /// A `null` status stays absent. It was `""` before, which took the glyph of a word Claude
+    /// had sent and left the tag beside it empty.
+    #[test]
+    fn a_null_status_is_absent_and_not_an_empty_word() {
+        assert!(status(&one("null")).is_none());
+        assert!(status(r#"[{"status_age":4,"zellij":{"session":"s","pane":"0"}}]"#).is_none());
+    }
+
+    /// Nothing reported and nothing left after the trim are one fact, so both are `None`.
+    #[test]
+    fn a_blank_status_is_absent() {
+        assert!(status(&one(r#""""#)).is_none());
+        assert!(status(&one(r#"" \t ""#)).is_none());
+    }
+
+    /// The four words this build knows, whatever case they arrive in.
+    #[test]
+    fn a_known_status_is_named_without_regard_to_case() {
+        assert!(matches!(status(&one(r#""waiting""#)), Some(Status::Waiting)));
+        assert!(matches!(status(&one(r#""IDLE""#)), Some(Status::Idle)));
+        assert!(matches!(status(&one(r#""Busy""#)), Some(Status::Busy)));
+        assert!(matches!(status(&one(r#""shell""#)), Some(Status::Shell)));
+    }
+
+    /// A word from a release after this one keeps its own text, in the case it arrived in. The
+    /// word is the only part of the tag that is correct for it.
+    #[test]
+    fn an_unnamed_status_keeps_its_word() {
+        let status = status(&one(r#"" Compacting ""#)).expect("a status");
+        assert_eq!(word(Some(&status)), "Compacting");
+        assert_eq!(full_tag(Some(&status), 0), "🛸 COMPACTING");
+        assert_eq!(abbr_tag(Some(&status), 0), "[C]");
+    }
+
+    /// Attention first, then the words this build knows, then one it does not, then silence.
+    #[test]
+    fn a_status_sorts_by_how_much_it_wants_you() {
+        let ranks: Vec<u8> = ["waiting", "idle", "busy", "shell", "compacting"]
+            .iter()
+            .map(|word| status_rank(Status::parse(Some(word)).as_ref()))
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert!(status_rank(None) > 4);
+    }
+
+    /// An unreported status is not an unnamed one. `❔` says nothing arrived; `🛸` says a word
+    /// arrived that this build cannot name.
+    #[test]
+    fn an_unreported_status_has_a_glyph_of_its_own() {
+        assert_eq!(full_tag(None, 0), UNREPORTED_GLYPH);
+        assert_eq!(abbr_tag(None, 0), UNREPORTED_GLYPH);
+        assert_eq!(word(None), "unreported");
+        assert!(!is_waiting(None));
+        assert!(!is_busy(None));
+    }
+
+    /// Only `busy` turns the spinner, and only `waiting` takes the accent colour.
+    #[test]
+    fn only_two_statuses_are_asked_about_by_name() {
+        let busy = Status::parse(Some("busy"));
+        assert!(is_busy(busy.as_ref()) && !is_waiting(busy.as_ref()));
+        let waiting = Status::parse(Some("waiting"));
+        assert!(is_waiting(waiting.as_ref()) && !is_busy(waiting.as_ref()));
+        assert_ne!(full_tag(busy.as_ref(), 0), full_tag(busy.as_ref(), 1));
     }
 }
