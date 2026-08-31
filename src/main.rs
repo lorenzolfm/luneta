@@ -12,6 +12,7 @@
 
 mod agents;
 mod dirs;
+mod fetch;
 mod layout;
 mod panes;
 mod render;
