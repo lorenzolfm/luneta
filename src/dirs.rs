@@ -73,9 +73,15 @@ pub const PREVIEW_VALUE: &str = "preview";
 pub const PATH_KEY: &str = "luneta_path";
 
 /// What `Enter` on this row does. The host decides it, and this reports it.
+///
+/// The variant is the whole of that decision, including whether the cwd goes with the name:
+/// `Create` is the only outcome the host applies it to. That is not a second property to read
+/// off the variant, it is the variant, so `confirm_dir` matches on this and a fifth outcome
+/// stops the build there rather than silently taking the branch that drops the cwd.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// The derived name is free. The session is created, in this directory.
+    /// The derived name is free. The session is created, in this directory, and this is the one
+    /// outcome that carries the cwd.
     Create,
     /// The derived name is a live session: the host attaches to it and **ignores the cwd**.
     Attach,
@@ -94,12 +100,6 @@ impl Action {
             Action::Resurrect => "Resurrect",
             Action::Here => "already in",
         }
-    }
-
-    /// Only `Create` can carry the cwd. The host discards or replaces it in the other cases,
-    /// and a discarded argument makes you believe a session is somewhere it is not.
-    pub fn carries_cwd(&self) -> bool {
-        matches!(self, Action::Create)
     }
 }
 

@@ -788,27 +788,31 @@ impl State {
     /// `Enter` on a directory row.
     ///
     /// This makes the same call as the session screen: the plugin chooses a name, and the host
-    /// decides what the name means. Only the cwd is new, and it goes with the one branch that
+    /// decides what the name means. Only the cwd is new, and it goes with the one outcome that
     /// can use it.
     ///
     /// An attach passes the name alone. The host accepts a cwd there and discards it, because
     /// `ClientInfo::set_cwd` has no `Attach` arm, and a discarded argument makes you believe a
     /// session is somewhere it is not. On an attach row, the directory beside the name is where
     /// the session would have been created, not where it is.
+    ///
+    /// This is the only place that picks between the two calls, so it names every [`Action`]
+    /// rather than testing one and letting the rest fall through. A fifth outcome stops the
+    /// build here, where the choice is made, instead of quietly taking the arm that drops the
+    /// cwd.
     fn confirm_dir(&mut self) {
         let Some(row) = self.dirs.selected_row() else {
             return;
         };
-        // Refused, and the prompt has said so for as long as the row was highlighted. An
-        // attach to the current session does not fail, it panics the client
-        // (`commands.rs:794`).
-        if row.action == Action::Here {
-            return;
-        }
-        if row.action.carries_cwd() {
-            switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)));
-        } else {
-            switch_session(Some(&row.name));
+        match row.action {
+            // Refused, and the prompt has said so for as long as the row was highlighted. An
+            // attach to the current session does not fail, it panics the client
+            // (`commands.rs:794`).
+            Action::Here => return,
+            Action::Create => {
+                switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)))
+            },
+            Action::Attach | Action::Resurrect => switch_session(Some(&row.name)),
         }
         close_self();
     }
