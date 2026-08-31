@@ -24,6 +24,7 @@ use std::time::Duration;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
+use crate::panes;
 use crate::sessions::{validate_name, Selection};
 
 /// The command behind this screen. `-l` lists, and `-s` prints the frecency score.
@@ -33,16 +34,29 @@ use crate::sessions::{validate_name, Selection};
 /// and `/tmp` and cannot stat any other path.
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
-/// The command behind the preview box. It prints one entry per line, includes dotfiles, and
-/// puts a `/` after each directory.
+/// The command behind the preview box.
+///
+/// `eza` draws the listing and the picker prints what it drew, so an entry keeps its own colour
+/// and its own icon. The box thus shows a directory the way your shell shows it. Those bytes
+/// come from another program and cross the same border a pane screen crosses: only colour
+/// passes. See [`crate::panes::sgr_only`].
 ///
 /// The caller adds the path after a `--`, because a directory can be named `-l`.
 ///
-/// `--group-directories-first` is omitted, because that flag is a GNU extension. The plugin
-/// cannot know whether the host has GNU `ls`, and a rejected flag is a preview that fails on
-/// another machine. [`DirSet::ingest_listing`] does the same ordering from the `/` that `-p`
-/// adds.
-pub const LIST: [&str; 2] = ["ls", "-1Ap"];
+/// Each flag is `=always` because the plugin is not a terminal, and eza turns colour and its
+/// classify marks off when it writes to a pipe. `--group-directories-first` is a flag of eza,
+/// so this module does not sort. `--icons=always` needs a Nerd Font: remove it if the terminal
+/// has none.
+pub const LIST: [&str; 8] = [
+    "eza",
+    "--oneline",
+    "--almost-all",
+    "--group-directories-first",
+    "--classify=always",
+    "--color=always",
+    "--icons=always",
+    "--no-quotes",
+];
 
 /// Marks our own `RunCommandResult` so an unrelated one cannot be parsed as a directory list.
 pub const CONTEXT_KEY: &str = "luneta";
@@ -53,7 +67,7 @@ pub const PREVIEW_VALUE: &str = "preview";
 /// Which directory a preview reply is about, sent with the command and returned with the answer.
 ///
 /// The selected row cannot answer this. A reply arrives at any time, and the cursor has usually
-/// moved. Without the path on the reply, a slow `ls` would file its answer under the wrong
+/// moved. Without the path on the reply, a slow reply would be filed under the wrong
 /// directory, and the box would show the contents of a different place.
 pub const PATH_KEY: &str = "luneta_path";
 
@@ -90,10 +104,10 @@ impl Action {
 
 /// What the preview box knows about one directory.
 pub enum Listing {
-    /// `ls` has been asked and has not answered.
+    /// eza has been asked and has not answered.
     Reading,
     Ready {
-        /// Directories first, then files. See [`DirSet::ingest_listing`]. The list stops at
+        /// The lines of eza, in its order and with its colours. The list stops at
         /// [`MAX_ENTRIES`], and `total` is how many entries there were.
         entries: Vec<String>,
         total: usize,
@@ -112,7 +126,7 @@ const MAX_ENTRIES: usize = 128;
 /// How many directory listings to keep.
 ///
 /// Above this the cache is cleared, and no entry is evicted on its own. The cost of a wrong
-/// decision is one `ls` on a directory you return to. The cache exists for a few directories
+/// decision is one listing of a directory you return to. The cache exists for a few directories
 /// that you stop on, not for sixty-four that you pass.
 const MAX_LISTINGS: usize = 64;
 
@@ -162,7 +176,7 @@ pub struct DirSet {
     /// True between the question to zoxide and its answer, so that a re-focus starts no second
     /// process.
     pub asking: bool,
-    /// What `ls` said about each directory the cursor has rested on, keyed by path.
+    /// What eza said about each directory the cursor has stopped on, keyed by path.
     listings: BTreeMap<String, Listing>,
     all: Vec<Dir>,
     matcher: Option<SkimMatcherV2>,
@@ -282,11 +296,11 @@ impl DirSet {
         self.listings.get(path)
     }
 
-    /// Claim `path` for an `ls`, or refuse because there is nothing to ask.
+    /// Claim `path` for a listing, or refuse because there is nothing to ask.
     ///
     /// The [`Listing::Reading`] entry is the claim, so a second caller is refused. This gives
     /// one process per directory, not one per tick. A failure keeps its entry, because a
-    /// directory that cannot be read will fail again. Without that, `ls` would run ten times a
+    /// directory that cannot be read will fail again. Without that, eza would run ten times a
     /// second on a path that is gone.
     pub fn begin_listing(&mut self, path: &str) -> bool {
         if self.listings.contains_key(path) {
@@ -299,11 +313,15 @@ impl DirSet {
         true
     }
 
-    /// Take the reply from `ls` for one directory.
+    /// Take the reply from eza for one directory.
     ///
-    /// Directories go to the top, in the order `ls` gave them, found by the `/` that `-p` adds.
-    /// You read a listing for its shape before you read it for its names, and mixed directories
-    /// and files must be read twice.
+    /// The lines are kept in the order eza gave them, because `--group-directories-first` has
+    /// already put the directories at the top. Each line keeps its colours and loses every
+    /// other escape, which is what makes it safe to print.
+    ///
+    /// A failure is not always a non-zero exit. eza reports a directory it may not open on
+    /// stderr and still exits 0, so an empty listing with a message beside it is a failure and
+    /// not an empty directory. A directory that is genuinely empty writes nothing at all.
     pub fn ingest_listing(
         &mut self,
         path: String,
@@ -311,35 +329,52 @@ impl DirSet {
         stdout: &[u8],
         stderr: &[u8],
     ) {
-        if exit_code != Some(0) {
-            let reason = String::from_utf8_lossy(stderr);
-            // `ls` puts the path before its message, and the box already shows the path.
-            let reason = reason
-                .lines()
-                .next()
-                .unwrap_or("")
-                .rsplit(": ")
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let reason = if reason.is_empty() { "cannot be read".to_string() } else { reason };
+        let listed = String::from_utf8_lossy(stdout);
+        let complained = !String::from_utf8_lossy(stderr).trim().is_empty();
+        if exit_code != Some(0) || (listed.trim().is_empty() && complained) {
+            let reason = listing_error(&path, &String::from_utf8_lossy(stderr));
             self.listings.insert(path, Listing::Failed(reason));
             return;
         }
-        let listed = String::from_utf8_lossy(stdout);
-        let mut entries: Vec<String> = Vec::new();
-        let mut files: Vec<String> = Vec::new();
-        for line in listed.lines().map(str::trim_end).filter(|line| !line.is_empty()) {
-            match line.ends_with('/') {
-                true => entries.push(line.to_string()),
-                false => files.push(line.to_string()),
-            }
-        }
-        entries.append(&mut files);
+        let mut entries: Vec<String> = listed
+            .lines()
+            .map(panes::sgr_only)
+            .filter(|line| panes::columns(line) > 0)
+            .collect();
         let total = entries.len();
         entries.truncate(MAX_ENTRIES);
         self.listings.insert(path, Listing::Ready { entries, total });
+    }
+}
+
+/// Why a listing failed, in the fewest words that stay true.
+///
+/// eza writes prose to stderr, and the shape of that prose is not part of any interface. This
+/// keeps the first line and removes three things from it: the path, which the box already shows
+/// on the line above; the ` - code: N` that eza appends to a permission error; and the
+/// ` (os error N)` that it appends to a missing directory. What is left of
+/// `"/nope": No such file or directory (os error 2)` is `No such file or directory`, and what is
+/// left of `Permission denied: /nope - code: 13` is `Permission denied`.
+///
+/// A line this leaves empty means that eza said nothing, which it does when it did not run.
+fn listing_error(path: &str, stderr: &str) -> String {
+    let line = stderr.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let line = line.replace(path, "");
+    let line = cut_at(&line, " - code: ");
+    let line = cut_at(line, " (os error ");
+    // The removals above leave the quotes and separators that held the path.
+    let line = line.trim_matches(|c: char| c.is_whitespace() || "\":-".contains(c));
+    match line.is_empty() {
+        true => "eza is not available".to_string(),
+        false => line.to_string(),
+    }
+}
+
+/// `text` up to `marker`, or all of `text` when it has none.
+fn cut_at<'a>(text: &'a str, marker: &str) -> &'a str {
+    match text.rfind(marker) {
+        Some(at) => &text[..at],
+        None => text,
     }
 }
 
@@ -444,11 +479,26 @@ mod tests {
         }
     }
 
-    /// Directories first, in the order `ls` gave them.
+    fn failure(dirs: &DirSet, path: &str) -> String {
+        match dirs.listing(path) {
+            Some(Listing::Failed(reason)) => reason.clone(),
+            _ => panic!("expected a failure"),
+        }
+    }
+
+    /// The order of eza is kept, because `--group-directories-first` already applied it.
     #[test]
-    fn a_listing_floats_the_directories_to_the_top() {
-        let dirs = listed(b"Cargo.toml\nsrc/\nREADME.md\ntarget/\n");
+    fn a_listing_keeps_the_order_eza_gave_it() {
+        let dirs = listed(b"src/\ntarget/\nCargo.toml\nREADME.md\n");
         assert_eq!(entries(&dirs).0, ["src/", "target/", "Cargo.toml", "README.md"]);
+    }
+
+    /// Colour passes and every other escape is dropped, as it is for a pane. A line that is
+    /// escapes alone takes no columns and is not an entry.
+    #[test]
+    fn a_listing_keeps_its_colours_and_nothing_else() {
+        let dirs = listed(b"\x1b[34msrc\x1b[0m/\n\x1b[2J\x1b]0;title\x07Cargo.toml\n\x1b[H\n");
+        assert_eq!(entries(&dirs).0, ["\x1b[34msrc\x1b[0m/", "Cargo.toml"]);
     }
 
     /// A blank line is not an entry, and neither is the final newline.
@@ -468,30 +518,39 @@ mod tests {
         assert_eq!(total, MAX_ENTRIES * 2);
     }
 
-    /// A failure keeps the reason and removes the path that `ls` puts before it. The box shows
-    /// the path on the line above.
+    /// eza writes prose, and the box keeps the part of it that names the failure.
     #[test]
     fn a_failed_listing_keeps_the_reason_and_not_the_path() {
         let mut dirs = DirSet::default();
+        // A directory that is gone: a non-zero exit, with the path in quotes.
         dirs.ingest_listing(
             "/tmp/x".to_string(),
             Some(2),
             b"",
-            b"ls: cannot open directory '/tmp/x': Permission denied\n",
+            b"\"/tmp/x\": No such file or directory (os error 2)\n",
         );
-        match dirs.listing("/tmp/x") {
-            Some(Listing::Failed(reason)) => assert_eq!(reason, "Permission denied"),
-            _ => panic!("expected a failure"),
-        }
-        // A failure with no message still says something.
-        dirs.ingest_listing("/tmp/y".to_string(), Some(2), b"", b"");
-        match dirs.listing("/tmp/y") {
-            Some(Listing::Failed(reason)) => assert_eq!(reason, "cannot be read"),
-            _ => panic!("expected a failure"),
-        }
+        assert_eq!(failure(&dirs, "/tmp/x"), "No such file or directory");
+        // A directory it may not open: eza exits 0 and writes to stderr.
+        dirs.ingest_listing(
+            "/tmp/y".to_string(),
+            Some(0),
+            b"",
+            b"Permission denied: /tmp/y - code: 13\n",
+        );
+        assert_eq!(failure(&dirs, "/tmp/y"), "Permission denied");
+        // Nothing on either channel means that eza did not run.
+        dirs.ingest_listing("/tmp/z".to_string(), Some(1), b"", b"");
+        assert_eq!(failure(&dirs, "/tmp/z"), "eza is not available");
     }
 
-    /// The entry is the claim, so a second caller is refused: one `ls` per directory, not one
+    /// An empty directory writes nothing on either channel, so it is empty and not a failure.
+    /// Only a message beside an empty listing makes it a failure.
+    #[test]
+    fn an_empty_directory_is_not_a_failure() {
+        assert_eq!(entries(&listed(b"")), (Vec::new(), 0));
+    }
+
+    /// The entry is the claim, so a second caller is refused: one listing per directory, not one
     /// per tick. A failure keeps its claim, because the path will fail again.
     #[test]
     fn a_directory_is_only_ever_asked_about_once() {
@@ -500,7 +559,7 @@ mod tests {
         assert!(!dirs.begin_listing("/tmp/x"));
         dirs.ingest_listing("/tmp/x".to_string(), Some(0), b"src/\n", b"");
         assert!(!dirs.begin_listing("/tmp/x"));
-        dirs.ingest_listing("/tmp/x".to_string(), Some(2), b"", b"ls: nope: No such file");
+        dirs.ingest_listing("/tmp/x".to_string(), Some(2), b"", b"\"/tmp/x\": No such file");
         assert!(!dirs.begin_listing("/tmp/x"));
 
         // Until the picker becomes visible again, when every listing is out of date.

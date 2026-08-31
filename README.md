@@ -58,7 +58,7 @@ One `Tab` away:
 And one more `Tab`:
 
 ```
-╭─ luneta ───────────────────────── 1/4 ─╮╭─ luneta ─────────────────────────── 5 ─╮
+╭─ luneta ───────────────────────── 1/4 ─╮╭─ luneta ───────────────────── 5 items ─╮
 │                                        ││ /home/lorenzo/Projects/misc/luneta     │
 │                                        ││                                        │
 │                                        ││ src/                                   │
@@ -77,7 +77,9 @@ And one more `Tab`:
 ```
 
 The renderer draws those three pictures itself. To print them, run
-`cargo test -- --ignored --nocapture print_the_screens`.
+`cargo test -- --ignored --nocapture print_the_screens`. A terminal shows the
+directory listing in the colours and the icons of eza, which a page of text
+cannot; the picture above has neither.
 
 The session list follows four rules:
 
@@ -126,8 +128,12 @@ that it has no panes, and not that nothing runs to hold any.
 **An agent** shows its status and its time in that status on one line, which is
 the decision you make, and then its own pane.
 
-**A directory** shows its path and an `ls`, directories first, with the entry
-count in the border.
+**A directory** shows its path and its contents, as `eza` draws them: its
+colours, its icons, and its directories first. The count is in the border. The
+picker prints those bytes and does not re-colour them, for the reason it prints a
+pane unchanged — the colours belong to the program that chose them. `--icons`
+needs a Nerd Font, and it is one flag to remove in `dirs.rs` if your terminal has
+none.
 
 Both commands cost one process for each highlighted row, so both follow the same
 rules:
@@ -141,15 +147,16 @@ rules:
   not read again while you stay on the row. A new read for each tick would start
   one process a second for each row you look at.
 - **Filed by what the command asked about**, never by the position of the cursor
-  when the reply lands. `ls` and `dump-screen` answer at any time, and the cursor
+  when the reply lands. eza and `dump-screen` answer at any time, and the cursor
   has usually moved. Without the key on the reply, a slow answer would show the
   contents of another place.
-- **Only colour passes**, of everything a pane can write. `SGR` (`ESC [ … m`)
-  is kept, and every other escape is dropped complete, with the control characters.
-  The terminal that draws this plugin would obey a cursor move, a screen clear, a
-  scroll region, or an `OSC` that renames the tab. Each of those lets a pane redraw
-  the picker that only looks at it. The escape must go complete, because a sequence
-  that is one character short leaves its end on the screen as text.
+- **Only colour passes**, of everything either command can write. `SGR`
+  (`ESC [ … m`) is kept, and every other escape is dropped complete, with the
+  control characters. The terminal that draws this plugin would obey a cursor move,
+  a screen clear, a scroll region, or an `OSC` that renames the tab. Each of those
+  lets a previewed pane redraw the picker that only looks at it. The escape must go
+  complete, because a sequence that is one character short leaves its end on the
+  screen as text.
 
 The box takes half the pane, and it goes when the pane is narrow. Below 52 columns
 there is no room for two boxes that can say anything, so the list takes the full
@@ -382,16 +389,22 @@ and only logs the refusal, and so does the validator of the plugin.
   and not on the timer. A timer would start one process a second to read a database
   that changes only when you `cd`. `launch-or-focus` means that one instance serves
   many openings, which is what `Visible` is for.
-- **A second command, for the preview box.** `ls -1Ap -- <path>`, on the directory
-  the cursor stopped on, delayed, cached by path, and asked at most once for each
-  directory for each opening. The same permission covers it. The session and agent
-  screens spend that permission on `zellij action dump-screen`. See
+- **A second command, for the preview box.** `eza` on the directory the cursor
+  stopped on, delayed, cached by path, and asked at most once for each directory
+  for each opening. The same permission covers it. The session and agent screens
+  spend that permission on `zellij action dump-screen`. See
   [the preview box](#the-preview-box).
-- **Nothing, when it is missing.** Without zoxide, or with a refused grant, the
+- **Nothing, when either is missing.** Without zoxide, or with a refused grant, the
   screen says which: `zoxide is not available` on the note line. The three ways to
   be empty (waiting, failed, and nothing to show) are three different messages.
+  Without eza, the list still works and the preview box says `eza is not
+  available`.
 - **No `-a`.** Without it, zoxide removes directories that no longer exist, which
   is the one check for stale data that the plugin cannot do itself.
+
+  eza is not asked to filter anything. It reports a directory it may not open on
+  stderr and still exits 0, so an empty listing with a message beside it is read as
+  a failure and not as an empty directory.
 - **`Del` does nothing here.** To remove a directory from zoxide is a different
   action on a different store.
 
@@ -480,7 +493,7 @@ is what makes a GitHub release asset work: those redirect to
 
 Zellij prompts once for `RunCommands`, `ReadApplicationState` and
 `ChangeApplicationState`. Read the first one twice: it is how the picker runs
-`zoxide`, `claude-ps`, `ls` and `zellij` itself.
+`zoxide`, `claude-ps`, `eza` and `zellij` itself.
 
 ### Verifying what you got
 
@@ -536,7 +549,12 @@ the `PATH` of the zellij **server**, and neither is required:
 |---|---|---|
 | sessions | — | always works |
 | directories | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | `zoxide is not available` on the note line |
+| directories | [`eza`](https://github.com/eza-community/eza) | the list works; the preview box says `eza is not available` |
 | agents | [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | `claude-ps is not available` on the note line |
+
+The icons in the directory preview want a [Nerd Font](https://www.nerdfonts.com).
+Without one they draw as empty boxes, and `--icons=always` is the one flag to
+remove from `LIST` in `src/dirs.rs`.
 
 Both are found by name. Nothing in the source names an install path. Note that it
 is the `PATH` of the server and not of your shell: the server takes it from
@@ -763,7 +781,7 @@ bind "Ctrl a" {
   without `--path` the promised STDOUT is empty because the CLI exits first.
 - **A reply must carry what it was about.** A `RunCommandResult` arrives with the
   context map the command carried, which is the only link to the question. The
-  directory preview puts the path in that map: `ls` answers at any time, the cursor
+  directory preview puts the path in that map: eza answers at any time, the cursor
   has usually moved, and an answer filed under the current cursor shows the contents
   of another place with no sign of an error.
 - **A background poll must not move the cursor.** To rebuild the list once a second

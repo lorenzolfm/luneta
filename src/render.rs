@@ -442,7 +442,7 @@ fn pane_row(inner: usize, line: &str) -> String {
 /// The box answers a question that no row has the width to answer. The name of a session does
 /// not say what runs in it, the name of a directory does not say what is in it, and the label of
 /// an agent does not say what it waits for. Each screen answers from a different source: the
-/// session preview from the snapshot that gives the ages, the directory preview from an `ls`,
+/// session preview from the snapshot that gives the ages, the directory preview from eza,
 /// and the agent preview from the row. The three functions below share these two helpers only.
 ///
 /// This is [`draw`] with one more case in the middle: a pane row does not go through
@@ -687,10 +687,10 @@ fn dead_preview(rect: &Rect) -> Vec<PreviewRow> {
 // Preview: directories
 // ---------------------------------------------------------------------------------------------
 
-/// What is in the highlighted directory, as `ls` reports it. The title of the box is the
-/// session name the row would create, and the count in the border is the number of entries.
+/// What is in the highlighted directory, as eza draws it. The title of the box is the session
+/// name the row would create, and the count in the border is the number of entries.
 ///
-/// The listing is found by path, never by row index. The cursor moves faster than `ls` answers,
+/// The listing is found by path, never by row index. The cursor moves faster than eza answers,
 /// and a reply filed under the wrong directory would show the contents of another place. See
 /// [`crate::dirs::PATH_KEY`].
 fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) {
@@ -709,7 +709,7 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) 
         None | Some(Listing::Reading) => lines.push(preview_line(inner, "reading…", TAG)),
         Some(Listing::Failed(reason)) => lines.extend(error_lines(inner, reason)),
         Some(Listing::Ready { entries, total }) => {
-            right = total.to_string();
+            right = plural(*total, "item");
             if entries.is_empty() {
                 lines.push(preview_line(inner, "empty", TAG));
             }
@@ -719,11 +719,14 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) 
     (row.name.clone(), right, lines)
 }
 
-/// One entry of a listing. A directory is brighter, because it is where you would `cd` next,
-/// and `ls -p` has marked it with a `/`.
+/// One entry of a listing, in the colours and the icon eza gave it.
+///
+/// This is a [`PreviewRow::Pane`] and not a `Text`, for the reason a pane row is: the colours
+/// belong to the program that wrote them, and a `Text` has only the emphasis levels of the
+/// theme. eza already separates a directory from a file by colour, by icon and by the `/` that
+/// `--classify` adds, so nothing here has to decide that again.
 fn entry_line(inner: usize, entry: &str) -> PreviewRow {
-    let level = if entry.ends_with('/') { NAME } else { LABEL };
-    preview_line(inner, entry, level)
+    PreviewRow::Pane(pane_row(inner, entry))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1793,10 +1796,10 @@ mod tests {
         assert!(lines[0].content().contains("nothing highlighted"));
     }
 
-    /// The directory preview: the path, then the reply from `ls`, with the count in the border
-    /// and the directories first.
+    /// The directory preview: the path, then the reply from eza, in the order eza gave it,
+    /// with the count in the border.
     #[test]
-    fn a_directory_preview_lists_what_ls_said() {
+    fn a_directory_preview_lists_what_eza_said() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
@@ -1804,15 +1807,15 @@ mod tests {
         dirs.ingest_listing(
             "/home/you/misc/luneta".to_string(),
             Some(0),
-            b"Cargo.toml\nsrc/\nREADME.md\n",
+            b"src/\nCargo.toml\nREADME.md\n",
             b"",
         );
         let (title, right, lines) = dir_preview(&dirs, &rect);
-        assert_eq!((title.as_str(), right.as_str()), ("luneta", "3"));
+        assert_eq!((title.as_str(), right.as_str()), ("luneta", "3 items"));
         assert_eq!(
             picture(&rect, &title, &right, filled(&rect, lines)),
             vec![
-                "╭─ luneta ─────────── 3 ─╮",
+                "╭─ luneta ───── 3 items ─╮",
                 "│ /home/you/misc/luneta  │",
                 "│                        │",
                 "│ src/                   │",
@@ -1822,6 +1825,28 @@ mod tests {
                 "╰────────────────────────╯",
             ]
         );
+    }
+
+    /// A coloured entry is padded by what it shows and not by what it holds. An escape takes
+    /// no columns, so a line measured by its bytes would leave the right border short.
+    #[test]
+    fn a_coloured_listing_still_fills_the_box() {
+        for width in 12..48 {
+            let rect = Rect { x: 0, y: 0, width, height: 10 };
+            let mut dirs = DirSet::default();
+            dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+            dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+            dirs.ingest_listing(
+                "/home/you/misc/luneta".to_string(),
+                Some(0),
+                EZA.as_bytes(),
+                b"",
+            );
+            let (title, right, lines) = dir_preview(&dirs, &rect);
+            for line in picture(&rect, &title, &right, filled(&rect, lines)) {
+                assert_eq!(panes::columns(&line), width, "width {width}: {line:?}");
+            }
+        }
     }
 
     /// To the reader, "not asked yet" and "asked but not answered" are the same.
@@ -1919,7 +1944,7 @@ mod tests {
         dirs.ingest_listing(
             "/home/lorenzo/Projects/misc/luneta".to_string(),
             Some(0),
-            b"src/\ntarget/\nCargo.toml\nMakefile\nREADME.md\n",
+            EZA.as_bytes(),
             b"",
         );
         let rect = screen.results.as_ref().unwrap();
@@ -1965,4 +1990,13 @@ mod tests {
         4102 /home/lorenzo/Projects/misc/homelab\n\
         1877 /home/lorenzo/Projects/Work/bipa\n\
         18 /home/lorenzo/.local/bin\n";
+
+    /// What eza prints for this repo, copied from a run of the command in
+    /// [`crate::dirs::LIST`]. Blue for a directory and yellow for a file, an icon before each
+    /// name, and the `/` that `--classify` adds.
+    const EZA: &str = "\x1b[34m\u{f4d4} \x1b[1msrc\x1b[0m/\n\
+        \x1b[34m\u{e5ff} \x1b[1mtarget\x1b[0m/\n\
+        \x1b[33m\u{e6a8} \x1b[1;4mCargo.toml\x1b[0m\n\
+        \x1b[33m\u{e673} \x1b[1;4mMakefile\x1b[0m\n\
+        \x1b[33m\u{f00ba} \x1b[1;4mREADME.md\x1b[0m\n";
 }

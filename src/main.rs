@@ -137,7 +137,7 @@ impl Screen {
 
 /// What the preview box shows, which decides the cache that answers for it.
 enum Target {
-    /// A directory, keyed by its path. Answered by `ls`.
+    /// A directory, keyed by its path. Answered by eza.
     Dir(String),
     /// A pane, keyed by its session and its id. Answered by `zellij action dump-screen`.
     Pane(String, u32),
@@ -573,7 +573,7 @@ impl State {
                 if !self.dirs.begin_listing(&path) {
                     return false;
                 }
-                // `--` because a directory can be named `-l`, and the path last because `ls`
+                // `--` because a directory can be named `-l`, and the path last because eza
                 // reads it there.
                 let mut command = LIST.to_vec();
                 command.push("--");

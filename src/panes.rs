@@ -241,7 +241,7 @@ fn escape(chars: &mut std::str::Chars) -> String {
 /// `ESC [ … m` that sets colour and weight) passes. The terminal that draws this plugin would
 /// obey a cursor move, a scroll region, a screen clear, or an `OSC` that renames the tab. Each
 /// of those lets a pane redraw the picker that is looking at it. Control characters also go.
-fn sgr_only(line: &str) -> String {
+pub fn sgr_only(line: &str) -> String {
     let mut kept: Vec<Part> = parts(line)
         .into_iter()
         .filter(|part| match part {
