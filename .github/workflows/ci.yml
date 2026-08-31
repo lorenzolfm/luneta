@@ -1,20 +1,18 @@
-# Build on every PR; release when a tag says to.
+# Build on every PR, and release on a tag.
 #
-# One workflow rather than two, for the same reason CI builds through the flake
-# rather than a toolchain action: the build should be written down once. A
-# separate release pipeline would drift from the one PRs exercise, and the drift
-# would surface as a tag that fails after the code is already merged.
+# One workflow, not two, for the reason CI builds through the flake and not through
+# a toolchain action: the build is written down once. A separate release pipeline
+# would differ from the one that PRs run, and the difference would appear as a tag
+# that fails after the code is merged.
 #
-# So the `release` job does not build. It takes the artifact `build` produced,
-# which makes the bytes attached to a release the same bytes a PR check went
-# green on -- and the same bytes the provenance attestation is cut over.
+# The `release` job therefore does not build. It takes the artifact that `build`
+# produced, so the bytes in a release are the bytes a PR check passed, and the bytes
+# the provenance attestation covers.
 #
-# 🔴 Actions are pinned by COMMIT SHA, not by tag. `@v7` is a branch-like ref the
-# action's own repo can repoint at will, so a tag pin trusts every future commit
-# that repo ever makes. The threat model for a plugin released this way is
-# mostly this pipeline itself: whatever runs here can put bytes in front of
-# users under our name. The trailing comment names the human-readable version;
-# it is a label, and the SHA is the pin.
+# Actions are pinned by commit SHA, not by tag. `@v7` is a ref that the repo of the
+# action can move at any time, so a tag pin trusts every future commit of that repo.
+# Whatever runs here can put bytes in front of users under our name. The comment
+# after each SHA is a label for a person; the SHA is the pin.
 
 name: ci
 
@@ -30,8 +28,8 @@ permissions:
 
 jobs:
   build:
-    # The flake hardcodes `system = "x86_64-linux"`, so the runner has to be
-    # one. An arm64 or macos runner would fail in the flake, not in the build.
+    # The flake sets `system = "x86_64-linux"`, so the runner must be one. An arm64
+    # or macos runner fails in the flake, not in the build.
     runs-on: ubuntu-latest
 
     outputs:
@@ -45,15 +43,13 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Through the flake rather than a toolchain action, so CI builds with the
-      # exact rust the flake pins (1.95.0, the channel zellij's own
-      # rust-toolchain.toml names) and there is only one place that version is
-      # written down.
+      # Through the flake and not through a toolchain action, so that CI builds with
+      # the rust the flake pins (1.95.0, the channel the rust-toolchain.toml of
+      # zellij names) and the version is written down in one place.
       #
-      # There is nothing to `cargo test`: the crate is a plugin with no test
-      # modules, and a green test step that asserts nothing is worse than no
-      # test step. This checks that it compiles for wasm32-wasip1, which is the
-      # thing a host-target build would not have caught.
+      # This step checks that the crate compiles for wasm32-wasip1, which a build for
+      # the host target does not check. The unit tests run on the host target with
+      # `cargo test` and are not part of this step.
       - name: Build
         run: nix develop --command make build
 
@@ -85,10 +81,9 @@ jobs:
       attestations: write # record the provenance attestation
 
     steps:
-      # The tag names the asset, and the asset name is what zellij caches
-      # against, so a tag that disagrees with Cargo.toml would ship a build
-      # labelled as a version it is not. Cheap to check, miserable to notice
-      # after the fact -- the release is already public by then.
+      # The tag names the asset, and zellij caches against the asset name. A tag that
+      # disagrees with Cargo.toml would thus release a build under the wrong version,
+      # and the release is public before anyone finds the error.
       - name: Check the tag agrees with Cargo.toml
         run: |
           set -euo pipefail
@@ -103,33 +98,31 @@ jobs:
         with:
           name: luneta-wasm
 
-      # 🔴 The version belongs in the FILENAME, not just the tag directory.
-      # Zellij's downloader caches remote plugins by the last path segment of
-      # the URL and returns early if that file already exists -- no ETag, no
-      # timestamp, no re-fetch, ever (zellij-utils downloader.rs:88-92). Ship
-      # every release as `luneta.wasm` and each user is pinned forever to
-      # whichever build they happened to download first, with no way to hand
-      # them a fix.
+      # The version must be in the filename, and not in the tag directory alone. The
+      # downloader of zellij caches a remote plugin by the last path segment of the
+      # URL, and returns immediately if that file exists. It reads no ETag and no
+      # timestamp, and never fetches again (zellij-utils downloader.rs:88-92). A
+      # release named `luneta.wasm` would hold every user at the first build they
+      # downloaded, with no way to give them a correction.
       - name: Name the asset after the version
         run: cp luneta.wasm "luneta-${{ needs.build.outputs.version }}.wasm"
 
-      # `sha256sum -c SHA256SUMS` format, one file covering every asset -- the
-      # convention, rather than a per-file .sha256 nobody has a one-liner for.
+      # The `sha256sum -c SHA256SUMS` format, in one file that covers every asset.
       #
-      # ⚠️ On its own this proves only that the download was not truncated or
-      # corrupted. It is NOT a defence against tampering: anyone who can replace
-      # the asset can replace this file beside it. The attestation below is the
-      # part that says where the bytes came from.
+      # This proves only that the download is complete and not corrupted. It is not a
+      # defence against a change of the bytes: anyone who can replace the asset can
+      # replace this file beside it. The attestation below says where the bytes came
+      # from.
       - name: Checksums
         run: |
           set -euo pipefail
           sha256sum "luneta-${{ needs.build.outputs.version }}.wasm" > SHA256SUMS
           cat SHA256SUMS
 
-      # Keyless, via the runner's OIDC identity -- there is no private key here
-      # to guard, rotate, or leak. The claim is stronger than a signature's: not
-      # "somebody holding a key signed these bytes" but "these bytes came out of
-      # this workflow, at this commit, in this repo, on a GitHub-hosted runner".
+      # Keyless, through the OIDC identity of the runner. There is no private key to
+      # guard, to rotate, or to lose. The claim is stronger than a signature: not that
+      # somebody with a key signed these bytes, but that these bytes came out of this
+      # workflow, at this commit, in this repo, on a GitHub runner.
       #
       #   gh attestation verify luneta-<version>.wasm -R lorenzolfm/luneta
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4

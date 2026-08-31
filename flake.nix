@@ -15,9 +15,9 @@
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
       };
-      # Pinned to the channel zellij's own rust-toolchain.toml names, with the
-      # wasm target added. The system rustc cannot build wasm32-wasip1: nix ships
-      # std for the host triple only, and there is no rustup to add targets with.
+      # Pinned to the channel that the rust-toolchain.toml of zellij names, with the
+      # wasm target added. The system rustc cannot build wasm32-wasip1, because nix
+      # ships std for the host triple only and there is no rustup to add a target.
       toolchain = pkgs.rust-bin.stable."1.95.0".default.override {
         targets = [ "wasm32-wasip1" ];
       };

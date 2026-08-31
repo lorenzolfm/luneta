@@ -1,20 +1,18 @@
-//! The Claude Code agents that are running, and which one wants you.
+//! The Claude Code agents that run now, and which one waits for you.
 //!
-//! The rule that makes this screen work:
+//! The rule of this screen:
 //!
-//! > **An agent row is a zellij pane you can be standing in, and `Enter` puts you in it.**
+//! > An agent row is a zellij pane, and `Enter` puts you in it.
 //!
-//! That is one sentence and two host calls, because zellij will not let you attach to the
-//! session you are already in — `attach_with_session_name` reaches a bare
-//! `panic!("You are trying to attach to the current session")` (`src/commands.rs:793`) rather
-//! than declining. So a sibling agent sharing our own session is **not** a `switch_session`
-//! at all; it is a plain pane focus. See [`Jump`].
+//! That rule needs two host calls, because zellij does not let you attach to the current
+//! session: `attach_with_session_name` calls `panic!("You are trying to attach to the current
+//! session")` (`src/commands.rs:793`) instead of returning an error. An agent in our own
+//! session is therefore a pane focus, not a `switch_session`. See [`Jump`].
 //!
-//! 🔴 The plugin cannot read the agents itself. Its wasi sandbox preopens only `/host`,
-//! `/data`, `/cache` and `/tmp`, so neither `~/.claude/sessions/<pid>.json` nor `/proc` is
-//! reachable from in here — the join between "what Claude says it is doing" and "which pane
-//! that is" has to happen outside. `claude-ps` does it and prints JSON; this module only
-//! deserialises, filters and orders.
+//! The plugin cannot read the agents itself. Its wasi sandbox opens only `/host`, `/data`,
+//! `/cache` and `/tmp`, so it can reach neither `~/.claude/sessions/<pid>.json` nor `/proc`.
+//! Something outside must join what Claude reports to the pane that runs it. `claude-ps` does
+//! that and prints JSON. This module only deserialises, filters and sorts.
 
 use std::time::Duration;
 
@@ -24,62 +22,55 @@ use serde::Deserialize;
 
 use crate::sessions::Selection;
 
-/// The command behind this screen, looked up on the server's `PATH` exactly as `zoxide` is
-/// (`dirs.rs:37`). No shell, no `$HOME`: this screen's tool is an ordinary optional program,
-/// and naming an install path here is what made the plugin unusable by anyone else.
+/// The command behind this screen. The server finds it on `PATH`, as it finds `zoxide`. There
+/// is no shell and no `$HOME`, and no install path is written here.
 ///
-/// If a server `PATH` genuinely lacks it, the plugin's `agents_command` configuration key
-/// overrides this — that is the supported escape hatch, not a wrapper compiled in.
+/// If the server `PATH` does not hold it, the `agents_command` configuration key replaces this
+/// value.
 pub const QUERY: [&str; 1] = ["claude-ps"];
 
-/// Marks our own `RunCommandResult`. Shares the key with the directory screen and differs in
-/// the value — the plugin now issues two commands and the replies are told apart here.
+/// Marks our own `RunCommandResult`. It shares the key with the directory screen and differs
+/// in the value, which is how the replies are told apart.
 pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "agents";
 
-/// One object out of `claude-ps`, before this screen has decided anything about it.
+/// One object from `claude-ps`, before this screen decides anything about it.
 ///
-/// ⚠️ Only the keys this screen reads are named, and everything else in the object is ignored
-/// on purpose. That is the whole gain over the columns this replaced: the count used to be
-/// checked **exactly**, so `claude-ps` gaining `started_at` was a loud failure on a screen that
-/// understood every other field perfectly. A key this build has never heard of now costs
-/// nothing, and only a key it *depends* on going missing is still visible.
+/// Only the keys this screen reads are named, and all other keys are ignored. A new key thus
+/// costs nothing. The format this replaced counted columns exactly, so a new `started_at`
+/// column stopped a screen that understood every other field.
 ///
-/// 🔴 "Still visible" is a promise every depended-on key has to actually keep. `status_age`
-/// did not — it carried a `#[serde(default)]` that turned a renamed key into a silent `0`
-/// rather than a stopped parse — and the screen showed `0s` on every row until someone
-/// happened to notice the ages never moved. Tolerance is for keys we do not read.
+/// A key this screen depends on must still stop the parse when it is absent. `status_age` did
+/// not: it had a `#[serde(default)]`, so a renamed key became a silent `0` and every row showed
+/// `0s`. Tolerance is for the keys we do not read.
 #[derive(Deserialize)]
 struct Wire {
     #[serde(default)]
     status: Option<String>,
     /// Seconds in the current status.
     ///
-    /// 🔴 **Not** `#[serde(default)]`, and that is the whole point of this field. It was, and
-    /// `claude-ps` renamed the key to `status_age` underneath it — so every row deserialised to
-    /// a default `0` and the column read `0s` for every agent, for every status, forever. A
-    /// silent zero is the worst of both worlds: it is not a blank the eye skips, it is a
-    /// confident answer that happens to be wrong, on the column the routing decision is made
-    /// on. Absent now ends the parse and puts the reason on the note line, which is what the
-    /// rest of this struct's tolerance is *for* — unknown keys cost nothing precisely so that a
-    /// key we depend on can be strict.
+    /// This field has no `#[serde(default)]`. It had one, and `claude-ps` renamed the key to
+    /// `status_age`. Every row then took the default `0`, and the column showed `0s` for every
+    /// agent. A silent zero is worse than a blank, because it is a wrong answer in the column
+    /// that decides where you go. An absent key now stops the parse and puts the reason on the
+    /// note line.
     ///
-    /// The alias keeps a `claude-ps` older than the rename working, since neither side is
-    /// versioned against the other.
+    /// The alias keeps a `claude-ps` from before the rename working, because neither side has a
+    /// version the other can read.
     #[serde(alias = "age")]
     status_age: u64,
-    /// `null` when the agent is not inside zellij. One object rather than two fields, so there
-    /// is no state where a session is known and its pane is not.
+    /// `null` if the agent is not in zellij. One object, not two fields, so that a session
+    /// cannot arrive without its pane.
     #[serde(default)]
     zellij: Option<WireZellij>,
     #[serde(default)]
     cwd: Option<String>,
-    /// Claude's own label for the session. Worth showing only when someone chose it — see
-    /// [`name_is_chosen`].
+    /// The label Claude gives the session. Shown only if a person chose it. See
+    /// [`chosen_name`].
     #[serde(default)]
     name: Option<String>,
-    /// Who chose `name`, or `null`. Optional on purpose, unlike `status_age`: `null` is a
-    /// value the producer documents rather than a key going missing.
+    /// Who chose `name`, or `null`. This field is optional, unlike `status_age`, because
+    /// `claude-ps` documents `null` as a value.
     #[serde(default)]
     name_source: Option<String>,
 }
@@ -87,31 +78,29 @@ struct Wire {
 #[derive(Deserialize)]
 struct WireZellij {
     session: String,
-    /// A string on the wire, because it comes out of an environment variable and the producer
-    /// does not pretend to know it is a number. This screen needs a `u32` for
-    /// `focus-pane-id`, so one that will not parse is an agent it cannot reach.
+    /// A string, because it comes from an environment variable. This screen needs a `u32` for
+    /// `focus-pane-id`, so a value that does not parse is an agent it cannot reach.
     pane: String,
 }
 
-/// What `Enter` on this row will do. **Not** a rendered tag: the status column already owns
-/// that slot, and from where the user sits both of these mean the same thing — *go there*.
-/// They differ only in which host call cannot be used.
+/// What `Enter` on this row does. This is not shown on the screen, because both values mean
+/// the same thing to the user. They differ only in the host call they can use.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Jump {
     /// A different zellij session: attach to it and land on the pane.
     Switch,
-    /// Our own session, a different pane. `switch_session` would panic the client here, so
-    /// this is a pane focus instead — which is also what makes the degraded mode below safe.
+    /// Our own session, and a different pane. `switch_session` would panic the client here, so
+    /// this is a pane focus.
     Focus,
 }
 
 /// One agent out of `claude-ps`, already known to be inside zellij.
 struct Agent {
     session: String,
-    /// What the row is *called* — the chosen name where there is one, and the zellij session
-    /// otherwise. Decided once here, in [`parse`], because the fuzzy term is matched against it
-    /// and the hit positions are offsets into it: a label that changed after matching would
-    /// paint the highlight onto a string the matcher never saw.
+    /// What the row is called: the chosen name, or the zellij session if there is none.
+    /// [`parse`] decides this once, because the fuzzy term matches against it and the hit
+    /// positions are offsets into it. A later change would paint the highlight on a different
+    /// string.
     display: String,
     pane: u32,
     status: String,
@@ -119,28 +108,26 @@ struct Agent {
     cwd: String,
 }
 
-/// One row. As on the other two screens, this *is* one match-set entry.
+/// One row, which is also one match-set entry, as on the other two screens.
 pub struct AgentRow {
-    /// The zellij session name. **The address, not the label** — `Enter` acts on this and on
-    /// `pane`, whatever the row happens to be called.
+    /// The zellij session name. This is the address, not the label: `Enter` acts on it and on
+    /// `pane`, whatever the row is called.
     pub session: String,
-    /// What the row is called: the chosen name, or the session when no one chose one. This is
-    /// the **bare** string the fuzzy term was matched against, and what `indices` indexes.
+    /// What the row is called: the chosen name, or the session if there is none. The fuzzy term
+    /// matched this string, and `indices` are offsets into it.
     pub display: String,
     pub pane: u32,
-    /// Claude's status, carried through **verbatim**. Never compared against a known set for
-    /// the purpose of deciding whether to show it — see [`status_rank`].
+    /// The status from Claude, unchanged. Nothing compares it to a known set to decide whether
+    /// to show it. See [`status_rank`].
     pub status: String,
-    /// Time in the current status, as of the moment this row was built: what the snapshot
-    /// said, plus how long ago the snapshot was taken. A duration, not a timestamp.
+    /// Time in the current status when this row was built: the value in the snapshot plus the
+    /// age of the snapshot. This is a duration, not a time.
     ///
-    /// The offset is added here rather than left to the renderer because it is the same number
-    /// on every row, and a row carrying an age it is one addition short of is a row two callers
-    /// have to remember to finish. See [`crate::State::agents_since`] for why a frozen list
-    /// does not want a frozen clock.
+    /// The offset is added here because it is the same number on every row. See
+    /// [`crate::State::agents_since`].
     pub age: Duration,
     pub cwd: String,
-    /// Another visible row is called the same thing, so the pane has to be spelled out.
+    /// Another visible row has the same label, so the row must show its pane.
     pub shared: bool,
     pub jump: Jump,
     /// Character positions the fuzzy matcher hit **in `display`**, for highlighting.
@@ -151,14 +138,12 @@ pub struct AgentRow {
 }
 
 impl AgentRow {
-    /// What the row is called, plus `:pane` when that alone no longer picks a target out.
+    /// What the row is called, plus `:pane` when the label alone does not identify one row.
     ///
-    /// The suffix is presentation only — it is never what the term matched, because it is
-    /// never something you would type.
+    /// The suffix is for the screen only. The term never matches it, because nobody types it.
     ///
-    /// ⚠️ Only the **suffix** may be added here. The base is `display`, which is what the
-    /// matcher ran on and what `indices` indexes, so swapping it for something else at render
-    /// time would paint the highlight onto characters the term never hit.
+    /// Only the suffix can be added here. The base must stay `display`, because the matcher ran
+    /// on that string and `indices` are offsets into it.
     pub fn label(&self) -> String {
         if self.shared {
             format!("{}:{}", self.display, self.pane)
@@ -168,11 +153,11 @@ impl AgentRow {
     }
 }
 
-/// Why the agent list is not showing anything, when it is not showing anything.
+/// Why the agent list is empty.
 ///
-/// The directory screen's enum, for the directory screen's reason: "still asking", "the tool
-/// is not there" and "nothing is running" are three different facts, and collapsing them into
-/// a blank list turns a missing binary into "I guess this feature doesn't work".
+/// This is the enum of the directory screen, for the same reason. "Still asking", "the tool is
+/// absent" and "nothing runs" are three different facts, and a blank list for all three makes a
+/// missing program look like a broken feature.
 #[derive(Default)]
 pub enum Status {
     #[default]
@@ -187,20 +172,19 @@ pub struct AgentSet {
     pub rows: Vec<AgentRow>,
     pub selected: Option<usize>,
     pub asking: bool,
-    /// Agents running outside zellij. `Enter` has nothing to do with them, so they are out of
-    /// the **match set** — but counted here and said out loud on the note line, so that typing
-    /// one's name gives a blank list *with* an explanation rather than without one.
+    /// Agents that run outside zellij. `Enter` cannot reach them, so they are not rows. The
+    /// count stays, and the note line shows it, so that the name of such an agent gives an
+    /// empty list with an explanation.
     pub outside: usize,
     all: Vec<Agent>,
     matcher: Option<SkimMatcherV2>,
 }
 
 impl AgentSet {
-    /// Take the tool's reply.
+    /// Take the reply from the tool.
     ///
-    /// A non-zero exit is reported rather than swallowed, for the directory screen's reason:
-    /// the most likely failure — the tool is not installed — is otherwise indistinguishable
-    /// from "no agents are running", and those two want opposite reactions from the user.
+    /// An exit other than 0 is reported, not discarded. The most probable failure is that the
+    /// tool is not installed, which otherwise looks the same as an empty list.
     pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         self.asking = false;
         if exit_code != Some(0) {
@@ -221,9 +205,9 @@ impl AgentSet {
                 self.outside = outside;
                 self.status = Status::Ready;
             },
-            // A document this plugin cannot read. Reported rather than dropped, for the
-            // same reason a non-zero exit is: an empty list would read as "no agents running",
-            // when what it means is "your `claude-ps` and your picker disagree".
+            // A document this plugin cannot read. It is reported, not discarded: an empty
+            // list would mean that no agents run, when it means that `claude-ps` and the
+            // picker disagree.
             Err(reason) => {
                 self.status = Status::Failed(reason);
                 self.all.clear();
@@ -239,17 +223,15 @@ impl AgentSet {
         self.outside = 0;
     }
 
-    /// Rebuild against the term and where we are standing.
+    /// Rebuild against the term and the current position.
     ///
-    /// `origin` is `(session, pane)` — the pane the picker was opened over. Omitting by the
-    /// **pair** rather than by the session is what keeps a sibling agent in that same session
-    /// a legitimate target; omitting by session would take the interesting case away.
+    /// `origin` is the `(session, pane)` the picker was opened over. The pair is removed, not
+    /// the session, so that another agent in the same session stays a valid target.
     ///
-    /// `current` is our session name on its own, which is known even when the pane is not.
+    /// `current` is our session name, which is known even when the pane is not.
     ///
-    /// `since` is how long ago the snapshot was taken, added to every row's age. It is a fact
-    /// about now rather than about the agents, which is why it arrives per rebuild rather than
-    /// per ingest — the snapshot is frozen and this is what keeps the ages off it from being.
+    /// `since` is the age of the snapshot, added to the age of every row. It describes now, not
+    /// the agents, so it arrives with each rebuild and not with each reply.
     pub fn rebuild(
         &mut self,
         term: &str,
@@ -269,19 +251,17 @@ impl AgentSet {
             .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
 
         for agent in &self.all {
-            // The agent we are sitting in leaves the match set here, at the source — the same
-            // discipline the session screen applies to the current session, so that the
-            // rendered list *is* the match set and indices cannot drift.
+            // The agent we are in is removed here, as the session screen removes the current
+            // session, so that the rendered list stays equal to the match set.
             if origin == Some((agent.session.as_str(), agent.pane)) {
                 continue;
             }
             let (score, indices, is_exact) = if term.is_empty() {
                 (0, Vec::new(), false)
             } else {
-                // Matched against what the row is **called**, bare. You type what you see, so
-                // a row shown by its chosen name has to be reachable by that name. The `:pane`
-                // suffix is decided below, after filtering, and is not part of what anyone
-                // would type.
+                // Matched against the bare label. You type what you see, so a row that shows
+                // a chosen name must answer to that name. The `:pane` suffix is decided after
+                // this filter, and nobody types it.
                 match matcher.fuzzy_indices(&agent.display, term) {
                     Some((score, indices)) => (score, indices, agent.display == term),
                     None => continue,
@@ -307,22 +287,20 @@ impl AgentSet {
             });
         }
 
-        // Attention first, and `rank` sits **above** both `age` and `score` for the session
-        // screen's reason: it keeps the boundary between "wants you" and "does not" a fixed
-        // landmark while you narrow, instead of a line that shuffles on every keystroke.
+        // Attention first. `rank` sorts above `age` and `score`, which keeps the boundary
+        // between the agents that want you and the rest in one place as you type.
         //
-        // 🔴 Safe only because the snapshot is frozen for the life of the screen. Under a poll
-        // this ordering would move rows under the cursor as agents changed status. The ages
-        // below *do* move without a re-fetch, and are still safe here: `since` is one number
-        // added to every row, and a uniform offset cannot flip a comparison between two of them.
+        // This is safe only because the snapshot does not change while the screen is up. A poll
+        // would move rows under the cursor as agents change status. The ages do move without a
+        // new reply, and that is still safe: `since` is one number added to every row, and the
+        // same offset on both sides cannot change a comparison.
         self.rows.sort_by(|a, b| {
             b.is_exact
                 .cmp(&a.is_exact)
                 .then_with(|| a.rank.cmp(&b.rank))
-                // Most recent first, and `age` sits **above** `score`: within one status the
-                // agent that changed into it a moment ago is the one you were just working
-                // with, and that is a stabler thing to steer by than a fuzzy score that
-                // reshuffles the block on every keystroke.
+                // Most recent first. `age` sorts above `score`, because in one status the
+                // agent that changed a moment ago is the one you worked with. A fuzzy score
+                // moves the rows on every keystroke.
                 .then_with(|| a.age.cmp(&b.age))
                 .then_with(|| b.score.cmp(&a.score))
         });
@@ -332,8 +310,8 @@ impl AgentSet {
         self.selected = if self.rows.is_empty() {
             None
         } else {
-            // Held by identity — `(session, pane)` — not by index: the row may have moved, and
-            // an agent that fell out of the filter falls back to the top.
+            // Held by `(session, pane)`, not by index. An agent that the filter removes falls
+            // back to the top.
             held.and_then(|(session, pane)| {
                 self.rows
                     .iter()
@@ -343,26 +321,20 @@ impl AgentSet {
         };
     }
 
-    /// Decide the `:pane` suffix over the rows that are actually **visible**.
+    /// Decide the `:pane` suffix over the visible rows.
     ///
-    /// Computed after filtering rather than over the whole snapshot, which is what makes it
-    /// mean what it says: the suffix appears exactly when the label has stopped picking one row
-    /// out of the list, and goes away again when narrowing restores that.
+    /// This runs after the filter, not over the whole snapshot. The suffix thus appears exactly
+    /// when the label stops identifying one row, and goes when a narrower term restores that.
     ///
-    /// When a label is shared, *every* one of its rows is suffixed — "the first one is bare" is
-    /// not a rule anyone could read off the screen.
+    /// If two rows share a label, both rows get the suffix.
     ///
-    /// Over `display` rather than `session`, because the question is whether what you can *see*
-    /// still identifies a row. Two agents in one zellij session that carry different chosen
-    /// names are already told apart and take no suffix; two that fall back to the session name
-    /// collide exactly as they did before names were read at all.
+    /// The test uses `display`, not `session`, because the question is whether what you see
+    /// identifies a row. Two agents in one session with different chosen names need no suffix.
     ///
-    /// 🔴 The suffix disambiguates within a session and not across them, since a pane id is
-    /// per-session. Two rows in *different* sessions that a person gave the same name would
-    /// therefore both render `name:0`. That is a label a reader cannot split, and it is not an
-    /// action they can get wrong: every row carries its own `(session, pane)`, so `Enter` still
-    /// goes where the highlighted row points. Left as is rather than fixed by falling back to
-    /// the session, which would swap the base out from under `indices` — see [`AgentRow::label`].
+    /// A pane id belongs to one session, so the suffix separates rows in one session only. Two
+    /// rows in different sessions with the same chosen name both show `name:0`. The action is
+    /// still correct, because each row carries its own `(session, pane)`. A fallback to the
+    /// session name would change the base that `indices` points into. See [`AgentRow::label`].
     fn mark_shared(&mut self) {
         for i in 0..self.rows.len() {
             let shared = self
@@ -380,15 +352,14 @@ impl AgentSet {
 
     /// Is there a spinner on this screen to turn?
     ///
-    /// Over the whole match set rather than the scrolled-to window, which the renderer owns and
-    /// this side cannot see. The two differ only when every busy agent has been scrolled past,
-    /// and the cost of being wrong there is a redraw that paints what was already on screen —
-    /// cheaper than teaching this module how the viewport works to save it.
+    /// This counts the whole match set, not the visible window, which belongs to the renderer.
+    /// The two differ only when every busy agent is scrolled out of view, and the cost is one
+    /// redraw of what is already on the screen.
     pub fn any_busy(&self) -> bool {
         self.rows.iter().any(|row| is_busy(&row.status))
     }
 
-    /// Move the cursor. **No wrap**, as on both other screens.
+    /// Move the cursor. The cursor stops at both ends, as on the other screens.
     pub fn move_selection(&mut self, delta: isize) {
         let Some(current) = self.selected else { return };
         let last = self.rows.len().saturating_sub(1);
@@ -397,15 +368,13 @@ impl AgentSet {
     }
 }
 
-/// Where a status sorts. **Ranking only** — nothing is dropped for being unrecognised.
+/// Where a status sorts. This only ranks; it never removes a row.
 ///
-/// 🔴 The status vocabulary is **open** and moves with Claude Code's version: this screen was
-/// built against a release that emits `waiting`, `idle`, `busy` *and* `shell`, one more than
-/// the release before it. A match table that rendered only the ones it knew would have
-/// silently dropped a live row on the day it was written, so unknown statuses render as
-/// themselves and rank **last** — the plugin cannot know whether a word it has never seen
-/// wants attention, and guessing "probably urgent" would let a future release quietly promote
-/// noise to the top of the list.
+/// The set of statuses is open and changes with the version of Claude Code. This screen was
+/// built against a release that sends `waiting`, `idle`, `busy` and `shell`, which is one more
+/// than the release before it. A table that showed only known statuses would have hidden a live
+/// row on the day it was written. An unknown status therefore shows its own word and sorts
+/// last. The plugin cannot know whether a new word needs attention.
 fn status_rank(status: &str) -> u8 {
     if status.eq_ignore_ascii_case("waiting") {
         0
@@ -418,78 +387,67 @@ fn status_rank(status: &str) -> u8 {
     }
 }
 
-/// Is this the status the whole screen exists for?
+/// Is this the status the screen exists for?
 ///
-/// The one place a status word is compared against a literal for **presentation**, and it is
-/// safe for the same reason `status_rank` is: an unrecognised status still renders, just not
-/// in the accent colour.
+/// This is the only comparison of a status word for presentation. It is safe for the reason
+/// `status_rank` is safe: an unknown status still shows, but not in the accent colour.
 pub fn is_waiting(status: &str) -> bool {
     status.eq_ignore_ascii_case("waiting")
 }
 
-/// Is this status the one whose glyph moves?
+/// Does the glyph of this status move?
 ///
-/// Asked by the plugin *before* rendering, to decide whether the next animation tick has
-/// anything to repaint — so it is a question about cost, not about correctness. Getting it
-/// wrong on a status word this build has never seen costs a still spinner nobody is looking at,
-/// which is why it is the same literal comparison [`is_waiting`] is and not a bigger idea.
+/// The plugin asks this before it draws, to decide whether the next tick must repaint. It is a
+/// question about cost, not about correctness. A wrong answer for an unknown status costs one
+/// spinner that does not turn.
 pub fn is_busy(status: &str) -> bool {
     status.eq_ignore_ascii_case("busy")
 }
 
-/// One turn of the busy spinner, a frame per animation tick.
+/// One turn of the busy spinner, one frame per animation tick.
 ///
-/// Braille rather than the ASCII `|/-\`: every frame here is **one column wide**, so the tag
-/// column keeps the width it measured as the spinner turns. A cycle whose frames disagreed
-/// about their width would resize the column ten times a second and shove the two columns to
-/// its right back and forth for the whole time an agent was busy.
+/// These are braille characters, not the ASCII `|/-\`, because each frame is one column wide.
+/// The tag column thus keeps its measured width while the spinner turns. Frames of different
+/// widths would move the columns to the right ten times a second.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// The glyph for a status, or `None` for one this build has never heard of.
+/// The glyph for a status, or `None` for a status this build does not know.
 ///
-/// `frame` is the animation tick, and only `busy` reads it — see [`SPINNER`]. Every other
-/// status returns the same glyph on every frame, which is what keeps this a pure function of
-/// the row rather than a thing that has to be redrawn.
+/// `frame` is the animation tick. Only `busy` reads it. See [`SPINNER`].
 ///
-/// ⚠️ This is the lookup table the rest of this module refuses to have, and it is allowed to
-/// exist only because it is **decoration and nothing else**. It never decides whether a row is
-/// shown, never decides where one sorts, and never replaces the status word. A status invented
-/// after this was written keeps its own word, takes the neutral glyph, and is rendered as
-/// itself — so the table going stale costs a picture, never a row.
+/// This table is decoration only. It never decides whether a row shows, never decides where a
+/// row sorts, and never replaces the status word. A status added after this was written keeps
+/// its word, takes the neutral glyph, and still shows. A stale table thus costs a picture, not
+/// a row.
 ///
-/// The four below are the *whole* vocabulary of Claude Code 2.1.251, read out of the binary
-/// itself (`"busy","shell","idle","waiting"`) rather than inferred from what happened to be
-/// running. 🔴 That makes the table complete **today**, and is not a reason to drop the
-/// fallback: the set grew by one — `shell` — between two releases already.
+/// The four values are the full set of Claude Code 2.1.251, read from the binary
+/// (`"busy","shell","idle","waiting"`). That makes the table complete today, which is not a
+/// reason to remove the fallback: the set grew by one (`shell`) between two releases.
 fn glyph(status: &str, frame: u64) -> Option<&'static str> {
     Some(match status.to_ascii_lowercase().as_str() {
-        // Someone with their hand up: the one status this whole screen exists to surface, and
-        // literally what the agent is doing — it has asked you something and stopped.
+        // A raised hand: the agent asked you something and stopped. This is the status the
+        // screen exists for.
         "waiting" => "🙋",
-        // Not asleep. An idle agent has *finished* and is waiting on your next instruction,
-        // which is why it outranks a busy one in the sort — so it gets a cup rather than the
-        // "do not disturb" of a 💤.
+        // An idle agent has finished and waits for your next instruction, so it sorts above a
+        // busy one. A cup, not a 💤, because it is not asleep.
         "idle" => "☕",
-        // The one glyph that moves, because it is the one status that is *going* somewhere: a
-        // busy agent will leave this state on its own, and the spinner is the row saying so
-        // without the user having to watch the age column to find out. It replaces the static
-        // 🧠 that was here — a picture of thinking, where this is the thinking itself.
+        // The only glyph that moves, because a busy agent leaves this status on its own. The
+        // row thus shows that without the age column.
         "busy" => SPINNER[(frame as usize) % SPINNER.len()],
-        // It is a shell. There was never going to be another choice.
         "shell" => "🐚",
         _ => return None,
     })
 }
 
-/// Unidentified, and deliberately not one of the four — a status we cannot name must not be
-/// able to pass itself off as one we can. Nothing else on this screen is a vehicle.
+/// Unknown. It is not one of the four glyphs, so a status we cannot name cannot look like one
+/// we can.
 const UNKNOWN_GLYPH: &str = "🛸";
 
-/// `🔴 WAITING` — the glyph, then the status word uppercased verbatim.
+/// The glyph, then the status word in capitals, unchanged.
 ///
-/// The word stays. The glyph is what the eye scans a column for; the word is what tells you
-/// what a glyph you have never seen before actually means, and it is the only half that is
-/// guaranteed to be true of a status released after this code was.
+/// The word stays. You scan the column for the glyph, but the word explains a glyph you have
+/// not seen before. The word is also the only part that is correct for a status released after
+/// this code.
 pub fn full_tag(status: &str, frame: u64) -> String {
     format!(
         "{} {}",
@@ -498,12 +456,11 @@ pub fn full_tag(status: &str, frame: u64) -> String {
     )
 }
 
-/// `🔴` alone, for a pane too narrow to carry the word as well.
+/// The glyph alone, for a pane too narrow for the word.
 ///
-/// An unrecognised status degrades to its first letter rather than to [`UNKNOWN_GLYPH`]: the
-/// neutral glyph on every unknown row would render two *different* unknown statuses
-/// identically, where `[S]` and `[N]` at least stay distinct. Collisions between two unknowns
-/// sharing a letter are tolerated, as they were before there were glyphs at all.
+/// An unknown status becomes its first letter, not [`UNKNOWN_GLYPH`]. The neutral glyph would
+/// draw two different unknown statuses in the same way, where `[S]` and `[N]` stay different.
+/// Two unknown statuses with the same first letter still collide.
 pub fn abbr_tag(status: &str, frame: u64) -> String {
     match glyph(status, frame) {
         Some(glyph) => glyph.to_string(),
@@ -514,17 +471,14 @@ pub fn abbr_tag(status: &str, frame: u64) -> String {
     }
 }
 
-/// The JSON array `claude-ps` prints, as the agents this screen can act on.
+/// The JSON array from `claude-ps`, as the agents this screen can act on.
 ///
-/// Returns the agents inside zellij, and the **count** of those outside it. Agents outside
-/// zellij are dropped here rather than rendered with a placeholder session: `Enter` could do
-/// nothing for them, and rows `Enter` cannot act on do not belong on a screen whose only job
-/// is reachability. The count survives so they are never silently invisible.
+/// This returns the agents in zellij and the count of the agents outside it. An agent outside
+/// zellij is removed, because `Enter` can do nothing for it. The count stays, so that such an
+/// agent is never absent without an explanation.
 ///
-/// The one thing that is **not** dropped is a document that will not deserialise. That is not a
-/// row this screen cannot use, it is evidence that the tool and this build no longer agree, and
-/// every row in it is suspect for the same reason — so it ends the parse rather than rendering
-/// a partial list that looks complete.
+/// A document that does not deserialise stops the parse. It shows that the tool and this build
+/// disagree, which makes every row in it doubtful. A partial list would look complete.
 fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
     let wire: Vec<Wire> =
         serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {}", error))?;
@@ -532,8 +486,8 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
     let mut agents = Vec::new();
     let mut outside = 0;
     for row in wire {
-        // Both arms are "not somewhere `Enter` can put you": no zellij at all, or a pane id
-        // that is not a number and so cannot be handed to `focus-pane-id`.
+        // Both cases are places `Enter` cannot reach: no zellij, or a pane id that is not a
+        // number and cannot go to `focus-pane-id`.
         let Some(zellij) = row.zellij else {
             outside += 1;
             continue;
@@ -560,24 +514,19 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
     Ok((agents, outside))
 }
 
-/// The name to show for an agent, or `None` to fall back to the zellij session.
+/// The name to show for an agent, or `None` to use the zellij session.
 ///
-/// `claude-ps` reports both the name and **who chose it**, and the second half is the load
-/// bearing one. A `derived` name is the basename of the cwd plus a suffix, so showing it puts
-/// the cwd on the row twice — once as a name that looks chosen and once as the cwd it was
-/// copied from. Only `user` and `peer` are a name that a person or another agent picked.
+/// `claude-ps` reports the name and the source of the name, and the source decides this. A
+/// `derived` name is the basename of the cwd plus a suffix, so it would put the cwd on the row
+/// twice. Only `user` and `peer` are names that a person or another agent chose.
 ///
-/// 🔴 An unrecognised source is **suppressed**, and that is the exact opposite of what
-/// [`status_rank`] does with an unrecognised status. The asymmetry is the producer's, and it is
-/// deliberate on both sides: the status vocabulary is open and every value in it is a real
-/// state, so hiding one hides a live agent. The name sources are open too, but the ones that
-/// carry a chosen name are a short closed list and the machinery is the long open one — Claude
-/// Code already writes `derived`, `collision`, `auto` and `hook` — so a source invented
-/// tomorrow is far likelier to be more machinery. Trusting it would put a generated name where
-/// a chosen one belongs, which reads as information and is not.
+/// An unknown source is rejected, which is the opposite of what [`status_rank`] does with an
+/// unknown status. Every status is a real state, so a hidden status hides a live agent. The
+/// sources that carry a chosen name are a short list, but Claude Code already writes `derived`,
+/// `collision`, `auto` and `hook`. A new source is thus more probably another generated name.
 ///
-/// `None` is trusted, because it is the state before the key existed rather than a source this
-/// build failed to recognise, and an older `claude-ps` should keep working.
+/// An absent source is accepted, because it is the state from before the key existed. An older
+/// `claude-ps` must continue to work.
 fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
     let name = name.map(str::trim).filter(|name| !name.is_empty())?;
     let chosen = match source {
@@ -589,12 +538,11 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
     chosen.then(|| name.to_string())
 }
 
-/// Compact elapsed time as a **duration** — `4s`, `35m`, `2h`.
+/// Elapsed time as a duration: `4s`, `35m`, `2h`.
 ///
-/// Deliberately not [`crate::sessions::format_age`]: that one spells the same magnitudes with
-/// a trailing `" ago"`, which is right for "this session was created 2h ago" and wrong here.
-/// This column answers *how long has it been like this*, and an agent that has been waiting on
-/// you for thirty-five minutes is not an event that happened thirty-five minutes ago.
+/// This is not [`crate::sessions::format_age`], which adds `" ago"`. That form is correct for
+/// the time a session started. This column says how long the status has held, and an agent that
+/// has waited for thirty-five minutes is not an event from thirty-five minutes ago.
 pub fn format_duration(age: Duration) -> String {
     let secs = age.as_secs();
     match secs {

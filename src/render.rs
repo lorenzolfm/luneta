@@ -1,59 +1,52 @@
 //! Drawing the picker.
 //!
-//! Everything here goes through zellij's own `Text` component and the
-//! `print_text_with_coordinates` family rather than hand-written SGR. That is not cosmetic
-//! preference: a `Text` is serialized to the host as a DCS payload and coloured *there*, from
-//! the active theme's `StyleDeclaration`. So the picker picks up the user's theme (and its
-//! selected/emphasis colours) for free, with no `Styling` palette to carry and no `ModeUpdate`
-//! subscription to keep it current.
+//! This module draws through the `Text` component of zellij and the
+//! `print_text_with_coordinates` family, and not through its own SGR sequences. A `Text` goes to
+//! the host as a DCS payload, and the host colours it from the `StyleDeclaration` of the active
+//! theme. The picker thus follows the theme of the user, with no palette to carry and no
+//! `ModeUpdate` subscription to keep current.
 //!
-//! There is exactly one exception, and it is the preview box's screen rows: those are another
-//! pane's own bytes, and the colours in them are that pane's, not the theme's. A `Text` cannot
-//! carry them — it has four emphasis levels and the host decides what they look like — so those
-//! rows are printed as the escape sequences they arrived as. See [`PreviewRow`].
+//! There is one exception: the screen rows of the preview box. Those bytes belong to another
+//! pane, and their colours are that pane's colours. A `Text` cannot carry them, because it has
+//! four emphasis levels and the host decides how each one looks. Those rows are printed as the
+//! escape sequences they arrived as. See [`PreviewRow`].
 //!
-//! Colour is expressed as *emphasis levels*, not colours:
+//! Colour is expressed as emphasis levels, not as colours:
 //!
-//! | level | used for                                        |
-//! |-------|-------------------------------------------------|
-//! | 0     | tags — the quietest thing on the row            |
-//! | 1     | session names, chosen layout                    |
-//! | 2     | labels, box titles, the age column              |
-//! | 3     | the typed term, key caps, fuzzy-match hits      |
+//! | level | used for                                   |
+//! |-------|--------------------------------------------|
+//! | 0     | tags, which are the quietest part of a row  |
+//! | 1     | session names                              |
+//! | 2     | labels, box titles, the age column         |
+//! | 3     | the typed term, key names, match hits      |
 //!
-//! Weight is a second, blunter channel, and it has exactly one user. The host draws every
-//! character of a `Text` bold unless index level 5 says otherwise, so bold was the default and
-//! therefore said nothing. [`Line::finish`] now takes it off the content of every row, which
-//! leaves the box titles — `luneta` above, the screen name below — as the only bold text on
-//! the screen. See [`border_text`].
+//! Weight has one user. The host draws every character of a `Text` bold unless index level 5
+//! says otherwise, so bold was the default and said nothing. [`Line::finish`] removes it from
+//! the content of every row, which leaves the box titles as the only bold text. See
+//! [`border_text`].
 //!
-//! Absolute coordinates are safe here — and are what upstream uses — because the host deletes
-//! the plugin pane's viewport before feeding it each render (`plugin_pane.rs:243`). That also
-//! retires the old "build one frame, print it with no trailing newline" dance: there is no
-//! cursor to scroll off the top any more.
+//! Absolute coordinates are safe, because the host clears the viewport of the plugin pane
+//! before each render (`plugin_pane.rs:243`). No cursor can scroll a line off the top.
 //!
 //! ## One `Text` per row
 //!
-//! Rows used to be `Table` cells, and the host measured, padded and joined them. They are now
-//! whole lines, borders included, measured here — because a bordered row is not a thing a
-//! `Table` can express, and because the padding the host applied was invisible from this side.
-//! Three things follow from the change, and they are why it was worth making:
+//! Rows were once `Table` cells, which the host measured, padded and joined. They are now whole
+//! lines, measured here, because a `Table` cannot express a bordered row. Three results follow:
 //!
-//! - The selected row is one `Text::selected()` spanning the full width, so the highlight is a
-//!   continuous band rather than cells with gaps between them.
-//! - A trailing column can be pushed flush against the right border, which `Table` has no way
-//!   to ask for.
-//! - The empty-cell trap is gone. A `Table` cell's text crossed the wire as a comma-separated
-//!   list of its bytes, so `""` arrived as a list with no bytes rather than as text of length
-//!   zero: the cell was dropped, and since the wire format is one flat run of cells cut into
-//!   rows by a column count, *every* cell after it slid one place left. A row that dropped a
-//!   cell ate the first cell of the row below. There are no cells now.
+//! - The selected row is one `Text::selected()` across the full width, so the highlight is one
+//!   band and not a set of cells with gaps between them.
+//! - A last column can sit against the right border, which a `Table` cannot do.
+//! - The empty cell problem is gone. The text of a `Table` cell crossed the wire as a
+//!   comma-separated list of its bytes, so `""` arrived as a list of no bytes and not as text
+//!   of length zero. The host dropped the cell, and because the wire format is one run of cells
+//!   divided into rows by a column count, every later cell moved one place left. A row that
+//!   dropped a cell took the first cell of the row below it.
 //!
-//! The cost is arithmetic that used to be the host's, and three `print_*` calls per visible row
-//! instead of one per table — a row's interior, with its two borders printed either side, so
-//! that a selected row's highlight band cannot cover them (see [`draw_row`]). Renders are
-//! throttled to ~1/s (`main.rs`'s `polled || self.spinning()`), so that is ~90 calls a second
-//! on a full pane, against a budget that was already measured in tens.
+//! The cost is the arithmetic the host used to do, and three `print_*` calls for each visible
+//! row instead of one for each table: the interior of a row, with a border printed on each side,
+//! so that the highlight of a selected row cannot cover them (see [`draw_row`]). A render runs
+//! about once a second (`polled || self.spinning()` in `main.rs`), which is about 90 calls a
+//! second on a full pane.
 
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
@@ -63,7 +56,7 @@ use crate::dirs::{Action, DirRow, DirSet, Listing, Status};
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{format_age, Contents, Kind, MatchSet, Row};
-use crate::{Pending, Rename};
+use crate::Rename;
 
 /// Emphasis levels, named. See the table above.
 const TAG: usize = 0;
@@ -71,33 +64,31 @@ const NAME: usize = 1;
 const LABEL: usize = 2;
 const ACCENT: usize = 3;
 
-/// What the results box is called, on every screen that has one.
+/// The name of the results box, on every screen that has one.
 ///
-/// The picker's own name, not the screen's. It sits above an input box whose title already
-/// changes with `Tab` — a second label that changed with it would be saying the same thing
-/// twice, and the top-left corner of a floating pane is where you look to find out *what this
-/// window is*. It is also the pane name (`main.rs`'s `rename_plugin_pane`), which used to be
-/// on zellij's frame and went with it.
+/// This is the name of the picker, not the name of the screen. The title of the input box below
+/// it already changes with `Tab`, and the top left corner of a floating pane says what the
+/// window is. It is also the pane name (`rename_plugin_pane` in `main.rs`).
 const TITLE: &str = "luneta";
 
-/// The selection gutter: one column for the caret, one for the space after it.
+/// The selection gutter: one column for the caret, and one for the space after it.
 ///
-/// Every row pays for it, selected or not, because a gutter that appears only under the
-/// highlight would shift the whole list sideways by two columns as you arrow down it.
+/// Every row has one, selected or not. A gutter that appeared only under the highlight would
+/// move the whole list two columns sideways as you move down it.
 const CARET: usize = 2;
 
-/// Opens a row with its selection gutter.
+/// Open a row with its selection gutter.
 ///
-/// Belt and braces on purpose: the caret *and* `Text::selected`. The band alone is invisible on
-/// a theme whose selected background barely differs from its normal one, and the caret alone is
-/// a single character to find on a wide row.
+/// The row has both the caret and `Text::selected`. The band alone is hard to see on a theme
+/// whose selected background is close to its normal one, and the caret alone is one character
+/// to find on a wide row.
 fn gutter(line: &mut Line, selected: bool) {
     line.push(if selected { ">" } else { " " }, ACCENT);
     line.gap(1);
 }
 
-/// The blank columns between two columns of a row. Two, not the one the host used to insert,
-/// because a full-width box has room for it and three columns jammed together read as one.
+/// The blank columns between two columns of a row. Two, not the one the host used, because a
+/// full-width box has the space and three columns that touch read as one.
 const GAP: usize = 2;
 
 /// A note line: what it says, and whether saying it is bad news.
@@ -122,10 +113,8 @@ impl Note {
 
 /// The session screen.
 ///
-/// The results box is titled [`TITLE`] rather than "Results": what goes in that corner is the
-/// name of the thing you are looking at, and "Results" named the one thing on the screen that
-/// needed no naming — a box full of session names, directly above a prompt that says
-/// `Sessions`. Which list it is, is the input box's job to say.
+/// The results box is titled [`TITLE`] and not "Results". That corner names the window, and the
+/// input box below already names the list.
 pub fn render_search(
     state: &MatchSet,
     peeks: &Peeks,
@@ -148,13 +137,12 @@ pub fn render_search(
     draw_help(&screen, search_help(help_width(cols)));
 }
 
-/// The directory screen: the places you go, and what `Enter` would make of each.
+/// The directory screen: the places you go, and what `Enter` does with each one.
 ///
-/// Deliberately the same shape as [`render_search`] — same two boxes, same help row, same
-/// bottom-anchored list — so that `Tab` swaps the *contents* of a screen rather than the
-/// screen. The columns differ because the second one answers a different question: sessions
-/// show an age because age is what they are sorted by, and directories show their path because
-/// frecency is not a thing you can print usefully.
+/// This has the shape of [`render_search`]: the same two boxes, the same help row, and the same
+/// list at the bottom. `Tab` thus changes the contents of a screen and not the screen. The
+/// columns differ, because sessions sort by age and directories sort by frecency, which is not
+/// a useful thing to print.
 pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
     let notes = dir_note_texts(dirs);
@@ -171,11 +159,11 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
     draw_help(&screen, dirs_help(help_width(cols)));
 }
 
-/// The agent screen: who is running, what they are doing, and how long they have been doing it.
+/// The agent screen: which agents run, what they do, and for how long.
 ///
-/// `frame` is the animation tick, and reaches exactly one thing: the busy spinner's glyph. It
-/// is threaded down rather than read from `agents`, because it is a fact about *when we are
-/// drawing*, not about the agents — the snapshot they came from is still frozen.
+/// `frame` is the animation tick, and it reaches one thing: the glyph of the busy spinner. It
+/// is passed down and not read from `agents`, because it describes the moment of the draw and
+/// not the agents. Their snapshot does not change.
 pub fn render_agents(
     agents: &AgentSet,
     peeks: &Peeks,
@@ -199,13 +187,12 @@ pub fn render_agents(
     draw_help(&screen, agents_help(help_width(cols)));
 }
 
-/// Renaming the session you are in — the only session `rename_session` can address.
+/// Rename the current session, which is the only session `rename_session` can address.
 pub fn render_rename(rename: &Rename, current: Option<&str>, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
 
-    // The whole row, not the half the list would have had: this screen has one question on it
-    // and nothing to preview, and half a pane of question beside half a pane of blank box would
-    // be spending the width on saying that the preview has nothing to say.
+    // The full width, not the half the list would take. This screen asks one question and has
+    // nothing to preview.
     if let Some(rect) = &screen.full {
         let notes = current
             .map(|current| {
@@ -229,46 +216,15 @@ pub fn render_rename(rename: &Rename, current: Option<&str>, rows: usize, cols: 
     );
 }
 
-/// The confirm step before a session is killed or deleted. Nothing has happened at this point —
-/// this screen is what makes that true, and `Esc` backs out of it.
-///
-/// The keys live on the help row rather than in the input box, unlike every other screen: the
-/// input box here is not taking input, and printing `<ENTER> Kill` in both places would say the
-/// same thing twice on the one screen where the reader is being asked to stop and read.
-pub fn render_confirm(pending: &Pending, rows: usize, cols: usize) {
-    let screen = Screen::new(rows, cols);
-
-    // The whole row, as on the rename screen and for the same reason.
-    if let Some(rect) = &screen.full {
-        // Spelling out what survives is the whole point of the screen: "kill" and "delete" look
-        // alike on a keyboard and differ entirely in what you can get back.
-        let note = match pending.kind {
-            Kind::Live => Note::dim(pending.consequence()),
-            Kind::Resurrectable => Note::error(pending.consequence()),
-        };
-        draw(rect, pending.verb(), "", interior(rect, &[note], Vec::new()));
-    }
-    let question = format!("{} \"{}\"?", pending.verb(), pending.name);
-    draw_input(&screen, pending.verb(), (question, None, false));
-    // `Del` is on this row only while there is an escalation left to offer. Once the question
-    // is already "Delete", naming a key that would do nothing is worse than the blank space.
-    let mut keys = vec![("<ENTER>", pending.verb(), pending.verb())];
-    if pending.can_purge() {
-        keys.push(("<Del>", "Delete for good", "Delete"));
-    }
-    keys.push(("<ESC>", "Cancel", "Cancel"));
-    draw_help(&screen, keys_text(help_width(cols), &keys));
-}
-
 // ---------------------------------------------------------------------------------------------
 // The chrome
 // ---------------------------------------------------------------------------------------------
 
-/// What the input box holds: the text being typed, what `Enter` would do with it, and whether
-/// saying so is bad news.
+/// What the input box holds: the text you type, what `Enter` does with it, and whether that is
+/// a refusal.
 type Prompt = (String, Option<String>, bool);
 
-/// The help row is indented to line up with the content inside the boxes above it.
+/// The help row is indented to align with the content inside the boxes above it.
 fn help_width(cols: usize) -> usize {
     cols.saturating_sub(PAD * 2)
 }
@@ -286,20 +242,19 @@ fn draw(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) {
     print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
-/// One interior row: the left border, the row, the right border — three `Text`s, not one.
+/// One interior row: the left border, the row, and the right border. These are three `Text`
+/// values, not one.
 ///
-/// ⚠️ The split is what keeps the selection band inside the box. `Text::selected()` is a
-/// property of a whole `Text` and the host paints the selected background across all of it, so
-/// while a row carried its own `│` characters the highlight covered them and the box lost both
-/// sides on the one row you were pointing at. The borders are their own `Text`s now, printed
-/// either side, and they are never the selected one.
+/// The division keeps the selection band inside the box. `Text::selected()` applies to a whole
+/// `Text`, and the host paints the selected background over all of it. A row that held its own
+/// `│` characters thus lost both sides of the box under the highlight. The borders are now
+/// their own `Text` values, and neither is ever the selected one.
 ///
-/// The cost is three `print_*` calls per row where there used to be one. Renders are throttled
-/// to ~1/s (`main.rs`'s `polled || self.spinning()`), so that is ~90 calls a second on a full
-/// pane, against a budget that was already measured in tens.
+/// The cost is three `print_*` calls for each row instead of one, which is about 90 calls a
+/// second on a full pane.
 fn draw_row(rect: &Rect, y: usize, row: Text) {
     let Some(inner) = rect.width.checked_sub(2) else {
-        // A box two columns wide is two borders with nothing between them. Nothing to draw.
+        // A box of two columns is two borders with nothing between them.
         return;
     };
     let edge = || Text::new(VERTICAL.to_string()).dim_all();
@@ -308,13 +263,11 @@ fn draw_row(rect: &Rect, y: usize, row: Text) {
     print_at(edge(), rect.x + rect.width - 1, y, 1);
 }
 
-/// The one place on the screen that keeps its bold.
+/// The only text on the screen that stays bold.
 ///
-/// [`Line::finish`] unbolds every character of every row (see the ⚠️ there), so a box title is
-/// bold by being the thing that was not unbolded — which is what makes [`TITLE`] and the screen
-/// name read as headings rather than as more chrome. The right-hand count is unbolded
-/// with the rest: it is a readout, not a heading, and two bold things in one border is one too
-/// many.
+/// [`Line::finish`] removes bold from every character of every row, so a box title is bold
+/// because nothing removed it. [`TITLE`] and the screen name thus read as headings. The count
+/// on the right is not bold: it is a readout, not a heading.
 fn border_text(border: Border) -> Text {
     let rule = border.rule_indices();
     let Border { line, title, right } = border;
@@ -328,8 +281,8 @@ fn border_text(border: Border) -> Text {
     text
 }
 
-/// A box's interior: blank rows, then the notes, then the body — bottom-anchored as one block,
-/// so the list hugs the prompt and the notes ride on top of the list.
+/// The interior of a box: blank rows, then the notes, then the body. The block sits at the
+/// bottom, so that the list is next to the prompt and the notes are above the list.
 fn interior(rect: &Rect, notes: &[Note], body: Vec<Text>) -> Vec<Text> {
     let block = anchor(rect, notes.len(), body.len());
     let mut lines: Vec<Text> = (rect.inner_y()..block.y).map(|_| blank_line(rect)).collect();
@@ -338,9 +291,9 @@ fn interior(rect: &Rect, notes: &[Note], body: Vec<Text>) -> Vec<Text> {
     lines
 }
 
-/// ⚠️ Notes are hard-truncated to the box. A note wider than its box would paint over the right
-/// border — the same defect that once let a long `RunCommandResult` failure reason, carrying an
-/// absolute path, run past the pane and be overwritten mid-word by the help line.
+/// A note is truncated to the box. A note that is wider would write over the right border. A
+/// long failure reason from `RunCommandResult`, which carries an absolute path, once passed the
+/// edge of the pane and the help line then wrote over it.
 fn note_line(rect: &Rect, note: &Note) -> Text {
     let inner = rect.inner_width();
     let mut line = Line::new();
@@ -353,23 +306,22 @@ fn note_line(rect: &Rect, note: &Note) -> Text {
     line.finish(inner)
 }
 
-/// `> typed_` on the left, what `Enter` would do on the right.
+/// `> typed_` on the left, and what `Enter` does on the right.
 ///
-/// The two are pushed apart rather than run together because they answer different questions and
-/// change at different times: the left half moves under your fingers, the right half changes
-/// when the highlight does.
+/// The two are separated, because they answer different questions and change at different
+/// times. The left half changes as you type, and the right half changes with the highlight.
 ///
-/// When they will not both fit, the action is cut first and dropped below [`MIN_ACTION`]. The
-/// term you are typing is never the thing that gets cut — and when the term alone overruns the
-/// box it is truncated from the *left*, because what you just typed is at its end.
+/// If both do not fit, the action is cut first, and it goes below [`MIN_ACTION`]. The term is
+/// never cut. If the term alone is too wide, it is truncated from the left, because the
+/// characters you typed last are at its end.
 fn input_line(rect: &Rect, prompt: Prompt) -> Text {
     let (input, action, is_error) = prompt;
     let inner = rect.inner_width();
     let mut line = Line::new();
     line.push("> ", TAG);
 
-    // Trailing `_` is a cursor stand-in: a plugin's real cursor is off by default and turning it
-    // on would mean tracking its position through every re-render.
+    // The final `_` stands for the cursor. The real cursor of a plugin is off by default, and
+    // to turn it on would mean to track its position through every render.
     let (typed, _) = truncate_left(&format!("{}_", input), inner.saturating_sub(2));
     line.push(&typed, ACCENT);
 
@@ -386,15 +338,14 @@ fn input_line(rect: &Rect, prompt: Prompt) -> Text {
     line.finish(inner)
 }
 
-/// The narrowest an action clause is worth printing: `<ENTER> ` and something after it.
+/// The narrowest action worth printing: `<ENTER> ` and one word after it.
 const MIN_ACTION: usize = 12;
 
 fn draw_input(screen: &Screen, title: &str, prompt: Prompt) {
     let rect = &screen.input;
     if !screen.bordered {
-        // No room for a border — and now literally none, since [`Line::finish`] stopped putting
-        // one on. The one row left says what you are typing, which is the only thing on this
-        // screen that cannot be inferred from anything else.
+        // No room for a border. The one row that is left shows what you type, which nothing
+        // else on this screen can show.
         print_at(input_line(rect, prompt), rect.x, rect.y, rect.width);
         return;
     }
@@ -407,11 +358,11 @@ fn draw_help(screen: &Screen, help: Text) {
     }
 }
 
-/// `3/47` — where the cursor is, over how many rows matched.
+/// `3/47`: the position of the cursor, over the number of rows that matched.
 ///
-/// One token answering both "how many did my search leave?" and "how far down am I?", which is
-/// what retired the `+N more` line: `1/47` says there are forty-six below without spending a
-/// row to say it. With nothing selected there is no position to report, so only the count is.
+/// This answers two questions in one place: how many rows the search left, and how far down the
+/// list you are. `1/47` says that 46 rows are below, and costs no row of its own. With no
+/// selection there is no position, so only the count shows.
 fn count(selected: Option<usize>, total: usize) -> String {
     match selected {
         Some(index) if total > 0 => format!("{}/{}", index + 1, total),
@@ -420,9 +371,8 @@ fn count(selected: Option<usize>, total: usize) -> String {
     }
 }
 
-/// Keep the selection on screen, scrolling only when it would otherwise fall off. A centred
-/// viewport would shift every row on every keystroke; row-index stability is a non-goal, but
-/// gratuitous motion is still noise.
+/// Keep the selection on the screen, and scroll only when it would leave. A centred viewport
+/// would move every row on every keystroke.
 fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
     if visible >= total {
         return (0, total);
@@ -440,25 +390,23 @@ fn blank_line(rect: &Rect) -> Text {
     Text::new(rect.blank()).dim_all()
 }
 
-/// One row of a preview box: one the picker wrote, or one a pane did.
+/// One row of a preview box: a row the picker wrote, or a row a pane wrote.
 ///
-/// 🔴 The two cannot be the same thing, and that is forced by what a `Text` is. A `Text` is a
-/// string plus emphasis *levels*, and the host turns the levels into colours from the theme —
-/// which is exactly right for everything the picker says about a pane, and no use at all for
-/// what is on one. A pane's line already carries its own colours, as `SGR`, in truecolour: `nvim`
-/// syntax, a diff's red and green, a prompt's branch. There is no level to put those in.
+/// The two cannot be one type, because of what a `Text` is. A `Text` is a string and a set of
+/// emphasis levels, and the host turns the levels into colours from the theme. That is correct
+/// for what the picker says about a pane, and useless for what is on one. A pane line carries
+/// its own colours as `SGR`, in truecolour: `nvim` syntax, the red and green of a diff, the
+/// branch in a prompt. No level can hold those.
 ///
-/// So a pane's row is printed as the bytes it arrived as. That is safe for two reasons and only
-/// those two: [`crate::panes::sgr_only`] has already thrown away every escape that is not a
-/// colour, so the bytes cannot move the cursor or clear the screen; and the host addresses its
-/// own `Text` components with exactly the same `ESC [ y ; x H` this uses
-/// (`ui/components/component_coordinates.rs:19`), so the two are not two mechanisms — one is
-/// what the other is made of.
+/// A pane row is therefore printed as the bytes it arrived as. That is safe for two reasons.
+/// [`crate::panes::sgr_only`] has removed every escape that is not a colour, so the bytes cannot
+/// move the cursor or clear the screen. The host also places its own `Text` components with the
+/// same `ESC [ y ; x H` this code uses (`ui/components/component_coordinates.rs:19`).
 enum PreviewRow {
     /// Ours: a styled row, coloured by the theme.
     Own(Text),
-    /// Theirs: an interior's worth of a pane's line, colours included, already cut and padded
-    /// to the width of the box by [`pane_row`].
+    /// Theirs: one interior width of a pane line, with its colours. [`pane_row`] has already
+    /// cut and padded it to the box.
     Pane(String),
 }
 
@@ -469,9 +417,8 @@ impl From<Text> for PreviewRow {
 }
 
 impl PreviewRow {
-    /// The row as characters — what the box would look like. Escapes included, for the pane's
-    /// rows: they are part of the row, they just take no columns. Only the tests read a row
-    /// back; the renderer prints it.
+    /// The row as characters, which is how the box looks. A pane row keeps its escapes, which
+    /// are part of the row and take no columns. Only the tests read a row back.
     #[cfg(test)]
     fn content(&self) -> &str {
         match self {
@@ -481,26 +428,25 @@ impl PreviewRow {
     }
 }
 
-/// A pane's line, laid out the way [`Line::finish`] lays out ours: one column of padding either
-/// side, cut to the interior and padded back out to it, so a pane's row and the picker's own are
-/// the same width and the right border stands in the same place on both.
+/// A pane line, laid out as [`Line::finish`] lays out our own rows: one column of padding on
+/// each side, cut to the interior and padded back to it. A pane row and a picker row are thus
+/// the same width, and the right border is in the same place on both.
 fn pane_row(inner: usize, line: &str) -> String {
     let line = panes::fit(line, inner);
     let pad = inner.saturating_sub(panes::columns(&line));
     format!(" {}{} ", line, " ".repeat(pad))
 }
 
-/// Draw the preview box: the same chrome as any other box, with its content at the top.
+/// Draw the preview box: the borders of any other box, with the content at the top.
 ///
-/// The box beside the list answers the question every row of every screen begs and no row has
-/// the width to answer: a session's name does not say what is running in it, a directory's does
-/// not say what is in it, and an agent's label does not say what it is stuck on. Each screen
-/// answers it from a different place — the session preview off the same one-second snapshot the
-/// ages come from, the directory preview off an `ls` the cursor triggers, the agent preview off
-/// the row itself — so the three builders below share these two helpers and nothing else.
+/// The box answers a question that no row has the width to answer. The name of a session does
+/// not say what runs in it, the name of a directory does not say what is in it, and the label of
+/// an agent does not say what it waits for. Each screen answers from a different source: the
+/// session preview from the snapshot that gives the ages, the directory preview from an `ls`,
+/// and the agent preview from the row. The three functions below share these two helpers only.
 ///
-/// This is [`draw`] with one extra case in the middle, rather than a call to it: a pane's row
-/// does not go through `print_at` at all.
+/// This is [`draw`] with one more case in the middle: a pane row does not go through
+/// `print_at`.
 fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
     print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
     for (i, row) in filled(rect, lines).into_iter().enumerate() {
@@ -513,13 +459,12 @@ fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
     print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
-/// One row of a pane's screen: the box's borders either side of it, and the pane's own bytes
+/// One row of a pane screen: the borders of the box on each side, and the bytes of the pane
 /// between them.
 ///
-/// ⚠️ The resets are not optional. One before, because a `Text` printed a moment ago left the
-/// terminal in whatever colour it ended on and the pane's first characters may set none of their
-/// own; one after, because the pane's line may end mid-colour and the box's right border is not
-/// the place to find that out.
+/// Both resets are necessary. The first one clears the colour that the last `Text` left, because
+/// the first characters of the pane can set no colour of their own. The second one clears a
+/// colour that the pane line did not close, which would otherwise reach the right border.
 fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
     let Some(inner) = rect.width.checked_sub(2) else {
         return;
@@ -530,21 +475,20 @@ fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
     print_at(edge(), rect.x + rect.width - 1, y, 1);
 }
 
-/// A preview box's interior: content at the top, blanks under it.
+/// The interior of a preview box: content at the top, and blank rows below it.
 ///
-/// Top-anchored, where [`interior`] is bottom-anchored, and the disagreement is not an oversight
-/// — the two are read from opposite ends. The list grows up out of the prompt you are typing
-/// into; a preview is read from its first line down, and anchoring it to the floor would leave a
-/// short one stranded away from the title that says what it is.
+/// This is anchored to the top, where [`interior`] is anchored to the bottom, because the two
+/// are read from opposite ends. The list grows up from the prompt you type into. A preview is
+/// read from its first line down, and a short one at the bottom would be far from the title that
+/// names it.
 ///
-/// ⚠️ Content that overruns the box loses its tail, and the last row says how much. The preview
-/// does not scroll and cannot: the cursor is in the list beside it, and every key that could
-/// move it means something there. A box that cannot be scrolled had better be honest about what
-/// it is not showing.
+/// Content that is too tall loses its end, and the last row says how much. The preview cannot
+/// scroll, because the cursor is in the list beside it and every key that could move it has a
+/// meaning there.
 fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
     let height = rect.inner_height();
     if lines.len() > height {
-        // One more than the overflow: the marker takes a row of its own, off the last one that
+        // One more than the overflow, because the marker takes the row of the last line that
         // would have fitted.
         let hidden = lines.len() - height + 1;
         lines.truncate(height.saturating_sub(1));
@@ -554,8 +498,8 @@ fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
     lines
 }
 
-/// One line of a preview box: text at `level`, cut to the box. The picker's own words about a
-/// pane, which is why it comes back as a [`PreviewRow::Own`] and not as the pane's bytes.
+/// One line of a preview box: text at `level`, cut to the box. These are the words of the
+/// picker, so the result is a [`PreviewRow::Own`].
 fn preview_line(inner: usize, text: &str, level: usize) -> PreviewRow {
     let mut line = Line::new();
     line.push(&truncate(text, inner), level);
@@ -579,15 +523,14 @@ fn error_lines(inner: usize, text: &str) -> Vec<PreviewRow> {
         .collect()
 }
 
-/// Break `text` into lines of at most `width` columns, at spaces.
+/// Divide `text` into lines of `width` columns or fewer, at spaces.
 ///
-/// The one place in the picker that wraps rather than truncates, and the exception earns itself:
-/// everywhere else a string is a *column* of a row, so a cut end costs a name and the row still
-/// reads. Here the box is a paragraph's worth of room and a sentence explaining why a session has
-/// nothing to show has nowhere to be continued to.
+/// This is the only place in the picker that wraps text. Everywhere else a string is one column
+/// of a row, so a cut end costs a name and the row still reads. Here the box has the room for a
+/// paragraph, and a sentence that explains why a session shows nothing has nowhere else to go.
 ///
-/// A word wider than the box is still cut, by [`truncate`]: a hard break mid-word reads as two
-/// words, which on a screen full of session names is worse than an elision that says so.
+/// [`truncate`] still cuts a word that is wider than the box. A break inside a word reads as two
+/// words, which is worse than a mark that says the word was cut.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for word in text.split_whitespace() {
@@ -603,12 +546,12 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// What a preview box says when the list beside it has no highlight to talk about.
+/// What a preview box says when the list beside it has no highlight.
 fn nothing_highlighted(rect: &Rect) -> (String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     (
-        // Not [`TITLE`]: the box beside this one is already called that, and a preview is
-        // titled after the thing it is previewing — which right now is nothing.
+        // Not [`TITLE`], because the box beside this one has that name. A preview is named
+        // after what it shows, and it shows nothing.
         "Preview".to_string(),
         vec![
             preview_line(inner, "nothing highlighted", TAG),
@@ -622,10 +565,10 @@ fn nothing_highlighted(rect: &Rect) -> (String, Vec<PreviewRow>) {
 // Preview: sessions
 // ---------------------------------------------------------------------------------------------
 
-/// What is on the highlighted session's screen — or, for a dead one, why there is no screen.
+/// What is on the screen of the highlighted session, or why a dead session has no screen.
 ///
-/// The title is the session; the border's right-hand label is what it is made of; the body is
-/// one of its panes, live. Which pane, and why that one, is [`crate::sessions::Focus`].
+/// The title is the session. The right label of the border is the pane count. The body is one
+/// of its panes. [`crate::sessions::Focus`] says which pane and why.
 fn session_preview(
     state: &MatchSet,
     peeks: &Peeks,
@@ -637,18 +580,16 @@ fn session_preview(
         return (title, String::new(), lines);
     };
     let contents = state.contents.get(&row.name);
-    // Only for a live session, and only once it has said how many panes it has: a count in the
-    // border of a box explaining that there is nothing to count answers a question nobody is in
-    // a position to ask.
+    // Only for a live session, and only after it reports its panes. A count in the border of
+    // a box that explains that there is nothing to count says nothing.
     let right = match (row.kind, contents) {
         (Kind::Live, Some(contents)) => plural(contents.panes, "pane"),
         _ => String::new(),
     };
     let lines = match (row.kind, contents) {
         (Kind::Live, Some(contents)) => live_preview(rect, peeks, &row.name, contents),
-        // A live session whose server has not written its metadata yet. Rare and
-        // self-correcting — the next poll picks it up — so it says so rather than showing a
-        // plausible blank.
+        // A live session whose server has not yet written its metadata. The next poll finds
+        // it, so the box says so and does not show a blank.
         (Kind::Live, None) => {
             wrapped_lines(inner, "no detail yet — the session has not reported what is in it", TAG)
         },
@@ -661,8 +602,8 @@ fn session_preview(
 fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let Some(focus) = &contents.focus else {
-        // Every pane it has is a plugin, and a plugin pane dumps empty however much it is
-        // drawing. Nothing to show, and a reason rather than a blank box.
+        // Every pane is a plugin pane, and a plugin pane dumps an empty screen. The box gives
+        // the reason and is not blank.
         return wrapped_lines(inner, "nothing but plugin panes — no screen to show", TAG);
     };
     let mut lines = vec![caption(inner, &focus.tab, &focus.title).into(), blank_line(rect).into()];
@@ -670,15 +611,14 @@ fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> 
     lines
 }
 
-/// `editor · nvim` — the tab, then the pane's own title.
+/// `editor · nvim`: the tab, then the title of the pane.
 ///
-/// The box's title is the session, so this line is the rest of the address: which of its panes
-/// the screen below belongs to. Without it, a session with seven panes shows you one of them
-/// and does not say which.
+/// The title of the box is the session, so this line completes the address and names the pane.
+/// Without it, a session of seven panes shows one of them and does not say which.
 fn caption(inner: usize, tab: &str, title: &str) -> Text {
     let mut line = Line::new();
-    // The tab name gives way to the pane title rather than the other way round: two panes of
-    // one tab are told apart by their titles, and it is a pane you are looking at.
+    // The tab name is cut before the pane title. Two panes of one tab differ in their titles,
+    // and you look at a pane.
     let room = inner.saturating_sub(title.width() + 3).max(MIN_TAB);
     line.push(&truncate(tab, room), LABEL);
     line.push(" · ", TAG);
@@ -686,25 +626,24 @@ fn caption(inner: usize, tab: &str, title: &str) -> Text {
     line.finish(inner)
 }
 
-/// The narrowest a tab name is worth printing before the pane title takes what is left.
+/// The narrowest tab name worth printing. The pane title takes the rest.
 const MIN_TAB: usize = 6;
 
-/// The pane's screen, or why there is not one yet.
+/// The screen of the pane, or why there is none yet.
 ///
-/// ⚠️ The **tail**, cut to what the box has left, and standing on the box's floor. A terminal
-/// is read from the bottom: its newest line is its last, so a preview showing the top of a pane
-/// would show you where the session had been rather than where it is — and a short screen
-/// floating in the middle of the box would put the prompt in a different place on every row you
-/// moved to. `used` is what the lines above have already spent.
+/// The box shows the end of the screen, cut to the space that is left, at the bottom of the
+/// box. You read a terminal from the bottom, so a preview of the top of a pane would show where
+/// the session was and not where it is. A short screen in the middle of the box would also put
+/// the prompt in a different place for each row. `used` is the space the lines above have taken.
 ///
-/// The three ways there is no screen are not bottom-anchored: they are the box talking about
-/// itself rather than a terminal, and they read from the top like everything else here.
+/// The three messages that replace a screen are at the top, because the box says them about
+/// itself and not about a terminal.
 fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let rows = rect.inner_height().saturating_sub(used);
     match peeks.get(key) {
-        // Not asked yet and asked-but-unanswered are the same thing to the reader: the answer
-        // is on its way. The pause between them is [`crate::PREVIEW_DELAY`].
+        // To the reader, "not asked yet" and "asked but not answered" are the same: the
+        // answer is on its way. [`crate::PREVIEW_DELAY`] is the time between them.
         None | Some(Peek::Reading) => vec![preview_line(inner, "reading…", TAG)],
         Some(Peek::Failed(reason)) => error_lines(inner, reason),
         Some(Peek::Ready(screen)) if screen.is_empty() => {
@@ -731,9 +670,8 @@ fn plural(n: usize, thing: &str) -> String {
     }
 }
 
-/// A dead session has no process, so there is no screen to look at and no panes to count.
-/// Saying `0 panes` would report that it has none rather than that there is nothing running to
-/// have any.
+/// A dead session has no process, so it has no screen and no panes to count. `0 panes` would
+/// say that it has no panes, and not that nothing runs to hold any.
 fn dead_preview(rect: &Rect) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let mut lines = vec![preview_line(inner, "not running", TAG), blank_line(rect).into()];
@@ -749,25 +687,25 @@ fn dead_preview(rect: &Rect) -> Vec<PreviewRow> {
 // Preview: directories
 // ---------------------------------------------------------------------------------------------
 
-/// What is in the highlighted directory, as `ls` reports it — the box's title is the session
-/// name the row would create, and the count in its border is how many entries there are.
+/// What is in the highlighted directory, as `ls` reports it. The title of the box is the
+/// session name the row would create, and the count in the border is the number of entries.
 ///
-/// ⚠️ The listing is looked up by **path**, never by row index. The cursor moves faster than
-/// `ls` answers, and a reply filed under the wrong directory would be a box confidently showing
-/// you somewhere else's contents. See [`crate::dirs::PATH_KEY`].
+/// The listing is found by path, never by row index. The cursor moves faster than `ls` answers,
+/// and a reply filed under the wrong directory would show the contents of another place. See
+/// [`crate::dirs::PATH_KEY`].
 fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     let Some(row) = dirs.selected_row() else {
         let (title, lines) = nothing_highlighted(rect);
         return (title, String::new(), lines);
     };
-    // From the left, as on the row: what identifies a directory is the end of its path.
+    // Cut from the left, as on the row. The end of a path identifies a directory.
     let (path, _) = truncate_left(&row.path, inner);
     let mut lines = vec![preview_line(inner, &path, LABEL), blank_line(rect).into()];
     let mut right = String::new();
     match dirs.listing(&row.path) {
-        // Not asked yet and asked-but-unanswered are the same thing to the reader: the answer is
-        // on its way. The pause between them is [`crate::PREVIEW_DELAY`], and it is deliberate.
+        // To the reader, "not asked yet" and "asked but not answered" are the same: the
+        // answer is on its way. [`crate::PREVIEW_DELAY`] is the time between them.
         None | Some(Listing::Reading) => lines.push(preview_line(inner, "reading…", TAG)),
         Some(Listing::Failed(reason)) => lines.extend(error_lines(inner, reason)),
         Some(Listing::Ready { entries, total }) => {
@@ -781,8 +719,8 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) 
     (row.name.clone(), right, lines)
 }
 
-/// One entry of a listing. Directories are the loud ones — they are what you would `cd` into
-/// next, and `ls -p` has already marked them with the `/` that says so.
+/// One entry of a listing. A directory is brighter, because it is where you would `cd` next,
+/// and `ls -p` has marked it with a `/`.
 fn entry_line(inner: usize, entry: &str) -> PreviewRow {
     let level = if entry.ends_with('/') { NAME } else { LABEL };
     preview_line(inner, entry, level)
@@ -792,18 +730,17 @@ fn entry_line(inner: usize, entry: &str) -> PreviewRow {
 // Preview: agents
 // ---------------------------------------------------------------------------------------------
 
-/// What the highlighted agent is doing, and what it has on its screen.
+/// What the highlighted agent does, and what is on its screen.
 ///
-/// The status and its age go first, on one line, because they are the routing decision:
-/// *waiting, for eleven minutes* is the row you go to. Under them is the agent's own pane —
-/// which, on the one screen whose whole purpose is telling you which agent wants you, is the
-/// thing that says what it wants.
+/// The status and its age are on the first line, because they decide where you go: an agent
+/// that has waited eleven minutes is the row to choose. Below them is the pane of the agent,
+/// which says what it waits for.
 fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     let Some(row) = agents.selected_row() else {
         return nothing_highlighted(rect);
     };
-    // The same one status that is accented in the list, accented here, for the same reason.
+    // The status that takes the accent colour in the list takes it here too.
     let level = if agents::is_waiting(&row.status) { ACCENT } else { LABEL };
     let mut line = Line::new();
     line.push(&truncate(&row.status, inner), level);
@@ -818,8 +755,8 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
 // Sessions
 // ---------------------------------------------------------------------------------------------
 
-/// The narrowest a path column is worth having. Below this it says nothing a `…` would not, so
-/// the column is dropped and the name and tag get the room.
+/// The narrowest path column worth having. Below this it says no more than a `…`, so the
+/// column goes and the name and the tag take the space.
 const MIN_PATH: usize = 12;
 
 fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
@@ -832,17 +769,17 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         return Vec::new();
     }
 
-    // The separator takes a row of its own, so the window is over *display lines* rather than
-    // over rows. Every index below is one or the other and never both: `row` indexes
-    // `state.rows` and is what the selection means, `line` indexes what is drawn.
+    // The separator takes a row, so the window counts display lines and not rows. Each index
+    // below is one or the other: `row` indexes `state.rows` and holds the selection, and `line`
+    // indexes what is drawn.
     let dead_at = dead_from(&state.rows);
     let line_of = |row: usize| row + usize::from(dead_at.is_some_and(|at| row >= at));
     let lines = state.rows.len() + usize::from(dead_at.is_some());
     let selected_line = state.selected.map(line_of).unwrap_or(0);
     let (start, end) = viewport(selected_line, lines, capacity);
 
-    // Widths are measured over the *visible* window only. Measuring the whole list would make
-    // the name column jump as you scroll, for the sake of names you cannot see.
+    // Widths are measured over the visible window. The whole list would move the name column
+    // as you scroll, for names you cannot see.
     let visible = |line: usize| {
         dead_at.map_or(Some(line), |at| match line.cmp(&at) {
             std::cmp::Ordering::Less => Some(line),
@@ -856,9 +793,8 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         .map(|i| format_age(state.rows[*i].age).width())
         .max()
         .unwrap_or(0);
-    // Two columns now that the tag is gone, so the name gets everything the gutter and the age
-    // do not need and there is nothing left to degrade — the `Full`/`AbbrTag`/`NoAge` ladder
-    // went with it.
+    // Two columns, so the name takes what the gutter and the age do not need. There is nothing
+    // left to remove on a narrow pane.
     let name_budget = inner.saturating_sub(CARET + GAP + age_width).max(4);
 
     (start..end)
@@ -872,31 +808,28 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         .collect()
 }
 
-/// Where the dead sessions start, when any of them do.
+/// Where the dead sessions start, if there are any.
 ///
-/// A single position, not a search per row: `MatchSet` sorts live before resurrectable at every
-/// stage (see its module doc, rule 2), so the list is always two groups and never an
-/// interleaving. If that ever stops being true this returns a boundary that files live rows
-/// under a headstone, which is why the sort keeps `kind_rank` above everything else.
+/// This is one position, not a test for each row. `MatchSet` sorts live sessions before
+/// resurrectable ones at every stage (rule 2 of its module doc), so the list is always two
+/// groups. If that changes, this returns a boundary that puts live rows under the separator,
+/// which is why the sort keeps `kind_rank` above all else.
 fn dead_from(rows: &[Row]) -> Option<usize> {
     rows.iter().position(|row| row.kind == Kind::Resurrectable)
 }
 
 /// `🪦 Dead sessions ──────────────────`
 ///
-/// Chrome, not a `Row`. It never enters `MatchSet.rows`, so it cannot be selected, `↑`/`↓` step
-/// over it without knowing it is there, and `selected_name()` cannot return it. It scrolls with
-/// the list like any other line: pinning it would mean `viewport` reserving a row conditionally
-/// on where the selection sits, and the input line already says `Resurrect` for the highlighted
-/// row, so scrolling it away costs the grouping, not the meaning.
+/// This is a border, not a `Row`. It never enters `MatchSet.rows`, so it cannot be selected,
+/// `↑` and `↓` pass over it, and `selected_name()` cannot return it. It scrolls with the list. A
+/// fixed position would make `viewport` reserve a row that depends on the selection, and the
+/// input line already says `Resurrect` for the highlighted row.
 ///
-/// The rule runs to the right edge rather than being centred, which also makes it self-
-/// correcting: `🪦` is East-Asian-Wide and a fair number of terminal fonts draw it in one cell
-/// anyway, and a rule that ends at the border absorbs the disagreement.
+/// The rule runs to the right edge and is not centred, which also corrects an error of width:
+/// `🪦` is an East Asian Wide character, and many terminal fonts draw it in one cell.
 fn separator(inner: usize, label: &str) -> Text {
     let mut line = Line::new();
-    // Indented past the selection gutter, so it starts where the names do rather than where the
-    // carets do.
+    // Indented past the selection gutter, so that it starts where the names start.
     line.gap(CARET);
     line.push(&truncate(label, inner.saturating_sub(CARET)), LABEL);
     if line.columns() < inner {
@@ -908,19 +841,18 @@ fn separator(inner: usize, label: &str) -> Text {
 
 fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> Text {
     let name = truncate(&row.name, name_budget);
-    // A truncated name drops the indices that fell off the end — colouring a position that no
-    // longer exists would paint the wrong character.
+    // A truncated name drops the indexes past its end. A colour on a position that is gone
+    // would paint another character.
     let visible = name.chars().count();
     let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
 
     let mut line = Line::new();
     gutter(&mut line, selected);
     line.push_hits(&name, NAME, ACCENT, &hits);
-    // The age is pushed flush against the right border rather than left-packed behind the
-    // longest name. Two columns in a box as wide as the pane would otherwise huddle at the left
-    // with half the box empty beside them, and the age column would shift every time the
-    // longest visible name changed. Flush right rather than left-aligned in a right-hand block,
-    // so that every row's `ago` lands in the same column whatever the number in front of it.
+    // The age sits against the right border, and not after the longest name. Two columns in a
+    // box as wide as the pane would otherwise stay on the left with half the box empty, and the
+    // age column would move whenever the longest visible name changed. The text is aligned
+    // right, so that `ago` is in the same column on every row.
     let age = format_age(row.age);
     line.pad_to(inner.saturating_sub(age.width()));
     line.push(&age, LABEL);
@@ -933,22 +865,20 @@ fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> T
     }
 }
 
-/// The search term, with the `Enter` outcome spelled out beside it.
+/// The search term, with the result of `Enter` beside it.
 ///
-/// Putting the outcome in the input box rather than on a line of its own is what lets the
-/// picker say what `Enter` does in both states — pointing at the highlighted row, or at the
-/// literal text — without the two sentences ever contradicting each other.
+/// The result is in the input box and not on its own line, so that one sentence says what
+/// `Enter` does in both states: on the highlighted row, or on the text you typed.
 fn prompt_text(state: &MatchSet) -> Prompt {
     let (action, is_error) = enter_action(state);
     (state.search_term.clone(), action, is_error)
 }
 
-/// What `Enter` will do, and whether saying so is bad news.
+/// What `Enter` does, and whether that is a refusal.
 ///
-/// The refusals are the two states `confirm_search` turns into a no-op. Surfacing them here,
-/// live and in the error colour, is what makes that no-op legible without an error overlay —
-/// upstream's `show_error()` would swallow the next keystroke, and this is a state you wander
-/// into by typing.
+/// The two refusals are the states in which `confirm_search` does nothing. They show here, in
+/// the error colour, as you type. An error overlay would take the next keystroke, and you reach
+/// this state by typing.
 fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
     if let Some(index) = state.selected {
         return match state.rows.get(index).map(|r| r.kind) {
@@ -958,8 +888,8 @@ fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
         };
     }
     if state.is_own_name() {
-        // A no-op, not an error and not an offer to create a name that is already taken by the
-        // session you are sitting in.
+        // This does nothing. It is not an error, and not an offer to create a name that the
+        // current session already has.
         return (Some("already attached".to_string()), false);
     }
     if let Some(reason) = state.name_error() {
@@ -972,13 +902,12 @@ fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
     }
 }
 
-/// *"Where did my own session go?"* — from inside `despesas`, typing `desp` gives a blank list
-/// and no explanation. Shown only when the term actually reaches for it; with an empty term you
-/// can see the list and you know where you are.
+/// The note that says where the current session went. From inside `despesas`, the term `desp`
+/// gives an empty list and no explanation. The note shows only when the term matches that
+/// session. With an empty term you can see the list and you know where you are.
 ///
-/// It lives outside the result list on purpose: never a row, never selectable, never indexed —
-/// which is what lets it talk about the current session without putting the current session
-/// back into the match set it was deliberately taken out of.
+/// The note is not a row. It cannot be selected and has no index, so it can name the current
+/// session without a return of that session to the match set.
 fn note_texts(state: &MatchSet, error: Option<&str>) -> Vec<Note> {
     let mut notes = Vec::new();
     if let Some(error) = error {
@@ -1016,9 +945,8 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
     let (start, end) = viewport(dirs.selected.unwrap_or(0), dirs.rows.len(), capacity);
     let window = &dirs.rows[start..end];
 
-    // The name is capped at a third of the width before anything else is decided. Nothing else
-    // here has a natural size — a path will happily eat a whole row — so the cap is what keeps
-    // two columns on screen instead of one and a half.
+    // The name has a limit of one third of the width, set before all else. A path has no
+    // natural size and would take a whole row, so the limit keeps two columns on the screen.
     let name_column =
         window.iter().map(|r| r.name.width()).max().unwrap_or(0).min(inner / 3).max(4);
     let path_budget = inner.saturating_sub(CARET + name_column + GAP);
@@ -1040,34 +968,29 @@ fn dir_line(
     path_budget: usize,
     inner: usize,
 ) -> Text {
-    // The one row `Enter` will not act on, and with the `[HERE]` tag gone this is the only
-    // thing on the row that says so. Greyed out is the universal spelling of "not actionable",
-    // it costs no columns, and this is the only row on any screen where `Enter` does nothing —
-    // so there is nothing else it could be confused with. The input line still spells out
-    // `already in this session` when the highlight lands here.
+    // The only row `Enter` does not act on. A dim row is the usual form for "no action", it
+    // costs no columns, and no other row on any screen refuses `Enter`. The input line also
+    // says `already in this session` when the highlight is here.
     let refused = row.action == Action::Here;
     let level = if refused { TAG } else { NAME };
 
     let mut line = Line::new();
     gutter(&mut line, selected);
-    // Not highlighted, because the term was never matched against it — the match ran on the
-    // path, and painting hits onto a string they were not found in would be a lie that happens
-    // to line up sometimes.
+    // Not highlighted, because the term never matched this string. The match ran on the path,
+    // and hits painted on another string would be wrong.
     line.push(&truncate(&row.name, name_column), level);
     line.pad_to(CARET + name_column);
     line.gap(GAP);
 
     let (path, dropped) = truncate_left(&row.path, path_budget);
-    // Flush right. A path is already elided from the left, so ending every one of them at the
-    // border puts the `…` in a ragged column and the part that identifies the directory in a
-    // straight one — which is the way round that matters.
+    // Aligned right. A path is already cut from the left, so an end at the border puts the `…`
+    // in an uneven column and the part that identifies the directory in a straight one.
     line.pad_to(inner.saturating_sub(path.width()));
     if refused {
         line.push(&path, TAG);
     } else {
-        // The indices are into the *untruncated* path. Those that fell off the left are gone;
-        // the rest shift down by what was dropped and back up by one for the `…` standing in
-        // for it.
+        // The indexes point into the full path. Those before the cut are gone, and the rest
+        // move down by the number removed and up by one for the `…`.
         let shift = usize::from(dropped > 0);
         let hits: Vec<usize> =
             row.indices.iter().filter(|i| **i >= dropped).map(|i| i - dropped + shift).collect();
@@ -1082,17 +1005,16 @@ fn dir_line(
     }
 }
 
-/// The directory prompt names the session that would be made, not the directory that would be
-/// entered. That is the thing you have to be able to argue with — the path is already on the
-/// row, and the name is the part the plugin invented.
+/// The directory prompt names the session that would be created, not the directory. The path is
+/// already on the row, and the name is the part the plugin derived.
 fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
     let Some(row) = dirs.selected_row() else {
         return (term.to_string(), None, false);
     };
     let refused = row.action == Action::Here;
     let action = if refused {
-        // The one row `Enter` will not act on. It belongs in the prompt rather than on a note
-        // line because it is a property of the highlight, and it has to move with it.
+        // The only row `Enter` does not act on. This is in the prompt and not on a note line,
+        // because it belongs to the highlight and must move with it.
         "already in this session".to_string()
     } else {
         format!("{} \"{}\"", row.action.verb(), row.name)
@@ -1100,8 +1022,8 @@ fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
     (term.to_string(), Some(action), refused)
 }
 
-/// The directory screen has three ways to be empty and they are not interchangeable. Only the
-/// failure gets a note line — the other two are self-explanatory in the list's own place.
+/// The directory screen has three ways to be empty. Only the failure needs a note line, because
+/// the other two explain themselves in the place of the list.
 fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
     match &dirs.status {
         Status::Failed(reason) => vec![Note::error(reason)],
@@ -1112,8 +1034,8 @@ fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
 fn dir_empty_text(dirs: &DirSet, term: &str) -> String {
     match &dirs.status {
         Status::Waiting => "asking zoxide…".to_string(),
-        // The reason is already on the note line directly above; on a pane this small, saying
-        // it twice costs more than the second copy is worth.
+        // The reason is on the note line above. A pane this small has no space to say it
+        // twice.
         Status::Failed(_) => "no directories".to_string(),
         Status::Ready if term.is_empty() => "zoxide knows nowhere yet".to_string(),
         Status::Ready => format!("no match for \"{}\"", term),
@@ -1124,17 +1046,15 @@ fn dir_empty_text(dirs: &DirSet, term: &str) -> String {
 // Agents
 // ---------------------------------------------------------------------------------------------
 
-/// How much the agent row had to give up to fit the box's width.
+/// How much an agent row must give up to fit the width of the box.
 ///
-/// The ladder is **abbreviate the tag → drop cwd → drop age**, and that order is a judgement
-/// about what each column is for. Age outranks cwd because in the common case the label already
-/// names the project the cwd would repeat, while nothing else on the row says how long an agent
-/// has been stuck — which is the whole routing decision.
+/// The order of removal is: shorten the tag, remove the cwd, remove the age. The age stays
+/// longer than the cwd, because the label usually names the project that the cwd would repeat,
+/// and nothing else on the row says how long an agent has waited.
 ///
-/// There was a rung above `Full` carrying a token count, dropped when `claude-ps` stopped
-/// emitting `context`: its join was a guess off a lossy cwd slug and it was that tool's only
-/// unbounded read. A rung no producer can reach is not a fallback, it is a branch that cannot
-/// be exercised.
+/// A level above `Full` once carried a token count. It went when `claude-ps` stopped sending
+/// `context`, which it derived from a cwd that could not always be reversed and which was its
+/// only read of unbounded size.
 #[derive(PartialEq, Eq)]
 enum AgentFit {
     /// name + [WAITING] + age + cwd
@@ -1165,22 +1085,19 @@ fn agent_body(
     let (start, end) = viewport(agents.selected.unwrap_or(0), agents.rows.len(), capacity);
     let window = &agents.rows[start..end];
 
-    // Measured at the same `frame` the cells below are built at, so a width and the glyph that
-    // has to fit in it can never come from two different turns of the spinner — every spinner
-    // frame is one column wide anyway (see `agents::SPINNER`), and passing the frame is what
-    // keeps that a property of the spinner rather than an assumption made here.
+    // Measured at the `frame` that builds the cells below, so that a width and the glyph it
+    // must hold come from one turn of the spinner. Every spinner frame is one column wide (see
+    // `agents::SPINNER`), and the frame is passed so that this code does not assume that.
     let full_tag =
         window.iter().map(|r| agents::full_tag(&r.status, frame).width()).max().unwrap_or(0);
-    // Measured rather than assumed, unlike the directory screen's fixed `ABBR_TAG`: a glyph is
-    // two columns wide and an unknown status's `[S]` fallback is three, so the narrow tag column
-    // is not one width any more.
+    // Measured, not assumed. A glyph takes two columns and the `[S]` form of an unknown status
+    // takes three, so the narrow tag column has no fixed width.
     let abbr_width =
         window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
     let age_width =
         window.iter().map(|r| agents::format_duration(r.age).width()).max().unwrap_or(0);
-    // Capped at a third of the width before anything else is decided — the name is the one
-    // column with a natural size, and letting it take what it likes is what turns four columns
-    // into two and a half.
+    // A limit of one third of the width, set before all else. Without it the name takes the
+    // space of the other columns.
     let name_column =
         window.iter().map(|r| r.label().width()).max().unwrap_or(0).min(inner / 3).max(4);
 
@@ -1235,9 +1152,9 @@ fn agent_line(
     frame: u64,
 ) -> Text {
     let label = truncate(&row.label(), name_column);
-    // The term was matched against the **bare** label, so a `:pane` suffix cannot carry a hit —
-    // and a truncated label drops the indices that fell off the end, because colouring a
-    // position that no longer exists paints the wrong character.
+    // The term matched the bare label, so a `:pane` suffix holds no hit. A truncated label
+    // also drops the indexes past its end, because a colour on a position that is gone would
+    // paint another character.
     let visible = label.chars().count();
     let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
 
@@ -1246,8 +1163,8 @@ fn agent_line(
     line.push_hits(&label, NAME, ACCENT, &hits);
     line.pad_to(CARET + name_column);
     line.gap(GAP);
-    // The one status that is spelled in the accent colour. Every other status — including ones
-    // released after this was written — renders as itself, quietly.
+    // The only status in the accent colour. Every other status, including one released after
+    // this code, shows as itself.
     let tag_level = if agents::is_waiting(&row.status) { ACCENT } else { TAG };
     let tag = if matches!(fit, AgentFit::Full) {
         agents::full_tag(&row.status, frame)
@@ -1256,20 +1173,20 @@ fn agent_line(
     };
     line.push(&tag, tag_level);
 
-    // The last column of whatever survived the ladder goes flush right, as on the other two
-    // screens; the ones before it stay left-packed at the widths they were measured to.
+    // The last column that remains is aligned right, as on the other two screens. The columns
+    // before it keep the widths they were measured to.
     let age = agents::format_duration(row.age);
     match cwd_budget {
         Some(cwd_budget) => {
             line.pad_to(CARET + name_column + GAP + tag_column);
             line.gap(GAP);
             line.push(&age, LABEL);
-            // Still `truncate_left` underneath: two components are short, but not bounded — a
-            // single directory may be named anything at all.
+            // `truncate_left` is still necessary: two components are short but have no
+            // limit, because a directory can have any name.
             let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
             line.pad_to(inner.saturating_sub(cwd.width()));
-            // Not highlighted: the match ran on the row's label, and painting hits onto a
-            // string they were not found in would be a lie that happens to line up sometimes.
+            // Not highlighted: the match ran on the label of the row, and hits painted on
+            // another string would be wrong.
             line.push(&cwd, LABEL);
         },
         None if !matches!(fit, AgentFit::NoAge) => {
@@ -1287,8 +1204,8 @@ fn agent_line(
     }
 }
 
-/// The agent prompt names where `Enter` would put you — the session, and the pane when the
-/// session alone does not say which.
+/// The agent prompt names where `Enter` puts you: the session, and the pane when the session
+/// alone is not enough.
 fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
     match agents.selected_row() {
         Some(row) => (term.to_string(), Some(format!("Go to \"{}\"", row.label())), false),
@@ -1296,9 +1213,9 @@ fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
     }
 }
 
-/// Agents outside zellij are not rows — `Enter` could do nothing for them. Counting them here
-/// is what keeps them from being *silently* absent: without this, an agent running in a plain
-/// terminal is a name you can type that gives a blank list and no reason.
+/// An agent outside zellij is not a row, because `Enter` can do nothing for it. The count here
+/// stops such an agent from being absent without an explanation: its name would otherwise give
+/// an empty list and no reason.
 fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
     let mut notes = Vec::new();
     if let AgentStatus::Failed(reason) = &agents.status {
@@ -1316,8 +1233,8 @@ fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
 fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
     match &agents.status {
         AgentStatus::Waiting => "looking for agents…".to_string(),
-        // The reason is already on the note line directly above; on a pane this small, saying
-        // it twice costs more than the second copy is worth.
+        // The reason is on the note line above. A pane this small has no space to say it
+        // twice.
         AgentStatus::Failed(_) => "no agents".to_string(),
         AgentStatus::Ready if term.is_empty() => "no agents running".to_string(),
         AgentStatus::Ready => format!("no match for \"{}\"", term),
@@ -1326,22 +1243,20 @@ fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
 
 /// The last two components of a path: `misc/luneta` for `/home/you/Projects/misc/luneta`.
 ///
-/// Down a column of agents the leading components are the same `/home/you/…` on every row, so
-/// they cost width without separating anything. What tells two agents apart is at the end.
+/// In a column of agents the first components are the same `/home/you/…` on every row. They take
+/// width and separate nothing. The end of the path is what differs.
 ///
-/// Two components rather than one, for the reason [`crate::dirs`] derives session names from
-/// two: measured across a real 136-path zoxide database, the last-two form collided **zero**
-/// times where the bare basename collided nine ways (`master`, `backend`, `frontend`, `bin`,
-/// …). One component would be shorter and would routinely name two different projects the same
-/// thing, on the one screen whose job is telling agents apart.
+/// Two components, not one, because this column must tell two agents apart. In a 136-path
+/// zoxide database, the last two components collided zero times and the last component alone
+/// collided nine times (`master`, `backend`, `frontend`, `bin`). One component would give two
+/// different projects the same text.
 ///
-/// ⚠️ No `…` marks the elision, unlike `truncate_left`. This is an abbreviation applied to
-/// every row by the same rule, not a row running out of room — a marker on all of them would
-/// be noise carrying no per-row information.
+/// There is no `…` here, unlike in `truncate_left`. The same rule applies to every row, so a
+/// marker on all of them would give no information.
 fn short_cwd(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     match parts.as_slice() {
-        // `/` itself, or something that is not a path at all.
+        // The root directory, or a string that is not a path.
         [] => path.to_string(),
         [only] => (*only).to_string(),
         [.., parent, base] => format!("{}/{}", parent, base),
@@ -1360,15 +1275,15 @@ fn search_help(width: usize) -> Text {
             ("<ENTER>", "Select", "Select"),
             ("<TAB>", "Agents", "Agents"),
             ("<Ctrl r>", "Rename", "Rename"),
-            ("<Del>", "Delete", "Delete"),
+            ("<Del>", "Kill or delete", "Delete"),
             ("<ESC>", "Close", "Close"),
         ],
     )
 }
 
-/// The directory screen's keys. Shorter than the session screen's because two of that screen's
-/// keys have nothing to act on here: there is no rename that means anything to a directory, and
-/// deleting one would be a different verb against a different database.
+/// The keys of the directory screen. Two keys of the session screen have nothing to act on
+/// here: a directory has no name to change, and to remove one is a different action on a
+/// different database.
 fn dirs_help(width: usize) -> Text {
     keys_text(
         width,
@@ -1381,8 +1296,8 @@ fn dirs_help(width: usize) -> Text {
     )
 }
 
-/// The agent screen's keys. `Enter` does the same thing on every row, so there is only one to
-/// name — and the third screen has to fit the same 60%-of-terminal pane as the other two.
+/// The keys of the agent screen. `Enter` does one thing on every row, and this screen must fit
+/// the same pane as the other two.
 fn agents_help(width: usize) -> Text {
     keys_text(
         width,
@@ -1398,13 +1313,12 @@ fn agents_help(width: usize) -> Text {
 /// A key and the two lengths of its description, longest first.
 type Key<'a> = (&'a str, &'a str, &'a str);
 
-/// The help line in the most detail that fits, over four spellings: `<KEY> - Description, …`,
-/// the same without the dashes, the same with short descriptions, and finally keys alone.
+/// The help line in the most detail that fits. There are four forms: `<KEY> - Description, …`,
+/// the same without the dashes, the same with short descriptions, and the keys alone.
 ///
-/// The default floating pane is 60% of the terminal, which puts the search screen's six keys
-/// past the first two spellings on any ordinary terminal — the short tier is what the user
-/// actually sees, not a rarely-hit fallback. Dropping descriptions before dropping a key is
-/// deliberate: a key you cannot see is a feature you will never find.
+/// The floating pane is 60% of the terminal, which is too narrow for the first two forms with
+/// the six keys of the search screen. The third form is thus the usual one. A description goes
+/// before a key does, because you cannot find a key you cannot see.
 fn keys_text(width: usize, keys: &[Key]) -> Text {
     let spelled = |sep: &str, joiner: &str, short: bool| {
         keys.iter()
@@ -1434,11 +1348,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    // Only the tests build these; the renderer is handed them ready-made.
+    // Only the tests build these. The renderer receives them.
     use crate::sessions::{Focus, Selection};
 
-    /// A pane, rendered to the lines it would print. The picture, in other words — which is the
-    /// thing that used to be unknowable from inside this crate, because the host assembled it.
+    /// A pane, rendered to the lines it prints. This picture was not available inside the
+    /// crate while the host assembled it.
     fn picture<R: Into<PreviewRow>>(
         rect: &Rect,
         title: &str,
@@ -1446,8 +1360,8 @@ mod tests {
         interior: Vec<R>,
     ) -> Vec<String> {
         let mut lines = vec![rect.top(title, right).line];
-        // The borders are put back on here because `draw_row` puts them on there: a row's own
-        // `Text` is the interior only, so that a selected one cannot highlight them.
+        // The borders are added here because `draw_row` adds them there. The `Text` of a row
+        // is the interior only, so that a selected row cannot highlight them.
         lines.extend(interior.into_iter().map(|line| {
             format!("{}{}{}", VERTICAL, line.into().content(), VERTICAL)
         }));
@@ -1473,24 +1387,22 @@ mod tests {
         }
     }
 
-    /// A cache holding one pane's screen, as `dump-screen` would have left it.
+    /// A cache that holds one pane screen, as `dump-screen` leaves it.
     fn peeked(session: &str, pane: u32, screen: &str) -> Peeks {
         let mut peeks = Peeks::default();
         peeks.ingest(panes::key(session, pane), Some(0), screen.as_bytes(), b"");
         peeks
     }
 
-    /// Two boxes side by side, as the pane draws them — the preview's picture is only ever
-    /// read next to the list it is previewing.
+    /// Two boxes side by side, as the pane draws them.
     fn beside(left: Vec<String>, right: Vec<String>) -> Vec<String> {
         left.into_iter().zip(right).map(|(left, right)| format!("{}{}", left, right)).collect()
     }
 
     const HOUR: u64 = 3600;
 
-    /// The whole frame, exactly: the list pinned to the bottom of its box rather than the top,
-    /// the age flush against the right border, and the headstone between the two groups doing
-    /// the job the `[ATTACH]`/`[RESURRECT]` tags used to do per row.
+    /// The whole frame: the list at the bottom of its box, the age against the right border,
+    /// and the separator between the two groups.
     #[test]
     fn the_list_hugs_the_bottom_of_its_box() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 8 };
@@ -1518,8 +1430,8 @@ mod tests {
         );
     }
 
-    /// No dead sessions, no headstone. The separator is drawn exactly when there is a group
-    /// for it to label, so the common case — nothing dead — spends no row on saying so.
+    /// With no dead sessions there is no separator. It is drawn only when it has a group to
+    /// name, so the usual case costs no row.
     #[test]
     fn an_all_live_list_gets_no_headstone() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
@@ -1534,8 +1446,8 @@ mod tests {
         }
     }
 
-    /// A list that is only dead sessions still gets its headstone. Without it — and with the
-    /// tags gone — nothing on screen would say that `Enter` resurrects rather than attaches.
+    /// A list of dead sessions alone still gets the separator. Without it, nothing on the
+    /// screen would say that `Enter` resurrects and does not attach.
     #[test]
     fn an_all_dead_list_still_gets_one() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
@@ -1546,7 +1458,7 @@ mod tests {
         assert!(body[1].content().starts_with(" > old"));
     }
 
-    /// The separator is a display line, so it takes a row from the window like anything else.
+    /// The separator is a display line, so it takes a row from the window.
     #[test]
     fn the_headstone_costs_a_row_of_list() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
@@ -1559,16 +1471,16 @@ mod tests {
                 session("dead-2", Kind::Resurrectable, HOUR),
             ]
         };
-        // Four rows and a separator make five display lines for four rows of box, so one row
-        // scrolls off — not all four rows plus a separator crammed into four.
+        // Four rows and a separator make five display lines for a box of four rows, so one
+        // row scrolls out of view.
         let body = search_body(&matches(rows(), Some(0)), &rect, 0);
         assert_eq!(body.len(), 4);
         assert_eq!(body.iter().filter(|l| l.content().contains('🪦')).count(), 1);
     }
 
-    /// Scrolling into the dead group keeps the selection on screen, which is the thing the
-    /// row-index/display-line split exists to get right: the two disagree by one from the
-    /// boundary onwards, and windowing on the wrong one loses the cursor.
+    /// A scroll into the dead group keeps the selection on the screen. The row index and the
+    /// display line differ by one after the boundary, and a window over the wrong one loses the
+    /// cursor.
     #[test]
     fn the_selection_survives_the_boundary() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 6 };
@@ -1585,7 +1497,7 @@ mod tests {
             let body = search_body(&matches(rows, Some(selected)), &rect, 0);
             assert_eq!(body.len(), rect.inner_height());
             let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
-            // The caret is on exactly one line, and it is the selected session's.
+            // The caret is on one line, and that line is the selected session.
             let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with(" > ")).collect();
             assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
             assert!(
@@ -1595,8 +1507,8 @@ mod tests {
         }
     }
 
-    /// Notes ride on top of the list and the pair anchors as one block, so a note never lands
-    /// between the highlighted row and the caret below it.
+    /// The notes are above the list, and the two are anchored as one block, so that a note is
+    /// never between the highlighted row and the prompt.
     #[test]
     fn notes_ride_on_top_of_the_list() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 7 };
@@ -1617,8 +1529,8 @@ mod tests {
         );
     }
 
-    /// A note wider than the box is cut to fit. Letting one run on would paint over the right
-    /// border — the bordered version of the defect that used to let it be overwritten mid-word.
+    /// A note that is wider than the box is cut. A longer note would write over the right
+    /// border.
     #[test]
     fn a_long_note_never_reaches_the_border() {
         let rect = Rect { x: 0, y: 0, width: 24, height: 5 };
@@ -1630,19 +1542,18 @@ mod tests {
         assert_eq!(lines[3], "│ zoxide: no such fil… │");
     }
 
-    /// Whatever the pane's size and whatever is in it, every line of a box is exactly as wide
-    /// as the box and closed at both ends. This is the invariant a bordered layout lives or
-    /// dies by: one short line and the right-hand border develops a hole.
+    /// At every size and with every content, each line of a box is as wide as the box and
+    /// closed at both ends. One short line would make a hole in the right border.
     #[test]
     fn every_line_is_exactly_the_width_of_its_box() {
-        // Rebuilt per case rather than cloned: `Row` is not `Clone`, and making it so to
-        // please a test would be the test reaching into the production type.
+        // Rebuilt for each case, not cloned. `Row` is not `Clone`, and a test must not change
+        // a production type.
         let rows = || {
             vec![
                 session("luneta", Kind::Live, 2 * HOUR),
                 session("a-very-long-session-name-indeed", Kind::Resurrectable, 400 * HOUR),
-                // Four characters, eight columns — the case where counting characters instead
-                // of columns puts the right border in the wrong place.
+                // Four characters and eight columns. A count of characters instead of columns
+                // puts the right border in the wrong place.
                 session("日本語版", Kind::Live, 60),
             ]
         };
@@ -1666,7 +1577,7 @@ mod tests {
         }
     }
 
-    /// An empty list still says why it is empty, in the place a row would have been.
+    /// An empty list says why it is empty, in the place of a row.
     #[test]
     fn an_empty_list_explains_itself_where_the_rows_would_be() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
@@ -1685,40 +1596,40 @@ mod tests {
         );
     }
 
-    /// The caret and the term on the left, what `Enter` would do flush against the right.
+    /// The caret and the term on the left, and the action of `Enter` against the right.
     #[test]
     fn the_input_line_pushes_the_action_to_the_right() {
         let rect = Rect { x: 0, y: 0, width: 40, height: 3 };
         let line = input_line(&rect, ("desp".to_string(), Some("Attach".to_string()), false));
         assert_eq!(line.content(), " > desp_               <ENTER> Attach ");
-        // The interior of the box, borders excluded — see `Line::finish`.
+        // The interior of the box, without the borders. See `Line::finish`.
         assert_eq!(line.content().width(), rect.width - 2);
     }
 
-    /// The term is never the thing that gets cut. Below the width an action clause needs, the
-    /// action goes and the term keeps the box to itself.
+    /// The term is never cut. Below the width an action needs, the action goes and the term
+    /// keeps the box.
     #[test]
     fn a_narrow_box_drops_the_action_not_the_term() {
         let rect = Rect { x: 0, y: 0, width: 18, height: 3 };
         let line = input_line(&rect, ("despesas".to_string(), Some("Attach".to_string()), false));
         assert_eq!(line.content(), " > despesas_    ");
-        // The interior of the box, borders excluded — see `Line::finish`.
+        // The interior of the box, without the borders. See `Line::finish`.
         assert_eq!(line.content().width(), rect.width - 2);
     }
 
-    /// A term longer than the box keeps its tail: what you just typed is at the end, and the
-    /// cursor stand-in has to stay next to it.
+    /// A term that is longer than the box keeps its end, where the characters you typed last
+    /// are, together with the cursor.
     #[test]
     fn an_overlong_term_is_cut_from_the_left() {
         let rect = Rect { x: 0, y: 0, width: 16, height: 3 };
         let line = input_line(&rect, ("a-very-long-name".to_string(), None, false));
         assert_eq!(line.content(), " > …ong-name_ ");
-        // The interior of the box, borders excluded — see `Line::finish`.
+        // The interior of the box, without the borders. See `Line::finish`.
         assert_eq!(line.content().width(), rect.width - 2);
     }
 
-    /// `3/47` while something is selected, the bare count when nothing is, nothing at all when
-    /// there is nothing to count.
+    /// `3/47` with a selection, the count alone without one, and nothing when there is nothing
+    /// to count.
     #[test]
     fn the_counter_reports_position_over_total() {
         assert_eq!(count(Some(2), 47), "3/47");
@@ -1728,7 +1639,7 @@ mod tests {
         assert_eq!(count(Some(0), 0), "");
     }
 
-    /// A list that fits shows all of it, from the top, whatever is selected.
+    /// A list that fits shows all of its rows, from the top, at every selection.
     #[test]
     fn viewport_does_not_scroll_a_list_that_fits() {
         assert_eq!(viewport(0, 5, 10), (0, 5));
@@ -1736,8 +1647,8 @@ mod tests {
         assert_eq!(viewport(0, 0, 10), (0, 0));
     }
 
-    /// Scrolling starts only once the selection would fall off the bottom, and then moves by
-    /// exactly as much as it has to. Gratuitous motion is the thing being avoided.
+    /// The scroll starts only when the selection would leave the bottom, and then moves as
+    /// little as it can.
     #[test]
     fn viewport_scrolls_only_to_keep_the_selection_on_screen() {
         assert_eq!(viewport(2, 20, 5), (0, 5));
@@ -1746,8 +1657,8 @@ mod tests {
         assert_eq!(viewport(19, 20, 5), (15, 20));
     }
 
-    /// The window is always exactly `visible` rows while there are rows to fill it, never
-    /// reaches past the end of the list, and always contains the selection.
+    /// The window is `visible` rows while the list can fill it, never passes the end of the
+    /// list, and always holds the selection.
     #[test]
     fn viewport_windows_stay_in_bounds() {
         for total in 0..12 {
@@ -1777,8 +1688,7 @@ mod tests {
         assert_eq!(short_cwd("/misc/luneta/"), "misc/luneta");
     }
 
-    /// The ladder degrades by dropping detail, never by dropping a key: "a key you cannot see
-    /// is a feature you will never find."
+    /// The help line drops detail and never drops a key."
     #[test]
     fn keys_text_drops_descriptions_before_it_drops_keys() {
         let keys: &[Key] = &[("<↓↑>", "Navigate", "Nav"), ("<ENTER>", "Select", "Select")];
@@ -1790,7 +1700,7 @@ mod tests {
         assert_eq!(keys_text(0, keys).content(), "<↓↑>/<ENTER>");
     }
 
-    /// Every tier that claims to fit must actually fit.
+    /// Every form that reports that it fits must fit.
     #[test]
     fn keys_text_respects_the_width_it_is_given() {
         let keys: &[Key] = &[
@@ -1801,16 +1711,14 @@ mod tests {
         ];
         for width in 12..80 {
             let line = keys_text(width, keys);
-            // The last-resort spelling is allowed to overflow — there is nothing shorter that
-            // still names every key.
+            // The last form can pass the width, because no shorter form names every key.
             if line.content().contains(' ') {
                 assert!(line.content().width() <= width, "width {width}: {}", line.content());
             }
         }
     }
 
-    /// The preview box, whole: which pane you are looking at, and what is on it — the tail of
-    /// it, because a terminal is read from the bottom.
+    /// The whole preview box: which pane you look at, and the end of what is on it.
     #[test]
     fn a_session_preview_shows_the_pane_it_names() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
@@ -1834,8 +1742,7 @@ mod tests {
         );
     }
 
-    /// Nothing has been asked yet and the answer has not come back yet are the same thing to
-    /// the reader: it is on its way.
+    /// To the reader, "not asked yet" and "asked but not answered" are the same.
     #[test]
     fn a_pane_says_so_while_it_is_being_read() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
@@ -1854,7 +1761,7 @@ mod tests {
         assert!(session_preview(&state, &empty, &rect).2[2].content().contains("nothing on"));
     }
 
-    /// A dead session has no process, so there is no screen and nothing to count.
+    /// A dead session has no process, so it has no screen and nothing to count.
     #[test]
     fn a_dead_session_has_nothing_to_look_inside() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
@@ -1876,8 +1783,7 @@ mod tests {
         );
     }
 
-    /// With no highlight there is nothing to preview, and the box says so rather than showing
-    /// the last thing that was there.
+    /// With no highlight there is nothing to preview, and the box says so.
     #[test]
     fn an_empty_list_previews_nothing() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 6 };
@@ -1887,8 +1793,8 @@ mod tests {
         assert!(lines[0].content().contains("nothing highlighted"));
     }
 
-    /// The directory preview: the path it is about, then what `ls` said was in it — the count
-    /// in the border, the directories first.
+    /// The directory preview: the path, then the reply from `ls`, with the count in the border
+    /// and the directories first.
     #[test]
     fn a_directory_preview_lists_what_ls_said() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
@@ -1902,11 +1808,11 @@ mod tests {
             b"",
         );
         let (title, right, lines) = dir_preview(&dirs, &rect);
-        assert_eq!((title.as_str(), right.as_str()), ("misc-luneta", "3"));
+        assert_eq!((title.as_str(), right.as_str()), ("luneta", "3"));
         assert_eq!(
             picture(&rect, &title, &right, filled(&rect, lines)),
             vec![
-                "╭─ misc-luneta ────── 3 ─╮",
+                "╭─ luneta ─────────── 3 ─╮",
                 "│ /home/you/misc/luneta  │",
                 "│                        │",
                 "│ src/                   │",
@@ -1918,8 +1824,7 @@ mod tests {
         );
     }
 
-    /// Nothing has been asked yet and the answer has not come back yet are the same thing to
-    /// the reader: it is on its way.
+    /// To the reader, "not asked yet" and "asked but not answered" are the same.
     #[test]
     fn a_directory_says_so_while_it_is_being_read() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
@@ -1936,8 +1841,8 @@ mod tests {
         assert_eq!(dir_preview(&dirs, &rect).1, "");
     }
 
-    /// Wrapping is the preview box's alone, and it breaks at spaces. A word wider than the box
-    /// is cut, because a hard break mid-word reads as two words.
+    /// Only the preview box wraps text, and it breaks at spaces. A word that is wider than the
+    /// box is cut, because a break inside a word reads as two words.
     #[test]
     fn wrap_breaks_at_spaces_and_cuts_only_overlong_words() {
         assert_eq!(wrap("not running yet", 20), vec!["not running yet"]);
@@ -1951,9 +1856,8 @@ mod tests {
         }
     }
 
-    /// Not an assertion — a way to look at whole panes from
-    /// `cargo test -- --ignored --nocapture`. The three screens, drawn by the renderer that
-    /// draws them for real, which is where the README's pictures come from.
+    /// Not a test. This prints whole panes with `cargo test -- --ignored --nocapture`, drawn
+    /// by the renderer that draws them for real. The pictures in the README come from here.
     #[test]
     #[ignore = "prints the screens; run with --ignored --nocapture to look at them"]
     fn print_the_screens() {
@@ -1972,7 +1876,7 @@ mod tests {
         let peeks = peeked(
             "dotfiles",
             7,
-            "  1 //! luneta — a personal zellij session picker.\n  2 \n  3 mod agents;\n\
+            "  1 //! luneta: a personal zellij session picker.\n  2 \n  3 mod agents;\n\
              \n\"src/main.rs\" 1005L, 41k\n",
         );
         let notes = vec![Note::dim("you are in \"notes\" — not listed")];
@@ -2034,14 +1938,14 @@ mod tests {
         );
     }
 
-    /// The two boxes, the prompt under them and the help row under that — the whole pane.
+    /// The two boxes, the prompt below them, and the help row below that.
     fn print_pane(boxes: Vec<String>, screen: &Screen, title: &str, prompt: Prompt, help: Text) {
         for line in boxes {
             println!("{line}");
         }
         let input = &screen.input;
         println!("{}", input.top(title, "").line);
-        // Borders put back on as `draw_row` puts them on — see `picture`.
+        // Borders added as `draw_row` adds them. See `picture`.
         println!("{}{}{}", VERTICAL, input_line(input, prompt).content(), VERTICAL);
         println!("{}", input.bottom());
         println!("  {}\n", help.content());
