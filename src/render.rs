@@ -1217,21 +1217,13 @@ fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
     }
 }
 
-/// An agent outside zellij is not a row, because `Enter` can do nothing for it. The count here
-/// stops such an agent from being absent without an explanation: its name would otherwise give
-/// an empty list and no reason.
+/// The agent screen has three ways to be empty. Only the failure needs a note line, because the
+/// other two explain themselves in the place of the list.
 fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
-    let mut notes = Vec::new();
-    if let Fetch::Failed(reason) = &agents.status {
-        notes.push(Note::error(truncate(reason, width)));
+    match &agents.status {
+        Fetch::Failed(reason) => vec![Note::error(truncate(reason, width))],
+        _ => Vec::new(),
     }
-    let outside = match agents.outside {
-        0 => return notes,
-        1 => "1 agent not in zellij — not listed".to_string(),
-        n => format!("{} agents not in zellij — not listed", n),
-    };
-    notes.push(Note::dim(outside));
-    notes
 }
 
 fn agent_empty_text(agents: &AgentSet, term: &str) -> String {

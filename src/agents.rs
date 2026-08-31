@@ -262,10 +262,6 @@ pub struct AgentSet {
     pub rows: Vec<AgentRow>,
     pub selected: Option<usize>,
     pub asking: bool,
-    /// Agents that run outside zellij. `Enter` cannot reach them, so they are not rows. The
-    /// count stays, and the note line shows it, so that the name of such an agent gives an
-    /// empty list with an explanation.
-    pub outside: usize,
     all: Vec<Agent>,
     matcher: Option<SkimMatcherV2>,
 }
@@ -286,13 +282,11 @@ impl AgentSet {
                 format!("claude-ps: {}", reason)
             });
             self.all.clear();
-            self.outside = 0;
             return;
         }
         match parse(&String::from_utf8_lossy(stdout)) {
-            Ok((agents, outside)) => {
+            Ok(agents) => {
                 self.all = agents;
-                self.outside = outside;
                 self.status = Fetch::Ready;
             },
             // A document this plugin cannot read. It is reported, not discarded: an empty
@@ -301,7 +295,6 @@ impl AgentSet {
             Err(reason) => {
                 self.status = Fetch::Failed(reason);
                 self.all.clear();
-                self.outside = 0;
             },
         }
     }
@@ -310,7 +303,6 @@ impl AgentSet {
         self.asking = false;
         self.status = Fetch::Failed(reason.into());
         self.all.clear();
-        self.outside = 0;
     }
 
     /// Rebuild against the term and the current position.
@@ -529,31 +521,23 @@ pub fn abbr_tag(status: &Status, frame: u64) -> String {
 
 /// The JSON array from `claude-ps`, as the agents this screen can act on.
 ///
-/// This returns the agents in zellij and the count of the agents outside it. An agent outside
-/// zellij is removed, because `Enter` can do nothing for it. The count stays, so that such an
-/// agent is never absent without an explanation.
+/// An agent this screen cannot address is dropped, without a count and without a note. The
+/// rule of the screen is that a row is a pane `Enter` puts you in, so an agent with no pane to
+/// go to is not a row that is missing — it is not a row.
 ///
 /// A document that does not deserialise stops the parse. It shows that the tool and this build
 /// disagree, which makes every row in it doubtful. A partial list would look complete.
-fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
+fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
     let wire: Vec<Wire> =
         serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {}", error))?;
 
     let mut agents = Vec::new();
-    let mut outside = 0;
     for row in wire {
-        // Both cases are places `Enter` cannot reach: no zellij, or a pane id that is not a
-        // number and cannot go to `focus-pane-id`.
-        let Some(zellij) = row.zellij else {
-            outside += 1;
-            continue;
-        };
-        let Ok(pane) = zellij.pane.parse::<u32>() else {
-            outside += 1;
-            continue;
-        };
+        // Three places `Enter` cannot reach: no zellij, a pane id that is not a number and
+        // cannot go to `focus-pane-id`, or no session to attach to.
+        let Some(zellij) = row.zellij else { continue };
+        let Ok(pane) = zellij.pane.parse::<u32>() else { continue };
         if zellij.session.is_empty() {
-            outside += 1;
             continue;
         }
         let display = chosen_name(row.name.as_deref(), row.name_source.as_deref())
@@ -567,7 +551,7 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
             cwd: row.cwd.unwrap_or_default(),
         });
     }
-    Ok((agents, outside))
+    Ok(agents)
 }
 
 /// The name to show for an agent, or `None` to use the zellij session.
@@ -615,7 +599,7 @@ mod tests {
     use super::*;
 
     fn status(json: &str) -> Status {
-        let (agents, _) = parse(json).expect("the document should parse");
+        let agents = parse(json).expect("the document should parse");
         agents.into_iter().next().expect("one agent").status
     }
 
@@ -624,6 +608,21 @@ mod tests {
             r#"[{{"status":{},"status_age":4,"zellij":{{"session":"s","pane":"0"}}}}]"#,
             status
         )
+    }
+
+    /// An agent this screen cannot address is not a row and is not counted. There is no pane
+    /// to put you in, so there is nothing to say about it.
+    #[test]
+    fn an_agent_this_screen_cannot_address_is_dropped() {
+        let agents = parse(
+            r#"[{"status":"idle","status_age":4},
+                {"status":"idle","status_age":4,"zellij":{"session":"s","pane":"nope"}},
+                {"status":"idle","status_age":4,"zellij":{"session":"","pane":"0"}},
+                {"status":"idle","status_age":4,"zellij":{"session":"s","pane":"0"}}]"#,
+        )
+        .expect("the document should parse");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].session, "s");
     }
 
     /// A `null` status is unreported. It was `""` before, which took the glyph of a word
