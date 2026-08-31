@@ -1345,7 +1345,7 @@ mod tests {
 
     use super::*;
     // Only the tests build these. The renderer receives them.
-    use crate::sessions::{Focus, Selection};
+    use crate::sessions::{Focus, Selection, Sessions};
 
     /// A pane, rendered to the lines it prints. This picture was not available inside the
     /// crate while the host assembled it.
@@ -1796,7 +1796,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
-        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/you/misc/luneta".to_string(),
             Some(0),
@@ -1828,7 +1828,7 @@ mod tests {
             let rect = Rect { x: 0, y: 0, width, height: 10 };
             let mut dirs = DirSet::default();
             dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
-            dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+            dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
             dirs.ingest_listing(
                 "/home/you/misc/luneta".to_string(),
                 Some(0),
@@ -1848,7 +1848,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
-        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
 
         let unasked = dir_preview(&dirs, &rect).2;
         assert!(unasked[2].content().contains("reading…"));
@@ -1933,7 +1933,7 @@ mod tests {
 
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
-        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/lorenzo/Projects/misc/luneta".to_string(),
             Some(0),
