@@ -605,7 +605,7 @@ fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> 
         return wrapped_lines(inner, "nothing but plugin panes — no screen to show", TAG);
     };
     let mut lines = vec![caption(inner, &focus.tab, &focus.title).into(), blank_line(rect).into()];
-    lines.extend(screen_lines(rect, peeks, &panes::key(name, focus.pane), lines.len()));
+    lines.extend(screen_lines(rect, peeks, name, focus.pane, lines.len()));
     lines
 }
 
@@ -636,10 +636,16 @@ const MIN_TAB: usize = 6;
 ///
 /// The three messages that replace a screen are at the top, because the box says them about
 /// itself and not about a terminal.
-fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<PreviewRow> {
+fn screen_lines(
+    rect: &Rect,
+    peeks: &Peeks,
+    session: &str,
+    pane: u32,
+    used: usize,
+) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let rows = rect.inner_height().saturating_sub(used);
-    match peeks.get(key) {
+    match peeks.get(session, pane) {
         // To the reader, "not asked yet" and "asked but not answered" are the same: the
         // answer is on its way. [`crate::PREVIEW_DELAY`] is the time between them.
         None | Some(Peek::Reading) => vec![preview_line(inner, "reading…", TAG)],
@@ -748,7 +754,7 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
     line.push(" · ", TAG);
     line.push(&row.age.label(), TAG);
     let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
-    lines.extend(screen_lines(rect, peeks, &panes::key(&row.session, row.pane), lines.len()));
+    lines.extend(screen_lines(rect, peeks, &row.session, row.pane, lines.len()));
     (row.label(), lines)
 }
 
@@ -1383,7 +1389,7 @@ mod tests {
     /// A cache that holds one pane screen, as `dump-screen` leaves it.
     fn peeked(session: &str, pane: u32, screen: &str) -> Peeks {
         let mut peeks = Peeks::default();
-        peeks.ingest(panes::key(session, pane), Some(0), screen.as_bytes(), b"");
+        peeks.ingest((session.to_string(), pane), Some(0), screen.as_bytes(), b"");
         peeks
     }
 
@@ -1745,7 +1751,7 @@ mod tests {
         let unasked = session_preview(&state, &Peeks::default(), &rect).2;
         assert!(unasked[2].content().contains("reading…"));
         let mut peeks = Peeks::default();
-        assert!(peeks.claim(&panes::key("dotfiles", 7)));
+        assert!(peeks.claim("dotfiles", 7));
         let asked = session_preview(&state, &peeks, &rect).2;
         assert_eq!(asked[2].content(), unasked[2].content());
 
