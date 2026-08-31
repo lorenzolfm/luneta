@@ -1041,8 +1041,8 @@ fn dir_empty_text(dirs: &DirSet, term: &str) -> String {
         // The reason is on the note line above. A pane this small has no space to say it
         // twice.
         Fetch::Failed(_) => "no directories".to_string(),
-        Fetch::Ready if term.is_empty() => "zoxide knows nowhere yet".to_string(),
-        Fetch::Ready => format!("no match for \"{}\"", term),
+        Fetch::Ready(_) if term.is_empty() => "zoxide knows nowhere yet".to_string(),
+        Fetch::Ready(_) => format!("no match for \"{}\"", term),
     }
 }
 
@@ -1232,8 +1232,8 @@ fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
         // The reason is on the note line above. A pane this small has no space to say it
         // twice.
         Fetch::Failed(_) => "no agents".to_string(),
-        Fetch::Ready if term.is_empty() => "no agents running".to_string(),
-        Fetch::Ready => format!("no match for \"{}\"", term),
+        Fetch::Ready(_) if term.is_empty() => "no agents running".to_string(),
+        Fetch::Ready(_) => format!("no match for \"{}\"", term),
     }
 }
 

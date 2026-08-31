@@ -132,7 +132,7 @@ const MAX_ENTRIES: usize = 128;
 const MAX_LISTINGS: usize = 64;
 
 /// One directory out of zoxide, with the session name it would be given.
-struct Dir {
+pub struct Dir {
     path: String,
     name: String,
     frecency: f64,
@@ -154,8 +154,8 @@ pub struct DirRow {
 
 #[derive(Default)]
 pub struct DirSet {
-    /// Why the list is empty, when it is. See [`Fetch`].
-    pub status: Fetch,
+    /// Why the list is empty, when it is, and the directories when it is not. See [`Fetch`].
+    pub status: Fetch<Vec<Dir>>,
     pub rows: Vec<DirRow>,
     /// An index into `rows`. `None` only when `rows` is empty. Unlike the session screen, this
     /// screen cannot act on the typed text: it can only offer a directory zoxide knows.
@@ -165,7 +165,6 @@ pub struct DirSet {
     pub asking: bool,
     /// What eza said about each directory the cursor has stopped on, keyed by path.
     listings: BTreeMap<String, Listing>,
-    all: Vec<Dir>,
     matcher: Option<SkimMatcherV2>,
 }
 
@@ -174,26 +173,25 @@ impl DirSet {
     /// reason, because the most probable failure is that zoxide is not installed. Without the
     /// reason, that looks the same as an empty database.
     pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
-        self.asking = false;
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
-            self.status = Fetch::Failed(if reason.is_empty() {
+            self.fail(if reason.is_empty() {
                 "zoxide is not available".to_string()
             } else {
                 format!("zoxide: {}", reason)
             });
-            self.all.clear();
             return;
         }
-        self.all = parse(&String::from_utf8_lossy(stdout));
-        self.status = Fetch::Ready;
+        self.asking = false;
+        self.status = Fetch::Ready(parse(&String::from_utf8_lossy(stdout)));
     }
 
+    /// The one way to a failure, from here and from the server. It takes the directories with
+    /// it, because [`Fetch::Failed`] has nowhere to keep them.
     pub fn fail(&mut self, reason: impl Into<String>) {
         self.asking = false;
         self.status = Fetch::Failed(reason.into());
-        self.all.clear();
     }
 
     /// Rebuild against the term and the latest session snapshot.
@@ -214,22 +212,26 @@ impl DirSet {
         };
         self.rows.clear();
 
-        if term.is_empty() {
-            for dir in &self.all {
-                self.rows.push(DirRow::new(dir, live, dead, current, 0, vec![], false));
-            }
-        } else {
-            let matcher = self
-                .matcher
-                .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
-            for dir in &self.all {
-                // Matched against the path, not the derived name. You remember the path, and
-                // it is what you would type at `z`. The name comes from the path, so a term
-                // that finds the name also finds the path.
-                if let Some((score, indices)) = matcher.fuzzy_indices(&dir.path, term) {
-                    let is_exact = dir.name == term;
-                    self.rows
-                        .push(DirRow::new(dir, live, dead, current, score, indices, is_exact));
+        // Only an answer has directories to filter. The other two states have none, and an
+        // empty list is what the screen draws for them.
+        if let Fetch::Ready(all) = &self.status {
+            if term.is_empty() {
+                for dir in all {
+                    self.rows.push(DirRow::new(dir, live, dead, current, 0, vec![], false));
+                }
+            } else {
+                let matcher = self
+                    .matcher
+                    .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
+                for dir in all {
+                    // Matched against the path, not the derived name. You remember the path,
+                    // and it is what you would type at `z`. The name comes from the path, so a
+                    // term that finds the name also finds the path.
+                    if let Some((score, indices)) = matcher.fuzzy_indices(&dir.path, term) {
+                        let is_exact = dir.name == term;
+                        self.rows
+                            .push(DirRow::new(dir, live, dead, current, score, indices, is_exact));
+                    }
                 }
             }
         }
@@ -471,6 +473,21 @@ mod tests {
             Some(Listing::Failed(reason)) => reason.clone(),
             _ => panic!("expected a failure"),
         }
+    }
+
+    /// A failure takes the directories with it. The rows of the last answer cannot outlive it,
+    /// because [`Fetch::Failed`] has nowhere to keep them.
+    #[test]
+    fn a_failure_leaves_no_directories_behind() {
+        let mut dirs = DirSet::default();
+        dirs.ingest(Some(0), b"  9264.0 /home/you/Projects/thing\n", b"");
+        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        assert_eq!(dirs.rows.len(), 1);
+
+        dirs.fail("zoxide: gone");
+        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        assert!(dirs.rows.is_empty());
+        assert!(dirs.selected.is_none());
     }
 
     /// The order of eza is kept, because `--group-directories-first` already applied it.
