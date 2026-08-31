@@ -52,7 +52,7 @@ use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentRow, AgentSet};
-use crate::dirs::{Action, DirRow, DirSet, Listing};
+use crate::dirs::{DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
@@ -979,17 +979,11 @@ fn dir_line(
     path_budget: usize,
     inner: usize,
 ) -> Text {
-    // The only row `Enter` does not act on. A dim row is the usual form for "no action", it
-    // costs no columns, and no other row on any screen refuses `Enter`. The input line also
-    // says `already in this session` when the highlight is here.
-    let refused = row.action == Action::Here;
-    let level = if refused { TAG } else { NAME };
-
     let mut line = Line::new();
     gutter(&mut line, selected);
     // Not highlighted, because the term never matched this string. The match ran on the path,
     // and hits painted on another string would be wrong.
-    line.push(&truncate(&row.name, name_column), level);
+    line.push(&truncate(&row.name, name_column), NAME);
     line.pad_to(CARET + name_column);
     line.gap(GAP);
 
@@ -997,16 +991,12 @@ fn dir_line(
     // Aligned right. A path is already cut from the left, so an end at the border puts the `…`
     // in an uneven column and the part that identifies the directory in a straight one.
     line.pad_to(inner.saturating_sub(path.width()));
-    if refused {
-        line.push(&path, TAG);
-    } else {
-        // The indexes point into the full path. Those before the cut are gone, and the rest
-        // move down by the number removed and up by one for the `…`.
-        let shift = usize::from(dropped > 0);
-        let hits: Vec<usize> =
-            row.indices.iter().filter(|i| **i >= dropped).map(|i| i - dropped + shift).collect();
-        line.push_hits(&path, LABEL, ACCENT, &hits);
-    }
+    // The indexes point into the full path. Those before the cut are gone, and the rest move
+    // down by the number removed and up by one for the `…`.
+    let shift = usize::from(dropped > 0);
+    let hits: Vec<usize> =
+        row.indices.iter().filter(|i| **i >= dropped).map(|i| i - dropped + shift).collect();
+    line.push_hits(&path, LABEL, ACCENT, &hits);
 
     let text = line.finish(inner);
     if selected {
@@ -1017,20 +1007,15 @@ fn dir_line(
 }
 
 /// The directory prompt names the session that would be created, not the directory. The path is
-/// already on the row, and the name is the part the plugin derived.
+/// already on the row, and the name is the part the plugin derived — with the postfix it took,
+/// so the prompt is where you read that `luneta` is about to become `luneta-2`.
+///
+/// Every row does the same thing here, so the verb is a constant. No row is refused.
 fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
     let Some(row) = dirs.selected_row() else {
         return (term.to_string(), None, false);
     };
-    let refused = row.action == Action::Here;
-    let action = if refused {
-        // The only row `Enter` does not act on. This is in the prompt and not on a note line,
-        // because it belongs to the highlight and must move with it.
-        "already in this session".to_string()
-    } else {
-        format!("{} \"{}\"", row.action.verb(), row.name)
-    };
-    (term.to_string(), Some(action), refused)
+    (term.to_string(), Some(format!("Create \"{}\"", row.name)), false)
 }
 
 /// The directory screen has three ways to be empty. Only the failure needs a note line, because
@@ -1353,7 +1338,7 @@ mod tests {
     // Only the tests build these. The renderer receives them.
     use crate::cursor::Cursor;
     use crate::elapsed::Age;
-    use crate::sessions::{Focus, Selection, Sessions};
+    use crate::sessions::{Focus, Selection, Session, Sessions};
 
     /// A pane, rendered to the lines it prints. This picture was not available inside the
     /// crate while the host assembled it.
@@ -1942,7 +1927,10 @@ mod tests {
 
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
-        dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
+        // The same snapshot the first picture was drawn from, so the three pictures are one
+        // moment: `luneta` is live there, so the directory of that name proposes `luneta-2`
+        // here.
+        dirs.rebuild("", &live(), Some("notes"), Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/lorenzo/Projects/misc/luneta".to_string(),
             Some(0),
@@ -1987,6 +1975,17 @@ mod tests {
          "zellij": {"session": "notes", "pane": "7"}},
         {"status": "idle", "status_age": 60, "cwd": "/home/lorenzo"}
     ]"#;
+
+    /// The sessions of the first picture, as the directory screen reads them: the same names,
+    /// in the two lists the poll splits them into.
+    fn live() -> Sessions {
+        let named =
+            |name: &str, age: u64| Session { name: name.to_string(), age: Age::from_secs(age) };
+        Sessions {
+            live: vec![named("luneta", 2 * 3600), named("dotfiles", 5 * 3600)],
+            dead: vec![named("despesas-old", 12 * 86400), named("api-spike", 40 * 86400)],
+        }
+    }
 
     const ZOXIDE: &str = "9268 /home/lorenzo/Projects/misc/luneta\n\
         4102 /home/lorenzo/Projects/misc/homelab\n\

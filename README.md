@@ -58,25 +58,27 @@ One `Tab` away:
 And one more `Tab`:
 
 ```
-╭─ luneta ───────────────────────── 1/4 ─╮╭─ luneta ───────────────────── 5 items ─╮
+╭─ luneta ───────────────────────── 1/4 ─╮╭─ luneta-2 ─────────────────── 5 items ─╮
 │                                        ││ /home/lorenzo/Projects/misc/luneta     │
 │                                        ││                                        │
 │                                        ││ src/                                   │
 │                                        ││ target/                                │
 │                                        ││ Cargo.toml                             │
 │                                        ││ Makefile                               │
-│ > luneta   …renzo/Projects/misc/luneta ││ README.md                              │
-│   homelab  …enzo/Projects/misc/homelab ││                                        │
-│   bipa     …lorenzo/Projects/Work/bipa ││                                        │
+│ > luneta-2  …enzo/Projects/misc/luneta ││ README.md                              │
+│   homelab   …nzo/Projects/misc/homelab ││                                        │
+│   bipa      …orenzo/Projects/Work/bipa ││                                        │
 │   bin         /home/lorenzo/.local/bin ││                                        │
 ╰────────────────────────────────────────╯╰────────────────────────────────────────╯
 ╭─ Directories ────────────────────────────────────────────────────────────────────╮
-│ > _                                                      <ENTER> Create "luneta" │
+│ > _                                                    <ENTER> Create "luneta-2" │
 ╰──────────────────────────────────────────────────────────────────────────────────╯
   <↓↑> - Navigate, <ENTER> - Go there, <TAB> - Sessions, <ESC> - Close
 ```
 
-The renderer draws those three pictures itself. To print them, run
+The three pictures are one moment, so the third one shows what the first one causes:
+`luneta` is a live session there, and the directory of that name therefore offers
+`luneta-2` here. The renderer draws them itself. To print them, run
 `cargo test -- --ignored --nocapture print_the_screens`. A terminal shows the
 directory listing in the colours and the icons of eza, which a page of text
 cannot; the picture above has neither.
@@ -347,34 +349,39 @@ The directory screen lists directories from **zoxide**, in the frecency order of
 zoxide, and `Enter` puts you in one. The search term is shared, so `Tab` asks the
 other list the same question.
 
-**A directory row is a proposed session name and a cwd, and the cwd applies only
-if the name is free.** The host makes that rule. `switch_session_with_cwd` carries
-the cwd to `ClientInfo::set_cwd`, which matches `New` and `Resurrect` and discards
-all else through a `_ => {}`. Give it the name of a live session and you attach to
-that session, wherever it is, with no error and no cwd.
-
-The prompt therefore names the outcome the host will choose, and it is computed
-against the session snapshot on every poll, so a session created elsewhere changes
-a create row into an attach row under the cursor:
-
-- **Create** — the name is free. The session is made, in that directory.
-- **Attach to** / **Resurrect** — the name is taken. The name goes to the host
-  alone. The host would accept a cwd and discard it, and a discarded argument makes
-  you believe a session is somewhere it is not.
-- **already in this session** — the name is the current session, and `Enter` is
-  refused. That is not a courtesy: an attach to the current session does not fail,
-  it panics the client.
-
-The plugin cannot verify an attach. Neither `SessionInfo` nor `PaneInfo` has a cwd,
-so nothing can ask a live session which directory it is in. An attach row means
-that a session of this name exists, not that it is in this directory.
+**A directory row is a cwd and a session name that nothing else holds.** Every row
+does the same thing on `Enter`: it creates a session, in that directory. The screen
+never attaches, because the session screen beside it is where you go to a session
+that exists.
 
 **The session name is the directory itself**, so `~/Projects/Work/bipa.git/master`
-gives `master`. Two directories can end in the same component, and the plugin
-cannot tell that the existing session of that name is somewhere else. In a
-136-path zoxide database, nine names collided that way: `master`, `backend`,
-`frontend`, `bin`, `nixos`, `skills`, `.claude`, `.config` and `ldk-server`. On
-those rows, read the path beside the name before you press `Enter`.
+gives `master`. **A name the snapshot already holds takes a postfix**: `master-2`,
+then `master-3`, counting past every live session and every saved layout, and past
+the session you are in, which the poll leaves out of both lists. The row and the
+prompt show the name you will get, so `Create "luneta-2"` is the whole warning that
+`luneta` was taken.
+
+The postfix is not a nicety, it is what keeps the cwd. `switch_session_with_cwd`
+carries the cwd to `ClientInfo::set_cwd`, which matches `New` and `Resurrect` and
+discards all else through a `_ => {}`. Give it the name of a live session and you
+attach to that session, wherever it is, with no error and no cwd. The plugin
+therefore never gives it one.
+
+That matters because the plugin cannot tell where a session is. Neither
+`SessionInfo` nor `PaneInfo` has a cwd, and two directories can end in the same
+component: in a 136-path zoxide database, nine names collided that way — `master`,
+`backend`, `frontend`, `bin`, `nixos`, `skills`, `.claude`, `.config` and
+`ldk-server`. A session called `master` is *some* `master`. The row does not guess
+which, and does not address it.
+
+Two rows can still propose one name, since each is computed against the snapshot
+alone. Only one of them can be pressed — the picker closes on `Enter` — and the
+next opening sees the session the first one made.
+
+The name is recomputed on every poll, so a session another client creates moves the
+row to the next postfix under the cursor. The window between that poll and your
+`Enter` is the one case left: the host then attaches, silently, and the plugin has
+no way to ask for a name and be told it was refused.
 
 A name cannot contain a `/`, which matters twice: the host refuses such a name,
 and only logs the refusal, and so does the validator of the plugin.
@@ -445,9 +452,10 @@ The row therefore carries the call that applies:
   which attaches and lands on the pane, and not on the default pane of the session;
 - **our own** session: `focus_terminal_pane(pane, …)`, a pane focus.
 
-That division also removes the need for a refusal. A directory row for the current
-session can do nothing safely, but an agent row for the current session has a call
-that works.
+That division is why no screen refuses a row. The directory screen answers the same
+problem in the other direction: it never addresses a session that exists, so the
+name it hands over is always a new one, and the session you are in is one more name
+to step past.
 
 ## The geometry is arithmetic, and it is tested
 
