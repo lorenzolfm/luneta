@@ -24,6 +24,7 @@ use std::time::Duration;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
+use crate::fetch::Fetch;
 use crate::panes;
 use crate::sessions::{validate_name, Selection};
 
@@ -151,24 +152,10 @@ pub struct DirRow {
     is_exact: bool,
 }
 
-/// Why the directory list is empty.
-///
-/// The screen has three ways to be empty, and they are different: it still waits, zoxide is
-/// absent, or zoxide has nothing. A blank list for all three makes a missing program look like
-/// a broken feature.
-#[derive(Default)]
-pub enum Status {
-    /// The permission has not come back yet, or zoxide has not answered.
-    #[default]
-    Waiting,
-    Ready,
-    /// zoxide could not be run or did not succeed. Carries what to put on screen.
-    Failed(String),
-}
-
 #[derive(Default)]
 pub struct DirSet {
-    pub status: Status,
+    /// Why the list is empty, when it is. See [`Fetch`].
+    pub status: Fetch,
     pub rows: Vec<DirRow>,
     /// An index into `rows`. `None` only when `rows` is empty. Unlike the session screen, this
     /// screen cannot act on the typed text: it can only offer a directory zoxide knows.
@@ -183,7 +170,7 @@ pub struct DirSet {
 }
 
 impl DirSet {
-    /// Take the reply from zoxide. Any exit other than 0 becomes a [`Status::Failed`] with the
+    /// Take the reply from zoxide. Any exit other than 0 becomes a [`Fetch::Failed`] with the
     /// reason, because the most probable failure is that zoxide is not installed. Without the
     /// reason, that looks the same as an empty database.
     pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
@@ -191,7 +178,7 @@ impl DirSet {
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
-            self.status = Status::Failed(if reason.is_empty() {
+            self.status = Fetch::Failed(if reason.is_empty() {
                 "zoxide is not available".to_string()
             } else {
                 format!("zoxide: {}", reason)
@@ -200,12 +187,12 @@ impl DirSet {
             return;
         }
         self.all = parse(&String::from_utf8_lossy(stdout));
-        self.status = Status::Ready;
+        self.status = Fetch::Ready;
     }
 
     pub fn fail(&mut self, reason: impl Into<String>) {
         self.asking = false;
-        self.status = Status::Failed(reason.into());
+        self.status = Fetch::Failed(reason.into());
         self.all.clear();
     }
 

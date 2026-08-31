@@ -51,8 +51,9 @@
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
-use crate::agents::{self, AgentRow, AgentSet, Fetch};
-use crate::dirs::{Action, DirRow, DirSet, Listing, Status};
+use crate::agents::{self, AgentRow, AgentSet};
+use crate::dirs::{Action, DirRow, DirSet, Listing};
+use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{format_age, Contents, Kind, MatchSet, Row};
@@ -1029,19 +1030,19 @@ fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
 /// the other two explain themselves in the place of the list.
 fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
     match &dirs.status {
-        Status::Failed(reason) => vec![Note::error(reason)],
+        Fetch::Failed(reason) => vec![Note::error(reason)],
         _ => Vec::new(),
     }
 }
 
 fn dir_empty_text(dirs: &DirSet, term: &str) -> String {
     match &dirs.status {
-        Status::Waiting => "asking zoxide…".to_string(),
+        Fetch::Waiting => "asking zoxide…".to_string(),
         // The reason is on the note line above. A pane this small has no space to say it
         // twice.
-        Status::Failed(_) => "no directories".to_string(),
-        Status::Ready if term.is_empty() => "zoxide knows nowhere yet".to_string(),
-        Status::Ready => format!("no match for \"{}\"", term),
+        Fetch::Failed(_) => "no directories".to_string(),
+        Fetch::Ready if term.is_empty() => "zoxide knows nowhere yet".to_string(),
+        Fetch::Ready => format!("no match for \"{}\"", term),
     }
 }
 

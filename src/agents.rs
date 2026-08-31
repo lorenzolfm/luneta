@@ -21,6 +21,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
 
+use crate::fetch::Fetch;
 use crate::sessions::Selection;
 
 /// The command behind this screen. The server finds it on `PATH`, as it finds `zoxide`. There
@@ -155,20 +156,6 @@ impl AgentRow {
     }
 }
 
-/// Why the agent list is empty.
-///
-/// This is [`crate::dirs::Status`] under another name, for the same reason. "Still asking", "the
-/// tool is absent" and "nothing runs" are three different facts, and a blank list for all three
-/// makes a missing program look like a broken feature. The name differs because on this screen
-/// `Status` is what an agent is doing. See [`Status`].
-#[derive(Default)]
-pub enum Fetch {
-    #[default]
-    Waiting,
-    Ready,
-    Failed(String),
-}
-
 /// A status word this build cannot name, kept verbatim and never empty.
 #[derive(Clone)]
 pub struct StatusWord {
@@ -237,6 +224,7 @@ impl Status {
 
 #[derive(Default)]
 pub struct AgentSet {
+    /// Why the list is empty, when it is. See [`Fetch`].
     pub status: Fetch,
     pub rows: Vec<AgentRow>,
     pub selected: Option<usize>,
