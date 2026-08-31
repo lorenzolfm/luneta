@@ -442,12 +442,11 @@ fn derive_name(path: &str) -> Option<String> {
     validate_name(base).is_none().then(|| base.to_string())
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
+    use crate::elapsed::Age;
     use crate::sessions::Session;
 
     fn listed(stdout: &[u8]) -> DirSet {
@@ -591,7 +590,7 @@ mod tests {
     fn a_name_that_is_both_live_and_saved_attaches() {
         let both = |name: &str| Session {
             name: name.to_string(),
-            age: Duration::ZERO,
+            age: Age::ZERO,
         };
         let sessions = Sessions {
             live: vec![both("thing")],

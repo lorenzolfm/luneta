@@ -8,10 +8,11 @@
 //!    resurrectable ones at every stage.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+
+use crate::elapsed::Age;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -42,7 +43,7 @@ pub struct Session {
     /// Elapsed age, as the host reports it. The host truncates it to whole seconds
     /// (`screen.rs:3361`, `plugin_api/event.rs:1214`). The plugin sandbox cannot see the
     /// sockets that a better value needs.
-    pub age: Duration,
+    pub age: Age,
 }
 
 impl Sessions {
@@ -61,7 +62,7 @@ pub struct Row {
     pub kind: Kind,
     /// Elapsed age, carried from the snapshot. See [`Session::age`] for what the host's value
     /// is worth.
-    pub age: Duration,
+    pub age: Age,
     /// Character positions the fuzzy matcher hit, for highlighting. Empty on an empty term.
     pub indices: Vec<usize>,
     score: i64,
@@ -310,7 +311,7 @@ impl Row {
     pub(crate) fn new(
         name: String,
         kind: Kind,
-        age: Duration,
+        age: Age,
         score: i64,
         indices: Vec<usize>,
         is_exact: bool,
@@ -329,18 +330,5 @@ impl Row {
         self.kind_rank()
             .cmp(&other.kind_rank())
             .then_with(|| self.age.cmp(&other.age))
-    }
-}
-
-/// Elapsed time in one magnitude. The column shows the sort order, so `2h ago` is more useful
-/// than `2days 3h 14m 2s`.
-pub fn format_age(age: Duration) -> String {
-    let secs = age.as_secs();
-    match secs {
-        0..=59 => "<1m ago".to_string(),
-        60..=3599 => format!("{}m ago", secs / 60),
-        3600..=86_399 => format!("{}h ago", secs / 3600),
-        86_400..=604_799 => format!("{}d ago", secs / 86_400),
-        _ => format!("{}w ago", secs / 604_800),
     }
 }

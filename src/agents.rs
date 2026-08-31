@@ -14,12 +14,11 @@
 //! Something outside must join what Claude reports to the pane that runs it. `claude-ps` does
 //! that and prints JSON. This module only deserialises, filters and sorts.
 
-use std::time::Duration;
-
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
 
+use crate::elapsed::{Age, Held};
 use crate::fetch::Fetch;
 use crate::sessions::Selection;
 
@@ -106,7 +105,7 @@ pub struct Agent {
     display: String,
     pane: u32,
     status: Status,
-    age: Duration,
+    age: Held,
     cwd: String,
 }
 
@@ -126,7 +125,7 @@ pub struct AgentRow {
     ///
     /// The offset is added here because it is the same number on every row. See
     /// [`crate::State::agents_since`].
-    pub age: Duration,
+    pub age: Held,
     pub cwd: String,
     /// Another visible row has the same label, so the row must show its pane.
     pub shared: bool,
@@ -314,7 +313,7 @@ impl AgentSet {
         term: &str,
         current: Option<&str>,
         origin: Option<(&str, u32)>,
-        since: Duration,
+        since: Age,
         policy: Selection,
     ) {
         let held = match policy {
@@ -352,7 +351,7 @@ impl AgentSet {
                     display: agent.display.clone(),
                     pane: agent.pane,
                     status: agent.status.clone(),
-                    age: agent.age + since,
+                    age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
                     shared: false,
                     jump: if current == Some(agent.session.as_str()) {
@@ -546,7 +545,7 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
             display,
             pane,
             status: Status::parse(row.status.as_deref()),
-            age: Duration::from_secs(row.status_age),
+            age: Held::from_secs(row.status_age),
             cwd: row.cwd.unwrap_or_default(),
         });
     }
@@ -577,22 +576,6 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
     chosen.then(|| name.to_string())
 }
 
-/// Elapsed time as a duration: `4s`, `35m`, `2h`.
-///
-/// This is not [`crate::sessions::format_age`], which adds `" ago"`. That form is correct for
-/// the time a session started. This column says how long the status has held, and an agent that
-/// has waited for thirty-five minutes is not an event from thirty-five minutes ago.
-pub fn format_duration(age: Duration) -> String {
-    let secs = age.as_secs();
-    match secs {
-        0..=59 => format!("{}s", secs),
-        60..=3599 => format!("{}m", secs / 60),
-        3600..=86_399 => format!("{}h", secs / 3600),
-        86_400..=604_799 => format!("{}d", secs / 86_400),
-        _ => format!("{}w", secs / 604_800),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,11 +598,11 @@ mod tests {
     fn a_failure_leaves_no_agents_behind() {
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), one(r#""idle""#).as_bytes(), b"");
-        agents.rebuild("", None, None, Duration::ZERO, Selection::SnapToTop);
+        agents.rebuild("", None, None, Age::ZERO, Selection::SnapToTop);
         assert_eq!(agents.rows.len(), 1);
 
         agents.fail("claude-ps: gone");
-        agents.rebuild("", None, None, Duration::ZERO, Selection::SnapToTop);
+        agents.rebuild("", None, None, Age::ZERO, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert!(agents.selected.is_none());
     }

@@ -12,6 +12,7 @@
 
 mod agents;
 mod dirs;
+mod elapsed;
 mod fetch;
 mod layout;
 mod panes;
@@ -20,10 +21,10 @@ mod sessions;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use agents::{AgentSet, Jump};
 use dirs::{Action, DirSet, LIST};
+use elapsed::Age;
 use panes::Peeks;
 use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
 use zellij_tile::prelude::*;
@@ -439,7 +440,7 @@ impl State {
                 .filter(|s| !s.is_current_session)
                 .map(|session| {
                     let name = session.name.clone();
-                    let age = session.creation_time;
+                    let age = Age::new(session.creation_time);
                     contents.insert(name.clone(), contents_of(session));
                     Session { name, age }
                 })
@@ -450,7 +451,7 @@ impl State {
             dead: snapshot
                 .resurrectable_sessions
                 .into_iter()
-                .map(|(name, age)| Session { name, age })
+                .map(|(name, age)| Session { name, age: Age::new(age) })
                 .collect(),
         };
         self.matches.contents = contents;
@@ -521,8 +522,8 @@ impl State {
     /// The count is in ticks, because the plugin has no clock: a wasi sandbox with `/host` open
     /// is not a clock. The timer drifts with what the host does to it, which the one-second
     /// granularity of the column absorbs. A new opening reads a new snapshot.
-    fn agents_since(&self) -> Duration {
-        Duration::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
+    fn agents_since(&self) -> Age {
+        Age::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
     }
 
     /// Ask `claude-ps` for the list, once for each answer, on the same terms as zoxide.

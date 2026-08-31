@@ -56,7 +56,7 @@ use crate::dirs::{Action, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
-use crate::sessions::{format_age, Contents, Kind, MatchSet, Row};
+use crate::sessions::{Contents, Kind, MatchSet, Row};
 
 /// Emphasis levels, named. See the table above.
 const TAG: usize = 0;
@@ -746,7 +746,7 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
     let mut line = Line::new();
     line.push(&truncate(row.status.word(), inner), level);
     line.push(" · ", TAG);
-    line.push(&agents::format_duration(row.age), TAG);
+    line.push(&row.age.label(), TAG);
     let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
     lines.extend(screen_lines(rect, peeks, &panes::key(&row.session, row.pane), lines.len()));
     (row.label(), lines)
@@ -791,7 +791,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
     let window: Vec<usize> = (start..end).filter_map(visible).collect();
     let age_width = window
         .iter()
-        .map(|i| format_age(state.rows[*i].age).width())
+        .map(|i| state.rows[*i].age.label().width())
         .max()
         .unwrap_or(0);
     // Two columns, so the name takes what the gutter and the age do not need. There is nothing
@@ -854,7 +854,7 @@ fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> T
     // box as wide as the pane would otherwise stay on the left with half the box empty, and the
     // age column would move whenever the longest visible name changed. The text is aligned
     // right, so that `ago` is in the same column on every row.
-    let age = format_age(row.age);
+    let age = row.age.label();
     line.pad_to(inner.saturating_sub(age.width()));
     line.push(&age, LABEL);
 
@@ -1096,7 +1096,7 @@ fn agent_body(
     let abbr_width =
         window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
     let age_width =
-        window.iter().map(|r| agents::format_duration(r.age).width()).max().unwrap_or(0);
+        window.iter().map(|r| r.age.label().width()).max().unwrap_or(0);
     // A limit of one third of the width, set before all else. Without it the name takes the
     // space of the other columns.
     let name_column =
@@ -1176,7 +1176,7 @@ fn agent_line(
 
     // The last column that remains is aligned right, as on the other two screens. The columns
     // before it keep the widths they were measured to.
-    let age = agents::format_duration(row.age);
+    let age = row.age.label();
     match cwd_budget {
         Some(cwd_budget) => {
             line.pad_to(CARET + name_column + GAP + tag_column);
@@ -1338,10 +1338,10 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
     // Only the tests build these. The renderer receives them.
+    use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Sessions};
 
     /// A pane, rendered to the lines it prints. This picture was not available inside the
@@ -1363,7 +1363,7 @@ mod tests {
     }
 
     fn session(name: &str, kind: Kind, age: u64) -> Row {
-        Row::new(name.to_string(), kind, Duration::from_secs(age), 0, vec![], false)
+        Row::new(name.to_string(), kind, Age::from_secs(age), 0, vec![], false)
     }
 
     fn matches(rows: Vec<Row>, selected: Option<usize>) -> MatchSet {
@@ -1911,7 +1911,7 @@ mod tests {
 
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), AGENTS.as_bytes(), b"");
-        agents.rebuild("", Some("notes"), None, Duration::ZERO, Selection::SnapToTop);
+        agents.rebuild("", Some("notes"), None, Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
         let body = agent_body(&agents, "", rect, notes.len(), 0);
