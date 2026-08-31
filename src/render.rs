@@ -745,9 +745,9 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
         return nothing_highlighted(rect);
     };
     // The status that takes the accent colour in the list takes it here too.
-    let level = if agents::is_waiting(row.status.as_ref()) { ACCENT } else { LABEL };
+    let level = if row.status.is_waiting() { ACCENT } else { LABEL };
     let mut line = Line::new();
-    line.push(&truncate(agents::word(row.status.as_ref()), inner), level);
+    line.push(&truncate(row.status.word(), inner), level);
     line.push(" · ", TAG);
     line.push(&agents::format_duration(row.age), TAG);
     let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
@@ -1092,18 +1092,12 @@ fn agent_body(
     // Measured at the `frame` that builds the cells below, so that a width and the glyph it
     // must hold come from one turn of the spinner. Every spinner frame is one column wide (see
     // `agents::SPINNER`), and the frame is passed so that this code does not assume that.
-    let full_tag = window
-        .iter()
-        .map(|r| agents::full_tag(r.status.as_ref(), frame).width())
-        .max()
-        .unwrap_or(0);
+    let full_tag =
+        window.iter().map(|r| agents::full_tag(&r.status, frame).width()).max().unwrap_or(0);
     // Measured, not assumed. A glyph takes two columns and the `[S]` form of an unknown status
     // takes three, so the narrow tag column has no fixed width.
-    let abbr_width = window
-        .iter()
-        .map(|r| agents::abbr_tag(r.status.as_ref(), frame).width())
-        .max()
-        .unwrap_or(0);
+    let abbr_width =
+        window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
     let age_width =
         window.iter().map(|r| agents::format_duration(r.age).width()).max().unwrap_or(0);
     // A limit of one third of the width, set before all else. Without it the name takes the
@@ -1175,11 +1169,11 @@ fn agent_line(
     line.gap(GAP);
     // The only status in the accent colour. Every other status, including one released after
     // this code, shows as itself.
-    let tag_level = if agents::is_waiting(row.status.as_ref()) { ACCENT } else { TAG };
+    let tag_level = if row.status.is_waiting() { ACCENT } else { TAG };
     let tag = if matches!(fit, AgentFit::Full) {
-        agents::full_tag(row.status.as_ref(), frame)
+        agents::full_tag(&row.status, frame)
     } else {
-        agents::abbr_tag(row.status.as_ref(), frame)
+        agents::abbr_tag(&row.status, frame)
     };
     line.push(&tag, tag_level);
 
