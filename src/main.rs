@@ -25,7 +25,7 @@ use std::time::Duration;
 use agents::{AgentSet, Jump};
 use dirs::{Action, DirSet, LIST};
 use panes::Peeks;
-use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection};
+use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
 use zellij_tile::prelude::*;
 
 /// The pipe message this plugin answers, so that a key can open it on a chosen screen.
@@ -186,8 +186,7 @@ struct State {
     panes: Option<PaneManifest>,
     active_tab: Option<usize>,
     /// The last snapshot, so that a keystroke can filter again before the next poll.
-    live: Vec<(String, Duration)>,
-    dead: Vec<(String, Duration)>,
+    sessions: Sessions,
     rename: Rename,
     /// A host call that returned `Err`. The search screen shows it until the user does
     /// something that can produce a new one. It is never an overlay, so it cannot take a
@@ -432,21 +431,33 @@ impl State {
         // the ages must come from one snapshot, or the box would describe a session as it was
         // a second before the row beside it.
         let mut contents = BTreeMap::new();
-        self.live = snapshot
-            .live_sessions
-            .into_iter()
-            // The current session is removed here, not in the renderer, so that the rendered
-            // list stays equal to the match set.
-            .filter(|s| !s.is_current_session)
-            .map(|session| {
-                let row = (session.name.clone(), session.creation_time);
-                contents.insert(session.name.clone(), contents_of(session));
-                row
-            })
-            .collect();
+        // The one place the two lists are still crossable, and each is named beside the
+        // snapshot field it comes from. Everything downstream takes the pair.
+        self.sessions = Sessions {
+            live: snapshot
+                .live_sessions
+                .into_iter()
+                // The current session is removed here, not in the renderer, so that the
+                // rendered list stays equal to the match set.
+                .filter(|s| !s.is_current_session)
+                .map(|session| {
+                    let name = session.name.clone();
+                    let age = session.creation_time;
+                    contents.insert(name.clone(), contents_of(session));
+                    Session { name, age }
+                })
+                .collect(),
+            // The host's own shape for this list is `Vec<(String, Duration)>`
+            // (`zellij-utils/src/data.rs:2660`), so this one costs a map where it used to be
+            // a move.
+            dead: snapshot
+                .resurrectable_sessions
+                .into_iter()
+                .map(|(name, age)| Session { name, age })
+                .collect(),
+        };
         self.matches.contents = contents;
-        self.dead = snapshot.resurrectable_sessions;
-        self.matches.refresh(&self.live, &self.dead, current);
+        self.matches.refresh(&self.sessions, current);
         // The action of a directory row comes from the session list, so it becomes stale on
         // the same tick.
         self.rebuild_dirs(Selection::Hold);
@@ -636,8 +647,7 @@ impl State {
     fn rebuild_dirs(&mut self, policy: Selection) {
         self.dirs.rebuild(
             &self.matches.search_term,
-            &self.live,
-            &self.dead,
+            &self.sessions,
             self.matches.current_session.as_deref(),
             policy,
         );
@@ -890,7 +900,7 @@ impl State {
             Some("name must not be empty".to_string())
         } else if self.matches.current_session.as_deref() == Some(name) {
             Some("already called that".to_string())
-        } else if self.live.iter().chain(&self.dead).any(|(n, _)| n == name) {
+        } else if self.sessions.any_named(name) {
             Some("a session by that name already exists".to_string())
         } else {
             validate_name(name).map(str::to_string)
@@ -944,7 +954,7 @@ impl State {
         self.error = None;
         // Filters the snapshot again and does not call the host, so that a keystroke does not
         // wait for the next poll.
-        self.matches.set_search_term(term, &self.live, &self.dead);
+        self.matches.set_search_term(term, &self.sessions);
         // All three lists, because the term is shared and `Tab` must never show a list that
         // is behind what you typed.
         self.rebuild_dirs(Selection::SnapToTop);

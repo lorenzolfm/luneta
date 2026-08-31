@@ -21,13 +21,46 @@ pub enum Kind {
     Resurrectable,
 }
 
+/// The last snapshot, split the way the host splits it.
+///
+/// The two lists travel as one value because they are the same type and mean opposite things.
+/// As two adjacent `&[(String, Duration)]` parameters they crossed six signatures, and a swap
+/// at any one of them compiled: every `Attach` became a `Resurrect`, and `Enter` resurrected a
+/// saved layout over a session that was running. The pairing is now made once, in
+/// [`crate::State::poll`], beside the two snapshot fields it reads from.
+#[derive(Default)]
+pub struct Sessions {
+    /// Live sessions, without the current one. The poll removes it, not the renderer (rule 1).
+    pub live: Vec<Session>,
+    /// Dead sessions the host has a saved layout for. Nothing else can be resurrected.
+    pub dead: Vec<Session>,
+}
+
+/// One session in the snapshot. Which list holds it says whether it is live or resurrectable.
+pub struct Session {
+    pub name: String,
+    /// Elapsed age, as the host reports it. The host truncates it to whole seconds
+    /// (`screen.rs:3361`, `plugin_api/event.rs:1214`). The plugin sandbox cannot see the
+    /// sockets that a better value needs.
+    pub age: Duration,
+}
+
+impl Sessions {
+    /// Does any session already have this name, live or dead?
+    ///
+    /// Both lists, because the host resolves a name across both: a name that a saved layout
+    /// holds is as unusable for a rename as one a running session holds.
+    pub fn any_named(&self, name: &str) -> bool {
+        self.live.iter().chain(&self.dead).any(|s| s.name == name)
+    }
+}
+
 /// One row, which is also one match-set entry. There is no separate render-side list.
 pub struct Row {
     pub name: String,
     pub kind: Kind,
-    /// Elapsed age, as the host reports it. The host truncates it to whole seconds
-    /// (`screen.rs:3361`, `plugin_api/event.rs:1214`). The plugin sandbox cannot see the
-    /// sockets that a better value needs.
+    /// Elapsed age, carried from the snapshot. See [`Session::age`] for what the host's value
+    /// is worth.
     pub age: Duration,
     /// Character positions the fuzzy matcher hit, for highlighting. Empty on an empty term.
     pub indices: Vec<usize>,
@@ -105,25 +138,15 @@ impl MatchSet {
     /// Rebuild from the latest poll.
     ///
     /// The caller splits the snapshot and removes the current session from `live` (rule 1). It
-    /// keeps both lists, so that a keystroke can filter again before the next poll.
-    pub fn refresh(
-        &mut self,
-        live: &[(String, Duration)],
-        dead: &[(String, Duration)],
-        current_session: Option<String>,
-    ) {
+    /// keeps the whole snapshot, so that a keystroke can filter again before the next poll.
+    pub fn refresh(&mut self, sessions: &Sessions, current_session: Option<String>) {
         self.current_session = current_session;
         // Hold, not snap: this runs once a second in the background, and a snap would move
         // the cursor back to row 0 on every poll.
-        self.rebuild(live, dead, Selection::Hold);
+        self.rebuild(sessions, Selection::Hold);
     }
 
-    fn rebuild(
-        &mut self,
-        live: &[(String, Duration)],
-        dead: &[(String, Duration)],
-        policy: Selection,
-    ) {
+    fn rebuild(&mut self, sessions: &Sessions, policy: Selection) {
         let term = self.search_term.clone();
         // Computed below when the term is not empty. An empty term matches nothing.
         self.current_matches = false;
@@ -134,12 +157,25 @@ impl MatchSet {
         self.rows.clear();
 
         if term.is_empty() {
-            for (name, age) in live {
-                self.rows.push(Row::new(name.clone(), Kind::Live, *age, 0, vec![], false));
+            for session in &sessions.live {
+                self.rows.push(Row::new(
+                    session.name.clone(),
+                    Kind::Live,
+                    session.age,
+                    0,
+                    vec![],
+                    false,
+                ));
             }
-            for (name, age) in dead {
-                self.rows
-                    .push(Row::new(name.clone(), Kind::Resurrectable, *age, 0, vec![], false));
+            for session in &sessions.dead {
+                self.rows.push(Row::new(
+                    session.name.clone(),
+                    Kind::Resurrectable,
+                    session.age,
+                    0,
+                    vec![],
+                    false,
+                ));
             }
             // Live newest first, then resurrectable newest first. `age` is elapsed time, so
             // ascending age is newest first.
@@ -156,12 +192,21 @@ impl MatchSet {
                 .as_deref()
                 .map(|name| matcher.fuzzy_indices(name, &term).is_some())
                 .unwrap_or(false);
-            for (kind, list) in [(Kind::Live, live), (Kind::Resurrectable, dead)] {
-                for (name, age) in list {
-                    if let Some((score, indices)) = matcher.fuzzy_indices(name, &term) {
-                        let is_exact = *name == term;
-                        self.rows
-                            .push(Row::new(name.clone(), kind, *age, score, indices, is_exact));
+            for (kind, list) in [
+                (Kind::Live, &sessions.live),
+                (Kind::Resurrectable, &sessions.dead),
+            ] {
+                for session in list {
+                    if let Some((score, indices)) = matcher.fuzzy_indices(&session.name, &term) {
+                        let is_exact = session.name == term;
+                        self.rows.push(Row::new(
+                            session.name.clone(),
+                            kind,
+                            session.age,
+                            score,
+                            indices,
+                            is_exact,
+                        ));
                     }
                 }
             }
@@ -201,14 +246,9 @@ impl MatchSet {
 
     /// Set a new search term. The cursor goes to the top match, which is the best answer to a
     /// term that has just changed.
-    pub fn set_search_term(
-        &mut self,
-        term: String,
-        live: &[(String, Duration)],
-        dead: &[(String, Duration)],
-    ) {
+    pub fn set_search_term(&mut self, term: String, sessions: &Sessions) {
         self.search_term = term;
-        self.rebuild(live, dead, Selection::SnapToTop);
+        self.rebuild(sessions, Selection::SnapToTop);
     }
 
     /// Is the term the name of the current session?

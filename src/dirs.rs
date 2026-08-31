@@ -19,14 +19,13 @@
 //! can go to a session that was created somewhere else.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
 use crate::fetch::Fetch;
 use crate::panes;
-use crate::sessions::{validate_name, Selection};
+use crate::sessions::{validate_name, Selection, Sessions};
 
 /// The command behind this screen. `-l` lists, and `-s` prints the frecency score.
 ///
@@ -78,7 +77,7 @@ pub const PATH_KEY: &str = "luneta_path";
 /// `Create` is the only outcome the host applies it to. That is not a second property to read
 /// off the variant, it is the variant, so `confirm_dir` matches on this and a fifth outcome
 /// stops the build there rather than silently taking the branch that drops the cwd.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// The derived name is free. The session is created, in this directory, and this is the one
     /// outcome that carries the cwd.
@@ -201,8 +200,7 @@ impl DirSet {
     pub fn rebuild(
         &mut self,
         term: &str,
-        live: &[(String, Duration)],
-        dead: &[(String, Duration)],
+        sessions: &Sessions,
         current: Option<&str>,
         policy: Selection,
     ) {
@@ -217,7 +215,7 @@ impl DirSet {
         if let Fetch::Ready(all) = &self.status {
             if term.is_empty() {
                 for dir in all {
-                    self.rows.push(DirRow::new(dir, live, dead, current, 0, vec![], false));
+                    self.rows.push(DirRow::new(dir, sessions, current, 0, vec![], false));
                 }
             } else {
                 let matcher = self
@@ -230,7 +228,7 @@ impl DirSet {
                     if let Some((score, indices)) = matcher.fuzzy_indices(&dir.path, term) {
                         let is_exact = dir.name == term;
                         self.rows
-                            .push(DirRow::new(dir, live, dead, current, score, indices, is_exact));
+                            .push(DirRow::new(dir, sessions, current, score, indices, is_exact));
                     }
                 }
             }
@@ -370,8 +368,7 @@ fn cut_at<'a>(text: &'a str, marker: &str) -> &'a str {
 impl DirRow {
     fn new(
         dir: &Dir,
-        live: &[(String, Duration)],
-        dead: &[(String, Duration)],
+        sessions: &Sessions,
         current: Option<&str>,
         score: i64,
         indices: Vec<usize>,
@@ -379,7 +376,7 @@ impl DirRow {
     ) -> Self {
         DirRow {
             path: dir.path.clone(),
-            action: action_for(&dir.name, live, dead, current),
+            action: action_for(&dir.name, sessions, current),
             name: dir.name.clone(),
             indices,
             score,
@@ -393,17 +390,12 @@ impl DirRow {
 ///
 /// The order is the order the host uses: a live session wins over a saved layout. The current
 /// session is tested first, because the poll removes it from `live`.
-fn action_for(
-    name: &str,
-    live: &[(String, Duration)],
-    dead: &[(String, Duration)],
-    current: Option<&str>,
-) -> Action {
+fn action_for(name: &str, sessions: &Sessions, current: Option<&str>) -> Action {
     if current == Some(name) {
         Action::Here
-    } else if live.iter().any(|(n, _)| n == name) {
+    } else if sessions.live.iter().any(|s| s.name == name) {
         Action::Attach
-    } else if dead.iter().any(|(n, _)| n == name) {
+    } else if sessions.dead.iter().any(|s| s.name == name) {
         Action::Resurrect
     } else {
         Action::Create
@@ -453,7 +445,10 @@ fn derive_name(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::sessions::Session;
 
     fn listed(stdout: &[u8]) -> DirSet {
         let mut dirs = DirSet::default();
@@ -481,11 +476,11 @@ mod tests {
     fn a_failure_leaves_no_directories_behind() {
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"  9264.0 /home/you/Projects/thing\n", b"");
-        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         assert_eq!(dirs.rows.len(), 1);
 
         dirs.fail("zoxide: gone");
-        dirs.rebuild("", &[], &[], None, Selection::SnapToTop);
+        dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         assert!(dirs.rows.is_empty());
         assert!(dirs.selected.is_none());
     }
@@ -587,6 +582,28 @@ mod tests {
         assert_eq!(derive_name("/"), None);
         assert_eq!(derive_name(""), None);
         assert_eq!(derive_name(&format!("/home/{}", "d".repeat(108))), None);
+    }
+
+    /// A name can be in both lists, and the answer is the one the host gives: it attaches to
+    /// the running session and leaves the saved layout on disk. Nothing but the order of the
+    /// tests in [`action_for`] enforces this, so it is tested rather than assumed.
+    #[test]
+    fn a_name_that_is_both_live_and_saved_attaches() {
+        let both = |name: &str| Session {
+            name: name.to_string(),
+            age: Duration::ZERO,
+        };
+        let sessions = Sessions {
+            live: vec![both("thing")],
+            dead: vec![both("thing"), both("other")],
+        };
+
+        assert_eq!(action_for("thing", &sessions, None), Action::Attach);
+        assert_eq!(action_for("other", &sessions, None), Action::Resurrect);
+        assert_eq!(action_for("absent", &sessions, None), Action::Create);
+        // The current session is tested before either list, because the poll took it out of
+        // `live` and it would otherwise read as a create.
+        assert_eq!(action_for("thing", &sessions, Some("thing")), Action::Here);
     }
 
     /// The cache is cleared, and no entry is evicted on its own. See [`MAX_LISTINGS`].
