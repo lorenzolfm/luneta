@@ -78,13 +78,20 @@ const PREVIEW_DELAY: u64 = 2;
 
 /// Which screen has the keyboard. There is no kill-all and no disconnect-others, because both
 /// act on sessions this picker does not show.
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Default)]
 pub enum Mode {
     /// Type, filter, move, `Enter`.
     #[default]
     Search,
     /// Typing a new name for the session you are in.
-    Rename,
+    ///
+    /// `current` is the name the rename began on, and it is a copy on purpose. `poll` runs in
+    /// every mode, so `matches.current_session` can change while you type — another client
+    /// renaming the session you are in. Both readers, the note line and the `already called
+    /// that` test, take the copy, so everything this screen says dates from the keystroke that
+    /// opened it. Entering the mode is constructing the value, which is what makes the empty
+    /// input and the absent session unrepresentable rather than merely prevented.
+    Rename { current: String, input: String },
 }
 
 /// Which list the search screen shows. `Tab` changes it.
@@ -154,16 +161,6 @@ impl Target {
     }
 }
 
-/// The input of the rename screen, and the reason it is refused.
-///
-/// The reason is computed on each keystroke, not on `Enter`, so that the screen refuses a name
-/// while you type it.
-#[derive(Default)]
-pub struct Rename {
-    pub input: String,
-    pub error: Option<String>,
-}
-
 #[derive(Default)]
 struct State {
     mode: Mode,
@@ -187,7 +184,6 @@ struct State {
     active_tab: Option<usize>,
     /// The last snapshot, so that a keystroke can filter again before the next poll.
     sessions: Sessions,
-    rename: Rename,
     /// A host call that returned `Err`. The search screen shows it until the user does
     /// something that can produce a new one. It is never an overlay, so it cannot take a
     /// keystroke.
@@ -383,7 +379,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
-        match self.mode {
+        match &self.mode {
             Mode::Search => match self.screen {
                 Screen::Sessions => {
                     render::render_search(
@@ -406,9 +402,10 @@ impl ZellijPlugin for State {
                     self.frame,
                 ),
             },
-            Mode::Rename => render::render_rename(
-                &self.rename,
-                self.matches.current_session.as_deref(),
+            Mode::Rename { current, input } => render::render_rename(
+                current,
+                input,
+                self.rename_error(current, input),
                 rows,
                 cols,
             ),
@@ -472,7 +469,9 @@ impl State {
     /// All three conditions are necessary. The agent screen draws in `Search` mode only, so a
     /// rename or a confirmation hides every spinner in the list.
     fn spinning(&self) -> bool {
-        self.mode == Mode::Search && self.screen == Screen::Agents && self.agents.any_busy()
+        matches!(self.mode, Mode::Search)
+            && self.screen == Screen::Agents
+            && self.agents.any_busy()
     }
 
     /// The pane the picker was opened over, or `None` if it cannot be found.
@@ -558,7 +557,7 @@ impl State {
     ///
     /// This runs in `Search` mode only. A confirmation or a rename hides the box.
     fn follow_preview(&mut self) -> bool {
-        if self.mode != Mode::Search {
+        if !matches!(self.mode, Mode::Search) {
             return false;
         }
         let Some(target) = self.preview_target() else {
@@ -677,7 +676,7 @@ impl State {
         }
         match self.mode {
             Mode::Search => self.handle_search_key(key),
-            Mode::Rename => self.handle_rename_key(key),
+            Mode::Rename { .. } => self.handle_rename_key(key),
         }
     }
 
@@ -851,15 +850,13 @@ impl State {
 
     fn begin_rename(&mut self) {
         // There is nothing to rename until the host reports the current session.
-        if self.matches.current_session.is_none() {
+        let Some(current) = self.matches.current_session.clone() else {
             return;
-        }
+        };
         self.error = None;
-        // The field starts empty. The old name is on the note line, where you cannot delete
+        // The input starts empty. The old name is on the note line, where you cannot delete
         // half of it, and the screen already refuses an empty name.
-        self.rename = Rename::default();
-        self.validate_rename();
-        self.mode = Mode::Rename;
+        self.mode = Mode::Rename { current, input: String::new() };
     }
 
     fn handle_rename_key(&mut self, key: KeyWithModifier) -> bool {
@@ -873,15 +870,19 @@ impl State {
                 true
             },
             BareKey::Backspace if key.has_no_modifiers() => {
-                if self.rename.input.pop().is_none() {
+                // The input lives in the mode, and this function runs in one mode. The `else`
+                // is what saying so to the compiler costs.
+                let Mode::Rename { input, .. } = &mut self.mode else {
                     return false;
-                }
-                self.validate_rename();
-                true
+                };
+                // An empty input has nothing to delete, and nothing to redraw.
+                input.pop().is_some()
             },
             BareKey::Char(c) if key.has_no_modifiers() => {
-                self.rename.input.push(c);
-                self.validate_rename();
+                let Mode::Rename { input, .. } = &mut self.mode else {
+                    return false;
+                };
+                input.push(c);
                 true
             },
             _ => false,
@@ -890,30 +891,36 @@ impl State {
 
     /// Every reason a name is refused, in the order that gives the most useful message.
     ///
+    /// Answered on read — once per draw, once on `Enter` — the way `MatchSet::name_error`
+    /// already answers for the search screen over the same `validate_name`. A remembered answer
+    /// is a second fact about the input, and every edit path has to remember to renew it.
+    ///
     /// The collision test uses the snapshot, not `matches.rows`, because `rows` is filtered. A
     /// name that collides with a session the term excludes would otherwise pass.
-    fn validate_rename(&mut self) {
-        let name = self.rename.input.as_str();
-        self.rename.error = if name.is_empty() {
+    fn rename_error(&self, current: &str, name: &str) -> Option<&'static str> {
+        if name.is_empty() {
             // Valid on the create path, where the host names the session. A rename has no
             // such fallback.
-            Some("name must not be empty".to_string())
-        } else if self.matches.current_session.as_deref() == Some(name) {
-            Some("already called that".to_string())
+            Some("name must not be empty")
+        } else if current == name {
+            Some("already called that")
         } else if self.sessions.any_named(name) {
-            Some("a session by that name already exists".to_string())
+            Some("a session by that name already exists")
         } else {
-            validate_name(name).map(str::to_string)
-        };
+            validate_name(name)
+        }
     }
 
     fn apply_rename(&mut self) {
+        let Mode::Rename { current, input } = &self.mode else {
+            return;
+        };
         // This does nothing and shows no error. The prompt gave the reason on every
         // keystroke.
-        if self.rename.error.is_some() {
+        if self.rename_error(current, input).is_some() {
             return;
         }
-        rename_session(&self.rename.input);
+        rename_session(input);
         self.mode = Mode::Search;
         // The picker stays open. `current_session` is stale until the host applies the
         // rename, and the next poll corrects it.
