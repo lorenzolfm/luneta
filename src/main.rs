@@ -11,6 +11,7 @@
 //! saved layout gives a resurrect, and neither gives a create.
 
 mod agents;
+mod cursor;
 mod dirs;
 mod elapsed;
 mod fetch;
@@ -631,7 +632,7 @@ impl State {
         match self.screen {
             Screen::Dirs => self.dirs.selected_row().map(|row| Target::Dir(row.path.clone())),
             Screen::Sessions => {
-                let row = self.matches.selected.and_then(|i| self.matches.rows.get(i))?;
+                let row = self.matches.rows.selected_row()?;
                 // A dead session has no process and thus no screen. There is nothing to
                 // ask.
                 let focus = self.matches.contents.get(&row.name)?.focus.as_ref()?;
@@ -763,9 +764,9 @@ impl State {
 
     fn move_selection(&mut self, delta: isize) {
         match self.screen {
-            Screen::Sessions => self.matches.move_selection(delta),
-            Screen::Dirs => self.dirs.move_selection(delta),
-            Screen::Agents => self.agents.move_selection(delta),
+            Screen::Sessions => self.matches.rows.move_selection(delta),
+            Screen::Dirs => self.dirs.rows.move_selection(delta),
+            Screen::Agents => self.agents.rows.move_selection(delta),
         }
     }
 
@@ -943,7 +944,7 @@ impl State {
     /// on the live row and once again on the dead row that follows.
     fn delete_selected(&mut self) {
         // With no highlight, `Enter` acts on the text you typed, and `Del` has no target.
-        let Some(row) = self.matches.selected.and_then(|i| self.matches.rows.get(i)) else {
+        let Some(row) = self.matches.rows.selected_row() else {
             return;
         };
         let name = row.name.clone();

@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
+use crate::cursor::Cursor;
 use crate::elapsed::Age;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,9 +118,9 @@ pub enum Selection {
 #[derive(Default)]
 pub struct MatchSet {
     pub search_term: String,
-    pub rows: Vec<Row>,
-    /// An index into `rows`. `None` only when `rows` is empty.
-    pub selected: Option<usize>,
+    /// The rows and the cursor in them. See [`Cursor`], which holds the two together so that
+    /// `None` and an empty list cannot come apart.
+    pub rows: Cursor<Row>,
     /// The name of the current session, so that the note line can say the picker hides it.
     /// It is never in `rows`.
     pub current_session: Option<String>,
@@ -155,11 +156,11 @@ impl MatchSet {
             Selection::SnapToTop => None,
             Selection::Hold => self.selected_name().map(str::to_owned),
         };
-        self.rows.clear();
+        let mut rows: Vec<Row> = Vec::new();
 
         if term.is_empty() {
             for session in &sessions.live {
-                self.rows.push(Row::new(
+                rows.push(Row::new(
                     session.name.clone(),
                     Kind::Live,
                     session.age,
@@ -169,7 +170,7 @@ impl MatchSet {
                 ));
             }
             for session in &sessions.dead {
-                self.rows.push(Row::new(
+                rows.push(Row::new(
                     session.name.clone(),
                     Kind::Resurrectable,
                     session.age,
@@ -180,7 +181,7 @@ impl MatchSet {
             }
             // Live newest first, then resurrectable newest first. `age` is elapsed time, so
             // ascending age is newest first.
-            self.rows.sort_by(|a, b| a.kind_then_recency(b));
+            rows.sort_by(|a, b| a.kind_then_recency(b));
         } else {
             let matcher = self
                 .matcher
@@ -200,7 +201,7 @@ impl MatchSet {
                 for session in list {
                     if let Some((score, indices)) = matcher.fuzzy_indices(&session.name, &term) {
                         let is_exact = session.name == term;
-                        self.rows.push(Row::new(
+                        rows.push(Row::new(
                             session.name.clone(),
                             kind,
                             session.age,
@@ -218,7 +219,7 @@ impl MatchSet {
             //
             // The cost: the exact name of a dead session no longer moves the cursor to it
             // while live rows also match. The cursor goes to the top of the dead group.
-            self.rows.sort_by(|a, b| {
+            rows.sort_by(|a, b| {
                 a.kind_rank()
                     .cmp(&b.kind_rank())
                     .then_with(|| b.is_exact.cmp(&a.is_exact))
@@ -227,22 +228,14 @@ impl MatchSet {
             });
         }
 
-        // `None` only when there is nothing to point at. In that state `Enter` acts on the
-        // text you typed, which is the create path. See [`crate::render::enter_action`].
-        self.selected = if self.rows.is_empty() {
-            None
-        } else {
-            // `Hold` keeps the cursor on the same session, not on the same index. A session
-            // that is gone falls back to the top.
-            held.and_then(|name| self.rows.iter().position(|r| r.name == name))
-                .or(Some(0))
-        };
+        // `Hold` keeps the cursor on the same session, not on the same index. A session that is
+        // gone falls back to the top, and an empty list to no cursor at all — see
+        // [`Cursor::replace`], which is where those two answers now live.
+        self.rows.replace(rows, |row| held.as_deref() == Some(row.name.as_str()));
     }
 
     pub fn selected_name(&self) -> Option<&str> {
-        self.selected
-            .and_then(|i| self.rows.get(i))
-            .map(|r| r.name.as_str())
+        self.rows.selected_row().map(|r| r.name.as_str())
     }
 
     /// Set a new search term. The cursor goes to the top match, which is the best answer to a
@@ -265,15 +258,6 @@ impl MatchSet {
     /// uses the same [`validate_name`].
     pub fn name_error(&self) -> Option<&'static str> {
         validate_name(&self.search_term)
-    }
-
-    /// Move the cursor. The cursor stops at both ends and does not wrap, so that you can hold
-    /// a key down to reach the top match.
-    pub fn move_selection(&mut self, delta: isize) {
-        let Some(current) = self.selected else { return };
-        let last = self.rows.len().saturating_sub(1);
-        let next = (current as isize + delta).clamp(0, last as isize) as usize;
-        self.selected = Some(next);
     }
 }
 

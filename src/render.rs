@@ -127,7 +127,8 @@ pub fn render_search(
 
     if let Some(rect) = &screen.results {
         let body = search_body(state, rect, notes.len());
-        draw(rect, TITLE, &count(state.selected, state.rows.len()), interior(rect, &notes, body));
+        let right = count(state.rows.selected(), state.rows.len());
+        draw(rect, TITLE, &right, interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
         let (title, right, lines) = session_preview(state, peeks, rect);
@@ -149,7 +150,8 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
 
     if let Some(rect) = &screen.results {
         let body = dir_body(dirs, term, rect, notes.len());
-        draw(rect, TITLE, &count(dirs.selected, dirs.rows.len()), interior(rect, &notes, body));
+        let right = count(dirs.rows.selected(), dirs.rows.len());
+        draw(rect, TITLE, &right, interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
         let (title, right, lines) = dir_preview(dirs, rect);
@@ -177,7 +179,8 @@ pub fn render_agents(
 
     if let Some(rect) = &screen.results {
         let body = agent_body(agents, term, rect, notes.len(), frame);
-        draw(rect, TITLE, &count(agents.selected, agents.rows.len()), interior(rect, &notes, body));
+        let right = count(agents.rows.selected(), agents.rows.len());
+        draw(rect, TITLE, &right, interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
         let (title, lines) = agent_preview(agents, peeks, rect);
@@ -573,7 +576,7 @@ fn session_preview(
     rect: &Rect,
 ) -> (String, String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
-    let Some(row) = state.selected.and_then(|i| state.rows.get(i)) else {
+    let Some(row) = state.rows.selected_row() else {
         let (title, lines) = nothing_highlighted(rect);
         return (title, String::new(), lines);
     };
@@ -782,7 +785,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
     let dead_at = dead_from(&state.rows);
     let line_of = |row: usize| row + usize::from(dead_at.is_some_and(|at| row >= at));
     let lines = state.rows.len() + usize::from(dead_at.is_some());
-    let selected_line = state.selected.map(line_of).unwrap_or(0);
+    let selected_line = state.rows.selected().map(line_of).unwrap_or(0);
     let (start, end) = viewport(selected_line, lines, capacity);
 
     // Widths are measured over the visible window. The whole list would move the name column
@@ -808,7 +811,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         .map(|line| match visible(line) {
             None => separator(inner, "🪦 Dead sessions"),
             Some(i) => {
-                let selected = state.selected == Some(i);
+                let selected = state.rows.selected() == Some(i);
                 result_line(&state.rows[i], selected, name_budget, inner)
             },
         })
@@ -887,11 +890,12 @@ fn prompt_text(state: &MatchSet) -> Prompt {
 /// the error colour, as you type. An error overlay would take the next keystroke, and you reach
 /// this state by typing.
 fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
-    if let Some(index) = state.selected {
-        return match state.rows.get(index).map(|r| r.kind) {
-            Some(Kind::Live) => (Some("Attach".to_string()), false),
-            Some(Kind::Resurrectable) => (Some("Resurrect".to_string()), false),
-            None => (None, false),
+    // `selected_row` rather than the index and a `get`: a cursor cannot point past its rows, so
+    // the arm for an index that finds nothing had nothing to draw and can no longer be written.
+    if let Some(row) = state.rows.selected_row() {
+        return match row.kind {
+            Kind::Live => (Some("Attach".to_string()), false),
+            Kind::Resurrectable => (Some("Resurrect".to_string()), false),
         };
     }
     if state.is_own_name() {
@@ -949,7 +953,7 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
     if capacity == 0 {
         return Vec::new();
     }
-    let (start, end) = viewport(dirs.selected.unwrap_or(0), dirs.rows.len(), capacity);
+    let (start, end) = viewport(dirs.rows.selected().unwrap_or(0), dirs.rows.len(), capacity);
     let window = &dirs.rows[start..end];
 
     // The name has a limit of one third of the width, set before all else. A path has no
@@ -962,7 +966,7 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
         .iter()
         .enumerate()
         .map(|(offset, row)| {
-            let selected = dirs.selected == Some(start + offset);
+            let selected = dirs.rows.selected() == Some(start + offset);
             dir_line(row, selected, name_column, path_budget, inner)
         })
         .collect()
@@ -1089,7 +1093,7 @@ fn agent_body(
     if capacity == 0 {
         return Vec::new();
     }
-    let (start, end) = viewport(agents.selected.unwrap_or(0), agents.rows.len(), capacity);
+    let (start, end) = viewport(agents.rows.selected().unwrap_or(0), agents.rows.len(), capacity);
     let window = &agents.rows[start..end];
 
     // Measured at the `frame` that builds the cells below, so that a width and the glyph it
@@ -1132,7 +1136,7 @@ fn agent_body(
         .iter()
         .enumerate()
         .map(|(offset, row)| {
-            let selected = agents.selected == Some(start + offset);
+            let selected = agents.rows.selected() == Some(start + offset);
             agent_line(
                 row,
                 selected,
@@ -1347,6 +1351,7 @@ mod tests {
 
     use super::*;
     // Only the tests build these. The renderer receives them.
+    use crate::cursor::Cursor;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Sessions};
 
@@ -1374,8 +1379,9 @@ mod tests {
 
     fn matches(rows: Vec<Row>, selected: Option<usize>) -> MatchSet {
         let mut state = MatchSet::default();
-        state.rows = rows;
-        state.selected = selected;
+        // `unwrap_or(0)` rather than a second field: the cursor cannot be absent from a list
+        // that has rows, so `None` here can only mean the empty list. See [`Cursor::seeded`].
+        state.rows = Cursor::seeded(rows, selected.unwrap_or(0));
         state
     }
 
@@ -1413,7 +1419,7 @@ mod tests {
             Some(0),
         );
         let body = search_body(&state, &rect, 0);
-        let right = count(state.selected, state.rows.len());
+        let right = count(state.rows.selected(), state.rows.len());
         assert_eq!(
             picture(&rect, TITLE, &right, interior(&rect, &[], body)),
             vec![
@@ -1903,7 +1909,7 @@ mod tests {
         let notes = vec![Note::dim("you are in \"notes\" — not listed")];
         let rect = screen.results.as_ref().unwrap();
         let body = search_body(&state, rect, notes.len());
-        let right = count(state.selected, state.rows.len());
+        let right = count(state.rows.selected(), state.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
         let (title, right, lines) = session_preview(&state, &peeks, rect);
@@ -1921,7 +1927,7 @@ mod tests {
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
         let body = agent_body(&agents, "", rect, notes.len(), 0);
-        let right = count(agents.selected, agents.rows.len());
+        let right = count(agents.rows.selected(), agents.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
         let peeks = peeked("misc", 12, "> read the docs?\n\n  1. yes\n  2. no\n\n> _\n");
@@ -1946,7 +1952,7 @@ mod tests {
         let rect = screen.results.as_ref().unwrap();
         let notes = dir_note_texts(&dirs);
         let body = dir_body(&dirs, "", rect, notes.len());
-        let right = count(dirs.selected, dirs.rows.len());
+        let right = count(dirs.rows.selected(), dirs.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
         let (title, right, lines) = dir_preview(&dirs, rect);
