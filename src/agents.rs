@@ -14,12 +14,12 @@
 //! Something outside must join what Claude reports to the pane that runs it. `claude-ps` does
 //! that and prints JSON. This module only deserialises, filters and sorts.
 
-use std::time::Duration;
-
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
 
+use crate::cursor::Cursor;
+use crate::elapsed::{Age, Held};
 use crate::fetch::Fetch;
 use crate::sessions::Selection;
 
@@ -106,7 +106,7 @@ pub struct Agent {
     display: String,
     pane: u32,
     status: Status,
-    age: Duration,
+    age: Held,
     cwd: String,
 }
 
@@ -126,7 +126,7 @@ pub struct AgentRow {
     ///
     /// The offset is added here because it is the same number on every row. See
     /// [`crate::State::agents_since`].
-    pub age: Duration,
+    pub age: Held,
     pub cwd: String,
     /// Another visible row has the same label, so the row must show its pane.
     pub shared: bool,
@@ -259,8 +259,8 @@ impl Status {
 pub struct AgentSet {
     /// Why the list is empty, when it is, and the agents when it is not. See [`Fetch`].
     pub status: Fetch<Vec<Agent>>,
-    pub rows: Vec<AgentRow>,
-    pub selected: Option<usize>,
+    /// The rows and the cursor in them. See [`Cursor`].
+    pub rows: Cursor<AgentRow>,
     pub asking: bool,
     matcher: Option<SkimMatcherV2>,
 }
@@ -314,14 +314,14 @@ impl AgentSet {
         term: &str,
         current: Option<&str>,
         origin: Option<(&str, u32)>,
-        since: Duration,
+        since: Age,
         policy: Selection,
     ) {
         let held = match policy {
             Selection::SnapToTop => None,
             Selection::Hold => self.selected_row().map(|r| (r.session.clone(), r.pane)),
         };
-        self.rows.clear();
+        let mut rows: Vec<AgentRow> = Vec::new();
 
         // Only a reply has agents to filter. The other two states have none, and an empty list
         // is what the screen draws for them.
@@ -347,12 +347,12 @@ impl AgentSet {
                         None => continue,
                     }
                 };
-                self.rows.push(AgentRow {
+                rows.push(AgentRow {
                     session: agent.session.clone(),
                     display: agent.display.clone(),
                     pane: agent.pane,
                     status: agent.status.clone(),
-                    age: agent.age + since,
+                    age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
                     shared: false,
                     jump: if current == Some(agent.session.as_str()) {
@@ -375,7 +375,7 @@ impl AgentSet {
         // would move rows under the cursor as agents change status. The ages do move without a
         // new reply, and that is still safe: `since` is one number added to every row, and the
         // same offset on both sides cannot change a comparison.
-        self.rows.sort_by(|a, b| {
+        rows.sort_by(|a, b| {
             b.is_exact
                 .cmp(&a.is_exact)
                 .then_with(|| a.rank.cmp(&b.rank))
@@ -386,49 +386,18 @@ impl AgentSet {
                 .then_with(|| b.score.cmp(&a.score))
         });
 
-        self.mark_shared();
+        mark_shared(&mut rows);
 
-        self.selected = if self.rows.is_empty() {
-            None
-        } else {
-            // Held by `(session, pane)`, not by index. An agent that the filter removes falls
-            // back to the top.
-            held.and_then(|(session, pane)| {
-                self.rows
-                    .iter()
-                    .position(|r| r.session == session && r.pane == pane)
-            })
-            .or(Some(0))
-        };
-    }
-
-    /// Decide the `:pane` suffix over the visible rows.
-    ///
-    /// This runs after the filter, not over the whole snapshot. The suffix thus appears exactly
-    /// when the label stops identifying one row, and goes when a narrower term restores that.
-    ///
-    /// If two rows share a label, both rows get the suffix.
-    ///
-    /// The test uses `display`, not `session`, because the question is whether what you see
-    /// identifies a row. Two agents in one session with different chosen names need no suffix.
-    ///
-    /// A pane id belongs to one session, so the suffix separates rows in one session only. Two
-    /// rows in different sessions with the same chosen name both show `name:0`. The action is
-    /// still correct, because each row carries its own `(session, pane)`. A fallback to the
-    /// session name would change the base that `indices` points into. See [`AgentRow::label`].
-    fn mark_shared(&mut self) {
-        for i in 0..self.rows.len() {
-            let shared = self
-                .rows
-                .iter()
-                .enumerate()
-                .any(|(j, other)| j != i && other.display == self.rows[i].display);
-            self.rows[i].shared = shared;
-        }
+        // Held by `(session, pane)`, not by index. An agent that the filter removes falls back
+        // to the top. See [`Cursor::replace`].
+        self.rows.replace(rows, |row| {
+            held.as_ref()
+                .is_some_and(|(session, pane)| row.session == *session && row.pane == *pane)
+        });
     }
 
     pub fn selected_row(&self) -> Option<&AgentRow> {
-        self.selected.and_then(|i| self.rows.get(i))
+        self.rows.selected_row()
     }
 
     /// Is there a spinner on this screen to turn?
@@ -439,13 +408,32 @@ impl AgentSet {
     pub fn any_busy(&self) -> bool {
         self.rows.iter().any(|row| row.status.is_busy())
     }
+}
 
-    /// Move the cursor. The cursor stops at both ends, as on the other screens.
-    pub fn move_selection(&mut self, delta: isize) {
-        let Some(current) = self.selected else { return };
-        let last = self.rows.len().saturating_sub(1);
-        let next = (current as isize + delta).clamp(0, last as isize) as usize;
-        self.selected = Some(next);
+/// Decide the `:pane` suffix over the visible rows.
+///
+/// This runs after the filter, not over the whole snapshot. The suffix thus appears exactly
+/// when the label stops identifying one row, and goes when a narrower term restores that.
+///
+/// If two rows share a label, both rows get the suffix.
+///
+/// The test uses `display`, not `session`, because the question is whether what you see
+/// identifies a row. Two agents in one session with different chosen names need no suffix.
+///
+/// A pane id belongs to one session, so the suffix separates rows in one session only. Two
+/// rows in different sessions with the same chosen name both show `name:0`. The action is
+/// still correct, because each row carries its own `(session, pane)`. A fallback to the
+/// session name would change the base that `indices` points into. See [`AgentRow::label`].
+///
+/// It takes the rows and not the set, because it runs before they reach the [`Cursor`]: the
+/// suffix is part of building a row, and a `Cursor` hands out no `&mut`.
+fn mark_shared(rows: &mut [AgentRow]) {
+    for i in 0..rows.len() {
+        let shared = rows
+            .iter()
+            .enumerate()
+            .any(|(j, other)| j != i && other.display == rows[i].display);
+        rows[i].shared = shared;
     }
 }
 
@@ -546,7 +534,7 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
             display,
             pane,
             status: Status::parse(row.status.as_deref()),
-            age: Duration::from_secs(row.status_age),
+            age: Held::from_secs(row.status_age),
             cwd: row.cwd.unwrap_or_default(),
         });
     }
@@ -577,22 +565,6 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
     chosen.then(|| name.to_string())
 }
 
-/// Elapsed time as a duration: `4s`, `35m`, `2h`.
-///
-/// This is not [`crate::sessions::format_age`], which adds `" ago"`. That form is correct for
-/// the time a session started. This column says how long the status has held, and an agent that
-/// has waited for thirty-five minutes is not an event from thirty-five minutes ago.
-pub fn format_duration(age: Duration) -> String {
-    let secs = age.as_secs();
-    match secs {
-        0..=59 => format!("{}s", secs),
-        60..=3599 => format!("{}m", secs / 60),
-        3600..=86_399 => format!("{}h", secs / 3600),
-        86_400..=604_799 => format!("{}d", secs / 86_400),
-        _ => format!("{}w", secs / 604_800),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,13 +587,13 @@ mod tests {
     fn a_failure_leaves_no_agents_behind() {
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), one(r#""idle""#).as_bytes(), b"");
-        agents.rebuild("", None, None, Duration::ZERO, Selection::SnapToTop);
+        agents.rebuild("", None, None, Age::ZERO, Selection::SnapToTop);
         assert_eq!(agents.rows.len(), 1);
 
         agents.fail("claude-ps: gone");
-        agents.rebuild("", None, None, Duration::ZERO, Selection::SnapToTop);
+        agents.rebuild("", None, None, Age::ZERO, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
-        assert!(agents.selected.is_none());
+        assert!(agents.rows.selected().is_none());
     }
 
     /// An agent this screen cannot address is not a row and is not counted. There is no pane

@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
+use crate::cursor::Cursor;
 use crate::fetch::Fetch;
 use crate::panes;
 use crate::sessions::{validate_name, Selection, Sessions};
@@ -155,10 +156,10 @@ pub struct DirRow {
 pub struct DirSet {
     /// Why the list is empty, when it is, and the directories when it is not. See [`Fetch`].
     pub status: Fetch<Vec<Dir>>,
-    pub rows: Vec<DirRow>,
-    /// An index into `rows`. `None` only when `rows` is empty. Unlike the session screen, this
-    /// screen cannot act on the typed text: it can only offer a directory zoxide knows.
-    pub selected: Option<usize>,
+    /// The rows and the cursor in them. See [`Cursor`]. Unlike the session screen, this screen
+    /// cannot act on the typed text: it can only offer a directory zoxide knows, so an empty
+    /// list here means `Enter` has nothing at all to do.
+    pub rows: Cursor<DirRow>,
     /// True between the question to zoxide and its answer, so that a re-focus starts no second
     /// process.
     pub asking: bool,
@@ -208,14 +209,14 @@ impl DirSet {
             Selection::SnapToTop => None,
             Selection::Hold => self.selected_path().map(str::to_owned),
         };
-        self.rows.clear();
+        let mut rows: Vec<DirRow> = Vec::new();
 
         // Only an answer has directories to filter. The other two states have none, and an
         // empty list is what the screen draws for them.
         if let Fetch::Ready(all) = &self.status {
             if term.is_empty() {
                 for dir in all {
-                    self.rows.push(DirRow::new(dir, sessions, current, 0, vec![], false));
+                    rows.push(DirRow::new(dir, sessions, current, 0, vec![], false));
                 }
             } else {
                 let matcher = self
@@ -227,8 +228,7 @@ impl DirSet {
                     // term that finds the name also finds the path.
                     if let Some((score, indices)) = matcher.fuzzy_indices(&dir.path, term) {
                         let is_exact = dir.name == term;
-                        self.rows
-                            .push(DirRow::new(dir, sessions, current, score, indices, is_exact));
+                        rows.push(DirRow::new(dir, sessions, current, score, indices, is_exact));
                     }
                 }
             }
@@ -238,38 +238,24 @@ impl DirSet {
         // typed. The scores fall quickly: 9268 at rank 1, 18 at rank 10, and 5.5 at rank 20 in
         // a real database. The top of the list is the answer, and the tail is there for the
         // filter to search.
-        self.rows.sort_by(|a, b| {
+        rows.sort_by(|a, b| {
             b.is_exact
                 .cmp(&a.is_exact)
                 .then_with(|| b.score.cmp(&a.score))
                 .then_with(|| b.frecency.total_cmp(&a.frecency))
         });
 
-        self.selected = if self.rows.is_empty() {
-            None
-        } else {
-            // Held by path, not by index. A directory that the filter removes falls back to
-            // the top.
-            held.and_then(|path| self.rows.iter().position(|r| r.path == path))
-                .or(Some(0))
-        };
+        // Held by path, not by index. A directory that the filter removes falls back to the
+        // top. See [`Cursor::replace`].
+        self.rows.replace(rows, |row| held.as_deref() == Some(row.path.as_str()));
     }
 
     pub fn selected_row(&self) -> Option<&DirRow> {
-        self.selected.and_then(|i| self.rows.get(i))
+        self.rows.selected_row()
     }
 
     fn selected_path(&self) -> Option<&str> {
         self.selected_row().map(|r| r.path.as_str())
-    }
-
-    /// Move the cursor. The cursor stops at both ends and does not wrap, as on the session
-    /// screen.
-    pub fn move_selection(&mut self, delta: isize) {
-        let Some(current) = self.selected else { return };
-        let last = self.rows.len().saturating_sub(1);
-        let next = (current as isize + delta).clamp(0, last as isize) as usize;
-        self.selected = Some(next);
     }
 
     /// Clear every listing. A listing read during the last opening describes what was there
@@ -442,12 +428,11 @@ fn derive_name(path: &str) -> Option<String> {
     validate_name(base).is_none().then(|| base.to_string())
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
+    use crate::elapsed::Age;
     use crate::sessions::Session;
 
     fn listed(stdout: &[u8]) -> DirSet {
@@ -482,7 +467,7 @@ mod tests {
         dirs.fail("zoxide: gone");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         assert!(dirs.rows.is_empty());
-        assert!(dirs.selected.is_none());
+        assert!(dirs.rows.selected().is_none());
     }
 
     /// The order of eza is kept, because `--group-directories-first` already applied it.
@@ -591,7 +576,7 @@ mod tests {
     fn a_name_that_is_both_live_and_saved_attaches() {
         let both = |name: &str| Session {
             name: name.to_string(),
-            age: Duration::ZERO,
+            age: Age::ZERO,
         };
         let sessions = Sessions {
             live: vec![both("thing")],

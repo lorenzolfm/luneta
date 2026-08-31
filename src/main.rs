@@ -11,7 +11,9 @@
 //! saved layout gives a resurrect, and neither gives a create.
 
 mod agents;
+mod cursor;
 mod dirs;
+mod elapsed;
 mod fetch;
 mod layout;
 mod panes;
@@ -20,10 +22,10 @@ mod sessions;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use agents::{AgentSet, Jump};
 use dirs::{Action, DirSet, LIST};
+use elapsed::Age;
 use panes::Peeks;
 use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
 use zellij_tile::prelude::*;
@@ -144,21 +146,18 @@ impl Screen {
 }
 
 /// What the preview box shows, which decides the cache that answers for it.
+///
+/// Compared by value. The comparison used to run through a `Target::key` method, which
+/// flattened a pane's session and id into one tab-joined `String` and returned a directory's
+/// path unchanged — so a path holding a tab compared equal to a pane, and the delay served on
+/// one target counted for the other. `preview_at` outlives a screen change, so the two kinds
+/// really do meet. Deriving `PartialEq` is the same comparison with nothing flattened.
+#[derive(PartialEq, Eq)]
 enum Target {
     /// A directory, keyed by its path. Answered by eza.
     Dir(String),
     /// A pane, keyed by its session and its id. Answered by `zellij action dump-screen`.
     Pane(String, u32),
-}
-
-impl Target {
-    /// How the target is named in its cache, and, for a pane, in the context of its command.
-    fn key(&self) -> String {
-        match self {
-            Target::Dir(path) => path.clone(),
-            Target::Pane(session, pane) => panes::key(session, *pane),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -198,7 +197,7 @@ struct State {
     peeks: Peeks,
     /// What the cursor is on, and the frame it arrived. This is the delay behind the preview
     /// box. See [`State::follow_preview`].
-    preview_at: Option<(String, u64)>,
+    preview_at: Option<(Target, u64)>,
     /// The frame that received the agent snapshot in [`State::agents`].
     ///
     /// The snapshot does not change while the screen is up, and its `age` field is a duration
@@ -306,12 +305,18 @@ impl ZellijPlugin for State {
                         // dropped.
                         None => false,
                     },
-                    Some(panes::CONTEXT_VALUE) => match context.get(panes::PANE_KEY) {
-                        Some(pane) => {
-                            self.peeks.ingest(pane.clone(), exit_code, &stdout, &stderr);
-                            true
-                        },
-                        None => false,
+                    // The pane key arrives flattened and is unflattened here, because the cache
+                    // is keyed by the pair. An absent key and one that does not parse are the
+                    // same fact — nothing that says which pane this is about — so they share
+                    // the drop arm.
+                    Some(panes::CONTEXT_VALUE) => {
+                        match context.get(panes::PANE_KEY).and_then(|k| panes::parse_key(k)) {
+                            Some(key) => {
+                                self.peeks.ingest(key, exit_code, &stdout, &stderr);
+                                true
+                            },
+                            None => false,
+                        }
                     },
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr);
@@ -439,7 +444,7 @@ impl State {
                 .filter(|s| !s.is_current_session)
                 .map(|session| {
                     let name = session.name.clone();
-                    let age = session.creation_time;
+                    let age = Age::new(session.creation_time);
                     contents.insert(name.clone(), contents_of(session));
                     Session { name, age }
                 })
@@ -450,7 +455,7 @@ impl State {
             dead: snapshot
                 .resurrectable_sessions
                 .into_iter()
-                .map(|(name, age)| Session { name, age })
+                .map(|(name, age)| Session { name, age: Age::new(age) })
                 .collect(),
         };
         self.matches.contents = contents;
@@ -521,8 +526,8 @@ impl State {
     /// The count is in ticks, because the plugin has no clock: a wasi sandbox with `/host` open
     /// is not a clock. The timer drifts with what the host does to it, which the one-second
     /// granularity of the column absorbs. A new opening reads a new snapshot.
-    fn agents_since(&self) -> Duration {
-        Duration::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
+    fn agents_since(&self) -> Age {
+        Age::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
     }
 
     /// Ask `claude-ps` for the list, once for each answer, on the same terms as zoxide.
@@ -564,18 +569,17 @@ impl State {
             self.preview_at = None;
             return false;
         };
-        let key = target.key();
         match &self.preview_at {
             // The same target. Ask when it has been there long enough. The claim each cache
             // makes below refuses a second call, so this cannot ask twice.
-            Some((at, since)) if *at == key => {
+            Some((at, since)) if *at == target => {
                 if self.frame.wrapping_sub(*since) < PREVIEW_DELAY {
                     return false;
                 }
             },
             // A new target: start the count and ask nothing.
             _ => {
-                self.preview_at = Some((key, self.frame));
+                self.preview_at = Some((target, self.frame));
                 return false;
             },
         }
@@ -599,7 +603,7 @@ impl State {
                 );
             },
             Target::Pane(session, pane) => {
-                if !self.peeks.claim(&key) {
+                if !self.peeks.claim(&session, pane) {
                     return false;
                 }
                 let id = panes::pane_id(pane);
@@ -610,7 +614,9 @@ impl State {
                     &command,
                     BTreeMap::from([
                         (dirs::CONTEXT_KEY.to_string(), panes::CONTEXT_VALUE.to_string()),
-                        (panes::PANE_KEY.to_string(), key.clone()),
+                        // Flattened only for the trip, because the context map is
+                        // `BTreeMap<String, String>`. See [`panes::key`].
+                        (panes::PANE_KEY.to_string(), panes::key(&session, pane)),
                     ]),
                 );
             },
@@ -626,7 +632,7 @@ impl State {
         match self.screen {
             Screen::Dirs => self.dirs.selected_row().map(|row| Target::Dir(row.path.clone())),
             Screen::Sessions => {
-                let row = self.matches.selected.and_then(|i| self.matches.rows.get(i))?;
+                let row = self.matches.rows.selected_row()?;
                 // A dead session has no process and thus no screen. There is nothing to
                 // ask.
                 let focus = self.matches.contents.get(&row.name)?.focus.as_ref()?;
@@ -758,9 +764,9 @@ impl State {
 
     fn move_selection(&mut self, delta: isize) {
         match self.screen {
-            Screen::Sessions => self.matches.move_selection(delta),
-            Screen::Dirs => self.dirs.move_selection(delta),
-            Screen::Agents => self.agents.move_selection(delta),
+            Screen::Sessions => self.matches.rows.move_selection(delta),
+            Screen::Dirs => self.dirs.rows.move_selection(delta),
+            Screen::Agents => self.agents.rows.move_selection(delta),
         }
     }
 
@@ -938,7 +944,7 @@ impl State {
     /// on the live row and once again on the dead row that follows.
     fn delete_selected(&mut self) {
         // With no highlight, `Enter` acts on the text you typed, and `Del` has no target.
-        let Some(row) = self.matches.selected.and_then(|i| self.matches.rows.get(i)) else {
+        let Some(row) = self.matches.rows.selected_row() else {
             return;
         };
         let name = row.name.clone();

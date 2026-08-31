@@ -8,10 +8,12 @@
 //!    resurrectable ones at every stage.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+
+use crate::cursor::Cursor;
+use crate::elapsed::Age;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -42,7 +44,7 @@ pub struct Session {
     /// Elapsed age, as the host reports it. The host truncates it to whole seconds
     /// (`screen.rs:3361`, `plugin_api/event.rs:1214`). The plugin sandbox cannot see the
     /// sockets that a better value needs.
-    pub age: Duration,
+    pub age: Age,
 }
 
 impl Sessions {
@@ -61,7 +63,7 @@ pub struct Row {
     pub kind: Kind,
     /// Elapsed age, carried from the snapshot. See [`Session::age`] for what the host's value
     /// is worth.
-    pub age: Duration,
+    pub age: Age,
     /// Character positions the fuzzy matcher hit, for highlighting. Empty on an empty term.
     pub indices: Vec<usize>,
     score: i64,
@@ -116,9 +118,9 @@ pub enum Selection {
 #[derive(Default)]
 pub struct MatchSet {
     pub search_term: String,
-    pub rows: Vec<Row>,
-    /// An index into `rows`. `None` only when `rows` is empty.
-    pub selected: Option<usize>,
+    /// The rows and the cursor in them. See [`Cursor`], which holds the two together so that
+    /// `None` and an empty list cannot come apart.
+    pub rows: Cursor<Row>,
     /// The name of the current session, so that the note line can say the picker hides it.
     /// It is never in `rows`.
     pub current_session: Option<String>,
@@ -154,11 +156,11 @@ impl MatchSet {
             Selection::SnapToTop => None,
             Selection::Hold => self.selected_name().map(str::to_owned),
         };
-        self.rows.clear();
+        let mut rows: Vec<Row> = Vec::new();
 
         if term.is_empty() {
             for session in &sessions.live {
-                self.rows.push(Row::new(
+                rows.push(Row::new(
                     session.name.clone(),
                     Kind::Live,
                     session.age,
@@ -168,7 +170,7 @@ impl MatchSet {
                 ));
             }
             for session in &sessions.dead {
-                self.rows.push(Row::new(
+                rows.push(Row::new(
                     session.name.clone(),
                     Kind::Resurrectable,
                     session.age,
@@ -179,7 +181,7 @@ impl MatchSet {
             }
             // Live newest first, then resurrectable newest first. `age` is elapsed time, so
             // ascending age is newest first.
-            self.rows.sort_by(|a, b| a.kind_then_recency(b));
+            rows.sort_by(|a, b| a.kind_then_recency(b));
         } else {
             let matcher = self
                 .matcher
@@ -199,7 +201,7 @@ impl MatchSet {
                 for session in list {
                     if let Some((score, indices)) = matcher.fuzzy_indices(&session.name, &term) {
                         let is_exact = session.name == term;
-                        self.rows.push(Row::new(
+                        rows.push(Row::new(
                             session.name.clone(),
                             kind,
                             session.age,
@@ -217,7 +219,7 @@ impl MatchSet {
             //
             // The cost: the exact name of a dead session no longer moves the cursor to it
             // while live rows also match. The cursor goes to the top of the dead group.
-            self.rows.sort_by(|a, b| {
+            rows.sort_by(|a, b| {
                 a.kind_rank()
                     .cmp(&b.kind_rank())
                     .then_with(|| b.is_exact.cmp(&a.is_exact))
@@ -226,22 +228,14 @@ impl MatchSet {
             });
         }
 
-        // `None` only when there is nothing to point at. In that state `Enter` acts on the
-        // text you typed, which is the create path. See [`crate::render::enter_action`].
-        self.selected = if self.rows.is_empty() {
-            None
-        } else {
-            // `Hold` keeps the cursor on the same session, not on the same index. A session
-            // that is gone falls back to the top.
-            held.and_then(|name| self.rows.iter().position(|r| r.name == name))
-                .or(Some(0))
-        };
+        // `Hold` keeps the cursor on the same session, not on the same index. A session that is
+        // gone falls back to the top, and an empty list to no cursor at all — see
+        // [`Cursor::replace`], which is where those two answers now live.
+        self.rows.replace(rows, |row| held.as_deref() == Some(row.name.as_str()));
     }
 
     pub fn selected_name(&self) -> Option<&str> {
-        self.selected
-            .and_then(|i| self.rows.get(i))
-            .map(|r| r.name.as_str())
+        self.rows.selected_row().map(|r| r.name.as_str())
     }
 
     /// Set a new search term. The cursor goes to the top match, which is the best answer to a
@@ -264,15 +258,6 @@ impl MatchSet {
     /// uses the same [`validate_name`].
     pub fn name_error(&self) -> Option<&'static str> {
         validate_name(&self.search_term)
-    }
-
-    /// Move the cursor. The cursor stops at both ends and does not wrap, so that you can hold
-    /// a key down to reach the top match.
-    pub fn move_selection(&mut self, delta: isize) {
-        let Some(current) = self.selected else { return };
-        let last = self.rows.len().saturating_sub(1);
-        let next = (current as isize + delta).clamp(0, last as isize) as usize;
-        self.selected = Some(next);
     }
 }
 
@@ -310,7 +295,7 @@ impl Row {
     pub(crate) fn new(
         name: String,
         kind: Kind,
-        age: Duration,
+        age: Age,
         score: i64,
         indices: Vec<usize>,
         is_exact: bool,
@@ -329,18 +314,5 @@ impl Row {
         self.kind_rank()
             .cmp(&other.kind_rank())
             .then_with(|| self.age.cmp(&other.age))
-    }
-}
-
-/// Elapsed time in one magnitude. The column shows the sort order, so `2h ago` is more useful
-/// than `2days 3h 14m 2s`.
-pub fn format_age(age: Duration) -> String {
-    let secs = age.as_secs();
-    match secs {
-        0..=59 => "<1m ago".to_string(),
-        60..=3599 => format!("{}m ago", secs / 60),
-        3600..=86_399 => format!("{}h ago", secs / 3600),
-        86_400..=604_799 => format!("{}d ago", secs / 86_400),
-        _ => format!("{}w ago", secs / 604_800),
     }
 }

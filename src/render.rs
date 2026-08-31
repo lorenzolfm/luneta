@@ -56,7 +56,7 @@ use crate::dirs::{Action, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
-use crate::sessions::{format_age, Contents, Kind, MatchSet, Row};
+use crate::sessions::{Contents, Kind, MatchSet, Row};
 
 /// Emphasis levels, named. See the table above.
 const TAG: usize = 0;
@@ -127,7 +127,8 @@ pub fn render_search(
 
     if let Some(rect) = &screen.results {
         let body = search_body(state, rect, notes.len());
-        draw(rect, TITLE, &count(state.selected, state.rows.len()), interior(rect, &notes, body));
+        let right = count(state.rows.selected(), state.rows.len());
+        draw(rect, TITLE, &right, interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
         let (title, right, lines) = session_preview(state, peeks, rect);
@@ -149,7 +150,8 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
 
     if let Some(rect) = &screen.results {
         let body = dir_body(dirs, term, rect, notes.len());
-        draw(rect, TITLE, &count(dirs.selected, dirs.rows.len()), interior(rect, &notes, body));
+        let right = count(dirs.rows.selected(), dirs.rows.len());
+        draw(rect, TITLE, &right, interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
         let (title, right, lines) = dir_preview(dirs, rect);
@@ -177,7 +179,8 @@ pub fn render_agents(
 
     if let Some(rect) = &screen.results {
         let body = agent_body(agents, term, rect, notes.len(), frame);
-        draw(rect, TITLE, &count(agents.selected, agents.rows.len()), interior(rect, &notes, body));
+        let right = count(agents.rows.selected(), agents.rows.len());
+        draw(rect, TITLE, &right, interior(rect, &notes, body));
     }
     if let Some(rect) = &screen.preview {
         let (title, lines) = agent_preview(agents, peeks, rect);
@@ -573,7 +576,7 @@ fn session_preview(
     rect: &Rect,
 ) -> (String, String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
-    let Some(row) = state.selected.and_then(|i| state.rows.get(i)) else {
+    let Some(row) = state.rows.selected_row() else {
         let (title, lines) = nothing_highlighted(rect);
         return (title, String::new(), lines);
     };
@@ -605,7 +608,7 @@ fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> 
         return wrapped_lines(inner, "nothing but plugin panes — no screen to show", TAG);
     };
     let mut lines = vec![caption(inner, &focus.tab, &focus.title).into(), blank_line(rect).into()];
-    lines.extend(screen_lines(rect, peeks, &panes::key(name, focus.pane), lines.len()));
+    lines.extend(screen_lines(rect, peeks, name, focus.pane, lines.len()));
     lines
 }
 
@@ -636,10 +639,16 @@ const MIN_TAB: usize = 6;
 ///
 /// The three messages that replace a screen are at the top, because the box says them about
 /// itself and not about a terminal.
-fn screen_lines(rect: &Rect, peeks: &Peeks, key: &str, used: usize) -> Vec<PreviewRow> {
+fn screen_lines(
+    rect: &Rect,
+    peeks: &Peeks,
+    session: &str,
+    pane: u32,
+    used: usize,
+) -> Vec<PreviewRow> {
     let inner = rect.inner_width();
     let rows = rect.inner_height().saturating_sub(used);
-    match peeks.get(key) {
+    match peeks.get(session, pane) {
         // To the reader, "not asked yet" and "asked but not answered" are the same: the
         // answer is on its way. [`crate::PREVIEW_DELAY`] is the time between them.
         None | Some(Peek::Reading) => vec![preview_line(inner, "reading…", TAG)],
@@ -746,9 +755,9 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
     let mut line = Line::new();
     line.push(&truncate(row.status.word(), inner), level);
     line.push(" · ", TAG);
-    line.push(&agents::format_duration(row.age), TAG);
+    line.push(&row.age.label(), TAG);
     let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
-    lines.extend(screen_lines(rect, peeks, &panes::key(&row.session, row.pane), lines.len()));
+    lines.extend(screen_lines(rect, peeks, &row.session, row.pane, lines.len()));
     (row.label(), lines)
 }
 
@@ -776,7 +785,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
     let dead_at = dead_from(&state.rows);
     let line_of = |row: usize| row + usize::from(dead_at.is_some_and(|at| row >= at));
     let lines = state.rows.len() + usize::from(dead_at.is_some());
-    let selected_line = state.selected.map(line_of).unwrap_or(0);
+    let selected_line = state.rows.selected().map(line_of).unwrap_or(0);
     let (start, end) = viewport(selected_line, lines, capacity);
 
     // Widths are measured over the visible window. The whole list would move the name column
@@ -791,7 +800,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
     let window: Vec<usize> = (start..end).filter_map(visible).collect();
     let age_width = window
         .iter()
-        .map(|i| format_age(state.rows[*i].age).width())
+        .map(|i| state.rows[*i].age.label().width())
         .max()
         .unwrap_or(0);
     // Two columns, so the name takes what the gutter and the age do not need. There is nothing
@@ -802,7 +811,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         .map(|line| match visible(line) {
             None => separator(inner, "🪦 Dead sessions"),
             Some(i) => {
-                let selected = state.selected == Some(i);
+                let selected = state.rows.selected() == Some(i);
                 result_line(&state.rows[i], selected, name_budget, inner)
             },
         })
@@ -854,7 +863,7 @@ fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> T
     // box as wide as the pane would otherwise stay on the left with half the box empty, and the
     // age column would move whenever the longest visible name changed. The text is aligned
     // right, so that `ago` is in the same column on every row.
-    let age = format_age(row.age);
+    let age = row.age.label();
     line.pad_to(inner.saturating_sub(age.width()));
     line.push(&age, LABEL);
 
@@ -881,11 +890,12 @@ fn prompt_text(state: &MatchSet) -> Prompt {
 /// the error colour, as you type. An error overlay would take the next keystroke, and you reach
 /// this state by typing.
 fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
-    if let Some(index) = state.selected {
-        return match state.rows.get(index).map(|r| r.kind) {
-            Some(Kind::Live) => (Some("Attach".to_string()), false),
-            Some(Kind::Resurrectable) => (Some("Resurrect".to_string()), false),
-            None => (None, false),
+    // `selected_row` rather than the index and a `get`: a cursor cannot point past its rows, so
+    // the arm for an index that finds nothing had nothing to draw and can no longer be written.
+    if let Some(row) = state.rows.selected_row() {
+        return match row.kind {
+            Kind::Live => (Some("Attach".to_string()), false),
+            Kind::Resurrectable => (Some("Resurrect".to_string()), false),
         };
     }
     if state.is_own_name() {
@@ -943,7 +953,7 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
     if capacity == 0 {
         return Vec::new();
     }
-    let (start, end) = viewport(dirs.selected.unwrap_or(0), dirs.rows.len(), capacity);
+    let (start, end) = viewport(dirs.rows.selected().unwrap_or(0), dirs.rows.len(), capacity);
     let window = &dirs.rows[start..end];
 
     // The name has a limit of one third of the width, set before all else. A path has no
@@ -956,7 +966,7 @@ fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
         .iter()
         .enumerate()
         .map(|(offset, row)| {
-            let selected = dirs.selected == Some(start + offset);
+            let selected = dirs.rows.selected() == Some(start + offset);
             dir_line(row, selected, name_column, path_budget, inner)
         })
         .collect()
@@ -1083,7 +1093,7 @@ fn agent_body(
     if capacity == 0 {
         return Vec::new();
     }
-    let (start, end) = viewport(agents.selected.unwrap_or(0), agents.rows.len(), capacity);
+    let (start, end) = viewport(agents.rows.selected().unwrap_or(0), agents.rows.len(), capacity);
     let window = &agents.rows[start..end];
 
     // Measured at the `frame` that builds the cells below, so that a width and the glyph it
@@ -1096,7 +1106,7 @@ fn agent_body(
     let abbr_width =
         window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
     let age_width =
-        window.iter().map(|r| agents::format_duration(r.age).width()).max().unwrap_or(0);
+        window.iter().map(|r| r.age.label().width()).max().unwrap_or(0);
     // A limit of one third of the width, set before all else. Without it the name takes the
     // space of the other columns.
     let name_column =
@@ -1126,7 +1136,7 @@ fn agent_body(
         .iter()
         .enumerate()
         .map(|(offset, row)| {
-            let selected = agents.selected == Some(start + offset);
+            let selected = agents.rows.selected() == Some(start + offset);
             agent_line(
                 row,
                 selected,
@@ -1176,7 +1186,7 @@ fn agent_line(
 
     // The last column that remains is aligned right, as on the other two screens. The columns
     // before it keep the widths they were measured to.
-    let age = agents::format_duration(row.age);
+    let age = row.age.label();
     match cwd_budget {
         Some(cwd_budget) => {
             line.pad_to(CARET + name_column + GAP + tag_column);
@@ -1338,10 +1348,11 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
     // Only the tests build these. The renderer receives them.
+    use crate::cursor::Cursor;
+    use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Sessions};
 
     /// A pane, rendered to the lines it prints. This picture was not available inside the
@@ -1363,13 +1374,14 @@ mod tests {
     }
 
     fn session(name: &str, kind: Kind, age: u64) -> Row {
-        Row::new(name.to_string(), kind, Duration::from_secs(age), 0, vec![], false)
+        Row::new(name.to_string(), kind, Age::from_secs(age), 0, vec![], false)
     }
 
     fn matches(rows: Vec<Row>, selected: Option<usize>) -> MatchSet {
         let mut state = MatchSet::default();
-        state.rows = rows;
-        state.selected = selected;
+        // `unwrap_or(0)` rather than a second field: the cursor cannot be absent from a list
+        // that has rows, so `None` here can only mean the empty list. See [`Cursor::seeded`].
+        state.rows = Cursor::seeded(rows, selected.unwrap_or(0));
         state
     }
 
@@ -1383,7 +1395,7 @@ mod tests {
     /// A cache that holds one pane screen, as `dump-screen` leaves it.
     fn peeked(session: &str, pane: u32, screen: &str) -> Peeks {
         let mut peeks = Peeks::default();
-        peeks.ingest(panes::key(session, pane), Some(0), screen.as_bytes(), b"");
+        peeks.ingest((session.to_string(), pane), Some(0), screen.as_bytes(), b"");
         peeks
     }
 
@@ -1407,7 +1419,7 @@ mod tests {
             Some(0),
         );
         let body = search_body(&state, &rect, 0);
-        let right = count(state.selected, state.rows.len());
+        let right = count(state.rows.selected(), state.rows.len());
         assert_eq!(
             picture(&rect, TITLE, &right, interior(&rect, &[], body)),
             vec![
@@ -1745,7 +1757,7 @@ mod tests {
         let unasked = session_preview(&state, &Peeks::default(), &rect).2;
         assert!(unasked[2].content().contains("reading…"));
         let mut peeks = Peeks::default();
-        assert!(peeks.claim(&panes::key("dotfiles", 7)));
+        assert!(peeks.claim("dotfiles", 7));
         let asked = session_preview(&state, &peeks, &rect).2;
         assert_eq!(asked[2].content(), unasked[2].content());
 
@@ -1897,7 +1909,7 @@ mod tests {
         let notes = vec![Note::dim("you are in \"notes\" — not listed")];
         let rect = screen.results.as_ref().unwrap();
         let body = search_body(&state, rect, notes.len());
-        let right = count(state.selected, state.rows.len());
+        let right = count(state.rows.selected(), state.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
         let (title, right, lines) = session_preview(&state, &peeks, rect);
@@ -1911,11 +1923,11 @@ mod tests {
 
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), AGENTS.as_bytes(), b"");
-        agents.rebuild("", Some("notes"), None, Duration::ZERO, Selection::SnapToTop);
+        agents.rebuild("", Some("notes"), None, Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
         let body = agent_body(&agents, "", rect, notes.len(), 0);
-        let right = count(agents.selected, agents.rows.len());
+        let right = count(agents.rows.selected(), agents.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
         let peeks = peeked("misc", 12, "> read the docs?\n\n  1. yes\n  2. no\n\n> _\n");
@@ -1940,7 +1952,7 @@ mod tests {
         let rect = screen.results.as_ref().unwrap();
         let notes = dir_note_texts(&dirs);
         let body = dir_body(&dirs, "", rect, notes.len());
-        let right = count(dirs.selected, dirs.rows.len());
+        let right = count(dirs.rows.selected(), dirs.rows.len());
         let list = picture(rect, TITLE, &right, interior(rect, &notes, body));
         let rect = screen.preview.as_ref().unwrap();
         let (title, right, lines) = dir_preview(&dirs, rect);
