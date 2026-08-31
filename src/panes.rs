@@ -1,28 +1,22 @@
 //! What is on a pane's screen, for the box that shows it.
 //!
-//! 🔴 **The CLI, not the plugin API, and that is forced.** `zellij-tile` has
-//! `get_pane_scrollback(PaneId, bool)`, which is a blocking host call needing no process and no
-//! temporary file — and it can only ever answer for *this* session's panes, because a plugin
-//! runs inside one server and a `PaneId` means nothing to another. Every session on the picker's
-//! list is a different session (the current one is dropped at the source), so the one screen
-//! this is for is the one screen that API cannot serve. `zellij --session NAME action
-//! dump-screen` connects to that session's own server over its socket, which is the only route
-//! there is. It also costs no new permission: `RunCommands` is already granted for zoxide.
+//! The CLI does this, not the plugin API. `zellij-tile` has `get_pane_scrollback(PaneId, bool)`,
+//! which needs no process and no temporary file, but it can only answer for the current
+//! session: a plugin runs in one server, and a `PaneId` has no meaning in another. Every
+//! session in the picker list is a different session, so that call cannot serve this box.
+//! `zellij --session NAME action dump-screen` connects to the other server over its socket. It
+//! also needs no new permission, because `RunCommands` is already granted for zoxide.
 //!
-//! ⚠️ **`--path` and then read it back, because the reply is asynchronous.** `dump-screen`
-//! documents `--path` as optional and promises STDOUT without it; in 0.45.1 that prints nothing
-//! — the CLI returns before the server's answer arrives. With `--path` the *server* writes the
-//! file, and the CLI still returns first, so [`SCRIPT`] waits for the file to have something in
-//! it rather than reading it straight away. Measured: without the wait, every dump came back
-//! empty; with it, every one came back whole.
+//! The reply is asynchronous, so [`SCRIPT`] writes it to a file with `--path` and then waits.
+//! `dump-screen` documents `--path` as optional and promises STDOUT without it, but 0.45.1
+//! prints nothing: the CLI returns before the server answers. With `--path` the server writes
+//! the file, and the CLI still returns first. Without the wait, every dump was empty. With it,
+//! every dump was complete.
 //!
-//! 🔴 **`--ansi`, and the colours are the pane's own.** A dump without it is the pane's *text*,
-//! and a preview of text is a preview of a different screen: a diff without its red and green,
-//! a test run without its failure, a prompt without the git branch that is the only coloured
-//! thing on the line. So the dump keeps its styling and the renderer puts it through untouched
-//! — the one place in the picker that paints in colours it did not choose, because they are the
-//! answer to the question the box is asking. [`sgr_only`] is what makes that safe: a pane can
-//! write *anything*, and only the sequences that set colour survive contact with this module.
+//! The dump keeps the colours of the pane, because it uses `--ansi`. Text alone is a different
+//! screen: a diff without its red and green, or a prompt without its git branch. The renderer
+//! prints these rows unchanged. [`sgr_only`] makes that safe, because only the sequences that
+//! set colour pass through this module.
 
 use std::collections::BTreeMap;
 
@@ -30,13 +24,12 @@ use unicode_width::UnicodeWidthChar;
 
 /// One pane's screen, dumped to a temporary file and read back.
 ///
-/// `$1` is the session, `$2` the pane (`terminal_7`). Passed as **arguments** rather than
-/// interpolated into the script, so a session named `; rm -rf ~` is a session name and not a
-/// command. `zellij`'s own output goes to stderr so it cannot land in the dump; the trap takes
-/// the temporary file with it whichever way the script leaves.
+/// `$1` is the session and `$2` is the pane (`terminal_7`). They are arguments, not text
+/// interpolated into the script, so a session named `; rm -rf ~` stays a name. The output of
+/// `zellij` goes to stderr and cannot enter the dump. The trap removes the temporary file.
 ///
-/// The wait is bounded at a second and gives up quietly: a pane with nothing on it produces an
-/// empty file that will never fill, and that is a real answer — [`Peek::Ready`] with no lines.
+/// The wait has a limit of one second and then stops without an error. An empty pane makes an
+/// empty file that never fills, and that is a valid answer: [`Peek::Ready`] with no lines.
 const SCRIPT: &str = r#"set -e
 f=$(mktemp)
 trap 'rm -f "$f"' EXIT
@@ -50,21 +43,20 @@ pub const DUMP: [&str; 4] = ["sh", "-c", SCRIPT, "luneta"];
 
 /// Marks our own `RunCommandResult`, on the same channel as the other two commands.
 pub const CONTEXT_VALUE: &str = "pane";
-/// Which pane a reply is about, carried out and back — see [`crate::dirs::PATH_KEY`], which
-/// exists for the same reason and would tell the same story.
+/// Which pane a reply is about, sent with the command and returned with the answer. See
+/// [`crate::dirs::PATH_KEY`], which exists for the same reason.
 pub const PANE_KEY: &str = "luneta_pane";
 
-/// How a pane is named in the cache, and in the context of the command that asks about it.
+/// How a pane is named in the cache and in the context of the command that asks about it.
 ///
-/// Session **and** pane, because one session has many and two sessions have their own numbering.
-/// A tab is the separator on the grounds that it is the one character a session name will not
-/// have in it; nothing ever parses this back apart, so the worst a collision could do is show
-/// one pane's screen under another's name.
+/// The key holds the session and the pane, because each session numbers its panes separately.
+/// The separator is a tab, which a session name cannot contain. Nothing parses the key again.
 pub fn key(session: &str, pane: u32) -> String {
     format!("{}\t{}", session, pane)
 }
 
-/// How the pane is spelled to `dump-screen`. Terminals only — a plugin pane dumps empty.
+/// How the pane is named to `dump-screen`. Terminals only, because a plugin pane dumps an
+/// empty screen.
 pub fn pane_id(pane: u32) -> String {
     format!("terminal_{}", pane)
 }
@@ -80,24 +72,21 @@ pub enum Peek {
     Failed(String),
 }
 
-/// The most lines kept for one pane.
+/// The maximum number of lines kept for one pane.
 ///
-/// A preview box is a few dozen rows at the very most and the box shows the *tail*, so anything
-/// past this could never be drawn. A pane 200 columns wide by 60 rows is otherwise several
-/// kilobytes of string per session the cursor rests on.
+/// The box holds a few dozen rows and shows the tail, so more lines cannot be drawn. A pane of
+/// 200 by 60 is several kilobytes of text for each session the cursor stops on.
 const MAX_LINES: usize = 64;
 
-/// How many panes' screens are worth keeping. Past this the cache is dropped whole — see
-/// [`crate::dirs`], where the same policy is argued at length.
+/// How many pane screens to keep. Above this the cache is cleared. See [`crate::dirs`].
 const MAX_PEEKS: usize = 32;
 
-/// What each pane the cursor has rested on had on its screen.
+/// The screen of each pane the cursor has stopped on.
 ///
-/// ⚠️ A **snapshot**, taken when the cursor landed and then held. A pane's screen is the one
-/// thing in this plugin that genuinely changes from moment to moment, so this is the same bargain
-/// the agent list makes and for the same reason: re-reading it under the cursor would mean
-/// forking a process a second per row you are reading. The cache is dropped whole when the
-/// picker is opened again, which is when it would otherwise start lying.
+/// Each entry is a snapshot, taken when the cursor arrives and then held. A pane screen changes
+/// continuously, but a new read for each tick would start one process per second for each row
+/// you look at. The agent list makes the same trade. The cache is cleared when the picker
+/// becomes visible again, which is when it would otherwise be out of date.
 #[derive(Default)]
 pub struct Peeks {
     screens: BTreeMap<String, Peek>,
@@ -110,9 +99,9 @@ impl Peeks {
 
     /// Claim a pane for a dump, or refuse because there is nothing to ask.
     ///
-    /// The claim *is* the [`Peek::Reading`] entry, so a second caller is refused — one process
-    /// per pane rather than one per tick. A failure holds its claim too: a pane that could not
-    /// be dumped will not dump any better on the next tick.
+    /// The [`Peek::Reading`] entry is the claim, so a second caller is refused. This gives one
+    /// process per pane, not one per tick. A failure keeps its claim, because a pane that
+    /// cannot be dumped will fail again on the next tick.
     pub fn claim(&mut self, key: &str) -> bool {
         if self.screens.contains_key(key) {
             return false;
@@ -124,11 +113,10 @@ impl Peeks {
         true
     }
 
-    /// Take a dump's reply.
+    /// Take the reply to a dump.
     ///
-    /// Blank lines are trimmed from both ends and only the tail is kept, because a terminal is
-    /// read from the bottom: the rows below the prompt are the pane's empty half, not its
-    /// newest half, and a preview that showed them would show you nothing for most panes.
+    /// Blank lines go from both ends, and only the tail is kept. You read a terminal from the
+    /// bottom: the rows below the prompt are empty, and a preview of them shows nothing.
     pub fn ingest(&mut self, key: String, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
@@ -145,23 +133,20 @@ impl Peeks {
         self.screens.insert(key, Peek::Ready(trim(&String::from_utf8_lossy(stdout))));
     }
 
-    /// Drop every screen. See the ⚠️ on the type: they are snapshots, and this is the moment
-    /// they stop being worth keeping.
+    /// Clear every screen. They are snapshots, and this is the moment they become stale.
     pub fn forget(&mut self) {
         self.screens.clear();
     }
 }
 
-/// A dump, cut down to the lines worth drawing.
+/// A dump, reduced to the lines that can be drawn.
 ///
-/// Each line keeps its colours and loses everything else — see [`sgr_only`], which is where the
-/// pane's bytes stop being arbitrary.
+/// Each line keeps its colours and loses all else. See [`sgr_only`].
 ///
-/// ⚠️ A trailing run of spaces goes, as it always did: it is what a pane leaves behind rather
-/// than something anyone can see, and [`fit`] would otherwise mark a line of blanks as cut off
-/// with a `…` at the right border. The cost is the right end of a full-width coloured bar —
-/// vim's status line, tmux's — which stops at its last word rather than at the box. `dump-screen`
-/// does not pad its lines out, so this is a guard against a pane that does it to itself.
+/// Trailing spaces go. They are invisible, and [`fit`] would otherwise put a `…` at the right
+/// border of a line of blanks. The cost is the right end of a full-width coloured bar, such as
+/// the status line of vim, which then stops at its last word. `dump-screen` does not pad its
+/// lines, so this only guards against a pane that pads its own.
 fn trim(dump: &str) -> Vec<String> {
     let mut lines: Vec<String> = dump.lines().map(sgr_only).collect();
     while lines.last().is_some_and(|line| columns(line) == 0) {
@@ -180,10 +165,8 @@ const ESC: char = '\u{1b}';
 
 /// A line of a dump, split into the characters that take a column and the escapes that do not.
 ///
-/// Everything that reads a pane's line — measuring it, cutting it, stripping it — has to walk it
-/// this way, and a walk that gets the boundaries slightly differently from its neighbour is how
-/// a cut lands in the middle of a colour. So it is done once, here, and the three below are
-/// folds over the result.
+/// To measure, cut or strip a line, you must walk it this way. Two walks that disagree about
+/// the boundaries put a cut in the middle of a colour, so the split is done once here.
 enum Part {
     /// One character the reader can see.
     Ch(char),
@@ -204,12 +187,12 @@ fn parts(line: &str) -> Vec<Part> {
     parts
 }
 
-/// The rest of one escape sequence, consumed from `chars`, `ESC` excluded.
+/// The rest of one escape sequence, read from `chars`. The `ESC` is not included.
 ///
-/// Three shapes, because the terminal has three: `CSI` (`ESC [`) runs to a byte in `@`–`~`;
-/// `OSC` and its relatives run to a `BEL` or a `ST`; anything else is the escape and its
-/// intermediates. Only the first shape is ever kept, but all three have to be *measured*
-/// correctly — a sequence walked off by one character leaves its tail behind as text.
+/// A terminal has three shapes of sequence. `CSI` (`ESC [`) ends at a byte from `@` to `~`.
+/// `OSC` and its relatives end at a `BEL` or a `ST`. All others are the escape and its
+/// intermediates. Only the first shape is kept, but all three must be measured correctly: a
+/// sequence that is one character short leaves its tail on the screen as text.
 fn escape(chars: &mut std::str::Chars) -> String {
     let mut seq = String::new();
     match chars.next() {
@@ -252,14 +235,13 @@ fn escape(chars: &mut std::str::Chars) -> String {
     seq
 }
 
-/// A pane's line with its colours kept and everything else thrown away.
+/// A pane line that keeps its colours and loses all else.
 ///
-/// 🔴 A pane can write *anything*, and this is the border it writes it across. Only `SGR` — the
-/// `ESC [ … m` that sets colour and weight — survives; a cursor move, a scroll region, a screen
-/// clear, an `OSC` that renames the tab would each be obeyed by the terminal drawing this
-/// plugin, and every one of them means a pane the picker is only *looking* at gets to redraw the
-/// picker. The rest of the line is characters, minus the control ones.
-fn sgr_only(line: &str) -> String {
+/// A pane can write any bytes, and this function is the border they cross. Only `SGR` (the
+/// `ESC [ … m` that sets colour and weight) passes. The terminal that draws this plugin would
+/// obey a cursor move, a scroll region, a screen clear, or an `OSC` that renames the tab. Each
+/// of those lets a pane redraw the picker that is looking at it. Control characters also go.
+pub fn sgr_only(line: &str) -> String {
     let mut kept: Vec<Part> = parts(line)
         .into_iter()
         .filter(|part| match part {
@@ -273,18 +255,18 @@ fn sgr_only(line: &str) -> String {
     kept.iter().map(render).collect()
 }
 
-/// How many columns of a box a line would take up. Escapes take none — that is the whole point
-/// of measuring this way rather than with `UnicodeWidthStr::width`, which would count them.
+/// How many columns of a box a line takes. Escapes take none, which is why this does not use
+/// `UnicodeWidthStr::width`.
 pub fn columns(line: &str) -> usize {
     parts(line).iter().map(width).sum()
 }
 
-/// Cut a line to `max` columns, marking the cut with `…` and keeping the colours whole.
+/// Cut a line to `max` columns, mark the cut with `…`, and keep the colours complete.
 ///
-/// [`crate::layout::truncate`]'s job, done over [`parts`] instead of over characters: the marker
-/// is paid for out of the budget, so what comes back never takes more than `max` columns. Every
-/// escape is kept, including the ones past the cut — they cost nothing to draw, and dropping the
-/// tail of a line is not a reason to drop the reset that ends it.
+/// This does the work of [`crate::layout::truncate`] over [`parts`] instead of over characters.
+/// The marker comes out of the budget, so the result never takes more than `max` columns. Every
+/// escape is kept, including those after the cut: they take no columns, and the reset at the
+/// end of a line must stay.
 pub fn fit(line: &str, max: usize) -> String {
     let parts = parts(line);
     if parts.iter().map(width).sum::<usize>() <= max {
@@ -338,8 +320,8 @@ mod tests {
         peeks
     }
 
-    /// The blank half of the pane goes, from both ends. A shell sitting at its prompt is two
-    /// lines of screen and fifty of nothing, and the fifty are what you would see otherwise.
+    /// The blank part of the pane goes, from both ends. A shell at its prompt is two lines of
+    /// screen and fifty blank lines.
     #[test]
     fn a_dump_is_trimmed_to_what_is_on_the_screen() {
         let peeks = dumped(b"\n\n> cargo test\nok\n   \n\n\n");
@@ -348,13 +330,13 @@ mod tests {
         assert_eq!(ready(&dumped(b"\n\n\n"), "k"), Vec::<String>::new());
     }
 
-    /// Blank lines *inside* the screen are part of it, and stay.
+    /// Blank lines inside the screen are part of it and stay.
     #[test]
     fn a_gap_in_the_middle_is_screen_and_not_padding() {
         assert_eq!(ready(&dumped(b"one\n\ntwo\n"), "k"), ["one", "", "two"]);
     }
 
-    /// The tail is what is kept, because a terminal is read from the bottom.
+    /// The tail is kept, because you read a terminal from the bottom.
     #[test]
     fn an_overlong_dump_keeps_its_last_lines() {
         let dump: String = (0..MAX_LINES * 2).map(|i| format!("line-{}\n", i)).collect();
@@ -363,29 +345,28 @@ mod tests {
         assert_eq!(lines[MAX_LINES - 1], format!("line-{}", MAX_LINES * 2 - 1));
     }
 
-    /// Colour survives; everything else does not. `SGR` is the pane's answer to what the
-    /// preview box is asking, and a bell or a tab is not.
+    /// Colour passes and all else does not. A bell or a tab is not part of the answer.
     #[test]
     fn a_dump_keeps_its_colours_and_nothing_else() {
         assert_eq!(ready(&dumped(b"a\x1b[31mred\x07\tb"), "k"), ["a\x1b[31mredb"]);
     }
 
-    /// 🔴 The escapes that would let a previewed pane redraw the picker. Each is dropped
-    /// *whole*: a sequence walked off by one character leaves its tail behind as text, which is
-    /// the failure this is really guarding against.
+    /// The escapes that would let a previewed pane redraw the picker. Each one is dropped
+    /// complete: a sequence that is one character short leaves its tail on the screen as
+    /// text.
     #[test]
     fn an_escape_that_is_not_a_colour_is_dropped_whole() {
         // A cursor move, a screen clear, a scroll region, a cursor-hide.
         assert_eq!(ready(&dumped(b"\x1b[9;9Ha\x1b[2Jb\x1b[1;5rc\x1b[?25ld"), "k"), ["abcd"]);
         // An `OSC` that renames the tab, terminated both ways it can be.
         assert_eq!(ready(&dumped(b"\x1b]0;title\x07a\x1b]2;more\x1b\\b"), "k"), ["ab"]);
-        // A `DCS` payload — the shape the host's own components arrive in.
+        // A `DCS` payload, which is the form the host uses for its own components.
         assert_eq!(ready(&dumped(b"a\x1bPztext;1,2\x1b\\b"), "k"), ["ab"]);
         // A two-character escape, and one carrying an intermediate.
         assert_eq!(ready(&dumped(b"a\x1b7b\x1b(Bc"), "k"), ["abc"]);
     }
 
-    /// Escapes take no columns, so a coloured line is measured and cut by what is on it.
+    /// Escapes take no columns, so a coloured line is measured by its visible characters.
     #[test]
     fn a_coloured_line_is_measured_by_what_can_be_seen() {
         let line = "\x1b[31mred\x1b[m";
@@ -394,8 +375,8 @@ mod tests {
         assert_eq!(fit(line, 3), line);
     }
 
-    /// The cut lands between characters and keeps every colour, including the ones past it —
-    /// the reset that ends a line is what stops it bleeding into the border.
+    /// The cut falls between characters and keeps every colour, including those after it. The
+    /// reset at the end of a line stops the colour from reaching the border.
     #[test]
     fn a_cut_line_keeps_its_colours() {
         assert_eq!(fit("\x1b[31mredder\x1b[m", 4), "\x1b[31mred…\x1b[m");
@@ -404,7 +385,7 @@ mod tests {
         assert_eq!(fit("日本語", 4), "日…");
     }
 
-    /// A pane is asked about once, whatever the answer was.
+    /// A pane is asked about once, whatever the answer is.
     #[test]
     fn a_pane_is_only_ever_asked_about_once() {
         let mut peeks = Peeks::default();
@@ -420,7 +401,7 @@ mod tests {
         assert!(peeks.claim("k"));
     }
 
-    /// Session and pane, so two panes of one session are two entries.
+    /// The key holds the session and the pane, so two panes of one session are two entries.
     #[test]
     fn a_key_names_a_pane_and_not_a_session() {
         assert_ne!(key("misc", 1), key("misc", 2));

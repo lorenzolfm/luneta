@@ -1,7 +1,7 @@
-# luneta — the edit -> see-it loop.
+# luneta build recipes.
 #
-# All recipes assume you are inside `nix develop` (or have direnv allowed, which
-# does it for you). The bare system rustc CANNOT build this: see flake.nix.
+# Every recipe needs `nix develop`, or direnv, which enters it for you. The system
+# rustc cannot build this crate. See flake.nix.
 
 WASM       := target/wasm32-wasip1/release/luneta.wasm
 INSTALL_DIR := $(HOME)/.local/share/zellij/plugins
@@ -13,8 +13,8 @@ SESSION    ?=
 build:
 	cargo build --release --target wasm32-wasip1
 
-# Permissions are cached against the ABSOLUTE path of the .wasm, so keeping the
-# installed path stable is what stops zellij re-prompting on every install.
+# Zellij caches permissions against the absolute path of the .wasm. Keep this path
+# stable, or zellij asks for the permissions again after each install.
 install: build
 	@mkdir -p $(INSTALL_DIR)
 	install -m 0644 $(WASM) $(INSTALLED)
@@ -22,32 +22,27 @@ install: build
 
 ZELLIJ_CMD = $(if $(SESSION),zellij -s $(SESSION),zellij)
 
-# Put the freshly built bytes into the picker pane. No zellij restart, no
-# re-prompt, and — unlike what this used to do — no pane is closed.
+# Put the new bytes into the picker pane. This needs no zellij restart, asks for no
+# permission again, and closes no pane.
 #
-# Two calls, because neither one covers both states on its own:
+# Two calls are necessary, because neither one covers both states:
 #
-#   launch-or-focus  the picker may not be running at all. This is the only one
-#                    of the two that can create it, and the only one that can
-#                    say --floating, which is the geometry the keybinding gives
-#                    it. On a picker that IS running it just takes focus.
-#   start-or-reload  re-reads the .wasm from disk and swaps it into the pane
-#                    that is already there. This is what actually picks up the
-#                    new bytes when the pane survived from the last loop.
+#   launch-or-focus  Creates the picker if it does not run, and is the only call
+#                    that can pass --floating, which is the geometry the key
+#                    binding gives it. On a picker that runs, it takes focus.
+#   start-or-reload  Reads the .wasm from disk again and puts it into the pane
+#                    that is already there. This is what loads the new bytes.
 #
-# Order matters: focus-or-create first so that there is something to reload.
-# Running it the other way round reloads a picker that may not exist yet and
-# then launches one from whatever was already cached.
+# The order matters. Focus or create first, so that there is something to reload.
 #
-# ⚠️ This replaced a close-and-relaunch pair, and the reason is not tidiness.
-# That version had to name the pane it was closing and could not: zellij
-# documents a `plugin_<id>` on launch-or-focus-plugin's stdout ("Returns: Plugin
-# pane ID") but prints nothing at all on 0.45.1, so the recipe's guard saw an
-# empty id and refused to run — correctly, since `close-pane` without an id
-# closes whatever is *focused*, which during a dev loop is usually your editor.
-# Reloading in place needs no pane id, so there is nothing left to get wrong.
+# Do not return to a close-and-relaunch pair. That version had to name the pane it
+# closed, and it could not: zellij documents a `plugin_<id>` on the stdout of
+# launch-or-focus-plugin ("Returns: Plugin pane ID"), but 0.45.1 prints nothing.
+# The guard of the recipe thus saw an empty id and refused to run, which was
+# correct: `close-pane` without an id closes the focused pane, which during
+# development is usually your editor. A reload needs no pane id.
 #
-# Pass SESSION=<name> to drive another session; omit it to use the current one.
+# Pass SESSION=<name> to drive another session. Omit it to use the current one.
 reload:
 	$(ZELLIJ_CMD) action launch-or-focus-plugin \
 		--skip-plugin-cache --floating file:$(INSTALLED)

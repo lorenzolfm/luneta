@@ -1,14 +1,11 @@
-//! The match set: what the picker is showing, in the order it shows it.
+//! The match set: the rows the picker shows, in the order it shows them.
 //!
-//! Two rules are load-bearing here and are *not* free to change:
+//! Two rules control this module:
 //!
-//! 1. **The current session leaves the match set**, filtered here rather than in the
-//!    renderer. Upstream drops it with a `continue` in the render cache, which leaves the
-//!    rendered list and the match set disagreeing about indices. Filtering here means
-//!    **the rendered list *is* the match set** and the two can never diverge.
-//! 2. **Filtering only ever removes rows, never re-groups them.** Live sessions always
-//!    sort before resurrectable ones, at every stage. Upstream sorts score-first with type as a
-//!    tiebreak, so its live and dead rows interleave as you type.
+//! 1. The current session is removed here, not in the renderer. The rendered list is thus
+//!    equal to the match set, and their indices cannot disagree.
+//! 2. A filter only removes rows. It never regroups them: live sessions sort before
+//!    resurrectable ones at every stage.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -18,19 +15,19 @@ use fuzzy_matcher::FuzzyMatcher;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A live session. Handing its name to the host resolves to an attach.
+    /// A live session. The host resolves its name to an attach.
     Live,
-    /// A dead session with a saved layout. The same call resolves to a resurrect.
+    /// A dead session with a saved layout. The host resolves its name to a resurrect.
     Resurrectable,
 }
 
-/// One row. This *is* one match-set entry — there is no separate render-side list.
+/// One row, which is also one match-set entry. There is no separate render-side list.
 pub struct Row {
     pub name: String,
     pub kind: Kind,
-    /// Elapsed age as the host reports it, truncated to whole seconds on the way out
-    /// (`screen.rs:3361`, `plugin_api/event.rs:1214`). Trusted as-is; the plugin sandbox
-    /// cannot see the sockets it would need to compute anything better.
+    /// Elapsed age, as the host reports it. The host truncates it to whole seconds
+    /// (`screen.rs:3361`, `plugin_api/event.rs:1214`). The plugin sandbox cannot see the
+    /// sockets that a better value needs.
     pub age: Duration,
     /// Character positions the fuzzy matcher hit, for highlighting. Empty on an empty term.
     pub indices: Vec<usize>,
@@ -38,47 +35,43 @@ pub struct Row {
     is_exact: bool,
 }
 
-/// Which pane of a live session the preview box shows, and what the session is made of.
+/// Which pane of a live session the preview box shows, and what the session contains.
 ///
-/// 🔴 Built from the *other* sessions' `SessionInfo`, which is real data and not an estimate —
-/// each zellij server writes its own tabs and panes to `session-metadata.kdl` about once a
-/// second and every other server reads them back (`zellij-utils/src/sessions.rs`,
-/// `read_live_session_states`). So the picker can pick a session's focused pane without being
-/// attached to it, and pick it from the same snapshot the ages come from.
+/// The data comes from the other sessions' `SessionInfo`. Each zellij server writes its tabs
+/// and panes to `session-metadata.kdl` about once a second, and every other server reads them
+/// (`zellij-utils/src/sessions.rs`, `read_live_session_states`). The picker can thus find the
+/// focused pane of a session it is not attached to, from the snapshot that gives the ages.
 ///
-/// A resurrectable session has none of this. Its layout is on disk in a form the host will not
-/// hand a plugin, and there is no process behind it to have a screen — see [`crate::render`].
+/// A resurrectable session has no such data. Its layout is on disk in a form the host does not
+/// give to a plugin, and no process is behind it.
 pub struct Contents {
-    /// Selectable panes across every tab. Counted where the filter that makes it mean anything
-    /// is applied — see [`Focus`].
+    /// Selectable panes in all tabs, counted where [`Focus`] applies its filter.
     pub panes: usize,
-    /// The pane whose screen the box shows. `None` for a session made only of plugin panes,
-    /// which have nothing to dump.
+    /// The pane whose screen the box shows. `None` if the session has only plugin panes,
+    /// which dump nothing.
     pub focus: Option<Focus>,
 }
 
-/// The pane the preview box reads, and where it sits.
+/// The pane the preview box reads, and its location.
 ///
-/// The **focused** pane of the **active** tab, which is what you would be looking at a moment
-/// after `Enter` — so the box shows you the thing attaching would show you.
+/// This is the focused pane of the active tab: the pane you see immediately after `Enter`.
 ///
-/// ⚠️ Chosen from the selectable, unsuppressed **terminals** only. Zellij's own tab bar and
-/// status bar are panes in that manifest like any other (`is_selectable` is the flag their doc
-/// comment names as the way to tell them apart), and a plugin pane dumps empty whatever it is
-/// drawing — so either would give the box a blank screen and no reason for it.
+/// Only selectable, unsuppressed terminals are used. Zellij's tab bar and status bar are panes
+/// in the same manifest, and `is_selectable` is the flag that identifies them. A plugin pane
+/// dumps an empty screen. Either one would make the box blank.
 pub struct Focus {
     pub pane: u32,
-    /// The tab it is in, for the line that says which pane you are looking at.
+    /// The tab that holds the pane, for the caption line.
     pub tab: String,
-    /// The pane's own title, from the same place the tab bar takes it.
+    /// The pane title, from the source the tab bar uses.
     pub title: String,
 }
 
-/// What a rebuild should do with the cursor.
+/// What a rebuild does with the cursor.
 ///
-/// Shared with the directory screen rather than duplicated there: the two lists hold different
-/// things and sort by different keys, but the cursor rule is the same one in both — a new term
-/// snaps to the top match, a background refresh stays put.
+/// The directory and agent screens share this rule. Their lists hold different things and sort
+/// by different keys, but a new term always goes to the top match and a background refresh
+/// always keeps its position.
 #[derive(Clone, Copy)]
 pub enum Selection {
     /// The search term changed: go to the top match.
@@ -91,20 +84,19 @@ pub enum Selection {
 pub struct MatchSet {
     pub search_term: String,
     pub rows: Vec<Row>,
-    /// Always-on selection: an index into `rows`, or `None` only when `rows` is empty.
+    /// An index into `rows`. `None` only when `rows` is empty.
     pub selected: Option<usize>,
-    /// The current session's name, kept only so the hint line can say the picker is hiding it.
-    /// It is deliberately *not* in `rows`.
+    /// The name of the current session, so that the note line can say the picker hides it.
+    /// It is never in `rows`.
     pub current_session: Option<String>,
-    /// Does the current session fuzzy-match the term? One extra `fuzzy_indices` call per
-    /// keystroke against a name that never enters `rows` — the whole cost of the hint line.
+    /// Does the current session match the term? This costs one `fuzzy_indices` call per
+    /// keystroke, and is the whole cost of the note line.
     pub current_matches: bool,
-    /// Which pane to show for each live session, by name. Kept beside the rows rather than on
-    /// them: the rows are rebuilt on every keystroke and this once a poll, and carrying it on
-    /// the rows would mean rebuilding it a hundred times to use it once.
+    /// Which pane to show for each live session, by name. It is kept beside the rows because
+    /// the rows are rebuilt on each keystroke, but this map is rebuilt once per poll.
     ///
-    /// A name that is not in here has nothing to show — a resurrectable session, or a live one
-    /// whose server has not written its metadata yet.
+    /// A name that is absent has nothing to show. It is a resurrectable session, or a live
+    /// session whose server has not yet written its metadata.
     pub contents: BTreeMap<String, Contents>,
     matcher: Option<SkimMatcherV2>,
 }
@@ -112,9 +104,8 @@ pub struct MatchSet {
 impl MatchSet {
     /// Rebuild from the latest poll.
     ///
-    /// The caller has already split the snapshot and dropped the current session from `live`
-    /// (rule 1) — it keeps those lists so a keystroke can re-filter without waiting for the
-    /// next poll.
+    /// The caller splits the snapshot and removes the current session from `live` (rule 1). It
+    /// keeps both lists, so that a keystroke can filter again before the next poll.
     pub fn refresh(
         &mut self,
         live: &[(String, Duration)],
@@ -122,8 +113,8 @@ impl MatchSet {
         current_session: Option<String>,
     ) {
         self.current_session = current_session;
-        // Hold, not snap. This runs once a second in the background; snapping here would drag
-        // the cursor back to row 0 under the user's fingers every poll.
+        // Hold, not snap: this runs once a second in the background, and a snap would move
+        // the cursor back to row 0 on every poll.
         self.rebuild(live, dead, Selection::Hold);
     }
 
@@ -134,7 +125,7 @@ impl MatchSet {
         policy: Selection,
     ) {
         let term = self.search_term.clone();
-        // Recomputed below whenever the term is non-empty; an empty term reaches for nothing.
+        // Computed below when the term is not empty. An empty term matches nothing.
         self.current_matches = false;
         let held = match policy {
             Selection::SnapToTop => None,
@@ -150,16 +141,16 @@ impl MatchSet {
                 self.rows
                     .push(Row::new(name.clone(), Kind::Resurrectable, *age, 0, vec![], false));
             }
-            // Empty term: live newest-first, then resurrectable newest-first. `age` is elapsed
-            // time, so ascending age *is* newest-first.
+            // Live newest first, then resurrectable newest first. `age` is elapsed time, so
+            // ascending age is newest first.
             self.rows.sort_by(|a, b| a.kind_then_recency(b));
         } else {
             let matcher = self
                 .matcher
                 .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
-            // The current session is not a row and never will be, but the hint line has
-            // to know whether the term is reaching for it — otherwise typing your own session's
-            // name gives a blank list and no explanation.
+            // The current session is never a row, but the note line must know whether the
+            // term matches it. Without this, the name of your own session gives an empty list
+            // and no explanation.
             self.current_matches = self
                 .current_session
                 .as_deref()
@@ -174,21 +165,13 @@ impl MatchSet {
                     }
                 }
             }
-            // Non-empty term: live before resurrectable, then exact match, then score, then
-            // recency. Type comes above everything deliberately — that is what stops the
-            // live/dead boundary from moving as you type.
+            // Live before resurrectable, then exact match, then score, then recency. Kind
+            // sorts above all else, which keeps the live/dead boundary in one place as you
+            // type. The list is thus always two groups, which is what the separator row needs
+            // (see rule 2 in the module doc).
             //
-            // ⚠️ `is_exact` used to outrank type, which quietly broke rule 2 above: with a live
-            // `rapid` and a dead `api`, typing `api` put the dead row *first* and the list was
-            // no longer two groups but an interleaving. That was survivable while every row
-            // carried its own `[ATTACH]`/`[RESURRECT]` tag. It is not survivable now that the
-            // groups are what say which is which — a single separator cannot describe a list
-            // that is not partitioned, and drawing one anyway would file a live session under
-            // "dead".
-            //
-            // The cost is real and worth naming: typing a dead session's exact name no longer
-            // lands the cursor on it when live rows also match the term. It goes to the top of
-            // the dead group instead, and the input line says so.
+            // The cost: the exact name of a dead session no longer moves the cursor to it
+            // while live rows also match. The cursor goes to the top of the dead group.
             self.rows.sort_by(|a, b| {
                 a.kind_rank()
                     .cmp(&b.kind_rank())
@@ -198,14 +181,13 @@ impl MatchSet {
             });
         }
 
-        // `None` only when there is nothing to point at. That is also the state that puts
-        // `Enter` on the literal text you typed — see [`crate::render::enter_action`] — so an
-        // empty list is not a dead end, it is the create path.
+        // `None` only when there is nothing to point at. In that state `Enter` acts on the
+        // text you typed, which is the create path. See [`crate::render::enter_action`].
         self.selected = if self.rows.is_empty() {
             None
         } else {
-            // `Hold` keeps the cursor on the same *session*, not the same row — the row may have
-            // moved, and a session that vanished falls back to the top.
+            // `Hold` keeps the cursor on the same session, not on the same index. A session
+            // that is gone falls back to the top.
             held.and_then(|name| self.rows.iter().position(|r| r.name == name))
                 .or(Some(0))
         };
@@ -217,8 +199,8 @@ impl MatchSet {
             .map(|r| r.name.as_str())
     }
 
-    /// A new search term: fzf cursor discipline snaps back to the top match, because with
-    /// a new term the top match *is* the answer by construction.
+    /// Set a new search term. The cursor goes to the top match, which is the best answer to a
+    /// term that has just changed.
     pub fn set_search_term(
         &mut self,
         term: String,
@@ -229,24 +211,23 @@ impl MatchSet {
         self.rebuild(live, dead, Selection::SnapToTop);
     }
 
-    /// Is the term exactly the name of the session we are sitting in?
+    /// Is the term the name of the current session?
     ///
-    /// That session is not in `rows`, so it can never be the highlight; this is the one
-    /// place the fork still has to recognise it, to make `Enter` a no-op rather than an offer to
-    /// create a session that already exists.
+    /// That session is not in `rows` and cannot be the highlight. This test makes `Enter` do
+    /// nothing, instead of offering to create a session that exists.
     pub fn is_own_name(&self) -> bool {
         !self.search_term.is_empty()
             && self.current_session.as_deref() == Some(self.search_term.as_str())
     }
 
-    /// Why the *search term* cannot be a session name, or `None` if it can. See
-    /// [`validate_name`], which the rename screen shares.
+    /// Why the search term cannot be a session name, or `None` if it can. The rename screen
+    /// uses the same [`validate_name`].
     pub fn name_error(&self) -> Option<&'static str> {
         validate_name(&self.search_term)
     }
 
-    /// Move the cursor. **No wrap**: running off either end is a no-op, so the top match
-    /// stays reachable by holding a key rather than by counting rows.
+    /// Move the cursor. The cursor stops at both ends and does not wrap, so that you can hold
+    /// a key down to reach the top match.
     pub fn move_selection(&mut self, delta: isize) {
         let Some(current) = self.selected else { return };
         let last = self.rows.len().saturating_sub(1);
@@ -257,14 +238,12 @@ impl MatchSet {
 
 /// Why `name` cannot be a session name, or `None` if it can.
 ///
-/// 🔴 The host does **not** validate on the plugin's create path — `validate_session_name` is
-/// wired only to the CLI and the web client — so this is the last line of defence. Upstream's
-/// plugin checks only the length and `/`; the `.`, `..` and whitespace-only rejections are
-/// ported from the host's own validator.
+/// The host does not validate names on the plugin create path. `validate_session_name` is
+/// connected only to the CLI and the web client, so this function is the last check. The `.`,
+/// `..` and whitespace-only rules come from the host validator.
 ///
-/// An empty name is **valid** here: on the create path it means `new_session_name = None` and
-/// the host names the session itself. Rename has no such fallback, so it rejects empty names
-/// separately, before asking.
+/// An empty name is valid. On the create path it means `new_session_name = None`, and the host
+/// names the session. The rename screen has no such fallback and rejects an empty name.
 pub fn validate_name(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return None;
@@ -281,14 +260,13 @@ pub fn validate_name(name: &str) -> Option<&'static str> {
     if name.len() >= 108 {
         return Some("name must be shorter than 108 bytes");
     }
-    // has_forbidden_session is deliberately *not* ported: it concerns web-client-forbidden
-    // sessions, there is no web server in this config, and upstream applies it only on the
-    // typed-name path anyway. Two lines to revert if the web server is ever turned on.
+    // `has_forbidden_session` is not ported. It applies to web-client sessions, and this
+    // configuration has no web server. Add it here if the web server is turned on.
     None
 }
 
 impl Row {
-    /// `pub(crate)` for the render tests, which need a row without a live host to get one from.
+    /// `pub(crate)` for the render tests, which build a row without a host.
     pub(crate) fn new(
         name: String,
         kind: Kind,
@@ -314,8 +292,8 @@ impl Row {
     }
 }
 
-/// Compact elapsed time: the column exists to make the sort order visible, so it wants one
-/// glanceable magnitude, not humantime's `2days 3h 14m 2s`.
+/// Elapsed time in one magnitude. The column shows the sort order, so `2h ago` is more useful
+/// than `2days 3h 14m 2s`.
 pub fn format_age(age: Duration) -> String {
     let secs = age.as_secs();
     match secs {
