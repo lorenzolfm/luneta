@@ -44,7 +44,7 @@ One `Tab` away:
 │                                        ││                                        │
 │                                        ││ > read the docs?                       │
 │                                        ││                                        │
-│ 1 agent not in zellij — not listed     ││   1. yes                               │
+│                                        ││   1. yes                               │
 │ > luneta  🙋  18m          misc/luneta ││   2. no                                │
 │   notes   ☕  5m     lorenzo/Documents ││                                        │
 │   bipa    ⠋   31m            Work/bipa ││ > _                                    │
@@ -245,8 +245,9 @@ nor `/proc`.
   new opening takes a new snapshot.
 - **The agent whose pane you opened the picker from is not listed.** It is removed
   by `(session, pane)` and not by session, so another agent in the same session
-  stays a valid target. An agent outside zellij is removed too, and counted on the
-  note line so that it is never absent without an explanation.
+  stays a valid target. An agent this screen cannot address is dropped as well,
+  and silently: a row is a pane `Enter` puts you in, and an agent with no pane to
+  go to is not a row that is missing — it is not a row.
 - **Keys are read by name, and a document that does not parse is loud.** The wire
   is a JSON array. This screen names `status`, `status_age`, `zellij`, `cwd`,
   `name` and `name_source`, and ignores all else, so a new key costs nothing. A key
@@ -255,7 +256,7 @@ nor `/proc`.
   records what happened when `status_age` was tolerant instead.
 - **`zellij` is one object or `null`.** A session and its pane arrive together or
   not at all, so `Enter` needs no guard against half an address. `null` means that
-  the agent is outside zellij, and the note line counts it.
+  the agent runs outside zellij, and this screen has nothing to offer it.
 
 ## What `Enter` does
 

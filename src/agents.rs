@@ -97,7 +97,7 @@ pub enum Jump {
 }
 
 /// One agent out of `claude-ps`, already known to be inside zellij.
-struct Agent {
+pub struct Agent {
     session: String,
     /// What the row is called: the chosen name, or the zellij session if there is none.
     /// [`parse`] decides this once, because the fuzzy term matches against it and the hit
@@ -257,16 +257,11 @@ impl Status {
 
 #[derive(Default)]
 pub struct AgentSet {
-    /// Why the list is empty, when it is. See [`Fetch`].
-    pub status: Fetch,
+    /// Why the list is empty, when it is, and the agents when it is not. See [`Fetch`].
+    pub status: Fetch<Vec<Agent>>,
     pub rows: Vec<AgentRow>,
     pub selected: Option<usize>,
     pub asking: bool,
-    /// Agents that run outside zellij. `Enter` cannot reach them, so they are not rows. The
-    /// count stays, and the note line shows it, so that the name of such an agent gives an
-    /// empty list with an explanation.
-    pub outside: usize,
-    all: Vec<Agent>,
     matcher: Option<SkimMatcherV2>,
 }
 
@@ -276,41 +271,33 @@ impl AgentSet {
     /// An exit other than 0 is reported, not discarded. The most probable failure is that the
     /// tool is not installed, which otherwise looks the same as an empty list.
     pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
-        self.asking = false;
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
-            self.status = Fetch::Failed(if reason.is_empty() {
+            self.fail(if reason.is_empty() {
                 "claude-ps is not available".to_string()
             } else {
                 format!("claude-ps: {}", reason)
             });
-            self.all.clear();
-            self.outside = 0;
             return;
         }
         match parse(&String::from_utf8_lossy(stdout)) {
-            Ok((agents, outside)) => {
-                self.all = agents;
-                self.outside = outside;
-                self.status = Fetch::Ready;
+            Ok(agents) => {
+                self.asking = false;
+                self.status = Fetch::Ready(agents);
             },
             // A document this plugin cannot read. It is reported, not discarded: an empty
             // list would mean that no agents run, when it means that `claude-ps` and the
             // picker disagree.
-            Err(reason) => {
-                self.status = Fetch::Failed(reason);
-                self.all.clear();
-                self.outside = 0;
-            },
+            Err(reason) => self.fail(reason),
         }
     }
 
+    /// The one way to a failure, from here and from the server. It takes the agents with it,
+    /// because [`Fetch::Failed`] has nowhere to keep them.
     pub fn fail(&mut self, reason: impl Into<String>) {
         self.asking = false;
         self.status = Fetch::Failed(reason.into());
-        self.all.clear();
-        self.outside = 0;
     }
 
     /// Rebuild against the term and the current position.
@@ -336,45 +323,49 @@ impl AgentSet {
         };
         self.rows.clear();
 
-        let matcher = self
-            .matcher
-            .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
+        // Only a reply has agents to filter. The other two states have none, and an empty list
+        // is what the screen draws for them.
+        if let Fetch::Ready(all) = &self.status {
+            let matcher = self
+                .matcher
+                .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
 
-        for agent in &self.all {
-            // The agent we are in is removed here, as the session screen removes the current
-            // session, so that the rendered list stays equal to the match set.
-            if origin == Some((agent.session.as_str(), agent.pane)) {
-                continue;
-            }
-            let (score, indices, is_exact) = if term.is_empty() {
-                (0, Vec::new(), false)
-            } else {
-                // Matched against the bare label. You type what you see, so a row that shows
-                // a chosen name must answer to that name. The `:pane` suffix is decided after
-                // this filter, and nobody types it.
-                match matcher.fuzzy_indices(&agent.display, term) {
-                    Some((score, indices)) => (score, indices, agent.display == term),
-                    None => continue,
+            for agent in all {
+                // The agent we are in is removed here, as the session screen removes the
+                // current session, so that the rendered list stays equal to the match set.
+                if origin == Some((agent.session.as_str(), agent.pane)) {
+                    continue;
                 }
-            };
-            self.rows.push(AgentRow {
-                session: agent.session.clone(),
-                display: agent.display.clone(),
-                pane: agent.pane,
-                status: agent.status.clone(),
-                age: agent.age + since,
-                cwd: agent.cwd.clone(),
-                shared: false,
-                jump: if current == Some(agent.session.as_str()) {
-                    Jump::Focus
+                let (score, indices, is_exact) = if term.is_empty() {
+                    (0, Vec::new(), false)
                 } else {
-                    Jump::Switch
-                },
-                indices,
-                rank: status_rank(&agent.status),
-                score,
-                is_exact,
-            });
+                    // Matched against the bare label. You type what you see, so a row that
+                    // shows a chosen name must answer to that name. The `:pane` suffix is
+                    // decided after this filter, and nobody types it.
+                    match matcher.fuzzy_indices(&agent.display, term) {
+                        Some((score, indices)) => (score, indices, agent.display == term),
+                        None => continue,
+                    }
+                };
+                self.rows.push(AgentRow {
+                    session: agent.session.clone(),
+                    display: agent.display.clone(),
+                    pane: agent.pane,
+                    status: agent.status.clone(),
+                    age: agent.age + since,
+                    cwd: agent.cwd.clone(),
+                    shared: false,
+                    jump: if current == Some(agent.session.as_str()) {
+                        Jump::Focus
+                    } else {
+                        Jump::Switch
+                    },
+                    indices,
+                    rank: status_rank(&agent.status),
+                    score,
+                    is_exact,
+                });
+            }
         }
 
         // Attention first. `rank` sorts above `age` and `score`, which keeps the boundary
@@ -529,31 +520,23 @@ pub fn abbr_tag(status: &Status, frame: u64) -> String {
 
 /// The JSON array from `claude-ps`, as the agents this screen can act on.
 ///
-/// This returns the agents in zellij and the count of the agents outside it. An agent outside
-/// zellij is removed, because `Enter` can do nothing for it. The count stays, so that such an
-/// agent is never absent without an explanation.
+/// An agent this screen cannot address is dropped, without a count and without a note. The
+/// rule of the screen is that a row is a pane `Enter` puts you in, so an agent with no pane to
+/// go to is not a row that is missing — it is not a row.
 ///
 /// A document that does not deserialise stops the parse. It shows that the tool and this build
 /// disagree, which makes every row in it doubtful. A partial list would look complete.
-fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
+fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
     let wire: Vec<Wire> =
         serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {}", error))?;
 
     let mut agents = Vec::new();
-    let mut outside = 0;
     for row in wire {
-        // Both cases are places `Enter` cannot reach: no zellij, or a pane id that is not a
-        // number and cannot go to `focus-pane-id`.
-        let Some(zellij) = row.zellij else {
-            outside += 1;
-            continue;
-        };
-        let Ok(pane) = zellij.pane.parse::<u32>() else {
-            outside += 1;
-            continue;
-        };
+        // Three places `Enter` cannot reach: no zellij, a pane id that is not a number and
+        // cannot go to `focus-pane-id`, or no session to attach to.
+        let Some(zellij) = row.zellij else { continue };
+        let Ok(pane) = zellij.pane.parse::<u32>() else { continue };
         if zellij.session.is_empty() {
-            outside += 1;
             continue;
         }
         let display = chosen_name(row.name.as_deref(), row.name_source.as_deref())
@@ -567,7 +550,7 @@ fn parse(stdout: &str) -> Result<(Vec<Agent>, usize), String> {
             cwd: row.cwd.unwrap_or_default(),
         });
     }
-    Ok((agents, outside))
+    Ok(agents)
 }
 
 /// The name to show for an agent, or `None` to use the zellij session.
@@ -615,7 +598,7 @@ mod tests {
     use super::*;
 
     fn status(json: &str) -> Status {
-        let (agents, _) = parse(json).expect("the document should parse");
+        let agents = parse(json).expect("the document should parse");
         agents.into_iter().next().expect("one agent").status
     }
 
@@ -624,6 +607,36 @@ mod tests {
             r#"[{{"status":{},"status_age":4,"zellij":{{"session":"s","pane":"0"}}}}]"#,
             status
         )
+    }
+
+    /// A failure takes the agents with it. The rows of the last reply cannot outlive it,
+    /// because [`Fetch::Failed`] has nowhere to keep them.
+    #[test]
+    fn a_failure_leaves_no_agents_behind() {
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), one(r#""idle""#).as_bytes(), b"");
+        agents.rebuild("", None, None, Duration::ZERO, Selection::SnapToTop);
+        assert_eq!(agents.rows.len(), 1);
+
+        agents.fail("claude-ps: gone");
+        agents.rebuild("", None, None, Duration::ZERO, Selection::SnapToTop);
+        assert!(agents.rows.is_empty());
+        assert!(agents.selected.is_none());
+    }
+
+    /// An agent this screen cannot address is not a row and is not counted. There is no pane
+    /// to put you in, so there is nothing to say about it.
+    #[test]
+    fn an_agent_this_screen_cannot_address_is_dropped() {
+        let agents = parse(
+            r#"[{"status":"idle","status_age":4},
+                {"status":"idle","status_age":4,"zellij":{"session":"s","pane":"nope"}},
+                {"status":"idle","status_age":4,"zellij":{"session":"","pane":"0"}},
+                {"status":"idle","status_age":4,"zellij":{"session":"s","pane":"0"}}]"#,
+        )
+        .expect("the document should parse");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].session, "s");
     }
 
     /// A `null` status is unreported. It was `""` before, which took the glyph of a word
