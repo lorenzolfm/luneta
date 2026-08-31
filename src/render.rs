@@ -51,7 +51,7 @@
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
-use crate::agents::{self, AgentRow, AgentSet, Status as AgentStatus};
+use crate::agents::{self, AgentRow, AgentSet, Fetch};
 use crate::dirs::{Action, DirRow, DirSet, Listing, Status};
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
@@ -744,9 +744,9 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
         return nothing_highlighted(rect);
     };
     // The status that takes the accent colour in the list takes it here too.
-    let level = if agents::is_waiting(&row.status) { ACCENT } else { LABEL };
+    let level = if agents::is_waiting(row.status.as_ref()) { ACCENT } else { LABEL };
     let mut line = Line::new();
-    line.push(&truncate(&row.status, inner), level);
+    line.push(&truncate(agents::word(row.status.as_ref()), inner), level);
     line.push(" · ", TAG);
     line.push(&agents::format_duration(row.age), TAG);
     let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
@@ -1091,12 +1091,18 @@ fn agent_body(
     // Measured at the `frame` that builds the cells below, so that a width and the glyph it
     // must hold come from one turn of the spinner. Every spinner frame is one column wide (see
     // `agents::SPINNER`), and the frame is passed so that this code does not assume that.
-    let full_tag =
-        window.iter().map(|r| agents::full_tag(&r.status, frame).width()).max().unwrap_or(0);
+    let full_tag = window
+        .iter()
+        .map(|r| agents::full_tag(r.status.as_ref(), frame).width())
+        .max()
+        .unwrap_or(0);
     // Measured, not assumed. A glyph takes two columns and the `[S]` form of an unknown status
     // takes three, so the narrow tag column has no fixed width.
-    let abbr_width =
-        window.iter().map(|r| agents::abbr_tag(&r.status, frame).width()).max().unwrap_or(0);
+    let abbr_width = window
+        .iter()
+        .map(|r| agents::abbr_tag(r.status.as_ref(), frame).width())
+        .max()
+        .unwrap_or(0);
     let age_width =
         window.iter().map(|r| agents::format_duration(r.age).width()).max().unwrap_or(0);
     // A limit of one third of the width, set before all else. Without it the name takes the
@@ -1168,11 +1174,11 @@ fn agent_line(
     line.gap(GAP);
     // The only status in the accent colour. Every other status, including one released after
     // this code, shows as itself.
-    let tag_level = if agents::is_waiting(&row.status) { ACCENT } else { TAG };
+    let tag_level = if agents::is_waiting(row.status.as_ref()) { ACCENT } else { TAG };
     let tag = if matches!(fit, AgentFit::Full) {
-        agents::full_tag(&row.status, frame)
+        agents::full_tag(row.status.as_ref(), frame)
     } else {
-        agents::abbr_tag(&row.status, frame)
+        agents::abbr_tag(row.status.as_ref(), frame)
     };
     line.push(&tag, tag_level);
 
@@ -1221,7 +1227,7 @@ fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
 /// an empty list and no reason.
 fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
     let mut notes = Vec::new();
-    if let AgentStatus::Failed(reason) = &agents.status {
+    if let Fetch::Failed(reason) = &agents.status {
         notes.push(Note::error(truncate(reason, width)));
     }
     let outside = match agents.outside {
@@ -1235,12 +1241,12 @@ fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
 
 fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
     match &agents.status {
-        AgentStatus::Waiting => "looking for agents…".to_string(),
+        Fetch::Waiting => "looking for agents…".to_string(),
         // The reason is on the note line above. A pane this small has no space to say it
         // twice.
-        AgentStatus::Failed(_) => "no agents".to_string(),
-        AgentStatus::Ready if term.is_empty() => "no agents running".to_string(),
-        AgentStatus::Ready => format!("no match for \"{}\"", term),
+        Fetch::Failed(_) => "no agents".to_string(),
+        Fetch::Ready if term.is_empty() => "no agents running".to_string(),
+        Fetch::Ready => format!("no match for \"{}\"", term),
     }
 }
 
