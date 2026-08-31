@@ -57,7 +57,6 @@ use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{format_age, Contents, Kind, MatchSet, Row};
-use crate::Rename;
 
 /// Emphasis levels, named. See the table above.
 const TAG: usize = 0;
@@ -189,25 +188,23 @@ pub fn render_agents(
 }
 
 /// Rename the current session, which is the only session `rename_session` can address.
-pub fn render_rename(rename: &Rename, current: Option<&str>, rows: usize, cols: usize) {
+///
+/// `current` is not optional. The mode carries it, so there is no rename screen without a
+/// session to rename.
+pub fn render_rename(current: &str, input: &str, error: Option<&str>, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
 
     // The full width, not the half the list would take. This screen asks one question and has
     // nothing to preview.
     if let Some(rect) = &screen.full {
-        let notes = current
-            .map(|current| {
-                Note::dim(format!("renaming \"{}\" — the session you are in", current))
-            })
-            .into_iter()
-            .collect::<Vec<_>>();
+        let notes = vec![Note::dim(format!("renaming \"{}\" — the session you are in", current))];
         draw(rect, "Rename", "", interior(rect, &notes, Vec::new()));
     }
-    let (action, is_error) = match rename.error.as_deref() {
+    let (action, is_error) = match error {
         Some(error) => (error, true),
         None => ("Rename", false),
     };
-    draw_input(&screen, "Rename", (rename.input.clone(), Some(action.to_string()), is_error));
+    draw_input(&screen, "Rename", (input.to_string(), Some(action.to_string()), is_error));
     draw_help(
         &screen,
         keys_text(
