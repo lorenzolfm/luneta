@@ -8,7 +8,7 @@ INSTALL_DIR := $(HOME)/.local/share/zellij/plugins
 INSTALLED  := $(INSTALL_DIR)/luneta.wasm
 SESSION    ?=
 
-.PHONY: build install reload dev clean
+.PHONY: build install reload dev media clean
 
 build:
 	cargo build --release --target wasm32-wasip1
@@ -49,6 +49,15 @@ reload:
 	$(ZELLIJ_CMD) action start-or-reload-plugin file:$(INSTALLED)
 
 dev: install reload
+
+# Record the README GIFs with vhs, which drives a real terminal from a script.
+# The tapes press real keys against the installed .wasm, so what lands in a GIF is
+# the plugin and not a mock. See docs/media/README.md for what they assume.
+TAPES := $(wildcard docs/media/*.tape)
+
+media: install
+	@command -v vhs >/dev/null || { echo "vhs not found: nix shell nixpkgs#vhs"; exit 1; }
+	for tape in $(TAPES); do vhs $$tape; done
 
 clean:
 	cargo clean
