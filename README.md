@@ -24,7 +24,7 @@
 │                                        ││                                        │
 │                                        ││                                        │
 │                                        ││                                        │
-│ you are in "notes" — not listed        ││                                        │
+│   🏠 notes ─────────────────── current ││                                        │
 │   luneta                        2h ago ││   1 //! luneta: a personal zellij ses… │
 │ > dotfiles                      5h ago ││   2                                    │
 │   🪦 Dead sessions ─────────────────── ││   3 mod agents;                        │
@@ -166,8 +166,9 @@ The filter searches the **path**, because the path is what you would type at `z`
   no error overlay ever eats your next keystroke.
 - **Names are validated as you type**, in both the search box and the rename
   screen, so a name zellij would refuse never gets that far.
-- **The current session is never a row**, because you are already in it. A dim note
-  line below the list says so when your search reaches for it.
+- **The current session is never a row**, because you are already in it. It sits on
+  the first line as a banner instead, whatever you have typed: the count in the
+  border ignores it, `Up` and `Down` cannot reach it, and `Del` cannot act on it.
 - **`Del` cleans up** — kill a live session, delete a dead one, without leaving the
   picker.
 - **`Ctrl-r` renames** the session you are in.

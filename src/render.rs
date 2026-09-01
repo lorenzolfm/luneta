@@ -47,7 +47,7 @@ pub fn render_search(
     cols: usize,
 ) {
     let screen = Screen::new(rows, cols);
-    let notes = note_texts(state, error);
+    let notes = note_texts(error);
 
     if let Some(rect) = &screen.results {
         let body = search_body(state, rect, notes.len());
@@ -490,13 +490,23 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
 const MIN_PATH: usize = 12;
 
 fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
-    if state.rows.is_empty() {
-        return vec![note_line(rect, &Note::dim(empty_text(state)))];
-    }
     let inner = rect.inner_width();
-    let capacity = rect.inner_height().saturating_sub(notes);
+    let mut capacity = rect.inner_height().saturating_sub(notes);
+    let mut body = Vec::new();
+
+    if let Some(current) = state.current_session.as_deref() {
+        if capacity == 0 {
+            return body;
+        }
+        body.push(here_line(current, inner));
+        capacity -= 1;
+    }
     if capacity == 0 {
-        return Vec::new();
+        return body;
+    }
+    if state.rows.is_empty() {
+        body.push(note_line(rect, &Note::dim(empty_text(state))));
+        return body;
     }
 
     let dead_at = dead_from(&state.rows);
@@ -520,15 +530,33 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
         .unwrap_or(0);
     let name_budget = inner.saturating_sub(CARET + GAP + age_width).max(4);
 
-    (start..end)
-        .map(|line| match visible(line) {
-            None => separator(inner, "🪦 Dead sessions"),
-            Some(i) => {
-                let selected = state.rows.selected() == Some(i);
-                result_line(&state.rows[i], selected, name_budget, inner)
-            },
-        })
-        .collect()
+    body.extend((start..end).map(|line| match visible(line) {
+        None => separator(inner, "🪦 Dead sessions"),
+        Some(i) => {
+            let selected = state.rows.selected() == Some(i);
+            result_line(&state.rows[i], selected, name_budget, inner)
+        },
+    }));
+    body
+}
+
+const HERE: &str = "current";
+
+fn here_line(current: &str, inner: usize) -> Text {
+    let mut line = Line::new();
+    line.gap(CARET);
+    line.push(&truncate(&format!("🏠 {}", current), inner.saturating_sub(CARET)), NAME);
+    let room = inner.saturating_sub(line.columns());
+    if room >= HERE.width() + 3 {
+        line.gap(1);
+        line.push(&"─".repeat(room - HERE.width() - 2), TAG);
+        line.gap(1);
+        line.push(HERE, ACCENT);
+    } else if room > 1 {
+        line.gap(1);
+        line.push(&"─".repeat(room - 1), TAG);
+    }
+    line.finish(inner)
 }
 
 fn dead_from(rows: &[Row]) -> Option<usize> {
@@ -591,24 +619,21 @@ fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
     }
 }
 
-fn note_texts(state: &MatchSet, error: Option<&str>) -> Vec<Note> {
-    let mut notes = Vec::new();
-    if let Some(error) = error {
-        notes.push(Note::error(error));
+fn note_texts(error: Option<&str>) -> Vec<Note> {
+    match error {
+        Some(error) => vec![Note::error(error)],
+        None => Vec::new(),
     }
-    if state.current_matches {
-        if let Some(current) = state.current_session.as_ref() {
-            notes.push(Note::dim(format!("you are in \"{}\" — not listed", current)));
-        }
-    }
-    notes
 }
 
 fn empty_text(state: &MatchSet) -> String {
-    if state.search_term.is_empty() {
-        "no sessions".to_string()
+    if !state.search_term.is_empty() {
+        return format!("no match for \"{}\"", state.search_term);
+    }
+    if state.current_session.is_some() {
+        "no other sessions".to_string()
     } else {
-        format!("no match for \"{}\"", state.search_term)
+        "no sessions".to_string()
     }
 }
 
@@ -955,6 +980,114 @@ mod tests {
         state
     }
 
+    fn attached(rows: Vec<Row>, selected: Option<usize>, current: &str) -> MatchSet {
+        let mut state = matches(rows, selected);
+        state.current_session = Some(current.to_string());
+        state
+    }
+
+    #[test]
+    fn the_current_session_is_pinned_above_the_list() {
+        let rect = Rect { x: 0, y: 0, width: 42, height: 8 };
+        let state = attached(
+            vec![
+                session("luneta", Kind::Live, 2 * HOUR),
+                session("dotfiles", Kind::Live, 5 * HOUR),
+                session("api-spike", Kind::Resurrectable, 40 * DAY),
+            ],
+            Some(1),
+            "notes",
+        );
+        let body = search_body(&state, &rect, 0);
+        let right = count(state.rows.selected(), state.rows.len());
+        assert_eq!(
+            picture(&rect, TITLE, &right, interior(&rect, &[], body)),
+            vec![
+                "╭─ luneta ───────────────────────── 2/3 ─╮",
+                "│                                        │",
+                "│   🏠 notes ─────────────────── current │",
+                "│   luneta                        2h ago │",
+                "│ > dotfiles                      5h ago │",
+                "│   🪦 Dead sessions ─────────────────── │",
+                "│   api-spike                     5w ago │",
+                "╰────────────────────────────────────────╯",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_banner_gives_up_its_label_before_it_gives_up_the_name() {
+        let banner = |width: usize, name: &str| {
+            let rect = Rect { x: 0, y: 0, width, height: 5 };
+            search_body(&attached(Vec::new(), None, name), &rect, 0)[0].content().to_string()
+        };
+        assert_eq!(banner(24, "notes"), "   🏠 notes ─ current ");
+        assert_eq!(banner(22, "notes"), "   🏠 notes ─────── ");
+        assert_eq!(
+            banner(42, "a-very-long-session-name-indeed"),
+            "   🏠 a-very-long-session-name-indeed ─ "
+        );
+        assert_eq!(
+            banner(42, "a-very-long-session-name-indeed-and-then-some"),
+            "   🏠 a-very-long-session-name-indeed-… "
+        );
+    }
+
+    #[test]
+    fn the_only_session_left_is_the_one_you_are_in() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
+        let body = search_body(&attached(Vec::new(), None, "notes"), &rect, 0);
+        assert_eq!(
+            picture(&rect, TITLE, "", interior(&rect, &[], body)),
+            vec![
+                "╭─ luneta ───────────────────╮",
+                "│                            │",
+                "│   🏠 notes ─────── current │",
+                "│ no other sessions          │",
+                "╰────────────────────────────╯",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_banner_keeps_the_top_line_however_far_the_list_scrolls() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 7 };
+        let names: Vec<String> = (0..10).map(|i| format!("s{i}")).collect();
+        for selected in 0..10 {
+            let rows: Vec<Row> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let kind = if i < 5 { Kind::Live } else { Kind::Resurrectable };
+                    session(name, kind, HOUR)
+                })
+                .collect();
+            let body = search_body(&attached(rows, Some(selected), "notes"), &rect, 0);
+            assert_eq!(body.len(), rect.inner_height());
+            let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
+            assert!(shown[0].starts_with("   🏠 notes "), "selected {selected}: {shown:?}");
+            let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with(" > ")).collect();
+            assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
+            assert!(
+                carets[0].starts_with(&format!(" > {} ", names[selected])),
+                "selected {selected}: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_banner_takes_the_last_line_before_the_rows_do() {
+        let rect = Rect { x: 0, y: 0, width: 30, height: 3 };
+        assert_eq!(rect.inner_height(), 1);
+        let state = attached(vec![session("luneta", Kind::Live, HOUR)], Some(0), "notes");
+
+        let body = search_body(&state, &rect, 0);
+        assert_eq!(body.len(), 1);
+        assert!(body[0].content().starts_with("   🏠 notes"));
+
+        assert!(search_body(&state, &rect, 1).is_empty());
+    }
+
     fn contents(panes: usize, tab: &str, title: &str) -> Contents {
         Contents {
             panes,
@@ -1069,10 +1202,10 @@ mod tests {
     }
 
     #[test]
-    fn notes_ride_on_top_of_the_list() {
+    fn notes_ride_on_top_of_the_banner_and_the_list() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 7 };
-        let state = matches(vec![session("luneta", Kind::Live, 2 * HOUR)], Some(0));
-        let notes = vec![Note::dim("you are in \"desp\" — not listed")];
+        let state = attached(vec![session("luneta", Kind::Live, 2 * HOUR)], Some(0), "notes");
+        let notes = vec![Note::error("delete \"old\" failed")];
         let body = search_body(&state, &rect, notes.len());
         assert_eq!(
             picture(&rect, TITLE, "", interior(&rect, &notes, body)),
@@ -1080,8 +1213,8 @@ mod tests {
                 "╭─ luneta ───────────────────╮",
                 "│                            │",
                 "│                            │",
-                "│                            │",
-                "│ you are in \"desp\" — not l… │",
+                "│ delete \"old\" failed        │",
+                "│   🏠 notes ─────── current │",
                 "│ > luneta            2h ago │",
                 "╰────────────────────────────╯",
             ]
@@ -1108,20 +1241,24 @@ mod tests {
                 session("日本語版", Kind::Live, 60),
             ]
         };
+        let currents = [None, Some("notes"), Some("a-very-long-session-name-indeed")];
         for width in 10..60 {
             for height in 3..10 {
                 for notes in 0..3 {
-                    let rect = Rect { x: 0, y: 0, width, height };
-                    let state = matches(rows(), Some(1));
-                    let notes: Vec<Note> =
-                        (0..notes).map(|i| Note::dim(format!("note {i}"))).collect();
-                    let body = search_body(&state, &rect, notes.len());
-                    let interior = interior(&rect, &notes, body);
-                    assert_eq!(interior.len(), rect.inner_height(), "{width}x{height}");
-                    for line in picture(&rect, TITLE, "9/9", interior) {
-                        assert_eq!(line.width(), width, "{width}x{height}: {line}");
-                        assert!(line.chars().next().is_some_and(|c| "╭╰│".contains(c)));
-                        assert!(line.chars().last().is_some_and(|c| "╮╯│".contains(c)));
+                    for current in currents {
+                        let rect = Rect { x: 0, y: 0, width, height };
+                        let mut state = matches(rows(), Some(1));
+                        state.current_session = current.map(str::to_string);
+                        let notes: Vec<Note> =
+                            (0..notes).map(|i| Note::dim(format!("note {i}"))).collect();
+                        let body = search_body(&state, &rect, notes.len());
+                        let interior = interior(&rect, &notes, body);
+                        assert_eq!(interior.len(), rect.inner_height(), "{width}x{height}");
+                        for line in picture(&rect, TITLE, "9/9", interior) {
+                            assert_eq!(line.width(), width, "{width}x{height}: {line}");
+                            assert!(line.chars().next().is_some_and(|c| "╭╰│".contains(c)));
+                            assert!(line.chars().last().is_some_and(|c| "╮╯│".contains(c)));
+                        }
                     }
                 }
             }
@@ -1430,7 +1567,7 @@ mod tests {
             "  1 //! luneta: a personal zellij session picker.\n  2 \n  3 mod agents;\n\
              \n\"src/main.rs\" 1005L, 41k\n",
         );
-        let notes = vec![Note::dim("you are in \"notes\" — not listed")];
+        let notes: Vec<Note> = Vec::new();
         let rect = screen.results.as_ref().unwrap();
         let body = search_body(&state, rect, notes.len());
         let right = count(state.rows.selected(), state.rows.len());
