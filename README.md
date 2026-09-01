@@ -21,7 +21,7 @@ Built against **zellij 0.45.0** (`zellij-tile = "=0.45.0"`).
 │                                        ││                                        │
 │                                        ││                                        │
 │                                        ││                                        │
-│ you are in "notes" — not listed        ││                                        │
+│   🏠 notes ─────────────────── current ││                                        │
 │   luneta                        2h ago ││   1 //! luneta: a personal zellij ses… │
 │ > dotfiles                      5h ago ││   2                                    │
 │   🪦 Dead sessions ─────────────────── ││   3 mod agents;                        │
@@ -90,10 +90,11 @@ The session list follows four rules:
   groups never moves.
 - **In each group, the newest is first.** The host reports `creation_time` as an
   elapsed age in whole seconds, so equal ages are common and harmless.
-- **The current session is not in the list**, because you are in it. It is
+- **The current session is not a row in the list**, because you are in it. It is
   removed where the match set is built, not in the renderer, so the rendered list
-  is the match set and the indexes of the two cannot differ. The note line below
-  the list names the session the picker hides.
+  is the match set and the indexes of the two cannot differ. It is drawn back in
+  as the banner on the first line, which is not a row: the count in the border
+  ignores it, `Up` and `Down` cannot reach it, and `Del` cannot act on it.
 - **The second column is the age**, for both kinds of row. It is the sort key, so
   it shows that the order is deliberate.
 
@@ -295,9 +296,8 @@ in the error colour of the theme: `already attached` when the term is the curren
 session, and the reason when the name is not legal, such as
 `name cannot contain '/'`.
 
-Below the list is the note line, which is dim, never a row and never selectable.
-It says the one thing the list cannot: `you are in "despesas" — not listed`,
-whenever your search reaches for the session the list omits.
+Above the list is the note line, which is dim, never a row and never selectable.
+It carries the error of the last action that failed, and nothing else.
 
 Name validation runs in the prompt as you type, and the rename screen uses the
 same validator. The host does not validate names on this path, because

@@ -60,7 +60,6 @@ pub struct MatchSet {
     pub search_term: String,
     pub rows: Cursor<Row>,
     pub current_session: Option<String>,
-    pub current_matches: bool,
     pub contents: BTreeMap<String, Contents>,
     matcher: Option<SkimMatcherV2>,
 }
@@ -73,7 +72,6 @@ impl MatchSet {
 
     fn rebuild(&mut self, sessions: &Sessions, policy: Selection) {
         let term = self.search_term.clone();
-        self.current_matches = false;
         let held = match policy {
             Selection::SnapToTop => None,
             Selection::Hold => self.selected_name().map(str::to_owned),
@@ -106,11 +104,6 @@ impl MatchSet {
             let matcher = self
                 .matcher
                 .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
-            self.current_matches = self
-                .current_session
-                .as_deref()
-                .map(|name| matcher.fuzzy_indices(name, &term).is_some())
-                .unwrap_or(false);
             for (kind, list) in [
                 (Kind::Live, &sessions.live),
                 (Kind::Resurrectable, &sessions.dead),
