@@ -166,8 +166,9 @@ impl DirSet {
 
     /// Rebuild against the term and the latest session snapshot.
     ///
-    /// Each rebuild needs the snapshot, because the snapshot decides the [`Action`] of each
-    /// row. A session that another client creates must change a row from create to attach.
+    /// Each rebuild needs the snapshot, because the snapshot decides the name of each row
+    /// (see [`free_name`]). A session that another client creates must move the row that asked
+    /// for its name on to the next postfix.
     pub fn rebuild(
         &mut self,
         term: &str,
@@ -186,20 +187,23 @@ impl DirSet {
         if let Fetch::Ready(all) = &self.status {
             if term.is_empty() {
                 for dir in all {
-                    rows.push(DirRow::new(dir, sessions, current, 0, vec![], false));
+                    let name = free_name(&dir.name, sessions, current);
+                    rows.push(DirRow::new(dir, name, 0, vec![], false));
                 }
             } else {
                 let matcher = self
                     .matcher
                     .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
                 for dir in all {
-                    // Matched against the path, not the derived name. You remember the path,
-                    // and it is what you would type at `z`. The name comes from the path, so a
-                    // term that finds the name also finds the path.
-                    if let Some((score, indices)) = matcher.fuzzy_indices(&dir.path, term) {
-                        let is_exact = dir.name == term;
-                        rows.push(DirRow::new(dir, sessions, current, score, indices, is_exact));
-                    }
+                    let name = free_name(&dir.name, sessions, current);
+                    let Some((score, indices)) = match_dir(matcher, term, &dir.path, &name) else {
+                        continue;
+                    };
+                    // Exact on either string. A term that names the postfix is exact on the
+                    // row that carries it, and a term that names the directory stays exact on
+                    // the row whose name the snapshot moved.
+                    let is_exact = name == term || dir.name == term;
+                    rows.push(DirRow::new(dir, name, score, indices, is_exact));
                 }
             }
         }
@@ -322,22 +326,30 @@ fn cut_at<'a>(text: &'a str, marker: &str) -> &'a str {
 }
 
 impl DirRow {
-    fn new(
-        dir: &Dir,
-        sessions: &Sessions,
-        current: Option<&str>,
-        score: i64,
-        indices: Vec<usize>,
-        is_exact: bool,
-    ) -> Self {
-        DirRow {
-            path: dir.path.clone(),
-            name: free_name(&dir.name, sessions, current),
-            indices,
-            score,
-            frecency: dir.frecency,
-            is_exact,
-        }
+    fn new(dir: &Dir, name: String, score: i64, indices: Vec<usize>, is_exact: bool) -> Self {
+        DirRow { path: dir.path.clone(), name, indices, score, frecency: dir.frecency, is_exact }
+    }
+}
+
+/// Where `term` hits this row, and how well.
+///
+/// The path is the subject, because you remember the path and it is what you would type at
+/// `z`. The name comes from the path, so a term that finds the name also finds the path — with
+/// one exception, which is the whole reason this is a function: the postfix that [`free_name`]
+/// adds is on the row and in the prompt and nowhere in the path. Without the second try, the
+/// screen would show you `luneta-2` and then find nothing when you typed it.
+///
+/// The fallback highlights nothing. The indices of one string cannot be painted on another,
+/// and the path is what the row draws.
+fn match_dir(
+    matcher: &SkimMatcherV2,
+    term: &str,
+    path: &str,
+    name: &str,
+) -> Option<(i64, Vec<usize>)> {
+    match matcher.fuzzy_indices(path, term) {
+        Some((score, indices)) => Some((score, indices)),
+        None => matcher.fuzzy_match(name, term).map(|score| (score, Vec::new())),
     }
 }
 
@@ -584,6 +596,31 @@ mod tests {
         assert_eq!(free_name("other", &sessions, None), "other-2");
     }
 
+    /// The name a row shows is a term that finds it. The postfix is nowhere in the path, so
+    /// without the second try in [`match_dir`] the screen would offer `luneta-2` and then
+    /// answer an empty list when you typed it back.
+    #[test]
+    fn the_name_a_row_shows_is_a_term_that_finds_it() {
+        let mut dirs = DirSet::default();
+        dirs.ingest(Some(0), b"9268 /home/lorenzo/Projects/misc/luneta\n", b"");
+        let sessions = Sessions { live: vec![named("luneta")], dead: vec![] };
+
+        dirs.rebuild("", &sessions, None, Selection::SnapToTop);
+        let shown = dirs.selected_row().unwrap().name.clone();
+        assert_eq!(shown, "luneta-2");
+
+        // The path still finds it, and so does the name the row draws.
+        for term in ["luneta", "luneta-2"] {
+            dirs.rebuild(term, &sessions, None, Selection::SnapToTop);
+            assert_eq!(dirs.selected_row().map(|r| r.name.as_str()), Some("luneta-2"), "{term}");
+        }
+
+        // The fallback is a second try, not a second chance: a term neither string holds still
+        // matches nothing.
+        dirs.rebuild("luneta-3", &sessions, None, Selection::SnapToTop);
+        assert!(dirs.rows.is_empty());
+    }
+
     /// The current session is not in either list — the poll takes it out of `live` — and it
     /// holds its name all the same.
     #[test]
@@ -617,14 +654,23 @@ mod tests {
     }
 
     /// The cut is a character boundary, so a name of multi-byte characters stays a string.
+    ///
+    /// The base is at the limit and the byte a `-2` leaves off at is inside a character, which
+    /// is the case the walk in [`head`] exists for. A base of whole characters up to that byte
+    /// would take the early return and test nothing.
     #[test]
     fn a_long_name_is_cut_between_characters() {
-        // Three bytes each, so the limit falls inside a character.
-        let base = "の".repeat(MAX_NAME_BYTES / 3);
+        // 1 + 35 * 3 + 1 bytes, so the last `の` straddles the byte a `-2` cuts at.
+        let base = format!("a{}x", "の".repeat(35));
+        assert_eq!(base.len(), MAX_NAME_BYTES);
+        assert!(!base.is_char_boundary(MAX_NAME_BYTES - 2));
         let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
 
+        // The walk gives up the straddling character, so the name lands two bytes under the
+        // limit rather than in the middle of a `の`.
         let name = free_name(&base, &sessions, None);
-        assert!(name.ends_with("-2"));
+        assert_eq!(name, format!("a{}-2", "の".repeat(34)));
+        assert!(name.len() < MAX_NAME_BYTES);
         assert!(validate_name(&name).is_none());
     }
 

@@ -460,8 +460,8 @@ impl State {
         };
         self.matches.contents = contents;
         self.matches.refresh(&self.sessions, current);
-        // The action of a directory row comes from the session list, so it becomes stale on
-        // the same tick.
+        // The name a directory row proposes comes from the session list, so it becomes
+        // stale on the same tick.
         self.rebuild_dirs(Selection::Hold);
         // This does not ask for the agent list again. It computes which call `Enter` makes,
         // which row is our own, and the age of the snapshot. The first two come from the
@@ -647,8 +647,8 @@ impl State {
 
     /// Rebuild the directory rows against the current term and the current snapshot.
     ///
-    /// Both callers pass both inputs each time. A keystroke changes the term, and a poll changes
-    /// the actions. A row built from a stale input promises the wrong result for `Enter`.
+    /// Both callers pass both inputs each time. A keystroke changes the term, and a poll
+    /// changes the names. A row built from a stale input promises the wrong name for `Enter`.
     fn rebuild_dirs(&mut self, policy: Selection) {
         self.dirs.rebuild(
             &self.matches.search_term,
@@ -803,7 +803,7 @@ impl State {
     /// `Enter` on a directory row: one call, and always the same one.
     ///
     /// A row carries a name no session in the last snapshot answers to (see
-    /// [`dirs::free_name`]), so this is a create and the host applies the cwd. That is the
+    /// `dirs::free_name`), so this is a create and the host applies the cwd. That is the
     /// whole reason the name is postfixed: `ClientInfo::set_cwd` has no `Attach` arm, and a
     /// name that resolves to a session would take you there and drop the directory beside it
     /// on the floor.
@@ -827,8 +827,9 @@ impl State {
     /// session")` (`src/commands.rs:793`) and stops the client. An agent in our own session
     /// must therefore be a pane focus, not a session switch.
     ///
-    /// This screen thus needs no refusal. A directory row for our own session can do nothing
-    /// safely, but an agent row for our own session has a call that works.
+    /// No screen refuses a row, and the two reach that in opposite directions: an agent row
+    /// for our own session has a call that works, and a directory row steps around the name of
+    /// our own session instead of addressing it.
     fn confirm_agent(&mut self) {
         let Some(row) = self.agents.selected_row() else {
             return;

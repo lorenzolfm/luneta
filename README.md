@@ -374,6 +374,19 @@ component: in a 136-path zoxide database, nine names collided that way — `mast
 `ldk-server`. A session called `master` is *some* `master`. The row does not guess
 which, and does not address it.
 
+The filter answers to the postfix. It searches the path, because the path is what
+you remember and what you would type at `z`, and the name comes out of the path —
+except for the postfix, which is on the row and nowhere in the path. A term that
+finds neither in the path is tried against the name, so the screen can never show
+you `luneta-2` and then answer an empty list when you type it back. That second try
+highlights nothing: the hits of one string cannot be painted on another.
+
+The count does not come back down. A saved layout holds a name as firmly as a
+running session, and zellij serializes a session when it exits, so a directory you
+open every day climbs `luneta-2`, `luneta-3`, `luneta-4` until you press `Del` on
+the dead rows the session screen lists. That is the price of never handing the host
+a name it could resolve, and `Del` is where it is paid.
+
 Two rows can still propose one name, since each is computed against the snapshot
 alone. Only one of them can be pressed — the picker closes on `Enter` — and the
 next opening sees the session the first one made.

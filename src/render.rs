@@ -1390,6 +1390,7 @@ mod tests {
     }
 
     const HOUR: u64 = 3600;
+    const DAY: u64 = 24 * HOUR;
 
     /// The whole frame: the list at the bottom of its box, the age against the right border,
     /// and the separator between the two groups.
@@ -1875,15 +1876,13 @@ mod tests {
     fn print_the_screens() {
         let (rows, cols) = (16, 84);
         let screen = Screen::new(rows, cols);
-        let mut state = matches(
-            vec![
-                session("luneta", Kind::Live, 2 * 3600),
-                session("dotfiles", Kind::Live, 5 * 3600),
-                session("despesas-old", Kind::Resurrectable, 12 * 86400),
-                session("api-spike", Kind::Resurrectable, 40 * 86400),
-            ],
-            Some(1),
-        );
+        // The rows come from the snapshot through `refresh`, which is the call the poll
+        // makes, so the first picture and the third are drawn from one value and cannot drift
+        // apart. See [`snapshot`].
+        let sessions = snapshot();
+        let mut state = MatchSet::default();
+        state.refresh(&sessions, Some("notes".to_string()));
+        state.rows.move_selection(1);
         state.contents.insert("dotfiles".to_string(), contents(3, "editor", "nvim"));
         let peeks = peeked(
             "dotfiles",
@@ -1927,10 +1926,10 @@ mod tests {
 
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
-        // The same snapshot the first picture was drawn from, so the three pictures are one
+        // The same value the first picture was drawn from, so the three pictures are one
         // moment: `luneta` is live there, so the directory of that name proposes `luneta-2`
         // here.
-        dirs.rebuild("", &live(), Some("notes"), Selection::SnapToTop);
+        dirs.rebuild("", &sessions, Some("notes"), Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/lorenzo/Projects/misc/luneta".to_string(),
             Some(0),
@@ -1976,14 +1975,18 @@ mod tests {
         {"status": "idle", "status_age": 60, "cwd": "/home/lorenzo"}
     ]"#;
 
-    /// The sessions of the first picture, as the directory screen reads them: the same names,
-    /// in the two lists the poll splits them into.
-    fn live() -> Sessions {
+    /// The sessions behind the first picture and the third, in the shape the poll hands to
+    /// both screens.
+    ///
+    /// One value, because the two pictures make one claim between them: `luneta` is live in
+    /// this list, which is why the directory of that name offers `luneta-2`. Two lists would
+    /// let a later edit break that and print both halves without complaint.
+    fn snapshot() -> Sessions {
         let named =
             |name: &str, age: u64| Session { name: name.to_string(), age: Age::from_secs(age) };
         Sessions {
-            live: vec![named("luneta", 2 * 3600), named("dotfiles", 5 * 3600)],
-            dead: vec![named("despesas-old", 12 * 86400), named("api-spike", 40 * 86400)],
+            live: vec![named("luneta", 2 * HOUR), named("dotfiles", 5 * HOUR)],
+            dead: vec![named("despesas-old", 12 * DAY), named("api-spike", 40 * DAY)],
         }
     }
 

@@ -262,7 +262,7 @@ impl MatchSet {
 }
 
 /// The longest name the host accepts. `validate_session_name` refuses 108 bytes and more, and
-/// [`crate::dirs::free_name`] keeps its postfixed names inside this.
+/// `dirs::free_name` keeps its postfixed names inside this.
 pub const MAX_NAME_BYTES: usize = 107;
 
 /// Why `name` cannot be a session name, or `None` if it can.
