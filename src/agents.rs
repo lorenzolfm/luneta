@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
@@ -53,17 +51,12 @@ impl Seat {
 
 pub struct Live<'a> {
     current: Option<&'a str>,
-    panes: &'a BTreeMap<String, Vec<u32>>,
     places: &'a Places,
 }
 
 impl<'a> Live<'a> {
-    pub fn new(
-        current: Option<&'a str>,
-        panes: &'a BTreeMap<String, Vec<u32>>,
-        places: &'a Places,
-    ) -> Self {
-        Live { current, panes, places }
+    pub fn new(current: Option<&'a str>, places: &'a Places) -> Self {
+        Live { current, places }
     }
 
     fn seat(&self, session: &str) -> Seat {
@@ -74,15 +67,10 @@ impl<'a> Live<'a> {
         }
     }
 
-    fn holds(&self, session: &str, pane: u32) -> bool {
-        self.panes.get(session).is_some_and(|panes| panes.contains(&pane))
-    }
-
     fn place(&self, agent: &Agent) -> Option<Seat> {
-        if self.panes.is_empty() || self.holds(&agent.reported, agent.pane) {
-            return Some(self.seat(&agent.reported));
-        }
-        self.places.find(agent.pane, &agent.cwd).map(|session| self.seat(session))
+        self.places
+            .find(agent.pane, &agent.cwd, &agent.reported)
+            .map(|session| self.seat(session))
     }
 }
 
@@ -388,33 +376,11 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn live(sessions: &[(&str, &[u32])]) -> BTreeMap<String, Vec<u32>> {
-        sessions
-            .iter()
-            .map(|(name, panes)| (name.to_string(), panes.to_vec()))
-            .collect()
-    }
-
-    fn rows(
-        json: &str,
-        current: Option<&str>,
-        panes: &BTreeMap<String, Vec<u32>>,
-        places: &Places,
-    ) -> AgentSet {
+    fn rows(json: &str, current: Option<&str>, places: &Places) -> AgentSet {
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        agents.rebuild(
-            "",
-            &Live::new(current, panes, places),
-            None,
-            Age::ZERO,
-            Selection::SnapToTop,
-        );
+        agents.rebuild("", &Live::new(current, places), None, Age::ZERO, Selection::SnapToTop);
         agents
-    }
-
-    fn nowhere() -> BTreeMap<String, Vec<u32>> {
-        BTreeMap::new()
     }
 
     fn status(json: &str) -> Status {
@@ -424,26 +390,19 @@ mod tests {
 
     fn one(status: &str) -> String {
         format!(
-            r#"[{{"status":{},"status_age":4,"zellij":{{"session":"s","pane":"0"}}}}]"#,
+            r#"[{{"status":{},"status_age":4,"cwd":"/w/s","zellij":{{"session":"s","pane":"0"}}}}]"#,
             status
         )
     }
 
     #[test]
     fn a_failure_leaves_no_agents_behind() {
-        let panes = live(&[("s", &[0])]);
-        let places = Places::default();
-        let mut agents = rows(&one(r#""idle""#), None, &panes, &places);
+        let places = Places::of(&[("s", &[(0, "/w/s")])]);
+        let mut agents = rows(&one(r#""idle""#), None, &places);
         assert_eq!(agents.rows.len(), 1);
 
         agents.fail("claude-ps: gone");
-        agents.rebuild(
-            "",
-            &Live::new(None, &panes, &places),
-            None,
-            Age::ZERO,
-            Selection::SnapToTop,
-        );
+        agents.rebuild("", &Live::new(None, &places), None, Age::ZERO, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert!(agents.rows.selected().is_none());
     }
@@ -460,8 +419,7 @@ mod tests {
 
     #[test]
     fn a_renamed_session_takes_its_agents_with_it() {
-        let panes = live(&[("luneta", &[0, 6])]);
-        let agents = rows(TWO_IN_ONE_SESSION, Some("luneta"), &panes, &luneta_holds_both());
+        let agents = rows(TWO_IN_ONE_SESSION, Some("luneta"), &luneta_holds_both());
 
         let seats: Vec<&Seat> = agents.rows.iter().map(|row| &row.seat).collect();
         assert_eq!(seats, [&Seat::Here("luneta".to_string()); 2]);
@@ -472,13 +430,12 @@ mod tests {
 
     #[test]
     fn the_pane_you_are_in_is_dropped_by_its_pane_and_not_its_name() {
-        let panes = live(&[("luneta", &[0, 6])]);
         let places = luneta_holds_both();
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
         agents.rebuild(
             "",
-            &Live::new(Some("luneta"), &panes, &places),
+            &Live::new(Some("luneta"), &places),
             Some(0),
             Age::ZERO,
             Selection::SnapToTop,
@@ -492,79 +449,74 @@ mod tests {
         let json = r#"[{"status":"idle","status_age":4,"name":"handoff","name_source":"user",
             "cwd":"/w/luneta","zellij":{"session":"misc-luneta","pane":"0"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/w/luneta")])]);
-        let agents = rows(json, Some("luneta"), &live(&[("luneta", &[0])]), &places);
+        let agents = rows(json, Some("luneta"), &places);
         assert_eq!(agents.rows[0].display, "handoff");
         assert_eq!(agents.rows[0].seat, Seat::Here("luneta".to_string()));
     }
 
     #[test]
-    fn a_session_that_holds_the_pane_is_taken_at_its_word() {
-        let panes = live(&[("luneta", &[0]), ("ghostty", &[0])]);
+    fn a_reported_name_that_still_names_a_holder_breaks_the_tie() {
         let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/misc",
             "zellij":{"session":"ghostty","pane":"0"}}]"#;
         let places = Places::of(&[
             ("luneta", &[(0, "/w/misc")]),
             ("ghostty", &[(0, "/w/misc")]),
         ]);
-        let agents = rows(json, Some("luneta"), &panes, &places);
+        let agents = rows(json, Some("luneta"), &places);
         assert_eq!(agents.rows[0].seat, Seat::There("ghostty".to_string()));
         assert_eq!(agents.rows[0].display, "ghostty");
     }
 
     #[test]
     fn the_session_holding_the_pane_the_agent_works_in_claims_it() {
-        let panes = live(&[("luneta", &[0]), ("affiliate", &[0, 4])]);
         let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/bipa/affiliate",
             "zellij":{"session":"bipa.git","pane":"4"}}]"#;
         let places = Places::of(&[
             ("luneta", &[(0, "/w/luneta")]),
             ("affiliate", &[(0, "/w/bipa"), (4, "/w/bipa/affiliate")]),
         ]);
-        let agents = rows(json, Some("luneta"), &panes, &places);
+        let agents = rows(json, Some("luneta"), &places);
         assert_eq!(agents.rows[0].seat, Seat::There("affiliate".to_string()));
         assert_eq!(agents.rows[0].display, "affiliate");
     }
 
     #[test]
     fn a_pane_two_sessions_could_answer_for_is_left_alone() {
-        let panes = live(&[("one", &[0]), ("two", &[0])]);
         let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/repo",
             "zellij":{"session":"gone","pane":"0"}}]"#;
         let places = Places::of(&[("one", &[(0, "/w/repo")]), ("two", &[(0, "/w/repo")])]);
-        let agents = rows(json, Some("one"), &panes, &places);
+        let agents = rows(json, Some("one"), &places);
         assert!(agents.rows.is_empty());
         assert_eq!(agents.unplaced, 1);
     }
 
     #[test]
     fn an_agent_no_live_pane_answers_for_is_dropped() {
-        let panes = live(&[("luneta", &[0]), ("ghostty", &[0])]);
         let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/bipa",
             "zellij":{"session":"bipa.git","pane":"4"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/w/luneta")]), ("ghostty", &[(0, "/w/misc")])]);
-        let agents = rows(json, Some("luneta"), &panes, &places);
+        let agents = rows(json, Some("luneta"), &places);
         assert!(agents.rows.is_empty());
         assert_eq!(agents.unplaced, 1);
     }
 
     #[test]
-    fn before_the_first_poll_the_reported_session_is_all_there_is() {
+    fn before_the_first_list_panes_reply_nothing_is_placed() {
         let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/misc",
             "zellij":{"session":"ghostty","pane":"0"}}]"#;
-        let agents = rows(json, None, &nowhere(), &Places::default());
-        assert_eq!(agents.rows[0].seat, Seat::There("ghostty".to_string()));
-        assert_eq!(agents.unplaced, 0);
+        let agents = rows(json, None, &Places::default());
+        assert!(agents.rows.is_empty());
+        assert_eq!(agents.unplaced, 1);
     }
 
     #[test]
     fn the_search_asks_the_name_the_session_goes_by_now() {
-        let panes = live(&[("luneta", &[0, 6])]);
         let places = luneta_holds_both();
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
         agents.rebuild(
             "luneta",
-            &Live::new(Some("luneta"), &panes, &places),
+            &Live::new(Some("luneta"), &places),
             None,
             Age::ZERO,
             Selection::SnapToTop,
@@ -572,7 +524,7 @@ mod tests {
         assert_eq!(agents.rows.len(), 2);
         agents.rebuild(
             "misc",
-            &Live::new(Some("luneta"), &panes, &places),
+            &Live::new(Some("luneta"), &places),
             None,
             Age::ZERO,
             Selection::SnapToTop,

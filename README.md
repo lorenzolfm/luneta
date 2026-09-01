@@ -298,12 +298,14 @@ An agent that has not been given a name goes by the name of the session it sits 
 plus its pane, if another agent in the same session would answer to the same name.
 That is the name the session goes by **now**. An agent reports the session it
 started in — the old name, after a rename, and nothing can correct it, because the
-name lives in the environment of a process that is already running. So luneta only
-takes that name at its word when a live session by that name still holds the pane;
-otherwise it asks every live session which panes it has, and takes the one session
-holding a pane with that id and the directory the agent works in. An agent no live
-pane answers for is left out of the list and counted in a note under it, rather than
-offering you a jump to a session that no longer exists.
+name lives in the environment of a process that is already running. So luneta never
+uses that name as an address. It asks every live session which panes it has, and
+takes the one session holding a pane with the agent's pane id and the directory the
+agent works in. Only when several sessions could answer for that pane does the
+reported name get a say, as a tiebreaker: the holder it names wins, and failing
+that, the holder whose pane is running claude. An agent no live pane answers for is
+left out of the list and counted in a note under it, rather than offering you a jump
+to a session that no longer exists.
 
 The list is snapshotted when the screen opens, so no row moves while you read it.
 The ages keep climbing. The agent you opened the picker from is not listed; another

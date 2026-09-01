@@ -925,9 +925,6 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
 
 #[cfg(test)]
 mod tests {
-
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::cursor::Cursor;
     use crate::places::Places;
@@ -1403,11 +1400,10 @@ mod tests {
             "zellij":{"session":"bipa.git","pane":"4"}},
             {"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
              "zellij":{"session":"luneta","pane":"0"}}]"#;
-        let panes = BTreeMap::from([("luneta".to_string(), vec![0])]);
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = agents::Live::new(Some("luneta"), &panes, &places);
+        let live = agents::Live::new(Some("luneta"), &places);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
         assert_eq!(agents.rows.len(), 1);
@@ -1451,13 +1447,12 @@ mod tests {
 
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), AGENTS.as_bytes(), b"");
-        let panes = BTreeMap::from([
-            ("misc".to_string(), vec![12]),
-            ("bipa".to_string(), vec![3]),
-            ("notes".to_string(), vec![7]),
+        let places = Places::of(&[
+            ("misc", &[(12, "/home/lorenzo/Projects/misc/luneta")]),
+            ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
+            ("notes", &[(7, "/home/lorenzo/Documents")]),
         ]);
-        let places = Places::default();
-        let live = agents::Live::new(Some("notes"), &panes, &places);
+        let live = agents::Live::new(Some("notes"), &places);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));

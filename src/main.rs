@@ -91,7 +91,7 @@ struct State {
     agents: AgentSet,
     agents_command: Option<String>,
     panes: Option<PaneManifest>,
-    live_panes: BTreeMap<String, Vec<u32>>,
+    live_names: Vec<String>,
     places: Places,
     active_tab: Option<usize>,
     sessions: Sessions,
@@ -276,10 +276,10 @@ impl State {
             .find(|s| s.is_current_session)
             .map(|s| s.name.clone());
         let mut contents = BTreeMap::new();
-        let mut live_panes = BTreeMap::new();
+        let mut live_names = Vec::new();
         let mut live = Vec::new();
         for session in snapshot.live_sessions {
-            live_panes.insert(session.name.clone(), terminal_panes(&session.panes));
+            live_names.push(session.name.clone());
             if session.is_current_session {
                 continue;
             }
@@ -288,7 +288,7 @@ impl State {
             contents.insert(name.clone(), contents_of(session));
             live.push(Session { name, age });
         }
-        self.live_panes = live_panes;
+        self.live_names = live_names;
         self.sessions = Sessions {
             live,
             dead: snapshot
@@ -324,11 +324,7 @@ impl State {
     fn rebuild_agents(&mut self, policy: Selection) {
         let origin = self.origin_pane();
         let since = self.agents_since();
-        let live = Live::new(
-            self.matches.current_session.as_deref(),
-            &self.live_panes,
-            &self.places,
-        );
+        let live = Live::new(self.matches.current_session.as_deref(), &self.places);
         self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
     }
 
@@ -337,8 +333,7 @@ impl State {
     }
 
     fn ask_places(&mut self) {
-        let live: Vec<String> = self.live_panes.keys().cloned().collect();
-        for session in self.places.ask(&live) {
+        for session in self.places.ask(&self.live_names) {
             run_command(
                 &places::query(&session),
                 BTreeMap::from([
@@ -674,16 +669,6 @@ fn contents_of(session: SessionInfo) -> Contents {
         }
     }
     Contents { panes: total, focus }
-}
-
-fn terminal_panes(manifest: &PaneManifest) -> Vec<u32> {
-    manifest
-        .panes
-        .values()
-        .flatten()
-        .filter(|pane| pane.is_selectable && !pane.is_suppressed && !pane.is_plugin)
-        .map(|pane| pane.id)
-        .collect()
 }
 
 fn resize_self(plugin_id: u32) {
