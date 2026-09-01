@@ -828,6 +828,9 @@ fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
         Fetch::Failed(reason) => vec![Note::error(truncate(reason, width))],
         _ => Vec::new(),
     };
+    if let Some(trouble) = &agents.trouble {
+        notes.push(Note::error(truncate(trouble, width)));
+    }
     if agents.unplaced > 0 {
         notes.push(Note::dim(truncate(&unplaced_text(agents.unplaced), width)));
     }
@@ -845,6 +848,9 @@ fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
     match &agents.status {
         Fetch::Waiting => "looking for agents…".to_string(),
         Fetch::Failed(_) => "no agents".to_string(),
+        Fetch::Ready(all) if !all.is_empty() && agents.unplaced == all.len() => {
+            "no agent sits in a pane luneta can find".to_string()
+        },
         Fetch::Ready(_) if term.is_empty() => "no agents running".to_string(),
         Fetch::Ready(_) => format!("no match for \"{}\"", term),
     }
@@ -1412,6 +1418,45 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].text, "1 agent sits in a pane luneta cannot find");
         assert!(!notes[0].error);
+    }
+
+    #[test]
+    fn a_topology_luneta_could_not_read_says_so_where_the_rows_would_be() {
+        let json = r#"[{"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
+            "zellij":{"session":"luneta","pane":"0"}}]"#;
+        let mut places = Places::default();
+        places.ask(&["luneta".to_string()]);
+        places.ingest("luneta".to_string(), Some(1), b"", b"zellij: no session luneta\n");
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = agents::Live::new(Some("luneta"), &places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+
+        assert!(agents.rows.is_empty());
+        assert_eq!(agent_empty_text(&agents, ""), "no agent sits in a pane luneta can find");
+        let notes = agent_note_texts(&agents, 80);
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, "zellij: no session luneta");
+        assert!(notes[0].error);
+        assert_eq!(notes[1].text, "1 agent sits in a pane luneta cannot find");
+        assert!(!notes[1].error);
+    }
+
+    #[test]
+    fn a_partial_drop_still_answers_for_the_term_that_emptied_the_list() {
+        let json = r#"[{"status":"waiting","status_age":60,"cwd":"/home/lorenzo/Projects/misc",
+            "zellij":{"session":"bipa.git","pane":"4"}},
+            {"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
+             "zellij":{"session":"luneta","pane":"0"}}]"#;
+        let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = agents::Live::new(Some("luneta"), &places);
+        agents.rebuild("zzz", &live, None, Age::ZERO, Selection::SnapToTop);
+
+        assert!(agents.rows.is_empty());
+        assert_eq!(agents.unplaced, 1);
+        assert_eq!(agent_empty_text(&agents, "zzz"), "no match for \"zzz\"");
     }
 
     #[test]

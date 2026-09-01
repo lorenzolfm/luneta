@@ -67,6 +67,10 @@ impl<'a> Live<'a> {
         }
     }
 
+    fn trouble(&self) -> Option<String> {
+        self.places.trouble()
+    }
+
     fn place(&self, agent: &Agent) -> Option<Seat> {
         self.places
             .find(agent.pane, &agent.cwd, &agent.reported)
@@ -181,6 +185,7 @@ pub struct AgentSet {
     pub rows: Cursor<AgentRow>,
     pub asking: bool,
     pub unplaced: usize,
+    pub trouble: Option<String>,
     matcher: Option<SkimMatcherV2>,
 }
 
@@ -277,6 +282,10 @@ impl AgentSet {
 
         mark_shared(&mut rows);
         self.unplaced = unplaced;
+        self.trouble = match unplaced {
+            0 => None,
+            _ => live.trouble(),
+        };
 
         self.rows.replace(rows, |row| {
             held.as_ref()
@@ -530,6 +539,31 @@ mod tests {
             Selection::SnapToTop,
         );
         assert!(agents.rows.is_empty());
+    }
+
+    #[test]
+    fn a_session_luneta_could_not_read_is_only_reported_when_it_cost_an_agent() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/luneta",
+            "zellij":{"session":"luneta","pane":"0"}}]"#;
+        let mut places = Places::of(&[("luneta", &[(0, "/w/luneta")])]);
+        places.ask(&["luneta".to_string(), "ghostty".to_string()]);
+        places.ingest("ghostty".to_string(), Some(1), b"", b"zellij: no session ghostty\n");
+        let agents = rows(json, Some("luneta"), &places);
+        assert_eq!(agents.rows.len(), 1);
+        assert_eq!(agents.unplaced, 0);
+        assert_eq!(agents.trouble, None);
+    }
+
+    #[test]
+    fn the_failure_that_lost_an_agent_is_carried_next_to_the_count() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/misc",
+            "zellij":{"session":"ghostty","pane":"0"}}]"#;
+        let mut places = Places::default();
+        places.ask(&["ghostty".to_string()]);
+        places.ingest("ghostty".to_string(), Some(1), b"", b"zellij: no session ghostty\n");
+        let agents = rows(json, Some("luneta"), &places);
+        assert_eq!(agents.unplaced, 1);
+        assert_eq!(agents.trouble.as_deref(), Some("zellij: no session ghostty"));
     }
 
     #[test]

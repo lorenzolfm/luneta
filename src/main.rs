@@ -136,6 +136,7 @@ impl ZellijPlugin for State {
                     rename_plugin_pane(plugin_id, "luneta");
                     resize_self(plugin_id);
                     self.ask_zoxide();
+                    self.poll();
                     self.ask_agents();
                 } else {
                     self.dirs.fail("permission denied");
@@ -180,7 +181,7 @@ impl ZellijPlugin for State {
                     Some(places::CONTEXT_VALUE) => {
                         match context.get(places::SESSION_KEY) {
                             Some(session) => {
-                                self.places.ingest(session.clone(), exit_code, &stdout);
+                                self.places.ingest(session.clone(), exit_code, &stdout, &stderr);
                                 self.rebuild_agents(Selection::Hold);
                                 true
                             },

@@ -30,11 +30,16 @@ struct Pane {
     claude: bool,
 }
 
+enum Reply {
+    Panes(Vec<Pane>),
+    Failed(String),
+}
+
 const MARK: char = '✳';
 
 #[derive(Default)]
 pub struct Places {
-    sessions: BTreeMap<String, Vec<Pane>>,
+    sessions: BTreeMap<String, Reply>,
     asked: Option<Vec<String>>,
 }
 
@@ -48,12 +53,33 @@ impl Places {
         live.to_vec()
     }
 
-    pub fn ingest(&mut self, session: String, exit_code: Option<i32>, stdout: &[u8]) {
-        let panes = match exit_code {
-            Some(0) => parse(&String::from_utf8_lossy(stdout)),
-            _ => Vec::new(),
+    pub fn ingest(
+        &mut self,
+        session: String,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) {
+        if !self.asked.as_ref().is_some_and(|asked| asked.contains(&session)) {
+            return;
+        }
+        let reply = match exit_code {
+            Some(0) => Reply::Panes(parse(&String::from_utf8_lossy(stdout))),
+            _ => Reply::Failed(reason(&session, stderr)),
         };
-        self.sessions.insert(session, panes);
+        self.sessions.insert(session, reply);
+    }
+
+    pub fn trouble(&self) -> Option<String> {
+        let mut failed = self.sessions.values().filter_map(|reply| match reply {
+            Reply::Failed(reason) => Some(reason.as_str()),
+            Reply::Panes(_) => None,
+        });
+        let first = failed.next()?;
+        match failed.count() {
+            0 => Some(first.to_string()),
+            rest => Some(format!("{} sessions could not be read: {}", rest + 1, first)),
+        }
     }
 
     pub fn forget(&mut self) {
@@ -67,6 +93,10 @@ impl Places {
         let held: Vec<(&str, bool)> = self
             .sessions
             .iter()
+            .filter_map(|(name, reply)| match reply {
+                Reply::Panes(panes) => Some((name, panes)),
+                Reply::Failed(_) => None,
+            })
             .filter_map(|(name, panes)| {
                 panes
                     .iter()
@@ -85,6 +115,15 @@ impl Places {
             (Some((name, _)), None) => Some(name),
             _ => None,
         }
+    }
+}
+
+fn reason(session: &str, stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().next().unwrap_or("").trim();
+    match line.is_empty() {
+        true => format!("the panes of {} could not be read", session),
+        false => line.to_string(),
     }
 }
 
@@ -111,6 +150,7 @@ fn is_claude(command: Option<&str>, title: Option<&str>) -> bool {
 impl Places {
     pub fn of(sessions: &[(&str, &[(u32, &str)])]) -> Self {
         Places {
+            asked: Some(sessions.iter().map(|(name, _)| name.to_string()).collect()),
             sessions: sessions
                 .iter()
                 .map(|(name, panes)| {
@@ -118,10 +158,9 @@ impl Places {
                         .iter()
                         .map(|(id, cwd)| Pane { id: *id, cwd: cwd.to_string(), claude: true })
                         .collect();
-                    (name.to_string(), panes)
+                    (name.to_string(), Reply::Panes(panes))
                 })
                 .collect(),
-            asked: None,
         }
     }
 }
@@ -129,6 +168,15 @@ impl Places {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn asked(sessions: &[(&str, &[u8])]) -> Places {
+        let mut places = Places::default();
+        places.ask(&sessions.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>());
+        for (name, stdout) in sessions {
+            places.ingest(name.to_string(), Some(0), stdout, b"");
+        }
+        places
+    }
 
     const GHOSTTY: &str = r#"[
         {"id":0,"is_plugin":true,"is_selectable":false,"is_suppressed":false,
@@ -141,9 +189,7 @@ mod tests {
          "pane_command":"/run/current-system/sw/bin/fish"}]"#;
 
     fn ghostty() -> Places {
-        let mut places = Places::default();
-        places.ingest("ghostty".to_string(), Some(0), GHOSTTY.as_bytes());
-        places
+        asked(&[("ghostty", GHOSTTY.as_bytes())])
     }
 
     #[test]
@@ -159,17 +205,16 @@ mod tests {
     fn a_plugin_pane_never_answers_for_a_terminal_of_the_same_id() {
         let places = ghostty();
         assert_eq!(places.find(0, "", ""), None);
-        assert_eq!(places.sessions["ghostty"].len(), 2);
+        match &places.sessions["ghostty"] {
+            Reply::Panes(panes) => assert_eq!(panes.len(), 2),
+            Reply::Failed(reason) => panic!("{}", reason),
+        }
     }
 
     #[test]
     fn an_agent_with_no_cwd_is_not_guessed_at() {
-        let mut places = Places::default();
-        places.ingest(
-            "s".to_string(),
-            Some(0),
-            br#"[{"id":0,"is_plugin":false,"pane_cwd":"","pane_command":"claude"}]"#,
-        );
+        let places =
+            asked(&[("s", br#"[{"id":0,"is_plugin":false,"pane_cwd":"","pane_command":"claude"}]"#)]);
         assert_eq!(places.find(0, "", ""), None);
     }
 
@@ -181,39 +226,31 @@ mod tests {
 
     #[test]
     fn the_pane_that_runs_claude_wins_a_tie() {
-        let mut places = Places::default();
-        places.ingest(
-            "shell".to_string(),
-            Some(0),
-            br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
-                 "title":"~/w/repo"}]"#,
-        );
-        places.ingest(
-            "agent".to_string(),
-            Some(0),
-            r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"claude",
+        let places = asked(&[
+            ("shell", br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
+                 "title":"~/w/repo"}]"#),
+            (
+                "agent",
+                r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"claude",
                  "title":"✳ Claude Code"}]"#
-                .as_bytes(),
-        );
+                    .as_bytes(),
+            ),
+        ]);
         assert_eq!(places.find(0, "/w/repo", ""), Some("agent"));
     }
 
     #[test]
     fn a_claude_started_inside_a_shell_is_known_by_its_title() {
-        let mut places = Places::default();
-        places.ingest(
-            "shell".to_string(),
-            Some(0),
-            br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
-                 "title":"~/w/repo"}]"#,
-        );
-        places.ingest(
-            "agent".to_string(),
-            Some(0),
-            r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
+        let places = asked(&[
+            ("shell", br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
+                 "title":"~/w/repo"}]"#),
+            (
+                "agent",
+                r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
                  "title":"✳ Claude Code"}]"#
-                .as_bytes(),
-        );
+                    .as_bytes(),
+            ),
+        ]);
         assert_eq!(places.find(0, "/w/repo", ""), Some("agent"));
     }
 
@@ -226,20 +263,16 @@ mod tests {
 
     #[test]
     fn a_name_that_still_holds_the_pane_outranks_the_claude_guess() {
-        let mut places = Places::default();
-        places.ingest(
-            "shell".to_string(),
-            Some(0),
-            br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
-                 "title":"~/w/repo"}]"#,
-        );
-        places.ingest(
-            "agent".to_string(),
-            Some(0),
-            r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"claude",
+        let places = asked(&[
+            ("shell", br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
+                 "title":"~/w/repo"}]"#),
+            (
+                "agent",
+                r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"claude",
                  "title":"✳ Claude Code"}]"#
-                .as_bytes(),
-        );
+                    .as_bytes(),
+            ),
+        ]);
         assert_eq!(places.find(0, "/w/repo", "shell"), Some("shell"));
     }
 
@@ -250,10 +283,48 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_could_not_be_read_holds_nothing() {
+    fn a_session_that_could_not_be_read_holds_nothing_and_says_why() {
         let mut places = ghostty();
-        places.ingest("ghostty".to_string(), Some(1), b"");
+        places.ingest("ghostty".to_string(), Some(1), b"", b"zellij: no session ghostty\n");
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), None);
+        assert_eq!(places.trouble().as_deref(), Some("zellij: no session ghostty"));
+    }
+
+    #[test]
+    fn a_session_that_answered_is_not_a_session_that_could_not_be_read() {
+        assert_eq!(ghostty().trouble(), None);
+        assert_eq!(Places::default().trouble(), None);
+    }
+
+    #[test]
+    fn a_failure_that_said_nothing_still_names_the_session_it_lost() {
+        let mut places = Places::default();
+        places.ask(&["misc".to_string()]);
+        places.ingest("misc".to_string(), None, b"", b"");
+        assert_eq!(places.trouble().as_deref(), Some("the panes of misc could not be read"));
+    }
+
+    #[test]
+    fn a_failure_that_took_every_session_is_counted_once() {
+        let mut places = Places::default();
+        places.ask(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        for session in ["a", "b", "c"] {
+            places.ingest(session.to_string(), Some(127), b"", b"zellij: command not found\n");
+        }
+        assert_eq!(
+            places.trouble().as_deref(),
+            Some("3 sessions could not be read: zellij: command not found")
+        );
+    }
+
+    #[test]
+    fn a_reply_that_outlived_the_session_it_names_is_dropped() {
+        let mut places = Places::default();
+        assert_eq!(places.ask(&["ghostty".to_string()]), ["ghostty"]);
+        assert_eq!(places.ask(&["luneta".to_string()]), ["luneta"]);
+        places.ingest("ghostty".to_string(), Some(0), GHOSTTY.as_bytes(), b"");
+        assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", "ghostty"), None);
+        assert_eq!(places.trouble(), None);
     }
 
     #[test]
@@ -269,7 +340,6 @@ mod tests {
     #[test]
     fn a_session_that_is_gone_is_forgotten_when_the_rest_are_asked_again() {
         let mut places = ghostty();
-        assert_eq!(places.ask(&["ghostty".to_string()]), ["ghostty"]);
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), Some("ghostty"));
         assert_eq!(places.ask(&["luneta".to_string()]), ["luneta"]);
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), None);
