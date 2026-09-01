@@ -27,7 +27,7 @@
 │   🏠 notes ─────────────────── current ││                                        │
 │   luneta                        2h ago ││   1 //! luneta: a personal zellij ses… │
 │ > dotfiles                      5h ago ││   2                                    │
-│   🪦 Dead sessions ─────────────────── ││   3 mod agents;                        │
+│   ─────────────────── 🪦 Dead sessions ││   3 mod agents;                        │
 │   despesas-old                  1w ago ││                                        │
 │   api-spike                     5w ago ││ "src/main.rs" 1005L, 41k               │
 ╰────────────────────────────────────────╯╰────────────────────────────────────────╯

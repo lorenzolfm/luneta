@@ -566,11 +566,13 @@ fn dead_from(rows: &[Row]) -> Option<usize> {
 fn separator(inner: usize, label: &str) -> Text {
     let mut line = Line::new();
     line.gap(CARET);
-    line.push(&truncate(label, inner.saturating_sub(CARET)), LABEL);
-    if line.columns() < inner {
+    let label = truncate(label, inner.saturating_sub(CARET));
+    let room = inner.saturating_sub(line.columns());
+    if room >= label.width() + 2 {
+        line.push(&"─".repeat(room - label.width() - 1), TAG);
         line.gap(1);
-        line.push(&"─".repeat(inner - line.columns()), TAG);
     }
+    line.push(&label, LABEL);
     line.finish(inner)
 }
 
@@ -1008,7 +1010,7 @@ mod tests {
                 "│   🏠 notes ─────────────────── current │",
                 "│   luneta                        2h ago │",
                 "│ > dotfiles                      5h ago │",
-                "│   🪦 Dead sessions ─────────────────── │",
+                "│   ─────────────────── 🪦 Dead sessions │",
                 "│   api-spike                     5w ago │",
                 "╰────────────────────────────────────────╯",
             ]
@@ -1128,7 +1130,7 @@ mod tests {
                 "│                            │",
                 "│                            │",
                 "│ > luneta            2h ago │",
-                "│   🪦 Dead sessions ─────── │",
+                "│   ─────── 🪦 Dead sessions │",
                 "│   old               3h ago │",
                 "╰────────────────────────────╯",
             ]
@@ -1155,7 +1157,7 @@ mod tests {
         let state = matches(vec![session("old", Kind::Resurrectable, HOUR)], Some(0));
         let body = search_body(&state, &rect, 0);
         assert_eq!(body.len(), 2);
-        assert!(body[0].content().starts_with("   🪦 Dead sessions"));
+        assert!(body[0].content().trim_end().ends_with("🪦 Dead sessions"));
         assert!(body[1].content().starts_with(" > old"));
     }
 
