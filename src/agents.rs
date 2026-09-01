@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::cursor::Cursor;
 use crate::elapsed::{Age, Held};
 use crate::fetch::Fetch;
+use crate::places::Places;
 use crate::sessions::Selection;
 
 pub const QUERY: [&str; 1] = ["claude-ps"];
@@ -34,15 +35,48 @@ struct WireZellij {
     pane: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Jump {
-    Switch,
-    Focus,
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Seat {
+    Here(String),
+    There(String),
+}
+
+impl Seat {
+    pub fn session(&self) -> &str {
+        match self {
+            Seat::Here(session) | Seat::There(session) => session,
+        }
+    }
+}
+
+pub struct Live<'a> {
+    current: Option<&'a str>,
+    places: &'a Places,
+}
+
+impl<'a> Live<'a> {
+    pub fn new(current: Option<&'a str>, places: &'a Places) -> Self {
+        Live { current, places }
+    }
+
+    fn seat(&self, session: &str) -> Seat {
+        if self.current == Some(session) {
+            Seat::Here(session.to_string())
+        } else {
+            Seat::There(session.to_string())
+        }
+    }
+
+    fn place(&self, agent: &Agent) -> Option<Seat> {
+        self.places
+            .find(agent.pane, &agent.cwd, &agent.reported)
+            .map(|session| self.seat(session))
+    }
 }
 
 pub struct Agent {
-    session: String,
-    display: String,
+    reported: String,
+    name: Option<String>,
     pane: u32,
     status: Status,
     age: Held,
@@ -50,14 +84,14 @@ pub struct Agent {
 }
 
 pub struct AgentRow {
-    pub session: String,
+    reported: String,
+    pub seat: Seat,
     pub display: String,
     pub pane: u32,
     pub status: Status,
     pub age: Held,
     pub cwd: String,
     pub shared: bool,
-    pub jump: Jump,
     pub indices: Vec<usize>,
     rank: u8,
     score: i64,
@@ -146,6 +180,7 @@ pub struct AgentSet {
     pub status: Fetch<Vec<Agent>>,
     pub rows: Cursor<AgentRow>,
     pub asking: bool,
+    pub unplaced: usize,
     matcher: Option<SkimMatcherV2>,
 }
 
@@ -178,16 +213,17 @@ impl AgentSet {
     pub fn rebuild(
         &mut self,
         term: &str,
-        current: Option<&str>,
-        origin: Option<(&str, u32)>,
+        live: &Live,
+        origin: Option<u32>,
         since: Age,
         policy: Selection,
     ) {
         let held = match policy {
             Selection::SnapToTop => None,
-            Selection::Hold => self.selected_row().map(|r| (r.session.clone(), r.pane)),
+            Selection::Hold => self.selected_row().map(|r| (r.reported.clone(), r.pane)),
         };
         let mut rows: Vec<AgentRow> = Vec::new();
+        let mut unplaced = 0;
 
         if let Fetch::Ready(all) = &self.status {
             let matcher = self
@@ -195,30 +231,34 @@ impl AgentSet {
                 .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
 
             for agent in all {
-                if origin == Some((agent.session.as_str(), agent.pane)) {
+                let Some(seat) = live.place(agent) else {
+                    unplaced += 1;
+                    continue;
+                };
+                if matches!(seat, Seat::Here(_)) && origin == Some(agent.pane) {
                     continue;
                 }
+                let display = agent
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| seat.session().to_string());
                 let (score, indices, is_exact) = if term.is_empty() {
                     (0, Vec::new(), false)
                 } else {
-                    match matcher.fuzzy_indices(&agent.display, term) {
-                        Some((score, indices)) => (score, indices, agent.display == term),
+                    match matcher.fuzzy_indices(&display, term) {
+                        Some((score, indices)) => (score, indices, display == term),
                         None => continue,
                     }
                 };
                 rows.push(AgentRow {
-                    session: agent.session.clone(),
-                    display: agent.display.clone(),
+                    reported: agent.reported.clone(),
+                    seat,
+                    display,
                     pane: agent.pane,
                     status: agent.status.clone(),
                     age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
                     shared: false,
-                    jump: if current == Some(agent.session.as_str()) {
-                        Jump::Focus
-                    } else {
-                        Jump::Switch
-                    },
                     indices,
                     rank: status_rank(&agent.status),
                     score,
@@ -236,10 +276,11 @@ impl AgentSet {
         });
 
         mark_shared(&mut rows);
+        self.unplaced = unplaced;
 
         self.rows.replace(rows, |row| {
             held.as_ref()
-                .is_some_and(|(session, pane)| row.session == *session && row.pane == *pane)
+                .is_some_and(|(reported, pane)| row.reported == *reported && row.pane == *pane)
         });
     }
 
@@ -308,11 +349,9 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
         if zellij.session.is_empty() {
             continue;
         }
-        let display = chosen_name(row.name.as_deref(), row.name_source.as_deref())
-            .unwrap_or_else(|| zellij.session.clone());
         agents.push(Agent {
-            session: zellij.session,
-            display,
+            reported: zellij.session,
+            name: chosen_name(row.name.as_deref(), row.name_source.as_deref()),
             pane,
             status: Status::parse(row.status.as_deref()),
             age: Held::from_secs(row.status_age),
@@ -337,6 +376,13 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn rows(json: &str, current: Option<&str>, places: &Places) -> AgentSet {
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.rebuild("", &Live::new(current, places), None, Age::ZERO, Selection::SnapToTop);
+        agents
+    }
+
     fn status(json: &str) -> Status {
         let agents = parse(json).expect("the document should parse");
         agents.into_iter().next().expect("one agent").status
@@ -344,22 +390,146 @@ mod tests {
 
     fn one(status: &str) -> String {
         format!(
-            r#"[{{"status":{},"status_age":4,"zellij":{{"session":"s","pane":"0"}}}}]"#,
+            r#"[{{"status":{},"status_age":4,"cwd":"/w/s","zellij":{{"session":"s","pane":"0"}}}}]"#,
             status
         )
     }
 
     #[test]
     fn a_failure_leaves_no_agents_behind() {
-        let mut agents = AgentSet::default();
-        agents.ingest(Some(0), one(r#""idle""#).as_bytes(), b"");
-        agents.rebuild("", None, None, Age::ZERO, Selection::SnapToTop);
+        let places = Places::of(&[("s", &[(0, "/w/s")])]);
+        let mut agents = rows(&one(r#""idle""#), None, &places);
         assert_eq!(agents.rows.len(), 1);
 
         agents.fail("claude-ps: gone");
-        agents.rebuild("", None, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &Live::new(None, &places), None, Age::ZERO, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert!(agents.rows.selected().is_none());
+    }
+
+    const TWO_IN_ONE_SESSION: &str = r#"[
+        {"status":"idle","status_age":4,"cwd":"/w/luneta",
+         "zellij":{"session":"misc-luneta","pane":"0"}},
+        {"status":"idle","status_age":4,"cwd":"/w/luneta",
+         "zellij":{"session":"luneta","pane":"6"}}]"#;
+
+    fn luneta_holds_both() -> Places {
+        Places::of(&[("luneta", &[(0, "/w/luneta"), (6, "/w/luneta")])])
+    }
+
+    #[test]
+    fn a_renamed_session_takes_its_agents_with_it() {
+        let agents = rows(TWO_IN_ONE_SESSION, Some("luneta"), &luneta_holds_both());
+
+        let seats: Vec<&Seat> = agents.rows.iter().map(|row| &row.seat).collect();
+        assert_eq!(seats, [&Seat::Here("luneta".to_string()); 2]);
+        let labels: Vec<String> = agents.rows.iter().map(|row| row.label()).collect();
+        assert_eq!(labels, ["luneta:0", "luneta:6"]);
+        assert_eq!(agents.unplaced, 0);
+    }
+
+    #[test]
+    fn the_pane_you_are_in_is_dropped_by_its_pane_and_not_its_name() {
+        let places = luneta_holds_both();
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
+        agents.rebuild(
+            "",
+            &Live::new(Some("luneta"), &places),
+            Some(0),
+            Age::ZERO,
+            Selection::SnapToTop,
+        );
+        assert_eq!(agents.rows.len(), 1);
+        assert_eq!(agents.rows[0].pane, 6);
+    }
+
+    #[test]
+    fn a_name_the_user_chose_outlives_a_rename() {
+        let json = r#"[{"status":"idle","status_age":4,"name":"handoff","name_source":"user",
+            "cwd":"/w/luneta","zellij":{"session":"misc-luneta","pane":"0"}}]"#;
+        let places = Places::of(&[("luneta", &[(0, "/w/luneta")])]);
+        let agents = rows(json, Some("luneta"), &places);
+        assert_eq!(agents.rows[0].display, "handoff");
+        assert_eq!(agents.rows[0].seat, Seat::Here("luneta".to_string()));
+    }
+
+    #[test]
+    fn a_reported_name_that_still_names_a_holder_breaks_the_tie() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/misc",
+            "zellij":{"session":"ghostty","pane":"0"}}]"#;
+        let places = Places::of(&[
+            ("luneta", &[(0, "/w/misc")]),
+            ("ghostty", &[(0, "/w/misc")]),
+        ]);
+        let agents = rows(json, Some("luneta"), &places);
+        assert_eq!(agents.rows[0].seat, Seat::There("ghostty".to_string()));
+        assert_eq!(agents.rows[0].display, "ghostty");
+    }
+
+    #[test]
+    fn the_session_holding_the_pane_the_agent_works_in_claims_it() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/bipa/affiliate",
+            "zellij":{"session":"bipa.git","pane":"4"}}]"#;
+        let places = Places::of(&[
+            ("luneta", &[(0, "/w/luneta")]),
+            ("affiliate", &[(0, "/w/bipa"), (4, "/w/bipa/affiliate")]),
+        ]);
+        let agents = rows(json, Some("luneta"), &places);
+        assert_eq!(agents.rows[0].seat, Seat::There("affiliate".to_string()));
+        assert_eq!(agents.rows[0].display, "affiliate");
+    }
+
+    #[test]
+    fn a_pane_two_sessions_could_answer_for_is_left_alone() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/repo",
+            "zellij":{"session":"gone","pane":"0"}}]"#;
+        let places = Places::of(&[("one", &[(0, "/w/repo")]), ("two", &[(0, "/w/repo")])]);
+        let agents = rows(json, Some("one"), &places);
+        assert!(agents.rows.is_empty());
+        assert_eq!(agents.unplaced, 1);
+    }
+
+    #[test]
+    fn an_agent_no_live_pane_answers_for_is_dropped() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/bipa",
+            "zellij":{"session":"bipa.git","pane":"4"}}]"#;
+        let places = Places::of(&[("luneta", &[(0, "/w/luneta")]), ("ghostty", &[(0, "/w/misc")])]);
+        let agents = rows(json, Some("luneta"), &places);
+        assert!(agents.rows.is_empty());
+        assert_eq!(agents.unplaced, 1);
+    }
+
+    #[test]
+    fn before_the_first_list_panes_reply_nothing_is_placed() {
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/misc",
+            "zellij":{"session":"ghostty","pane":"0"}}]"#;
+        let agents = rows(json, None, &Places::default());
+        assert!(agents.rows.is_empty());
+        assert_eq!(agents.unplaced, 1);
+    }
+
+    #[test]
+    fn the_search_asks_the_name_the_session_goes_by_now() {
+        let places = luneta_holds_both();
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
+        agents.rebuild(
+            "luneta",
+            &Live::new(Some("luneta"), &places),
+            None,
+            Age::ZERO,
+            Selection::SnapToTop,
+        );
+        assert_eq!(agents.rows.len(), 2);
+        agents.rebuild(
+            "misc",
+            &Live::new(Some("luneta"), &places),
+            None,
+            Age::ZERO,
+            Selection::SnapToTop,
+        );
+        assert!(agents.rows.is_empty());
     }
 
     #[test]
@@ -372,7 +542,7 @@ mod tests {
         )
         .expect("the document should parse");
         assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].session, "s");
+        assert_eq!(agents[0].reported, "s");
     }
 
     #[test]

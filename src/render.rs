@@ -483,7 +483,7 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
     line.push(" · ", TAG);
     line.push(&row.age.label(), TAG);
     let mut lines = vec![line.finish(inner).into(), blank_line(rect).into()];
-    lines.extend(screen_lines(rect, peeks, &row.session, row.pane, lines.len()));
+    lines.extend(screen_lines(rect, peeks, row.seat.session(), row.pane, lines.len()));
     (row.label(), lines)
 }
 
@@ -824,9 +824,20 @@ fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
 }
 
 fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
-    match &agents.status {
+    let mut notes = match &agents.status {
         Fetch::Failed(reason) => vec![Note::error(truncate(reason, width))],
         _ => Vec::new(),
+    };
+    if agents.unplaced > 0 {
+        notes.push(Note::dim(truncate(&unplaced_text(agents.unplaced), width)));
+    }
+    notes
+}
+
+fn unplaced_text(unplaced: usize) -> String {
+    match unplaced {
+        1 => "1 agent sits in a pane luneta cannot find".to_string(),
+        n => format!("{} agents sit in panes luneta cannot find", n),
     }
 }
 
@@ -914,9 +925,9 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::cursor::Cursor;
+    use crate::places::Places;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Session, Sessions};
 
@@ -1384,6 +1395,26 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_luneta_cannot_place_is_left_out_and_counted() {
+        let json = r#"[{"status":"waiting","status_age":60,"cwd":"/home/lorenzo/Projects/misc",
+            "zellij":{"session":"bipa.git","pane":"4"}},
+            {"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
+             "zellij":{"session":"luneta","pane":"0"}}]"#;
+        let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = agents::Live::new(Some("luneta"), &places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+
+        assert_eq!(agents.rows.len(), 1);
+        assert_eq!(agents.rows[0].display, "luneta");
+        let notes = agent_note_texts(&agents, 80);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "1 agent sits in a pane luneta cannot find");
+        assert!(!notes[0].error);
+    }
+
+    #[test]
     #[ignore = "prints the screens; run with --ignored --nocapture to look at them"]
     fn print_the_screens() {
         let (rows, cols) = (16, 84);
@@ -1416,7 +1447,13 @@ mod tests {
 
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), AGENTS.as_bytes(), b"");
-        agents.rebuild("", Some("notes"), None, Age::ZERO, Selection::SnapToTop);
+        let places = Places::of(&[
+            ("misc", &[(12, "/home/lorenzo/Projects/misc/luneta")]),
+            ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
+            ("notes", &[(7, "/home/lorenzo/Documents")]),
+        ]);
+        let live = agents::Live::new(Some("notes"), &places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
         let body = agent_body(&agents, "", rect, notes.len(), 0);
