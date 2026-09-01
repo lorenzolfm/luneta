@@ -5,16 +5,18 @@ mod elapsed;
 mod fetch;
 mod layout;
 mod panes;
+mod places;
 mod render;
 mod sessions;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agents::{AgentSet, Jump};
+use agents::{AgentSet, Live, Seat};
 use dirs::{DirSet, LIST};
 use elapsed::Age;
 use panes::Peeks;
+use places::Places;
 use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
 use zellij_tile::prelude::*;
 
@@ -89,6 +91,8 @@ struct State {
     agents: AgentSet,
     agents_command: Option<String>,
     panes: Option<PaneManifest>,
+    live_panes: BTreeMap<String, Vec<u32>>,
+    places: Places,
     active_tab: Option<usize>,
     sessions: Sessions,
     error: Option<String>,
@@ -173,6 +177,16 @@ impl ZellijPlugin for State {
                             None => false,
                         }
                     },
+                    Some(places::CONTEXT_VALUE) => {
+                        match context.get(places::SESSION_KEY) {
+                            Some(session) => {
+                                self.places.ingest(session.clone(), exit_code, &stdout);
+                                self.rebuild_agents(Selection::Hold);
+                                true
+                            },
+                            None => false,
+                        }
+                    },
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr);
                         self.agents_taken_at = self.frame;
@@ -196,6 +210,8 @@ impl ZellijPlugin for State {
                 self.ask_zoxide();
                 self.dirs.forget_listings();
                 self.peeks.forget();
+                self.places.forget();
+                self.ask_places();
                 self.ask_agents();
                 false
             },
@@ -254,21 +270,27 @@ impl State {
         let Ok(snapshot) = get_session_list() else {
             return;
         };
-        let current_session = snapshot.live_sessions.iter().find(|s| s.is_current_session);
-        let current = current_session.map(|s| s.name.clone());
+        let current = snapshot
+            .live_sessions
+            .iter()
+            .find(|s| s.is_current_session)
+            .map(|s| s.name.clone());
         let mut contents = BTreeMap::new();
+        let mut live_panes = BTreeMap::new();
+        let mut live = Vec::new();
+        for session in snapshot.live_sessions {
+            live_panes.insert(session.name.clone(), terminal_panes(&session.panes));
+            if session.is_current_session {
+                continue;
+            }
+            let name = session.name.clone();
+            let age = Age::new(session.creation_time);
+            contents.insert(name.clone(), contents_of(session));
+            live.push(Session { name, age });
+        }
+        self.live_panes = live_panes;
         self.sessions = Sessions {
-            live: snapshot
-                .live_sessions
-                .into_iter()
-                .filter(|s| !s.is_current_session)
-                .map(|session| {
-                    let name = session.name.clone();
-                    let age = Age::new(session.creation_time);
-                    contents.insert(name.clone(), contents_of(session));
-                    Session { name, age }
-                })
-                .collect(),
+            live,
             dead: snapshot
                 .resurrectable_sessions
                 .into_iter()
@@ -277,6 +299,7 @@ impl State {
         };
         self.matches.contents = contents;
         self.matches.refresh(&self.sessions, current);
+        self.ask_places();
         self.rebuild_dirs(Selection::Hold);
         self.rebuild_agents(Selection::Hold);
     }
@@ -299,19 +322,31 @@ impl State {
     }
 
     fn rebuild_agents(&mut self, policy: Selection) {
-        let current = self.matches.current_session.clone();
-        let pane = self.origin_pane();
-        let origin = match (current.as_deref(), pane) {
-            (Some(session), Some(pane)) => Some((session, pane)),
-            _ => None,
-        };
+        let origin = self.origin_pane();
         let since = self.agents_since();
-        self.agents
-            .rebuild(&self.matches.search_term, current.as_deref(), origin, since, policy);
+        let live = Live::new(
+            self.matches.current_session.as_deref(),
+            &self.live_panes,
+            &self.places,
+        );
+        self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
     }
 
     fn agents_since(&self) -> Age {
         Age::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
+    }
+
+    fn ask_places(&mut self) {
+        let live: Vec<String> = self.live_panes.keys().cloned().collect();
+        for session in self.places.ask(&live) {
+            run_command(
+                &places::query(&session),
+                BTreeMap::from([
+                    (dirs::CONTEXT_KEY.to_string(), places::CONTEXT_VALUE.to_string()),
+                    (places::SESSION_KEY.to_string(), session.clone()),
+                ]),
+            );
+        }
     }
 
     fn ask_agents(&mut self) {
@@ -395,10 +430,10 @@ impl State {
                 let focus = self.matches.contents.get(&row.name)?.focus.as_ref()?;
                 Some(Target::Pane(row.name.clone(), focus.pane))
             },
-            Screen::Agents => self
-                .agents
-                .selected_row()
-                .map(|row| Target::Pane(row.session.clone(), row.pane)),
+            Screen::Agents => {
+                let row = self.agents.selected_row()?;
+                Some(Target::Pane(row.seat.session().to_string(), row.pane))
+            },
         }
     }
 
@@ -525,10 +560,10 @@ impl State {
         let Some(row) = self.agents.selected_row() else {
             return;
         };
-        match row.jump {
-            Jump::Focus => focus_terminal_pane(row.pane, false, false),
-            Jump::Switch => {
-                switch_session_with_focus(&row.session, None, Some((row.pane, false)))
+        match &row.seat {
+            Seat::Here(_) => focus_terminal_pane(row.pane, false, false),
+            Seat::There(session) => {
+                switch_session_with_focus(session, None, Some((row.pane, false)))
             },
         }
         close_self();
@@ -639,6 +674,16 @@ fn contents_of(session: SessionInfo) -> Contents {
         }
     }
     Contents { panes: total, focus }
+}
+
+fn terminal_panes(manifest: &PaneManifest) -> Vec<u32> {
+    manifest
+        .panes
+        .values()
+        .flatten()
+        .filter(|pane| pane.is_selectable && !pane.is_suppressed && !pane.is_plugin)
+        .map(|pane| pane.id)
+        .collect()
 }
 
 fn resize_self(plugin_id: u32) {
