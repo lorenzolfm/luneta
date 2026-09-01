@@ -24,7 +24,7 @@
 │                                        ││                                        │
 │                                        ││                                        │
 │                                        ││                                        │
-│   🏠 notes ─────────────────── current ││                                        │
+│   notes ─────────────────── 🏠 Current ││                                        │
 │   luneta                        2h ago ││   1 //! luneta: a personal zellij ses… │
 │ > dotfiles                      5h ago ││   2                                    │
 │   ─────────────────── 🪦 Dead sessions ││   3 mod agents;                        │

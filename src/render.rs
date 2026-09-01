@@ -540,12 +540,12 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
     body
 }
 
-const HERE: &str = "current";
+const HERE: &str = "🏠 Current";
 
 fn here_line(current: &str, inner: usize) -> Text {
     let mut line = Line::new();
     line.gap(CARET);
-    line.push(&truncate(&format!("🏠 {}", current), inner.saturating_sub(CARET)), NAME);
+    line.push(&truncate(current, inner.saturating_sub(CARET)), NAME);
     let room = inner.saturating_sub(line.columns());
     if room >= HERE.width() + 3 {
         line.gap(1);
@@ -1007,7 +1007,7 @@ mod tests {
             vec![
                 "╭─ luneta ───────────────────────── 2/3 ─╮",
                 "│                                        │",
-                "│   🏠 notes ─────────────────── current │",
+                "│   notes ─────────────────── 🏠 Current │",
                 "│   luneta                        2h ago │",
                 "│ > dotfiles                      5h ago │",
                 "│   ─────────────────── 🪦 Dead sessions │",
@@ -1023,15 +1023,15 @@ mod tests {
             let rect = Rect { x: 0, y: 0, width, height: 5 };
             search_body(&attached(Vec::new(), None, name), &rect, 0)[0].content().to_string()
         };
-        assert_eq!(banner(24, "notes"), "   🏠 notes ─ current ");
-        assert_eq!(banner(22, "notes"), "   🏠 notes ─────── ");
+        assert_eq!(banner(24, "notes"), "   notes ─ 🏠 Current ");
+        assert_eq!(banner(22, "notes"), "   notes ────────── ");
         assert_eq!(
             banner(42, "a-very-long-session-name-indeed"),
-            "   🏠 a-very-long-session-name-indeed ─ "
+            "   a-very-long-session-name-indeed ──── "
         );
         assert_eq!(
             banner(42, "a-very-long-session-name-indeed-and-then-some"),
-            "   🏠 a-very-long-session-name-indeed-… "
+            "   a-very-long-session-name-indeed-and… "
         );
     }
 
@@ -1044,7 +1044,7 @@ mod tests {
             vec![
                 "╭─ luneta ───────────────────╮",
                 "│                            │",
-                "│   🏠 notes ─────── current │",
+                "│   notes ─────── 🏠 Current │",
                 "│ no other sessions          │",
                 "╰────────────────────────────╯",
             ]
@@ -1067,7 +1067,7 @@ mod tests {
             let body = search_body(&attached(rows, Some(selected), "notes"), &rect, 0);
             assert_eq!(body.len(), rect.inner_height());
             let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
-            assert!(shown[0].starts_with("   🏠 notes "), "selected {selected}: {shown:?}");
+            assert!(shown[0].starts_with("   notes "), "selected {selected}: {shown:?}");
             let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with(" > ")).collect();
             assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
             assert!(
@@ -1085,7 +1085,7 @@ mod tests {
 
         let body = search_body(&state, &rect, 0);
         assert_eq!(body.len(), 1);
-        assert!(body[0].content().starts_with("   🏠 notes"));
+        assert!(body[0].content().starts_with("   notes"));
 
         assert!(search_body(&state, &rect, 1).is_empty());
     }
@@ -1216,7 +1216,7 @@ mod tests {
                 "│                            │",
                 "│                            │",
                 "│ delete \"old\" failed        │",
-                "│   🏠 notes ─────── current │",
+                "│   notes ─────── 🏠 Current │",
                 "│ > luneta            2h ago │",
                 "╰────────────────────────────╯",
             ]
