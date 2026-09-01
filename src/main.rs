@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use agents::{AgentSet, Jump};
-use dirs::{Action, DirSet, LIST};
+use dirs::{DirSet, LIST};
 use elapsed::Age;
 use panes::Peeks;
 use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
@@ -800,35 +800,23 @@ impl State {
         close_self();
     }
 
-    /// `Enter` on a directory row.
+    /// `Enter` on a directory row: one call, and always the same one.
     ///
-    /// This makes the same call as the session screen: the plugin chooses a name, and the host
-    /// decides what the name means. Only the cwd is new, and it goes with the one outcome that
-    /// can use it.
+    /// A row carries a name no session in the last snapshot answers to (see
+    /// [`dirs::free_name`]), so this is a create and the host applies the cwd. That is the
+    /// whole reason the name is postfixed: `ClientInfo::set_cwd` has no `Attach` arm, and a
+    /// name that resolves to a session would take you there and drop the directory beside it
+    /// on the floor.
     ///
-    /// An attach passes the name alone. The host accepts a cwd there and discards it, because
-    /// `ClientInfo::set_cwd` has no `Attach` arm, and a discarded argument makes you believe a
-    /// session is somewhere it is not. On an attach row, the directory beside the name is where
-    /// the session would have been created, not where it is.
-    ///
-    /// This is the only place that picks between the two calls, so it names every [`Action`]
-    /// rather than testing one and letting the rest fall through. A fifth outcome stops the
-    /// build here, where the choice is made, instead of quietly taking the arm that drops the
-    /// cwd.
+    /// The snapshot can be a second old, so the name can be taken between the poll and this
+    /// call. The host then attaches, silently, which is the behaviour this screen had for
+    /// every taken name before. Nothing here can close that window: the plugin has no way to
+    /// ask for a name and be told it was refused.
     fn confirm_dir(&mut self) {
         let Some(row) = self.dirs.selected_row() else {
             return;
         };
-        match row.action {
-            // Refused, and the prompt has said so for as long as the row was highlighted. An
-            // attach to the current session does not fail, it panics the client
-            // (`commands.rs:794`).
-            Action::Here => return,
-            Action::Create => {
-                switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)))
-            },
-            Action::Attach | Action::Resurrect => switch_session(Some(&row.name)),
-        }
+        switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)));
         close_self();
     }
 

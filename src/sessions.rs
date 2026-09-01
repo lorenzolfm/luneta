@@ -261,6 +261,10 @@ impl MatchSet {
     }
 }
 
+/// The longest name the host accepts. `validate_session_name` refuses 108 bytes and more, and
+/// [`crate::dirs::free_name`] keeps its postfixed names inside this.
+pub const MAX_NAME_BYTES: usize = 107;
+
 /// Why `name` cannot be a session name, or `None` if it can.
 ///
 /// The host does not validate names on the plugin create path. `validate_session_name` is
@@ -282,7 +286,7 @@ pub fn validate_name(name: &str) -> Option<&'static str> {
     if name.contains('/') {
         return Some("name cannot contain '/'");
     }
-    if name.len() >= 108 {
+    if name.len() > MAX_NAME_BYTES {
         return Some("name must be shorter than 108 bytes");
     }
     // `has_forbidden_session` is not ported. It applies to web-client sessions, and this

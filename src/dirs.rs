@@ -2,21 +2,22 @@
 //!
 //! The rule of this screen:
 //!
-//! > A directory row is a proposed session name and a cwd. The cwd applies only if the name is
-//! > free.
+//! > A directory row is a cwd and a session name that nothing else holds. `Enter` creates that
+//! > session, there.
 //!
-//! The host makes that rule, not this module. `switch_session_with_cwd` carries the cwd to
-//! `ClientInfo::set_cwd` (`zellij-client/src/lib.rs:526-532`), which matches `New` and
+//! Holding a free name is what makes the cwd apply. `switch_session_with_cwd` carries the cwd
+//! to `ClientInfo::set_cwd` (`zellij-client/src/lib.rs:526-532`), which matches `New` and
 //! `Resurrect` and discards all else through a `_ => {}`. Give it the name of a live session
-//! and you attach to that session, wherever it is, with no error and no cwd. [`Action`] is
-//! therefore computed from the snapshot that builds the session screen, and it names the
-//! outcome the host will choose.
+//! and you attach to that session, wherever it is, with no error and no cwd. This module
+//! therefore never gives it one: a name the snapshot already holds takes a `-2`, and the row
+//! shows the name you will get. The name is recomputed against every poll, so a session that
+//! another client creates moves the row to the next postfix.
 //!
-//! The plugin cannot verify that outcome. Neither `SessionInfo` nor `PaneInfo` has a cwd, so
-//! nothing can ask a live session which directory it is in. `Attach to` means that a session of
-//! this name exists, not that it is in this directory. A name is the last component of the
-//! path (see [`derive_name`]), and two directories can end in the same component, so an attach
-//! can go to a session that was created somewhere else.
+//! The snapshot is all the plugin has. Neither `SessionInfo` nor `PaneInfo` has a cwd, so
+//! nothing can ask a live session which directory it is in, and a name is the last component
+//! of the path (see [`derive_name`]), which two directories can share. A session named after
+//! this directory may thus be somewhere else. That is why the postfix and not an attach: the
+//! row never addresses a session it cannot identify, it steps around the name.
 
 use std::collections::BTreeMap;
 
@@ -26,7 +27,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use crate::cursor::Cursor;
 use crate::fetch::Fetch;
 use crate::panes;
-use crate::sessions::{validate_name, Selection, Sessions};
+use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions};
 
 /// The command behind this screen. `-l` lists, and `-s` prints the frecency score.
 ///
@@ -72,37 +73,6 @@ pub const PREVIEW_VALUE: &str = "preview";
 /// directory, and the box would show the contents of a different place.
 pub const PATH_KEY: &str = "luneta_path";
 
-/// What `Enter` on this row does. The host decides it, and this reports it.
-///
-/// The variant is the whole of that decision, including whether the cwd goes with the name:
-/// `Create` is the only outcome the host applies it to. That is not a second property to read
-/// off the variant, it is the variant, so `confirm_dir` matches on this and a fifth outcome
-/// stops the build there rather than silently taking the branch that drops the cwd.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    /// The derived name is free. The session is created, in this directory, and this is the one
-    /// outcome that carries the cwd.
-    Create,
-    /// The derived name is a live session: the host attaches to it and **ignores the cwd**.
-    Attach,
-    /// The derived name has a saved layout: the host resurrects it.
-    Resurrect,
-    /// The derived name is the current session. `Enter` is refused, because the client calls
-    /// `panic!` when it is asked to attach to itself (`commands.rs:794`).
-    Here,
-}
-
-impl Action {
-    pub fn verb(&self) -> &'static str {
-        match self {
-            Action::Create => "Create",
-            Action::Attach => "Attach to",
-            Action::Resurrect => "Resurrect",
-            Action::Here => "already in",
-        }
-    }
-}
-
 /// What the preview box knows about one directory.
 pub enum Listing {
     /// eza has been asked and has not answered.
@@ -142,9 +112,9 @@ pub struct Dir {
 pub struct DirRow {
     /// Absolute, and handed to the host verbatim as the new session's cwd.
     pub path: String,
-    /// [`derive_name`] of `path`: the name the session gets.
+    /// The name the session gets: [`derive_name`] of `path`, postfixed by [`free_name`] until
+    /// the snapshot does not hold it.
     pub name: String,
-    pub action: Action,
     /// Character positions the fuzzy matcher hit **in `path`**, for highlighting.
     pub indices: Vec<usize>,
     score: i64,
@@ -362,8 +332,7 @@ impl DirRow {
     ) -> Self {
         DirRow {
             path: dir.path.clone(),
-            action: action_for(&dir.name, sessions, current),
-            name: dir.name.clone(),
+            name: free_name(&dir.name, sessions, current),
             indices,
             score,
             frecency: dir.frecency,
@@ -372,20 +341,48 @@ impl DirRow {
     }
 }
 
-/// Which of the three host outcomes this name gives.
+/// `base`, or the first `base-2`, `base-3`, … that no session in the snapshot answers to.
 ///
-/// The order is the order the host uses: a live session wins over a saved layout. The current
-/// session is tested first, because the poll removes it from `live`.
-fn action_for(name: &str, sessions: &Sessions, current: Option<&str>) -> Action {
-    if current == Some(name) {
-        Action::Here
-    } else if sessions.live.iter().any(|s| s.name == name) {
-        Action::Attach
-    } else if sessions.dead.iter().any(|s| s.name == name) {
-        Action::Resurrect
-    } else {
-        Action::Create
+/// A taken name is not an error to report, it is a name to step past, because the host reads
+/// one as an instruction to attach and drops the cwd with it (see the module doc). The current
+/// session counts as taken and is tested apart from the two lists, because the poll removes it
+/// from `live`.
+///
+/// Two rows can still propose one name. Each is computed against the snapshot alone, so two
+/// directories ending in `master` both read `master` while neither exists. Only one of them
+/// can be pressed — the picker closes on `Enter` — and the next opening sees the session the
+/// first one made.
+///
+/// The loop ends. The snapshot is finite, every candidate differs from every other, and a name
+/// no session holds is therefore reached within one step per session.
+fn free_name(base: &str, sessions: &Sessions, current: Option<&str>) -> String {
+    let taken = |name: &str| current == Some(name) || sessions.any_named(name);
+    if !taken(base) {
+        return base.to_string();
     }
+    (2..)
+        .map(|n| {
+            let postfix = format!("-{}", n);
+            // The postfix takes room from the base rather than from the limit. A name at the
+            // limit is refused by the host, which only logs the refusal
+            // (`zellij_exports.rs:2971-2977`), so a long directory loses its last characters
+            // instead of losing the `Enter`.
+            format!("{}{}", head(base, MAX_NAME_BYTES.saturating_sub(postfix.len())), postfix)
+        })
+        .find(|candidate| !taken(candidate))
+        .expect("a finite snapshot cannot hold every postfix")
+}
+
+/// The first `bytes` bytes of `text`, cut back to a character boundary.
+fn head(text: &str, bytes: usize) -> &str {
+    if text.len() <= bytes {
+        return text;
+    }
+    let mut end = bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// `  9264.0 /home/you/Projects/thing`: the score in a fixed field aligned right, one space,
@@ -409,13 +406,12 @@ fn parse(stdout: &str) -> Vec<Dir> {
         .collect()
 }
 
-/// The session name for a directory: its last path component.
+/// The name a directory asks for: its last path component. What it gets is [`free_name`] of
+/// this.
 ///
 /// The name is the directory itself, because that is what you would call the session. Two
 /// directories can end in the same component, such as `bipa.git/master` and
-/// `infra.git/master`. Both rows then propose one name, and the second row becomes an attach
-/// to the session that the first row created. The module doc says why the plugin cannot detect
-/// that.
+/// `infra.git/master`, so this is a request and not the answer.
 ///
 /// The result cannot contain a `/`. This matters twice: the host refuses such a name
 /// (`zellij_exports.rs:2971-2977`, where it only logs the refusal), and so does
@@ -434,6 +430,10 @@ mod tests {
     use super::*;
     use crate::elapsed::Age;
     use crate::sessions::Session;
+
+    fn named(name: &str) -> Session {
+        Session { name: name.to_string(), age: Age::ZERO }
+    }
 
     fn listed(stdout: &[u8]) -> DirSet {
         let mut dirs = DirSet::default();
@@ -569,26 +569,63 @@ mod tests {
         assert_eq!(derive_name(&format!("/home/{}", "d".repeat(108))), None);
     }
 
-    /// A name can be in both lists, and the answer is the one the host gives: it attaches to
-    /// the running session and leaves the saved layout on disk. Nothing but the order of the
-    /// tests in [`action_for`] enforces this, so it is tested rather than assumed.
+    /// A name a session holds is stepped past, whichever list holds it, and a free name is
+    /// left alone.
     #[test]
-    fn a_name_that_is_both_live_and_saved_attaches() {
-        let both = |name: &str| Session {
-            name: name.to_string(),
-            age: Age::ZERO,
-        };
+    fn a_taken_name_takes_the_next_postfix() {
         let sessions = Sessions {
-            live: vec![both("thing")],
-            dead: vec![both("thing"), both("other")],
+            live: vec![named("thing")],
+            dead: vec![named("other")],
         };
 
-        assert_eq!(action_for("thing", &sessions, None), Action::Attach);
-        assert_eq!(action_for("other", &sessions, None), Action::Resurrect);
-        assert_eq!(action_for("absent", &sessions, None), Action::Create);
-        // The current session is tested before either list, because the poll took it out of
-        // `live` and it would otherwise read as a create.
-        assert_eq!(action_for("thing", &sessions, Some("thing")), Action::Here);
+        assert_eq!(free_name("absent", &sessions, None), "absent");
+        assert_eq!(free_name("thing", &sessions, None), "thing-2");
+        // A saved layout holds a name as firmly as a running session: the host resolves both.
+        assert_eq!(free_name("other", &sessions, None), "other-2");
+    }
+
+    /// The current session is not in either list — the poll takes it out of `live` — and it
+    /// holds its name all the same.
+    #[test]
+    fn the_session_you_are_in_holds_its_name_too() {
+        let sessions = Sessions::default();
+        assert_eq!(free_name("here", &sessions, Some("here")), "here-2");
+    }
+
+    /// The postfix counts up until the snapshot runs out, so a directory you have opened three
+    /// times is the fourth session and not a collision.
+    #[test]
+    fn the_postfix_counts_past_every_session_that_holds_one() {
+        let sessions = Sessions {
+            live: vec![named("thing"), named("thing-2")],
+            dead: vec![named("thing-3")],
+        };
+        assert_eq!(free_name("thing", &sessions, None), "thing-4");
+    }
+
+    /// The postfix takes its room from the base. A name at the limit is refused by the host,
+    /// which only logs the refusal, so the last characters go instead of the `Enter`.
+    #[test]
+    fn a_long_name_loses_its_tail_and_not_its_postfix() {
+        let base = "d".repeat(MAX_NAME_BYTES);
+        let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
+
+        let name = free_name(&base, &sessions, None);
+        assert_eq!(name.len(), MAX_NAME_BYTES);
+        assert!(name.ends_with("-2"));
+        assert!(validate_name(&name).is_none());
+    }
+
+    /// The cut is a character boundary, so a name of multi-byte characters stays a string.
+    #[test]
+    fn a_long_name_is_cut_between_characters() {
+        // Three bytes each, so the limit falls inside a character.
+        let base = "の".repeat(MAX_NAME_BYTES / 3);
+        let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
+
+        let name = free_name(&base, &sessions, None);
+        assert!(name.ends_with("-2"));
+        assert!(validate_name(&name).is_none());
     }
 
     /// The cache is cleared, and no entry is evicted on its own. See [`MAX_LISTINGS`].
