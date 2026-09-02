@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use zellij_tile::prelude::Text;
+use crate::paint::Painted;
 
 const TOP_LEFT: char = '╭';
 const TOP_RIGHT: char = '╮';
@@ -174,7 +174,7 @@ impl Line {
         start..self.chars
     }
 
-    pub fn finish(self, inner_width: usize) -> Text {
+    pub fn finish(self, inner_width: usize) -> Painted {
         let Line { mut text, mut chars, mut columns, styles } = self;
         if columns > inner_width {
             text = truncate(&text, inner_width);
@@ -212,7 +212,7 @@ impl Line {
             }
         }
 
-        let mut text = Text::new(&line).unbold_indices(styled);
+        let mut text = Painted::new(&line).unbold_indices(styled);
         for style in styles {
             text = match style {
                 Style::Level(level, range) => match clamp(range) {

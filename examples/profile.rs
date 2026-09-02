@@ -8,6 +8,7 @@
 #[path = "../src/elapsed.rs"] mod elapsed;
 #[path = "../src/fetch.rs"] mod fetch;
 #[path = "../src/layout.rs"] mod layout;
+#[path = "../src/paint.rs"] mod paint;
 #[path = "../src/panes.rs"] mod panes;
 #[path = "../src/places.rs"] mod places;
 #[path = "../src/render.rs"] mod render;
@@ -305,8 +306,8 @@ fn main() {
     prim.push(bench("panes::columns (1 line)", 20000, || {
         std::hint::black_box(panes::columns(&line));
     }));
-    prim.push(bench("panes::fit (1 line, 56 cols)", 20000, || {
-        std::hint::black_box(panes::fit(&line, 56));
+    prim.push(bench("panes::fitted (1 line, 56 cols)", 20000, || {
+        std::hint::black_box(panes::fitted(&line, 56));
     }));
     prim.push(bench("layout::truncate (185 chars)", 20000, || {
         std::hint::black_box(layout::truncate(&plain, 56));
@@ -361,13 +362,13 @@ fn main() {
         l.push("2h ago", 2);
         std::hint::black_box(l.finish(inner));
     }));
-    b.push(bench("Text::serialize (that row)", 50000, || {
+    b.push(bench("that row onto the wire", 50000, || {
         let mut l = layout::Line::new();
         l.push("> ", 3);
         l.push_hits("session-000-work", 1, 3, &[0, 1, 2]);
         l.pad_to(40);
         l.push("2h ago", 2);
-        std::hint::black_box(l.finish(inner).serialize());
+        paint::print_at(&l.finish(inner), 1, 1, inner + 2);
     }));
     let rect = layout::Rect { x: 0, y: 0, width: 60, height: 26 };
     b.push(bench("Rect::top + rule_indices (border)", 50000, || {

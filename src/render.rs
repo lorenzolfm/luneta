@@ -1,10 +1,10 @@
 use unicode_width::UnicodeWidthStr;
-use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentRow, AgentSet};
 use crate::dirs::{DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
+use crate::paint::{self, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
 
@@ -130,32 +130,32 @@ fn help_width(cols: usize) -> usize {
     cols.saturating_sub(PAD * 2)
 }
 
-fn print_at(text: Text, x: usize, y: usize, width: usize) {
-    print_text_with_coordinates(text, x, y, Some(width), None);
+fn print_at(text: Painted, x: usize, y: usize, width: usize) {
+    paint::print_at(&text, x, y, width);
 }
 
-fn draw(rect: &Rect, title: &str, right: &str, interior: Vec<Text>) {
+fn draw(rect: &Rect, title: &str, right: &str, interior: Vec<Painted>) {
     print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
     for (i, line) in interior.into_iter().enumerate() {
         draw_row(rect, rect.inner_y() + i, line);
     }
-    print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
+    print_at(Painted::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
-fn draw_row(rect: &Rect, y: usize, row: Text) {
+fn draw_row(rect: &Rect, y: usize, row: Painted) {
     let Some(inner) = rect.width.checked_sub(2) else {
         return;
     };
-    let edge = || Text::new(VERTICAL.to_string()).dim_all();
+    let edge = || Painted::new(VERTICAL.to_string()).dim_all();
     print_at(edge(), rect.x, y, 1);
     print_at(row, rect.x + 1, y, inner);
     print_at(edge(), rect.x + rect.width - 1, y, 1);
 }
 
-fn border_text(border: Border) -> Text {
+fn border_text(border: Border) -> Painted {
     let rule = border.rule_indices();
     let Border { line, title, right } = border;
-    let mut text = Text::new(line).dim_indices(rule);
+    let mut text = Painted::new(line).dim_indices(rule);
     if let Some(range) = title {
         text = text.color_range(LABEL, range);
     }
@@ -165,15 +165,15 @@ fn border_text(border: Border) -> Text {
     text
 }
 
-fn interior(rect: &Rect, notes: &[Note], body: Vec<Text>) -> Vec<Text> {
+fn interior(rect: &Rect, notes: &[Note], body: Vec<Painted>) -> Vec<Painted> {
     let block = anchor(rect, notes.len(), body.len());
-    let mut lines: Vec<Text> = (rect.inner_y()..block.y).map(|_| blank_line(rect)).collect();
+    let mut lines: Vec<Painted> = (rect.inner_y()..block.y).map(|_| blank_line(rect)).collect();
     lines.extend(notes.iter().take(block.notes).map(|note| note_line(rect, note)));
     lines.extend(body.into_iter().take(block.rows));
     lines
 }
 
-fn note_line(rect: &Rect, note: &Note) -> Text {
+fn note_line(rect: &Rect, note: &Note) -> Painted {
     let inner = rect.inner_width();
     let mut line = Line::new();
     let text = truncate(&note.text, inner);
@@ -185,7 +185,7 @@ fn note_line(rect: &Rect, note: &Note) -> Text {
     line.finish(inner)
 }
 
-fn input_line(rect: &Rect, prompt: Prompt) -> Text {
+fn input_line(rect: &Rect, prompt: Prompt) -> Painted {
     let (input, action, is_error) = prompt;
     let inner = rect.inner_width();
     let mut line = Line::new();
@@ -218,7 +218,7 @@ fn draw_input(screen: &Screen, title: &str, prompt: Prompt) {
     draw(rect, title, "", vec![input_line(rect, prompt)]);
 }
 
-fn draw_help(screen: &Screen, help: Text) {
+fn draw_help(screen: &Screen, help: Painted) {
     if let Some(y) = screen.help_y {
         print_at(help, PAD, y, screen.input.width.saturating_sub(PAD));
     }
@@ -240,18 +240,18 @@ fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
     (start, (start + visible).min(total))
 }
 
-fn blank_line(rect: &Rect) -> Text {
+fn blank_line(rect: &Rect) -> Painted {
     // Spaces only: dimming them costs an index per column and shows nothing.
-    Text::new(rect.blank())
+    Painted::new(rect.blank())
 }
 
 enum PreviewRow {
-    Own(Text),
+    Own(Painted),
     Pane(String),
 }
 
-impl From<Text> for PreviewRow {
-    fn from(text: Text) -> Self {
+impl From<Painted> for PreviewRow {
+    fn from(text: Painted) -> Self {
         PreviewRow::Own(text)
     }
 }
@@ -289,14 +289,14 @@ fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
             PreviewRow::Pane(line) => draw_pane_row(rect, y, &line),
         }
     }
-    print_at(Text::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
+    print_at(Painted::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
 fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
     if rect.width < 2 {
         return;
     }
-    let edge = || Text::new(VERTICAL.to_string()).dim_all();
+    let edge = || Painted::new(VERTICAL.to_string()).dim_all();
     print_at(edge(), rect.x, y, 1);
     print!("\u{1b}[{};{}H\u{1b}[m{}\u{1b}[m", y + 1, rect.x + 2, line);
     print_at(edge(), rect.x + rect.width - 1, y, 1);
@@ -396,7 +396,7 @@ fn live_preview(rect: &Rect, peeks: &Peeks, name: &str, contents: &Contents) -> 
     lines
 }
 
-fn caption(inner: usize, tab: &str, title: &str) -> Text {
+fn caption(inner: usize, tab: &str, title: &str) -> Painted {
     let mut line = Line::new();
     let room = inner.saturating_sub(title.width() + 3).max(MIN_TAB);
     line.push(&truncate(tab, room), LABEL);
@@ -498,7 +498,7 @@ fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<
 
 const MIN_PATH: usize = 12;
 
-fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
+fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Painted> {
     let inner = rect.inner_width();
     let mut capacity = rect.inner_height().saturating_sub(notes);
     let mut body = Vec::new();
@@ -551,7 +551,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Text> {
 
 const HERE: &str = "🏠 Current";
 
-fn here_line(current: &str, inner: usize) -> Text {
+fn here_line(current: &str, inner: usize) -> Painted {
     let mut line = Line::new();
     line.gap(CARET);
     line.push(&truncate(current, inner.saturating_sub(CARET)), NAME);
@@ -572,7 +572,7 @@ fn dead_from(rows: &[Row]) -> Option<usize> {
     rows.iter().position(|row| row.kind == Kind::Resurrectable)
 }
 
-fn separator(inner: usize, label: &str) -> Text {
+fn separator(inner: usize, label: &str) -> Painted {
     let mut line = Line::new();
     line.gap(CARET);
     let label = truncate(label, inner.saturating_sub(CARET));
@@ -585,7 +585,7 @@ fn separator(inner: usize, label: &str) -> Text {
     line.finish(inner)
 }
 
-fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> Text {
+fn result_line(row: &Row, selected: bool, name_budget: usize, inner: usize) -> Painted {
     let name = truncate(&row.name, name_budget);
     let visible = name.chars().count();
     let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
@@ -648,7 +648,7 @@ fn empty_text(state: &MatchSet) -> String {
     }
 }
 
-fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Text> {
+fn dir_body(dirs: &DirSet, term: &str, rect: &Rect, notes: usize) -> Vec<Painted> {
     if dirs.rows.is_empty() {
         return vec![note_line(rect, &Note::dim(dir_empty_text(dirs, term)))];
     }
@@ -680,7 +680,7 @@ fn dir_line(
     name_column: usize,
     path_budget: usize,
     inner: usize,
-) -> Text {
+) -> Painted {
     let mut line = Line::new();
     gutter(&mut line, selected);
     line.push(&truncate(&row.name, name_column), NAME);
@@ -739,7 +739,7 @@ fn agent_body(
     rect: &Rect,
     notes: usize,
     frame: u64,
-) -> Vec<Text> {
+) -> Vec<Painted> {
     if agents.rows.is_empty() {
         return vec![note_line(rect, &Note::dim(agent_empty_text(agents, term)))];
     }
@@ -809,7 +809,7 @@ fn agent_line(
     cwd_budget: Option<usize>,
     inner: usize,
     frame: u64,
-) -> Text {
+) -> Painted {
     let label = truncate(&row.label(), name_column);
     let visible = label.chars().count();
     let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
@@ -895,7 +895,7 @@ fn short_cwd(path: &str) -> String {
     }
 }
 
-fn search_help(width: usize) -> Text {
+fn search_help(width: usize) -> Painted {
     keys_text(
         width,
         &[
@@ -909,7 +909,7 @@ fn search_help(width: usize) -> Text {
     )
 }
 
-fn dirs_help(width: usize) -> Text {
+fn dirs_help(width: usize) -> Painted {
     keys_text(
         width,
         &[
@@ -921,7 +921,7 @@ fn dirs_help(width: usize) -> Text {
     )
 }
 
-fn agents_help(width: usize) -> Text {
+fn agents_help(width: usize) -> Painted {
     keys_text(
         width,
         &[
@@ -935,7 +935,7 @@ fn agents_help(width: usize) -> Text {
 
 type Key<'a> = (&'a str, &'a str, &'a str);
 
-fn keys_text(width: usize, keys: &[Key]) -> Text {
+fn keys_text(width: usize, keys: &[Key]) -> Painted {
     let spelled = |sep: &str, joiner: &str, short: bool| {
         keys.iter()
             .map(|(k, long, brief)| format!("{}{}{}", k, sep, if short { brief } else { long }))
@@ -952,7 +952,7 @@ fn keys_text(width: usize, keys: &[Key]) -> Text {
     .find(|candidate| candidate.width() <= width)
     .unwrap_or_else(|| keys.iter().map(|(k, _, _)| *k).collect::<Vec<_>>().join("/"));
 
-    let mut text = Text::new(&line).dim_all();
+    let mut text = Painted::new(&line).dim_all();
     for (key, _, _) in keys {
         text = text.color_substring(ACCENT, key);
     }
@@ -1643,7 +1643,7 @@ mod tests {
         );
     }
 
-    fn print_pane(boxes: Vec<String>, screen: &Screen, title: &str, prompt: Prompt, help: Text) {
+    fn print_pane(boxes: Vec<String>, screen: &Screen, title: &str, prompt: Prompt, help: Painted) {
         for line in boxes {
             println!("{line}");
         }

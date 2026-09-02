@@ -4,6 +4,7 @@ mod dirs;
 mod elapsed;
 mod fetch;
 mod layout;
+mod paint;
 mod panes;
 mod places;
 mod render;

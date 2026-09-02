@@ -200,6 +200,7 @@ pub fn columns(line: &str) -> usize {
     parts(line).map(|part| width(&part)).sum()
 }
 
+#[cfg(test)]
 pub fn fit(line: &str, max: usize) -> String {
     fitted(line, max).0
 }
