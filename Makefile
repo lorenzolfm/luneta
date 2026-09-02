@@ -52,7 +52,8 @@ dev: install reload
 
 # Record the README GIFs with vhs, which drives a real terminal from a script.
 # The tapes press real keys against the installed .wasm, so what lands in a GIF is
-# the plugin and not a mock. See docs/media/README.md for what they assume.
+# the plugin and not a mock. They assume zoxide, eza and claude-ps on the PATH, a
+# populated zoxide database, a running Claude Code agent, and a Nerd Font.
 TAPES := $(wildcard docs/media/*.tape)
 
 media: install
