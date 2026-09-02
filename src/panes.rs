@@ -201,12 +201,19 @@ pub fn columns(line: &str) -> usize {
 }
 
 pub fn fit(line: &str, max: usize) -> String {
+    fitted(line, max).0
+}
+
+/// `fit`, plus the visible width of what came back — the caller that pads the
+/// line to a box would otherwise have to walk it a second time to learn that.
+pub fn fitted(line: &str, max: usize) -> (String, usize) {
     let mut out = String::with_capacity(line.len());
-    if columns(line) <= max {
+    let whole = columns(line);
+    if whole <= max {
         for part in parts(line) {
             write(&part, &mut out);
         }
-        return out;
+        return (out, whole);
     }
     let mut used = 0;
     let mut cut = false;
@@ -214,6 +221,7 @@ pub fn fit(line: &str, max: usize) -> String {
         if !cut && used + width(&part) > max.saturating_sub(1) {
             cut = true;
             out.push('…');
+            used += 1;
         }
         if cut && matches!(part, Part::Ch(_)) {
             continue;
@@ -221,7 +229,7 @@ pub fn fit(line: &str, max: usize) -> String {
         used += width(&part);
         write(&part, &mut out);
     }
-    out
+    (out, used)
 }
 
 fn width(part: &Part) -> usize {

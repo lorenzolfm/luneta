@@ -266,10 +266,18 @@ impl PreviewRow {
     }
 }
 
-fn pane_row(inner: usize, line: &str) -> String {
-    let line = panes::fit(line, inner);
-    let pad = inner.saturating_sub(panes::columns(&line));
-    format!(" {}{} ", line, " ".repeat(pad))
+/// Fits a dumped line to the interior of `rect` and pads it out to exactly the
+/// full width of the row, margins included. `draw_pane_row` prints the result
+/// verbatim — this is the only place the line is measured or cut.
+fn pane_row(rect: &Rect, line: &str) -> String {
+    let inner = rect.inner_width();
+    let (line, used) = panes::fitted(line, inner);
+    let mut out = String::with_capacity(line.len() + (inner - used) + 2);
+    out.push(' ');
+    out.push_str(&line);
+    out.extend(std::iter::repeat_n(' ', inner - used));
+    out.push(' ');
+    out
 }
 
 fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
@@ -285,12 +293,12 @@ fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
 }
 
 fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
-    let Some(inner) = rect.width.checked_sub(2) else {
+    if rect.width < 2 {
         return;
-    };
+    }
     let edge = || Text::new(VERTICAL.to_string()).dim_all();
     print_at(edge(), rect.x, y, 1);
-    print!("\u{1b}[{};{}H\u{1b}[m{}\u{1b}[m", y + 1, rect.x + 2, panes::fit(line, inner));
+    print!("\u{1b}[{};{}H\u{1b}[m{}\u{1b}[m", y + 1, rect.x + 2, line);
     print_at(edge(), rect.x + rect.width - 1, y, 1);
 }
 
@@ -421,7 +429,7 @@ fn screen_lines(
             lines.extend(
                 screen[screen.len() - shown..]
                     .iter()
-                    .map(|line| PreviewRow::Pane(pane_row(inner, line))),
+                    .map(|line| PreviewRow::Pane(pane_row(rect, line))),
             );
             lines
         },
@@ -463,14 +471,14 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) 
             if entries.is_empty() {
                 lines.push(preview_line(inner, "empty", TAG));
             }
-            lines.extend(entries.iter().map(|entry| entry_line(inner, entry)));
+            lines.extend(entries.iter().map(|entry| entry_line(rect, entry)));
         },
     }
     (row.name.clone(), right, lines)
 }
 
-fn entry_line(inner: usize, entry: &str) -> PreviewRow {
-    PreviewRow::Pane(pane_row(inner, entry))
+fn entry_line(rect: &Rect, entry: &str) -> PreviewRow {
+    PreviewRow::Pane(pane_row(rect, entry))
 }
 
 fn agent_preview(agents: &AgentSet, peeks: &Peeks, rect: &Rect) -> (String, Vec<PreviewRow>) {
