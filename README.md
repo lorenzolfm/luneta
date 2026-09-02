@@ -13,7 +13,7 @@
 
 <!--
   MEDIA SLOT — hero.gif
-  Record with `make media` (needs charmbracelet/vhs); see docs/media/README.md.
+  Record with `make media` (needs charmbracelet/vhs).
   Then point the <img> below at docs/media/hero.gif.
 -->
 <p align="center"><img src="docs/media/sessions.png" alt="the session picker: live and dead sessions on the left, the highlighted session's focused pane on the right" width="900"></p>
