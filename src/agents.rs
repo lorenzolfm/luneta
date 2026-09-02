@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
@@ -294,12 +296,15 @@ impl AgentSet {
 }
 
 fn mark_shared(rows: &mut [AgentRow]) {
-    for i in 0..rows.len() {
-        let shared = rows
-            .iter()
-            .enumerate()
-            .any(|(j, other)| j != i && other.display == rows[i].display);
-        rows[i].shared = shared;
+    let shared: Vec<bool> = {
+        let mut seen: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
+        for row in rows.iter() {
+            *seen.entry(row.display.as_str()).or_insert(0) += 1;
+        }
+        rows.iter().map(|row| seen[row.display.as_str()] > 1).collect()
+    };
+    for (row, shared) in rows.iter_mut().zip(shared) {
+        row.shared = shared;
     }
 }
 

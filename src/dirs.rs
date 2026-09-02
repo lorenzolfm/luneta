@@ -6,7 +6,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use crate::cursor::Cursor;
 use crate::fetch::Fetch;
 use crate::panes;
-use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions};
+use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions, Taken};
 
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
@@ -96,11 +96,12 @@ impl DirSet {
             Selection::Hold => self.selected_path().map(str::to_owned),
         };
         let mut rows: Vec<DirRow> = Vec::new();
+        let taken = sessions.taken(current);
 
         if let Fetch::Ready(all) = &self.status {
             if term.is_empty() {
                 for dir in all {
-                    let name = free_name(&dir.name, sessions, current);
+                    let name = free_name(&dir.name, &taken);
                     rows.push(DirRow::new(dir, name, 0, vec![], false));
                 }
             } else {
@@ -108,7 +109,7 @@ impl DirSet {
                     .matcher
                     .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
                 for dir in all {
-                    let name = free_name(&dir.name, sessions, current);
+                    let name = free_name(&dir.name, &taken);
                     let Some((score, indices)) = match_dir(matcher, term, &dir.path, &name) else {
                         continue;
                     };
@@ -217,9 +218,8 @@ fn match_dir(
     }
 }
 
-fn free_name(base: &str, sessions: &Sessions, current: Option<&str>) -> String {
-    let taken = |name: &str| current == Some(name) || sessions.any_named(name);
-    if !taken(base) {
+fn free_name(base: &str, taken: &Taken) -> String {
+    if !taken.holds(base) {
         return base.to_string();
     }
     (2..)
@@ -227,7 +227,7 @@ fn free_name(base: &str, sessions: &Sessions, current: Option<&str>) -> String {
             let postfix = format!("-{}", n);
             format!("{}{}", head(base, MAX_NAME_BYTES.saturating_sub(postfix.len())), postfix)
         })
-        .find(|candidate| !taken(candidate))
+        .find(|candidate| !taken.holds(candidate))
         .expect("a finite snapshot cannot hold every postfix")
 }
 
@@ -395,9 +395,9 @@ mod tests {
             dead: vec![named("other")],
         };
 
-        assert_eq!(free_name("absent", &sessions, None), "absent");
-        assert_eq!(free_name("thing", &sessions, None), "thing-2");
-        assert_eq!(free_name("other", &sessions, None), "other-2");
+        assert_eq!(free_name("absent", &sessions.taken(None)), "absent");
+        assert_eq!(free_name("thing", &sessions.taken(None)), "thing-2");
+        assert_eq!(free_name("other", &sessions.taken(None)), "other-2");
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn the_session_you_are_in_holds_its_name_too() {
         let sessions = Sessions::default();
-        assert_eq!(free_name("here", &sessions, Some("here")), "here-2");
+        assert_eq!(free_name("here", &sessions.taken(Some("here"))), "here-2");
     }
 
     #[test]
@@ -431,7 +431,7 @@ mod tests {
             live: vec![named("thing"), named("thing-2")],
             dead: vec![named("thing-3")],
         };
-        assert_eq!(free_name("thing", &sessions, None), "thing-4");
+        assert_eq!(free_name("thing", &sessions.taken(None)), "thing-4");
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         let base = "d".repeat(MAX_NAME_BYTES);
         let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
 
-        let name = free_name(&base, &sessions, None);
+        let name = free_name(&base, &sessions.taken(None));
         assert_eq!(name.len(), MAX_NAME_BYTES);
         assert!(name.ends_with("-2"));
         assert!(validate_name(&name).is_none());
@@ -452,7 +452,7 @@ mod tests {
         assert!(!base.is_char_boundary(MAX_NAME_BYTES - 2));
         let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
 
-        let name = free_name(&base, &sessions, None);
+        let name = free_name(&base, &sessions.taken(None));
         assert_eq!(name, format!("a{}-2", "の".repeat(34)));
         assert!(name.len() < MAX_NAME_BYTES);
         assert!(validate_name(&name).is_none());
