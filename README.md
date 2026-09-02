@@ -13,29 +13,10 @@
 
 <!--
   MEDIA SLOT — hero.gif
-  Record with `make media` (needs charmbracelet/vhs); see docs/media/README.md.
-  Then replace the code block below with:
-  <p align="center"><img src="docs/media/hero.gif" alt="luneta demo" width="900"></p>
+  Record with `make media` (needs charmbracelet/vhs).
+  Then point the <img> below at docs/media/hero.gif.
 -->
-
-```
-╭─ luneta ───────────────────────── 2/4 ─╮╭─ dotfiles ─────────────────── 3 panes ─╮
-│                                        ││ editor · nvim                          │
-│                                        ││                                        │
-│                                        ││                                        │
-│                                        ││                                        │
-│   notes ─────────────────── 🏠 Current ││                                        │
-│   luneta                        2h ago ││   1 //! luneta: a personal zellij ses… │
-│ > dotfiles                      5h ago ││   2                                    │
-│   ─────────────────── 🪦 Dead sessions ││   3 mod agents;                        │
-│   despesas-old                  1w ago ││                                        │
-│   api-spike                     5w ago ││ "src/main.rs" 1005L, 41k               │
-╰────────────────────────────────────────╯╰────────────────────────────────────────╯
-╭─ Sessions ───────────────────────────────────────────────────────────────────────╮
-│ > _                                                               <ENTER> Attach │
-╰──────────────────────────────────────────────────────────────────────────────────╯
-  <↓↑> Nav <ENTER> Select <TAB> Agents <Ctrl r> Rename <Del> Delete <ESC> Close
-```
+<p align="center"><img src="docs/media/sessions.png" alt="the session picker: live and dead sessions on the left, the highlighted session's focused pane on the right" width="900"></p>
 
 ---
 
@@ -75,27 +56,9 @@ directories costs nothing.
 
 <!--
   MEDIA SLOT — agents.gif
-  <p align="center"><img src="docs/media/agents.gif" alt="agent picker" width="900"></p>
+  Recorded by `make media`; swap the <img> src for docs/media/agents.gif once it exists.
 -->
-
-```
-╭─ luneta ───────────────────────── 1/3 ─╮╭─ luneta ───────────────────────────────╮
-│                                        ││ waiting · 18m                          │
-│                                        ││                                        │
-│                                        ││                                        │
-│                                        ││                                        │
-│                                        ││ > read the docs?                       │
-│                                        ││                                        │
-│                                        ││   1. yes                               │
-│ > luneta  🙋  18m          misc/luneta ││   2. no                                │
-│   notes   ☕  5m     lorenzo/Documents ││                                        │
-│   bipa    ⠋   31m            Work/bipa ││                                        │
-╰────────────────────────────────────────╯╰────────────────────────────────────────╯
-╭─ Agents ─────────────────────────────────────────────────────────────────────────╮
-│ > _                                                       <ENTER> Go to "luneta" │
-╰──────────────────────────────────────────────────────────────────────────────────╯
-  <↓↑> - Navigate, <ENTER> - Go to agent, <TAB> - Directories, <ESC> - Close
-```
+<p align="center"><img src="docs/media/agents.png" alt="the agent picker: agents sorted by attention on the left, the highlighted agent's question on the right" width="900"></p>
 
 Run several agents at once and the problem is not starting them, it is knowing
 which one stopped and needs you. The list is **sorted by attention** — 🙋 `waiting`
@@ -121,27 +84,9 @@ Needs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) on the server's
 
 <!--
   MEDIA SLOT — dirs.gif
-  <p align="center"><img src="docs/media/dirs.gif" alt="directory picker" width="900"></p>
+  Recorded by `make media`; swap the <img> src for docs/media/dirs.gif once it exists.
 -->
-
-```
-╭─ luneta ───────────────────────── 1/4 ─╮╭─ luneta-2 ─────────────────── 5 items ─╮
-│                                        ││ /home/lorenzo/Projects/misc/luneta     │
-│                                        ││                                        │
-│                                        ││  src/                                  │
-│                                        ││  target/                               │
-│                                        ││  Cargo.toml                            │
-│                                        ││  Makefile                              │
-│ > luneta-2  …enzo/Projects/misc/luneta ││ 󰂺 README.md                            │
-│   homelab   …nzo/Projects/misc/homelab ││                                        │
-│   bipa      …orenzo/Projects/Work/bipa ││                                        │
-│   bin         /home/lorenzo/.local/bin ││                                        │
-╰────────────────────────────────────────╯╰────────────────────────────────────────╯
-╭─ Directories ────────────────────────────────────────────────────────────────────╮
-│ > _                                                    <ENTER> Create "luneta-2" │
-╰──────────────────────────────────────────────────────────────────────────────────╯
-  <↓↑> - Navigate, <ENTER> - Go there, <TAB> - Sessions, <ESC> - Close
-```
+<p align="center"><img src="docs/media/dirs.png" alt="the directory picker: zoxide directories on the left, the highlighted directory's contents on the right" width="900"></p>
 
 Every row is a directory plus a session name **nothing else is holding**. The name
 is the directory itself, and if it is taken it steps to `luneta-2`, `luneta-3`,
