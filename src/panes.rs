@@ -102,39 +102,58 @@ fn trim(dump: &str) -> Vec<String> {
 
 const ESC: char = '\u{1b}';
 
-enum Part {
+enum Part<'a> {
     Ch(char),
-    Escape(String),
+    Escape(&'a str),
 }
 
-fn parts(line: &str) -> Vec<Part> {
-    let mut parts = Vec::new();
-    let mut chars = line.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            ESC => parts.push(Part::Escape(escape(&mut chars))),
-            ch if ch.is_control() => {},
-            ch => parts.push(Part::Ch(ch)),
+/// Walks a dumped line as visible characters and escape sequences. Borrows the
+/// line rather than copying it: a screenful of these runs on every frame.
+struct Parts<'a> {
+    line: &'a str,
+    chars: std::str::CharIndices<'a>,
+}
+
+impl<'a> Iterator for Parts<'a> {
+    type Item = Part<'a>;
+
+    fn next(&mut self) -> Option<Part<'a>> {
+        loop {
+            let (at, ch) = self.chars.next()?;
+            match ch {
+                ESC => {
+                    let start = at + ESC.len_utf8();
+                    return Some(Part::Escape(escape(self.line, &mut self.chars, start)));
+                },
+                ch if ch.is_control() => continue,
+                ch => return Some(Part::Ch(ch)),
+            }
         }
     }
-    parts
 }
 
-fn escape(chars: &mut std::str::Chars) -> String {
-    let mut seq = String::new();
+fn parts(line: &str) -> Parts<'_> {
+    Parts { line, chars: line.char_indices() }
+}
+
+/// Consumes one escape sequence and returns the span that names it — for CSI
+/// the whole sequence, for OSC and DCS just the introducer, whose payload is
+/// swallowed and never reproduced.
+fn escape<'a>(line: &'a str, chars: &mut std::str::CharIndices<'a>, start: usize) -> &'a str {
+    let mut end = start;
     match chars.next() {
-        Some('[') => {
-            seq.push('[');
-            for ch in chars.by_ref() {
-                seq.push(ch);
+        Some((at, '[')) => {
+            end = at + 1;
+            for (at, ch) in chars.by_ref() {
+                end = at + ch.len_utf8();
                 if ('\u{40}'..='\u{7e}').contains(&ch) {
                     break;
                 }
             }
         },
-        Some(ch @ (']' | 'P' | 'X' | '^' | '_')) => {
-            seq.push(ch);
-            while let Some(ch) = chars.next() {
+        Some((at, ch @ (']' | 'P' | 'X' | '^' | '_'))) => {
+            end = at + ch.len_utf8();
+            while let Some((_, ch)) = chars.next() {
                 if ch == '\u{7}' {
                     break;
                 }
@@ -144,11 +163,11 @@ fn escape(chars: &mut std::str::Chars) -> String {
                 }
             }
         },
-        Some(ch) => {
-            seq.push(ch);
+        Some((at, ch)) => {
+            end = at + ch.len_utf8();
             if ('\u{20}'..='\u{2f}').contains(&ch) {
-                for next in chars.by_ref() {
-                    seq.push(next);
+                for (at, next) in chars.by_ref() {
+                    end = at + next.len_utf8();
                     if !('\u{20}'..='\u{2f}').contains(&next) {
                         break;
                     }
@@ -157,12 +176,11 @@ fn escape(chars: &mut std::str::Chars) -> String {
         },
         None => {},
     }
-    seq
+    &line[start..end]
 }
 
 pub fn sgr_only(line: &str) -> String {
     let mut kept: Vec<Part> = parts(line)
-        .into_iter()
         .filter(|part| match part {
             Part::Escape(seq) => seq.starts_with('[') && seq.ends_with('m'),
             Part::Ch(_) => true,
@@ -171,33 +189,48 @@ pub fn sgr_only(line: &str) -> String {
     while kept.last().is_some_and(|part| matches!(part, Part::Ch(' '))) {
         kept.pop();
     }
-    kept.iter().map(render).collect()
+    let mut out = String::with_capacity(line.len());
+    for part in &kept {
+        write(part, &mut out);
+    }
+    out
 }
 
 pub fn columns(line: &str) -> usize {
-    parts(line).iter().map(width).sum()
+    parts(line).map(|part| width(&part)).sum()
 }
 
+#[cfg(test)]
 pub fn fit(line: &str, max: usize) -> String {
-    let parts = parts(line);
-    if parts.iter().map(width).sum::<usize>() <= max {
-        return parts.iter().map(render).collect();
+    fitted(line, max).0
+}
+
+/// `fit`, plus the visible width of what came back — the caller that pads the
+/// line to a box would otherwise have to walk it a second time to learn that.
+pub fn fitted(line: &str, max: usize) -> (String, usize) {
+    let mut out = String::with_capacity(line.len());
+    let whole = columns(line);
+    if whole <= max {
+        for part in parts(line) {
+            write(&part, &mut out);
+        }
+        return (out, whole);
     }
-    let mut out = String::new();
     let mut used = 0;
     let mut cut = false;
-    for part in &parts {
-        if !cut && used + width(part) > max.saturating_sub(1) {
+    for part in parts(line) {
+        if !cut && used + width(&part) > max.saturating_sub(1) {
             cut = true;
             out.push('…');
+            used += 1;
         }
         if cut && matches!(part, Part::Ch(_)) {
             continue;
         }
-        used += width(part);
-        out.push_str(&render(part));
+        used += width(&part);
+        write(&part, &mut out);
     }
-    out
+    (out, used)
 }
 
 fn width(part: &Part) -> usize {
@@ -207,10 +240,13 @@ fn width(part: &Part) -> usize {
     }
 }
 
-fn render(part: &Part) -> String {
+fn write(part: &Part, out: &mut String) {
     match part {
-        Part::Ch(ch) => ch.to_string(),
-        Part::Escape(seq) => format!("{}{}", ESC, seq),
+        Part::Ch(ch) => out.push(*ch),
+        Part::Escape(seq) => {
+            out.push(ESC);
+            out.push_str(seq);
+        },
     }
 }
 

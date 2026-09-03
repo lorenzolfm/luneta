@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -32,9 +32,19 @@ struct Pane {
 
 const MARK: char = '✳';
 
+/// One session that holds a pane of a given id. `find` asks about a pane many
+/// times per frame — once per agent — so the answers are indexed by pane id
+/// instead of being searched for across every session's pane list.
+struct Holder {
+    session: String,
+    cwd: String,
+    claude: bool,
+}
+
 #[derive(Default)]
 pub struct Places {
     sessions: BTreeMap<String, Vec<Pane>>,
+    holders: HashMap<u32, Vec<Holder>>,
     asked: Option<Vec<String>>,
 }
 
@@ -44,6 +54,7 @@ impl Places {
             return Vec::new();
         }
         self.sessions.retain(|name, _| live.contains(name));
+        self.reindex();
         self.asked = Some(live.to_vec());
         live.to_vec()
     }
@@ -54,6 +65,28 @@ impl Places {
             _ => Vec::new(),
         };
         self.sessions.insert(session, panes);
+        self.reindex();
+    }
+
+    /// Rebuilds the pane index from the sessions. Keeps the first pane of each
+    /// (id, cwd) within a session, and visits sessions in name order, so a tie
+    /// between two sessions is broken the same way every time.
+    fn reindex(&mut self) {
+        let mut holders: HashMap<u32, Vec<Holder>> = HashMap::new();
+        for (name, panes) in &self.sessions {
+            let mut seen: HashSet<(u32, &str)> = HashSet::new();
+            for pane in panes {
+                if !seen.insert((pane.id, pane.cwd.as_str())) {
+                    continue;
+                }
+                holders.entry(pane.id).or_default().push(Holder {
+                    session: name.clone(),
+                    cwd: pane.cwd.clone(),
+                    claude: pane.claude,
+                });
+            }
+        }
+        self.holders = holders;
     }
 
     pub fn forget(&mut self) {
@@ -64,25 +97,20 @@ impl Places {
         if cwd.is_empty() {
             return None;
         }
-        let held: Vec<(&str, bool)> = self
-            .sessions
-            .iter()
-            .filter_map(|(name, panes)| {
-                panes
-                    .iter()
-                    .find(|held| held.id == pane && held.cwd == cwd)
-                    .map(|held| (name.as_str(), held.claude))
-            })
-            .collect();
-        if let [(only, _)] = held.as_slice() {
-            return Some(only);
+        let holders = self.holders.get(&pane)?;
+        let held = || holders.iter().filter(|held| held.cwd == cwd);
+        let mut only = held();
+        match (only.next(), only.next()) {
+            (Some(only), None) => return Some(only.session.as_str()),
+            (None, _) => return None,
+            _ => {},
         }
-        if let Some((named, _)) = held.iter().find(|(name, _)| *name == reported) {
-            return Some(named);
+        if let Some(named) = held().find(|held| held.session == reported) {
+            return Some(named.session.as_str());
         }
-        let mut claudes = held.iter().filter(|(_, claude)| *claude);
+        let mut claudes = held().filter(|held| held.claude);
         match (claudes.next(), claudes.next()) {
-            (Some((name, _)), None) => Some(name),
+            (Some(one), None) => Some(one.session.as_str()),
             _ => None,
         }
     }
@@ -110,7 +138,7 @@ fn is_claude(command: Option<&str>, title: Option<&str>) -> bool {
 #[cfg(test)]
 impl Places {
     pub fn of(sessions: &[(&str, &[(u32, &str)])]) -> Self {
-        Places {
+        let mut places = Places {
             sessions: sessions
                 .iter()
                 .map(|(name, panes)| {
@@ -121,8 +149,10 @@ impl Places {
                     (name.to_string(), panes)
                 })
                 .collect(),
-            asked: None,
-        }
+            ..Places::default()
+        };
+        places.reindex();
+        places
     }
 }
 

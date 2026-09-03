@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -26,6 +26,31 @@ pub struct Session {
 impl Sessions {
     pub fn any_named(&self, name: &str) -> bool {
         self.live.iter().chain(&self.dead).any(|s| s.name == name)
+    }
+
+    pub fn taken<'a>(&'a self, current: Option<&'a str>) -> Taken<'a> {
+        Taken::new(self, current)
+    }
+}
+
+/// The session names already in use, in a shape that answers the same question
+/// for every directory in the list without re-walking the snapshot each time.
+pub struct Taken<'a>(HashSet<&'a str>);
+
+impl<'a> Taken<'a> {
+    fn new(sessions: &'a Sessions, current: Option<&'a str>) -> Self {
+        let mut names: HashSet<&str> = sessions
+            .live
+            .iter()
+            .chain(&sessions.dead)
+            .map(|session| session.name.as_str())
+            .collect();
+        names.extend(current);
+        Taken(names)
+    }
+
+    pub fn holds(&self, name: &str) -> bool {
+        self.0.contains(name)
     }
 }
 
