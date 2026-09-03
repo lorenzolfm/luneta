@@ -47,11 +47,15 @@ jobs:
       # the rust the flake pins (1.95.0, the channel the rust-toolchain.toml of
       # zellij names) and the version is written down in one place.
       #
+      # `nix run .#dev` and not `nix develop --command dev`, because the CLI carries
+      # the toolchain in its own runtimeInputs: the recipe a developer runs and the
+      # recipe CI runs are then the same derivation, not two paths into it.
+      #
       # This step checks that the crate compiles for wasm32-wasip1, which a build for
       # the host target does not check. The unit tests run on the host target with
       # `cargo test` and are not part of this step.
       - name: Build
-        run: nix develop --command make build
+        run: nix run .#dev -- build
 
       - name: Read the version out of Cargo.toml
         id: version

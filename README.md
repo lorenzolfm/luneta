@@ -13,7 +13,11 @@
 
 <!--
   MEDIA SLOT — hero.gif
-  Record with `make media` (needs charmbracelet/vhs).
+  Record with `vhs docs/media/hero.tape` (nix shell nixpkgs#vhs), after a
+  `dev install`. The tapes press real keys against the installed .wasm, so what
+  lands in a GIF is the plugin and not a mock: they assume zoxide, eza and
+  claude-ps on the PATH, a populated zoxide database, a running Claude Code
+  agent, and a Nerd Font.
   Then point the <img> below at docs/media/hero.gif.
 -->
 <p align="center"><img src="docs/media/sessions.png" alt="the session picker: live and dead sessions on the left, the highlighted session's focused pane on the right" width="900"></p>
@@ -40,7 +44,7 @@ Select an item to see a live preview of it.
 
 <!--
   MEDIA SLOT — agents.gif
-  Recorded by `make media`; swap the <img> src for docs/media/agents.gif once it exists.
+  Record with `vhs docs/media/agents.tape`; swap the <img> src for docs/media/agents.gif once it exists.
 -->
 <p align="center"><img src="docs/media/agents.png" alt="the agent picker: agents sorted by attention on the left, the highlighted agent's question on the right" width="900"></p>
 
@@ -68,7 +72,7 @@ Agent support, today:
 
 <!--
   MEDIA SLOT — dirs.gif
-  Recorded by `make media`; swap the <img> src for docs/media/dirs.gif once it exists.
+  Record with `vhs docs/media/dirs.tape`; swap the <img> src for docs/media/dirs.gif once it exists.
 -->
 <p align="center"><img src="docs/media/dirs.png" alt="the directory picker: zoxide directories on the left, the highlighted directory's contents on the right" width="900"></p>
 
@@ -191,7 +195,7 @@ Only if you would rather not install a downloaded `.wasm`.
 
 ```sh
 nix develop          # or: direnv allow, once
-make install         # builds and installs to ~/.local/share/zellij/plugins/luneta.wasm
+dev install          # builds and installs to ~/.local/share/zellij/plugins/luneta.wasm
 ```
 
 The flake pins the rust toolchain with `wasm32-wasip1` added; a system rustc
