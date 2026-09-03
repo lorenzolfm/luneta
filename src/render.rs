@@ -241,7 +241,8 @@ fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
 }
 
 fn blank_line(rect: &Rect) -> Text {
-    Text::new(rect.blank()).dim_all()
+    // Spaces only: dimming them costs an index per column and shows nothing.
+    Text::new(rect.blank())
 }
 
 enum PreviewRow {

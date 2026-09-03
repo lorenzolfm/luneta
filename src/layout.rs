@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zellij_tile::prelude::Text;
 
 const TOP_LEFT: char = '╭';
@@ -86,7 +86,7 @@ impl Rect {
     }
 
     pub fn blank(&self) -> String {
-        Line::new().finish(self.inner_width()).content().to_string()
+        " ".repeat(self.inner_width() + 2)
     }
 
 }
@@ -113,6 +113,7 @@ impl Border {
 
 pub struct Line {
     text: String,
+    chars: usize,
     columns: usize,
     styles: Vec<Style>,
 }
@@ -131,7 +132,7 @@ impl Default for Line {
 
 impl Line {
     pub fn new() -> Self {
-        Self { text: String::new(), columns: 0, styles: Vec::new() }
+        Self { text: String::new(), chars: 0, columns: 0, styles: Vec::new() }
     }
 
     pub fn columns(&self) -> usize {
@@ -157,6 +158,7 @@ impl Line {
 
     pub fn gap(&mut self, n: usize) {
         self.text.extend(std::iter::repeat_n(' ', n));
+        self.chars += n;
         self.columns += n;
     }
 
@@ -165,21 +167,24 @@ impl Line {
     }
 
     fn raw(&mut self, text: &str) -> Range<usize> {
-        let start = self.text.chars().count();
+        let start = self.chars;
         self.text.push_str(text);
+        self.chars += text.chars().count();
         self.columns += text.width();
-        start..self.text.chars().count()
+        start..self.chars
     }
 
     pub fn finish(self, inner_width: usize) -> Text {
-        let Line { mut text, mut columns, styles } = self;
+        let Line { mut text, mut chars, mut columns, styles } = self;
         if columns > inner_width {
             text = truncate(&text, inner_width);
+            chars = text.chars().count();
             columns = text.width();
         }
-        let visible = text.chars().count();
+        let visible = chars;
 
-        let mut line = String::from(" ");
+        let mut line = String::with_capacity(text.len() + inner_width - columns + 2);
+        line.push(' ');
         line.push_str(&text);
         line.extend(std::iter::repeat_n(' ', inner_width - columns));
         line.push(' ');
@@ -191,21 +196,23 @@ impl Line {
             (start < end).then(|| shift(start)..shift(end))
         };
 
-        let styled: Vec<usize> = styles
-            .iter()
-            .flat_map(|style| match style {
+        // Every position no style covers is a space — padding, a gap, or the
+        // border margin — so it needs no index list of its own to look right.
+        let mut styled: Vec<usize> = Vec::new();
+        for style in &styles {
+            match style {
                 Style::Level(_, range) | Style::Error(range) => {
-                    clamp(range.clone()).map(|r| r.collect::<Vec<_>>()).unwrap_or_default()
+                    if let Some(range) = clamp(range.clone()) {
+                        styled.extend(range);
+                    }
                 },
                 Style::Hits(_, indices) => {
-                    indices.iter().filter(|i| **i < visible).map(|i| shift(*i)).collect()
+                    styled.extend(indices.iter().filter(|i| **i < visible).map(|i| shift(*i)));
                 },
-            })
-            .collect();
-        let frame: Vec<usize> =
-            (0..line.chars().count()).filter(|i| !styled.contains(i)).collect();
+            }
+        }
 
-        let mut text = Text::new(&line).dim_indices(frame).unbold_indices(styled);
+        let mut text = Text::new(&line).unbold_indices(styled);
         for style in styles {
             text = match style {
                 Style::Level(level, range) => match clamp(range) {
@@ -286,7 +293,7 @@ pub fn truncate(text: &str, max: usize) -> String {
     let mut out = String::new();
     let mut width = 0;
     for ch in text.chars() {
-        let w = ch.to_string().width();
+        let w = ch.width().unwrap_or(0);
         if width + w > max.saturating_sub(1) {
             break;
         }
@@ -305,7 +312,7 @@ pub fn truncate_left(text: &str, max: usize) -> (String, usize) {
     let mut width = 0;
     let mut kept = 0;
     for ch in chars.iter().rev() {
-        let w = ch.to_string().width();
+        let w = ch.width().unwrap_or(0);
         if width + w > max.saturating_sub(1) {
             break;
         }
