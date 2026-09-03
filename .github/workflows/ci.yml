@@ -47,31 +47,36 @@ jobs:
       # the rust the flake pins (1.95.0, the channel the rust-toolchain.toml of
       # zellij names) and the version is written down in one place.
       #
-      # `nix run .#dev` and not `nix develop --command dev`, because the CLI carries
-      # the toolchain in its own runtimeInputs: the recipe a developer runs and the
-      # recipe CI runs are then the same derivation, not two paths into it.
+      # `nix build .#luneta` and not `nix run .#dev -- build`: the asset a tag ships
+      # is built from the dependency revisions Cargo.lock names, fetched by hash into
+      # a sandbox with no network, so the bytes the attestation covers do not depend
+      # on what cargo happened to resolve on the runner. `dev build` stays the
+      # development loop; both run the same cargo invocation.
       #
-      # This step checks that the crate compiles for wasm32-wasip1, which a build for
-      # the host target does not check. The unit tests run on the host target with
-      # `cargo test` and are not part of this step.
+      # This step also checks that the crate compiles for wasm32-wasip1, which a
+      # build for the host target does not check. The unit tests are host-target and
+      # are not part of it.
       - name: Build
-        run: nix run .#dev -- build
+        run: nix build .#luneta
 
-      - name: Read the version out of Cargo.toml
+      # Out of the read-only store and under a stable name, so the upload and the
+      # release job can both name the file without knowing a store path.
+      - name: Stage the artifact
+        run: install -m0644 result/luneta.wasm luneta.wasm
+
+      # From the derivation, which reads Cargo.toml, so the version the release
+      # checks against the tag is the one the built bytes were stamped with.
+      - name: Read the version
         id: version
         run: |
           set -euo pipefail
-          version="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          if [ -z "$version" ]; then
-            echo "::error::could not read version from Cargo.toml"
-            exit 1
-          fi
+          version="$(nix eval --raw .#luneta.version)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: luneta-wasm
-          path: target/wasm32-wasip1/release/luneta.wasm
+          path: luneta.wasm
           if-no-files-found: error
 
   release:

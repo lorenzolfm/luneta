@@ -201,6 +201,13 @@ dev install          # builds and installs to ~/.local/share/zellij/plugins/lune
 The flake pins the rust toolchain with `wasm32-wasip1` added; a system rustc
 without that target fails with `error[E0463]: can't find crate for 'std'`.
 
+For the artifact a release ships — every dependency at the revision `Cargo.lock`
+names, built in a sandbox, no devshell and no checkout needed:
+
+```sh
+nix build github:lorenzolfm/luneta   # -> result/luneta.wasm
+```
+
 Then point `config.kdl` at `file:` instead of the release URL:
 
 ```kdl
