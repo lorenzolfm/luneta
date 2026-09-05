@@ -208,6 +208,10 @@ names, built in a sandbox, no devshell and no checkout needed:
 nix build github:lorenzolfm/luneta   # -> result/luneta.wasm
 ```
 
+The flake names one system, `x86_64-linux`. On anything else that command and the
+`nix develop` above both fail to evaluate; build with cargo instead, on the
+toolchain `rust-toolchain.toml` names.
+
 Then point `config.kdl` at `file:` instead of the release URL:
 
 ```kdl

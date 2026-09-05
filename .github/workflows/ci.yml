@@ -59,6 +59,17 @@ jobs:
       - name: Build
         run: nix build .#luneta
 
+      # The step above never touches `dev`: `packages` is a lazy attrset and nothing
+      # in `luneta` reaches it, so a `dev` that does not build evaluates fine and CI
+      # goes green. `nix flake check` is no backstop either — it evaluates the
+      # derivation without building it. Build it, so that writeShellApplication runs
+      # shellcheck over scripts/dev.sh. A broken `dev` breaks `nix develop`, which is
+      # the way the README tells a contributor to build.
+      #
+      # `--no-link`, so that `result` stays the wasm the next step stages.
+      - name: Build the dev CLI
+        run: nix build --no-link .#dev
+
       # Out of the read-only store and under a stable name, so the upload and the
       # release job can both name the file without knowing a store path.
       - name: Stage the artifact
