@@ -70,6 +70,19 @@ jobs:
       - name: Build the dev CLI
         run: nix build --no-link .#dev
 
+      # Through `dev` and not a bare `cargo clippy`, for the reason the build above
+      # goes through the flake: the invocation is written down once, and the rust
+      # this lints with is the one the flake pins rather than whatever the runner
+      # image ships. The lint set itself lives in Cargo.toml and clippy.toml.
+      #
+      # This compiles the tree a second time, and that is the point — it is the only
+      # step that reaches the tests and the profiling example, which `nix build
+      # .#luneta` filters out of its source and never sees.
+      #
+      # `nix run` writes no symlink, so `result` stays the wasm the next step stages.
+      - name: Clippy
+        run: nix run .#dev -- clippy
+
       # Out of the read-only store and under a stable name, so the upload and the
       # release job can both name the file without knowing a store path.
       - name: Stage the artifact
