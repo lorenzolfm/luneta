@@ -16,16 +16,16 @@ pub const CONTEXT_VALUE: &str = "pane";
 pub const PANE_KEY: &str = "luneta_pane";
 
 pub fn key(session: &str, pane: u32) -> String {
-    format!("{}\t{}", pane, session)
+    format!("{pane}\t{session}")
 }
 
 pub fn parse_key(key: &str) -> Option<(String, u32)> {
     let (pane, session) = key.split_once('\t')?;
-    Some((session.to_string(), pane.parse().ok()?))
+    Some((session.to_owned(), pane.parse().ok()?))
 }
 
 pub fn pane_id(pane: u32) -> String {
-    format!("terminal_{}", pane)
+    format!("terminal_{pane}")
 }
 
 pub enum Peek {
@@ -45,11 +45,11 @@ pub struct Peeks {
 
 impl Peeks {
     pub fn get(&self, session: &str, pane: u32) -> Option<&Peek> {
-        self.screens.get(&(session.to_string(), pane))
+        self.screens.get(&(session.to_owned(), pane))
     }
 
     pub fn claim(&mut self, session: &str, pane: u32) -> bool {
-        let key = (session.to_string(), pane);
+        let key = (session.to_owned(), pane);
         if self.screens.contains_key(&key) {
             return false;
         }
@@ -72,9 +72,10 @@ impl Peeks {
             let reason = reason.lines().next().unwrap_or("").trim();
             self.screens.insert(
                 key,
-                Peek::Failed(match reason.is_empty() {
-                    true => "the pane could not be read".to_string(),
-                    false => reason.to_string(),
+                Peek::Failed(if reason.is_empty() {
+                    "the pane could not be read".to_owned()
+                } else {
+                    reason.to_owned()
                 }),
             );
             return;
@@ -125,7 +126,7 @@ impl<'a> Iterator for Parts<'a> {
                     let start = at + ESC.len_utf8();
                     return Some(Part::Escape(escape(self.line, &mut self.chars, start)));
                 },
-                ch if ch.is_control() => continue,
+                ch if ch.is_control() => {},
                 ch => return Some(Part::Ch(ch)),
             }
         }
@@ -252,6 +253,8 @@ fn write(part: &Part, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     fn ready(peeks: &Peeks) -> Vec<String> {
@@ -263,7 +266,7 @@ mod tests {
 
     fn dumped(stdout: &[u8]) -> Peeks {
         let mut peeks = Peeks::default();
-        peeks.ingest(("s".to_string(), 0), Some(0), stdout, b"");
+        peeks.ingest(("s".to_owned(), 0), Some(0), stdout, b"");
         peeks
     }
 
@@ -282,7 +285,10 @@ mod tests {
 
     #[test]
     fn an_overlong_dump_keeps_its_last_lines() {
-        let dump: String = (0..MAX_LINES * 2).map(|i| format!("line-{}\n", i)).collect();
+        let dump = (0..MAX_LINES * 2).fold(String::new(), |mut acc, i| {
+            writeln!(acc, "line-{i}").unwrap();
+            acc
+        });
         let lines = ready(&dumped(dump.as_bytes()));
         assert_eq!(lines.len(), MAX_LINES);
         assert_eq!(lines[MAX_LINES - 1], format!("line-{}", MAX_LINES * 2 - 1));
@@ -321,7 +327,7 @@ mod tests {
         let mut peeks = Peeks::default();
         assert!(peeks.claim("s", 0));
         assert!(!peeks.claim("s", 0));
-        peeks.ingest(("s".to_string(), 0), Some(1), b"", b"zellij: no such session\n");
+        peeks.ingest(("s".to_owned(), 0), Some(1), b"", b"zellij: no such session\n");
         assert!(!peeks.claim("s", 0));
         match peeks.get("s", 0) {
             Some(Peek::Failed(reason)) => assert_eq!(reason, "zellij: no such session"),
@@ -343,8 +349,8 @@ mod tests {
 
     #[test]
     fn a_wire_key_round_trips_whatever_the_session_is_called() {
-        assert_eq!(parse_key(&key("misc", 7)), Some(("misc".to_string(), 7)));
-        assert_eq!(parse_key(&key("a\tb", 7)), Some(("a\tb".to_string(), 7)));
+        assert_eq!(parse_key(&key("misc", 7)), Some(("misc".to_owned(), 7)));
+        assert_eq!(parse_key(&key("a\tb", 7)), Some(("a\tb".to_owned(), 7)));
         assert_eq!(parse_key(&key("", 0)), Some((String::new(), 0)));
         assert_eq!(parse_key("misc"), None);
         assert_eq!(parse_key("seven\tmisc"), None);

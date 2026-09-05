@@ -172,7 +172,7 @@ mod tests {
 
     fn ghostty() -> Places {
         let mut places = Places::default();
-        places.ingest("ghostty".to_string(), Some(0), GHOSTTY.as_bytes());
+        places.ingest("ghostty".to_owned(), Some(0), GHOSTTY.as_bytes());
         places
     }
 
@@ -196,7 +196,7 @@ mod tests {
     fn an_agent_with_no_cwd_is_not_guessed_at() {
         let mut places = Places::default();
         places.ingest(
-            "s".to_string(),
+            "s".to_owned(),
             Some(0),
             br#"[{"id":0,"is_plugin":false,"pane_cwd":"","pane_command":"claude"}]"#,
         );
@@ -213,13 +213,13 @@ mod tests {
     fn the_pane_that_runs_claude_wins_a_tie() {
         let mut places = Places::default();
         places.ingest(
-            "shell".to_string(),
+            "shell".to_owned(),
             Some(0),
             br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
                  "title":"~/w/repo"}]"#,
         );
         places.ingest(
-            "agent".to_string(),
+            "agent".to_owned(),
             Some(0),
             r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"claude",
                  "title":"✳ Claude Code"}]"#
@@ -232,13 +232,13 @@ mod tests {
     fn a_claude_started_inside_a_shell_is_known_by_its_title() {
         let mut places = Places::default();
         places.ingest(
-            "shell".to_string(),
+            "shell".to_owned(),
             Some(0),
             br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
                  "title":"~/w/repo"}]"#,
         );
         places.ingest(
-            "agent".to_string(),
+            "agent".to_owned(),
             Some(0),
             r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
                  "title":"✳ Claude Code"}]"#
@@ -258,13 +258,13 @@ mod tests {
     fn a_name_that_still_holds_the_pane_outranks_the_claude_guess() {
         let mut places = Places::default();
         places.ingest(
-            "shell".to_string(),
+            "shell".to_owned(),
             Some(0),
             br#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"fish",
                  "title":"~/w/repo"}]"#,
         );
         places.ingest(
-            "agent".to_string(),
+            "agent".to_owned(),
             Some(0),
             r#"[{"id":0,"is_plugin":false,"pane_cwd":"/w/repo","pane_command":"claude",
                  "title":"✳ Claude Code"}]"#
@@ -282,13 +282,13 @@ mod tests {
     #[test]
     fn a_session_that_could_not_be_read_holds_nothing() {
         let mut places = ghostty();
-        places.ingest("ghostty".to_string(), Some(1), b"");
+        places.ingest("ghostty".to_owned(), Some(1), b"");
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), None);
     }
 
     #[test]
     fn the_same_set_of_sessions_is_only_asked_about_once() {
-        let live = vec!["a".to_string(), "b".to_string()];
+        let live = vec!["a".to_owned(), "b".to_owned()];
         let mut places = Places::default();
         assert_eq!(places.ask(&live), live);
         assert!(places.ask(&live).is_empty());
@@ -299,9 +299,9 @@ mod tests {
     #[test]
     fn a_session_that_is_gone_is_forgotten_when_the_rest_are_asked_again() {
         let mut places = ghostty();
-        assert_eq!(places.ask(&["ghostty".to_string()]), ["ghostty"]);
+        assert_eq!(places.ask(&["ghostty".to_owned()]), ["ghostty"]);
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), Some("ghostty"));
-        assert_eq!(places.ask(&["luneta".to_string()]), ["luneta"]);
+        assert_eq!(places.ask(&["luneta".to_owned()]), ["luneta"]);
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), None);
     }
 

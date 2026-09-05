@@ -59,7 +59,7 @@ pub fn render_search(
         draw_preview(rect, &title, &right, lines);
     }
     draw_input(&screen, "Sessions", prompt_text(state));
-    draw_help(&screen, search_help(help_width(cols)));
+    draw_help(&screen, &search_help(help_width(cols)));
 }
 
 pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
@@ -76,7 +76,7 @@ pub fn render_dirs(dirs: &DirSet, term: &str, rows: usize, cols: usize) {
         draw_preview(rect, &title, &right, lines);
     }
     draw_input(&screen, "Directories", dir_prompt(dirs, term));
-    draw_help(&screen, dirs_help(help_width(cols)));
+    draw_help(&screen, &dirs_help(help_width(cols)));
 }
 
 pub fn render_agents(
@@ -100,24 +100,24 @@ pub fn render_agents(
         draw_preview(rect, &title, "", lines);
     }
     draw_input(&screen, "Agents", agent_prompt(agents, term));
-    draw_help(&screen, agents_help(help_width(cols)));
+    draw_help(&screen, &agents_help(help_width(cols)));
 }
 
 pub fn render_rename(current: &str, input: &str, error: Option<&str>, rows: usize, cols: usize) {
     let screen = Screen::new(rows, cols);
 
     if let Some(rect) = &screen.full {
-        let notes = vec![Note::dim(format!("renaming \"{}\" — the session you are in", current))];
+        let notes = vec![Note::dim(format!("renaming \"{current}\" — the session you are in"))];
         draw(rect, "Rename", "", interior(rect, &notes, Vec::new()));
     }
     let (action, is_error) = match error {
         Some(error) => (error, true),
         None => ("Rename", false),
     };
-    draw_input(&screen, "Rename", (input.to_string(), Some(action.to_string()), is_error));
+    draw_input(&screen, "Rename", (input.to_owned(), Some(action.to_owned()), is_error));
     draw_help(
         &screen,
-        keys_text(
+        &keys_text(
             help_width(cols),
             &[("<ENTER>", "Rename", "Rename"), ("<ESC>", "Cancel", "Cancel")],
         ),
@@ -130,26 +130,26 @@ fn help_width(cols: usize) -> usize {
     cols.saturating_sub(PAD * 2)
 }
 
-fn print_at(text: Painted, x: usize, y: usize, width: usize) {
-    paint::print_at(&text, x, y, width);
+fn print_at(text: &Painted, x: usize, y: usize, width: usize) {
+    paint::print_at(text, x, y, width);
 }
 
 fn draw(rect: &Rect, title: &str, right: &str, interior: Vec<Painted>) {
-    print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
+    print_at(&border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
     for (i, line) in interior.into_iter().enumerate() {
-        draw_row(rect, rect.inner_y() + i, line);
+        draw_row(rect, rect.inner_y() + i, &line);
     }
-    print_at(Painted::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
+    print_at(&Painted::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
-fn draw_row(rect: &Rect, y: usize, row: Painted) {
+fn draw_row(rect: &Rect, y: usize, row: &Painted) {
     let Some(inner) = rect.width.checked_sub(2) else {
         return;
     };
     let edge = || Painted::new(VERTICAL.to_string()).dim_all();
-    print_at(edge(), rect.x, y, 1);
+    print_at(&edge(), rect.x, y, 1);
     print_at(row, rect.x + 1, y, inner);
-    print_at(edge(), rect.x + rect.width - 1, y, 1);
+    print_at(&edge(), rect.x + rect.width - 1, y, 1);
 }
 
 fn border_text(border: Border) -> Painted {
@@ -191,12 +191,12 @@ fn input_line(rect: &Rect, prompt: Prompt) -> Painted {
     let mut line = Line::new();
     line.push("> ", TAG);
 
-    let (typed, _) = truncate_left(&format!("{}_", input), inner.saturating_sub(2));
+    let (typed, _) = truncate_left(&format!("{input}_"), inner.saturating_sub(2));
     line.push(&typed, ACCENT);
 
     let room = inner.saturating_sub(line.columns() + GAP);
     if let Some(action) = action.filter(|_| room >= MIN_ACTION) {
-        let action = truncate(&format!("<ENTER> {}", action), room);
+        let action = truncate(&format!("<ENTER> {action}"), room);
         line.pad_to(inner - action.width());
         if is_error {
             line.push_error(&action);
@@ -212,13 +212,13 @@ const MIN_ACTION: usize = 12;
 fn draw_input(screen: &Screen, title: &str, prompt: Prompt) {
     let rect = &screen.input;
     if !screen.bordered {
-        print_at(input_line(rect, prompt), rect.x, rect.y, rect.width);
+        print_at(&input_line(rect, prompt), rect.x, rect.y, rect.width);
         return;
     }
     draw(rect, title, "", vec![input_line(rect, prompt)]);
 }
 
-fn draw_help(screen: &Screen, help: Painted) {
+fn draw_help(screen: &Screen, help: &Painted) {
     if let Some(y) = screen.help_y {
         print_at(help, PAD, y, screen.input.width.saturating_sub(PAD));
     }
@@ -281,15 +281,15 @@ fn pane_row(rect: &Rect, line: &str) -> String {
 }
 
 fn draw_preview(rect: &Rect, title: &str, right: &str, lines: Vec<PreviewRow>) {
-    print_at(border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
+    print_at(&border_text(rect.top(title, right)), rect.x, rect.y, rect.width);
     for (i, row) in filled(rect, lines).into_iter().enumerate() {
         let y = rect.inner_y() + i;
         match row {
-            PreviewRow::Own(text) => draw_row(rect, y, text),
+            PreviewRow::Own(text) => draw_row(rect, y, &text),
             PreviewRow::Pane(line) => draw_pane_row(rect, y, &line),
         }
     }
-    print_at(Painted::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
+    print_at(&Painted::new(rect.bottom()).dim_all(), rect.x, rect.bottom_y(), rect.width);
 }
 
 fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
@@ -297,9 +297,9 @@ fn draw_pane_row(rect: &Rect, y: usize, line: &str) {
         return;
     }
     let edge = || Painted::new(VERTICAL.to_string()).dim_all();
-    print_at(edge(), rect.x, y, 1);
+    print_at(&edge(), rect.x, y, 1);
     print!("\u{1b}[{};{}H\u{1b}[m{}\u{1b}[m", y + 1, rect.x + 2, line);
-    print_at(edge(), rect.x + rect.width - 1, y, 1);
+    print_at(&edge(), rect.x + rect.width - 1, y, 1);
 }
 
 fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
@@ -307,7 +307,7 @@ fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
     if lines.len() > height {
         let hidden = lines.len() - height + 1;
         lines.truncate(height.saturating_sub(1));
-        lines.push(note_line(rect, &Note::dim(format!("… {} more", hidden))).into());
+        lines.push(note_line(rect, &Note::dim(format!("… {hidden} more"))).into());
     }
     lines.resize_with(height, || blank_line(rect).into());
     lines
@@ -352,7 +352,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 fn nothing_highlighted(rect: &Rect) -> (String, Vec<PreviewRow>) {
     let inner = rect.inner_width();
     (
-        "Preview".to_string(),
+        "Preview".to_owned(),
         vec![
             preview_line(inner, "nothing highlighted", TAG),
             blank_line(rect).into(),
@@ -438,8 +438,8 @@ fn screen_lines(
 
 fn plural(n: usize, thing: &str) -> String {
     match n {
-        1 => format!("1 {}", thing),
-        n => format!("{} {}s", n, thing),
+        1 => format!("1 {thing}"),
+        n => format!("{n} {thing}s"),
     }
 }
 
@@ -521,7 +521,7 @@ fn search_body(state: &MatchSet, rect: &Rect, notes: usize) -> Vec<Painted> {
     let dead_at = dead_from(&state.rows);
     let line_of = |row: usize| row + usize::from(dead_at.is_some_and(|at| row >= at));
     let lines = state.rows.len() + usize::from(dead_at.is_some());
-    let selected_line = state.rows.selected().map(line_of).unwrap_or(0);
+    let selected_line = state.rows.selected().map_or(0, line_of);
     let (start, end) = viewport(selected_line, lines, capacity);
 
     let visible = |line: usize| {
@@ -613,18 +613,18 @@ fn prompt_text(state: &MatchSet) -> Prompt {
 fn enter_action(state: &MatchSet) -> (Option<String>, bool) {
     if let Some(row) = state.rows.selected_row() {
         return match row.kind {
-            Kind::Live => (Some("Attach".to_string()), false),
-            Kind::Resurrectable => (Some("Resurrect".to_string()), false),
+            Kind::Live => (Some("Attach".to_owned()), false),
+            Kind::Resurrectable => (Some("Resurrect".to_owned()), false),
         };
     }
     if state.is_own_name() {
-        return (Some("already attached".to_string()), false);
+        return (Some("already attached".to_owned()), false);
     }
     if let Some(reason) = state.name_error() {
-        return (Some(reason.to_string()), true);
+        return (Some(reason.to_owned()), true);
     }
     if state.search_term.is_empty() {
-        (Some("New session".to_string()), false)
+        (Some("New session".to_owned()), false)
     } else {
         (Some(format!("Create \"{}\"", state.search_term)), false)
     }
@@ -642,9 +642,9 @@ fn empty_text(state: &MatchSet) -> String {
         return format!("no match for \"{}\"", state.search_term);
     }
     if state.current_session.is_some() {
-        "no other sessions".to_string()
+        "no other sessions".to_owned()
     } else {
-        "no sessions".to_string()
+        "no sessions".to_owned()
     }
 }
 
@@ -704,9 +704,9 @@ fn dir_line(
 
 fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
     let Some(row) = dirs.selected_row() else {
-        return (term.to_string(), None, false);
+        return (term.to_owned(), None, false);
     };
-    (term.to_string(), Some(format!("Create \"{}\"", row.name)), false)
+    (term.to_owned(), Some(format!("Create \"{}\"", row.name)), false)
 }
 
 fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
@@ -718,10 +718,10 @@ fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
 
 fn dir_empty_text(dirs: &DirSet, term: &str) -> String {
     match &dirs.status {
-        Fetch::Waiting => "asking zoxide…".to_string(),
-        Fetch::Failed(_) => "no directories".to_string(),
-        Fetch::Ready(_) if term.is_empty() => "zoxide knows nowhere yet".to_string(),
-        Fetch::Ready(_) => format!("no match for \"{}\"", term),
+        Fetch::Waiting => "asking zoxide…".to_owned(),
+        Fetch::Failed(_) => "no directories".to_owned(),
+        Fetch::Ready(_) if term.is_empty() => "zoxide knows nowhere yet".to_owned(),
+        Fetch::Ready(_) => format!("no match for \"{term}\""),
     }
 }
 
@@ -799,7 +799,6 @@ fn agent_body(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn agent_line(
     row: &AgentRow,
     selected: bool,
@@ -854,8 +853,8 @@ fn agent_line(
 
 fn agent_prompt(agents: &AgentSet, term: &str) -> Prompt {
     match agents.selected_row() {
-        Some(row) => (term.to_string(), Some(format!("Go to \"{}\"", row.label())), false),
-        None => (term.to_string(), None, false),
+        Some(row) => (term.to_owned(), Some(format!("Go to \"{}\"", row.label())), false),
+        None => (term.to_owned(), None, false),
     }
 }
 
@@ -872,26 +871,26 @@ fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
 
 fn unplaced_text(unplaced: usize) -> String {
     match unplaced {
-        1 => "1 agent sits in a pane luneta cannot find".to_string(),
-        n => format!("{} agents sit in panes luneta cannot find", n),
+        1 => "1 agent sits in a pane luneta cannot find".to_owned(),
+        n => format!("{n} agents sit in panes luneta cannot find"),
     }
 }
 
 fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
     match &agents.status {
-        Fetch::Waiting => "looking for agents…".to_string(),
-        Fetch::Failed(_) => "no agents".to_string(),
-        Fetch::Ready(_) if term.is_empty() => "no agents running".to_string(),
-        Fetch::Ready(_) => format!("no match for \"{}\"", term),
+        Fetch::Waiting => "looking for agents…".to_owned(),
+        Fetch::Failed(_) => "no agents".to_owned(),
+        Fetch::Ready(_) if term.is_empty() => "no agents running".to_owned(),
+        Fetch::Ready(_) => format!("no match for \"{term}\""),
     }
 }
 
 fn short_cwd(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     match parts.as_slice() {
-        [] => path.to_string(),
-        [only] => (*only).to_string(),
-        [.., parent, base] => format!("{}/{}", parent, base),
+        [] => path.to_owned(),
+        [only] => (*only).to_owned(),
+        [.., parent, base] => format!("{parent}/{base}"),
     }
 }
 
@@ -982,7 +981,7 @@ mod tests {
     }
 
     fn session(name: &str, kind: Kind, age: u64) -> Row {
-        Row::new(name.to_string(), kind, Age::from_secs(age), 0, vec![], false)
+        Row::new(name.to_owned(), kind, Age::from_secs(age), 0, vec![], false)
     }
 
     fn matches(rows: Vec<Row>, selected: Option<usize>) -> MatchSet {
@@ -993,7 +992,7 @@ mod tests {
 
     fn attached(rows: Vec<Row>, selected: Option<usize>, current: &str) -> MatchSet {
         let mut state = matches(rows, selected);
-        state.current_session = Some(current.to_string());
+        state.current_session = Some(current.to_owned());
         state
     }
 
@@ -1030,7 +1029,7 @@ mod tests {
     fn the_banner_gives_up_its_label_before_it_gives_up_the_name() {
         let banner = |width: usize, name: &str| {
             let rect = Rect { x: 0, y: 0, width, height: 5 };
-            search_body(&attached(Vec::new(), None, name), &rect, 0)[0].content().to_string()
+            search_body(&attached(Vec::new(), None, name), &rect, 0)[0].content().to_owned()
         };
         assert_eq!(banner(24, "notes"), "   notes ─ 🏠 Current ");
         assert_eq!(banner(22, "notes"), "   notes ────────── ");
@@ -1075,7 +1074,7 @@ mod tests {
                 .collect();
             let body = search_body(&attached(rows, Some(selected), "notes"), &rect, 0);
             assert_eq!(body.len(), rect.inner_height());
-            let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
+            let shown: Vec<&str> = body.iter().map(super::super::paint::Painted::content).collect();
             assert!(shown[0].starts_with("   notes "), "selected {selected}: {shown:?}");
             let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with(" > ")).collect();
             assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
@@ -1102,18 +1101,18 @@ mod tests {
     fn contents(panes: usize, tab: &str, title: &str) -> Contents {
         Contents {
             panes,
-            focus: Some(Focus { pane: 7, tab: tab.to_string(), title: title.to_string() }),
+            focus: Some(Focus { pane: 7, tab: tab.to_owned(), title: title.to_owned() }),
         }
     }
 
     fn peeked(session: &str, pane: u32, screen: &str) -> Peeks {
         let mut peeks = Peeks::default();
-        peeks.ingest((session.to_string(), pane), Some(0), screen.as_bytes(), b"");
+        peeks.ingest((session.to_owned(), pane), Some(0), screen.as_bytes(), b"");
         peeks
     }
 
     fn beside(left: Vec<String>, right: Vec<String>) -> Vec<String> {
-        left.into_iter().zip(right).map(|(left, right)| format!("{}{}", left, right)).collect()
+        left.into_iter().zip(right).map(|(left, right)| format!("{left}{right}")).collect()
     }
 
     const HOUR: u64 = 3600;
@@ -1202,7 +1201,7 @@ mod tests {
                 .collect();
             let body = search_body(&matches(rows, Some(selected)), &rect, 0);
             assert_eq!(body.len(), rect.inner_height());
-            let shown: Vec<&str> = body.iter().map(|l| l.content()).collect();
+            let shown: Vec<&str> = body.iter().map(super::super::paint::Painted::content).collect();
             let carets: Vec<&&str> = shown.iter().filter(|l| l.starts_with(" > ")).collect();
             assert_eq!(carets.len(), 1, "selected {selected} fell off: {shown:?}");
             assert!(
@@ -1259,7 +1258,7 @@ mod tests {
                     for current in currents {
                         let rect = Rect { x: 0, y: 0, width, height };
                         let mut state = matches(rows(), Some(1));
-                        state.current_session = current.map(str::to_string);
+                        state.current_session = current.map(str::to_owned);
                         let notes: Vec<Note> =
                             (0..notes).map(|i| Note::dim(format!("note {i}"))).collect();
                         let body = search_body(&state, &rect, notes.len());
@@ -1280,7 +1279,7 @@ mod tests {
     fn an_empty_list_explains_itself_where_the_rows_would_be() {
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
         let mut state = matches(Vec::new(), None);
-        state.search_term = "desp".to_string();
+        state.search_term = "desp".to_owned();
         let body = search_body(&state, &rect, 0);
         assert_eq!(
             picture(&rect, TITLE, "", interior(&rect, &[], body)),
@@ -1297,7 +1296,7 @@ mod tests {
     #[test]
     fn the_input_line_pushes_the_action_to_the_right() {
         let rect = Rect { x: 0, y: 0, width: 40, height: 3 };
-        let line = input_line(&rect, ("desp".to_string(), Some("Attach".to_string()), false));
+        let line = input_line(&rect, ("desp".to_owned(), Some("Attach".to_owned()), false));
         assert_eq!(line.content(), " > desp_               <ENTER> Attach ");
         assert_eq!(line.content().width(), rect.width - 2);
     }
@@ -1305,7 +1304,7 @@ mod tests {
     #[test]
     fn a_narrow_box_drops_the_action_not_the_term() {
         let rect = Rect { x: 0, y: 0, width: 18, height: 3 };
-        let line = input_line(&rect, ("despesas".to_string(), Some("Attach".to_string()), false));
+        let line = input_line(&rect, ("despesas".to_owned(), Some("Attach".to_owned()), false));
         assert_eq!(line.content(), " > despesas_    ");
         assert_eq!(line.content().width(), rect.width - 2);
     }
@@ -1313,7 +1312,7 @@ mod tests {
     #[test]
     fn an_overlong_term_is_cut_from_the_left() {
         let rect = Rect { x: 0, y: 0, width: 16, height: 3 };
-        let line = input_line(&rect, ("a-very-long-name".to_string(), None, false));
+        let line = input_line(&rect, ("a-very-long-name".to_owned(), None, false));
         assert_eq!(line.content(), " > …ong-name_ ");
         assert_eq!(line.content().width(), rect.width - 2);
     }
@@ -1399,7 +1398,7 @@ mod tests {
     fn a_session_preview_shows_the_pane_it_names() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut state = matches(vec![session("dotfiles", Kind::Live, HOUR)], Some(0));
-        state.contents.insert("dotfiles".to_string(), contents(3, "editor", "nvim"));
+        state.contents.insert("dotfiles".to_owned(), contents(3, "editor", "nvim"));
         let peeks = peeked("dotfiles", 7, "one\ntwo\n> cargo test\nok\n\n\n");
         let (title, right, lines) = session_preview(&state, &peeks, &rect);
         assert_eq!((title.as_str(), right.as_str()), ("dotfiles", "3 panes"));
@@ -1422,7 +1421,7 @@ mod tests {
     fn a_pane_says_so_while_it_is_being_read() {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut state = matches(vec![session("dotfiles", Kind::Live, HOUR)], Some(0));
-        state.contents.insert("dotfiles".to_string(), contents(1, "editor", "nvim"));
+        state.contents.insert("dotfiles".to_owned(), contents(1, "editor", "nvim"));
 
         let unasked = session_preview(&state, &Peeks::default(), &rect).2;
         assert!(unasked[2].content().contains("reading…"));
@@ -1472,7 +1471,7 @@ mod tests {
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         dirs.ingest_listing(
-            "/home/you/misc/luneta".to_string(),
+            "/home/you/misc/luneta".to_owned(),
             Some(0),
             b"src/\nCargo.toml\nREADME.md\n",
             b"",
@@ -1502,7 +1501,7 @@ mod tests {
             dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
             dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
             dirs.ingest_listing(
-                "/home/you/misc/luneta".to_string(),
+                "/home/you/misc/luneta".to_owned(),
                 Some(0),
                 EZA.as_bytes(),
                 b"",
@@ -1569,9 +1568,9 @@ mod tests {
         let screen = Screen::new(rows, cols);
         let sessions = snapshot();
         let mut state = MatchSet::default();
-        state.refresh(&sessions, Some("notes".to_string()));
+        state.refresh(&sessions, Some("notes".to_owned()));
         state.rows.move_selection(1);
-        state.contents.insert("dotfiles".to_string(), contents(3, "editor", "nvim"));
+        state.contents.insert("dotfiles".to_owned(), contents(3, "editor", "nvim"));
         let peeks = peeked(
             "dotfiles",
             7,
@@ -1590,7 +1589,7 @@ mod tests {
             &screen,
             "Sessions",
             prompt_text(&state),
-            search_help(help_width(cols)),
+            &search_help(help_width(cols)),
         );
 
         let mut agents = AgentSet::default();
@@ -1615,14 +1614,14 @@ mod tests {
             &screen,
             "Agents",
             agent_prompt(&agents, ""),
-            agents_help(help_width(cols)),
+            &agents_help(help_width(cols)),
         );
 
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
         dirs.rebuild("", &sessions, Some("notes"), Selection::SnapToTop);
         dirs.ingest_listing(
-            "/home/lorenzo/Projects/misc/luneta".to_string(),
+            "/home/lorenzo/Projects/misc/luneta".to_owned(),
             Some(0),
             EZA.as_bytes(),
             b"",
@@ -1639,11 +1638,11 @@ mod tests {
             &screen,
             "Directories",
             dir_prompt(&dirs, ""),
-            dirs_help(help_width(cols)),
+            &dirs_help(help_width(cols)),
         );
     }
 
-    fn print_pane(boxes: Vec<String>, screen: &Screen, title: &str, prompt: Prompt, help: Painted) {
+    fn print_pane(boxes: Vec<String>, screen: &Screen, title: &str, prompt: Prompt, help: &Painted) {
         for line in boxes {
             println!("{line}");
         }
@@ -1666,7 +1665,7 @@ mod tests {
 
     fn snapshot() -> Sessions {
         let named =
-            |name: &str, age: u64| Session { name: name.to_string(), age: Age::from_secs(age) };
+            |name: &str, age: u64| Session { name: name.to_owned(), age: Age::from_secs(age) };
         Sessions {
             live: vec![named("luneta", 2 * HOUR), named("dotfiles", 5 * HOUR)],
             dead: vec![named("despesas-old", 12 * DAY), named("api-spike", 40 * DAY)],
