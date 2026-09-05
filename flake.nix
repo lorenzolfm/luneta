@@ -126,6 +126,7 @@
           dev — luneta build recipes (pinned nix tooling)
 
             dev build                  cargo build --release --target wasm32-wasip1
+            dev clippy [args...]       cargo clippy over every target, warnings denied
             dev install                build, then install to ~/.local/share/zellij/plugins
             dev reload [session]       install, then put the new bytes in the running picker
             dev clean                  cargo clean
@@ -140,7 +141,7 @@
               usage
               exit 0
               ;;
-            build | install | reload | clean) ;;
+            build | clippy | install | reload | clean) ;;
             *)
               # Explicit failure, not a silent fall-through to help: `dev buidl` in a script
               # or a CI step must not exit 0.
@@ -179,6 +180,24 @@
           case "$cmd" in
             build)
               build
+              ;;
+
+            # The lint set lives in Cargo.toml and clippy.toml, so this is only the
+            # invocation. Three parts of it are load-bearing:
+            #
+            #   --all-targets   the tests and the profiling example are code too, and
+            #                   `unwrap_used` reads differently in each — clippy.toml
+            #                   exempts tests, not examples.
+            #   --target        the same triple `dev build` uses. Linting the host
+            #                   target would check a build that never ships, and
+            #                   `cfg(target_*)` code would be linted on the wrong side.
+            #   -D warnings     every lint in Cargo.toml is set to `warn`, so without
+            #                   this the command always exits 0 and gates nothing.
+            #
+            # Anything after `dev clippy` goes to cargo, ahead of the `--`, so
+            # `dev clippy --fix --allow-dirty` applies the machine-applicable ones.
+            clippy)
+              cargo clippy --locked --all-targets --target wasm32-wasip1 "$@" -- -D warnings
               ;;
 
             install)

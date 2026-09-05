@@ -158,7 +158,7 @@ pub fn print_at(painted: &Painted, x: usize, y: usize, width: usize) {
         out.push_str("/;");
         painted.write(out);
         out.push_str("\u{1b}\\");
-        print!("{}", out);
+        print!("{out}");
     });
 }
 

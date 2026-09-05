@@ -18,3 +18,44 @@ serde_json = "1"
 opt-level = "z"
 lto = true
 strip = true
+
+# `all` and `pedantic` at the bottom, then the `restriction` lints that are worth
+# warning on top of them, then the pedantic lints that cost more than they catch.
+# Priority orders the overlap: a later priority wins, so the explicit entries
+# below survive the blanket `warn`s above.
+#
+# `dev clippy` is what runs this set; it denies warnings, so every `warn` here is
+# an error on a branch.
+[lints.clippy]
+all = { level = "warn", priority = 0 }
+pedantic = { level = "warn", priority = 1 }
+
+# Behaviors `restrict`ed by law
+allow_attributes = { level = "warn", priority = 2 }
+allow_attributes_without_reason = { level = "warn", priority = 2 }
+implicit_clone = { level = "warn", priority = 2 }
+redundant_test_prefix = { level = "warn", priority = 2 }
+redundant_type_annotations = { level = "warn", priority = 2 }
+str_to_string = { level = "warn", priority = 2 }
+todo = { level = "warn", priority = 2 }
+try_err = { level = "warn", priority = 2 }
+unimplemented = { level = "warn", priority = 2 }
+unwrap_used = { level = "warn", priority = 2 }
+panic = { level = "warn", priority = 2 }
+
+# `Pedantic` lints that are too pedantic
+cast-possible-wrap = { level = "allow", priority = 3 }
+cast-precision-loss = { level = "allow", priority = 3 }
+cast_possible_truncation = { level = "allow", priority = 3 }
+cast_sign_loss = { level = "allow", priority = 3 }
+inconsistent_digit_grouping = { level = "allow", priority = 3 }
+missing-errors-doc = { level = "allow", priority = 3 }
+missing_panics_doc = { level = "allow", priority = 3 }
+result_large_err = { level = "allow", priority = 3 }
+too_many_arguments = {  level = "allow", priority = 3 }
+too_many_lines = { level = "allow", priority = 3 }
+unreadable_literal = { level = "allow", priority = 3 }
+disallowed_methods = { level = "allow", priority = 3 }
+
+[lints.rust]
+unsafe_code = "deny"

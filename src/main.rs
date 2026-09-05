@@ -111,7 +111,7 @@ impl ZellijPlugin for State {
             .get(AGENTS_COMMAND)
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-            .map(str::to_string);
+            .map(str::to_owned);
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -154,7 +154,7 @@ impl ZellijPlugin for State {
                 let asked = self.follow_preview();
                 polled || self.spinning() || asked
             },
-            Event::Key(key) => self.handle_key(key),
+            Event::Key(key) => self.handle_key(&key),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 match context.get(dirs::CONTEXT_KEY).map(String::as_str) {
                     Some(dirs::CONTEXT_VALUE) => {
@@ -241,10 +241,10 @@ impl ZellijPlugin for State {
                         self.error.as_deref(),
                         rows,
                         cols,
-                    )
+                    );
                 },
                 Screen::Dirs => {
-                    render::render_dirs(&self.dirs, &self.matches.search_term, rows, cols)
+                    render::render_dirs(&self.dirs, &self.matches.search_term, rows, cols);
                 },
                 Screen::Agents => render::render_agents(
                     &self.agents,
@@ -338,8 +338,8 @@ impl State {
             run_command(
                 &places::query(&session),
                 BTreeMap::from([
-                    (dirs::CONTEXT_KEY.to_string(), places::CONTEXT_VALUE.to_string()),
-                    (places::SESSION_KEY.to_string(), session.clone()),
+                    (dirs::CONTEXT_KEY.to_owned(), places::CONTEXT_VALUE.to_owned()),
+                    (places::SESSION_KEY.to_owned(), session.clone()),
                 ]),
             );
         }
@@ -357,8 +357,8 @@ impl State {
         run_command(
             &command,
             BTreeMap::from([(
-                agents::CONTEXT_KEY.to_string(),
-                agents::CONTEXT_VALUE.to_string(),
+                agents::CONTEXT_KEY.to_owned(),
+                agents::CONTEXT_VALUE.to_owned(),
             )]),
         );
     }
@@ -393,8 +393,8 @@ impl State {
                 run_command(
                     &command,
                     BTreeMap::from([
-                        (dirs::CONTEXT_KEY.to_string(), dirs::PREVIEW_VALUE.to_string()),
-                        (dirs::PATH_KEY.to_string(), path.clone()),
+                        (dirs::CONTEXT_KEY.to_owned(), dirs::PREVIEW_VALUE.to_owned()),
+                        (dirs::PATH_KEY.to_owned(), path.clone()),
                     ]),
                 );
             },
@@ -409,8 +409,8 @@ impl State {
                 run_command(
                     &command,
                     BTreeMap::from([
-                        (dirs::CONTEXT_KEY.to_string(), panes::CONTEXT_VALUE.to_string()),
-                        (panes::PANE_KEY.to_string(), panes::key(&session, pane)),
+                        (dirs::CONTEXT_KEY.to_owned(), panes::CONTEXT_VALUE.to_owned()),
+                        (panes::PANE_KEY.to_owned(), panes::key(&session, pane)),
                     ]),
                 );
             },
@@ -428,7 +428,7 @@ impl State {
             },
             Screen::Agents => {
                 let row = self.agents.selected_row()?;
-                Some(Target::Pane(row.seat.session().to_string(), row.pane))
+                Some(Target::Pane(row.seat.session().to_owned(), row.pane))
             },
         }
     }
@@ -449,11 +449,11 @@ impl State {
         self.dirs.asking = true;
         run_command(
             &dirs::QUERY,
-            BTreeMap::from([(dirs::CONTEXT_KEY.to_string(), dirs::CONTEXT_VALUE.to_string())]),
+            BTreeMap::from([(dirs::CONTEXT_KEY.to_owned(), dirs::CONTEXT_VALUE.to_owned())]),
         );
     }
 
-    fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+    fn handle_key(&mut self, key: &KeyWithModifier) -> bool {
         if key.bare_key == BareKey::Char('c') && key.has_modifiers(&[KeyModifier::Ctrl]) {
             close_self();
             return false;
@@ -464,7 +464,7 @@ impl State {
         }
     }
 
-    fn handle_search_key(&mut self, key: KeyWithModifier) -> bool {
+    fn handle_search_key(&mut self, key: &KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Tab if key.has_no_modifiers() => {
                 self.screen = self.screen.next();
@@ -559,7 +559,7 @@ impl State {
         match &row.seat {
             Seat::Here(_) => focus_terminal_pane(row.pane, false, false),
             Seat::There(session) => {
-                switch_session_with_focus(session, None, Some((row.pane, false)))
+                switch_session_with_focus(session, None, Some((row.pane, false)));
             },
         }
         close_self();
@@ -573,7 +573,7 @@ impl State {
         self.mode = Mode::Rename { current, input: String::new() };
     }
 
-    fn handle_rename_key(&mut self, key: KeyWithModifier) -> bool {
+    fn handle_rename_key(&mut self, key: &KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Enter if key.has_no_modifiers() => {
                 self.apply_rename();
@@ -633,7 +633,7 @@ impl State {
             Kind::Resurrectable => ("delete", delete_dead_session(&name)),
         };
         self.set_term(String::new());
-        self.error = result.err().map(|e| format!("{} \"{}\": {}", verb, name, e));
+        self.error = result.err().map(|e| format!("{verb} \"{name}\": {e}"));
         self.poll();
     }
 
@@ -675,10 +675,10 @@ fn contents_of(session: SessionInfo) -> Contents {
 fn resize_self(plugin_id: u32) {
     let (x, y, width, height) = FLOATING;
     let Some(coordinates) = FloatingPaneCoordinates::new(
-        Some(x.to_string()),
-        Some(y.to_string()),
-        Some(width.to_string()),
-        Some(height.to_string()),
+        Some(x.to_owned()),
+        Some(y.to_owned()),
+        Some(width.to_owned()),
+        Some(height.to_owned()),
         None,
         Some(true),
     ) else {

@@ -21,7 +21,7 @@ impl Age {
     pub fn label(&self) -> String {
         let secs = self.0.as_secs();
         match secs {
-            0..=59 => "<1m ago".to_string(),
+            0..=59 => "<1m ago".to_owned(),
             60..=3599 => format!("{}m ago", secs / 60),
             3600..=86_399 => format!("{}h ago", secs / 3600),
             86_400..=604_799 => format!("{}d ago", secs / 86_400),
@@ -42,7 +42,7 @@ impl Held {
     pub fn label(&self) -> String {
         let secs = self.0.as_secs();
         match secs {
-            0..=59 => format!("{}s", secs),
+            0..=59 => format!("{secs}s"),
             60..=3599 => format!("{}m", secs / 60),
             3600..=86_399 => format!("{}h", secs / 3600),
             86_400..=604_799 => format!("{}d", secs / 86_400),

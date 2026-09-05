@@ -63,9 +63,9 @@ impl<'a> Live<'a> {
 
     fn seat(&self, session: &str) -> Seat {
         if self.current == Some(session) {
-            Seat::Here(session.to_string())
+            Seat::Here(session.to_owned())
         } else {
-            Seat::There(session.to_string())
+            Seat::There(session.to_owned())
         }
     }
 
@@ -120,7 +120,7 @@ impl StatusWord {
     fn new(word: &str) -> Option<Self> {
         Some(StatusWord {
             initial: word.chars().next()?,
-            word: word.to_string(),
+            word: word.to_owned(),
         })
     }
 
@@ -192,9 +192,9 @@ impl AgentSet {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
             self.fail(if reason.is_empty() {
-                "claude-ps is not available".to_string()
+                "claude-ps is not available".to_owned()
             } else {
-                format!("claude-ps: {}", reason)
+                format!("claude-ps: {reason}")
             });
             return;
         }
@@ -243,7 +243,7 @@ impl AgentSet {
                 let display = agent
                     .name
                     .clone()
-                    .unwrap_or_else(|| seat.session().to_string());
+                    .unwrap_or_else(|| seat.session().to_owned());
                 let (score, indices, is_exact) = if term.is_empty() {
                     (0, Vec::new(), false)
                 } else {
@@ -339,13 +339,13 @@ pub fn full_tag(status: &Status, frame: u64) -> String {
 pub fn abbr_tag(status: &Status, frame: u64) -> String {
     match status {
         Status::Unknown(word) => format!("[{}]", word.initial().to_uppercase()),
-        _ => glyph(status, frame).to_string(),
+        _ => glyph(status, frame).to_owned(),
     }
 }
 
 fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
     let wire: Vec<Wire> =
-        serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {}", error))?;
+        serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {error}"))?;
 
     let mut agents = Vec::new();
     for row in wire {
@@ -374,7 +374,7 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
             source.eq_ignore_ascii_case("user") || source.eq_ignore_ascii_case("peer")
         },
     };
-    chosen.then(|| name.to_string())
+    chosen.then(|| name.to_owned())
 }
 
 #[cfg(test)]
@@ -395,8 +395,7 @@ mod tests {
 
     fn one(status: &str) -> String {
         format!(
-            r#"[{{"status":{},"status_age":4,"cwd":"/w/s","zellij":{{"session":"s","pane":"0"}}}}]"#,
-            status
+            r#"[{{"status":{status},"status_age":4,"cwd":"/w/s","zellij":{{"session":"s","pane":"0"}}}}]"#
         )
     }
 
@@ -427,8 +426,8 @@ mod tests {
         let agents = rows(TWO_IN_ONE_SESSION, Some("luneta"), &luneta_holds_both());
 
         let seats: Vec<&Seat> = agents.rows.iter().map(|row| &row.seat).collect();
-        assert_eq!(seats, [&Seat::Here("luneta".to_string()); 2]);
-        let labels: Vec<String> = agents.rows.iter().map(|row| row.label()).collect();
+        assert_eq!(seats, [&Seat::Here("luneta".to_owned()); 2]);
+        let labels: Vec<String> = agents.rows.iter().map(super::AgentRow::label).collect();
         assert_eq!(labels, ["luneta:0", "luneta:6"]);
         assert_eq!(agents.unplaced, 0);
     }
@@ -456,7 +455,7 @@ mod tests {
         let places = Places::of(&[("luneta", &[(0, "/w/luneta")])]);
         let agents = rows(json, Some("luneta"), &places);
         assert_eq!(agents.rows[0].display, "handoff");
-        assert_eq!(agents.rows[0].seat, Seat::Here("luneta".to_string()));
+        assert_eq!(agents.rows[0].seat, Seat::Here("luneta".to_owned()));
     }
 
     #[test]
@@ -468,7 +467,7 @@ mod tests {
             ("ghostty", &[(0, "/w/misc")]),
         ]);
         let agents = rows(json, Some("luneta"), &places);
-        assert_eq!(agents.rows[0].seat, Seat::There("ghostty".to_string()));
+        assert_eq!(agents.rows[0].seat, Seat::There("ghostty".to_owned()));
         assert_eq!(agents.rows[0].display, "ghostty");
     }
 
@@ -481,7 +480,7 @@ mod tests {
             ("affiliate", &[(0, "/w/bipa"), (4, "/w/bipa/affiliate")]),
         ]);
         let agents = rows(json, Some("luneta"), &places);
-        assert_eq!(agents.rows[0].seat, Seat::There("affiliate".to_string()));
+        assert_eq!(agents.rows[0].seat, Seat::There("affiliate".to_owned()));
         assert_eq!(agents.rows[0].display, "affiliate");
     }
 

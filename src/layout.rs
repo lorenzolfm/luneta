@@ -49,7 +49,7 @@ impl Rect {
 
         let mut has_right = false;
         if !right.is_empty() && rule >= right.width() + 4 {
-            tail = format!(" {} {}", right, HORIZONTAL);
+            tail = format!(" {right} {HORIZONTAL}");
             rule -= tail.width();
             has_right = true;
         }
@@ -288,7 +288,7 @@ pub fn anchor(rect: &Rect, notes: usize, rows: usize) -> Block {
 
 pub fn truncate(text: &str, max: usize) -> String {
     if text.width() <= max {
-        return text.to_string();
+        return text.to_owned();
     }
     let mut out = String::new();
     let mut width = 0;
@@ -306,7 +306,7 @@ pub fn truncate(text: &str, max: usize) -> String {
 
 pub fn truncate_left(text: &str, max: usize) -> (String, usize) {
     if text.width() <= max {
-        return (text.to_string(), 0);
+        return (text.to_owned(), 0);
     }
     let chars: Vec<char> = text.chars().collect();
     let mut width = 0;
@@ -508,10 +508,10 @@ mod tests {
 
     #[test]
     fn truncate_left_keeps_the_tail_and_says_what_it_dropped() {
-        assert_eq!(truncate_left("luneta", 12), ("luneta".to_string(), 0));
+        assert_eq!(truncate_left("luneta", 12), ("luneta".to_owned(), 0));
         assert_eq!(
             truncate_left("/home/you/projects/luneta", 12),
-            ("…ects/luneta".to_string(), 14)
+            ("…ects/luneta".to_owned(), 14)
         );
         assert!(truncate_left("/home/you/projects/luneta", 12).0.width() <= 12);
 

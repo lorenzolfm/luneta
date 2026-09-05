@@ -69,9 +69,9 @@ impl DirSet {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
             self.fail(if reason.is_empty() {
-                "zoxide is not available".to_string()
+                "zoxide is not available".to_owned()
             } else {
-                format!("zoxide: {}", reason)
+                format!("zoxide: {reason}")
             });
             return;
         }
@@ -152,7 +152,7 @@ impl DirSet {
         if self.listings.len() >= MAX_LISTINGS {
             self.listings.clear();
         }
-        self.listings.insert(path.to_string(), Listing::Reading);
+        self.listings.insert(path.to_owned(), Listing::Reading);
         true
     }
 
@@ -187,10 +187,7 @@ fn listing_error(path: &str, stderr: &str) -> String {
     let line = cut_at(&line, " - code: ");
     let line = cut_at(line, " (os error ");
     let line = line.trim_matches(|c: char| c.is_whitespace() || "\":-".contains(c));
-    match line.is_empty() {
-        true => "eza is not available".to_string(),
-        false => line.to_string(),
-    }
+    if line.is_empty() { "eza is not available".to_owned() } else { line.to_owned() }
 }
 
 fn cut_at<'a>(text: &'a str, marker: &str) -> &'a str {
@@ -218,13 +215,17 @@ fn match_dir(
     }
 }
 
+#[expect(
+    clippy::maybe_infinite_iter,
+    reason = "the snapshot is finite, so some postfix in `2..` is free; `find` stops there"
+)]
 fn free_name(base: &str, taken: &Taken) -> String {
     if !taken.holds(base) {
-        return base.to_string();
+        return base.to_owned();
     }
     (2..)
         .map(|n| {
-            let postfix = format!("-{}", n);
+            let postfix = format!("-{n}");
             format!("{}{}", head(base, MAX_NAME_BYTES.saturating_sub(postfix.len())), postfix)
         })
         .find(|candidate| !taken.holds(candidate))
@@ -253,30 +254,32 @@ fn parse(stdout: &str) -> Vec<Dir> {
                 return None;
             }
             let name = derive_name(path)?;
-            Some(Dir { path: path.to_string(), name, frecency })
+            Some(Dir { path: path.to_owned(), name, frecency })
         })
         .collect()
 }
 
 fn derive_name(path: &str) -> Option<String> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
-    validate_name(base).is_none().then(|| base.to_string())
+    validate_name(base).is_none().then(|| base.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
+
+    use std::fmt::Write as _;
 
     use super::*;
     use crate::elapsed::Age;
     use crate::sessions::Session;
 
     fn named(name: &str) -> Session {
-        Session { name: name.to_string(), age: Age::ZERO }
+        Session { name: name.to_owned(), age: Age::ZERO }
     }
 
     fn listed(stdout: &[u8]) -> DirSet {
         let mut dirs = DirSet::default();
-        dirs.ingest_listing("/tmp/x".to_string(), Some(0), stdout, b"");
+        dirs.ingest_listing("/tmp/x".to_owned(), Some(0), stdout, b"");
         dirs
     }
 
@@ -327,7 +330,10 @@ mod tests {
 
     #[test]
     fn a_long_listing_is_capped_but_still_counted() {
-        let listing: String = (0..MAX_ENTRIES * 2).map(|i| format!("file-{}\n", i)).collect();
+        let listing = (0..MAX_ENTRIES * 2).fold(String::new(), |mut acc, i| {
+            writeln!(acc, "file-{i}").unwrap();
+            acc
+        });
         let (entries, total) = entries(&listed(listing.as_bytes()));
         assert_eq!(entries.len(), MAX_ENTRIES);
         assert_eq!(total, MAX_ENTRIES * 2);
@@ -337,20 +343,20 @@ mod tests {
     fn a_failed_listing_keeps_the_reason_and_not_the_path() {
         let mut dirs = DirSet::default();
         dirs.ingest_listing(
-            "/tmp/x".to_string(),
+            "/tmp/x".to_owned(),
             Some(2),
             b"",
             b"\"/tmp/x\": No such file or directory (os error 2)\n",
         );
         assert_eq!(failure(&dirs, "/tmp/x"), "No such file or directory");
         dirs.ingest_listing(
-            "/tmp/y".to_string(),
+            "/tmp/y".to_owned(),
             Some(0),
             b"",
             b"Permission denied: /tmp/y - code: 13\n",
         );
         assert_eq!(failure(&dirs, "/tmp/y"), "Permission denied");
-        dirs.ingest_listing("/tmp/z".to_string(), Some(1), b"", b"");
+        dirs.ingest_listing("/tmp/z".to_owned(), Some(1), b"", b"");
         assert_eq!(failure(&dirs, "/tmp/z"), "eza is not available");
     }
 
@@ -364,9 +370,9 @@ mod tests {
         let mut dirs = DirSet::default();
         assert!(dirs.begin_listing("/tmp/x"));
         assert!(!dirs.begin_listing("/tmp/x"));
-        dirs.ingest_listing("/tmp/x".to_string(), Some(0), b"src/\n", b"");
+        dirs.ingest_listing("/tmp/x".to_owned(), Some(0), b"src/\n", b"");
         assert!(!dirs.begin_listing("/tmp/x"));
-        dirs.ingest_listing("/tmp/x".to_string(), Some(2), b"", b"\"/tmp/x\": No such file");
+        dirs.ingest_listing("/tmp/x".to_owned(), Some(2), b"", b"\"/tmp/x\": No such file");
         assert!(!dirs.begin_listing("/tmp/x"));
 
         dirs.forget_listings();
@@ -462,7 +468,7 @@ mod tests {
     fn a_full_cache_is_dropped_rather_than_grown() {
         let mut dirs = DirSet::default();
         for i in 0..MAX_LISTINGS {
-            assert!(dirs.begin_listing(&format!("/tmp/{}", i)));
+            assert!(dirs.begin_listing(&format!("/tmp/{i}")));
         }
         assert!(dirs.listing("/tmp/0").is_some());
         assert!(dirs.begin_listing("/tmp/one-too-many"));

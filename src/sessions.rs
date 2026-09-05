@@ -124,7 +124,7 @@ impl MatchSet {
                     false,
                 ));
             }
-            rows.sort_by(|a, b| a.kind_then_recency(b));
+            rows.sort_by(Row::kind_then_recency);
         } else {
             let matcher = self
                 .matcher
