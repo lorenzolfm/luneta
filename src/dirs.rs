@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn a_name_is_the_directory_itself() {
         assert_eq!(derive_name("/home/you/Projects/misc/luneta").as_deref(), Some("luneta"));
-        assert_eq!(derive_name("/home/you/Work/bipa.git/master").as_deref(), Some("master"));
+        assert_eq!(derive_name("/home/you/Work/nova.git/master").as_deref(), Some("master"));
         assert_eq!(derive_name("/opt").as_deref(), Some("opt"));
         assert_eq!(derive_name("/home/you/notes/").as_deref(), Some("notes"));
     }
