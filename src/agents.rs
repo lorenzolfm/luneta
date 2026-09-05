@@ -473,11 +473,11 @@ mod tests {
 
     #[test]
     fn the_session_holding_the_pane_the_agent_works_in_claims_it() {
-        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/bipa/affiliate",
-            "zellij":{"session":"bipa.git","pane":"4"}}]"#;
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/nova/affiliate",
+            "zellij":{"session":"nova.git","pane":"4"}}]"#;
         let places = Places::of(&[
             ("luneta", &[(0, "/w/luneta")]),
-            ("affiliate", &[(0, "/w/bipa"), (4, "/w/bipa/affiliate")]),
+            ("affiliate", &[(0, "/w/nova"), (4, "/w/nova/affiliate")]),
         ]);
         let agents = rows(json, Some("luneta"), &places);
         assert_eq!(agents.rows[0].seat, Seat::There("affiliate".to_owned()));
@@ -496,8 +496,8 @@ mod tests {
 
     #[test]
     fn an_agent_no_live_pane_answers_for_is_dropped() {
-        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/bipa",
-            "zellij":{"session":"bipa.git","pane":"4"}}]"#;
+        let json = r#"[{"status":"idle","status_age":4,"cwd":"/w/nova",
+            "zellij":{"session":"nova.git","pane":"4"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/w/luneta")]), ("ghostty", &[(0, "/w/misc")])]);
         let agents = rows(json, Some("luneta"), &places);
         assert!(agents.rows.is_empty());

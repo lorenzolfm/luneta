@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn an_agent_luneta_cannot_place_is_left_out_and_counted() {
         let json = r#"[{"status":"waiting","status_age":60,"cwd":"/home/lorenzo/Projects/misc",
-            "zellij":{"session":"bipa.git","pane":"4"}},
+            "zellij":{"session":"nova.git","pane":"4"}},
             {"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
              "zellij":{"session":"luneta","pane":"0"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
@@ -1596,7 +1596,7 @@ mod tests {
         agents.ingest(Some(0), AGENTS.as_bytes(), b"");
         let places = Places::of(&[
             ("misc", &[(12, "/home/lorenzo/Projects/misc/luneta")]),
-            ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
+            ("nova", &[(3, "/home/lorenzo/Projects/Work/nova")]),
             ("notes", &[(7, "/home/lorenzo/Documents")]),
         ]);
         let live = agents::Live::new(Some("notes"), &places);
@@ -1656,8 +1656,8 @@ mod tests {
     const AGENTS: &str = r#"[
         {"status": "waiting", "status_age": 1080, "cwd": "/home/lorenzo/Projects/misc/luneta",
          "name": "luneta", "name_source": "user", "zellij": {"session": "misc", "pane": "12"}},
-        {"status": "busy", "status_age": 1860, "cwd": "/home/lorenzo/Projects/Work/bipa",
-         "zellij": {"session": "bipa", "pane": "3"}},
+        {"status": "busy", "status_age": 1860, "cwd": "/home/lorenzo/Projects/Work/nova",
+         "zellij": {"session": "nova", "pane": "3"}},
         {"status": "idle", "status_age": 300, "cwd": "/home/lorenzo/Documents",
          "zellij": {"session": "notes", "pane": "7"}},
         {"status": "idle", "status_age": 60, "cwd": "/home/lorenzo"}
@@ -1674,7 +1674,7 @@ mod tests {
 
     const ZOXIDE: &str = "9268 /home/lorenzo/Projects/misc/luneta\n\
         4102 /home/lorenzo/Projects/misc/homelab\n\
-        1877 /home/lorenzo/Projects/Work/bipa\n\
+        1877 /home/lorenzo/Projects/Work/nova\n\
         18 /home/lorenzo/.local/bin\n";
 
     const EZA: &str = "\x1b[34m\u{f4d4} \x1b[1msrc\x1b[0m/\n\
