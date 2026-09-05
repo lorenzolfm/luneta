@@ -63,7 +63,7 @@ jobs:
       # in `luneta` reaches it, so a `dev` that does not build evaluates fine and CI
       # goes green. `nix flake check` is no backstop either — it evaluates the
       # derivation without building it. Build it, so that writeShellApplication runs
-      # shellcheck over scripts/dev.sh. A broken `dev` breaks `nix develop`, which is
+      # shellcheck over the recipes. A broken `dev` breaks `nix develop`, which is
       # the way the README tells a contributor to build.
       #
       # `--no-link`, so that `result` stays the wasm the next step stages.
