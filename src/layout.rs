@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 use crate::paint::Painted;
 
 const TOP_LEFT: char = '╭';
@@ -183,10 +183,13 @@ impl Line {
         }
         let visible = chars;
 
-        let mut line = String::with_capacity(text.len() + inner_width - columns + 2);
+        // `truncate` promises `columns <= inner_width`; saturate anyway, since
+        // the alternative is a panic that takes the whole plugin down.
+        let fill = inner_width.saturating_sub(columns);
+        let mut line = String::with_capacity(text.len() + fill + 2);
         line.push(' ');
         line.push_str(&text);
-        line.extend(std::iter::repeat_n(' ', inner_width - columns));
+        line.extend(std::iter::repeat_n(' ', fill));
         line.push(' ');
 
         let shift = |i: usize| i + 1;
@@ -289,6 +292,11 @@ pub fn anchor(rect: &Rect, notes: usize, rows: usize) -> Block {
 /// Cuts `text` to at most `max` columns, ending it with `…` when it was cut.
 /// The result is never wider than `max`: with no room at all there is no
 /// marker either, so a caller can pad `max - width` without checking.
+///
+/// Each candidate prefix is measured as a string, not as a sum of its
+/// characters: `str::width` counts an emoji presentation sequence (`☺\u{FE0F}`)
+/// as 2 columns and a control character as 1, where summing `char::width`
+/// gives 1 and 0 — and the callers pad by the string measure.
 pub fn truncate(text: &str, max: usize) -> String {
     if text.width() <= max {
         return text.to_owned();
@@ -296,42 +304,44 @@ pub fn truncate(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(0);
-        if width + w > max.saturating_sub(1) {
+    let room = max - 1;
+    let mut end = 0;
+    for (at, ch) in text.char_indices() {
+        let next = at + ch.len_utf8();
+        if text[..next].width() > room {
             break;
         }
-        out.push(ch);
-        width += w;
+        end = next;
     }
+    let mut out = String::with_capacity(end + '…'.len_utf8());
+    out.push_str(&text[..end]);
     out.push('…');
     out
 }
 
+/// `truncate` from the other end: keeps the tail, leads it with `…`, and says
+/// how many characters were dropped so hit indices can be shifted to match.
 pub fn truncate_left(text: &str, max: usize) -> (String, usize) {
     if text.width() <= max {
         return (text.to_owned(), 0);
     }
-    let chars: Vec<char> = text.chars().collect();
+    let total = text.chars().count();
     if max == 0 {
-        return (String::new(), chars.len());
+        return (String::new(), total);
     }
-    let mut width = 0;
+    let room = max - 1;
+    let mut start = text.len();
     let mut kept = 0;
-    for ch in chars.iter().rev() {
-        let w = ch.width().unwrap_or(0);
-        if width + w > max.saturating_sub(1) {
+    for (at, _) in text.char_indices().rev() {
+        if text[at..].width() > room {
             break;
         }
-        width += w;
+        start = at;
         kept += 1;
     }
-    let dropped = chars.len() - kept;
     let mut out = String::from("…");
-    out.extend(chars[dropped..].iter());
-    (out, dropped)
+    out.push_str(&text[start..]);
+    (out, total - kept)
 }
 
 #[cfg(test)]
@@ -517,6 +527,26 @@ mod tests {
     }
 
     #[test]
+    fn truncate_measures_what_the_caller_measures() {
+        // `str::width` and a sum of `char::width` disagree at these; the
+        // caller pads by the former, so the cut must be measured by it too.
+        let heart = "❤\u{FE0F}";
+        assert_eq!(heart.width(), 2);
+        assert_eq!(truncate("❤\u{FE0F}abc", 2), "❤…");
+        assert_eq!(truncate("❤\u{FE0F}abc", 3), "❤\u{FE0F}…");
+        assert_eq!(truncate("\t\tabc", 1), "…");
+        assert_eq!(truncate("\t\tabc", 3), "\t\t…");
+        for text in ["❤\u{FE0F}abc", "a❤\u{FE0F}bc", "\t\tabc", "a\r\nb", "‘\u{FE01}x"] {
+            for max in 0..8 {
+                assert!(truncate(text, max).width() <= max, "{text:?} at {max}");
+                assert!(truncate_left(text, max).0.width() <= max, "{text:?} at {max}");
+            }
+        }
+        assert_eq!(truncate_left("abc❤\u{FE0F}", 2), ("…\u{FE0F}".to_owned(), 4));
+        assert_eq!(truncate_left("abc❤\u{FE0F}", 3), ("…❤\u{FE0F}".to_owned(), 3));
+    }
+
+    #[test]
     fn truncate_left_keeps_the_tail_and_says_what_it_dropped() {
         assert_eq!(truncate_left("luneta", 12), ("luneta".to_owned(), 0));
         assert_eq!(
@@ -541,6 +571,14 @@ mod tests {
         assert_eq!(line.finish(0).content(), "  ");
         let mut line = Line::new();
         line.push("日本語", 0);
+        assert_eq!(line.finish(1).content(), " … ");
+        // An emoji presentation sequence right at the cut used to leave the
+        // line one column wider than the box, and the same subtraction wrapped.
+        let mut line = Line::new();
+        line.push("❤\u{FE0F}abc", 0);
+        assert_eq!(line.finish(2).content(), " ❤… ");
+        let mut line = Line::new();
+        line.push("\t\tabc", 0);
         assert_eq!(line.finish(1).content(), " … ");
     }
 }
