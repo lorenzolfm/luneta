@@ -286,9 +286,15 @@ pub fn anchor(rect: &Rect, notes: usize, rows: usize) -> Block {
     Block { y: rect.inner_y() + (height - notes - rows), notes, rows }
 }
 
+/// Cuts `text` to at most `max` columns, ending it with `…` when it was cut.
+/// The result is never wider than `max`: with no room at all there is no
+/// marker either, so a caller can pad `max - width` without checking.
 pub fn truncate(text: &str, max: usize) -> String {
     if text.width() <= max {
         return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
     }
     let mut out = String::new();
     let mut width = 0;
@@ -309,6 +315,9 @@ pub fn truncate_left(text: &str, max: usize) -> (String, usize) {
         return (text.to_owned(), 0);
     }
     let chars: Vec<char> = text.chars().collect();
+    if max == 0 {
+        return (String::new(), chars.len());
+    }
     let mut width = 0;
     let mut kept = 0;
     for ch in chars.iter().rev() {
@@ -498,8 +507,9 @@ mod tests {
     fn truncate_pays_for_its_own_marker() {
         assert_eq!(truncate("despesas", 5), "desp…");
         assert_eq!(truncate("despesas", 1), "…");
+        assert_eq!(truncate("despesas", 0), "");
         for max in 0..12 {
-            assert!(truncate("despesas", max).width() <= max.max(1));
+            assert!(truncate("despesas", max).width() <= max);
         }
         assert_eq!("日本語版".width(), 8);
         assert_eq!(truncate("日本語版", 5), "日本…");
@@ -518,5 +528,19 @@ mod tests {
         let (out, dropped) = truncate_left("abcdefghij", 5);
         assert_eq!((out.as_str(), dropped), ("…ghij", 6));
         assert_eq!(out.chars().count(), 10 - dropped + 1);
+        assert_eq!(truncate_left("abcdefghij", 0), (String::new(), 10));
+    }
+
+    #[test]
+    fn a_line_with_no_room_still_finishes() {
+        // A pane a few columns wide has an inner width of 0. The line used to
+        // truncate to "…" and then pad `0 - 1` columns: a capacity overflow in
+        // release, where the subtraction wraps.
+        let mut line = Line::new();
+        line.push("/home/you/projects/luneta", 0);
+        assert_eq!(line.finish(0).content(), "  ");
+        let mut line = Line::new();
+        line.push("日本語", 0);
+        assert_eq!(line.finish(1).content(), " … ");
     }
 }
