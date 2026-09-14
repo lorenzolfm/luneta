@@ -208,6 +208,8 @@ pub fn fit(line: &str, max: usize) -> String {
 
 /// `fit`, plus the visible width of what came back — the caller that pads the
 /// line to a box would otherwise have to walk it a second time to learn that.
+/// The width is never more than `max`: with no room the `…` goes too, and only
+/// the escapes survive.
 pub fn fitted(line: &str, max: usize) -> (String, usize) {
     let mut out = String::with_capacity(line.len());
     let whole = columns(line);
@@ -216,6 +218,12 @@ pub fn fitted(line: &str, max: usize) -> (String, usize) {
             write(&part, &mut out);
         }
         return (out, whole);
+    }
+    if max == 0 {
+        for part in parts(line).filter(|part| matches!(part, Part::Escape(_))) {
+            write(&part, &mut out);
+        }
+        return (out, 0);
     }
     let mut used = 0;
     let mut cut = false;
@@ -320,6 +328,7 @@ mod tests {
         assert_eq!(fit("\x1b[31mredder\x1b[m", 4), "\x1b[31mred…\x1b[m");
         assert_eq!(columns(&fit("\x1b[31mredder\x1b[m", 4)), 4);
         assert_eq!(fit("日本語", 4), "日…");
+        assert_eq!(fitted("\x1b[31mredder\x1b[m", 0), ("\x1b[31m\x1b[m".to_owned(), 0));
     }
 
     #[test]
