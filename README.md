@@ -100,7 +100,7 @@ started it — on a long-lived session that can be older than your shell profile
 ```kdl
 plugins {
     // ...
-    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.1/luneta-0.2.1.wasm"
+    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm"
 }
 ```
 
@@ -117,7 +117,7 @@ downloads — it fetches the URL and runs the bytes. Every release ships a
 check, and install from disk instead:
 
 ```sh
-v=0.2.1
+v=0.2.2
 gh release download "v$v" -R lorenzolfm/luneta -p 'luneta-*.wasm' -p SHA256SUMS
 sha256sum -c SHA256SUMS
 gh attestation verify "luneta-$v.wasm" -R lorenzolfm/luneta
@@ -145,22 +145,22 @@ keybinds {
             SwitchToMode "normal"
         }
         bind "Ctrl a" {
-            LaunchOrFocusPlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.1/luneta-0.2.1.wasm" {
+            LaunchOrFocusPlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
                 floating true
                 move_to_focused_tab true
             }
-            MessagePlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.1/luneta-0.2.1.wasm" {
+            MessagePlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
                 name "screen"
                 payload "agents"
             }
             SwitchToMode "normal"
         }
         bind "Ctrl d" {
-            LaunchOrFocusPlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.1/luneta-0.2.1.wasm" {
+            LaunchOrFocusPlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
                 floating true
                 move_to_focused_tab true
             }
-            MessagePlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.1/luneta-0.2.1.wasm" {
+            MessagePlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
                 name "screen"
                 payload "dirs"
             }
