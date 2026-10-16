@@ -137,11 +137,11 @@ plugins {
 }
 ```
 
-Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
-`ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
-luneta reaches `zoxide`, `eza`, `claude-ps` and `zellij` itself;
-`OpenTerminalsOrPlugins` is how the [dock](#dock-the-sidebar) opens the sidebar.
-Every mode asks for all four, since zellij keeps one grant for a plugin.
+Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
+`ChangeApplicationState`. `RunCommands` is how luneta reaches `zoxide`, `eza`,
+`claude-ps` and `zellij` itself. The [dock](#dock-the-sidebar) asks for
+`OpenTerminalsOrPlugins` as well, which is how it opens the sidebar, so zellij
+prompts once more, the first time the dock loads.
 
 <details>
 <summary><strong>Prefer to verify the bytes first?</strong></summary>

@@ -41,10 +41,18 @@ const SIDEBAR: &str = "sidebar";
 
 const DOCK: &str = "dock";
 
-/// Every mode asks for the same, since zellij keeps one grant for a plugin's
-/// file and each mode's would overwrite the others'. The dock opens the
-/// sidebar.
-const PERMISSIONS: [PermissionType; 4] = [
+/// What the picker and the sidebar ask for.
+const PERMISSIONS: [PermissionType; 3] = [
+    PermissionType::ReadApplicationState,
+    PermissionType::ChangeApplicationState,
+    PermissionType::RunCommands,
+];
+
+/// The dock opens the sidebar, and asks for that as well. zellij keeps one
+/// grant for a plugin's file, and puts a new one in its place each time it
+/// prompts, but it prompts only for what the grant lacks: the dock asks for
+/// everything the other modes do, so theirs never takes the dock's away.
+const DOCK_PERMISSIONS: [PermissionType; 4] = [
     PermissionType::ReadApplicationState,
     PermissionType::ChangeApplicationState,
     PermissionType::RunCommands,
@@ -138,7 +146,7 @@ struct State {
     tabs: Vec<TabInfo>,
     branches: Vec<Branch>,
     here: Option<u32>,
-    detached: bool,
+    away: bool,
     places_at: u64,
     size: (usize, usize),
     dock: Option<dock::Dock>,
@@ -150,8 +158,8 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         let ids = get_plugin_ids();
         self.plugin_id = ids.plugin_id;
-        request_permission(&PERMISSIONS);
         if configuration.get(MODE).map(|value| value.trim()) == Some(DOCK) {
+            request_permission(&DOCK_PERMISSIONS);
             let mut sidebar = configuration;
             sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
             self.dock = Some(dock::Dock::new(self.plugin_id, ids.client_id, sidebar));
@@ -162,6 +170,7 @@ impl ZellijPlugin for State {
             ]);
             return;
         }
+        request_permission(&PERMISSIONS);
         self.agents_command = configuration
             .get(AGENTS_COMMAND)
             .map(|value| value.trim())
@@ -363,23 +372,24 @@ impl State {
             return;
         };
         if self.sidebar.is_some() {
+            // zellij keeps a client's plugins running after the client leaves,
+            // timers and all, and knows no focused pane for it. A sidebar its
+            // client left asks nothing until the client comes back.
+            self.away = get_focused_pane_info().is_err();
+            if self.away {
+                return;
+            }
             self.seat_from(&snapshot);
             self.branches = snapshot
                 .live_sessions
                 .iter()
                 .map(|s| Branch::new(s.name.clone(), Age::new(s.creation_time), &s.tabs, &s.panes))
                 .collect();
-            self.detached = snapshot
-                .live_sessions
-                .iter()
-                .any(|s| s.is_current_session && s.connected_clients == 0);
-            if !self.detached {
-                if self.frame.wrapping_sub(self.places_at) >= TICKS_PER_PLACES {
-                    self.places_at = self.frame;
-                    self.places.forget();
-                }
-                self.ask_agents();
+            if self.frame.wrapping_sub(self.places_at) >= TICKS_PER_PLACES {
+                self.places_at = self.frame;
+                self.places.forget();
             }
+            self.ask_agents();
         }
         let current = snapshot
             .live_sessions
@@ -416,7 +426,7 @@ impl State {
     }
 
     fn spinning(&self) -> bool {
-        let shown = self.sidebar.is_some()
+        let shown = (self.sidebar.is_some() && !self.away)
             || (matches!(self.mode, Mode::Search) && self.screen == Screen::Agents);
         shown && self.agents.any_busy()
     }
