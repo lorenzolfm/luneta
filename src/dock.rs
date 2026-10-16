@@ -10,6 +10,7 @@
 //!
 //! `toggle` hides the sidebar and every placeholder, the panes beside them
 //! taking their columns, and brings them back. Closing the sidebar hides it.
+//! A tab left with nothing but its column closes, as it would without one.
 //!
 //! zellij runs a dock for each client, and every dock sees the same panes.
 //! Each follows its own client's tab switches, but only the dock of the client
@@ -105,6 +106,8 @@ enum Act {
     Move { sidebar: u32, from: Option<u32>, into: u32, tab: usize },
     Focus { sidebar: u32 },
     Close { pane: PaneId },
+    /// Close a tab, by id.
+    CloseTab { tab: usize },
 }
 
 /// The panes as the dock needs them.
@@ -123,6 +126,9 @@ struct Scene {
     url: Option<String>,
     /// The other clients in the session.
     others: BTreeSet<ClientId>,
+    /// Tabs, by position, with a pane besides the sidebar and the placeholders
+    /// that can take the focus.
+    occupied: BTreeSet<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +154,11 @@ impl Seen {
             floating: pane.is_floating,
             spot: spot(pane),
         }
+    }
+
+    /// Whether it stands in a column.
+    fn stands(&self) -> bool {
+        !self.hidden && !self.floating
     }
 }
 
@@ -176,6 +187,8 @@ impl Scene {
                     scene.sidebars.push((*tab, Seen::new(pane)));
                 } else if is_placeholder(pane) {
                     scene.placeholders.entry(*tab).or_default().push(Seen::new(pane));
+                } else if pane.is_selectable && !pane.is_suppressed && !pane.is_floating {
+                    scene.occupied.insert(*tab);
                 }
             }
         }
@@ -196,7 +209,19 @@ impl Scene {
 
     /// The sidebar, when it stands in a column.
     fn home(&self) -> Option<(usize, Seen)> {
-        self.sidebar().filter(|(_, s)| !s.hidden && !s.floating)
+        self.sidebar().filter(|(_, s)| s.stands())
+    }
+
+    /// Tabs, by position, left with nothing but the sidebar or a placeholder.
+    /// zellij closes a tab once none of its tiled panes can take the focus,
+    /// and both of those can. A tab that holds neither is zellij's to close,
+    /// or still opening.
+    fn deserted(&self) -> Vec<usize> {
+        let column = |tab: &usize| {
+            self.home().is_some_and(|(at, _)| at == *tab)
+                || self.placeholders.get(tab).is_some_and(|ps| ps.iter().any(Seen::stands))
+        };
+        self.ids.keys().filter(|tab| !self.occupied.contains(tab) && column(tab)).copied().collect()
     }
 
     fn id(&self, tab: usize) -> usize {
@@ -253,6 +278,7 @@ impl Scene {
             Act::Focus { .. } | Act::Restore { .. } => true,
             Act::Close { pane: PaneId::Terminal(id) } => placeholder(id).is_none(),
             Act::Close { pane: PaneId::Plugin(id) } => sidebar(id).is_none(),
+            Act::CloseTab { tab } => self.position(tab).is_none(),
         }
     }
 }
@@ -443,7 +469,9 @@ impl Dock {
             return acts;
         }
         let home = scene.home().map(|(tab, _)| tab);
+        let deserted = scene.deserted();
         if leads {
+            acts.extend(deserted.iter().map(|tab| Act::CloseTab { tab: scene.id(*tab) }));
             for tab in scene.placeholders.keys().filter(|tab| Some(**tab) != home) {
                 if let Some(placeholder) = scene.placeholder(*tab).filter(|p| p.hidden) {
                     acts.push(Act::Show { pane: placeholder.id });
@@ -452,7 +480,10 @@ impl Dock {
         }
         let into = scene.placeholder(scene.active).filter(|p| !p.hidden).map(|p| p.id);
         let tab = scene.active_id;
-        if self.docking() {
+        // A tab on its way out is no place to dock, and takes a sidebar in it
+        // along: the dock opens it again once the tab is gone.
+        let leaving = |tab| deserted.contains(&tab);
+        if self.docking() || leaving(scene.active) || home.is_some_and(leaving) {
             return acts;
         }
         if let Some(placeholder) = into.filter(|_| self.unsettled.contains(&tab)) {
@@ -562,6 +593,7 @@ impl Dock {
             },
             Act::Close { pane: PaneId::Plugin(id) } => close_plugin_pane(id),
             Act::Close { pane: PaneId::Terminal(id) } => close_terminal_pane(id),
+            Act::CloseTab { tab } => close_tab_with_id(tab as u64),
         }
         true
     }
@@ -770,8 +802,8 @@ mod tests {
         let scene = scene(
             &tabs,
             vec![
-                (0, vec![sidebar(5, false), placeholder(1, true)]),
-                (1, vec![placeholder(3, false)]),
+                (0, vec![sidebar(5, false), placeholder(1, true), terminal(2)]),
+                (1, vec![placeholder(3, false), terminal(4)]),
             ],
             None,
         );
@@ -806,8 +838,8 @@ mod tests {
             let scene = scene(
                 &tabs,
                 vec![
-                    (0, vec![sidebar(5, true), placeholder(1, true)]),
-                    (1, vec![placeholder(3, !placeholder_shown)]),
+                    (0, vec![sidebar(5, true), placeholder(1, true), terminal(2)]),
+                    (1, vec![placeholder(3, !placeholder_shown), terminal(4)]),
                 ],
                 None,
             );
@@ -830,8 +862,8 @@ mod tests {
         let halfway = scene(
             &tabs,
             vec![
-                (0, vec![sidebar(5, true), placeholder(1, false)]),
-                (1, vec![placeholder(3, false)]),
+                (0, vec![sidebar(5, true), placeholder(1, false), terminal(2)]),
+                (1, vec![placeholder(3, false), terminal(4)]),
             ],
             None,
         );
@@ -843,8 +875,8 @@ mod tests {
         let done = scene(
             &tabs,
             vec![
-                (0, vec![placeholder(1, false)]),
-                (1, vec![sidebar(5, false), placeholder(3, true)]),
+                (0, vec![placeholder(1, false), terminal(2)]),
+                (1, vec![sidebar(5, false), placeholder(3, true), terminal(4)]),
             ],
             None,
         );
@@ -857,8 +889,8 @@ mod tests {
         let scene = scene(
             &tabs,
             vec![
-                (0, vec![sidebar(5, true), placeholder(1, false)]),
-                (1, vec![placeholder(3, false)]),
+                (0, vec![sidebar(5, true), placeholder(1, false), terminal(2)]),
+                (1, vec![placeholder(3, false), terminal(4)]),
             ],
             None,
         );
@@ -882,8 +914,8 @@ mod tests {
         let at = [(1, 0), (2, 1)];
         let panes = || {
             vec![
-                (0, vec![placeholder(1, false), placeholder(2, true)]),
-                (1, vec![placeholder(3, true)]),
+                (0, vec![placeholder(1, false), placeholder(2, true), terminal(4)]),
+                (1, vec![placeholder(3, true), terminal(6)]),
             ]
         };
         let first = scene(&tabs_of(1, &at, 2), panes(), None);
@@ -963,8 +995,8 @@ mod tests {
             scene(
                 &tabs_of(client, &at, 2),
                 vec![
-                    (0, vec![sidebar(5, false), placeholder(1, true)]),
-                    (1, vec![placeholder(3, false)]),
+                    (0, vec![sidebar(5, false), placeholder(1, true), terminal(2)]),
+                    (1, vec![placeholder(3, false), terminal(4)]),
                 ],
                 None,
             )
@@ -974,7 +1006,7 @@ mod tests {
                 &tabs_of(client, &at, 2),
                 vec![
                     (0, vec![placeholder(1, true), terminal(2)]),
-                    (1, vec![placeholder(3, false)]),
+                    (1, vec![placeholder(3, false), terminal(4)]),
                 ],
                 None,
             )
@@ -1027,6 +1059,27 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_left_with_nothing_but_the_column_closes() {
+        // The last shell is gone from tab 0, where the sidebar stands, and
+        // from tab 2, where client 1 is, which keeps only a floating one.
+        // Client 2 has just come to tab 1, but the sidebar goes with its tab.
+        let at = [(1, 2), (2, 1)];
+        let panes = || {
+            vec![
+                (0, vec![sidebar(5, false), placeholder(1, true)]),
+                (1, vec![placeholder(3, false), terminal(4)]),
+                (2, vec![placeholder(6, false), PaneInfo { is_floating: true, ..terminal(7) }]),
+            ]
+        };
+        let first = scene(&tabs_of(1, &at, 3), panes(), None);
+        assert_eq!(
+            going(1).plan(&first),
+            vec![Act::CloseTab { tab: 10 }, Act::CloseTab { tab: 12 }],
+        );
+        assert!(going(2).plan(&scene(&tabs_of(2, &at, 3), panes(), None)).is_empty());
+    }
+
+    #[test]
     fn a_sidebar_being_opened_is_not_lost() {
         let tabs = [tab(0, true)];
         let scene = scene(&tabs, vec![(0, vec![placeholder(1, false)])], None);
@@ -1057,7 +1110,11 @@ mod tests {
     #[test]
     fn focus_on_a_sidebar_that_shows_goes_into_it() {
         let tabs = [tab(0, true)];
-        let shown = scene(&tabs, vec![(0, vec![sidebar(5, false), placeholder(1, true)])], None);
+        let shown = scene(
+            &tabs,
+            vec![(0, vec![sidebar(5, false), placeholder(1, true), terminal(2)])],
+            None,
+        );
         let mut dock = going(1);
         dock.want = Want::Back { focus: true };
         assert_eq!(run(&mut dock, &shown), vec![Act::Focus { sidebar: 5 }]);
@@ -1070,8 +1127,8 @@ mod tests {
         let scene = scene(
             &tabs,
             vec![
-                (0, vec![sidebar(5, false), placeholder(1, true)]),
-                (1, vec![placeholder(3, false)]),
+                (0, vec![sidebar(5, false), placeholder(1, true), terminal(2)]),
+                (1, vec![placeholder(3, false), terminal(4)]),
             ],
             None,
         );
@@ -1135,8 +1192,13 @@ mod tests {
     #[test]
     fn extra_sidebars_and_placeholders_close() {
         let tabs = [tab(0, true)];
-        let panes =
-            vec![sidebar(7, false), sidebar(5, false), placeholder(1, true), placeholder(2, true)];
+        let panes = vec![
+            sidebar(7, false),
+            sidebar(5, false),
+            placeholder(1, true),
+            placeholder(2, true),
+            terminal(3),
+        ];
         let scene = scene(&tabs, vec![(0, panes)], None);
         assert_eq!(
             dock().plan(&scene),
@@ -1152,7 +1214,8 @@ mod tests {
             title: "file:luneta.wasm".to_owned(),
             ..sidebar(5, false)
         };
-        let scene = scene(&tabs, vec![(0, vec![floating, placeholder(1, false)])], Some(5));
+        let scene =
+            scene(&tabs, vec![(0, vec![floating, placeholder(1, false), terminal(2)])], Some(5));
         assert!(dock().plan(&scene).is_empty());
     }
 }

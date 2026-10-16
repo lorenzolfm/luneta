@@ -243,14 +243,16 @@ layout {
 When another tab comes on screen, the sidebar hands its tab back the placeholder
 and takes the new tab's, in its place, so the panes beside it never change size.
 The dock opens the sidebar when the session starts, and again if the tab that
-held it closes. Closing the sidebar hides it.
+held it closes. Closing the sidebar hides it. A tab closes with the last pane
+beside its column, as it would without one, and the session ends with its last
+tab.
 
 zellij opens every new tab of a session from the layout the session was made
 with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every new
-session its column. Leave the `pane` in: a layout of nothing but a
-`default_tab_template` opens tabs that hold the placeholder and no terminal. A
-session that is already running keeps its own layout, with no column to dock
-into; start it again.
+session its column. Leave the `pane` in: a tab of nothing but the placeholder
+closes as soon as it opens, so a session from a layout of nothing but a
+`default_tab_template` ends as soon as it starts. A session that is already
+running keeps its own layout, with no column to dock into; start it again.
 
 A layout of your own leaves zellij's swap layouts behind: the ones `Alt [` and
 `Alt ]` step through, and that arrange a tab as you open panes in it. Give the
