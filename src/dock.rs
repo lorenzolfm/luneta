@@ -348,8 +348,10 @@ impl Dock {
         };
         // zellij keeps a client's dock running after the client leaves, and
         // hands it every key still. It has seen none of the panes since, so it
-        // leaves them be, and catches up if its client comes back.
-        if self.granted && !attached() {
+        // leaves them be, and catches up if its client comes back. When zellij
+        // is too busy to say, a dock goes on as it was: one whose client left
+        // is behind from the first key that came since.
+        if self.granted && !attached().unwrap_or(!self.behind) {
             self.behind = true;
             return;
         }
@@ -677,10 +679,18 @@ fn showing(pane: u32) -> bool {
     get_pane_info(PaneId::Terminal(pane)).is_some_and(|p| !p.is_suppressed)
 }
 
-/// Whether this dock's client is still attached: zellij knows no focused pane
-/// for one that left.
-fn attached() -> bool {
-    get_focused_pane_info().is_ok()
+/// How zellij's answer on the focused pane begins when it took too long.
+const TIMEOUT: &str = "Timeout";
+
+/// Whether this plugin's client is still attached, if zellij says. It says at
+/// once that it knows no focused pane for one that left; an answer that times
+/// out says only that zellij is busy.
+pub fn attached() -> Option<bool> {
+    match get_focused_pane_info() {
+        Ok(_) => Some(true),
+        Err(error) if error.starts_with(TIMEOUT) => None,
+        Err(_) => Some(false),
+    }
 }
 
 fn spot(pane: &PaneInfo) -> Spot {

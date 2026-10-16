@@ -367,7 +367,7 @@ impl State {
             // zellij keeps a client's plugins running after the client leaves,
             // timers and all, and knows no focused pane for it. A sidebar its
             // client left asks nothing until the client comes back.
-            self.away = get_focused_pane_info().is_err();
+            self.away = dock::attached() == Some(false);
             if self.away {
                 return;
             }
