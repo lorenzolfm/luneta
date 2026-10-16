@@ -76,6 +76,13 @@ pub struct Dock {
     /// layout puts things back when the tab comes on screen, the only time a
     /// dock can ask for it.
     unsettled: BTreeSet<usize>,
+    /// Tabs, by id, whose swap layout was as zellij left it the last time the
+    /// sidebar showed.
+    clean: BTreeSet<usize>,
+    /// Tabs, by id, whose swap layout hiding marked changed by hand, and that
+    /// were clean before. zellij arranges no pane that opens in such a tab
+    /// until the swap layout is applied again, when the tab comes on screen.
+    marked: BTreeSet<usize>,
 }
 
 /// What the sidebar is to be.
@@ -99,7 +106,8 @@ enum Act {
     /// Open a sidebar into a placeholder.
     Open { into: u32, tab: usize },
     /// Apply the swap layout of the tab on screen again, which puts a
-    /// placeholder that came back elsewhere in its column.
+    /// placeholder that came back elsewhere in its column, and has zellij
+    /// arrange the panes that open in the tab again.
     Restore { placeholder: u32, tab: usize },
     /// Bring the sidebar into a placeholder, giving the tab it leaves back the
     /// placeholder it covered there.
@@ -126,6 +134,13 @@ struct Scene {
     url: Option<String>,
     /// The other clients in the session.
     others: BTreeSet<ClientId>,
+    /// Tabs, by id, whose swap layout zellij has not marked changed by hand.
+    /// zellij names no layout for a tab of one pane, and calls it unmarked
+    /// whatever it is.
+    clean: BTreeSet<usize>,
+    /// Tabs, by id, showing their floating panes. zellij reports the floating
+    /// panes' layout for such a tab, and applies theirs when asked for one.
+    floating: BTreeSet<usize>,
     /// Tabs, by position, with a pane besides the sidebar and the placeholders
     /// that can take the focus.
     occupied: BTreeSet<usize>,
@@ -175,6 +190,17 @@ impl Scene {
             active_id: active.tab_id,
             ids: tabs.iter().map(|t| (t.position, t.tab_id)).collect(),
             others: tabs.iter().flat_map(|t| t.other_focused_clients.iter().copied()).collect(),
+            clean: tabs
+                .iter()
+                .filter(|t| t.active_swap_layout_name.is_some() && !t.is_swap_layout_dirty)
+                .filter(|t| !t.are_floating_panes_visible)
+                .map(|t| t.tab_id)
+                .collect(),
+            floating: tabs
+                .iter()
+                .filter(|t| t.are_floating_panes_visible)
+                .map(|t| t.tab_id)
+                .collect(),
             ..Scene::default()
         };
         for (tab, panes) in &manifest.panes {
@@ -366,6 +392,7 @@ impl Dock {
             self.catch_up(scene);
         }
         self.observe(scene);
+        self.marks(scene);
         let mut acts = self.plan(scene);
         self.reclaim = None;
         acts.retain(|act| !self.asked.contains_key(act));
@@ -418,6 +445,18 @@ impl Dock {
             .filter(|placeholders| placeholders.iter().all(|p| p.hidden))
             .and_then(|placeholders| placeholders.first())
             .map(|p| p.id);
+    }
+
+    /// Keeps track of the tabs hiding marks: each whose swap layout was clean
+    /// the last time the sidebar showed, or that opens clean while it is
+    /// hidden, until its layout is clean again.
+    fn marks(&mut self, scene: &Scene) {
+        if self.want == Want::Hidden {
+            self.marked.extend(self.clean.iter().chain(&scene.clean));
+        } else {
+            self.marked.retain(|tab| !scene.clean.contains(tab) && scene.position(*tab).is_some());
+            self.clean.clone_from(&scene.clean);
+        }
     }
 
     /// Where every placeholder belongs, as of these panes.
@@ -486,7 +525,9 @@ impl Dock {
         if self.docking() || leaving(scene.active) || home.is_some_and(leaving) {
             return acts;
         }
-        if let Some(placeholder) = into.filter(|_| self.unsettled.contains(&tab)) {
+        let again = (self.unsettled.contains(&tab) || self.marked.contains(&tab))
+            && !scene.floating.contains(&tab);
+        if let Some(placeholder) = into.filter(|_| again) {
             acts.push(Act::Restore { placeholder, tab });
         }
         match sidebar {
@@ -560,7 +601,7 @@ impl Dock {
                 let opened = open_plugin_pane_floating(url, configuration, None, BTreeMap::new());
                 if let Some(PaneId::Plugin(sidebar)) = opened {
                     self.sidebar = Some(sidebar);
-                    self.settle(sidebar, into, tab);
+                    self.settle(sidebar, into, tab, scene);
                 }
             },
             Act::Move { sidebar, from, into, tab } => {
@@ -580,10 +621,11 @@ impl Dock {
                     },
                     _ => {},
                 }
-                self.settle(sidebar, into, tab);
+                self.settle(sidebar, into, tab, scene);
             },
             Act::Restore { placeholder, tab } => {
                 self.unsettled.remove(&tab);
+                self.marked.remove(&tab);
                 mark(PaneId::Terminal(placeholder));
                 next_swap_layout();
             },
@@ -598,14 +640,19 @@ impl Dock {
         true
     }
 
-    /// Puts the sidebar in the placeholder of the tab on screen, back in its
-    /// column if the placeholder had come back elsewhere.
-    fn settle(&mut self, sidebar: u32, into: u32, tab: usize) {
+    /// Puts the sidebar in the placeholder of the tab on screen, and applies
+    /// the tab's swap layout again if the placeholder had come back elsewhere
+    /// or hiding marked the layout, unless the tab shows its floating panes.
+    fn settle(&mut self, sidebar: u32, into: u32, tab: usize, scene: &Scene) {
         let id = PaneId::Plugin(sidebar);
         replace_pane_with_existing_pane(PaneId::Terminal(into), id, true);
-        if self.unsettled.remove(&tab) {
-            mark(id);
-            next_swap_layout();
+        if !scene.floating.contains(&tab) {
+            let unsettled = self.unsettled.remove(&tab);
+            let marked = self.marked.remove(&tab);
+            if unsettled || marked {
+                mark(id);
+                next_swap_layout();
+            }
         }
         if self.want == (Want::Back { focus: true }) {
             focus_plugin_pane(sidebar, false, false);
@@ -1136,6 +1183,72 @@ mod tests {
         dock.placed = Some(11);
         dock.unsettled.insert(11);
         assert_eq!(dock.plan(&scene), vec![Act::Restore { placeholder: 3, tab: 11 }]);
+    }
+
+    #[test]
+    fn a_tab_whose_swap_layout_hiding_marked_gets_it_back_on_screen() {
+        // Client 1 keeps the sidebar in tab 0, and client 2 looks at the
+        // others. Tab 1's swap layout is as zellij left it; tab 2's was
+        // changed by hand.
+        let tabs = |on, dirty: [bool; 3]| {
+            let mut tabs = tabs_of(2, &[(1, 0), (2, on)], 3);
+            for (tab, dirty) in tabs.iter_mut().zip(dirty) {
+                tab.active_swap_layout_name = Some("vertical".to_owned());
+                tab.is_swap_layout_dirty = dirty;
+            }
+            tabs
+        };
+        let panes = |hidden| {
+            vec![
+                (0, vec![sidebar(5, hidden), placeholder(1, true), terminal(2)]),
+                (1, vec![placeholder(3, hidden), terminal(4)]),
+                (2, vec![placeholder(6, hidden), terminal(7)]),
+            ]
+        };
+        let mut dock = going(2);
+        dock.placed = Some(11);
+        let shown = scene(&tabs(1, [false, false, true]), panes(false), None);
+        run(&mut dock, &shown);
+        dock.want = Want::Hidden;
+        run(&mut dock, &shown);
+        // Hidden, each tab holds one pane, and zellij names no layout for it.
+        let hidden = scene(&tabs_of(2, &[(1, 0), (2, 1)], 3), panes(true), None);
+        run(&mut dock, &hidden);
+        dock.want = Want::Back { focus: false };
+        run(&mut dock, &hidden);
+        // Back, with every tiled layout marked. While tab 1 shows its floating
+        // panes, zellij reports their layout, and would apply theirs.
+        let mut floating = tabs(1, [true, false, true]);
+        floating[1].are_floating_panes_visible = true;
+        assert!(run(&mut dock, &scene(&floating, panes(false), None)).is_empty());
+        let back = |on| scene(&tabs(on, [true; 3]), panes(false), None);
+        assert_eq!(run(&mut dock, &back(1)), vec![Act::Restore { placeholder: 3, tab: 11 }]);
+        dock.placed = Some(12);
+        assert!(run(&mut dock, &back(2)).is_empty());
+    }
+
+    #[test]
+    fn a_tab_whose_sidebar_was_closed_by_hand_gets_its_swap_layout_back_on_screen() {
+        // One shell beside the sidebar: once it closes, the tab holds one
+        // pane, and zellij names no layout for it.
+        let layout = |dirty| TabInfo {
+            active_swap_layout_name: Some("vertical".to_owned()),
+            is_swap_layout_dirty: dirty,
+            ..tab(0, true)
+        };
+        let mut dock = going(1);
+        dock.placed = Some(10);
+        let docked = vec![(0, vec![sidebar(5, false), placeholder(1, true), terminal(2)])];
+        run(&mut dock, &scene(&[layout(false)], docked, None));
+        let closed = vec![(0, vec![placeholder(1, true), terminal(2)])];
+        run(&mut dock, &scene(&[tab(0, true)], closed, None));
+        assert_eq!(dock.want, Want::Hidden);
+        dock.want = Want::Back { focus: false };
+        let back = vec![(0, vec![placeholder(1, false), terminal(2)])];
+        assert_eq!(
+            run(&mut dock, &scene(&[layout(true)], back, None)),
+            vec![Act::Restore { placeholder: 1, tab: 10 }, Act::Open { into: 1, tab: 10 }],
+        );
     }
 
     #[test]
