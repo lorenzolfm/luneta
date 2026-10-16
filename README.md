@@ -83,8 +83,9 @@ Lists the directories you work in, in frecency order, and lets you create a new 
 
 ### Sidebar
 
-The same plugin, pinned to the left of every tab instead of floating over it:
-every live session, the panes in it, and what the agent in each pane is doing.
+The same plugin, docked to the left of the tab you are in instead of floating
+over it: every live session, the panes in it, and what the agent in each pane
+is doing. One sidebar for the whole session, which follows you from tab to tab.
 
 ```text
 ▾ bipa                     🙋1
@@ -109,8 +110,8 @@ Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
 and sessions alike. A folded session keeps its count and shows the glyph of
 the agent that wants you most.
 
-One key hides the sidebar in every tab of the session, the panes beside it
-taking its columns, and brings it back where it stood.
+One key hides the sidebar, the panes beside it taking its columns in every tab,
+and brings it back.
 
 ## Getting started
 
@@ -136,9 +137,11 @@ plugins {
 }
 ```
 
-Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
-`ChangeApplicationState`. `RunCommands` is how luneta reaches `zoxide`, `eza`,
-`claude-ps` and `zellij` itself.
+Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
+`ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
+luneta reaches `zoxide`, `eza`, `claude-ps` and `zellij` itself;
+`OpenTerminalsOrPlugins` is how the [dock](#dock-the-sidebar) opens the sidebar.
+Every mode asks for all four, since zellij keeps one grant for a plugin.
 
 <details>
 <summary><strong>Prefer to verify the bytes first?</strong></summary>
@@ -202,9 +205,22 @@ keybinds {
 }
 ```
 
-### Pin the sidebar
+### Dock the sidebar
 
-Give the plugin `mode "sidebar"` in a layout, beside the pane you work in:
+The sidebar is one pane for the whole session. The dock keeps it in the tab on
+screen: the same plugin, in the background, loaded with every session in
+`config.kdl`:
+
+```kdl
+load_plugins {
+    "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+        mode "dock"
+    }
+}
+```
+
+Every tab keeps a column for the sidebar to dock into: a placeholder, a pane that
+runs `tail -f /dev/null`. Give it to every tab in a layout:
 
 ```kdl
 // ~/.config/zellij/layouts/sidebar.kdl
@@ -213,10 +229,8 @@ layout {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane size=32 borderless=true {
-            plugin location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-                mode "sidebar"
-            }
+        pane size=32 borderless=true command="tail" {
+            args "-f" "/dev/null"
         }
         pane focus=true
     }
@@ -226,20 +240,22 @@ layout {
 }
 ```
 
-zellij opens every new tab of a session from the layout the session was made
-with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every
-new session a sidebar. Leave the `pane` in: a layout of nothing but a
-`default_tab_template` opens tabs that hold the sidebar and no terminal.
+When another tab comes on screen, the sidebar hands its tab back the placeholder
+and takes the new tab's, in its place, so the panes beside it never change size.
+The dock opens the sidebar when the session starts, and again if the tab that
+held it closes. Closing the sidebar hides it.
 
-A session that is already running keeps its own layout.
-`zellij action new-tab --layout ~/.config/zellij/layouts/sidebar.kdl` opens one
-tab with a sidebar in it, and the tabs after it follow the session's layout
-again.
+zellij opens every new tab of a session from the layout the session was made
+with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every new
+session its column. Leave the `pane` in: a layout of nothing but a
+`default_tab_template` opens tabs that hold the placeholder and no terminal. A
+session that is already running keeps its own layout, with no column to dock
+into; start it again.
 
 A layout of your own leaves zellij's swap layouts behind: the ones `Alt [` and
 `Alt ]` step through, and that arrange a tab as you open panes in it. Give the
-layout its own, with the sidebar in a column of its own, in a file beside it.
-zellij's, with every pane count one higher for the sidebar:
+layout its own, with the placeholder in a column of its own, in a file beside it.
+zellij's, with every pane count one higher for the column:
 
 ```kdl
 // ~/.config/zellij/layouts/sidebar.swap.kdl
@@ -248,10 +264,8 @@ tab_template name="ui" {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane size=32 borderless=true {
-            plugin location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-                mode "sidebar"
-            }
+        pane size=32 borderless=true command="tail" {
+            args "-f" "/dev/null"
         }
         pane {
             children
@@ -320,14 +334,14 @@ swap_tiled_layout name="half-stacked" {
 }
 ```
 
-The floating ones, which do not touch the sidebar, are the
-`swap_floating_layout` blocks of `zellij setup --dump-swap-layout default`.
-The sidebar needs the tiled ones to come back to its column after hiding, in a
-tab of more than one terminal.
+The floating ones, which do not touch the column, are the
+`swap_floating_layout` blocks of `zellij setup --dump-swap-layout default`. The
+sidebar needs the tiled ones to come back to its column after hiding, in a tab
+of more than one terminal.
 
 Three key bindings drive it without moving your hands to it. A `MessagePlugin`
-with no location goes to every plugin in the session. Every sidebar hides and
-shows; the rest only the sidebar on screen acts on:
+with no location goes to every plugin in the session: the dock answers
+`toggle`, and the sidebar `focus` and `next`.
 
 ```kdl
 keybinds {
@@ -347,7 +361,7 @@ keybinds {
                 payload "next"
             }
         }
-        // Hide the sidebar in every tab, or bring it back.
+        // Hide the sidebar, or bring it back.
         bind "Alt b" {
             MessagePlugin {
                 name "sidebar"
@@ -358,14 +372,17 @@ keybinds {
 }
 ```
 
-`Alt s` on hidden sidebars brings them back and moves into the one on screen.
-A tab opened while they are hidden opens with its sidebar hidden too.
+`Alt s` on a hidden sidebar brings it back and moves into it. A tab opened while
+it is hidden opens with its column hidden too.
 
 `Alt h`, which zellij binds to move the focus left, reaches the sidebar from
 the leftmost pane as well.
 
-Only the sidebar in the tab on screen does any work, hidden or not. The others
-wake once a second to keep the clock, and ask `claude-ps` nothing.
+Two clients on one session — a terminal and `zellij web`, say — share the one
+sidebar. It goes with whoever switched tabs last, and comes back from hidden to
+the tab of the client that attached first. A key reaches the plugins of every
+client, and zellij does not say whose it was, so `Alt s` and `Alt a` act for
+both.
 
 ---
 

@@ -7,11 +7,20 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use zellij_tile::prelude::{PaneManifest, TabInfo};
+use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::cursor::Cursor;
 use crate::elapsed::{Age, Held};
+
+/// What a placeholder runs: the column each tab keeps for the sidebar, which
+/// the dock opens it into. Nothing anyone goes to.
+pub const PLACEHOLDER: [&str; 3] = ["tail", "-f", "/dev/null"];
+
+pub fn is_placeholder(pane: &PaneInfo) -> bool {
+    !pane.is_plugin
+        && pane.terminal_command.as_deref().is_some_and(|c| c.split(' ').eq(PLACEHOLDER))
+}
 
 /// A live session and its panes, as the sidebar is handed it.
 pub struct Branch {
@@ -34,7 +43,8 @@ impl Branch {
 }
 
 /// The panes a person can go to, in tab order, the tiled ones of a tab before
-/// its floating ones, and in the order they were opened within each.
+/// its floating ones, and in the order they were opened within each. The
+/// sidebar's placeholders are not among them.
 pub fn leaves(tabs: &[TabInfo], manifest: &PaneManifest) -> Vec<Leaf> {
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
@@ -43,7 +53,7 @@ pub fn leaves(tabs: &[TabInfo], manifest: &PaneManifest) -> Vec<Leaf> {
             .find(|tab| tab.position == *position)
             .map_or("", |tab| tab.name.as_str());
         for pane in panes {
-            if pane.is_plugin || !pane.is_selectable || pane.is_suppressed {
+            if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
                 continue;
             }
             keyed.push((
@@ -422,9 +432,22 @@ mod tests {
         let hidden = PaneInfo { is_suppressed: true, ..pane(9, "hidden") };
         let floating = PaneInfo { is_floating: true, ..pane(1, "floating") };
         let bar = PaneInfo { is_selectable: false, ..pane(8, "bar") };
+        let placeholder =
+            PaneInfo { terminal_command: Some("tail -f /dev/null".to_owned()), ..pane(7, "tail") };
         let manifest = manifest(&[
             (1, vec![pane(2, "second tab")]),
-            (0, vec![floating, plugin, pane(5, "tiled, later"), pane(3, "tiled"), hidden, bar]),
+            (
+                0,
+                vec![
+                    floating,
+                    plugin,
+                    pane(5, "tiled, later"),
+                    pane(3, "tiled"),
+                    hidden,
+                    bar,
+                    placeholder,
+                ],
+            ),
         ]);
         let leaves = leaves(&[tab(0, "code"), tab(1, "logs")], &manifest);
         let seen: Vec<(u32, &str, &str)> =

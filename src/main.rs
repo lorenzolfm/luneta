@@ -1,6 +1,7 @@
 mod agents;
 mod cursor;
 mod dirs;
+mod dock;
 mod elapsed;
 mod fetch;
 mod layout;
@@ -20,7 +21,7 @@ use elapsed::Age;
 use panes::Peeks;
 use places::Places;
 use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
-use tree::{Branch, Node, Place, Tree};
+use tree::{is_placeholder, Branch, Node, Place, Tree};
 use zellij_tile::prelude::*;
 
 const SCREEN_PIPE: &str = "screen";
@@ -28,14 +29,27 @@ const SCREEN_PIPE: &str = "screen";
 /// The pipe a key binding reaches the sidebar through. Its payload is `focus`,
 /// which moves the focus into the sidebar or back out of it, `next`, which
 /// goes to the next agent that wants you, or `toggle`, which hides the sidebar
-/// in every tab of the session, or shows it again.
+/// or shows it again.
 const SIDEBAR_PIPE: &str = "sidebar";
 
-/// `mode "sidebar"` in the plugin's configuration makes it the sidebar: a pane
-/// a layout pins to the side of every tab, which never closes itself.
+/// `mode "dock"`, in `load_plugins`, makes the plugin the dock: one to a
+/// session, in the background, keeping a sidebar in the tab on screen. The
+/// sidebar it opens, `mode "sidebar"`, is a pane that never closes itself.
 const MODE: &str = "mode";
 
 const SIDEBAR: &str = "sidebar";
+
+const DOCK: &str = "dock";
+
+/// Every mode asks for the same, since zellij keeps one grant for a plugin's
+/// file and each mode's would overwrite the others'. The dock opens the
+/// sidebar.
+const PERMISSIONS: [PermissionType; 4] = [
+    PermissionType::ReadApplicationState,
+    PermissionType::ChangeApplicationState,
+    PermissionType::RunCommands,
+    PermissionType::OpenTerminalsOrPlugins,
+];
 
 const AGENTS_COMMAND: &str = "agents_command";
 
@@ -48,11 +62,6 @@ const TICKS_PER_SECOND: u64 = 10;
 const TICKS_PER_POLL: u64 = TICKS_PER_SECOND;
 
 const PREVIEW_DELAY: u64 = 2;
-
-/// A layout puts a sidebar in every tab of every session, and only the one in
-/// the tab on screen has anything to do. The rest wake this often, and only to
-/// keep the clock.
-const REST: f64 = 1.0;
 
 /// How often the sidebar asks each session for its panes again, so that an
 /// agent started in a new pane, or in a shell that moved, finds its row.
@@ -132,29 +141,27 @@ struct State {
     detached: bool,
     places_at: u64,
     size: (usize, usize),
-    tab_id: Option<usize>,
-    resting: bool,
-    hiding: Hiding,
-}
-
-/// Whether the sidebars are hidden. Each sidebar of a session keeps its own
-/// account, all of them hearing the same keys.
-#[derive(Default)]
-struct Hiding {
-    hidden: bool,
-    /// Where the sidebar stood before it hid: x, y, columns, rows.
-    spot: Option<(usize, usize, usize, usize)>,
-    /// Shown somewhere else in a tab off screen, which the tab's swap layout
-    /// could not reach to put it back.
-    misplaced: bool,
-    /// Found its pane, and followed the others.
-    placed: bool,
+    dock: Option<dock::Dock>,
 }
 
 register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        let ids = get_plugin_ids();
+        self.plugin_id = ids.plugin_id;
+        request_permission(&PERMISSIONS);
+        if configuration.get(MODE).map(|value| value.trim()) == Some(DOCK) {
+            let mut sidebar = configuration;
+            sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
+            self.dock = Some(dock::Dock::new(self.plugin_id, ids.client_id, sidebar));
+            subscribe(&[
+                EventType::PermissionRequestResult,
+                EventType::TabUpdate,
+                EventType::PaneUpdate,
+            ]);
+            return;
+        }
         self.agents_command = configuration
             .get(AGENTS_COMMAND)
             .map(|value| value.trim())
@@ -163,12 +170,6 @@ impl ZellijPlugin for State {
         if configuration.get(MODE).map(|value| value.trim()) == Some(SIDEBAR) {
             self.sidebar = Some(Tree::default());
         }
-        self.plugin_id = get_plugin_ids().plugin_id;
-        request_permission(&[
-            PermissionType::ReadApplicationState,
-            PermissionType::ChangeApplicationState,
-            PermissionType::RunCommands,
-        ]);
         subscribe(&[
             EventType::PermissionRequestResult,
             EventType::Timer,
@@ -185,10 +186,20 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
+        if let Some(dock) = self.dock.as_mut() {
+            match event {
+                Event::PermissionRequestResult(PermissionStatus::Granted) => dock.grant(),
+                Event::TabUpdate(tabs) => dock.tabs(tabs),
+                Event::PaneUpdate(panes) => dock.panes(panes),
+                _ => {},
+            }
+            return false;
+        }
         match event {
             Event::PermissionRequestResult(status) => {
                 if matches!(status, PermissionStatus::Granted) {
-                    rename_plugin_pane(self.plugin_id, "luneta");
+                    let title = if self.sidebar.is_some() { dock::SIDEBAR_TITLE } else { "luneta" };
+                    rename_plugin_pane(self.plugin_id, title);
                     if self.sidebar.is_none() {
                         resize_self(self.plugin_id);
                         self.ask_zoxide();
@@ -201,11 +212,6 @@ impl ZellijPlugin for State {
                 true
             },
             Event::Timer(_) => {
-                if self.rest() {
-                    set_timeout(REST);
-                    self.frame = self.frame.wrapping_add(TICKS_PER_SECOND);
-                    return false;
-                }
                 set_timeout(TICK);
                 let polled = self.frame.is_multiple_of(TICKS_PER_POLL);
                 if polled {
@@ -287,6 +293,12 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        if let Some(dock) = self.dock.as_mut() {
+            if message.name == SIDEBAR_PIPE {
+                dock.pipe(message.payload.as_deref().map(str::trim));
+            }
+            return false;
+        }
         if self.sidebar.is_some() {
             self.sidebar_pipe(&message);
             return false;
@@ -302,6 +314,9 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.dock.is_some() {
+            return;
+        }
         self.size = (rows, cols);
         if let Some(tree) = &self.sidebar {
             let focused = self.sidebar_focused();
@@ -755,30 +770,6 @@ impl State {
         self.panes = Some(current.panes.clone());
         self.tabs.clone_from(&current.tabs);
         self.active_tab = current.tabs.iter().find(|t| t.active).map(|t| t.position);
-        self.learn_tab();
-    }
-
-    /// Whether this is a sidebar in a tab off screen, which rests. One that
-    /// has not yet found its tab stays awake until it has, and one coming back
-    /// on screen catches up.
-    fn rest(&mut self) -> bool {
-        let resting = self.sidebar.is_some() && self.tab_id.is_some() && !self.on_screen();
-        if self.resting && !resting {
-            self.wake();
-        }
-        self.resting = resting;
-        resting
-    }
-
-    /// The id of this sidebar's tab, which, unlike its position, stays put
-    /// when the tabs move.
-    fn learn_tab(&mut self) {
-        let Some(position) = self.own_tab() else {
-            return;
-        };
-        if let Some(tab) = self.tabs.iter().find(|t| t.position == position) {
-            self.tab_id = Some(tab.tab_id);
-        }
     }
 
     fn own_tab(&self) -> Option<usize> {
@@ -788,13 +779,6 @@ impl State {
             .iter()
             .find(|(_, panes)| panes.iter().any(|p| p.is_plugin && p.id == self.plugin_id))
             .map(|(tab, _)| *tab)
-    }
-
-    /// zellij tells only the plugins in the tab on screen when the tabs
-    /// change, so a sidebar in a tab left behind would go on believing it is
-    /// on screen. It asks instead.
-    fn on_screen(&self) -> bool {
-        self.tab_id.is_some_and(|own| get_focused_pane_info().is_ok_and(|(tab, _)| tab == own))
     }
 
     fn sidebar_focused(&self) -> bool {
@@ -814,23 +798,13 @@ impl State {
         focused && !floating
     }
 
-    /// After the panes or the tabs change. A sidebar off screen leaves its
-    /// rows alone, since a title that turns with a spinner changes the panes
-    /// many times a second. Says whether to draw.
+    /// After the panes or the tabs change. Says whether to draw.
     fn settle(&mut self) -> bool {
-        self.learn_tab();
-        self.place();
-        if self.rest() {
-            return false;
-        }
         self.rebuild_agents(Selection::Hold);
         self.sidebar.is_some()
     }
 
     fn wake(&mut self) {
-        if std::mem::take(&mut self.hiding.misplaced) {
-            self.restore();
-        }
         self.places.forget();
         self.places_at = self.frame;
         self.poll();
@@ -985,25 +959,15 @@ impl State {
         }
     }
 
-    /// A key binding broadcasts to every plugin in the session, so every
-    /// sidebar in it hears the message. Hiding and showing is for all of them
-    /// at once; the rest is for the one on screen. Focusing hidden sidebars
-    /// shows them first.
+    /// A key binding broadcasts to every plugin in the session: the sidebar
+    /// and the dock both hear it. The dock hides and shows the sidebar, and
+    /// answers a `focus` while it is hidden, bringing it back first.
     fn sidebar_pipe(&mut self, message: &PipeMessage) {
         if message.name != SIDEBAR_PIPE {
             return;
         }
-        let payload = message.payload.as_deref().map(str::trim);
-        match payload {
-            Some("toggle") => self.hiding.hidden = !self.hiding.hidden,
-            Some("focus") => self.hiding.hidden = false,
-            _ => {},
-        }
-        self.reconcile();
-        if !self.on_screen() {
-            return;
-        }
-        match payload {
+        match message.payload.as_deref().map(str::trim) {
+            Some("focus") if self.hidden() => {},
             Some("focus") if self.has_focus() => self.go_back(),
             Some("focus") => focus_plugin_pane(self.plugin_id, false, false),
             Some("next") => self.go_to_next(),
@@ -1017,103 +981,9 @@ impl State {
         get_focused_pane_info().is_ok_and(|(_, pane)| pane == PaneId::Plugin(self.plugin_id))
     }
 
-    /// This sidebar's pane, shown or hidden.
-    fn own_pane(&self) -> Option<&PaneInfo> {
-        let tab = self.own_tab()?;
-        let panes = self.panes.as_ref()?.panes.get(&tab)?;
-        panes.iter().find(|p| p.is_plugin && p.id == self.plugin_id)
+    fn hidden(&self) -> bool {
+        get_pane_info(PaneId::Plugin(self.plugin_id)).is_some_and(|own| own.is_suppressed)
     }
-
-    /// Takes this sidebar's pane out of its tab, the panes beside it taking
-    /// its columns, or puts it back where it stood without moving the focus.
-    ///
-    /// A swap layout keeps a column for the sidebar, and would hand the one it
-    /// leaves to a terminal, but leaves a layout changed by hand alone: the
-    /// sidebar marks it so before it goes. Coming back, zellij puts it wherever
-    /// it finds room, and the tab's swap layout puts it back in its column, if
-    /// the tab is on screen, which is the only one it reaches. A sidebar off
-    /// screen waits for its tab.
-    fn reconcile(&mut self) {
-        let id = PaneId::Plugin(self.plugin_id);
-        let Some(own) = get_pane_info(id) else {
-            return;
-        };
-        if own.is_suppressed == self.hiding.hidden {
-            return;
-        }
-        if self.hiding.hidden {
-            if !self.hiding.misplaced {
-                self.hiding.spot = Some(spot(&own));
-            }
-            self.mark();
-            hide_self();
-            return;
-        }
-        show_pane_with_id(id, false, false);
-        if get_pane_info(id).map(|p| spot(&p)) == self.hiding.spot {
-            return;
-        }
-        if self.on_screen() {
-            self.restore();
-        } else {
-            self.hiding.misplaced = true;
-        }
-    }
-
-    /// Marks the tab's layout changed by hand. zellij has no call for that,
-    /// and resizing a pane by its id leaves the mark alone, but stacking a
-    /// pane on nothing sets it and does nothing else.
-    fn mark(&self) {
-        stack_panes(vec![PaneId::Plugin(self.plugin_id)]);
-    }
-
-    /// Applies the tab's swap layout again, which has a column for the
-    /// sidebar. Asked for on a layout marked changed by hand, zellij applies
-    /// the current one rather than the next.
-    fn restore(&self) {
-        self.mark();
-        next_swap_layout();
-    }
-
-    /// The first time this sidebar finds its pane. One in a tab opened after
-    /// the sidebars were hidden hides too.
-    fn place(&mut self) {
-        if self.sidebar.is_none() || self.hiding.placed {
-            return;
-        }
-        let Some(url) = self.own_pane().map(|p| p.plugin_url.clone()) else {
-            return;
-        };
-        self.hiding.placed = true;
-        let Some(url) = url else {
-            return;
-        };
-        let Some(manifest) = self.panes.as_ref() else {
-            return;
-        };
-        let others: Vec<&PaneInfo> = manifest
-            .panes
-            .values()
-            .flat_map(|panes| sidebars(panes, &url))
-            .filter(|p| p.id != self.plugin_id)
-            .collect();
-        if !others.is_empty() && others.iter().all(|p| p.is_suppressed) {
-            self.hiding.hidden = true;
-            self.reconcile();
-        }
-    }
-}
-
-fn spot(pane: &PaneInfo) -> (usize, usize, usize, usize) {
-    (pane.pane_x, pane.pane_y, pane.pane_columns, pane.pane_rows)
-}
-
-/// The sidebars among a tab's panes: tiled plugin panes, shown or hidden,
-/// loaded from `url`. The floating picker can share the url, and floats.
-fn sidebars<'a>(panes: &'a [PaneInfo], url: &'a str) -> impl Iterator<Item = &'a PaneInfo> {
-    panes
-        .iter()
-        .filter(move |p| p.is_plugin && !p.is_floating && p.plugin_url.as_deref() == Some(url))
 }
 
 fn contents_of(session: SessionInfo) -> Contents {
@@ -1127,6 +997,7 @@ fn contents_of(session: SessionInfo) -> Contents {
             .unwrap_or_default()
             .into_iter()
             .filter(|pane| pane.is_selectable && !pane.is_suppressed && !pane.is_plugin)
+            .filter(|pane| !is_placeholder(pane))
             .collect();
         total += in_tab.len();
         let pick = in_tab.iter().find(|pane| pane.is_focused).or_else(|| in_tab.first());
