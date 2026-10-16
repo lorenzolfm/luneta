@@ -259,6 +259,16 @@ fn parse(stdout: &str) -> Vec<Dir> {
         .collect()
 }
 
+/// A cwd as luneta shows one: its last two parts.
+pub fn short_cwd(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    match parts.as_slice() {
+        [] => path.to_owned(),
+        [only] => (*only).to_owned(),
+        [.., parent, base] => format!("{parent}/{base}"),
+    }
+}
+
 fn derive_name(path: &str) -> Option<String> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
     validate_name(base).is_none().then(|| base.to_owned())
@@ -295,6 +305,16 @@ mod tests {
             Some(Listing::Failed(reason)) => reason.clone(),
             _ => panic!("expected a failure"),
         }
+    }
+
+    #[test]
+    fn short_cwd_keeps_the_last_two_components() {
+        assert_eq!(short_cwd("/home/you/Projects/misc/luneta"), "misc/luneta");
+        assert_eq!(short_cwd("/home/you"), "home/you");
+        assert_eq!(short_cwd("/home"), "home");
+        assert_eq!(short_cwd("/"), "/");
+        assert_eq!(short_cwd(""), "");
+        assert_eq!(short_cwd("/misc/luneta/"), "misc/luneta");
     }
 
     #[test]

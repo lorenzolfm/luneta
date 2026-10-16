@@ -421,7 +421,10 @@ impl State {
             self.branches = snapshot
                 .live_sessions
                 .iter()
-                .map(|s| Branch::new(s.name.clone(), Age::new(s.creation_time), &s.tabs, &s.panes))
+                .map(|s| {
+                    let age = Age::new(s.creation_time);
+                    Branch::new(s.name.clone(), age, &s.tabs, &s.panes, &self.places)
+                })
                 .collect();
             if self.frame.wrapping_sub(self.places_at) >= TICKS_PER_PLACES {
                 self.places_at = self.frame;
@@ -872,11 +875,16 @@ impl State {
         let current = self.matches.current_session.clone();
         if let (Some(current), Some(manifest)) = (current.as_deref(), self.panes.as_ref()) {
             if let Some(branch) = self.branches.iter_mut().find(|b| b.name == current) {
-                branch.panes = tree::leaves(&self.tabs, manifest);
+                branch.panes = tree::leaves(current, &self.tabs, manifest, &self.places);
             }
         }
         let follow = !self.sidebar_focused();
         if let Role::Sidebar(tree) = &mut self.role {
+            // A search lasts while the sidebar has the focus. One left behind
+            // would keep the rows it hides out of sight.
+            if follow {
+                tree.close_search();
+            }
             tree.rebuild(&self.branches, current.as_deref(), &self.agents, self.here, follow);
         }
     }
@@ -885,12 +893,20 @@ impl State {
         if !key.has_no_modifiers() {
             return false;
         }
+        let search = match &self.role {
+            Role::Sidebar(tree) => tree.search().map(str::to_owned),
+            _ => None,
+        };
+        if let Some(term) = search {
+            return self.handle_search_box_key(key.bare_key, term);
+        }
         match key.bare_key {
             BareKey::Down | BareKey::Char('j') => self.move_tree(1),
             BareKey::Up | BareKey::Char('k') => self.move_tree(-1),
             BareKey::Left | BareKey::Char('h') => self.fold(Some(true)),
             BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
             BareKey::Char(' ') => self.fold(None),
+            BareKey::Char('/') => self.search_tree(String::new()),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -905,6 +921,51 @@ impl State {
             },
             _ => false,
         }
+    }
+
+    /// The keys `j k h l n` and `Space` type, like any other character, while
+    /// the search box is open. `Esc` closes it, and so does `Backspace` once
+    /// there is nothing left to take back, as in less and vim.
+    fn handle_search_box_key(&mut self, key: BareKey, mut term: String) -> bool {
+        match key {
+            BareKey::Down => self.move_tree(1),
+            BareKey::Up => self.move_tree(-1),
+            BareKey::Enter => {
+                self.go_to_selected();
+                true
+            },
+            BareKey::Esc => self.close_search(),
+            BareKey::Backspace if term.is_empty() => self.close_search(),
+            BareKey::Backspace => {
+                term.pop();
+                self.search_tree(term)
+            },
+            BareKey::Char(c) => {
+                term.push(c);
+                self.search_tree(term)
+            },
+            _ => false,
+        }
+    }
+
+    fn search_tree(&mut self, term: String) -> bool {
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        tree.search_for(term);
+        self.rebuild_tree();
+        true
+    }
+
+    fn close_search(&mut self) -> bool {
+        let closed = match &mut self.role {
+            Role::Sidebar(tree) => tree.close_search(),
+            _ => false,
+        };
+        if closed {
+            self.rebuild_tree();
+        }
+        closed
     }
 
     fn handle_mouse(&mut self, mouse: Mouse) -> bool {
@@ -935,9 +996,11 @@ impl State {
             return false;
         };
         tree.rows.select(index);
+        let searching = tree.search().is_some();
         match tree.rows.selected_row() {
-            Some(Node::Session(_)) => self.fold(None),
-            Some(Node::Pane(_)) => {
+            // A search unfolds what it finds, so a fold would show nothing.
+            Some(Node::Session(_)) if !searching => self.fold(None),
+            Some(_) => {
                 self.go_to_selected();
                 true
             },
@@ -968,6 +1031,9 @@ impl State {
         changed
     }
 
+    /// Going anywhere closes the search, so that the sidebar you come back to
+    /// shows every row. The session you are in, found by a search, is the pane
+    /// you came from.
     fn go_to_selected(&mut self) {
         let Role::Sidebar(tree) = &self.role else {
             return;
@@ -975,11 +1041,16 @@ impl State {
         let Some(place) = tree.rows.selected_row().map(Node::place) else {
             return;
         };
+        let searched = self.close_search();
         let current = self.matches.current_session.as_deref();
         match place {
             Place::Pane(session, pane) => self.go_to(&session, pane),
             Place::Session(session) if current == Some(session.as_str()) => {
-                self.fold(None);
+                if searched {
+                    self.go_back();
+                } else {
+                    self.fold(None);
+                }
             },
             Place::Session(session) => switch_session(Some(&session)),
         }

@@ -110,6 +110,12 @@ Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
 and sessions alike. A folded session keeps its count and shows the glyph of
 the agent that wants you most.
 
+Press `/` to search, as in less and vim. The tree narrows to the rows that
+match what you type, fuzzily, as the picker does: a session by its name, a pane
+by its row, its tab or its directory. The rows left keep their order, and the
+highlight lands on the best match, so `Alt s` `/` *a few characters* `Enter`
+takes you anywhere. A folded session opens to show the panes found in it.
+
 One key hides the sidebar, the panes beside it taking its columns in every tab,
 and brings it back.
 
@@ -415,7 +421,17 @@ In the sidebar, once it has the focus:
 | `←` `→` / `h` `l` | fold / unfold the session |
 | `Space` | fold or unfold |
 | `n` | go to the next agent that wants you |
+| `/` | search |
 | `Esc` | back to the pane you came from |
+
+While the search is open, every key types into it but these:
+
+| key | does |
+|---|---|
+| `↓` / `↑` | move the highlight |
+| `Enter` | go to the highlighted row, and close the search |
+| `Esc` | close the search, and clear it |
+| `Backspace` | delete a character, or close the search once it is empty |
 
 ---
 

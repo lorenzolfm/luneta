@@ -1,7 +1,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
-use crate::dirs::{DirRow, DirSet, Listing};
+use crate::dirs::{short_cwd, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::paint::{self, Painted};
@@ -889,15 +889,6 @@ fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
     }
 }
 
-fn short_cwd(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    match parts.as_slice() {
-        [] => path.to_owned(),
-        [only] => (*only).to_owned(),
-        [.., parent, base] => format!("{parent}/{base}"),
-    }
-}
-
 fn search_help(width: usize) -> Painted {
     keys_text(
         width,
@@ -945,15 +936,18 @@ fn keys_text(width: usize, keys: &[Key]) -> Painted {
             .collect::<Vec<_>>()
             .join(joiner)
     };
+    let bare = |joiner: &str| keys.iter().map(|(k, _, _)| *k).collect::<Vec<_>>().join(joiner);
     let line = [
         spelled(" - ", ", ", false),
         spelled(" ", "  ", false),
         spelled(" ", "  ", true),
         spelled(" ", " ", true),
+        bare("/"),
+        bare(""),
     ]
     .into_iter()
     .find(|candidate| candidate.width() <= width)
-    .unwrap_or_else(|| keys.iter().map(|(k, _, _)| *k).collect::<Vec<_>>().join("/"));
+    .unwrap_or_else(|| bare("/"));
 
     let mut text = Painted::new(&line).dim_all();
     for (key, _, _) in keys {
@@ -970,18 +964,26 @@ pub fn render_notice(text: &str, rows: usize, cols: usize) {
 }
 
 /// How a sidebar `rows` tall is cut up: the tree from the top, the notes under
-/// it, and a line of keys at the bottom while the sidebar has the focus.
+/// it, the search box while it is open, and a line of keys at the bottom while
+/// the sidebar has the focus. The box opens at the bottom so that no row moves.
 struct Shelf {
     tree: usize,
     notes: usize,
+    search_y: Option<usize>,
     help_y: Option<usize>,
 }
 
 impl Shelf {
-    fn new(rows: usize, notes: usize, focused: bool) -> Self {
-        let help = usize::from(focused && rows > 1);
-        let notes = notes.min(rows - help);
-        Shelf { tree: rows - help - notes, notes, help_y: (help == 1).then(|| rows - 1) }
+    fn new(rows: usize, notes: usize, focused: bool, searching: bool) -> Self {
+        let search = usize::from(searching && rows > 0);
+        let help = usize::from(focused && rows > search + 1);
+        let notes = notes.min(rows - search - help);
+        Shelf {
+            tree: rows - search - help - notes,
+            notes,
+            search_y: (search == 1).then(|| rows - help - 1),
+            help_y: (help == 1).then(|| rows - 1),
+        }
     }
 }
 
@@ -995,12 +997,17 @@ pub fn render_sidebar(
 ) {
     let inner = cols.saturating_sub(2);
     let notes = agent_note_texts(agents, inner);
-    let shelf = Shelf::new(rows, notes.len(), focused);
+    let term = tree.search();
+    let shelf = Shelf::new(rows, notes.len(), focused, term.is_some());
     for (y, line) in sidebar_lines(tree, &notes, &shelf, focused, cols, frame).iter().enumerate() {
         print_at(line, 0, y, cols);
     }
+    if let Some((y, term)) = shelf.search_y.zip(term) {
+        print_at(&search_line(term, inner), 0, y, cols);
+    }
     if let Some(y) = shelf.help_y {
-        print_at(&sidebar_help(inner), 1, y, inner);
+        let help = if term.is_some() { search_help_line(inner) } else { sidebar_help(inner) };
+        print_at(&help, 1, y, inner);
     }
 }
 
@@ -1014,7 +1021,7 @@ pub fn sidebar_row_at(
     line: usize,
 ) -> Option<usize> {
     let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
-    let shelf = Shelf::new(rows, notes, focused);
+    let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
     if line >= shelf.tree {
         return None;
     }
@@ -1043,7 +1050,9 @@ fn sidebar_lines(
     let mut lines = Vec::with_capacity(shelf.tree + shelf.notes);
     if tree.rows.is_empty() {
         if shelf.tree > 0 {
-            lines.push(note_within(inner, &Note::dim("no sessions")));
+            let typed = tree.search().is_some_and(|term| !term.is_empty());
+            let empty = if typed { "no match" } else { "no sessions" };
+            lines.push(note_within(inner, &Note::dim(empty)));
         }
     } else {
         let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
@@ -1080,7 +1089,8 @@ fn branch_line(node: &SessionNode, inner: usize, frame: u64) -> Painted {
     line.push(if node.folded { FOLDED } else { UNFOLDED }, TAG);
     line.gap(1);
     let room = inner.saturating_sub(line.columns() + reserve);
-    line.push(&truncate(&node.name, room), if node.current { ACCENT } else { NAME });
+    let (name, hits) = lit(&node.name, room, &node.hits);
+    line.push_hits(&name, if node.current { ACCENT } else { NAME }, ACCENT, &hits);
     if !badge.is_empty() {
         line.pad_to(inner.saturating_sub(badge.width()));
         line.push(&badge, level);
@@ -1119,11 +1129,31 @@ fn leaf_line(node: &PaneNode, glyphs: usize, inner: usize, frame: u64) -> Painte
     let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
     let room = inner.saturating_sub(line.columns() + reserve);
     let level = if node.agent.is_some() { NAME } else { TAG };
-    line.push(&truncate(&node.label, room), level);
+    let (label, hits) = lit(&node.label, room, &node.hits);
+    line.push_hits(&label, level, ACCENT, &hits);
     if !age.is_empty() {
         line.pad_to(inner.saturating_sub(age.width()));
         line.push(&age, LABEL);
     }
+    line.finish(inner)
+}
+
+/// `text` cut to `room`, and the characters a search lit that are left in it.
+/// The `…` that ends a cut stands for what it took, and is not one of them.
+fn lit(text: &str, room: usize, hits: &[usize]) -> (String, Vec<usize>) {
+    let cut = truncate(text, room);
+    let count = cut.chars().count();
+    let kept = if cut == text { count } else { count.saturating_sub(1) };
+    let hits = hits.iter().copied().filter(|hit| *hit < kept).collect();
+    (cut, hits)
+}
+
+/// The search box: what is typed, its tail when it is too long to fit.
+fn search_line(term: &str, inner: usize) -> Painted {
+    let mut line = Line::new();
+    line.push("/", TAG);
+    let (typed, _) = truncate_left(&format!("{term}_"), inner.saturating_sub(1));
+    line.push(&typed, ACCENT);
     line.finish(inner)
 }
 
@@ -1136,7 +1166,15 @@ fn sidebar_help(width: usize) -> Painted {
             ("<←→>", "Fold", "Fold"),
             ("<n>", "Next", "Next"),
             ("<ESC>", "Back", "Back"),
+            ("</>", "Search", "Search"),
         ],
+    )
+}
+
+fn search_help_line(width: usize) -> Painted {
+    keys_text(
+        width,
+        &[("<↓↑>", "Move", "Move"), ("<ENTER>", "Go", "Go"), ("<ESC>", "Clear", "Clear")],
     )
 }
 
@@ -1543,16 +1581,6 @@ mod tests {
     }
 
     #[test]
-    fn short_cwd_keeps_the_last_two_components() {
-        assert_eq!(short_cwd("/home/you/Projects/misc/luneta"), "misc/luneta");
-        assert_eq!(short_cwd("/home/you"), "home/you");
-        assert_eq!(short_cwd("/home"), "home");
-        assert_eq!(short_cwd("/"), "/");
-        assert_eq!(short_cwd(""), "");
-        assert_eq!(short_cwd("/misc/luneta/"), "misc/luneta");
-    }
-
-    #[test]
     fn keys_text_drops_descriptions_before_it_drops_keys() {
         let keys: &[Key] = &[("<↓↑>", "Navigate", "Nav"), ("<ENTER>", "Select", "Select")];
         assert_eq!(keys_text(60, keys).content(), "<↓↑> - Navigate, <ENTER> - Select");
@@ -1874,6 +1902,7 @@ mod tests {
             folded,
             waiting,
             loudest: loudest.map(|word| Status::parse(Some(word))),
+            hits: Vec::new(),
         })
     }
 
@@ -1887,6 +1916,7 @@ mod tests {
                 age: Held::from_secs(age),
             }),
             here: false,
+            hits: Vec::new(),
         })
     }
 
@@ -1910,7 +1940,7 @@ mod tests {
         rows: usize,
         cols: usize,
     ) -> Vec<String> {
-        let shelf = Shelf::new(rows, notes.len(), focused);
+        let shelf = Shelf::new(rows, notes.len(), focused, tree.search().is_some());
         sidebar_lines(tree, notes, &shelf, focused, cols, 0)
             .iter()
             .map(|line| line.content().to_owned())
@@ -1956,13 +1986,33 @@ mod tests {
         let unfocused = sidebar_picture(&tree, &notes, false, 6, 32);
         assert_eq!(unfocused.len(), 6);
         assert_eq!(unfocused[5], " claude-ps: gone                ");
-        assert!(Shelf::new(6, 1, false).help_y.is_none());
+        assert!(Shelf::new(6, 1, false, false).help_y.is_none());
 
         let focused = sidebar_picture(&tree, &notes, true, 6, 32);
         assert_eq!(focused.len(), 5);
         assert_eq!(focused[4], " claude-ps: gone                ");
-        assert_eq!(Shelf::new(6, 1, true).help_y, Some(5));
+        assert_eq!(Shelf::new(6, 1, true, false).help_y, Some(5));
         assert!(sidebar_help(30).content().width() <= 30);
+        assert!(search_help_line(30).content().width() <= 30);
+    }
+
+    #[test]
+    fn the_search_box_opens_under_the_tree_and_moves_no_row() {
+        let mut tree = sidebar_tree(workday(), 0);
+        let closed = sidebar_picture(&tree, &[], true, 9, 32);
+        tree.search_for("handoff-eng-11259".to_owned());
+        let open = sidebar_picture(&tree, &[], true, 9, 32);
+        assert_eq!(open.len(), closed.len() - 1);
+        assert_eq!(open[..], closed[..open.len()]);
+
+        let shelf = Shelf::new(9, 0, true, true);
+        assert_eq!((shelf.search_y, shelf.help_y), (Some(7), Some(8)));
+        assert_eq!(search_line("pix", 30).content(), " /pix_                          ");
+        assert_eq!(search_line("handoff-eng-11259", 10).content(), " /…g-11259_ ");
+
+        let agents = AgentSet::default();
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 6), Some(6));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 7), None);
     }
 
     #[test]
@@ -1989,23 +2039,39 @@ mod tests {
 
     #[test]
     fn a_sidebar_with_no_sessions_says_so() {
+        let mut tree = Tree::default();
         assert_eq!(
-            sidebar_picture(&Tree::default(), &[], false, 2, 20),
+            sidebar_picture(&tree, &[], false, 2, 20),
             vec![" no sessions        ", "                    "]
         );
+        tree.search_for(String::new());
+        assert_eq!(sidebar_picture(&tree, &[], true, 3, 20)[0], " no sessions        ");
+        tree.search_for("zz".to_owned());
+        assert_eq!(sidebar_picture(&tree, &[], true, 3, 20)[0], " no match           ");
     }
 
     #[test]
     fn every_sidebar_line_is_exactly_the_width_of_the_pane() {
         let notes = [Note::dim("2 agents sit in panes luneta cannot find")];
         for cols in 2..48 {
+            let search = search_line("handoff pix outflow", cols - 2);
+            assert_eq!(search.content().width(), cols, "{cols}: {}", search.content());
             for rows in 1..12 {
-                for focused in [false, true] {
+                for (focused, searching) in [(false, false), (true, false), (true, true)] {
                     for selected in [0, 3, 7] {
-                        let tree = sidebar_tree(workday(), selected);
+                        let mut tree = sidebar_tree(workday(), selected);
+                        if searching {
+                            tree.search_for("pix".to_owned());
+                        }
                         let lines = sidebar_picture(&tree, &notes, focused, rows, cols);
-                        let help = usize::from(focused && rows > 1);
-                        assert_eq!(lines.len(), rows - help, "{cols}x{rows}");
+                        let shelf = Shelf::new(rows, notes.len(), focused, searching);
+                        let below = [shelf.search_y, shelf.help_y];
+                        assert_eq!(
+                            lines.len() + below.iter().flatten().count(),
+                            rows,
+                            "{cols}x{rows}"
+                        );
+                        assert!(below.iter().flatten().all(|y| *y >= lines.len()), "{rows}");
                         for line in lines {
                             assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
                         }
