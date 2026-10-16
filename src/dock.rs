@@ -12,10 +12,12 @@
 //! taking their columns, and brings them back. Closing the sidebar hides it.
 //! A tab left with nothing but its column closes, as it would without one.
 //!
-//! zellij runs a dock for each client, and every dock sees the same panes.
-//! Each follows its own client's tab switches, but only the dock of the client
-//! that attached first hides, shows, opens or closes anything, so two docks
-//! never pull the columns two ways.
+//! zellij runs a dock for each client, and every dock sees the same panes and
+//! the tab every client is on. Only the dock of the client that attached first
+//! moves, hides, shows, opens or closes anything, so two docks never pull the
+//! columns two ways: it takes the sidebar to the tab a client came to last.
+//! zellij applies a swap layout to the tab on screen for the client that asks,
+//! so putting a tab's layout back is for the dock of a client on it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +34,11 @@ const PATIENCE: u32 = 10;
 
 /// Where a pane stands: x, y, columns, rows.
 type Spot = (usize, usize, usize, usize);
+
+/// A tab, by the id zellij keeps for it while it lives. Its position changes
+/// as the tabs before it close; the id does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TabId(usize);
 
 /// What a key binding asks through the `sidebar` pipe. Every plugin in the
 /// session hears it, and the dock and the sidebar each answer their own.
@@ -78,12 +85,13 @@ pub struct Dock {
     behind: bool,
     /// The sidebar's pane, from the moment the dock opens it.
     sidebar: Option<u32>,
-    /// The tab, by id, the sidebar was last seen in.
-    stood: Option<usize>,
-    /// The tab, by id, this client last had the sidebar brought to. zellij
-    /// runs a dock for each client, and each follows only its own, so two
-    /// clients on two tabs do not take the sidebar from each other forever.
-    placed: Option<usize>,
+    /// The tab the sidebar was last seen in.
+    stood: Option<TabId>,
+    /// The tab each client was on at the last update.
+    seats: BTreeMap<ClientId, TabId>,
+    /// The client the sidebar follows: the last to come to a tab, or to
+    /// attach. Every dock keeps it, and the one that leads goes by it.
+    followed: Option<ClientId>,
     /// What the dock has asked for and the panes do not show yet, and how many
     /// updates ago. An update can show the panes from before, or from halfway.
     asked: BTreeMap<Act, u32>,
@@ -95,17 +103,17 @@ pub struct Dock {
     /// tab's swap layout, which handed its column to a terminal; the
     /// placeholder takes the column back, and then hides as any other does.
     reclaim: Option<u32>,
-    /// Tabs, by id, whose placeholder came back somewhere else. The tab's swap
-    /// layout puts things back when the tab comes on screen, the only time a
-    /// dock can ask for it.
-    unsettled: BTreeSet<usize>,
-    /// Tabs, by id, whose swap layout was as zellij left it the last time the
-    /// sidebar showed.
-    clean: BTreeSet<usize>,
-    /// Tabs, by id, whose swap layout hiding marked changed by hand, and that
-    /// were clean before. zellij arranges no pane that opens in such a tab
-    /// until the swap layout is applied again, when the tab comes on screen.
-    marked: BTreeSet<usize>,
+    /// Tabs whose placeholder came back somewhere else. The tab's swap layout
+    /// puts things back when the tab comes on screen, the only time a dock
+    /// can ask for it.
+    unsettled: BTreeSet<TabId>,
+    /// Tabs whose swap layout was as zellij left it the last time the sidebar
+    /// showed.
+    clean: BTreeSet<TabId>,
+    /// Tabs whose swap layout hiding marked changed by hand, and that were
+    /// clean before. zellij arranges no pane that opens in such a tab until
+    /// the swap layout is applied again, when the tab comes on screen.
+    marked: BTreeSet<TabId>,
 }
 
 /// What the sidebar is to be.
@@ -127,46 +135,44 @@ enum Act {
     /// Show a hidden placeholder again.
     Show { pane: u32 },
     /// Open a sidebar into a placeholder.
-    Open { into: u32, tab: usize },
+    Open { into: u32, tab: TabId },
     /// Apply the swap layout of the tab on screen again, which puts a
     /// placeholder that came back elsewhere in its column, and has zellij
-    /// arrange the panes that open in the tab again.
-    Restore { placeholder: u32, tab: usize },
+    /// arrange the panes that open in the tab again. `pane` stands in the
+    /// tab's column.
+    Restore { pane: PaneId, tab: TabId },
     /// Bring the sidebar into a placeholder, giving the tab it leaves back the
     /// placeholder it covered there.
-    Move { sidebar: u32, from: Option<u32>, into: u32, tab: usize },
+    Move { sidebar: u32, from: Option<u32>, into: u32, tab: TabId },
     Focus { sidebar: u32 },
     Close { pane: PaneId },
-    /// Close a tab, by id.
-    CloseTab { tab: usize },
+    CloseTab { tab: TabId },
 }
 
 /// The panes as the dock needs them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Scene {
-    active: usize,
-    /// The tab on screen, by id.
-    active_id: usize,
-    /// Tab ids by position.
-    ids: BTreeMap<usize, usize>,
-    /// Every pane that is a sidebar, by tab position.
-    sidebars: Vec<(usize, Seen)>,
-    /// Every placeholder, by tab position.
-    placeholders: BTreeMap<usize, Vec<Seen>>,
+    /// The tab on screen.
+    active: TabId,
+    tabs: BTreeSet<TabId>,
+    /// The tab each client is on, this dock's own among them.
+    seats: BTreeMap<ClientId, TabId>,
+    /// Every pane that is a sidebar, and its tab.
+    sidebars: Vec<(TabId, Seen)>,
+    /// Every placeholder, by tab.
+    placeholders: BTreeMap<TabId, Vec<Seen>>,
     /// The url the dock was loaded from, for the sidebar.
     url: Option<String>,
-    /// The other clients in the session.
-    others: BTreeSet<ClientId>,
-    /// Tabs, by id, whose swap layout zellij has not marked changed by hand.
-    /// zellij names no layout for a tab of one pane, and calls it unmarked
-    /// whatever it is.
-    clean: BTreeSet<usize>,
-    /// Tabs, by id, showing their floating panes. zellij reports the floating
-    /// panes' layout for such a tab, and applies theirs when asked for one.
-    floating: BTreeSet<usize>,
-    /// Tabs, by position, with a pane besides the sidebar and the placeholders
-    /// that can take the focus.
-    occupied: BTreeSet<usize>,
+    /// Tabs whose swap layout zellij has not marked changed by hand. zellij
+    /// names no layout for a tab of one pane, and calls it unmarked whatever
+    /// it is.
+    clean: BTreeSet<TabId>,
+    /// Tabs showing their floating panes. zellij reports the floating panes'
+    /// layout for such a tab, and applies theirs when asked for one.
+    floating: BTreeSet<TabId>,
+    /// Tabs with a pane besides the sidebar and the placeholders that can
+    /// take the focus.
+    occupied: BTreeSet<TabId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,43 +207,54 @@ impl Seen {
 }
 
 impl Scene {
+    /// zellij keys the panes by the position of their tab, and only the tabs
+    /// say which tab that is: the panes go by tab id from here on.
     fn new(
         manifest: &PaneManifest,
         tabs: &[TabInfo],
+        client: ClientId,
         plugin_id: u32,
         sidebar: Option<u32>,
     ) -> Option<Self> {
-        let active = tabs.iter().find(|t| t.active)?;
+        let id = |tab: &TabInfo| TabId(tab.tab_id);
+        let active = id(tabs.iter().find(|t| t.active)?);
+        let mut seats: BTreeMap<ClientId, TabId> = tabs
+            .iter()
+            .flat_map(|t| t.other_focused_clients.iter().map(move |other| (*other, id(t))))
+            .collect();
+        seats.insert(client, active);
         let mut scene = Scene {
-            active: active.position,
-            active_id: active.tab_id,
-            ids: tabs.iter().map(|t| (t.position, t.tab_id)).collect(),
-            others: tabs.iter().flat_map(|t| t.other_focused_clients.iter().copied()).collect(),
+            active,
+            tabs: tabs.iter().map(id).collect(),
+            seats,
+            sidebars: Vec::new(),
+            placeholders: BTreeMap::new(),
+            url: None,
             clean: tabs
                 .iter()
                 .filter(|t| t.active_swap_layout_name.is_some() && !t.is_swap_layout_dirty)
                 .filter(|t| !t.are_floating_panes_visible)
-                .map(|t| t.tab_id)
+                .map(id)
                 .collect(),
-            floating: tabs
-                .iter()
-                .filter(|t| t.are_floating_panes_visible)
-                .map(|t| t.tab_id)
-                .collect(),
-            ..Scene::default()
+            floating: tabs.iter().filter(|t| t.are_floating_panes_visible).map(id).collect(),
+            occupied: BTreeSet::new(),
         };
-        for (tab, panes) in &manifest.panes {
+        let positions: BTreeMap<usize, TabId> = tabs.iter().map(|t| (t.position, id(t))).collect();
+        for (position, panes) in &manifest.panes {
+            // Panes of a tab these tabs do not have are from another report:
+            // the dock waits for the panes and the tabs of the same one.
+            let tab = *positions.get(position)?;
             for pane in panes {
                 if pane.is_plugin && pane.id == plugin_id {
                     scene.url.clone_from(&pane.plugin_url);
                 } else if pane.is_plugin
                     && (pane.title == SIDEBAR_TITLE || Some(pane.id) == sidebar)
                 {
-                    scene.sidebars.push((*tab, Seen::new(pane)));
+                    scene.sidebars.push((tab, Seen::new(pane)));
                 } else if is_placeholder(pane) {
-                    scene.placeholders.entry(*tab).or_default().push(Seen::new(pane));
+                    scene.placeholders.entry(tab).or_default().push(Seen::new(pane));
                 } else if pane.is_selectable && !pane.is_suppressed && !pane.is_floating {
-                    scene.occupied.insert(*tab);
+                    scene.occupied.insert(tab);
                 }
             }
         }
@@ -245,41 +262,32 @@ impl Scene {
     }
 
     /// The tab's placeholder: the one showing, or else the first.
-    fn placeholder(&self, tab: usize) -> Option<Seen> {
+    fn placeholder(&self, tab: TabId) -> Option<Seen> {
         let placeholders = self.placeholders.get(&tab)?;
         placeholders.iter().find(|p| !p.hidden).or(placeholders.first()).copied()
     }
 
     /// Which sidebar stays, when there are two. Every client's dock picks the
     /// same one.
-    fn sidebar(&self) -> Option<(usize, Seen)> {
+    fn sidebar(&self) -> Option<(TabId, Seen)> {
         self.sidebars.iter().min_by_key(|(_, s)| s.id).copied()
     }
 
     /// The sidebar, when it stands in a column.
-    fn home(&self) -> Option<(usize, Seen)> {
+    fn home(&self) -> Option<(TabId, Seen)> {
         self.sidebar().filter(|(_, s)| s.stands())
     }
 
-    /// Tabs, by position, left with nothing but the sidebar or a placeholder.
-    /// zellij closes a tab once none of its tiled panes can take the focus,
-    /// and both of those can. A tab that holds neither is zellij's to close,
-    /// or still opening.
-    fn deserted(&self) -> Vec<usize> {
-        let column = |tab: &usize| {
+    /// Tabs left with nothing but the sidebar or a placeholder. zellij closes
+    /// a tab once none of its tiled panes can take the focus, and both of
+    /// those can. A tab that holds neither is zellij's to close, or still
+    /// opening.
+    fn deserted(&self) -> Vec<TabId> {
+        let column = |tab: &TabId| {
             self.home().is_some_and(|(at, _)| at == *tab)
                 || self.placeholders.get(tab).is_some_and(|ps| ps.iter().any(Seen::stands))
         };
-        self.ids.keys().filter(|tab| !self.occupied.contains(tab) && column(tab)).copied().collect()
-    }
-
-    fn id(&self, tab: usize) -> usize {
-        self.ids.get(&tab).copied().unwrap_or(tab)
-    }
-
-    /// The position of the tab with an id, while there is one.
-    fn position(&self, id: usize) -> Option<usize> {
-        self.ids.iter().find(|(_, tab)| **tab == id).map(|(position, _)| *position)
+        self.tabs.iter().filter(|tab| !self.occupied.contains(tab) && column(tab)).copied().collect()
     }
 
     /// What the sidebar is to be, read off the panes: hidden when none of it
@@ -322,12 +330,12 @@ impl Scene {
             Act::Hide { pane: PaneId::Plugin(id) } => sidebar(id).is_none_or(|s| s.hidden),
             Act::Show { pane } => placeholder(pane).is_some_and(|p| !p.hidden),
             Act::Open { tab, .. } | Act::Move { tab, .. } => {
-                self.home().is_some_and(|(at, _)| self.id(at) == tab)
+                self.home().is_some_and(|(at, _)| at == tab)
             },
             Act::Focus { .. } | Act::Restore { .. } => true,
             Act::Close { pane: PaneId::Terminal(id) } => placeholder(id).is_none(),
             Act::Close { pane: PaneId::Plugin(id) } => sidebar(id).is_none(),
-            Act::CloseTab { tab } => self.position(tab).is_none(),
+            Act::CloseTab { tab } => !self.tabs.contains(&tab),
         }
     }
 }
@@ -379,6 +387,11 @@ impl Dock {
             return;
         }
         self.want = want;
+        // Back from hidden, it goes to the tab of the client that attached
+        // first, whoever came to a tab last.
+        if let Want::Back { .. } = want {
+            self.followed = None;
+        }
         self.asked.clear();
         self.step();
     }
@@ -403,7 +416,7 @@ impl Dock {
         let (Some(manifest), false) = (self.panes.as_ref(), self.tabs.is_empty()) else {
             return None;
         };
-        Scene::new(manifest, &self.tabs, self.plugin_id, self.sidebar)
+        Scene::new(manifest, &self.tabs, self.client, self.plugin_id, self.sidebar)
     }
 
     /// Takes in the panes, and says what to ask zellij for that the dock has
@@ -418,6 +431,7 @@ impl Dock {
         }
         self.observe(scene);
         self.marks(scene);
+        self.follow(scene);
         let mut acts = self.plan(scene);
         self.reclaim = None;
         acts.retain(|act| !self.asked.contains_key(act));
@@ -442,7 +456,7 @@ impl Dock {
         self.track(scene);
         if let Some((tab, sidebar)) = scene.sidebar() {
             self.sidebar = Some(sidebar.id);
-            self.stood = Some(scene.id(tab));
+            self.stood = Some(tab);
             if let (Want::Back { focus }, Some(_)) = (self.want, scene.home()) {
                 if !(focus && self.leads(scene)) {
                     self.want = Want::Shown;
@@ -460,13 +474,13 @@ impl Dock {
             return;
         }
         // Gone with its tab, it opens again.
-        let Some(tab) = scene.position(stood) else {
+        if !scene.tabs.contains(&stood) {
             return;
-        };
+        }
         self.want = Want::Hidden;
         self.reclaim = scene
             .placeholders
-            .get(&tab)
+            .get(&stood)
             .filter(|placeholders| placeholders.iter().all(|p| p.hidden))
             .and_then(|placeholders| placeholders.first())
             .map(|p| p.id);
@@ -479,9 +493,20 @@ impl Dock {
         if self.want == Want::Hidden {
             self.marked.extend(self.clean.iter().chain(&scene.clean));
         } else {
-            self.marked.retain(|tab| !scene.clean.contains(tab) && scene.position(*tab).is_some());
+            self.marked.retain(|tab| !scene.clean.contains(tab) && scene.tabs.contains(tab));
             self.clean.clone_from(&scene.clean);
         }
+    }
+
+    /// Takes in where every client is. One on a tab it was not on at the last
+    /// update, or new to the session, takes the sidebar with it; of two that
+    /// came at once, the first to attach does.
+    fn follow(&mut self, scene: &Scene) {
+        let came = scene.seats.iter().find(|(client, tab)| self.seats.get(*client) != Some(*tab));
+        if let Some((client, _)) = came {
+            self.followed = Some(*client);
+        }
+        self.seats.clone_from(&scene.seats);
     }
 
     /// Where every placeholder belongs, as of these panes.
@@ -493,7 +518,7 @@ impl Dock {
                 continue;
             };
             let covered = home.filter(|(at, _)| at == tab).map(|(_, sidebar)| sidebar.spot);
-            let spot = self.belongs(placeholder, covered, scene.id(*tab));
+            let spot = self.belongs(placeholder, covered, *tab);
             homes.insert(placeholder.id, Home { spot, hidden: placeholder.hidden });
         }
         self.homes = homes;
@@ -502,7 +527,7 @@ impl Dock {
     /// Where a placeholder belongs. One back from hidden where it belongs came
     /// back from under a sidebar that left; one back somewhere else leaves its
     /// tab unsettled until it is back in place.
-    fn belongs(&mut self, placeholder: Seen, covered: Option<Spot>, tab: usize) -> Spot {
+    fn belongs(&mut self, placeholder: Seen, covered: Option<Spot>, tab: TabId) -> Spot {
         let Some(was) = self.homes.get(&placeholder.id).copied() else {
             return covered.unwrap_or(placeholder.spot);
         };
@@ -535,39 +560,41 @@ impl Dock {
         let home = scene.home().map(|(tab, _)| tab);
         let deserted = scene.deserted();
         if leads {
-            acts.extend(deserted.iter().map(|tab| Act::CloseTab { tab: scene.id(*tab) }));
+            acts.extend(deserted.iter().map(|tab| Act::CloseTab { tab: *tab }));
             for tab in scene.placeholders.keys().filter(|tab| Some(**tab) != home) {
                 if let Some(placeholder) = scene.placeholder(*tab).filter(|p| p.hidden) {
                     acts.push(Act::Show { pane: placeholder.id });
                 }
             }
         }
-        let into = scene.placeholder(scene.active).filter(|p| !p.hidden).map(|p| p.id);
-        let tab = scene.active_id;
+        let tab = self.target(scene);
         // A tab on its way out is no place to dock, and takes a sidebar in it
         // along: the dock opens it again once the tab is gone.
         let leaving = |tab| deserted.contains(&tab);
-        if self.docking() || leaving(scene.active) || home.is_some_and(leaving) {
+        if self.docking() || leaving(scene.active) || leaving(tab) || home.is_some_and(leaving) {
             return acts;
         }
-        let again = (self.unsettled.contains(&tab) || self.marked.contains(&tab))
-            && !scene.floating.contains(&tab);
-        if let Some(placeholder) = into.filter(|_| again) {
-            acts.push(Act::Restore { placeholder, tab });
+        if let Some(pane) = self.restore(scene) {
+            acts.push(Act::Restore { pane, tab: scene.active });
         }
+        // Every dock reads the same panes, and two that moved the sidebar off
+        // them would pull it two ways.
+        if !leads {
+            return acts;
+        }
+        let into = scene.placeholder(tab).filter(|p| !p.hidden).map(|p| p.id);
         match sidebar {
-            None if leads => acts.extend(into.map(|into| Act::Open { into, tab })),
-            None => {},
+            None => acts.extend(into.map(|into| Act::Open { into, tab })),
             Some((_, sidebar)) if sidebar.floating => {},
             Some((_, sidebar)) => {
-                let away = home != Some(scene.active) && self.placed != Some(tab);
-                let back = leads && matches!(self.want, Want::Back { .. });
+                let away = home != Some(tab);
+                let back = matches!(self.want, Want::Back { .. });
                 match into {
                     Some(into) if sidebar.hidden && back || !sidebar.hidden && away => {
                         let from = home.and_then(|home| scene.placeholder(home)).map(|p| p.id);
                         acts.push(Act::Move { sidebar: sidebar.id, from, into, tab });
                     },
-                    _ if leads && !sidebar.hidden && self.want == (Want::Back { focus: true }) => {
+                    _ if !sidebar.hidden && self.want == (Want::Back { focus: true }) => {
                         acts.push(Act::Focus { sidebar: sidebar.id });
                     },
                     _ => {},
@@ -575,6 +602,28 @@ impl Dock {
             },
         }
         acts
+    }
+
+    /// The tab the sidebar is to stand in: that of the client it follows, or
+    /// else the one on screen.
+    fn target(&self, scene: &Scene) -> TabId {
+        self.followed.and_then(|client| scene.seats.get(&client).copied()).unwrap_or(scene.active)
+    }
+
+    /// What stands in the column of the tab on screen, when its swap layout is
+    /// to be applied again and this dock is the one to ask: its placeholder
+    /// came back somewhere else, or hiding marked it.
+    fn restore(&self, scene: &Scene) -> Option<PaneId> {
+        let tab = scene.active;
+        let again = (self.unsettled.contains(&tab) || self.marked.contains(&tab))
+            && !scene.floating.contains(&tab);
+        if !again || !self.answers(scene) {
+            return None;
+        }
+        match scene.home() {
+            Some((at, sidebar)) if at == tab => Some(PaneId::Plugin(sidebar.id)),
+            _ => scene.placeholder(tab).filter(|p| !p.hidden).map(|p| PaneId::Terminal(p.id)),
+        }
     }
 
     /// Takes the placeholders and the sidebar out, the placeholder of one
@@ -598,7 +647,18 @@ impl Dock {
     /// client's dock, with no word of whose it was, and the sidebar coming
     /// back from hidden goes to the tab of the first.
     fn leads(&self, scene: &Scene) -> bool {
-        scene.others.iter().all(|other| *other > self.client)
+        scene.seats.keys().all(|client| *client >= self.client)
+    }
+
+    /// Whether this dock's client attached first of those on the tab on
+    /// screen. zellij applies a swap layout to the tab on screen for the
+    /// client that asks, and one of them asks.
+    fn answers(&self, scene: &Scene) -> bool {
+        scene
+            .seats
+            .iter()
+            .filter(|(_, tab)| **tab == scene.active)
+            .all(|(client, _)| *client >= self.client)
     }
 
     /// Whether a sidebar is on its way into a placeholder. Halfway, it is
@@ -609,8 +669,8 @@ impl Dock {
 
     /// Asks zellij for the act, and says whether it did. The sidebar goes
     /// only into a placeholder that still shows, since zellij drops a pane it
-    /// is to put in place of a hidden one, and another dock may have hidden
-    /// it since these panes.
+    /// is to put in place of a hidden one, and it may have been hidden since
+    /// these panes.
     fn act(&mut self, act: Act, scene: &Scene) -> bool {
         match act {
             Act::Hide { pane } => {
@@ -648,10 +708,10 @@ impl Dock {
                 }
                 self.settle(sidebar, into, tab, scene);
             },
-            Act::Restore { placeholder, tab } => {
+            Act::Restore { pane, tab } => {
                 self.unsettled.remove(&tab);
                 self.marked.remove(&tab);
-                mark(PaneId::Terminal(placeholder));
+                mark(pane);
                 next_swap_layout();
             },
             Act::Focus { sidebar } => {
@@ -660,18 +720,20 @@ impl Dock {
             },
             Act::Close { pane: PaneId::Plugin(id) } => close_plugin_pane(id),
             Act::Close { pane: PaneId::Terminal(id) } => close_terminal_pane(id),
-            Act::CloseTab { tab } => close_tab_with_id(tab as u64),
+            Act::CloseTab { tab } => close_tab_with_id(tab.0 as u64),
         }
         true
     }
 
-    /// Puts the sidebar in the placeholder of the tab on screen, and applies
-    /// the tab's swap layout again if the placeholder had come back elsewhere
-    /// or hiding marked the layout, unless the tab shows its floating panes.
-    fn settle(&mut self, sidebar: u32, into: u32, tab: usize, scene: &Scene) {
+    /// Puts the sidebar in the placeholder of the tab it is to stand in. When
+    /// that is the tab on screen, it applies the tab's swap layout again if
+    /// the placeholder had come back elsewhere or hiding marked the layout,
+    /// unless the tab shows its floating panes; on another client's tab, its
+    /// dock does.
+    fn settle(&mut self, sidebar: u32, into: u32, tab: TabId, scene: &Scene) {
         let id = PaneId::Plugin(sidebar);
         replace_pane_with_existing_pane(PaneId::Terminal(into), id, true);
-        if !scene.floating.contains(&tab) {
+        if tab == scene.active && !scene.floating.contains(&tab) {
             let unsettled = self.unsettled.remove(&tab);
             let marked = self.marked.remove(&tab);
             if unsettled || marked {
@@ -683,7 +745,6 @@ impl Dock {
             focus_plugin_pane(sidebar, false, false);
         }
         self.want = Want::Shown;
-        self.placed = Some(tab);
     }
 }
 
@@ -789,9 +850,20 @@ mod tests {
         }
     }
 
+    /// The panes as client 1's dock reads them.
     fn scene(tabs: &[TabInfo], panes: Vec<(usize, Vec<PaneInfo>)>, known: Option<u32>) -> Scene {
+        seen_by(1, tabs, panes, known)
+    }
+
+    /// The panes as `client`'s dock reads them, `tabs` being as it sees them.
+    fn seen_by(
+        client: ClientId,
+        tabs: &[TabInfo],
+        panes: Vec<(usize, Vec<PaneInfo>)>,
+        known: Option<u32>,
+    ) -> Scene {
         let manifest = PaneManifest { panes: panes.into_iter().collect::<HashMap<_, _>>() };
-        Scene::new(&manifest, tabs, DOCK, known).expect("a tab is active")
+        Scene::new(&manifest, tabs, client, DOCK, known).expect("a tab is active")
     }
 
     fn dock() -> Dock {
@@ -840,7 +912,7 @@ mod tests {
             None,
         );
         assert_eq!(scene.url.as_deref(), Some("file:luneta.wasm"));
-        assert_eq!(dock().plan(&scene), vec![Act::Open { into: 1, tab: 10 }]);
+        assert_eq!(dock().plan(&scene), vec![Act::Open { into: 1, tab: TabId(10) }]);
     }
 
     #[test]
@@ -854,10 +926,8 @@ mod tests {
             ],
             None,
         );
-        let mut dock = dock();
-        dock.placed = Some(10);
-        let moved = Act::Move { sidebar: 5, from: Some(1), into: 3, tab: 11 };
-        assert_eq!(dock.plan(&scene), vec![moved]);
+        let moved = Act::Move { sidebar: 5, from: Some(1), into: 3, tab: TabId(11) };
+        assert_eq!(dock().plan(&scene), vec![moved]);
     }
 
     #[test]
@@ -874,22 +944,54 @@ mod tests {
         assert!(dock().plan(&scene).is_empty());
     }
 
+    /// Three tabs, a shell and a placeholder in each, and the sidebar in
+    /// `docked` over its placeholder.
+    fn three_tabs(docked: usize) -> Vec<(usize, Vec<PaneInfo>)> {
+        let mut panes = vec![
+            (0, vec![placeholder(1, false), terminal(2)]),
+            (1, vec![placeholder(3, false), terminal(4)]),
+            (2, vec![placeholder(5, false), terminal(6)]),
+        ];
+        let (_, column) = &mut panes[docked];
+        column[0].is_suppressed = true;
+        column.push(sidebar(9, false));
+        panes
+    }
+
     #[test]
-    fn another_client_on_another_tab_does_not_take_the_sidebar_back() {
-        // This client brought the sidebar to tab 1 and still sits there; the
-        // other client took it to tab 0.
-        let tabs = [tab(0, false), tab(1, true)];
-        let scene = scene(
-            &tabs,
-            vec![
-                (0, vec![sidebar(5, false), placeholder(1, true), terminal(2)]),
-                (1, vec![placeholder(3, false), terminal(4)]),
-            ],
-            None,
+    fn the_sidebar_goes_to_the_tab_a_client_came_to_last() {
+        let seen = |at: &[(ClientId, usize)], docked| {
+            seen_by(1, &tabs_of(1, at, 3), three_tabs(docked), None)
+        };
+        let mut dock = going(1);
+        assert!(run(&mut dock, &seen(&[(1, 0), (2, 0)], 0)).is_empty());
+        // Client 2 comes to tab 1, and client 1 stays on tab 0.
+        assert_eq!(
+            run(&mut dock, &seen(&[(1, 0), (2, 1)], 0)),
+            vec![Act::Move { sidebar: 9, from: Some(1), into: 3, tab: TabId(11) }],
         );
-        let mut dock = dock();
-        dock.placed = Some(11);
-        assert!(dock.plan(&scene).is_empty());
+        assert!(run(&mut dock, &seen(&[(1, 0), (2, 1)], 1)).is_empty());
+    }
+
+    #[test]
+    fn only_the_dock_that_leads_moves_the_sidebar() {
+        let seen = |client, at: &[(ClientId, usize)], docked| {
+            seen_by(client, &tabs_of(client, at, 3), three_tabs(docked), None)
+        };
+        let (mut first, mut second) = (going(1), going(2));
+        let mut both = |at: &[(ClientId, usize)], docked| {
+            (run(&mut first, &seen(1, at, docked)), run(&mut second, &seen(2, at, docked)))
+        };
+        assert_eq!(both(&[(1, 0), (2, 0)], 0), (vec![], vec![]));
+        // Client 1 comes to tab 1, and client 2, which stays, leaves the
+        // sidebar to go with it.
+        let moved = Act::Move { sidebar: 9, from: Some(1), into: 3, tab: TabId(11) };
+        assert_eq!(both(&[(1, 1), (2, 0)], 0), (vec![moved], vec![]));
+        assert_eq!(both(&[(1, 1), (2, 0)], 1), (vec![], vec![]));
+        // Both come to another tab at once, off the same panes: the first to
+        // attach takes the sidebar with it.
+        let moved = Act::Move { sidebar: 9, from: Some(3), into: 1, tab: TabId(10) };
+        assert_eq!(both(&[(1, 0), (2, 2)], 1), (vec![moved], vec![]));
     }
 
     #[test]
@@ -930,7 +1032,10 @@ mod tests {
         assert_eq!(hidden(&dock, false), vec![Act::Show { pane: 1 }, Act::Show { pane: 3 }]);
         assert_eq!(
             hidden(&dock, true),
-            vec![Act::Show { pane: 1 }, Act::Move { sidebar: 5, from: None, into: 3, tab: 11 }],
+            vec![
+                Act::Show { pane: 1 },
+                Act::Move { sidebar: 5, from: None, into: 3, tab: TabId(11) },
+            ],
         );
     }
 
@@ -947,7 +1052,7 @@ mod tests {
             ],
             None,
         );
-        let moved = Act::Move { sidebar: 5, from: Some(1), into: 3, tab: 11 };
+        let moved = Act::Move { sidebar: 5, from: Some(1), into: 3, tab: TabId(11) };
         let mut dock = dock();
         dock.asked.insert(moved, 0);
         assert!(!halfway.shows(moved));
@@ -998,14 +1103,14 @@ mod tests {
                 (1, vec![placeholder(3, true), terminal(6)]),
             ]
         };
-        let first = scene(&tabs_of(1, &at, 2), panes(), None);
-        let second = scene(&tabs_of(2, &at, 2), panes(), None);
+        let first = seen_by(1, &tabs_of(1, &at, 2), panes(), None);
+        let second = seen_by(2, &tabs_of(2, &at, 2), panes(), None);
         assert_eq!(
             going(1).plan(&first),
             vec![
                 Act::Close { pane: PaneId::Terminal(2) },
                 Act::Show { pane: 3 },
-                Act::Open { into: 1, tab: 10 },
+                Act::Open { into: 1, tab: TabId(10) },
             ],
         );
         assert!(going(2).plan(&second).is_empty());
@@ -1021,7 +1126,8 @@ mod tests {
     fn a_client_that_attaches_while_the_sidebar_is_hidden_leaves_it_hidden() {
         let at = [(1, 0), (2, 1)];
         let hidden = |client| {
-            scene(
+            seen_by(
+                client,
                 &tabs_of(client, &at, 2),
                 vec![
                     (0, vec![sidebar(5, true), placeholder(1, true)]),
@@ -1072,7 +1178,8 @@ mod tests {
         // looks at tab 1.
         let at = [(1, 0), (2, 1)];
         let docked = |client| {
-            scene(
+            seen_by(
+                client,
                 &tabs_of(client, &at, 2),
                 vec![
                     (0, vec![sidebar(5, false), placeholder(1, true), terminal(2)]),
@@ -1082,7 +1189,8 @@ mod tests {
             )
         };
         let closed = |client| {
-            scene(
+            seen_by(
+                client,
                 &tabs_of(client, &at, 2),
                 vec![
                     (0, vec![placeholder(1, true), terminal(2)]),
@@ -1092,8 +1200,6 @@ mod tests {
             )
         };
         let (mut first, mut second) = (going(1), going(2));
-        first.placed = Some(10);
-        second.placed = Some(11);
         run(&mut first, &docked(1));
         run(&mut second, &docked(2));
         assert_eq!(
@@ -1133,7 +1239,7 @@ mod tests {
         );
         assert_eq!(
             left,
-            vec![Act::Close { pane: PaneId::Terminal(3) }, Act::Open { into: 7, tab: 12 }],
+            vec![Act::Close { pane: PaneId::Terminal(3) }, Act::Open { into: 7, tab: TabId(12) }],
         );
         assert_eq!(dock.want, Want::Shown);
     }
@@ -1151,12 +1257,12 @@ mod tests {
                 (2, vec![placeholder(6, false), PaneInfo { is_floating: true, ..terminal(7) }]),
             ]
         };
-        let first = scene(&tabs_of(1, &at, 3), panes(), None);
+        let first = seen_by(1, &tabs_of(1, &at, 3), panes(), None);
         assert_eq!(
             going(1).plan(&first),
-            vec![Act::CloseTab { tab: 10 }, Act::CloseTab { tab: 12 }],
+            vec![Act::CloseTab { tab: TabId(10) }, Act::CloseTab { tab: TabId(12) }],
         );
-        assert!(going(2).plan(&scene(&tabs_of(2, &at, 3), panes(), None)).is_empty());
+        assert!(going(2).plan(&seen_by(2, &tabs_of(2, &at, 3), panes(), None)).is_empty());
     }
 
     #[test]
@@ -1165,7 +1271,7 @@ mod tests {
         let scene = scene(&tabs, vec![(0, vec![placeholder(1, false)])], None);
         let mut dock = dock();
         dock.sidebar = Some(5);
-        dock.asked.insert(Act::Open { into: 1, tab: 10 }, 0);
+        dock.asked.insert(Act::Open { into: 1, tab: TabId(10) }, 0);
         dock.observe(&scene);
         assert_eq!(dock.sidebar, Some(5));
     }
@@ -1175,7 +1281,8 @@ mod tests {
         let at = [(1, 0), (2, 1)];
         let mut second = going(2);
         second.want = Want::Back { focus: true };
-        let back = scene(
+        let back = seen_by(
+            2,
             &tabs_of(2, &at, 2),
             vec![
                 (0, vec![sidebar(5, false), placeholder(1, true)]),
@@ -1202,20 +1309,44 @@ mod tests {
 
     #[test]
     fn a_placeholder_back_elsewhere_in_the_tab_on_screen_is_put_back() {
-        // Another client keeps the sidebar in tab 0; this one looks at tab 1.
-        let tabs = [tab(0, false), tab(1, true)];
-        let scene = scene(
-            &tabs,
+        // Client 1 keeps the sidebar in tab 0; client 2 looks at tab 1.
+        let scene = seen_by(
+            2,
+            &tabs_of(2, &[(1, 0), (2, 1)], 2),
             vec![
                 (0, vec![sidebar(5, false), placeholder(1, true), terminal(2)]),
                 (1, vec![placeholder(3, false), terminal(4)]),
             ],
             None,
         );
-        let mut dock = dock();
-        dock.placed = Some(11);
-        dock.unsettled.insert(11);
-        assert_eq!(dock.plan(&scene), vec![Act::Restore { placeholder: 3, tab: 11 }]);
+        let mut dock = going(2);
+        dock.unsettled.insert(TabId(11));
+        let restore = Act::Restore { pane: PaneId::Terminal(3), tab: TabId(11) };
+        assert_eq!(dock.plan(&scene), vec![restore]);
+    }
+
+    #[test]
+    fn of_the_clients_on_a_tab_only_the_first_to_attach_puts_it_back() {
+        let at = [(1, 0), (2, 1), (3, 1)];
+        let seen = |client| {
+            seen_by(
+                client,
+                &tabs_of(client, &at, 2),
+                vec![
+                    (0, vec![placeholder(1, false), terminal(2)]),
+                    (1, vec![sidebar(5, false), placeholder(3, true), terminal(4)]),
+                ],
+                None,
+            )
+        };
+        let unsettled = |client| {
+            let mut dock = going(client);
+            dock.unsettled.insert(TabId(11));
+            dock.plan(&seen(client))
+        };
+        let restore = Act::Restore { pane: PaneId::Plugin(5), tab: TabId(11) };
+        assert_eq!(unsettled(2), vec![restore]);
+        assert!(unsettled(3).is_empty());
     }
 
     #[test]
@@ -1238,14 +1369,14 @@ mod tests {
                 (2, vec![placeholder(6, hidden), terminal(7)]),
             ]
         };
+        let seen = |tabs: &[TabInfo], hidden| seen_by(2, tabs, panes(hidden), None);
         let mut dock = going(2);
-        dock.placed = Some(11);
-        let shown = scene(&tabs(1, [false, false, true]), panes(false), None);
+        let shown = seen(&tabs(1, [false, false, true]), false);
         run(&mut dock, &shown);
         dock.want = Want::Hidden;
         run(&mut dock, &shown);
         // Hidden, each tab holds one pane, and zellij names no layout for it.
-        let hidden = scene(&tabs_of(2, &[(1, 0), (2, 1)], 3), panes(true), None);
+        let hidden = seen(&tabs_of(2, &[(1, 0), (2, 1)], 3), true);
         run(&mut dock, &hidden);
         dock.want = Want::Back { focus: false };
         run(&mut dock, &hidden);
@@ -1253,10 +1384,12 @@ mod tests {
         // panes, zellij reports their layout, and would apply theirs.
         let mut floating = tabs(1, [true, false, true]);
         floating[1].are_floating_panes_visible = true;
-        assert!(run(&mut dock, &scene(&floating, panes(false), None)).is_empty());
-        let back = |on| scene(&tabs(on, [true; 3]), panes(false), None);
-        assert_eq!(run(&mut dock, &back(1)), vec![Act::Restore { placeholder: 3, tab: 11 }]);
-        dock.placed = Some(12);
+        assert!(run(&mut dock, &seen(&floating, false)).is_empty());
+        let back = |on| seen(&tabs(on, [true; 3]), false);
+        assert_eq!(
+            run(&mut dock, &back(1)),
+            vec![Act::Restore { pane: PaneId::Terminal(3), tab: TabId(11) }],
+        );
         assert!(run(&mut dock, &back(2)).is_empty());
     }
 
@@ -1270,7 +1403,6 @@ mod tests {
             ..tab(0, true)
         };
         let mut dock = going(1);
-        dock.placed = Some(10);
         let docked = vec![(0, vec![sidebar(5, false), placeholder(1, true), terminal(2)])];
         run(&mut dock, &scene(&[layout(false)], docked, None));
         let closed = vec![(0, vec![placeholder(1, true), terminal(2)])];
@@ -1280,7 +1412,10 @@ mod tests {
         let back = vec![(0, vec![placeholder(1, false), terminal(2)])];
         assert_eq!(
             run(&mut dock, &scene(&[layout(true)], back, None)),
-            vec![Act::Restore { placeholder: 1, tab: 10 }, Act::Open { into: 1, tab: 10 }],
+            vec![
+                Act::Restore { pane: PaneId::Terminal(1), tab: TabId(10) },
+                Act::Open { into: 1, tab: TabId(10) },
+            ],
         );
     }
 
@@ -1329,7 +1464,7 @@ mod tests {
                 assert!(dock.unsettled.is_empty());
             }
             dock.observe(&back(ELSEWHERE));
-            assert_eq!(dock.unsettled, BTreeSet::from([10]));
+            assert_eq!(dock.unsettled, BTreeSet::from([TabId(10)]));
             dock.observe(&back(COLUMN));
             assert!(dock.unsettled.is_empty());
         }
