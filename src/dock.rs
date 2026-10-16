@@ -33,6 +33,29 @@ const PATIENCE: u32 = 10;
 /// Where a pane stands: x, y, columns, rows.
 type Spot = (usize, usize, usize, usize);
 
+/// What a key binding asks through the `sidebar` pipe. Every plugin in the
+/// session hears it, and the dock and the sidebar each answer their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// Into the sidebar, or back out of it. A hidden one comes back first.
+    Focus,
+    /// To the next agent that wants you.
+    Next,
+    /// Hide the sidebar, or bring it back.
+    Toggle,
+}
+
+impl Ask {
+    pub fn parse(payload: &str) -> Option<Self> {
+        match payload.trim() {
+            "focus" => Some(Ask::Focus),
+            "next" => Some(Ask::Next),
+            "toggle" => Some(Ask::Toggle),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Dock {
     plugin_id: u32,
@@ -339,12 +362,12 @@ impl Dock {
     /// `toggle` hides the sidebar or brings it back; `focus` brings a hidden
     /// one back and moves into it. The sidebar itself answers a `focus` while
     /// it shows.
-    pub fn pipe(&mut self, payload: Option<&str>) {
-        let want = match (payload, self.want) {
-            (Some("toggle"), Want::Hidden) => Want::Back { focus: false },
-            (Some("toggle"), _) => Want::Hidden,
-            (Some("focus"), Want::Hidden) => Want::Back { focus: true },
-            _ => return,
+    pub fn pipe(&mut self, ask: Ask) {
+        let want = match (ask, self.want) {
+            (Ask::Toggle, Want::Hidden) => Want::Back { focus: false },
+            (Ask::Toggle, _) => Want::Hidden,
+            (Ask::Focus, Want::Hidden) => Want::Back { focus: true },
+            (Ask::Focus | Ask::Next, _) => return,
         };
         // zellij keeps a client's dock running after the client leaves, and
         // hands it every key still. It has seen none of the panes since, so it

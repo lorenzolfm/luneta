@@ -962,6 +962,13 @@ fn keys_text(width: usize, keys: &[Key]) -> Painted {
     text
 }
 
+/// One line saying what is wrong, for a pane that has nothing else to show.
+pub fn render_notice(text: &str, rows: usize, cols: usize) {
+    if rows > 0 {
+        print_at(&note_within(cols.saturating_sub(2), &Note::error(text)), 0, 0, cols);
+    }
+}
+
 /// How a sidebar `rows` tall is cut up: the tree from the top, the notes under
 /// it, and a line of keys at the bottom while the sidebar has the focus.
 struct Shelf {

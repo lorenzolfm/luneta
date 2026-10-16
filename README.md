@@ -219,6 +219,9 @@ load_plugins {
 }
 ```
 
+A `mode` luneta does not know does nothing but say so, in its pane if it has
+one and in zellij's log.
+
 Every tab keeps a column for the sidebar to dock into: a placeholder, a pane that
 runs `tail -f /dev/null`. Give it to every tab in a layout:
 

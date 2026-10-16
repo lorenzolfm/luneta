@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use agents::{AgentSet, Live, Seat};
 use dirs::{DirSet, LIST};
+use dock::Ask;
 use elapsed::Age;
 use panes::Peeks;
 use places::Places;
@@ -26,10 +27,7 @@ use zellij_tile::prelude::*;
 
 const SCREEN_PIPE: &str = "screen";
 
-/// The pipe a key binding reaches the sidebar through. Its payload is `focus`,
-/// which moves the focus into the sidebar or back out of it, `next`, which
-/// goes to the next agent that wants you, or `toggle`, which hides the sidebar
-/// or shows it again.
+/// The pipe a key binding reaches the sidebar through, its payload an `Ask`.
 const SIDEBAR_PIPE: &str = "sidebar";
 
 /// `mode "dock"`, in `load_plugins`, makes the plugin the dock: one to a
@@ -40,6 +38,24 @@ const MODE: &str = "mode";
 const SIDEBAR: &str = "sidebar";
 
 const DOCK: &str = "dock";
+
+/// What a load of the plugin is, by its `mode`.
+#[derive(Default)]
+enum Role {
+    /// No `mode`: the picker, floating over the tab.
+    #[default]
+    Picker,
+    Sidebar(Tree),
+    Dock(dock::Dock),
+    /// A `mode` luneta does not know. It says so, and does nothing else.
+    Unknown(String),
+}
+
+/// What a load with a `mode` luneta does not know says, in its pane if it has
+/// one, and in zellij's log.
+fn unknown_mode(mode: &str) -> String {
+    format!("luneta has no mode {mode:?}: \"{SIDEBAR}\", \"{DOCK}\", or none for the picker")
+}
 
 /// Every mode asks for the same. zellij keeps one grant for a plugin's file,
 /// and each load puts what it asks for in the grant's place, whether zellij
@@ -134,7 +150,7 @@ struct State {
     peeks: Peeks,
     preview_at: Option<(Target, u64)>,
     agents_taken_at: u64,
-    sidebar: Option<Tree>,
+    role: Role,
     plugin_id: u32,
     tabs: Vec<TabInfo>,
     branches: Vec<Branch>,
@@ -142,7 +158,6 @@ struct State {
     away: bool,
     places_at: u64,
     size: (usize, usize),
-    dock: Option<dock::Dock>,
 }
 
 register_plugin!(State);
@@ -152,25 +167,36 @@ impl ZellijPlugin for State {
         let ids = get_plugin_ids();
         self.plugin_id = ids.plugin_id;
         request_permission(&PERMISSIONS);
-        if configuration.get(MODE).map(|value| value.trim()) == Some(DOCK) {
-            let mut sidebar = configuration;
-            sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
-            self.dock = Some(dock::Dock::new(self.plugin_id, ids.client_id, sidebar));
-            subscribe(&[
-                EventType::PermissionRequestResult,
-                EventType::TabUpdate,
-                EventType::PaneUpdate,
-            ]);
-            return;
+        self.role = match configuration.get(MODE).map(|value| value.trim()) {
+            None => Role::Picker,
+            Some(SIDEBAR) => Role::Sidebar(Tree::default()),
+            Some(DOCK) => {
+                let mut sidebar = configuration.clone();
+                sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
+                Role::Dock(dock::Dock::new(self.plugin_id, ids.client_id, sidebar))
+            },
+            Some(mode) => Role::Unknown(mode.to_owned()),
+        };
+        match &self.role {
+            Role::Picker | Role::Sidebar(_) => {},
+            Role::Dock(_) => {
+                subscribe(&[
+                    EventType::PermissionRequestResult,
+                    EventType::TabUpdate,
+                    EventType::PaneUpdate,
+                ]);
+                return;
+            },
+            Role::Unknown(mode) => {
+                eprintln!("{}", unknown_mode(mode));
+                return;
+            },
         }
         self.agents_command = configuration
             .get(AGENTS_COMMAND)
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
-        if configuration.get(MODE).map(|value| value.trim()) == Some(SIDEBAR) {
-            self.sidebar = Some(Tree::default());
-        }
         subscribe(&[
             EventType::PermissionRequestResult,
             EventType::Timer,
@@ -180,28 +206,32 @@ impl ZellijPlugin for State {
             EventType::PaneUpdate,
             EventType::TabUpdate,
         ]);
-        if self.sidebar.is_some() {
+        if self.is_sidebar() {
             subscribe(&[EventType::Mouse]);
         }
         set_timeout(0.0);
     }
 
     fn update(&mut self, event: Event) -> bool {
-        if let Some(dock) = self.dock.as_mut() {
-            match event {
-                Event::PermissionRequestResult(PermissionStatus::Granted) => dock.grant(),
-                Event::TabUpdate(tabs) => dock.tabs(tabs),
-                Event::PaneUpdate(panes) => dock.panes(panes),
-                _ => {},
-            }
-            return false;
+        match self.role {
+            Role::Picker | Role::Sidebar(_) => {},
+            Role::Dock(ref mut dock) => {
+                match event {
+                    Event::PermissionRequestResult(PermissionStatus::Granted) => dock.grant(),
+                    Event::TabUpdate(tabs) => dock.tabs(tabs),
+                    Event::PaneUpdate(panes) => dock.panes(panes),
+                    _ => {},
+                }
+                return false;
+            },
+            Role::Unknown(_) => return false,
         }
         match event {
             Event::PermissionRequestResult(status) => {
                 if matches!(status, PermissionStatus::Granted) {
-                    let title = if self.sidebar.is_some() { dock::SIDEBAR_TITLE } else { "luneta" };
+                    let title = if self.is_sidebar() { dock::SIDEBAR_TITLE } else { "luneta" };
                     rename_plugin_pane(self.plugin_id, title);
-                    if self.sidebar.is_none() {
+                    if !self.is_sidebar() {
                         resize_self(self.plugin_id);
                         self.ask_zoxide();
                     }
@@ -222,7 +252,7 @@ impl ZellijPlugin for State {
                 let asked = self.follow_preview();
                 polled || self.spinning() || asked
             },
-            Event::Key(key) if self.sidebar.is_some() => self.handle_sidebar_key(&key),
+            Event::Key(key) if self.is_sidebar() => self.handle_sidebar_key(&key),
             Event::Key(key) => self.handle_key(&key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
@@ -276,7 +306,7 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
                 self.settle()
             },
-            Event::Visible(true) if self.sidebar.is_some() => {
+            Event::Visible(true) if self.is_sidebar() => {
                 self.wake();
                 true
             },
@@ -294,15 +324,26 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        if let Some(dock) = self.dock.as_mut() {
-            if message.name == SIDEBAR_PIPE {
-                dock.pipe(message.payload.as_deref().map(str::trim));
-            }
-            return false;
-        }
-        if self.sidebar.is_some() {
-            self.sidebar_pipe(&message);
-            return false;
+        let ask = message
+            .payload
+            .as_deref()
+            .filter(|_| message.name == SIDEBAR_PIPE)
+            .and_then(Ask::parse);
+        match self.role {
+            Role::Picker => {},
+            Role::Sidebar(_) => {
+                if let Some(ask) = ask {
+                    self.sidebar_pipe(ask);
+                }
+                return false;
+            },
+            Role::Dock(ref mut dock) => {
+                if let Some(ask) = ask {
+                    dock.pipe(ask);
+                }
+                return false;
+            },
+            Role::Unknown(_) => return false,
         }
         if message.name != SCREEN_PIPE {
             return false;
@@ -315,14 +356,19 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
-        if self.dock.is_some() {
-            return;
-        }
         self.size = (rows, cols);
-        if let Some(tree) = &self.sidebar {
-            let focused = self.sidebar_focused();
-            render::render_sidebar(tree, &self.agents, focused, rows, cols, self.frame);
-            return;
+        match &self.role {
+            Role::Picker => {},
+            Role::Sidebar(tree) => {
+                let focused = self.sidebar_focused();
+                render::render_sidebar(tree, &self.agents, focused, rows, cols, self.frame);
+                return;
+            },
+            Role::Dock(_) => return,
+            Role::Unknown(mode) => {
+                render::render_notice(&unknown_mode(mode), rows, cols);
+                return;
+            },
         }
         match &self.mode {
             Mode::Search => match self.screen {
@@ -363,7 +409,7 @@ impl State {
         let Ok(snapshot) = get_session_list() else {
             return;
         };
-        if self.sidebar.is_some() {
+        if self.is_sidebar() {
             // zellij keeps a client's plugins running after the client leaves,
             // timers and all, and knows no focused pane for it. A sidebar its
             // client left asks nothing until the client comes back.
@@ -418,7 +464,7 @@ impl State {
     }
 
     fn spinning(&self) -> bool {
-        let shown = (self.sidebar.is_some() && !self.away)
+        let shown = (self.is_sidebar() && !self.away)
             || (matches!(self.mode, Mode::Search) && self.screen == Screen::Agents);
         shown && self.agents.any_busy()
     }
@@ -435,7 +481,7 @@ impl State {
     }
 
     fn rebuild_agents(&mut self, policy: Selection) {
-        let origin = if self.sidebar.is_some() { None } else { self.origin_pane() };
+        let origin = if self.is_sidebar() { None } else { self.origin_pane() };
         let since = self.agents_since();
         let live = Live::new(self.matches.current_session.as_deref(), &self.places);
         self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
@@ -477,7 +523,7 @@ impl State {
     }
 
     fn follow_preview(&mut self) -> bool {
-        if self.sidebar.is_some() || !matches!(self.mode, Mode::Search) {
+        if self.is_sidebar() || !matches!(self.mode, Mode::Search) {
             return false;
         }
         let Some(target) = self.preview_target() else {
@@ -759,6 +805,10 @@ impl State {
 }
 
 impl State {
+    fn is_sidebar(&self) -> bool {
+        matches!(self.role, Role::Sidebar(_))
+    }
+
     /// zellij sends the panes and the tabs when they change, and a sidebar
     /// that was still asking for its permissions at the time never hears them.
     /// The session list carries the same two, a little older, to start from.
@@ -803,7 +853,7 @@ impl State {
     /// After the panes or the tabs change. Says whether to draw.
     fn settle(&mut self) -> bool {
         self.rebuild_agents(Selection::Hold);
-        self.sidebar.is_some()
+        self.is_sidebar()
     }
 
     fn wake(&mut self) {
@@ -813,7 +863,7 @@ impl State {
     }
 
     fn rebuild_tree(&mut self) {
-        if self.sidebar.is_none() {
+        if !self.is_sidebar() {
             return;
         }
         if let Some(pane) = self.origin_pane() {
@@ -826,7 +876,7 @@ impl State {
             }
         }
         let follow = !self.sidebar_focused();
-        if let Some(tree) = self.sidebar.as_mut() {
+        if let Role::Sidebar(tree) = &mut self.role {
             tree.rebuild(&self.branches, current.as_deref(), &self.agents, self.here, follow);
         }
     }
@@ -858,7 +908,7 @@ impl State {
     }
 
     fn handle_mouse(&mut self, mouse: Mouse) -> bool {
-        if self.sidebar.is_none() {
+        if !self.is_sidebar() {
             return false;
         }
         match mouse {
@@ -877,7 +927,7 @@ impl State {
     fn click(&mut self, line: usize) -> bool {
         let (rows, cols) = self.size;
         let focused = self.sidebar_focused();
-        let Some(tree) = self.sidebar.as_mut() else {
+        let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         let Some(index) = render::sidebar_row_at(tree, &self.agents, focused, rows, cols, line)
@@ -896,7 +946,7 @@ impl State {
     }
 
     fn move_tree(&mut self, delta: isize) -> bool {
-        let Some(tree) = self.sidebar.as_mut() else {
+        let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         tree.rows.move_selection(delta);
@@ -905,7 +955,7 @@ impl State {
 
     /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     fn fold(&mut self, folded: Option<bool>) -> bool {
-        let Some(tree) = self.sidebar.as_mut() else {
+        let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         let changed = match folded {
@@ -919,8 +969,10 @@ impl State {
     }
 
     fn go_to_selected(&mut self) {
-        let Some(place) = self.sidebar.as_ref().and_then(|t| t.rows.selected_row()).map(Node::place)
-        else {
+        let Role::Sidebar(tree) = &self.role else {
+            return;
+        };
+        let Some(place) = tree.rows.selected_row().map(Node::place) else {
             return;
         };
         let current = self.matches.current_session.as_deref();
@@ -964,16 +1016,13 @@ impl State {
     /// A key binding broadcasts to every plugin in the session: the sidebar
     /// and the dock both hear it. The dock hides and shows the sidebar, and
     /// answers a `focus` while it is hidden, bringing it back first.
-    fn sidebar_pipe(&mut self, message: &PipeMessage) {
-        if message.name != SIDEBAR_PIPE {
-            return;
-        }
-        match message.payload.as_deref().map(str::trim) {
-            Some("focus") if self.hidden() => {},
-            Some("focus") if self.has_focus() => self.go_back(),
-            Some("focus") => focus_plugin_pane(self.plugin_id, false, false),
-            Some("next") => self.go_to_next(),
-            _ => {},
+    fn sidebar_pipe(&self, ask: Ask) {
+        match ask {
+            Ask::Focus if self.hidden() => {},
+            Ask::Focus if self.has_focus() => self.go_back(),
+            Ask::Focus => focus_plugin_pane(self.plugin_id, false, false),
+            Ask::Next => self.go_to_next(),
+            Ask::Toggle => {},
         }
     }
 
