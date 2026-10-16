@@ -26,6 +26,12 @@ impl<T> Cursor<T> {
         };
     }
 
+    pub fn select(&mut self, index: usize) {
+        if index < self.rows.len() {
+            self.selected = Some(index);
+        }
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
         let Some(current) = self.selected else { return };
         let last = self.rows.len().saturating_sub(1);
@@ -95,6 +101,18 @@ mod tests {
         assert_eq!(cursor.selected(), Some(2));
         cursor.move_selection(-99);
         assert_eq!(cursor.selected(), Some(0));
+    }
+
+    #[test]
+    fn a_row_that_is_not_there_cannot_be_selected() {
+        let mut cursor = Cursor::seeded(vec!["a", "b"], 0);
+        cursor.select(1);
+        assert_eq!(cursor.selected(), Some(1));
+        cursor.select(2);
+        assert_eq!(cursor.selected(), Some(1));
+        let mut empty: Cursor<&str> = Cursor::default();
+        empty.select(0);
+        assert_eq!(empty.selected(), None);
     }
 
     #[test]

@@ -31,6 +31,7 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Create, hop between and delete sessions
 * Jump to the agent that is waiting for you
 * Create a session in a directory you work in
+* Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -79,6 +80,37 @@ Agent support, today:
 Lists the directories you work in, in frecency order, and lets you create a new session right where you want to be.
 
 ---
+
+### Sidebar
+
+The same plugin, pinned to the left of every tab instead of floating over it:
+every live session, the panes in it, and what the agent in each pane is doing.
+
+```text
+▾ bipa                     🙋1
+  ☕ handoff-eng-11259-pr… 13h
+  🙋 dda-bank-slip-paid-fe… 3m
+  ⠋  Handoff pix outflow … 12s
+▸ floresta                   ⠋
+▾ unnamed
+› ⠋  orca-copy             12s
+     ~/P/m/unnamed
+```
+
+Sessions keep their place, oldest first, so a row never moves under your eye
+or your mouse. Which agent wants you is the job of the glyph, the count on its
+session's row, and the `next` key — not of the order.
+
+An agent's row is named for what it is doing: the name you gave it, or else
+the title Claude Code gives its pane. A pane with no agent in it is dimmed, and
+`›` marks the pane you are in.
+
+Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
+and sessions alike. A folded session keeps its count and shows the glyph of
+the agent that wants you most.
+
+One key hides the sidebar in every tab of the session, the panes beside it
+taking its columns, and brings it back where it stood.
 
 ## Getting started
 
@@ -170,6 +202,171 @@ keybinds {
 }
 ```
 
+### Pin the sidebar
+
+Give the plugin `mode "sidebar"` in a layout, beside the pane you work in:
+
+```kdl
+// ~/.config/zellij/layouts/sidebar.kdl
+layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane size=32 borderless=true {
+            plugin location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+                mode "sidebar"
+            }
+        }
+        pane focus=true
+    }
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
+```
+
+zellij opens every new tab of a session from the layout the session was made
+with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every
+new session a sidebar. Leave the `pane` in: a layout of nothing but a
+`default_tab_template` opens tabs that hold the sidebar and no terminal.
+
+A session that is already running keeps its own layout.
+`zellij action new-tab --layout ~/.config/zellij/layouts/sidebar.kdl` opens one
+tab with a sidebar in it, and the tabs after it follow the session's layout
+again.
+
+A layout of your own leaves zellij's swap layouts behind: the ones `Alt [` and
+`Alt ]` step through, and that arrange a tab as you open panes in it. Give the
+layout its own, with the sidebar in a column of its own, in a file beside it.
+zellij's, with every pane count one higher for the sidebar:
+
+```kdl
+// ~/.config/zellij/layouts/sidebar.swap.kdl
+tab_template name="ui" {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane size=32 borderless=true {
+            plugin location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+                mode "sidebar"
+            }
+        }
+        pane {
+            children
+        }
+    }
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
+
+swap_tiled_layout name="vertical" {
+    ui max_panes=6 {
+        pane split_direction="vertical" {
+            pane
+            pane { children; }
+        }
+    }
+    ui max_panes=9 {
+        pane split_direction="vertical" {
+            pane { children; }
+            pane { pane; pane; pane; pane; }
+        }
+    }
+    ui max_panes=13 {
+        pane split_direction="vertical" {
+            pane { children; }
+            pane { pane; pane; pane; pane; }
+            pane { pane; pane; pane; pane; }
+        }
+    }
+}
+
+swap_tiled_layout name="horizontal" {
+    ui max_panes=5 {
+        pane
+        pane
+    }
+    ui max_panes=9 {
+        pane {
+            pane split_direction="vertical" { children; }
+            pane split_direction="vertical" { pane; pane; pane; pane; }
+        }
+    }
+    ui max_panes=13 {
+        pane {
+            pane split_direction="vertical" { children; }
+            pane split_direction="vertical" { pane; pane; pane; pane; }
+            pane split_direction="vertical" { pane; pane; pane; pane; }
+        }
+    }
+}
+
+swap_tiled_layout name="stacked" {
+    ui min_panes=5 {
+        pane stacked=true { children; }
+    }
+}
+
+swap_tiled_layout name="half-stacked" {
+    ui min_panes=6 {
+        pane split_direction="vertical" {
+            pane
+            pane stacked=true { children; }
+        }
+    }
+}
+```
+
+The floating ones, which do not touch the sidebar, are the
+`swap_floating_layout` blocks of `zellij setup --dump-swap-layout default`.
+The sidebar needs the tiled ones to come back to its column after hiding, in a
+tab of more than one terminal.
+
+Three key bindings drive it without moving your hands to it. A `MessagePlugin`
+with no location goes to every plugin in the session. Every sidebar hides and
+shows; the rest only the sidebar on screen acts on:
+
+```kdl
+keybinds {
+    normal {
+        // Into the sidebar, and back out to the pane you came from.
+        bind "Alt s" {
+            MessagePlugin {
+                name "sidebar"
+                payload "focus"
+            }
+        }
+        // The next agent that wants you: the waiting first, then the idle,
+        // the most recent first.
+        bind "Alt a" {
+            MessagePlugin {
+                name "sidebar"
+                payload "next"
+            }
+        }
+        // Hide the sidebar in every tab, or bring it back.
+        bind "Alt b" {
+            MessagePlugin {
+                name "sidebar"
+                payload "toggle"
+            }
+        }
+    }
+}
+```
+
+`Alt s` on hidden sidebars brings them back and moves into the one on screen.
+A tab opened while they are hidden opens with its sidebar hidden too.
+
+`Alt h`, which zellij binds to move the focus left, reaches the sidebar from
+the leftmost pane as well.
+
+Only the sidebar in the tab on screen does any work, hidden or not. The others
+wake once a second to keep the clock, and ask `claude-ps` nothing.
+
 ---
 
 ## Usage
@@ -186,6 +383,17 @@ Press your key, type, press `Enter`.
 | `Del` | kill a live session, or delete a dead one |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
+
+In the sidebar, once it has the focus:
+
+| key | does |
+|---|---|
+| `↓` `↑` / `j` `k` | move the highlight |
+| `Enter` | go to the highlighted pane, or switch to the highlighted session |
+| `←` `→` / `h` `l` | fold / unfold the session |
+| `Space` | fold or unfold |
+| `n` | go to the next agent that wants you |
+| `Esc` | back to the pane you came from |
 
 ---
 
