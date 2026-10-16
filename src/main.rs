@@ -41,18 +41,11 @@ const SIDEBAR: &str = "sidebar";
 
 const DOCK: &str = "dock";
 
-/// What the picker and the sidebar ask for.
-const PERMISSIONS: [PermissionType; 3] = [
-    PermissionType::ReadApplicationState,
-    PermissionType::ChangeApplicationState,
-    PermissionType::RunCommands,
-];
-
-/// The dock opens the sidebar, and asks for that as well. zellij keeps one
-/// grant for a plugin's file, and puts a new one in its place each time it
-/// prompts, but it prompts only for what the grant lacks: the dock asks for
-/// everything the other modes do, so theirs never takes the dock's away.
-const DOCK_PERMISSIONS: [PermissionType; 4] = [
+/// Every mode asks for the same. zellij keeps one grant for a plugin's file,
+/// and each load puts what it asks for in the grant's place, whether zellij
+/// prompts or not: a mode that asked for less would take the rest from the
+/// others. `OpenTerminalsOrPlugins` is the dock's, to open the sidebar.
+const PERMISSIONS: [PermissionType; 4] = [
     PermissionType::ReadApplicationState,
     PermissionType::ChangeApplicationState,
     PermissionType::RunCommands,
@@ -158,8 +151,8 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         let ids = get_plugin_ids();
         self.plugin_id = ids.plugin_id;
+        request_permission(&PERMISSIONS);
         if configuration.get(MODE).map(|value| value.trim()) == Some(DOCK) {
-            request_permission(&DOCK_PERMISSIONS);
             let mut sidebar = configuration;
             sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
             self.dock = Some(dock::Dock::new(self.plugin_id, ids.client_id, sidebar));
@@ -170,7 +163,6 @@ impl ZellijPlugin for State {
             ]);
             return;
         }
-        request_permission(&PERMISSIONS);
         self.agents_command = configuration
             .get(AGENTS_COMMAND)
             .map(|value| value.trim())
