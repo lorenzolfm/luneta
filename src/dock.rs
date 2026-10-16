@@ -25,9 +25,9 @@ use crate::tree::{is_placeholder, PLACEHOLDER};
 /// The title the sidebar gives its pane, by which the dock knows it.
 pub const SIDEBAR_TITLE: &str = "luneta sidebar";
 
-/// How many updates zellij may take to show what the dock asked for before
-/// the dock asks again.
-const PATIENCE: u32 = 20;
+/// How many reports of the panes and tabs zellij may take to show what the
+/// dock asked for before the dock asks again.
+const PATIENCE: u32 = 10;
 
 /// Where a pane stands: x, y, columns, rows.
 type Spot = (usize, usize, usize, usize);
@@ -41,6 +41,11 @@ pub struct Dock {
     sidebar_configuration: BTreeMap<String, String>,
     granted: bool,
     panes: Option<PaneManifest>,
+    /// Panes zellij has told of whose tabs have not come yet. zellij reports
+    /// the panes, then the tabs, after every change; read against the tabs
+    /// from before, the panes of a closed tab show its sidebar gone from a tab
+    /// still there, as though closed by hand.
+    early: Option<PaneManifest>,
     tabs: Vec<TabInfo>,
     want: Want,
     /// Whether the dock missed how the panes came to be: one that just
@@ -268,12 +273,15 @@ impl Dock {
 
     pub fn tabs(&mut self, tabs: Vec<TabInfo>) {
         self.tabs = tabs;
+        if let Some(panes) = self.early.take() {
+            self.panes = Some(panes);
+        }
         self.step();
     }
 
+    /// The dock reads the panes with the tabs that follow them.
     pub fn panes(&mut self, panes: PaneManifest) {
-        self.panes = Some(panes);
-        self.step();
+        self.early = Some(panes);
     }
 
     /// `toggle` hides the sidebar or brings it back; `focus` brings a hidden
@@ -302,10 +310,7 @@ impl Dock {
         if !self.granted {
             return;
         }
-        let (Some(manifest), false) = (self.panes.as_ref(), self.tabs.is_empty()) else {
-            return;
-        };
-        let Some(scene) = Scene::new(manifest, &self.tabs, self.plugin_id, self.sidebar) else {
+        let Some(scene) = self.scene() else {
             return;
         };
         for act in self.next(&scene) {
@@ -313,6 +318,15 @@ impl Dock {
                 self.asked.insert(act, 0);
             }
         }
+    }
+
+    /// The panes as the dock reads them, once zellij has told it of both the
+    /// panes and the tabs.
+    fn scene(&self) -> Option<Scene> {
+        let (Some(manifest), false) = (self.panes.as_ref(), self.tabs.is_empty()) else {
+            return None;
+        };
+        Scene::new(manifest, &self.tabs, self.plugin_id, self.sidebar)
     }
 
     /// Takes in the panes, and says what to ask zellij for that the dock has
@@ -686,6 +700,22 @@ mod tests {
         acts
     }
 
+    /// zellij's report of a change, the panes and then the tabs, and what the
+    /// dock asks for reading the panes after each: a key can come between the
+    /// two. A dock in a test is never granted, so it asks zellij for nothing
+    /// itself.
+    fn report(dock: &mut Dock, tabs: &[TabInfo], panes: Vec<(usize, Vec<PaneInfo>)>) -> Vec<Act> {
+        let read = |dock: &mut Dock| match dock.scene() {
+            Some(scene) => run(dock, &scene),
+            None => Vec::new(),
+        };
+        dock.panes(PaneManifest { panes: panes.into_iter().collect() });
+        let mut acts = read(dock);
+        dock.tabs(tabs.to_vec());
+        acts.extend(read(dock));
+        acts
+    }
+
     #[test]
     fn a_session_without_a_sidebar_opens_one_into_the_tab_on_screen() {
         let tabs = [tab(0, true), tab(1, false)];
@@ -969,21 +999,30 @@ mod tests {
 
     #[test]
     fn a_sidebar_lost_with_its_tab_opens_again() {
-        let with = |tabs: &[TabInfo], panes| scene(tabs, panes, None);
         let mut dock = going(1);
-        run(
+        report(
             &mut dock,
-            &with(
-                &[tab(0, false), tab(1, true)],
-                vec![
-                    (0, vec![placeholder(1, false)]),
-                    (1, vec![sidebar(5, false), placeholder(3, true)]),
-                ],
-            ),
+            &[tab(0, false), tab(1, true), tab(2, false)],
+            vec![
+                (0, vec![placeholder(1, false), terminal(2)]),
+                (1, vec![sidebar(5, false), placeholder(3, true), terminal(4)]),
+                (2, vec![placeholder(7, false), terminal(8)]),
+            ],
         );
-        // Tab 1 closes, and with it the sidebar.
-        let left = with(&[tab(0, true)], vec![(0, vec![placeholder(1, false), terminal(2)])]);
-        assert_eq!(run(&mut dock, &left), vec![Act::Open { into: 1, tab: 10 }]);
+        // Tab 1 closes, and with it the sidebar. Its hidden placeholder goes
+        // to the first tab, and tab 2 takes its place.
+        let left = report(
+            &mut dock,
+            &[tab(0, false), TabInfo { tab_id: 12, ..tab(1, true) }],
+            vec![
+                (0, vec![placeholder(1, false), terminal(2), placeholder(3, true)]),
+                (1, vec![placeholder(7, false), terminal(8)]),
+            ],
+        );
+        assert_eq!(
+            left,
+            vec![Act::Close { pane: PaneId::Terminal(3) }, Act::Open { into: 7, tab: 12 }],
+        );
         assert_eq!(dock.want, Want::Shown);
     }
 
