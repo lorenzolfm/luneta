@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -11,17 +11,20 @@ use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions, Taken}
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
 /// Prints, of the directories that follow it, the linked git worktrees: those
-/// whose `.git` is a file pointing into a repository's `worktrees`. A
-/// repository's own checkout has a `.git` directory, and the directory that
-/// holds a bare repository may have a `.git` file pointing at the repository.
-/// Builtins only, so that a long list starts no process per directory.
+/// whose `.git` is a file pointing into a repository's `worktrees`. Each comes
+/// on a line of its own, and the `gitdir` its `.git` names on the line after.
+/// A repository's own checkout has a `.git` directory, the directory that
+/// holds a bare repository may have a `.git` file pointing at the repository,
+/// and a submodule's `.git` points into `modules`, under `worktrees` too when
+/// the submodule is in a worktree. Builtins only, so that a long list starts
+/// no process per directory.
 pub const WORKTREES: [&str; 4] = [
     "sh",
     "-c",
     r#"for d do
     line=
     [ -f "$d/.git" ] && IFS= read -r line < "$d/.git"
-    case $line in "gitdir: "*/worktrees/*) printf '%s\n' "$d" ;; esac
+    case ${line%/*} in "gitdir: "*/worktrees) printf '%s\n%s\n' "$d" "${line#gitdir: }" ;; esac
 done"#,
     "sh",
 ];
@@ -117,9 +120,19 @@ impl DirSet {
         };
         if exit_code == Some(0) {
             let listed = String::from_utf8_lossy(stdout);
-            let worktrees: HashSet<&str> = listed.lines().collect();
-            for dir in found.iter_mut().filter(|dir| worktrees.contains(dir.path.as_str())) {
-                if let Some(name) = worktree_name(&dir.path) {
+            let lines: Vec<&str> = listed.lines().collect();
+            let gitdirs: HashMap<&str, &str> = lines
+                .chunks_exact(2)
+                .filter_map(|pair| match pair {
+                    [path, gitdir] => Some((*path, *gitdir)),
+                    _ => None,
+                })
+                .collect();
+            for dir in &mut found {
+                let Some(gitdir) = gitdirs.get(dir.path.as_str()) else {
+                    continue;
+                };
+                if let Some(name) = worktree_name(&dir.path, gitdir) {
                     dir.name = name;
                 }
             }
@@ -323,15 +336,37 @@ fn derive_name(path: &str) -> Option<String> {
     validate_name(base).is_none().then(|| base.to_owned())
 }
 
-/// A worktree is named for the directory that holds it too, `luneta-main`,
-/// where `main` alone would name one of every repository. A bare
-/// repository's `.git` is left off.
-fn worktree_name(path: &str) -> Option<String> {
-    let mut parts = path.split('/').filter(|part| !part.is_empty()).rev();
-    let base = parts.next()?;
-    let parent = parts.next()?;
-    let parent = parent.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(parent);
-    let name = format!("{parent}-{base}");
+/// A worktree is named for its repository too, `luneta-main`, where `main`
+/// alone would name one of every repository, wherever the worktree lives. The
+/// repository is the directory whose `worktrees` the `gitdir` points into, less
+/// a bare repository's `.git`, or, when that directory is hidden, as a `.git`
+/// or a `.bare`, the directory that holds it. A worktree whose own name starts
+/// with its repository's, as `app-hotfix` beside `app`, keeps it.
+fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
+    let base = path.split('/').rfind(|part| !part.is_empty())?;
+    let common = gitdir.rsplit_once('/')?.0.strip_suffix("/worktrees")?;
+    // A relative `gitdir` is from the worktree, as git wrote it.
+    let from = if gitdir.starts_with('/') { "" } else { path };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in from.split('/').chain(common.split('/')) {
+        match part {
+            "" | "." => {},
+            ".." => {
+                parts.pop();
+            },
+            part => parts.push(part),
+        }
+    }
+    let mut repository = parts.pop()?;
+    if repository.starts_with('.') {
+        repository = parts.pop()?;
+    }
+    let repository =
+        repository.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(repository);
+    if base.strip_prefix(repository).is_some_and(|rest| !rest.starts_with(char::is_alphanumeric)) {
+        return None;
+    }
+    let name = format!("{repository}-{base}");
     validate_name(&name).is_none().then_some(name)
 }
 
@@ -484,11 +519,15 @@ mod tests {
         // Relative, as `git worktree add --relative-paths` writes it, and with
         // no newline at the end.
         write("repo/feat x/.git", "gitdir: ../.bare/worktrees/feat x".to_owned());
+        // As git writes it for a submodule in a worktree.
+        write("repo/main/lib/.git", "gitdir: ../../.bare/worktrees/main/modules/lib\n".to_owned());
         write("sub/.git", "gitdir: ../.git/modules/sub\n".to_owned());
         std::fs::create_dir_all(at("checkout/.git")).expect("a .git directory");
         std::fs::create_dir_all(at("plain")).expect("a directory");
 
-        let asked = ["repo", "repo/main", "repo/feat x", "sub", "checkout", "plain", "gone"];
+        let asked = [
+            "repo", "repo/main", "repo/feat x", "repo/main/lib", "sub", "checkout", "plain", "gone",
+        ];
         let paths: Vec<String> = asked.iter().map(|path| at(path).display().to_string()).collect();
         let output = std::process::Command::new(WORKTREES[0])
             .args(&WORKTREES[1..])
@@ -499,22 +538,34 @@ mod tests {
 
         assert!(output.status.success());
         let found = String::from_utf8(output.stdout).expect("utf-8");
-        assert_eq!(found.lines().collect::<Vec<_>>(), [&paths[1], &paths[2]]);
+        let main = format!("{}/worktrees/main", repository.display());
+        assert_eq!(
+            found.lines().collect::<Vec<_>>(),
+            [&paths[1], &main, &paths[2], "../.bare/worktrees/feat x"]
+        );
     }
 
     #[test]
-    fn a_worktree_is_named_for_the_directory_that_holds_it_once_the_check_says() {
-        let zoxide = b"30 /home/you/misc/luneta\n20 /home/you/misc/luneta/main\n\
-                       10 /home/you/Work/infra.git/master\n5 /main\n";
-        let checked = b"/home/you/misc/luneta/main\n/home/you/Work/infra.git/master\n/main\n";
+    fn a_worktree_is_named_for_its_repository_once_the_check_says() {
+        let zoxide = b"30 /home/you/luneta\n25 /home/you/luneta/main\n20 /home/you/luneta/feat\n\
+                       15 /home/you/infra.git/master\n10 /home/you/app/.claude/worktrees/fix\n\
+                       5 /home/you/app-hotfix\n1 /main\n";
+        // Each worktree, and on the line after it the `gitdir` its `.git` names.
+        let checked = b"/home/you/luneta/main\n/home/you/luneta/.bare/worktrees/main\n\
+                        /home/you/luneta/feat\n../.bare/worktrees/feat\n\
+                        /home/you/infra.git/master\n/home/you/infra.git/worktrees/master\n\
+                        /home/you/app/.claude/worktrees/fix\n/home/you/app/.git/worktrees/fix\n\
+                        /home/you/app-hotfix\n/home/you/app/.git/worktrees/app-hotfix\n\
+                        /main\n/.bare/worktrees/main\n";
         let names = |dirs: &mut DirSet| {
             dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
             dirs.rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>()
         };
-        for (exit_code, named) in [
-            (Some(0), ["luneta", "luneta-main", "infra-master", "main"]),
-            (Some(2), ["luneta", "main", "master", "main"]),
-        ] {
+        let worktrees = [
+            "luneta", "luneta-main", "luneta-feat", "infra-master", "app-fix", "app-hotfix", "main",
+        ];
+        let own = ["luneta", "main", "feat", "master", "fix", "app-hotfix", "main"];
+        for (exit_code, named) in [(Some(0), worktrees), (Some(2), own)] {
             let mut dirs = DirSet::default();
             dirs.ingest(Some(0), zoxide, b"");
             assert!(names(&mut dirs).is_empty());
