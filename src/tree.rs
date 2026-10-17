@@ -165,11 +165,13 @@ pub struct Tree {
     matcher: Option<Box<SkimMatcherV2>>,
 }
 
-/// The search box, while it is open: what is typed in it, and whether the
-/// cursor has still to go to the row that matches it best.
-struct Search {
-    term: String,
-    seek: bool,
+/// The search box, while it is open.
+enum Search {
+    /// Nothing typed: the tree under it is the tree without it.
+    Empty,
+    /// A term narrows the tree, and `seek` until the cursor has gone to the
+    /// row that matches it best.
+    Typed { term: String, seek: bool },
 }
 
 impl Tree {
@@ -195,13 +197,15 @@ impl Tree {
         let mut order: Vec<&Branch> = branches.iter().collect();
         order.sort_by(|a, b| b.age.cmp(&a.age).then_with(|| a.name.cmp(&b.name)));
 
-        let seek = self.search.as_mut().is_some_and(|search| std::mem::take(&mut search.seek));
-        let typed = self.search.as_ref().filter(|search| !search.term.is_empty());
-        let finder = typed.map(|search| Finder {
+        let (term, seek) = match &mut self.search {
+            Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
+            Some(Search::Empty) | None => (None, false),
+        };
+        let finder = term.map(|term| Finder {
             matcher: self
                 .matcher
                 .get_or_insert_with(|| Box::new(SkimMatcherV2::default().use_cache(true))),
-            term: &search.term,
+            term,
         });
 
         let mut rows = Vec::new();
@@ -286,20 +290,24 @@ impl Tree {
 
     /// What is typed in the search box, while it is open.
     pub fn search(&self) -> Option<&str> {
-        self.search.as_ref().map(|search| search.term.as_str())
+        self.search.as_ref().map(|search| match search {
+            Search::Empty => "",
+            Search::Typed { term, .. } => term.as_str(),
+        })
     }
 
     /// Whether a term is typed in the search box. A box with nothing in it
     /// narrows nothing, and the tree under it works as it does without one.
     pub fn narrowed(&self) -> bool {
-        self.search().is_some_and(|term| !term.is_empty())
+        matches!(self.search, Some(Search::Typed { .. }))
     }
 
     /// Opens the search box with `term` in it, or puts `term` in the open one.
     /// The next `rebuild` keeps the rows that match it, and puts the cursor on
-    /// the one that matches best.
+    /// the one that matches best. An empty `term` narrows nothing.
     pub fn search_for(&mut self, term: String) {
-        self.search = Some(Search { term, seek: true });
+        self.search =
+            Some(if term.is_empty() { Search::Empty } else { Search::Typed { term, seek: true } });
     }
 
     /// Closes the search box, and says whether it was open. The next `rebuild`
