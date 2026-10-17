@@ -11,20 +11,25 @@ use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions, Taken}
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
 /// Prints, of the directories that follow it, the linked git worktrees: those
-/// whose `.git` is a file pointing into a repository's `worktrees`. Each comes
-/// on a line of its own, and the `gitdir` its `.git` names on the line after.
-/// A repository's own checkout has a `.git` directory, the directory that
-/// holds a bare repository may have a `.git` file pointing at the repository,
-/// and a submodule's `.git` points into `modules`, under `worktrees` too when
-/// the submodule is in a worktree. Builtins only, so that a long list starts
-/// no process per directory.
+/// whose `.git` is a file naming a git directory that holds a `commondir`, as
+/// git writes for every worktree it adds. Each comes on a line of its own, and
+/// the `gitdir` its `.git` names on the line after. A repository's own checkout
+/// has a `.git` directory, the directory that holds a bare repository may have
+/// a `.git` file pointing at the repository, and a submodule's `.git` points
+/// into `modules`, wherever the submodule lives; none of those holds a
+/// `commondir`. The check is an `if`, so that a last directory that is no
+/// worktree leaves the script a success. Builtins only, so that a long list
+/// starts no process per directory.
 pub const WORKTREES: [&str; 4] = [
     "sh",
     "-c",
     r#"for d do
     line=
     [ -f "$d/.git" ] && IFS= read -r line < "$d/.git"
-    case ${line%/*} in "gitdir: "*/worktrees) printf '%s\n%s\n' "$d" "${line#gitdir: }" ;; esac
+    case $line in "gitdir: "?*) ;; *) continue ;; esac
+    gitdir=${line#gitdir: }
+    case $gitdir in /*) at=$gitdir ;; *) at=$d/$gitdir ;; esac
+    if [ -f "$at/commondir" ]; then printf '%s\n%s\n' "$d" "$gitdir"; fi
 done"#,
     "sh",
 ];
@@ -121,13 +126,8 @@ impl DirSet {
         if exit_code == Some(0) {
             let listed = String::from_utf8_lossy(stdout);
             let lines: Vec<&str> = listed.lines().collect();
-            let gitdirs: HashMap<&str, &str> = lines
-                .chunks_exact(2)
-                .filter_map(|pair| match pair {
-                    [path, gitdir] => Some((*path, *gitdir)),
-                    _ => None,
-                })
-                .collect();
+            let gitdirs: HashMap<&str, &str> =
+                lines.as_chunks::<2>().0.iter().map(|[path, gitdir]| (*path, *gitdir)).collect();
             for dir in &mut found {
                 let Some(gitdir) = gitdirs.get(dir.path.as_str()) else {
                     continue;
@@ -511,22 +511,37 @@ mod tests {
         let at = |path: &str| root.join(path);
         let write = |path: &str, text: String| {
             std::fs::create_dir_all(at(path).parent().expect("a parent")).expect("a directory");
-            std::fs::write(at(path), text).expect("a .git file");
+            std::fs::write(at(path), text).expect("a file");
         };
         let repository = at("repo/.bare");
         write("repo/.git", "gitdir: ./.bare\n".to_owned());
         write("repo/main/.git", format!("gitdir: {}/worktrees/main\n", repository.display()));
+        write("repo/.bare/worktrees/main/commondir", "../..\n".to_owned());
         // Relative, as `git worktree add --relative-paths` writes it, and with
         // no newline at the end.
         write("repo/feat x/.git", "gitdir: ../.bare/worktrees/feat x".to_owned());
+        write("repo/.bare/worktrees/feat x/commondir", "../..\n".to_owned());
         // As git writes it for a submodule in a worktree.
         write("repo/main/lib/.git", "gitdir: ../../.bare/worktrees/main/modules/lib\n".to_owned());
+        write("repo/.bare/worktrees/main/modules/lib/HEAD", "ref: refs/heads/main\n".to_owned());
         write("sub/.git", "gitdir: ../.git/modules/sub\n".to_owned());
+        write(".git/modules/sub/HEAD", "ref: refs/heads/main\n".to_owned());
+        // A submodule whose path runs through a `worktrees` of its own.
+        write("app/worktrees/lib/.git", "gitdir: ../../.git/modules/worktrees/lib\n".to_owned());
+        write("app/.git/modules/worktrees/lib/HEAD", "ref: refs/heads/main\n".to_owned());
         std::fs::create_dir_all(at("checkout/.git")).expect("a .git directory");
         std::fs::create_dir_all(at("plain")).expect("a directory");
 
         let asked = [
-            "repo", "repo/main", "repo/feat x", "repo/main/lib", "sub", "checkout", "plain", "gone",
+            "repo",
+            "repo/main",
+            "repo/feat x",
+            "repo/main/lib",
+            "sub",
+            "app/worktrees/lib",
+            "checkout",
+            "plain",
+            "gone",
         ];
         let paths: Vec<String> = asked.iter().map(|path| at(path).display().to_string()).collect();
         let output = std::process::Command::new(WORKTREES[0])
