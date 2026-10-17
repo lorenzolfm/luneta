@@ -4,14 +4,20 @@
 //! Sessions keep their place — oldest first, the order `zellij list-sessions`
 //! prints — so a row never moves under the eye or the mouse. Saying which agent
 //! wants you is the job of the glyph and of the `next` key, not of the order.
+//! A search hides the rows that do not match and leaves the rest in that
+//! order; the cursor, not the order, says which matches best.
 
 use std::collections::{BTreeSet, HashMap};
 
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::cursor::Cursor;
+use crate::dirs::short_cwd;
 use crate::elapsed::{Age, Held};
+use crate::places::Places;
 
 /// What a placeholder runs: the column each tab keeps for the sidebar, which
 /// the dock opens it into. Nothing anyone goes to.
@@ -29,23 +35,37 @@ pub struct Branch {
     pub panes: Vec<Leaf>,
 }
 
-/// A terminal pane, and the name of the tab that holds it.
+/// A terminal pane, the name of the tab that holds it, and the directory it
+/// works in, once its session has said.
 pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
+    pub cwd: Option<String>,
 }
 
 impl Branch {
-    pub fn new(name: String, age: Age, tabs: &[TabInfo], manifest: &PaneManifest) -> Self {
-        Branch { name, age, panes: leaves(tabs, manifest) }
+    pub fn new(
+        name: String,
+        age: Age,
+        tabs: &[TabInfo],
+        manifest: &PaneManifest,
+        places: &Places,
+    ) -> Self {
+        let panes = leaves(&name, tabs, manifest, places);
+        Branch { name, age, panes }
     }
 }
 
 /// The panes a person can go to, in tab order, the tiled ones of a tab before
 /// its floating ones, and in the order they were opened within each. The
 /// sidebar's placeholders are not among them.
-pub fn leaves(tabs: &[TabInfo], manifest: &PaneManifest) -> Vec<Leaf> {
+pub fn leaves(
+    session: &str,
+    tabs: &[TabInfo],
+    manifest: &PaneManifest,
+    places: &Places,
+) -> Vec<Leaf> {
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
         let tab = tabs
@@ -58,7 +78,12 @@ pub fn leaves(tabs: &[TabInfo], manifest: &PaneManifest) -> Vec<Leaf> {
             }
             keyed.push((
                 (*position, pane.is_floating, pane.id),
-                Leaf { id: pane.id, title: pane.title.clone(), tab: tab.to_owned() },
+                Leaf {
+                    id: pane.id,
+                    title: pane.title.clone(),
+                    tab: tab.to_owned(),
+                    cwd: places.cwd(session, pane.id).map(str::to_owned),
+                },
             ));
         }
     }
@@ -85,6 +110,8 @@ pub struct SessionNode {
     /// The status of the agent that wants you most, for a folded session to
     /// show in place of the rows it hides.
     pub loudest: Option<Status>,
+    /// The characters of the name a search lands on.
+    pub hits: Vec<usize>,
 }
 
 pub struct PaneNode {
@@ -93,6 +120,8 @@ pub struct PaneNode {
     pub label: String,
     pub agent: Option<Mark>,
     pub here: bool,
+    /// The characters of the label a search lands on.
+    pub hits: Vec<usize>,
 }
 
 pub struct Mark {
@@ -130,12 +159,33 @@ impl Node {
 pub struct Tree {
     pub rows: Cursor<Node>,
     folded: BTreeSet<String>,
+    search: Option<Search>,
+    /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
+    /// that is never searched needs none.
+    matcher: Option<Box<SkimMatcherV2>>,
+}
+
+/// The search box, while it is open.
+enum Search {
+    /// Nothing typed: the tree under it is the tree without it.
+    Empty,
+    /// A term narrows the tree, and `seek` until the cursor has gone to the
+    /// row that matches it best.
+    Typed { term: String, seek: bool },
 }
 
 impl Tree {
     /// `follow` puts the cursor on the pane you are in, which is where it
     /// belongs while the sidebar does not have the focus. Otherwise the cursor
     /// stays on the row it was on, or on its session once that is folded.
+    ///
+    /// While the search box holds a term, only the rows that match it are
+    /// kept, with the session of each pane that does, unfolded. A session
+    /// found by its name alone shows as folded. The cursor goes to the best
+    /// match when the term changes, and stays on its row otherwise.
+    ///
+    /// A search lasts while the sidebar has the focus, so `follow` closes it.
+    /// One left behind would keep the rows it hides out of sight.
     pub fn rebuild(
         &mut self,
         branches: &[Branch],
@@ -144,13 +194,33 @@ impl Tree {
         here: Option<u32>,
         follow: bool,
     ) {
+        if follow {
+            self.search = None;
+        }
         let seated: HashMap<(&str, u32), &AgentRow> =
             agents.rows.iter().map(|row| ((row.seat.session(), row.pane), row)).collect();
 
         let mut order: Vec<&Branch> = branches.iter().collect();
         order.sort_by(|a, b| b.age.cmp(&a.age).then_with(|| a.name.cmp(&b.name)));
 
+        let (term, seek) = match &mut self.search {
+            Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
+            Some(Search::Empty) | None => (None, false),
+        };
+        let finder = term.map(|term| Finder {
+            matcher: self
+                .matcher
+                .get_or_insert_with(|| Box::new(SkimMatcherV2::default().use_cache(true))),
+            term,
+        });
+
         let mut rows = Vec::new();
+        let mut best: Option<(usize, Fit)> = None;
+        let mut weigh = |at: usize, fit: Fit| {
+            if best.is_none_or(|(_, top)| fit > top) {
+                best = Some((at, fit));
+            }
+        };
         for branch in order {
             let is_current = current == Some(branch.name.as_str());
             let folded = self.folded.contains(&branch.name);
@@ -161,36 +231,95 @@ impl Tree {
                 .collect();
             let statuses =
                 || panes.iter().filter_map(|(_, agent)| agent.map(|agent| &agent.status));
+            // A search looks inside a folded session too.
+            let open = if finder.is_some() || !folded { panes.as_slice() } else { &[] };
+            let mut shown = Vec::new();
+            for (leaf, agent) in open {
+                let label = label(leaf, *agent);
+                let (fit, hits) = match &finder {
+                    Some(finder) => match finder.pane(&label, leaf) {
+                        Some((fit, hits)) => (Some(fit), hits),
+                        None => continue,
+                    },
+                    None => (None, Vec::new()),
+                };
+                let node = PaneNode {
+                    session: branch.name.clone(),
+                    id: leaf.id,
+                    label,
+                    agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
+                    here: is_current && here == Some(leaf.id),
+                    hits,
+                };
+                shown.push((node, fit));
+            }
+            let named = finder.as_ref().and_then(|finder| finder.session(&branch.name));
+            let (fit, hits) = named.unzip();
+            if finder.is_some() && fit.is_none() && shown.is_empty() {
+                continue;
+            }
+            if let Some(fit) = fit {
+                weigh(rows.len(), fit);
+            }
             rows.push(Node::Session(SessionNode {
                 name: branch.name.clone(),
                 current: is_current,
-                folded,
+                folded: if finder.is_some() { shown.is_empty() } else { folded },
                 waiting: statuses().filter(|status| status.is_waiting()).count(),
                 loudest: statuses().min_by_key(|status| agents::status_rank(status)).cloned(),
+                hits: hits.unwrap_or_default(),
             }));
-            if folded {
-                continue;
-            }
-            for (leaf, agent) in panes {
-                rows.push(Node::Pane(PaneNode {
-                    session: branch.name.clone(),
-                    id: leaf.id,
-                    label: label(leaf, agent),
-                    agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
-                    here: is_current && here == Some(leaf.id),
-                }));
+            for (node, fit) in shown {
+                if let Some(fit) = fit {
+                    weigh(rows.len(), fit);
+                }
+                rows.push(Node::Pane(node));
             }
         }
+        let best = best.map(|(at, _)| at);
 
         let followed = if follow {
             current.zip(here).map(|(session, pane)| Place::Pane(session.to_owned(), pane))
         } else {
             None
         };
-        let held = followed
-            .or_else(|| self.rows.selected_row().map(Node::place))
-            .map(|place| self.shown(place));
-        self.rows.replace(rows, |node| held.as_ref().is_some_and(|place| node.is(place)));
+        let held = followed.or_else(|| self.rows.selected_row().map(Node::place));
+        let row_of = |place: &Place| rows.iter().position(|node| node.is(place));
+        let at = match best {
+            Some(best) if seek => Some(best),
+            _ => held
+                .and_then(|place| row_of(&place).or_else(|| row_of(&self.shown(place))))
+                .or(best),
+        };
+        self.rows.replace_at(rows, at);
+    }
+
+    /// What is typed in the search box, while it is open.
+    pub fn search(&self) -> Option<&str> {
+        self.search.as_ref().map(|search| match search {
+            Search::Empty => "",
+            Search::Typed { term, .. } => term.as_str(),
+        })
+    }
+
+    /// Whether a term is typed in the search box. A box with nothing in it
+    /// narrows nothing, and the tree under it works as it does without one.
+    pub fn narrowed(&self) -> bool {
+        matches!(self.search, Some(Search::Typed { .. }))
+    }
+
+    /// Opens the search box with `term` in it, or puts `term` in the open one.
+    /// The next `rebuild` keeps the rows that match it, and puts the cursor on
+    /// the one that matches best. An empty `term` narrows nothing.
+    pub fn search_for(&mut self, term: String) {
+        self.search =
+            Some(if term.is_empty() { Search::Empty } else { Search::Typed { term, seek: true } });
+    }
+
+    /// Closes the search box, and says whether it was open. The next `rebuild`
+    /// brings every row back, the cursor on the row it was on.
+    pub fn close_search(&mut self) -> bool {
+        self.search.take().is_some()
     }
 
     /// A pane in a folded session is shown by its session's row.
@@ -220,6 +349,48 @@ impl Tree {
         };
         let folded = self.folded.contains(name);
         self.fold(!folded)
+    }
+}
+
+/// How well a row matches a search: a row that shows the term itself beats
+/// any other, and then the higher score wins.
+type Fit = (bool, i64);
+
+/// A search term, and the matcher the picker uses.
+struct Finder<'a> {
+    matcher: &'a SkimMatcherV2,
+    term: &'a str,
+}
+
+impl Finder<'_> {
+    fn session(&self, name: &str) -> Option<(Fit, Vec<usize>)> {
+        self.find(name, &[])
+    }
+
+    /// A pane by its label, the tab it is in, and its cwd. Only the label is
+    /// on screen to light up. A tab zellij named `Tab #N` is no name to find,
+    /// and a cwd is its last two parts, as the agent list shows it: a whole
+    /// path has the letters for a few typed ones to land on nearly any of it.
+    fn pane(&self, label: &str, leaf: &Leaf) -> Option<(Fit, Vec<usize>)> {
+        let tab = is_named_tab(&leaf.tab).then_some(leaf.tab.as_str());
+        let cwd = leaf.cwd.as_deref().map(short_cwd);
+        self.find(label, &[tab, cwd.as_deref()])
+    }
+
+    /// The term against what a row shows, which has the characters it lands
+    /// on, and against what else the row goes by, which has a score only. A row
+    /// need not have each.
+    fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
+        let lit = self.matcher.fuzzy_indices(shown, self.term);
+        let score = lit
+            .iter()
+            .map(|(score, _)| *score)
+            .chain(
+                also.iter().flatten().filter_map(|text| self.matcher.fuzzy_match(text, self.term)),
+            )
+            .max()?;
+        let hits = lit.map(|(_, hits)| hits).unwrap_or_default();
+        Some(((shown == self.term, score), hits))
     }
 }
 
@@ -292,7 +463,12 @@ mod tests {
             age: Age::from_secs(age),
             panes: panes
                 .iter()
-                .map(|(id, title)| Leaf { id: *id, title: (*title).to_owned(), tab: String::new() })
+                .map(|(id, title)| Leaf {
+                    id: *id,
+                    title: (*title).to_owned(),
+                    tab: String::new(),
+                    cwd: None,
+                })
                 .collect(),
         }
     }
@@ -413,8 +589,12 @@ mod tests {
 
     #[test]
     fn a_renamed_tab_names_an_agent_that_has_no_topic_yet() {
-        let leaf =
-            |title: &str, tab: &str| Leaf { id: 7, title: title.to_owned(), tab: tab.to_owned() };
+        let leaf = |title: &str, tab: &str| Leaf {
+            id: 7,
+            title: title.to_owned(),
+            tab: tab.to_owned(),
+            cwd: None,
+        };
         assert_eq!(label(&leaf("✳ Claude Code", "liquid dual"), None), "liquid dual");
         assert_eq!(label(&leaf("✳ Claude Code", "Tab #13"), None), "Claude Code");
         assert_eq!(label(&leaf("✳ pix outflow", "liquid dual"), None), "pix outflow");
@@ -449,16 +629,19 @@ mod tests {
                 ],
             ),
         ]);
-        let leaves = leaves(&[tab(0, "code"), tab(1, "logs")], &manifest);
-        let seen: Vec<(u32, &str, &str)> =
-            leaves.iter().map(|leaf| (leaf.id, leaf.title.as_str(), leaf.tab.as_str())).collect();
+        let places = Places::of(&[("s", &[(3, "/w/s"), (2, "/w/logs")]), ("t", &[(5, "/w/t")])]);
+        let leaves = leaves("s", &[tab(0, "code"), tab(1, "logs")], &manifest, &places);
+        let seen: Vec<(u32, &str, &str, Option<&str>)> = leaves
+            .iter()
+            .map(|leaf| (leaf.id, leaf.title.as_str(), leaf.tab.as_str(), leaf.cwd.as_deref()))
+            .collect();
         assert_eq!(
             seen,
             [
-                (3, "tiled", "code"),
-                (5, "tiled, later", "code"),
-                (1, "floating", "code"),
-                (2, "second tab", "logs"),
+                (3, "tiled", "code", Some("/w/s")),
+                (5, "tiled, later", "code", None),
+                (1, "floating", "code", None),
+                (2, "second tab", "logs", Some("/w/logs")),
             ]
         );
     }
@@ -540,6 +723,118 @@ mod tests {
         let gone = agents(&[("gone", 0, "waiting")]);
         tree.rebuild(&[branch("a", 9, &[(0, "x")])], None, &gone, None, true);
         assert_eq!(drawn(&tree), ["▾ a", "  - x"]);
+    }
+
+    #[test]
+    fn a_search_keeps_the_rows_that_match_where_they_were() {
+        let branches = [
+            branch("bipa", 300, &[(31, "✳ a-p-i-x"), (39, "✳ dda-bank-slip"), (47, "✳ pix outflow")]),
+            branch("notes", 200, &[(0, "~/Documents")]),
+            branch("misc", 100, &[(3, "✳ luneta")]),
+        ];
+        let set = agents(&[]);
+        for (term, rows, best) in [
+            (
+                "pix",
+                &["▾ bipa", "  - a-p-i-x", "  - pix outflow"][..],
+                Place::Pane("bipa".to_owned(), 47),
+            ),
+            ("note", &["▸ notes"][..], Place::Session("notes".to_owned())),
+        ] {
+            let mut tree = Tree::default();
+            tree.rebuild(&branches, None, &set, None, false);
+            tree.search_for(term.to_owned());
+            tree.rebuild(&branches, None, &set, None, false);
+            assert_eq!(drawn(&tree), rows, "{term}");
+            assert_eq!(selected(&tree), Some(best), "{term}");
+        }
+    }
+
+    #[test]
+    fn a_pane_a_search_finds_unfolds_its_session_until_the_search_closes() {
+        let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")]), branch("b", 1, &[(4, "x")])];
+        let set = agents(&[]);
+        // Closed by hand, or by the sidebar losing the focus: a rebuild that
+        // follows you out of it.
+        for lost_focus in [false, true] {
+            let mut tree = Tree::default();
+            tree.rebuild(&branches, None, &set, None, false);
+            assert!(tree.fold(true));
+
+            tree.search_for("two".to_owned());
+            tree.rebuild(&branches, None, &set, None, false);
+            assert_eq!(drawn(&tree), ["▾ a", "  - two"]);
+
+            if !lost_focus {
+                assert!(tree.close_search());
+            }
+            tree.rebuild(&branches, None, &set, None, lost_focus);
+            assert_eq!(tree.search(), None, "lost focus: {lost_focus}");
+            assert_eq!(drawn(&tree), ["▸ a", "▾ b", "  - x"], "lost focus: {lost_focus}");
+            assert_eq!(selected(&tree), Some(Place::Session("a".to_owned())));
+        }
+    }
+
+    #[test]
+    fn a_pane_is_found_by_its_tab_and_its_cwd_but_lit_only_where_it_shows() {
+        let leaf = |id: u32, tab: &str, cwd: Option<&str>| Leaf {
+            id,
+            title: "nvim".to_owned(),
+            tab: tab.to_owned(),
+            cwd: cwd.map(str::to_owned),
+        };
+        let branches = [Branch {
+            name: "s".to_owned(),
+            age: Age::from_secs(1),
+            panes: vec![
+                leaf(0, "notes", Some("/w/a")),
+                leaf(1, "Tab #2", Some("/home/lorenzo/Projects/misc/luneta")),
+                leaf(2, "", None),
+            ],
+        }];
+        let found = |term: &str| {
+            let mut tree = Tree::default();
+            tree.search_for(term.to_owned());
+            tree.rebuild(&branches, None, &agents(&[]), None, false);
+            tree.rows
+                .iter()
+                .filter_map(|node| match node {
+                    Node::Pane(pane) => Some((pane.id, pane.hits.clone())),
+                    Node::Session(_) => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("notes"), [(0, vec![])]);
+        assert_eq!(found("luneta"), [(1, vec![])]);
+        assert_eq!(found("tab"), []);
+        assert_eq!(found("loren"), []);
+        assert_eq!(found("vi"), [(0, vec![1, 2]), (1, vec![1, 2]), (2, vec![1, 2])]);
+    }
+
+    #[test]
+    fn the_cursor_goes_to_the_best_match_only_when_the_term_changes() {
+        let all = [branch("a", 9, &[(0, "✳ pix one"), (1, "✳ two"), (2, "✳ p-i-x")])];
+        let set = agents(&[]);
+        let mut tree = Tree::default();
+        tree.rebuild(&all, None, &set, None, false);
+        tree.rows.move_selection(2);
+
+        tree.search_for(String::new());
+        tree.rebuild(&all, None, &set, None, false);
+        assert_eq!(tree.rows.len(), 4);
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 1)));
+
+        tree.search_for("pix".to_owned());
+        tree.rebuild(&all, None, &set, None, false);
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
+
+        tree.rows.move_selection(1);
+        tree.rebuild(&all, None, &set, None, false);
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 2)));
+
+        let fewer = [branch("a", 9, &[(0, "✳ pix one"), (1, "✳ two")])];
+        tree.rebuild(&fewer, None, &set, None, false);
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
     }
 
     #[test]

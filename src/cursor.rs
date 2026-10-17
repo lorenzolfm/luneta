@@ -19,8 +19,14 @@ impl<T> Cursor<T> {
     }
 
     pub fn replace(&mut self, rows: Vec<T>, held: impl Fn(&T) -> bool) {
+        let at = rows.iter().position(held);
+        self.replace_at(rows, at);
+    }
+
+    /// `replace`, for a caller that has found the row to hold itself.
+    pub fn replace_at(&mut self, rows: Vec<T>, at: Option<usize>) {
         self.rows = rows;
-        self.selected = match self.rows.iter().position(held) {
+        self.selected = match at.filter(|index| *index < self.rows.len()) {
             Some(index) => Some(index),
             None => (!self.rows.is_empty()).then_some(0),
         };

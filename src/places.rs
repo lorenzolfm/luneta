@@ -93,6 +93,12 @@ impl Places {
         self.asked = None;
     }
 
+    /// The directory a pane works in, as its session last said.
+    pub fn cwd(&self, session: &str, pane: u32) -> Option<&str> {
+        let panes = self.sessions.get(session)?;
+        panes.iter().find(|held| held.id == pane).map(|held| held.cwd.as_str())
+    }
+
     pub fn find(&self, pane: u32, cwd: &str, reported: &str) -> Option<&str> {
         if cwd.is_empty() {
             return None;
