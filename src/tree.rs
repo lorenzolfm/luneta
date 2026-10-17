@@ -289,6 +289,12 @@ impl Tree {
         self.search.as_ref().map(|search| search.term.as_str())
     }
 
+    /// Whether a term is typed in the search box. A box with nothing in it
+    /// narrows nothing, and the tree under it works as it does without one.
+    pub fn narrowed(&self) -> bool {
+        self.search().is_some_and(|term| !term.is_empty())
+    }
+
     /// Opens the search box with `term` in it, or puts `term` in the open one.
     /// The next `rebuild` keeps the rows that match it, and puts the cursor on
     /// the one that matches best.

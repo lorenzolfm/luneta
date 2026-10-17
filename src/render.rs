@@ -1050,8 +1050,7 @@ fn sidebar_lines(
     let mut lines = Vec::with_capacity(shelf.tree + shelf.notes);
     if tree.rows.is_empty() {
         if shelf.tree > 0 {
-            let typed = tree.search().is_some_and(|term| !term.is_empty());
-            let empty = if typed { "no match" } else { "no sessions" };
+            let empty = if tree.narrowed() { "no match" } else { "no sessions" };
             lines.push(note_within(inner, &Note::dim(empty)));
         }
     } else {

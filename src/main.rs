@@ -996,10 +996,10 @@ impl State {
             return false;
         };
         tree.rows.select(index);
-        let searching = tree.search().is_some();
+        let narrowed = tree.narrowed();
         match tree.rows.selected_row() {
-            // A search unfolds what it finds, so a fold would show nothing.
-            Some(Node::Session(_)) if !searching => self.fold(None),
+            // A term unfolds what it finds, so a fold would show nothing.
+            Some(Node::Session(_)) if !narrowed => self.fold(None),
             Some(_) => {
                 self.go_to_selected();
                 true
@@ -1032,8 +1032,8 @@ impl State {
     }
 
     /// Going anywhere closes the search, so that the sidebar you come back to
-    /// shows every row. The session you are in, found by a search, is the pane
-    /// you came from.
+    /// shows every row. The session you are in, found by a term, is the pane
+    /// you came from; with nothing typed, its row folds as it always does.
     fn go_to_selected(&mut self) {
         let Role::Sidebar(tree) = &self.role else {
             return;
@@ -1041,12 +1041,13 @@ impl State {
         let Some(place) = tree.rows.selected_row().map(Node::place) else {
             return;
         };
-        let searched = self.close_search();
+        let found = tree.narrowed();
+        self.close_search();
         let current = self.matches.current_session.as_deref();
         match place {
             Place::Pane(session, pane) => self.go_to(&session, pane),
             Place::Session(session) if current == Some(session.as_str()) => {
-                if searched {
+                if found {
                     self.go_back();
                 } else {
                     self.fold(None);
@@ -1149,4 +1150,85 @@ fn resize_self(plugin_id: u32) {
         return;
     };
     change_floating_panes_coordinates(vec![(PaneId::Plugin(plugin_id), coordinates)]);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::tree::Leaf;
+
+    /// A sidebar with the focus, in the one tab of session `a` beside its
+    /// pane, and session `b` with a pane of its own: rows `a`, `pane 1`, `b`,
+    /// `pane 4`.
+    fn focused_sidebar() -> State {
+        let pane = |id: u32, is_plugin: bool| PaneInfo {
+            id,
+            is_plugin,
+            is_focused: is_plugin,
+            is_selectable: true,
+            title: format!("pane {id}"),
+            ..PaneInfo::default()
+        };
+        let tab = vec![pane(9, true), pane(1, false)];
+        let branch = |name: &str, age: u64, panes: Vec<Leaf>| Branch {
+            name: name.to_owned(),
+            age: Age::from_secs(age),
+            panes,
+        };
+        let four =
+            Leaf { id: 4, title: "pane 4".to_owned(), tab: String::new(), cwd: String::new() };
+        let mut state = State {
+            role: Role::Sidebar(Tree::default()),
+            plugin_id: 9,
+            panes: Some(PaneManifest { panes: HashMap::from([(0, tab)]) }),
+            tabs: vec![TabInfo { position: 0, active: true, ..TabInfo::default() }],
+            active_tab: Some(0),
+            branches: vec![branch("a", 9, Vec::new()), branch("b", 1, vec![four])],
+            size: (10, 30),
+            ..State::default()
+        };
+        state.matches.current_session = Some("a".to_owned());
+        state.rebuild_tree();
+        state
+    }
+
+    /// With nothing typed, the search box changes nothing a session row does:
+    /// a click folds it, and so does `Enter` on your own. Found by a term,
+    /// both take you there instead, which for your own is back to your pane.
+    #[test]
+    fn a_session_row_folds_unless_a_term_found_it() {
+        for (typed, row, click, folded) in [
+            ("", 0, false, &["a"][..]),
+            ("", 0, true, &["a"]),
+            ("", 2, true, &["b"]),
+            ("a", 0, false, &[]),
+            ("a", 0, true, &[]),
+        ] {
+            let mut state = focused_sidebar();
+            state.search_tree(typed.to_owned());
+            if click {
+                state.click(row);
+            } else {
+                if let Role::Sidebar(tree) = &mut state.role {
+                    tree.rows.select(row);
+                }
+                state.go_to_selected();
+            }
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            let shut: Vec<&str> = tree
+                .rows
+                .iter()
+                .filter_map(|node| match node {
+                    Node::Session(session) if session.folded => Some(session.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shut, folded, "{typed:?}, row {row}, click: {click}");
+            if !typed.is_empty() {
+                assert_eq!(tree.search(), None, "{typed:?}, row {row}, click: {click}");
+            }
+        }
+    }
 }
