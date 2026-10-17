@@ -120,7 +120,7 @@ pub struct Line {
 
 enum Style {
     Level(usize, Range<usize>),
-    Hits(usize, Vec<usize>),
+    Indices(usize, Vec<usize>),
     Error(Range<usize>),
 }
 
@@ -144,11 +144,15 @@ impl Line {
         self.styles.push(Style::Level(level, range));
     }
 
+    /// `text` in `level`, and the characters at `hits` in `accent`. zellij
+    /// colours a character held in two levels with the higher one, so `level`
+    /// leaves the hits out: they show whichever of the two is higher.
     pub fn push_hits(&mut self, text: &str, level: usize, accent: usize, hits: &[usize]) {
         let range = self.raw(text);
         let start = range.start;
-        self.styles.push(Style::Level(level, range));
-        self.styles.push(Style::Hits(accent, hits.iter().map(|i| start + i).collect()));
+        let (lit, rest) = range.partition(|i| hits.contains(&(i - start)));
+        self.styles.push(Style::Indices(level, rest));
+        self.styles.push(Style::Indices(accent, lit));
     }
 
     pub fn push_error(&mut self, text: &str) {
@@ -209,7 +213,7 @@ impl Line {
                         styled.extend(range);
                     }
                 },
-                Style::Hits(_, indices) => {
+                Style::Indices(_, indices) => {
                     styled.extend(indices.iter().filter(|i| **i < visible).map(|i| shift(*i)));
                 },
             }
@@ -222,7 +226,7 @@ impl Line {
                     Some(range) => text.color_range(level, range),
                     None => text,
                 },
-                Style::Hits(level, indices) => text.color_indices(
+                Style::Indices(level, indices) => text.color_indices(
                     level,
                     indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
                 ),

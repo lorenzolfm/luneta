@@ -38,6 +38,13 @@ impl Painted {
         &self.text
     }
 
+    /// The colour level zellij draws the character at `index` in: the highest
+    /// of the four that holds it, as its text component picks.
+    #[cfg(test)]
+    pub fn level_at(&self, index: usize) -> Option<usize> {
+        (0..=3).rev().find(|level| self.indices.get(*level).is_some_and(|at| at.contains(&index)))
+    }
+
     pub fn selected(mut self) -> Self {
         self.selected = true;
         self

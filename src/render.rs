@@ -1088,8 +1088,11 @@ fn branch_line(node: &SessionNode, inner: usize, frame: u64) -> Painted {
     line.push(if node.folded { FOLDED } else { UNFOLDED }, TAG);
     line.gap(1);
     let room = inner.saturating_sub(line.columns() + reserve);
+    // The session you are in has its name in the accent, so the letters a
+    // search lands on in it take the level the other names have.
+    let (name_level, hit_level) = if node.current { (ACCENT, NAME) } else { (NAME, ACCENT) };
     let (name, hits) = lit(&node.name, room, &node.hits);
-    line.push_hits(&name, if node.current { ACCENT } else { NAME }, ACCENT, &hits);
+    line.push_hits(&name, name_level, hit_level, &hits);
     if !badge.is_empty() {
         line.pad_to(inner.saturating_sub(badge.width()));
         line.push(&badge, level);
@@ -2025,6 +2028,26 @@ mod tests {
         assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 2), Some(7));
         assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 3), None);
         assert_eq!(sidebar_row_at(&tree, &agents, true, 3, 32, 2), None);
+    }
+
+    #[test]
+    fn the_letters_a_search_lands_on_stand_out_on_every_session_row() {
+        for current in [false, true] {
+            let node = SessionNode {
+                name: "misc".to_owned(),
+                current,
+                folded: false,
+                waiting: 0,
+                loudest: None,
+                hits: vec![0, 2],
+            };
+            let line = branch_line(&node, 20, 0);
+            assert_eq!(line.content().chars().skip(3).take(4).collect::<String>(), "misc");
+            let [m, i, s, c] = [3, 4, 5, 6].map(|at| line.level_at(at));
+            assert_eq!((m, i), (s, c), "current: {current}");
+            assert_ne!(m, i, "current: {current}");
+            assert_eq!(i, Some(if current { ACCENT } else { NAME }), "current: {current}");
+        }
     }
 
     #[test]
