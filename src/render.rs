@@ -1683,6 +1683,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/you/misc/luneta".to_owned(),
@@ -1713,6 +1714,7 @@ mod tests {
             let rect = Rect { x: 0, y: 0, width, height: 10 };
             let mut dirs = DirSet::default();
             dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+            dirs.ingest_worktrees(Some(0), b"");
             dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
             dirs.ingest_listing(
                 "/home/you/misc/luneta".to_owned(),
@@ -1732,6 +1734,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
 
         let unasked = dir_preview(&dirs, &rect).2;
@@ -1833,6 +1836,7 @@ mod tests {
 
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &sessions, Some("notes"), Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/lorenzo/Projects/misc/luneta".to_owned(),

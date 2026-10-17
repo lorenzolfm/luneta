@@ -79,6 +79,8 @@ Agent support, today:
 
 Lists the directories you work in, in frecency order, and lets you create a new session right where you want to be.
 
+A session is named for its directory. A git worktree is named for the directory that holds it too, as `luneta-main`, where `main` alone would name a worktree of every repository; a bare repository's `.git` is left off, so `infra.git/master` is `infra-master`.
+
 ---
 
 ### Sidebar

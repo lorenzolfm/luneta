@@ -262,6 +262,20 @@ impl ZellijPlugin for State {
                 match context.get(dirs::CONTEXT_KEY).map(String::as_str) {
                     Some(dirs::CONTEXT_VALUE) => {
                         self.dirs.ingest(exit_code, &stdout, &stderr);
+                        if let Some(command) = self.dirs.worktrees_query() {
+                            run_command(
+                                &command,
+                                BTreeMap::from([(
+                                    dirs::CONTEXT_KEY.to_owned(),
+                                    dirs::WORKTREES_VALUE.to_owned(),
+                                )]),
+                            );
+                        }
+                        self.rebuild_dirs(Selection::Hold);
+                        true
+                    },
+                    Some(dirs::WORKTREES_VALUE) => {
+                        self.dirs.ingest_worktrees(exit_code, &stdout);
                         self.rebuild_dirs(Selection::Hold);
                         true
                     },

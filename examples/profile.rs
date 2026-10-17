@@ -271,6 +271,7 @@ fn main() {
         std::hint::black_box(&dirs);
     }));
     dirs.ingest(Some(0), &zox, b"");
+    dirs.ingest_worktrees(Some(0), b"");
 
     stats.push(bench("DirSet::rebuild (empty term)", 200, || {
         dirs.rebuild("", &sess, Some("session-000-work"), Selection::Hold);

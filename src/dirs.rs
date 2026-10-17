@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -9,6 +9,24 @@ use crate::panes;
 use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions, Taken};
 
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
+
+/// Prints, of the directories that follow it, the linked git worktrees: those
+/// whose `.git` is a file pointing into a repository's `worktrees`. A
+/// repository's own checkout has a `.git` directory, and the directory that
+/// holds a bare repository may have a `.git` file pointing at the repository.
+/// Builtins only, so that a long list starts no process per directory.
+pub const WORKTREES: [&str; 4] = [
+    "sh",
+    "-c",
+    r#"for d do
+    line=
+    [ -f "$d/.git" ] && IFS= read -r line < "$d/.git"
+    case $line in "gitdir: "*/worktrees/*) printf '%s\n' "$d" ;; esac
+done"#,
+    "sh",
+];
+
+pub const WORKTREES_VALUE: &str = "worktrees";
 
 pub const LIST: [&str; 8] = [
     "eza",
@@ -59,6 +77,10 @@ pub struct DirSet {
     pub status: Fetch<Vec<Dir>>,
     pub rows: Cursor<DirRow>,
     pub asking: bool,
+    /// The directories zoxide listed, until `WORKTREES` says which are
+    /// worktrees, and so what each is named. The list from before stays up
+    /// meanwhile, so that no name changes under your eye.
+    found: Option<Vec<Dir>>,
     listings: BTreeMap<String, Listing>,
     matcher: Option<SkimMatcherV2>,
 }
@@ -75,8 +97,35 @@ impl DirSet {
             });
             return;
         }
+        self.found = Some(parse(&String::from_utf8_lossy(stdout)));
+    }
+
+    /// `WORKTREES` with the directories zoxide listed, while they wait on it.
+    pub fn worktrees_query(&self) -> Option<Vec<&str>> {
+        let found = self.found.as_ref()?;
+        let mut command = WORKTREES.to_vec();
+        command.extend(found.iter().map(|dir| dir.path.as_str()));
+        Some(command)
+    }
+
+    /// Names each worktree among the directories zoxide listed for its
+    /// repository too. A check that failed leaves every directory its own
+    /// name.
+    pub fn ingest_worktrees(&mut self, exit_code: Option<i32>, stdout: &[u8]) {
+        let Some(mut found) = self.found.take() else {
+            return;
+        };
+        if exit_code == Some(0) {
+            let listed = String::from_utf8_lossy(stdout);
+            let worktrees: HashSet<&str> = listed.lines().collect();
+            for dir in found.iter_mut().filter(|dir| worktrees.contains(dir.path.as_str())) {
+                if let Some(name) = worktree_name(&dir.path) {
+                    dir.name = name;
+                }
+            }
+        }
         self.asking = false;
-        self.status = Fetch::Ready(parse(&String::from_utf8_lossy(stdout)));
+        self.status = Fetch::Ready(found);
     }
 
     pub fn fail(&mut self, reason: impl Into<String>) {
@@ -274,6 +323,18 @@ fn derive_name(path: &str) -> Option<String> {
     validate_name(base).is_none().then(|| base.to_owned())
 }
 
+/// A worktree is named for the directory that holds it too, `luneta-main`,
+/// where `main` alone would name one of every repository. A bare
+/// repository's `.git` is left off.
+fn worktree_name(path: &str) -> Option<String> {
+    let mut parts = path.split('/').filter(|part| !part.is_empty()).rev();
+    let base = parts.next()?;
+    let parent = parts.next()?;
+    let parent = parent.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(parent);
+    let name = format!("{parent}-{base}");
+    validate_name(&name).is_none().then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -321,6 +382,7 @@ mod tests {
     fn a_failure_leaves_no_directories_behind() {
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"  9264.0 /home/you/Projects/thing\n", b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         assert_eq!(dirs.rows.len(), 1);
 
@@ -407,6 +469,60 @@ mod tests {
         assert_eq!(derive_name("/home/you/notes/").as_deref(), Some("notes"));
     }
 
+    /// Each shape a `.git` takes, on disk, through the `sh` zellij would run.
+    #[test]
+    fn only_a_linked_worktree_is_found_a_worktree() {
+        let root = std::env::temp_dir().join(format!("luneta-worktrees-{}", std::process::id()));
+        let at = |path: &str| root.join(path);
+        let write = |path: &str, text: String| {
+            std::fs::create_dir_all(at(path).parent().expect("a parent")).expect("a directory");
+            std::fs::write(at(path), text).expect("a .git file");
+        };
+        let repository = at("repo/.bare");
+        write("repo/.git", "gitdir: ./.bare\n".to_owned());
+        write("repo/main/.git", format!("gitdir: {}/worktrees/main\n", repository.display()));
+        // Relative, as `git worktree add --relative-paths` writes it, and with
+        // no newline at the end.
+        write("repo/feat x/.git", "gitdir: ../.bare/worktrees/feat x".to_owned());
+        write("sub/.git", "gitdir: ../.git/modules/sub\n".to_owned());
+        std::fs::create_dir_all(at("checkout/.git")).expect("a .git directory");
+        std::fs::create_dir_all(at("plain")).expect("a directory");
+
+        let asked = ["repo", "repo/main", "repo/feat x", "sub", "checkout", "plain", "gone"];
+        let paths: Vec<String> = asked.iter().map(|path| at(path).display().to_string()).collect();
+        let output = std::process::Command::new(WORKTREES[0])
+            .args(&WORKTREES[1..])
+            .args(&paths)
+            .output()
+            .expect("sh runs");
+        std::fs::remove_dir_all(&root).expect("the directories go");
+
+        assert!(output.status.success());
+        let found = String::from_utf8(output.stdout).expect("utf-8");
+        assert_eq!(found.lines().collect::<Vec<_>>(), [&paths[1], &paths[2]]);
+    }
+
+    #[test]
+    fn a_worktree_is_named_for_the_directory_that_holds_it_once_the_check_says() {
+        let zoxide = b"30 /home/you/misc/luneta\n20 /home/you/misc/luneta/main\n\
+                       10 /home/you/Work/infra.git/master\n5 /main\n";
+        let checked = b"/home/you/misc/luneta/main\n/home/you/Work/infra.git/master\n/main\n";
+        let names = |dirs: &mut DirSet| {
+            dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
+            dirs.rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>()
+        };
+        for (exit_code, named) in [
+            (Some(0), ["luneta", "luneta-main", "infra-master", "main"]),
+            (Some(2), ["luneta", "main", "master", "main"]),
+        ] {
+            let mut dirs = DirSet::default();
+            dirs.ingest(Some(0), zoxide, b"");
+            assert!(names(&mut dirs).is_empty());
+            dirs.ingest_worktrees(exit_code, checked);
+            assert_eq!(names(&mut dirs), named, "{exit_code:?}");
+        }
+    }
+
     #[test]
     fn a_directory_without_a_usable_name_is_dropped() {
         assert_eq!(derive_name("/"), None);
@@ -430,6 +546,7 @@ mod tests {
     fn the_name_a_row_shows_is_a_term_that_finds_it() {
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"9268 /home/lorenzo/Projects/misc/luneta\n", b"");
+        dirs.ingest_worktrees(Some(0), b"");
         let sessions = Sessions { live: vec![named("luneta")], dead: vec![] };
 
         dirs.rebuild("", &sessions, None, Selection::SnapToTop);
