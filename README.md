@@ -238,7 +238,7 @@ layout {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane size=32 borderless=true command="tail" {
+        pane size=32 command="tail" {
             args "-f" "/dev/null"
         }
         pane focus=true
@@ -248,6 +248,11 @@ layout {
     }
 }
 ```
+
+Leave the placeholder its border. Each time zellij arranges a tab, the pane in
+the placeholder's place takes its `borderless`, the sidebar too, and zellij takes
+a borderless plugin on the edge of the tab for part of its own frame, like the
+tab bar, and draws no line between it and the panes beside it.
 
 When another tab comes on screen, the sidebar hands its tab back the placeholder
 and takes the new tab's, in its place, so the panes beside it never change size.
@@ -275,7 +280,7 @@ tab_template name="ui" {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane size=32 borderless=true command="tail" {
+        pane size=32 command="tail" {
             args "-f" "/dev/null"
         }
         pane {
