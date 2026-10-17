@@ -38,7 +38,7 @@ type Spot = (usize, usize, usize, usize);
 /// A tab, by the id zellij keeps for it while it lives. Its position changes
 /// as the tabs before it close; the id does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct TabId(usize);
+pub struct TabId(pub usize);
 
 /// What a key binding asks through the `sidebar` pipe. Every plugin in the
 /// session hears it, and the dock and the sidebar each answer their own.

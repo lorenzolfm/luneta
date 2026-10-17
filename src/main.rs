@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use agents::{AgentSet, Live, Seat};
 use dirs::{DirSet, LIST};
-use dock::Ask;
+use dock::{Ask, TabId};
 use elapsed::Age;
 use panes::Peeks;
 use pass::{At, On, Pass};
@@ -996,7 +996,7 @@ impl State {
         if !self.is_sidebar() {
             return false;
         }
-        self.pass.point();
+        self.pass.mouse(mouse);
         match mouse {
             Mouse::LeftClick(line, _) => {
                 let Ok(line) = usize::try_from(line) else {
@@ -1171,10 +1171,10 @@ fn contents_of(session: SessionInfo) -> Contents {
 /// there last, and only the tabs say which tab this client is on. A tab that
 /// marks more than one is shared, and zellij says which is this client's.
 fn focus_at(tab: &TabInfo, panes: &[PaneInfo], plugin_id: u32) -> Option<At> {
-    let id = tab.tab_id;
     if tab.are_floating_panes_visible {
-        return Some(At::Pane { tab: id, beside: None });
+        return Some(At::Floating);
     }
+    let id = TabId(tab.tab_id);
     let own = |pane: &PaneInfo| pane.is_plugin && pane.id == plugin_id;
     let mut focused = tiled(panes).filter(|p| p.is_focused);
     let pane = if let (Some(pane), None) = (focused.next(), focused.next()) {

@@ -9,26 +9,29 @@
 //!
 //! It keeps the focus you ask for, with `focus`, and the focus a click gives
 //! it. zellij hands a click that only focuses a pane to no one, but it ends the
-//! hover over the sidebar first, so a click comes as a mouse event just before
-//! the panes that show the sidebar focused. A key comes with none.
+//! hover over the sidebar first, so a click comes as the hover's end just
+//! before the panes that show the sidebar focused. A key comes with none.
 
-use zellij_tile::prelude::PaneId;
+use zellij_tile::prelude::{Mouse, PaneId};
 
+use crate::dock::TabId;
 use crate::TICKS_PER_SECOND;
 
 /// How long the focus you asked for may take to come, in ticks. A hidden
 /// sidebar comes back before the dock moves the focus into it.
 const WAIT: u64 = 2 * TICKS_PER_SECOND;
 
-/// Where this client's focus is, in one report of the panes and the tabs, a
-/// tab by its id.
+/// Where this client's focus is, in one report of the panes and the tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum At {
     /// A pane of its own; `beside` names it when it stands right of the
     /// column.
-    Pane { tab: usize, beside: Option<PaneId> },
-    Sidebar { tab: usize },
-    Placeholder { tab: usize },
+    Pane { tab: TabId, beside: Option<PaneId> },
+    /// The floating panes, shown over the tab. Hiding them gives the focus
+    /// back to the pane they covered.
+    Floating,
+    Sidebar { tab: TabId },
+    Placeholder { tab: TabId },
 }
 
 /// Where the focus is to go on to.
@@ -57,8 +60,9 @@ pub struct Pass {
     visit: Visit,
     /// The pane the focus was on last, outside the column: its tab, and the
     /// pane when it stands beside the column.
-    from: Option<(usize, Option<PaneId>)>,
-    /// Whether the mouse was on the sidebar since the report before.
+    from: Option<(TabId, Option<PaneId>)>,
+    /// Whether the hover over the sidebar ended, or a click came through to
+    /// it, since the report before.
     pointed: bool,
 }
 
@@ -69,8 +73,13 @@ impl Pass {
         }
     }
 
-    pub fn point(&mut self) {
-        self.pointed = true;
+    /// Takes in a mouse event on the sidebar. zellij ends the hover over a
+    /// plugin pane with a move to its last column, when a click focuses the
+    /// pane and when the pointer leaves it; a click through comes itself. A
+    /// pointer that moves on the sidebar, or scrolls it, is neither.
+    pub fn mouse(&mut self, mouse: Mouse) {
+        let ended = matches!(mouse, Mouse::Hover(0, column) if column == usize::from(u16::MAX));
+        self.pointed |= ended || matches!(mouse, Mouse::LeftClick(..));
     }
 
     /// Whether the focus is in the column only on its way somewhere else.
@@ -95,12 +104,18 @@ impl Pass {
                 self.visit = Visit::Out;
             }
         }
-        let tab = match (at, self.visit) {
+        let on = match (at, self.visit) {
             (At::Pane { tab, beside }, visit) => {
                 self.from = Some((tab, beside));
                 if !matches!(visit, Visit::Asked(_)) {
                     self.visit = Visit::Out;
                 }
+                return None;
+            },
+            // Over the floating panes, what the focus was in the pane they
+            // cover holds, but one sent on has got where it went.
+            (At::Floating, Visit::Passing) => {
+                self.visit = Visit::Out;
                 return None;
             },
             (At::Sidebar { .. }, Visit::Asked(_) | Visit::In) => {
@@ -112,27 +127,34 @@ impl Pass {
                 self.visit = Visit::In;
                 return None;
             },
-            (At::Sidebar { .. } | At::Placeholder { .. }, Visit::Passing)
+            (At::Floating, _)
+            | (At::Sidebar { .. } | At::Placeholder { .. }, Visit::Passing)
             | (At::Placeholder { .. }, Visit::Asked(_)) => return None,
-            (At::Sidebar { tab } | At::Placeholder { tab }, Visit::Out | Visit::In) => tab,
+            // One already in the column was not moved there: the sidebar left
+            // the tab under it.
+            (At::Placeholder { .. }, Visit::In) => On::Beside,
+            (At::Sidebar { tab } | At::Placeholder { tab }, Visit::Out) => {
+                if self.came_left(tab, stands) && tabs > 1 {
+                    On::Back
+                } else {
+                    On::Beside
+                }
+            },
         };
-        let back = self.came_left(tab, stands) && tabs > 1;
         self.visit = Visit::Passing;
-        Some(if back { On::Back } else { On::Beside })
+        Some(on)
     }
 
-    fn came_within(&self, tab: usize) -> bool {
+    fn came_within(&self, tab: TabId) -> bool {
         self.from.is_some_and(|(from, _)| from == tab)
     }
 
     /// Whether a key moved the focus left into the column, from the pane
-    /// beside it. One already in the column was not moved there: the sidebar
-    /// left the tab under it. Nor was one whose pane is gone: zellij hands the
-    /// focus of a pane that closes to the pane you were on before it, often
-    /// the sidebar.
-    fn came_left(&self, tab: usize, stands: impl Fn(PaneId) -> bool) -> bool {
+    /// beside it. Not one whose pane is gone: zellij hands the focus of a pane
+    /// that closes to the pane you were on before it, often the sidebar.
+    fn came_left(&self, tab: TabId, stands: impl Fn(PaneId) -> bool) -> bool {
         let beside = self.from.and_then(|(from, beside)| beside.filter(|_| from == tab));
-        self.visit == Visit::Out && beside.is_some_and(stands)
+        beside.is_some_and(stands)
     }
 }
 
@@ -143,7 +165,7 @@ mod tests {
     enum Step {
         See(At),
         Ask,
-        Point,
+        Point(Mouse),
         Wait(u64),
         /// The pane beside the column in this tab closes.
         Close(usize),
@@ -157,15 +179,25 @@ mod tests {
     }
 
     const fn pane(tab: usize, beside: bool) -> Step {
-        See(At::Pane { tab, beside: if beside { Some(neighbour(tab)) } else { None } })
+        let beside = if beside { Some(neighbour(tab)) } else { None };
+        See(At::Pane { tab: TabId(tab), beside })
     }
 
     const fn sidebar(tab: usize) -> Step {
-        See(At::Sidebar { tab })
+        See(At::Sidebar { tab: TabId(tab) })
     }
 
     const fn placeholder(tab: usize) -> Step {
-        See(At::Placeholder { tab })
+        See(At::Placeholder { tab: TabId(tab) })
+    }
+
+    const fn floating() -> Step {
+        See(At::Floating)
+    }
+
+    /// A click that only focuses the sidebar: the end of the hover over it.
+    fn click() -> Step {
+        Point(Mouse::Hover(0, usize::from(u16::MAX)))
     }
 
     /// Every report the sidebar takes in, in two tabs, and where it sends the
@@ -185,13 +217,38 @@ mod tests {
             ),
             (
                 "a click on the sidebar, from the pane beside it",
-                vec![pane(2, true), Point, sidebar(2), sidebar(2)],
+                vec![pane(2, true), click(), sidebar(2), sidebar(2)],
                 vec![None, None, None],
             ),
             (
+                "a click that comes through to the sidebar, from the pane beside it",
+                vec![pane(2, true), Point(Mouse::LeftClick(3, 4)), sidebar(2)],
+                vec![None, None],
+            ),
+            (
+                "the pointer moving on the sidebar, or scrolling it, does not keep a key",
+                vec![
+                    pane(2, true),
+                    Point(Mouse::Hover(3, 4)),
+                    Point(Mouse::ScrollDown(1)),
+                    sidebar(2),
+                ],
+                vec![None, Some(On::Back)],
+            ),
+            (
                 "the mouse on the sidebar does not keep a key that came from another tab",
-                vec![pane(1, true), Point, sidebar(2)],
+                vec![pane(1, true), click(), sidebar(2)],
                 vec![None, Some(On::Beside)],
+            ),
+            (
+                "in the sidebar, with floating panes shown and hidden again",
+                vec![pane(2, true), Ask, sidebar(2), floating(), sidebar(2)],
+                vec![None, None, None, None],
+            ),
+            (
+                "on to a tab with floating panes shown, and hidden again over its column",
+                vec![pane(2, true), sidebar(2), floating(), placeholder(1)],
+                vec![None, Some(On::Back), None, Some(On::Beside)],
             ),
             (
                 "focus, through panes from before it came",
@@ -238,7 +295,7 @@ mod tests {
                 match step {
                     See(at) => seen.push(pass.see(at, 2, frame, |pane| !closed.contains(&pane))),
                     Ask => pass.ask(frame),
-                    Point => pass.point(),
+                    Point(mouse) => pass.mouse(mouse),
                     Wait(ticks) => frame += ticks,
                     Close(tab) => closed.push(neighbour(tab)),
                 }
@@ -250,8 +307,8 @@ mod tests {
     #[test]
     fn left_in_the_only_tab_goes_back_beside() {
         let mut pass = Pass::default();
-        let beside = At::Pane { tab: 1, beside: Some(neighbour(1)) };
+        let beside = At::Pane { tab: TabId(1), beside: Some(neighbour(1)) };
         assert_eq!(pass.see(beside, 1, 0, |_| true), None);
-        assert_eq!(pass.see(At::Sidebar { tab: 1 }, 1, 0, |_| true), Some(On::Beside));
+        assert_eq!(pass.see(At::Sidebar { tab: TabId(1) }, 1, 0, |_| true), Some(On::Beside));
     }
 }
