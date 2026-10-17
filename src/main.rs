@@ -7,6 +7,7 @@ mod fetch;
 mod layout;
 mod paint;
 mod panes;
+mod pass;
 mod places;
 mod render;
 mod sessions;
@@ -17,9 +18,10 @@ use std::path::PathBuf;
 
 use agents::{AgentSet, Live, Seat};
 use dirs::{DirSet, LIST};
-use dock::Ask;
+use dock::{Ask, TabId};
 use elapsed::Age;
 use panes::Peeks;
+use pass::{At, On, Pass};
 use places::Places;
 use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
 use tree::{is_placeholder, Branch, Node, Place, Tree};
@@ -158,6 +160,7 @@ struct State {
     away: bool,
     places_at: u64,
     size: (usize, usize),
+    pass: Pass,
 }
 
 register_plugin!(State);
@@ -304,6 +307,7 @@ impl ZellijPlugin for State {
             Event::TabUpdate(tabs) => {
                 self.active_tab = tabs.iter().find(|t| t.active).map(|t| t.position);
                 self.tabs = tabs;
+                self.pass_over();
                 self.settle()
             },
             Event::Visible(true) if self.is_sidebar() => {
@@ -850,13 +854,38 @@ impl State {
             .and_then(|manifest| manifest.panes.get(&tab))
             .and_then(|panes| panes.iter().find(|p| p.is_plugin && p.id == self.plugin_id))
             .is_some_and(|own| own.is_focused);
-        focused && !floating
+        // The focus on its way past draws nothing, and leaves the highlight
+        // with the pane you are in.
+        focused && !floating && !self.pass.passing()
     }
 
     /// After the panes or the tabs change. Says whether to draw.
     fn settle(&mut self) -> bool {
         self.rebuild_agents(Selection::Hold);
         self.is_sidebar()
+    }
+
+    /// Sends the focus on when it lands in the column without being asked
+    /// there, as a key that moves it does.
+    fn pass_over(&mut self) {
+        if !self.is_sidebar() {
+            return;
+        }
+        let Some(tab) = self.tabs.iter().find(|t| t.active) else {
+            return;
+        };
+        let Some(panes) = self.panes.as_ref().and_then(|m| m.panes.get(&tab.position)) else {
+            return;
+        };
+        let Some(at) = focus_at(tab, panes, self.plugin_id) else {
+            return;
+        };
+        let stands = |pane| tiled(panes).any(|p| pane_id(p) == pane);
+        match self.pass.see(at, self.tabs.len(), self.frame, stands) {
+            Some(On::Back) => move_focus_or_tab(Direction::Left),
+            Some(On::Beside) => move_focus(Direction::Right),
+            None => {},
+        }
     }
 
     fn wake(&mut self) {
@@ -967,6 +996,7 @@ impl State {
         if !self.is_sidebar() {
             return false;
         }
+        self.pass.mouse(mouse);
         match mouse {
             Mouse::LeftClick(line, _) => {
                 let Ok(line) = usize::try_from(line) else {
@@ -1082,12 +1112,16 @@ impl State {
 
     /// A key binding broadcasts to every plugin in the session: the sidebar
     /// and the dock both hear it. The dock hides and shows the sidebar, and
-    /// answers a `focus` while it is hidden, bringing it back first.
-    fn sidebar_pipe(&self, ask: Ask) {
+    /// answers a `focus` while it is hidden, bringing it back first; the
+    /// sidebar waits for the focus, and keeps it.
+    fn sidebar_pipe(&mut self, ask: Ask) {
         match ask {
-            Ask::Focus if self.hidden() => {},
+            Ask::Focus if self.hidden() => self.pass.ask(self.frame),
             Ask::Focus if self.has_focus() => self.go_back(),
-            Ask::Focus => focus_plugin_pane(self.plugin_id, false, false),
+            Ask::Focus => {
+                self.pass.ask(self.frame);
+                focus_plugin_pane(self.plugin_id, false, false);
+            },
             Ask::Next => self.go_to_next(),
             Ask::Toggle => {},
         }
@@ -1130,6 +1164,49 @@ fn contents_of(session: SessionInfo) -> Contents {
         }
     }
     Contents { panes: total, focus }
+}
+
+/// Where this client's focus is, in the tab it is on, last reported, and that
+/// tab's panes. zellij marks focused, in each tab, the pane each client was on
+/// there last, and only the tabs say which tab this client is on. A tab that
+/// marks more than one is shared, and zellij says which is this client's.
+fn focus_at(tab: &TabInfo, panes: &[PaneInfo], plugin_id: u32) -> Option<At> {
+    if tab.are_floating_panes_visible {
+        return Some(At::Floating);
+    }
+    let id = TabId(tab.tab_id);
+    let own = |pane: &PaneInfo| pane.is_plugin && pane.id == plugin_id;
+    let mut focused = tiled(panes).filter(|p| p.is_focused);
+    let pane = if let (Some(pane), None) = (focused.next(), focused.next()) {
+        pane
+    } else {
+        // zellij names the tab by its id, though it calls it an index. The
+        // pane says enough: a pane stands in one tab only.
+        let (_, focus) = get_focused_pane_info().ok()?;
+        tiled(panes).find(|p| pane_id(p) == focus)?
+    };
+    if own(pane) {
+        return Some(At::Sidebar { tab: id });
+    }
+    if is_placeholder(pane) {
+        return Some(At::Placeholder { tab: id });
+    }
+    let column = tiled(panes).find(|p| own(p) || is_placeholder(p));
+    let beside = column.is_some_and(|c| pane.pane_x == c.pane_x + c.pane_columns);
+    Some(At::Pane { tab: id, beside: beside.then_some(pane_id(pane)) })
+}
+
+/// The panes of a tab that stand in its columns: neither floating nor hidden.
+fn tiled(panes: &[PaneInfo]) -> impl Iterator<Item = &PaneInfo> {
+    panes.iter().filter(|p| !p.is_floating && !p.is_suppressed)
+}
+
+fn pane_id(pane: &PaneInfo) -> PaneId {
+    if pane.is_plugin {
+        PaneId::Plugin(pane.id)
+    } else {
+        PaneId::Terminal(pane.id)
+    }
 }
 
 fn resize_self(plugin_id: u32) {

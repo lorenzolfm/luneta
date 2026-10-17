@@ -391,8 +391,17 @@ keybinds {
 `Alt s` on a hidden sidebar brings it back and moves into it. A tab opened while
 it is hidden opens with its column hidden too.
 
-`Alt h`, which zellij binds to move the focus left, reaches the sidebar from
-the leftmost pane as well.
+The keys that move the focus pass over the sidebar, as they pass over the tab
+bar: `Alt h`, which zellij binds to move the focus left, goes on from the pane
+beside the column to the tab before, and `Alt l` into a tab lands in the pane
+beside its column. `Alt s` and a click are the ways in. zellij does not say
+which key moved the focus, so one that moves it only within a tab, `h` in pane
+mode, goes on to the tab before too.
+
+zellij tells the sidebar of a click that only focuses it by the hover the click
+ends. With `mouse_hover_effects false` there is no hover, and such a click from
+the pane beside the column reads as `Alt h`; `mouse_click_through true` hands
+the sidebar the click itself.
 
 Two clients on one session — a terminal and `zellij web`, say — share the one
 sidebar. It goes with whoever switched tabs last, and comes back from hidden to
