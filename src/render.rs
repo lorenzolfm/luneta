@@ -1,12 +1,13 @@
 use unicode_width::UnicodeWidthStr;
 
-use crate::agents::{self, AgentRow, AgentSet};
+use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::dirs::{DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
 use crate::paint::{self, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
+use crate::tree::{Node, PaneNode, SessionNode, Tree};
 
 const TAG: usize = 0;
 const NAME: usize = 1;
@@ -174,7 +175,10 @@ fn interior(rect: &Rect, notes: &[Note], body: Vec<Painted>) -> Vec<Painted> {
 }
 
 fn note_line(rect: &Rect, note: &Note) -> Painted {
-    let inner = rect.inner_width();
+    note_within(rect.inner_width(), note)
+}
+
+fn note_within(inner: usize, note: &Note) -> Painted {
     let mut line = Line::new();
     let text = truncate(&note.text, inner);
     if note.error {
@@ -958,6 +962,184 @@ fn keys_text(width: usize, keys: &[Key]) -> Painted {
     text
 }
 
+/// One line saying what is wrong, for a pane that has nothing else to show.
+pub fn render_notice(text: &str, rows: usize, cols: usize) {
+    if rows > 0 {
+        print_at(&note_within(cols.saturating_sub(2), &Note::error(text)), 0, 0, cols);
+    }
+}
+
+/// How a sidebar `rows` tall is cut up: the tree from the top, the notes under
+/// it, and a line of keys at the bottom while the sidebar has the focus.
+struct Shelf {
+    tree: usize,
+    notes: usize,
+    help_y: Option<usize>,
+}
+
+impl Shelf {
+    fn new(rows: usize, notes: usize, focused: bool) -> Self {
+        let help = usize::from(focused && rows > 1);
+        let notes = notes.min(rows - help);
+        Shelf { tree: rows - help - notes, notes, help_y: (help == 1).then(|| rows - 1) }
+    }
+}
+
+pub fn render_sidebar(
+    tree: &Tree,
+    agents: &AgentSet,
+    focused: bool,
+    rows: usize,
+    cols: usize,
+    frame: u64,
+) {
+    let inner = cols.saturating_sub(2);
+    let notes = agent_note_texts(agents, inner);
+    let shelf = Shelf::new(rows, notes.len(), focused);
+    for (y, line) in sidebar_lines(tree, &notes, &shelf, focused, cols, frame).iter().enumerate() {
+        print_at(line, 0, y, cols);
+    }
+    if let Some(y) = shelf.help_y {
+        print_at(&sidebar_help(inner), 1, y, inner);
+    }
+}
+
+/// The row of the tree drawn on `line` of the sidebar, if one is.
+pub fn sidebar_row_at(
+    tree: &Tree,
+    agents: &AgentSet,
+    focused: bool,
+    rows: usize,
+    cols: usize,
+    line: usize,
+) -> Option<usize> {
+    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
+    let shelf = Shelf::new(rows, notes, focused);
+    if line >= shelf.tree {
+        return None;
+    }
+    let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
+    let index = start + line;
+    (index < end).then_some(index)
+}
+
+const UNFOLDED: &str = "▾";
+
+const FOLDED: &str = "▸";
+
+const HERE_MARK: &str = "›";
+
+const GLYPH: usize = 2;
+
+fn sidebar_lines(
+    tree: &Tree,
+    notes: &[Note],
+    shelf: &Shelf,
+    focused: bool,
+    cols: usize,
+    frame: u64,
+) -> Vec<Painted> {
+    let inner = cols.saturating_sub(2);
+    let mut lines = Vec::with_capacity(shelf.tree + shelf.notes);
+    if tree.rows.is_empty() {
+        if shelf.tree > 0 {
+            lines.push(note_within(inner, &Note::dim("no sessions")));
+        }
+    } else {
+        let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
+        let window = &tree.rows[start..end];
+        let glyphs = window
+            .iter()
+            .filter_map(|node| match node {
+                Node::Pane(PaneNode { agent: Some(mark), .. }) => {
+                    Some(agents::abbr_tag(&mark.status, frame).width())
+                },
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .max(GLYPH);
+        for (offset, node) in window.iter().enumerate() {
+            let line = match node {
+                Node::Session(node) => branch_line(node, inner, frame),
+                Node::Pane(node) => leaf_line(node, glyphs, inner, frame),
+            };
+            let selected = focused && tree.rows.selected() == Some(start + offset);
+            lines.push(if selected { line.selected() } else { line });
+        }
+    }
+    lines.resize_with(shelf.tree, || Painted::new(" ".repeat(inner + 2)));
+    lines.extend(notes.iter().take(shelf.notes).map(|note| note_within(inner, note)));
+    lines
+}
+
+fn branch_line(node: &SessionNode, inner: usize, frame: u64) -> Painted {
+    let (badge, level) = branch_badge(node, frame);
+    let reserve = if badge.is_empty() { 0 } else { badge.width() + 1 };
+    let mut line = Line::new();
+    line.push(if node.folded { FOLDED } else { UNFOLDED }, TAG);
+    line.gap(1);
+    let room = inner.saturating_sub(line.columns() + reserve);
+    line.push(&truncate(&node.name, room), if node.current { ACCENT } else { NAME });
+    if !badge.is_empty() {
+        line.pad_to(inner.saturating_sub(badge.width()));
+        line.push(&badge, level);
+    }
+    line.finish(inner)
+}
+
+/// What a session says on its own row: how many of its agents wait for you,
+/// and once it is folded, the glyph of the one that wants you most.
+fn branch_badge(node: &SessionNode, frame: u64) -> (String, usize) {
+    if node.waiting > 0 {
+        let glyph = agents::abbr_tag(&Status::Waiting, frame);
+        return (format!("{glyph}{}", node.waiting), ACCENT);
+    }
+    match &node.loudest {
+        Some(status) if node.folded => (agents::abbr_tag(status, frame), TAG),
+        _ => (String::new(), TAG),
+    }
+}
+
+fn leaf_line(node: &PaneNode, glyphs: usize, inner: usize, frame: u64) -> Painted {
+    let mut line = Line::new();
+    if node.here {
+        line.push(HERE_MARK, ACCENT);
+    } else {
+        line.gap(1);
+    }
+    line.gap(1);
+    if let Some(mark) = &node.agent {
+        let level = if mark.status.is_waiting() { ACCENT } else { TAG };
+        line.push(&agents::abbr_tag(&mark.status, frame), level);
+    }
+    line.pad_to(2 + glyphs);
+    line.gap(1);
+    let age = node.agent.as_ref().map(|mark| mark.age.label()).unwrap_or_default();
+    let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
+    let room = inner.saturating_sub(line.columns() + reserve);
+    let level = if node.agent.is_some() { NAME } else { TAG };
+    line.push(&truncate(&node.label, room), level);
+    if !age.is_empty() {
+        line.pad_to(inner.saturating_sub(age.width()));
+        line.push(&age, LABEL);
+    }
+    line.finish(inner)
+}
+
+fn sidebar_help(width: usize) -> Painted {
+    keys_text(
+        width,
+        &[
+            ("<↓↑>", "Move", "Move"),
+            ("<ENTER>", "Go", "Go"),
+            ("<←→>", "Fold", "Fold"),
+            ("<n>", "Next", "Next"),
+            ("<ESC>", "Back", "Back"),
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +1147,8 @@ mod tests {
     use crate::places::Places;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Session, Sessions};
+    use crate::elapsed::Held;
+    use crate::tree::Mark;
 
     fn picture<R: Into<PreviewRow>>(
         rect: &Rect,
@@ -1682,4 +1866,152 @@ mod tests {
         \x1b[33m\u{e6a8} \x1b[1;4mCargo.toml\x1b[0m\n\
         \x1b[33m\u{e673} \x1b[1;4mMakefile\x1b[0m\n\
         \x1b[33m\u{f00ba} \x1b[1;4mREADME.md\x1b[0m\n";
+
+    fn session_node(name: &str, folded: bool, waiting: usize, loudest: Option<&str>) -> Node {
+        Node::Session(SessionNode {
+            name: name.to_owned(),
+            current: false,
+            folded,
+            waiting,
+            loudest: loudest.map(|word| Status::parse(Some(word))),
+        })
+    }
+
+    fn pane_node(session: &str, id: u32, label: &str, agent: Option<(&str, u64)>) -> Node {
+        Node::Pane(PaneNode {
+            session: session.to_owned(),
+            id,
+            label: label.to_owned(),
+            agent: agent.map(|(word, age)| Mark {
+                status: Status::parse(Some(word)),
+                age: Held::from_secs(age),
+            }),
+            here: false,
+        })
+    }
+
+    fn here(node: Node) -> Node {
+        match node {
+            Node::Pane(pane) => Node::Pane(PaneNode { here: true, ..pane }),
+            session @ Node::Session(_) => session,
+        }
+    }
+
+    fn sidebar_tree(nodes: Vec<Node>, selected: usize) -> Tree {
+        let mut tree = Tree::default();
+        tree.rows = Cursor::seeded(nodes, selected);
+        tree
+    }
+
+    fn sidebar_picture(
+        tree: &Tree,
+        notes: &[Note],
+        focused: bool,
+        rows: usize,
+        cols: usize,
+    ) -> Vec<String> {
+        let shelf = Shelf::new(rows, notes.len(), focused);
+        sidebar_lines(tree, notes, &shelf, focused, cols, 0)
+            .iter()
+            .map(|line| line.content().to_owned())
+            .collect()
+    }
+
+    fn workday() -> Vec<Node> {
+        vec![
+            session_node("bipa", false, 1, Some("waiting")),
+            pane_node("bipa", 31, "handoff-eng-11259-pr4b", Some(("idle", 13 * HOUR))),
+            pane_node("bipa", 39, "dda-bank-slip-paid-feature", Some(("waiting", 180))),
+            pane_node("bipa", 47, "Handoff pix outflow request readback", Some(("busy", 12))),
+            session_node("floresta", true, 0, Some("busy")),
+            session_node("unnamed", false, 0, Some("busy")),
+            here(pane_node("unnamed", 0, "orca-copy", Some(("busy", 12)))),
+            pane_node("unnamed", 1, "~/P/m/unnamed", None),
+        ]
+    }
+
+    #[test]
+    fn the_sidebar_draws_each_session_over_its_panes() {
+        let tree = sidebar_tree(workday(), 6);
+        assert_eq!(
+            sidebar_picture(&tree, &[], false, 9, 32),
+            vec![
+                " ▾ bipa                     🙋1 ",
+                "   ☕ handoff-eng-11259-pr… 13h ",
+                "   🙋 dda-bank-slip-paid-fe… 3m ",
+                "   ⠋  Handoff pix outflow … 12s ",
+                " ▸ floresta                   ⠋ ",
+                " ▾ unnamed                      ",
+                " › ⠋  orca-copy             12s ",
+                "      ~/P/m/unnamed             ",
+                "                                ",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_keys_are_only_spelled_out_while_the_sidebar_has_the_focus() {
+        let tree = sidebar_tree(workday(), 0);
+        let notes = [Note::error("claude-ps: gone")];
+        let unfocused = sidebar_picture(&tree, &notes, false, 6, 32);
+        assert_eq!(unfocused.len(), 6);
+        assert_eq!(unfocused[5], " claude-ps: gone                ");
+        assert!(Shelf::new(6, 1, false).help_y.is_none());
+
+        let focused = sidebar_picture(&tree, &notes, true, 6, 32);
+        assert_eq!(focused.len(), 5);
+        assert_eq!(focused[4], " claude-ps: gone                ");
+        assert_eq!(Shelf::new(6, 1, true).help_y, Some(5));
+        assert!(sidebar_help(30).content().width() <= 30);
+    }
+
+    #[test]
+    fn the_sidebar_scrolls_to_keep_the_cursor_in_sight() {
+        let tree = sidebar_tree(workday(), 7);
+        let lines = sidebar_picture(&tree, &[], false, 3, 32);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[2].contains("~/P/m/unnamed"), "{lines:?}");
+        let agents = AgentSet::default();
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 0), Some(5));
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 2), Some(7));
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 3), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 3, 32, 2), None);
+    }
+
+    #[test]
+    fn a_click_below_the_last_row_lands_on_nothing() {
+        let tree = sidebar_tree(workday(), 0);
+        let agents = AgentSet::default();
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 7), Some(7));
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 8), None);
+        assert_eq!(sidebar_row_at(&Tree::default(), &agents, false, 20, 32, 0), None);
+    }
+
+    #[test]
+    fn a_sidebar_with_no_sessions_says_so() {
+        assert_eq!(
+            sidebar_picture(&Tree::default(), &[], false, 2, 20),
+            vec![" no sessions        ", "                    "]
+        );
+    }
+
+    #[test]
+    fn every_sidebar_line_is_exactly_the_width_of_the_pane() {
+        let notes = [Note::dim("2 agents sit in panes luneta cannot find")];
+        for cols in 2..48 {
+            for rows in 1..12 {
+                for focused in [false, true] {
+                    for selected in [0, 3, 7] {
+                        let tree = sidebar_tree(workday(), selected);
+                        let lines = sidebar_picture(&tree, &notes, focused, rows, cols);
+                        let help = usize::from(focused && rows > 1);
+                        assert_eq!(lines.len(), rows - help, "{cols}x{rows}");
+                        for line in lines {
+                            assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

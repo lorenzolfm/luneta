@@ -89,6 +89,7 @@ pub struct AgentRow {
     reported: String,
     pub seat: Seat,
     pub display: String,
+    pub chosen: bool,
     pub pane: u32,
     pub status: Status,
     pub age: Held,
@@ -240,6 +241,7 @@ impl AgentSet {
                 if matches!(seat, Seat::Here(_)) && origin == Some(agent.pane) {
                     continue;
                 }
+                let chosen = agent.name.is_some();
                 let display = agent
                     .name
                     .clone()
@@ -256,6 +258,7 @@ impl AgentSet {
                     reported: agent.reported.clone(),
                     seat,
                     display,
+                    chosen,
                     pane: agent.pane,
                     status: agent.status.clone(),
                     age: agent.age.grown_by(since),
@@ -293,6 +296,26 @@ impl AgentSet {
     pub fn any_busy(&self) -> bool {
         self.rows.iter().any(|row| row.status.is_busy())
     }
+
+    /// The agent after the one you are in, among those that want you: the
+    /// waiting first, then the idle, the most recent first, which is the order
+    /// the rows are already in. Wraps around, and passes over the pane you are
+    /// in when it is the only one.
+    pub fn next_wanted(&self, here: Option<(&str, u32)>) -> Option<&AgentRow> {
+        let wanted: Vec<&AgentRow> = self
+            .rows
+            .iter()
+            .filter(|row| matches!(row.status, Status::Waiting | Status::Idle))
+            .collect();
+        let at = here.and_then(|(session, pane)| {
+            wanted.iter().position(|row| row.seat.session() == session && row.pane == pane)
+        });
+        match at {
+            Some(_) if wanted.len() == 1 => None,
+            Some(at) => wanted.get((at + 1) % wanted.len()).copied(),
+            None => wanted.first().copied(),
+        }
+    }
 }
 
 fn mark_shared(rows: &mut [AgentRow]) {
@@ -308,7 +331,7 @@ fn mark_shared(rows: &mut [AgentRow]) {
     }
 }
 
-fn status_rank(status: &Status) -> u8 {
+pub fn status_rank(status: &Status) -> u8 {
     match status {
         Status::Waiting => 0,
         Status::Idle => 1,
@@ -601,6 +624,40 @@ mod tests {
         );
         assert!(!Status::Unreported.is_waiting());
         assert!(!Status::Unreported.is_busy());
+    }
+
+    #[test]
+    fn the_next_agent_that_wants_you_comes_round_in_order() {
+        let json = r#"[
+            {"status":"idle","status_age":90,"cwd":"/w/a","zellij":{"session":"a","pane":"0"}},
+            {"status":"busy","status_age":5,"cwd":"/w/b","zellij":{"session":"b","pane":"0"}},
+            {"status":"waiting","status_age":30,"cwd":"/w/c","zellij":{"session":"c","pane":"0"}},
+            {"status":"idle","status_age":10,"cwd":"/w/d","zellij":{"session":"d","pane":"0"}}]"#;
+        let places = Places::of(&[
+            ("a", &[(0, "/w/a")]),
+            ("b", &[(0, "/w/b")]),
+            ("c", &[(0, "/w/c")]),
+            ("d", &[(0, "/w/d")]),
+        ]);
+        let agents = rows(json, None, &places);
+        let next = |here: Option<(&str, u32)>| {
+            agents.next_wanted(here).map(|row| row.seat.session().to_owned())
+        };
+        assert_eq!(next(None).as_deref(), Some("c"));
+        assert_eq!(next(Some(("c", 0))).as_deref(), Some("d"));
+        assert_eq!(next(Some(("d", 0))).as_deref(), Some("a"));
+        assert_eq!(next(Some(("a", 0))).as_deref(), Some("c"));
+        assert_eq!(next(Some(("b", 0))).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn the_only_agent_that_wants_you_is_not_next_when_you_are_in_it() {
+        let places = Places::of(&[("s", &[(0, "/w/s")])]);
+        let agents = rows(&one(r#""waiting""#), None, &places);
+        assert!(agents.next_wanted(Some(("s", 0))).is_none());
+        assert_eq!(agents.next_wanted(Some(("s", 1))).map(|row| row.pane), Some(0));
+        let busy = rows(&one(r#""busy""#), None, &places);
+        assert!(busy.next_wanted(None).is_none());
     }
 
     #[test]

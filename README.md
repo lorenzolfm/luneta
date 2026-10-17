@@ -31,6 +31,7 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Create, hop between and delete sessions
 * Jump to the agent that is waiting for you
 * Create a session in a directory you work in
+* Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -80,6 +81,38 @@ Lists the directories you work in, in frecency order, and lets you create a new 
 
 ---
 
+### Sidebar
+
+The same plugin, docked to the left of the tab you are in instead of floating
+over it: every live session, the panes in it, and what the agent in each pane
+is doing. One sidebar for the whole session, which follows you from tab to tab.
+
+```text
+▾ bipa                     🙋1
+  ☕ handoff-eng-11259-pr… 13h
+  🙋 dda-bank-slip-paid-fe… 3m
+  ⠋  Handoff pix outflow … 12s
+▸ floresta                   ⠋
+▾ unnamed
+› ⠋  orca-copy             12s
+     ~/P/m/unnamed
+```
+
+Sessions keep their place, oldest first, so a row never moves under your eye
+or your mouse. Which agent wants you is the job of the glyph, the count on its
+session's row, and the `next` key — not of the order.
+
+An agent's row is named for what it is doing: the name you gave it, or else
+the title Claude Code gives its pane. A pane with no agent in it is dimmed, and
+`›` marks the pane you are in.
+
+Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
+and sessions alike. A folded session keeps its count and shows the glyph of
+the agent that wants you most.
+
+One key hides the sidebar, the panes beside it taking its columns in every tab,
+and brings it back.
+
 ## Getting started
 
 ### Requirements
@@ -104,9 +137,11 @@ plugins {
 }
 ```
 
-Zellij will prompt once for `RunCommands`, `ReadApplicationState` and
-`ChangeApplicationState`. `RunCommands` is how luneta reaches `zoxide`, `eza`,
-`claude-ps` and `zellij` itself.
+Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
+`ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
+luneta reaches `zoxide`, `eza`, `claude-ps` and `zellij` itself;
+`OpenTerminalsOrPlugins` is how the [dock](#dock-the-sidebar) opens the sidebar.
+Every mode asks for all four, since zellij keeps one grant for a plugin.
 
 <details>
 <summary><strong>Prefer to verify the bytes first?</strong></summary>
@@ -170,6 +205,190 @@ keybinds {
 }
 ```
 
+### Dock the sidebar
+
+The sidebar is one pane for the whole session. The dock keeps it in the tab on
+screen: the same plugin, in the background, loaded with every session in
+`config.kdl`:
+
+```kdl
+load_plugins {
+    "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+        mode "dock"
+    }
+}
+```
+
+A `mode` luneta does not know does nothing but say so, in its pane if it has
+one and in zellij's log.
+
+Every tab keeps a column for the sidebar to dock into: a placeholder, a pane that
+runs `tail -f /dev/null`. Give it to every tab in a layout:
+
+```kdl
+// ~/.config/zellij/layouts/sidebar.kdl
+layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane size=32 borderless=true command="tail" {
+            args "-f" "/dev/null"
+        }
+        pane focus=true
+    }
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
+```
+
+When another tab comes on screen, the sidebar hands its tab back the placeholder
+and takes the new tab's, in its place, so the panes beside it never change size.
+The dock opens the sidebar when the session starts, and again if the tab that
+held it closes. Closing the sidebar hides it. A tab closes with the last pane
+beside its column, as it would without one, and the session ends with its last
+tab.
+
+zellij opens every new tab of a session from the layout the session was made
+with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every new
+session its column. Leave the `pane` in: a tab of nothing but the placeholder
+closes as soon as it opens, so a session from a layout of nothing but a
+`default_tab_template` ends as soon as it starts. A session that is already
+running keeps its own layout, with no column to dock into; start it again.
+
+A layout of your own leaves zellij's swap layouts behind: the ones `Alt [` and
+`Alt ]` step through, and that arrange a tab as you open panes in it. Give the
+layout its own, with the placeholder in a column of its own, in a file beside it.
+zellij's, with every pane count one higher for the column:
+
+```kdl
+// ~/.config/zellij/layouts/sidebar.swap.kdl
+tab_template name="ui" {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane size=32 borderless=true command="tail" {
+            args "-f" "/dev/null"
+        }
+        pane {
+            children
+        }
+    }
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
+
+swap_tiled_layout name="vertical" {
+    ui max_panes=6 {
+        pane split_direction="vertical" {
+            pane
+            pane { children; }
+        }
+    }
+    ui max_panes=9 {
+        pane split_direction="vertical" {
+            pane { children; }
+            pane { pane; pane; pane; pane; }
+        }
+    }
+    ui max_panes=13 {
+        pane split_direction="vertical" {
+            pane { children; }
+            pane { pane; pane; pane; pane; }
+            pane { pane; pane; pane; pane; }
+        }
+    }
+}
+
+swap_tiled_layout name="horizontal" {
+    ui max_panes=5 {
+        pane
+        pane
+    }
+    ui max_panes=9 {
+        pane {
+            pane split_direction="vertical" { children; }
+            pane split_direction="vertical" { pane; pane; pane; pane; }
+        }
+    }
+    ui max_panes=13 {
+        pane {
+            pane split_direction="vertical" { children; }
+            pane split_direction="vertical" { pane; pane; pane; pane; }
+            pane split_direction="vertical" { pane; pane; pane; pane; }
+        }
+    }
+}
+
+swap_tiled_layout name="stacked" {
+    ui min_panes=5 {
+        pane stacked=true { children; }
+    }
+}
+
+swap_tiled_layout name="half-stacked" {
+    ui min_panes=6 {
+        pane split_direction="vertical" {
+            pane
+            pane stacked=true { children; }
+        }
+    }
+}
+```
+
+The floating ones, which do not touch the column, are the
+`swap_floating_layout` blocks of `zellij setup --dump-swap-layout default`. The
+sidebar needs the tiled ones to come back to its column after hiding, in a tab
+of more than one terminal.
+
+Three key bindings drive it without moving your hands to it. A `MessagePlugin`
+with no location goes to every plugin in the session: the dock answers
+`toggle`, and the sidebar `focus` and `next`.
+
+```kdl
+keybinds {
+    normal {
+        // Into the sidebar, and back out to the pane you came from.
+        bind "Alt s" {
+            MessagePlugin {
+                name "sidebar"
+                payload "focus"
+            }
+        }
+        // The next agent that wants you: the waiting first, then the idle,
+        // the most recent first.
+        bind "Alt a" {
+            MessagePlugin {
+                name "sidebar"
+                payload "next"
+            }
+        }
+        // Hide the sidebar, or bring it back.
+        bind "Alt b" {
+            MessagePlugin {
+                name "sidebar"
+                payload "toggle"
+            }
+        }
+    }
+}
+```
+
+`Alt s` on a hidden sidebar brings it back and moves into it. A tab opened while
+it is hidden opens with its column hidden too.
+
+`Alt h`, which zellij binds to move the focus left, reaches the sidebar from
+the leftmost pane as well.
+
+Two clients on one session — a terminal and `zellij web`, say — share the one
+sidebar. It goes with whoever switched tabs last, and comes back from hidden to
+the tab of the client that attached first. A key reaches the plugins of every
+client, and zellij does not say whose it was, so `Alt s` and `Alt a` act for
+both.
+
 ---
 
 ## Usage
@@ -186,6 +405,17 @@ Press your key, type, press `Enter`.
 | `Del` | kill a live session, or delete a dead one |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
+
+In the sidebar, once it has the focus:
+
+| key | does |
+|---|---|
+| `↓` `↑` / `j` `k` | move the highlight |
+| `Enter` | go to the highlighted pane, or switch to the highlighted session |
+| `←` `→` / `h` `l` | fold / unfold the session |
+| `Space` | fold or unfold |
+| `n` | go to the next agent that wants you |
+| `Esc` | back to the pane you came from |
 
 ---
 
