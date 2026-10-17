@@ -880,11 +880,6 @@ impl State {
         }
         let follow = !self.sidebar_focused();
         if let Role::Sidebar(tree) = &mut self.role {
-            // A search lasts while the sidebar has the focus. One left behind
-            // would keep the rows it hides out of sight.
-            if follow {
-                tree.close_search();
-            }
             tree.rebuild(&self.branches, current.as_deref(), &self.agents, self.here, follow);
         }
     }

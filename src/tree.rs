@@ -183,6 +183,9 @@ impl Tree {
     /// kept, with the session of each pane that does, unfolded. A session
     /// found by its name alone shows as folded. The cursor goes to the best
     /// match when the term changes, and stays on its row otherwise.
+    ///
+    /// A search lasts while the sidebar has the focus, so `follow` closes it.
+    /// One left behind would keep the rows it hides out of sight.
     pub fn rebuild(
         &mut self,
         branches: &[Branch],
@@ -191,6 +194,9 @@ impl Tree {
         here: Option<u32>,
         follow: bool,
     ) {
+        if follow {
+            self.search = None;
+        }
         let seated: HashMap<(&str, u32), &AgentRow> =
             agents.rows.iter().map(|row| ((row.seat.session(), row.pane), row)).collect();
 
@@ -744,18 +750,25 @@ mod tests {
     fn a_pane_a_search_finds_unfolds_its_session_until_the_search_closes() {
         let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")]), branch("b", 1, &[(4, "x")])];
         let set = agents(&[]);
-        let mut tree = Tree::default();
-        tree.rebuild(&branches, None, &set, None, false);
-        assert!(tree.fold(true));
+        // Closed by hand, or by the sidebar losing the focus: a rebuild that
+        // follows you out of it.
+        for lost_focus in [false, true] {
+            let mut tree = Tree::default();
+            tree.rebuild(&branches, None, &set, None, false);
+            assert!(tree.fold(true));
 
-        tree.search_for("two".to_owned());
-        tree.rebuild(&branches, None, &set, None, false);
-        assert_eq!(drawn(&tree), ["▾ a", "  - two"]);
+            tree.search_for("two".to_owned());
+            tree.rebuild(&branches, None, &set, None, false);
+            assert_eq!(drawn(&tree), ["▾ a", "  - two"]);
 
-        assert!(tree.close_search());
-        tree.rebuild(&branches, None, &set, None, false);
-        assert_eq!(drawn(&tree), ["▸ a", "▾ b", "  - x"]);
-        assert_eq!(selected(&tree), Some(Place::Session("a".to_owned())));
+            if !lost_focus {
+                assert!(tree.close_search());
+            }
+            tree.rebuild(&branches, None, &set, None, lost_focus);
+            assert_eq!(tree.search(), None, "lost focus: {lost_focus}");
+            assert_eq!(drawn(&tree), ["▸ a", "▾ b", "  - x"], "lost focus: {lost_focus}");
+            assert_eq!(selected(&tree), Some(Place::Session("a".to_owned())));
+        }
     }
 
     #[test]
