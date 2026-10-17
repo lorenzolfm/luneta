@@ -871,49 +871,21 @@ impl State {
         if !self.is_sidebar() {
             return;
         }
-        let Some(at) = self.focus_at() else {
+        let Some(tab) = self.tabs.iter().find(|t| t.active) else {
             return;
         };
-        match self.pass.see(at, self.tabs.len(), self.frame) {
+        let Some(panes) = self.panes.as_ref().and_then(|m| m.panes.get(&tab.position)) else {
+            return;
+        };
+        let Some(at) = focus_at(tab, panes, self.plugin_id) else {
+            return;
+        };
+        let stands = |pane| tiled(panes).any(|p| pane_id(p) == pane);
+        match self.pass.see(at, self.tabs.len(), self.frame, stands) {
             Some(On::Back) => move_focus_or_tab(Direction::Left),
             Some(On::Beside) => move_focus(Direction::Right),
             None => {},
         }
-    }
-
-    /// Where this client's focus is, in the panes and the tabs last reported.
-    /// zellij marks focused, in each tab, the pane each client was on there
-    /// last, and only the tabs say which tab this client is on. A tab that
-    /// marks more than one is shared, and zellij says which is this client's.
-    fn focus_at(&self) -> Option<At> {
-        let tab = self.tabs.iter().find(|t| t.active)?;
-        let id = tab.tab_id;
-        if tab.are_floating_panes_visible {
-            return Some(At::Pane { tab: id, beside: false });
-        }
-        let panes = self.panes.as_ref()?.panes.get(&tab.position)?;
-        let tiled = || panes.iter().filter(|p| !p.is_floating && !p.is_suppressed);
-        let own = |pane: &PaneInfo| pane.is_plugin && pane.id == self.plugin_id;
-        let mut focused = tiled().filter(|p| p.is_focused);
-        let pane = if let (Some(pane), None) = (focused.next(), focused.next()) {
-            pane
-        } else {
-            let (position, focus) = get_focused_pane_info().ok()?;
-            let is = |p: &&PaneInfo| match focus {
-                PaneId::Plugin(id) => p.is_plugin && p.id == id,
-                PaneId::Terminal(id) => !p.is_plugin && p.id == id,
-            };
-            tiled().filter(|_| position == tab.position).find(is)?
-        };
-        if own(pane) {
-            return Some(At::Sidebar { tab: id });
-        }
-        if is_placeholder(pane) {
-            return Some(At::Placeholder { tab: id });
-        }
-        let column = tiled().find(|p| own(p) || is_placeholder(p));
-        let beside = column.is_some_and(|c| pane.pane_x == c.pane_x + c.pane_columns);
-        Some(At::Pane { tab: id, beside })
     }
 
     fn wake(&mut self) {
@@ -1192,6 +1164,49 @@ fn contents_of(session: SessionInfo) -> Contents {
         }
     }
     Contents { panes: total, focus }
+}
+
+/// Where this client's focus is, in the tab it is on, last reported, and that
+/// tab's panes. zellij marks focused, in each tab, the pane each client was on
+/// there last, and only the tabs say which tab this client is on. A tab that
+/// marks more than one is shared, and zellij says which is this client's.
+fn focus_at(tab: &TabInfo, panes: &[PaneInfo], plugin_id: u32) -> Option<At> {
+    let id = tab.tab_id;
+    if tab.are_floating_panes_visible {
+        return Some(At::Pane { tab: id, beside: None });
+    }
+    let own = |pane: &PaneInfo| pane.is_plugin && pane.id == plugin_id;
+    let mut focused = tiled(panes).filter(|p| p.is_focused);
+    let pane = if let (Some(pane), None) = (focused.next(), focused.next()) {
+        pane
+    } else {
+        // zellij names the tab by its id, though it calls it an index. The
+        // pane says enough: a pane stands in one tab only.
+        let (_, focus) = get_focused_pane_info().ok()?;
+        tiled(panes).find(|p| pane_id(p) == focus)?
+    };
+    if own(pane) {
+        return Some(At::Sidebar { tab: id });
+    }
+    if is_placeholder(pane) {
+        return Some(At::Placeholder { tab: id });
+    }
+    let column = tiled(panes).find(|p| own(p) || is_placeholder(p));
+    let beside = column.is_some_and(|c| pane.pane_x == c.pane_x + c.pane_columns);
+    Some(At::Pane { tab: id, beside: beside.then_some(pane_id(pane)) })
+}
+
+/// The panes of a tab that stand in its columns: neither floating nor hidden.
+fn tiled(panes: &[PaneInfo]) -> impl Iterator<Item = &PaneInfo> {
+    panes.iter().filter(|p| !p.is_floating && !p.is_suppressed)
+}
+
+fn pane_id(pane: &PaneInfo) -> PaneId {
+    if pane.is_plugin {
+        PaneId::Plugin(pane.id)
+    } else {
+        PaneId::Terminal(pane.id)
+    }
 }
 
 fn resize_self(plugin_id: u32) {

@@ -12,6 +12,8 @@
 //! hover over the sidebar first, so a click comes as a mouse event just before
 //! the panes that show the sidebar focused. A key comes with none.
 
+use zellij_tile::prelude::PaneId;
+
 use crate::TICKS_PER_SECOND;
 
 /// How long the focus you asked for may take to come, in ticks. A hidden
@@ -22,8 +24,9 @@ const WAIT: u64 = 2 * TICKS_PER_SECOND;
 /// tab by its id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum At {
-    /// A pane of its own; `beside` when it stands right of the column.
-    Pane { tab: usize, beside: bool },
+    /// A pane of its own; `beside` names it when it stands right of the
+    /// column.
+    Pane { tab: usize, beside: Option<PaneId> },
     Sidebar { tab: usize },
     Placeholder { tab: usize },
 }
@@ -52,9 +55,9 @@ enum Visit {
 #[derive(Debug, Default)]
 pub struct Pass {
     visit: Visit,
-    /// The pane the focus was on last, outside the column: its tab, and
-    /// whether it stands beside the column.
-    from: Option<(usize, bool)>,
+    /// The pane the focus was on last, outside the column: its tab, and the
+    /// pane when it stands beside the column.
+    from: Option<(usize, Option<PaneId>)>,
     /// Whether the mouse was on the sidebar since the report before.
     pointed: bool,
 }
@@ -76,9 +79,16 @@ impl Pass {
     }
 
     /// Takes in where the focus is after a report, and says where to send it
-    /// on, if anywhere. A focus sent on is not sent on again, whatever the
-    /// reports that come before it gets there.
-    pub fn see(&mut self, at: At, tabs: usize, frame: u64) -> Option<On> {
+    /// on, if anywhere; `stands` says whether a pane is still in the tab. A
+    /// focus sent on is not sent on again, whatever the reports that come
+    /// before it gets there.
+    pub fn see(
+        &mut self,
+        at: At,
+        tabs: usize,
+        frame: u64,
+        stands: impl Fn(PaneId) -> bool,
+    ) -> Option<On> {
         let pointed = std::mem::take(&mut self.pointed);
         if let Visit::Asked(asked) = self.visit {
             if frame.wrapping_sub(asked) > WAIT {
@@ -106,13 +116,23 @@ impl Pass {
             | (At::Placeholder { .. }, Visit::Asked(_)) => return None,
             (At::Sidebar { tab } | At::Placeholder { tab }, Visit::Out | Visit::In) => tab,
         };
+        let back = self.came_left(tab, stands) && tabs > 1;
         self.visit = Visit::Passing;
-        let back = self.from == Some((tab, true)) && tabs > 1;
         Some(if back { On::Back } else { On::Beside })
     }
 
     fn came_within(&self, tab: usize) -> bool {
         self.from.is_some_and(|(from, _)| from == tab)
+    }
+
+    /// Whether a key moved the focus left into the column, from the pane
+    /// beside it. One already in the column was not moved there: the sidebar
+    /// left the tab under it. Nor was one whose pane is gone: zellij hands the
+    /// focus of a pane that closes to the pane you were on before it, often
+    /// the sidebar.
+    fn came_left(&self, tab: usize, stands: impl Fn(PaneId) -> bool) -> bool {
+        let beside = self.from.and_then(|(from, beside)| beside.filter(|_| from == tab));
+        self.visit == Visit::Out && beside.is_some_and(stands)
     }
 }
 
@@ -125,12 +145,19 @@ mod tests {
         Ask,
         Point,
         Wait(u64),
+        /// The pane beside the column in this tab closes.
+        Close(usize),
     }
 
-    use Step::{Ask, Point, See, Wait};
+    use Step::{Ask, Close, Point, See, Wait};
+
+    /// The pane that stands beside the column in `tab`.
+    const fn neighbour(tab: usize) -> PaneId {
+        PaneId::Terminal(tab as u32)
+    }
 
     const fn pane(tab: usize, beside: bool) -> Step {
-        See(At::Pane { tab, beside })
+        See(At::Pane { tab, beside: if beside { Some(neighbour(tab)) } else { None } })
     }
 
     const fn sidebar(tab: usize) -> Step {
@@ -191,17 +218,29 @@ mod tests {
                 vec![pane(2, false), sidebar(2)],
                 vec![None, Some(On::Beside)],
             ),
+            (
+                "the pane beside the column closes, and zellij hands the sidebar the focus",
+                vec![pane(2, true), Close(2), sidebar(2)],
+                vec![None, Some(On::Beside)],
+            ),
+            (
+                "in the sidebar as it leaves for another client's tab, on the placeholder it leaves",
+                vec![pane(2, true), Ask, sidebar(2), placeholder(2)],
+                vec![None, None, Some(On::Beside)],
+            ),
         ];
         for (case, steps, sent) in cases {
             let mut pass = Pass::default();
             let mut frame = 0;
+            let mut closed = Vec::new();
             let mut seen = Vec::new();
             for step in steps {
                 match step {
-                    See(at) => seen.push(pass.see(at, 2, frame)),
+                    See(at) => seen.push(pass.see(at, 2, frame, |pane| !closed.contains(&pane))),
                     Ask => pass.ask(frame),
                     Point => pass.point(),
                     Wait(ticks) => frame += ticks,
+                    Close(tab) => closed.push(neighbour(tab)),
                 }
             }
             assert_eq!(seen, sent, "{case}");
@@ -211,7 +250,8 @@ mod tests {
     #[test]
     fn left_in_the_only_tab_goes_back_beside() {
         let mut pass = Pass::default();
-        assert_eq!(pass.see(At::Pane { tab: 1, beside: true }, 1, 0), None);
-        assert_eq!(pass.see(At::Sidebar { tab: 1 }, 1, 0), Some(On::Beside));
+        let beside = At::Pane { tab: 1, beside: Some(neighbour(1)) };
+        assert_eq!(pass.see(beside, 1, 0, |_| true), None);
+        assert_eq!(pass.see(At::Sidebar { tab: 1 }, 1, 0, |_| true), Some(On::Beside));
     }
 }
