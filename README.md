@@ -113,8 +113,19 @@ the agent that wants you most.
 Press `/` to search, as in less and vim. The tree narrows to the rows that
 match what you type, fuzzily, as the picker does: a session by its name, a pane
 by its row, its tab or its directory. The rows left keep their order, and the
-highlight lands on the best match, so `Alt s` `/` *a few characters* `Enter`
+highlight lands on the best match, so `Ctrl b` `/` *a few characters* `Enter`
 takes you anywhere. A folded session opens to show the panes found in it.
+
+One key goes to the next pane listed, and from the last back to the first, so
+pressing it again and again takes you down the sidebar, across sessions. A
+folded session's panes are left out.
+
+The sidebar and the picker keep your place as you go from one to the other.
+A key that opens the picker from the sidebar opens it on the row you had
+highlighted: Sessions on its session, Agents on the agent in its pane, or else
+the first agent in its session. `Ctrl b` from the picker closes it and
+highlights, in the sidebar, the session or the agent the picker had, unfolding
+its session.
 
 One key hides the sidebar, the panes beside it taking its columns in every tab,
 and brings it back.
@@ -355,18 +366,27 @@ The floating ones, which do not touch the column, are the
 sidebar needs the tiled ones to come back to its column after hiding, in a tab
 of more than one terminal.
 
-Three key bindings drive it without moving your hands to it. A `MessagePlugin`
-with no location goes to every plugin in the session: the dock answers
-`toggle`, and the sidebar `focus` and `next`.
+Key bindings drive it without moving your hands to it. A `MessagePlugin` with
+no location goes to every plugin in the session: the dock answers `toggle`, the
+sidebar `focus`, `cycle` and `next`, and the picker `focus` too, handing the
+sidebar its row. Bind the ones you want:
 
 ```kdl
 keybinds {
     normal {
         // Into the sidebar, and back out to the pane you came from.
-        bind "Alt s" {
+        bind "Ctrl b" {
             MessagePlugin {
                 name "sidebar"
                 payload "focus"
+            }
+        }
+        // The next pane the sidebar lists, and from the last back to the
+        // first.
+        bind "Ctrl f" {
+            MessagePlugin {
+                name "sidebar"
+                payload "cycle"
             }
         }
         // The next agent that wants you: the waiting first, then the idle,
@@ -388,13 +408,16 @@ keybinds {
 }
 ```
 
-`Alt s` on a hidden sidebar brings it back and moves into it. A tab opened while
-it is hidden opens with its column hidden too.
+zellij's own keys take `Ctrl b` into tmux mode: unbind it there, or pick
+another key.
+
+`Ctrl b` on a hidden sidebar brings it back and moves into it. A tab opened
+while it is hidden opens with its column hidden too.
 
 The keys that move the focus pass over the sidebar, as they pass over the tab
 bar: `Alt h`, which zellij binds to move the focus left, goes on from the pane
 beside the column to the tab before, and `Alt l` into a tab lands in the pane
-beside its column. `Alt s` and a click are the ways in. zellij does not say
+beside its column. `Ctrl b` and a click are the ways in. zellij does not say
 which key moved the focus, so one that moves it only within a tab, `h` in pane
 mode, goes on to the tab before too.
 
@@ -406,8 +429,8 @@ the sidebar the click itself.
 Two clients on one session — a terminal and `zellij web`, say — share the one
 sidebar. It goes with whoever switched tabs last, and comes back from hidden to
 the tab of the client that attached first. A key reaches the plugins of every
-client, and zellij does not say whose it was, so `Alt s` and `Alt a` act for
-both.
+client, and zellij does not say whose it was, so `Ctrl b`, `Ctrl f` and
+`Alt a` act for both.
 
 ---
 

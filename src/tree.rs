@@ -7,7 +7,7 @@
 //! A search hides the rows that do not match and leaves the rest in that
 //! order; the cursor, not the order, says which matches best.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -97,6 +97,34 @@ pub enum Place {
     Pane(String, u32),
 }
 
+const SESSION_ARG: &str = "session";
+
+const PANE_ARG: &str = "pane";
+
+impl Place {
+    /// The place as the arguments of a pipe message, by which the sidebar and
+    /// the picker hand each other the row they have highlighted.
+    pub fn to_args(&self) -> BTreeMap<String, String> {
+        let (session, pane) = match self {
+            Place::Session(session) => (session, None),
+            Place::Pane(session, pane) => (session, Some(pane)),
+        };
+        let mut args = BTreeMap::from([(SESSION_ARG.to_owned(), session.clone())]);
+        if let Some(pane) = pane {
+            args.insert(PANE_ARG.to_owned(), pane.to_string());
+        }
+        args
+    }
+
+    pub fn from_args(args: &BTreeMap<String, String>) -> Option<Self> {
+        let session = args.get(SESSION_ARG)?.clone();
+        match args.get(PANE_ARG) {
+            Some(pane) => Some(Place::Pane(session, pane.parse().ok()?)),
+            None => Some(Place::Session(session)),
+        }
+    }
+}
+
 pub enum Node {
     Session(SessionNode),
     Pane(PaneNode),
@@ -163,6 +191,13 @@ pub struct Tree {
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
     /// that is never searched needs none.
     matcher: Option<Box<SkimMatcherV2>>,
+    /// Whether the last `rebuild` had the cursor follow the pane you are in.
+    following: bool,
+    /// Where the cursor was when the sidebar last lost the focus, for the
+    /// picker the focus went to.
+    left: Option<Place>,
+    /// The row the picker had highlighted when it handed the focus over.
+    handed: Option<Place>,
 }
 
 /// The search box, while it is open.
@@ -186,6 +221,10 @@ impl Tree {
     ///
     /// A search lasts while the sidebar has the focus, so `follow` closes it.
     /// One left behind would keep the rows it hides out of sight.
+    ///
+    /// The row the cursor is on when `follow` comes is kept for the picker,
+    /// and a row the picker handed over holds the cursor against `follow`
+    /// until the sidebar has the focus.
     pub fn rebuild(
         &mut self,
         branches: &[Branch],
@@ -194,6 +233,13 @@ impl Tree {
         here: Option<u32>,
         follow: bool,
     ) {
+        if follow && !self.following {
+            self.left = self.rows.selected_row().map(Node::place);
+        }
+        if !follow {
+            self.left = None;
+        }
+        self.following = follow;
         if follow {
             self.search = None;
         }
@@ -283,7 +329,8 @@ impl Tree {
         } else {
             None
         };
-        let held = followed.or_else(|| self.rows.selected_row().map(Node::place));
+        let handed = if follow { self.handed.clone() } else { self.handed.take() };
+        let held = handed.or(followed).or_else(|| self.rows.selected_row().map(Node::place));
         let row_of = |place: &Place| rows.iter().position(|node| node.is(place));
         let at = match best {
             Some(best) if seek => Some(best),
@@ -320,6 +367,35 @@ impl Tree {
     /// brings every row back, the cursor on the row it was on.
     pub fn close_search(&mut self) -> bool {
         self.search.take().is_some()
+    }
+
+    /// Puts the cursor on `place`, the row the picker had highlighted when it
+    /// handed over the focus, from the next `rebuild` until the sidebar has
+    /// the focus. A pane in a folded session unfolds it, to show the row.
+    pub fn hand(&mut self, place: Place) {
+        if let Place::Pane(session, _) = &place {
+            self.folded.remove(session);
+        }
+        self.handed = Some(place);
+    }
+
+    /// Where the cursor was when the sidebar lost the focus, once.
+    pub fn take_left(&mut self) -> Option<Place> {
+        self.left.take()
+    }
+
+    /// The pane listed after `here`, or the first one when `here` is not
+    /// listed: where `cycle` goes. A folded session lists none of its panes,
+    /// and a search only the ones it finds.
+    pub fn after(&self, here: Option<&Place>) -> Option<Place> {
+        let panes: Vec<Place> =
+            self.rows.iter().filter(|node| matches!(node, Node::Pane(_))).map(Node::place).collect();
+        let at = here.and_then(|here| panes.iter().position(|place| place == here));
+        match at {
+            Some(_) if panes.len() == 1 => None,
+            Some(at) => panes.get((at + 1) % panes.len()).cloned(),
+            None => panes.first().cloned(),
+        }
     }
 
     /// A pane in a folded session is shown by its session's row.
@@ -683,6 +759,70 @@ mod tests {
 
         tree.rebuild(&branches, Some("a"), &set, Some(0), true);
         assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
+    }
+
+    #[test]
+    fn the_row_the_cursor_was_on_as_the_focus_left_is_kept_once() {
+        let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")]), branch("b", 1, &[(4, "x")])];
+        let set = agents(&[]);
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, Some("a"), &set, Some(0), false);
+        tree.rows.move_selection(4);
+        tree.rebuild(&branches, Some("a"), &set, Some(0), false);
+        assert_eq!(tree.take_left(), None);
+
+        // The cursor follows you out, and a second rebuild without the focus
+        // keeps the row it left from.
+        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
+        assert_eq!(tree.take_left(), Some(Place::Pane("b".to_owned(), 4)));
+        assert_eq!(tree.take_left(), None);
+    }
+
+    #[test]
+    fn a_row_the_picker_hands_over_holds_the_cursor_until_the_sidebar_has_the_focus() {
+        let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")]), branch("b", 1, &[(4, "x")])];
+        let set = agents(&[]);
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, Some("a"), &set, Some(0), false);
+        tree.rows.move_selection(3);
+        assert!(tree.fold(true));
+        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+
+        let handed = Place::Pane("b".to_owned(), 4);
+        tree.hand(handed.clone());
+        for focused in [false, false, true] {
+            tree.rebuild(&branches, Some("a"), &set, Some(0), !focused);
+            assert_eq!(selected(&tree), Some(handed.clone()), "focused: {focused}");
+        }
+        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
+    }
+
+    #[test]
+    fn cycle_goes_down_the_panes_listed_and_back_to_the_first() {
+        let branches = [
+            branch("a", 9, &[(0, "x"), (1, "y")]),
+            branch("b", 5, &[(4, "z")]),
+            branch("c", 1, &[(7, "w")]),
+        ];
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, None, &agents(&[]), None, false);
+        tree.rows.move_selection(5);
+        assert!(tree.fold(true));
+        tree.rebuild(&branches, None, &agents(&[]), None, false);
+        let pane = |session: &str, id| Some(Place::Pane(session.to_owned(), id));
+        for (here, after) in [
+            (pane("a", 0), pane("a", 1)),
+            (pane("a", 1), pane("b", 4)),
+            // From the last, past the folded session's.
+            (pane("b", 4), pane("a", 0)),
+            (pane("c", 7), pane("a", 0)),
+            (None, pane("a", 0)),
+        ] {
+            assert_eq!(tree.after(here.as_ref()), after, "{here:?}");
+        }
     }
 
     #[test]

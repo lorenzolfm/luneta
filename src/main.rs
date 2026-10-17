@@ -32,6 +32,14 @@ const SCREEN_PIPE: &str = "screen";
 /// The pipe a key binding reaches the sidebar through, its payload an `Ask`.
 const SIDEBAR_PIPE: &str = "sidebar";
 
+/// The pipe the sidebar and the picker hand each other the row they have
+/// highlighted through, as the focus goes from one to the other, its
+/// arguments a `Place`.
+const PLACE_PIPE: &str = "place";
+
+/// The title the picker gives its pane, by which the sidebar knows it.
+const PICKER_TITLE: &str = "luneta";
+
 /// `mode "dock"`, in `load_plugins`, makes the plugin the dock: one to a
 /// session, in the background, keeping a sidebar in the tab on screen. The
 /// sidebar it opens, `mode "sidebar"`, is a pane that never closes itself.
@@ -161,6 +169,12 @@ struct State {
     places_at: u64,
     size: (usize, usize),
     pass: Pass,
+    /// The row the sidebar had highlighted when the focus came to the
+    /// picker, for the lists to land on as they come, until a key moves them.
+    handed: Option<Place>,
+    /// Whether `focus` came while the picker showed, for the sidebar. The
+    /// picker closes once the sidebar has the focus, which hides it.
+    leaving: bool,
 }
 
 register_plugin!(State);
@@ -232,7 +246,7 @@ impl ZellijPlugin for State {
         match event {
             Event::PermissionRequestResult(status) => {
                 if matches!(status, PermissionStatus::Granted) {
-                    let title = if self.is_sidebar() { dock::SIDEBAR_TITLE } else { "luneta" };
+                    let title = if self.is_sidebar() { dock::SIDEBAR_TITLE } else { PICKER_TITLE };
                     rename_plugin_pane(self.plugin_id, title);
                     if !self.is_sidebar() {
                         resize_self(self.plugin_id);
@@ -333,13 +347,23 @@ impl ZellijPlugin for State {
             .as_deref()
             .filter(|_| message.name == SIDEBAR_PIPE)
             .and_then(Ask::parse);
+        let place = Some(&message.args)
+            .filter(|_| message.name == PLACE_PIPE)
+            .and_then(Place::from_args);
         match self.role {
             Role::Picker => {},
             Role::Sidebar(_) => {
                 if let Some(ask) = ask {
                     self.sidebar_pipe(ask);
                 }
-                return false;
+                let Some(place) = place else {
+                    return false;
+                };
+                if let Role::Sidebar(tree) = &mut self.role {
+                    tree.hand(place);
+                }
+                self.rebuild_tree();
+                return true;
             },
             Role::Dock(ref mut dock) => {
                 if let Some(ask) = ask {
@@ -348,6 +372,15 @@ impl ZellijPlugin for State {
                 return false;
             },
             Role::Unknown(_) => return false,
+        }
+        if ask == Some(Ask::Focus) {
+            self.leave();
+            return false;
+        }
+        if let Some(place) = place {
+            self.handed = Some(place);
+            self.land();
+            return true;
         }
         if message.name != SCREEN_PIPE {
             return false;
@@ -492,7 +525,26 @@ impl State {
         let since = self.agents_since();
         let live = Live::new(self.matches.current_session.as_deref(), &self.places);
         self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
+        self.land();
         self.rebuild_tree();
+    }
+
+    /// Puts the picker's lists on the row the sidebar handed over: the session
+    /// on Sessions, and on Agents the agent in that pane, or else the first in
+    /// that session. Both lists, so that `Tab` keeps the place too.
+    fn land(&mut self) {
+        let Some(place) = &self.handed else {
+            return;
+        };
+        let (session, pane) = match place {
+            Place::Session(session) => (session.as_str(), None),
+            Place::Pane(session, pane) => (session.as_str(), Some(*pane)),
+        };
+        let live = |row: &sessions::Row| row.kind == Kind::Live && row.name == session;
+        if let Some(at) = self.matches.rows.iter().position(live) {
+            self.matches.rows.select(at);
+        }
+        self.agents.select_seated(session, pane);
     }
 
     fn agents_since(&self) -> Age {
@@ -620,6 +672,7 @@ impl State {
     }
 
     fn handle_key(&mut self, key: &KeyWithModifier) -> bool {
+        self.handed = None;
         if key.bare_key == BareKey::Char('c') && key.has_modifiers(&[KeyModifier::Ctrl]) {
             close_self();
             return false;
@@ -861,8 +914,60 @@ impl State {
 
     /// After the panes or the tabs change. Says whether to draw.
     fn settle(&mut self) -> bool {
+        if self.leaving && !self.on_screen() {
+            close_self();
+        }
         self.rebuild_agents(Selection::Hold);
         self.is_sidebar()
+    }
+
+    /// `focus` from the picker goes to the sidebar, with the row the picker
+    /// has highlighted. The picker closes once the sidebar has the focus,
+    /// which hides the floating panes: closed first, it would hand the focus
+    /// back to the pane under it, which may be the sidebar, where a `focus`
+    /// takes you out instead.
+    fn leave(&mut self) {
+        if !self.on_screen() {
+            return;
+        }
+        let Some(sidebar) = self.sidebar_pane() else {
+            return;
+        };
+        if let Some(place) = self.highlighted() {
+            hand(sidebar, &place);
+        }
+        self.leaving = true;
+    }
+
+    /// Whether the picker shows, over the tab on screen.
+    fn on_screen(&self) -> bool {
+        let Some(tab) = self.own_tab() else {
+            return false;
+        };
+        self.tabs.iter().any(|t| t.position == tab && t.active && t.are_floating_panes_visible)
+    }
+
+    /// The sidebar's pane, hidden or not. Of two, the one the dock keeps.
+    fn sidebar_pane(&self) -> Option<u32> {
+        let manifest = self.panes.as_ref()?;
+        let panes = manifest.panes.values().flatten();
+        panes.filter(|p| p.is_plugin && p.title == dock::SIDEBAR_TITLE).map(|p| p.id).min()
+    }
+
+    /// The picker's highlighted row, as the sidebar lists it. A directory is
+    /// not a row of the sidebar, nor is a session that is not running.
+    fn highlighted(&self) -> Option<Place> {
+        match self.screen {
+            Screen::Sessions => {
+                let row = self.matches.rows.selected_row().filter(|row| row.kind == Kind::Live)?;
+                Some(Place::Session(row.name.clone()))
+            },
+            Screen::Agents => {
+                let row = self.agents.selected_row()?;
+                Some(Place::Pane(row.seat.session().to_owned(), row.pane))
+            },
+            Screen::Dirs => None,
+        }
     }
 
     /// Sends the focus on when it lands in the column without being asked
@@ -911,6 +1016,36 @@ impl State {
         if let Role::Sidebar(tree) = &mut self.role {
             tree.rebuild(&self.branches, current.as_deref(), &self.agents, self.here, follow);
         }
+        if let Some((picker, place)) = self.handing() {
+            hand(picker, &place);
+        }
+    }
+
+    /// The picker the focus left the sidebar for, and the row the cursor was
+    /// on as it left: a key that opens the picker from the sidebar opens it
+    /// there. The floating panes can show before the picker is among them, or
+    /// has its title; once they are hidden, the focus went to a pane in the
+    /// tab instead.
+    fn handing(&mut self) -> Option<(u32, Place)> {
+        let tab = self.tabs.iter().find(|t| t.active)?;
+        let floating = tab.are_floating_panes_visible;
+        let panes = self.panes.as_ref().and_then(|m| m.panes.get(&tab.position));
+        let picker = panes
+            .into_iter()
+            .flatten()
+            .find(|p| p.is_floating && p.is_focused && !p.is_suppressed)
+            .filter(|p| p.is_plugin && p.title == PICKER_TITLE)
+            .map(|p| p.id);
+        let Role::Sidebar(tree) = &mut self.role else {
+            return None;
+        };
+        if !floating {
+            tree.take_left();
+            return None;
+        }
+        let picker = picker?;
+        let place = tree.take_left()?;
+        Some((picker, place))
     }
 
     fn handle_sidebar_key(&mut self, key: &KeyWithModifier) -> bool {
@@ -1090,16 +1225,30 @@ impl State {
         }
     }
 
-    /// A hidden sidebar hears nothing of the panes, so the pane you are in
-    /// comes from zellij.
     fn go_to_next(&self) {
-        let pane = match get_focused_pane_info() {
-            Ok((_, PaneId::Terminal(pane))) => Some(pane),
-            _ => self.here,
-        };
-        let here = self.matches.current_session.as_deref().zip(pane);
+        let here = self.matches.current_session.as_deref().zip(self.pane_now());
         if let Some(row) = self.agents.next_wanted(here) {
             self.go_to(row.seat.session(), row.pane);
+        }
+    }
+
+    fn go_to_after(&self) {
+        let Role::Sidebar(tree) = &self.role else {
+            return;
+        };
+        let session = self.matches.current_session.clone();
+        let here = session.zip(self.pane_now()).map(|(session, pane)| Place::Pane(session, pane));
+        if let Some(Place::Pane(session, pane)) = tree.after(here.as_ref()) {
+            self.go_to(&session, pane);
+        }
+    }
+
+    /// The pane you are in. A hidden sidebar hears nothing of the panes, so it
+    /// comes from zellij.
+    fn pane_now(&self) -> Option<u32> {
+        match get_focused_pane_info() {
+            Ok((_, PaneId::Terminal(pane))) => Some(pane),
+            _ => self.here,
         }
     }
 
@@ -1123,6 +1272,7 @@ impl State {
                 focus_plugin_pane(self.plugin_id, false, false);
             },
             Ask::Next => self.go_to_next(),
+            Ask::Cycle => self.go_to_after(),
             Ask::Toggle => {},
         }
     }
@@ -1209,6 +1359,15 @@ fn pane_id(pane: &PaneInfo) -> PaneId {
     }
 }
 
+/// Hands the sidebar or the picker the row to highlight, as the focus goes to
+/// it from the other.
+fn hand(plugin_id: u32, place: &Place) {
+    let message = MessageToPlugin::new(PLACE_PIPE)
+        .with_destination_plugin_id(plugin_id)
+        .with_args(place.to_args());
+    pipe_message_to_plugin(message);
+}
+
 fn resize_self(plugin_id: u32) {
     let (x, y, width, height) = FLOATING;
     let Some(coordinates) = FloatingPaneCoordinates::new(
@@ -1263,6 +1422,48 @@ mod tests {
         state.matches.current_session = Some("a".to_owned());
         state.rebuild_tree();
         state
+    }
+
+    /// A key that opens the picker from the sidebar: the floating panes show,
+    /// and the picker in them has the focus, and a title once it has its
+    /// permissions. Gone to a pane of the tab instead, the sidebar keeps its
+    /// row for no picker that comes later.
+    #[test]
+    fn the_picker_the_focus_leaves_the_sidebar_for_is_handed_its_row() {
+        let picker = |title: &str| PaneInfo {
+            id: 20,
+            is_plugin: true,
+            is_floating: true,
+            is_focused: true,
+            title: title.to_owned(),
+            ..PaneInfo::default()
+        };
+        let four = Place::Pane("b".to_owned(), 4);
+        for to_the_picker in [true, false] {
+            let mut state = focused_sidebar();
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(3);
+            }
+            state.rebuild_tree();
+            let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
+            if to_the_picker {
+                tab.push(picker("file:luneta.wasm"));
+                state.tabs[0].are_floating_panes_visible = true;
+            } else {
+                tab[0].is_focused = false;
+                tab[1].is_focused = true;
+            }
+            state.rebuild_tree();
+            assert_eq!(state.handing(), None, "to the picker: {to_the_picker}");
+
+            let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
+            tab.retain(|pane| pane.id != 20);
+            tab.push(picker(PICKER_TITLE));
+            state.tabs[0].are_floating_panes_visible = true;
+            let handed = to_the_picker.then(|| (20, four.clone()));
+            assert_eq!(state.handing(), handed, "to the picker: {to_the_picker}");
+            assert_eq!(state.handing(), None, "to the picker: {to_the_picker}");
+        }
     }
 
     /// With nothing typed, the search box changes nothing a session row does:
