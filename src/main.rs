@@ -1172,8 +1172,7 @@ mod tests {
             age: Age::from_secs(age),
             panes,
         };
-        let four =
-            Leaf { id: 4, title: "pane 4".to_owned(), tab: String::new(), cwd: String::new() };
+        let four = Leaf { id: 4, title: "pane 4".to_owned(), tab: String::new(), cwd: None };
         let mut state = State {
             role: Role::Sidebar(Tree::default()),
             plugin_id: 9,

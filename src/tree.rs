@@ -36,12 +36,12 @@ pub struct Branch {
 }
 
 /// A terminal pane, the name of the tab that holds it, and the directory it
-/// works in, empty until its session has said.
+/// works in, once its session has said.
 pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
-    pub cwd: String,
+    pub cwd: Option<String>,
 }
 
 impl Branch {
@@ -82,7 +82,7 @@ pub fn leaves(
                     id: pane.id,
                     title: pane.title.clone(),
                     tab: tab.to_owned(),
-                    cwd: places.cwd(session, pane.id).unwrap_or_default().to_owned(),
+                    cwd: places.cwd(session, pane.id).map(str::to_owned),
                 },
             ));
         }
@@ -372,18 +372,22 @@ impl Finder<'_> {
     /// and a cwd is its last two parts, as the agent list shows it: a whole
     /// path has the letters for a few typed ones to land on nearly any of it.
     fn pane(&self, label: &str, leaf: &Leaf) -> Option<(Fit, Vec<usize>)> {
-        let tab = if is_named_tab(&leaf.tab) { leaf.tab.as_str() } else { "" };
-        self.find(label, &[tab, &short_cwd(&leaf.cwd)])
+        let tab = is_named_tab(&leaf.tab).then_some(leaf.tab.as_str());
+        let cwd = leaf.cwd.as_deref().map(short_cwd);
+        self.find(label, &[tab, cwd.as_deref()])
     }
 
     /// The term against what a row shows, which has the characters it lands
-    /// on, and against what else the row goes by, which has a score only.
-    fn find(&self, shown: &str, also: &[&str]) -> Option<(Fit, Vec<usize>)> {
+    /// on, and against what else the row goes by, which has a score only. A row
+    /// need not have each.
+    fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
         let lit = self.matcher.fuzzy_indices(shown, self.term);
         let score = lit
             .iter()
             .map(|(score, _)| *score)
-            .chain(also.iter().filter_map(|text| self.matcher.fuzzy_match(text, self.term)))
+            .chain(
+                also.iter().flatten().filter_map(|text| self.matcher.fuzzy_match(text, self.term)),
+            )
             .max()?;
         let hits = lit.map(|(_, hits)| hits).unwrap_or_default();
         Some(((shown == self.term, score), hits))
@@ -463,7 +467,7 @@ mod tests {
                     id: *id,
                     title: (*title).to_owned(),
                     tab: String::new(),
-                    cwd: String::new(),
+                    cwd: None,
                 })
                 .collect(),
         }
@@ -589,7 +593,7 @@ mod tests {
             id: 7,
             title: title.to_owned(),
             tab: tab.to_owned(),
-            cwd: String::new(),
+            cwd: None,
         };
         assert_eq!(label(&leaf("✳ Claude Code", "liquid dual"), None), "liquid dual");
         assert_eq!(label(&leaf("✳ Claude Code", "Tab #13"), None), "Claude Code");
@@ -627,17 +631,17 @@ mod tests {
         ]);
         let places = Places::of(&[("s", &[(3, "/w/s"), (2, "/w/logs")]), ("t", &[(5, "/w/t")])]);
         let leaves = leaves("s", &[tab(0, "code"), tab(1, "logs")], &manifest, &places);
-        let seen: Vec<(u32, &str, &str, &str)> = leaves
+        let seen: Vec<(u32, &str, &str, Option<&str>)> = leaves
             .iter()
-            .map(|leaf| (leaf.id, leaf.title.as_str(), leaf.tab.as_str(), leaf.cwd.as_str()))
+            .map(|leaf| (leaf.id, leaf.title.as_str(), leaf.tab.as_str(), leaf.cwd.as_deref()))
             .collect();
         assert_eq!(
             seen,
             [
-                (3, "tiled", "code", "/w/s"),
-                (5, "tiled, later", "code", ""),
-                (1, "floating", "code", ""),
-                (2, "second tab", "logs", "/w/logs"),
+                (3, "tiled", "code", Some("/w/s")),
+                (5, "tiled, later", "code", None),
+                (1, "floating", "code", None),
+                (2, "second tab", "logs", Some("/w/logs")),
             ]
         );
     }
@@ -773,19 +777,19 @@ mod tests {
 
     #[test]
     fn a_pane_is_found_by_its_tab_and_its_cwd_but_lit_only_where_it_shows() {
-        let leaf = |id: u32, tab: &str, cwd: &str| Leaf {
+        let leaf = |id: u32, tab: &str, cwd: Option<&str>| Leaf {
             id,
             title: "nvim".to_owned(),
             tab: tab.to_owned(),
-            cwd: cwd.to_owned(),
+            cwd: cwd.map(str::to_owned),
         };
         let branches = [Branch {
             name: "s".to_owned(),
             age: Age::from_secs(1),
             panes: vec![
-                leaf(0, "notes", "/w/a"),
-                leaf(1, "Tab #2", "/home/lorenzo/Projects/misc/luneta"),
-                leaf(2, "", ""),
+                leaf(0, "notes", Some("/w/a")),
+                leaf(1, "Tab #2", Some("/home/lorenzo/Projects/misc/luneta")),
+                leaf(2, "", None),
             ],
         }];
         let found = |term: &str| {
