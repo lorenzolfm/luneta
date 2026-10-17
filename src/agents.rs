@@ -316,6 +316,20 @@ impl AgentSet {
             None => wanted.first().copied(),
         }
     }
+
+    /// Highlights the agent in `pane` of `session`, or else the first in
+    /// `session`: the nearest the list has to a row of the sidebar.
+    pub fn select_seated(&mut self, session: &str, pane: Option<u32>) {
+        let seated = |row: &AgentRow| row.seat.session() == session;
+        let at = self
+            .rows
+            .iter()
+            .position(|row| seated(row) && Some(row.pane) == pane)
+            .or_else(|| self.rows.iter().position(seated));
+        if let Some(at) = at {
+            self.rows.select(at);
+        }
+    }
 }
 
 fn mark_shared(rows: &mut [AgentRow]) {
@@ -658,6 +672,28 @@ mod tests {
         assert_eq!(agents.next_wanted(Some(("s", 1))).map(|row| row.pane), Some(0));
         let busy = rows(&one(r#""busy""#), None, &places);
         assert!(busy.next_wanted(None).is_none());
+    }
+
+    #[test]
+    fn a_row_of_the_sidebar_lands_on_its_agent_or_else_the_first_in_its_session() {
+        let json = r#"[
+            {"status":"idle","status_age":10,"cwd":"/w/s","zellij":{"session":"s","pane":"0"}},
+            {"status":"busy","status_age":5,"cwd":"/w/s","zellij":{"session":"s","pane":"1"}},
+            {"status":"waiting","status_age":30,"cwd":"/w/t","zellij":{"session":"t","pane":"0"}}]"#;
+        let places = Places::of(&[("s", &[(0, "/w/s"), (1, "/w/s")]), ("t", &[(0, "/w/t")])]);
+        for (session, pane, landed) in [
+            ("s", Some(0), ("s", 0)),
+            ("s", Some(1), ("s", 1)),
+            ("s", Some(9), ("s", 0)),
+            ("s", None, ("s", 0)),
+            ("u", Some(0), ("s", 1)),
+        ] {
+            let mut agents = rows(json, None, &places);
+            agents.rows.move_selection(2);
+            agents.select_seated(session, pane);
+            let row = agents.selected_row().expect("a row stays highlighted");
+            assert_eq!((row.seat.session(), row.pane), landed, "{session} {pane:?}");
+        }
     }
 
     #[test]

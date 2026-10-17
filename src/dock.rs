@@ -48,6 +48,9 @@ pub enum Ask {
     Focus,
     /// To the next agent that wants you.
     Next,
+    /// To the pane the sidebar lists after the one you are in, and from the
+    /// last back to the first.
+    Cycle,
     /// Hide the sidebar, or bring it back.
     Toggle,
 }
@@ -57,6 +60,7 @@ impl Ask {
         match payload.trim() {
             "focus" => Some(Ask::Focus),
             "next" => Some(Ask::Next),
+            "cycle" => Some(Ask::Cycle),
             "toggle" => Some(Ask::Toggle),
             _ => None,
         }
@@ -375,7 +379,7 @@ impl Dock {
             (Ask::Toggle, Want::Hidden) => Want::Back { focus: false },
             (Ask::Toggle, _) => Want::Hidden,
             (Ask::Focus, Want::Hidden) => Want::Back { focus: true },
-            (Ask::Focus | Ask::Next, _) => return,
+            (Ask::Focus | Ask::Next | Ask::Cycle, _) => return,
         };
         // zellij keeps a client's dock running after the client leaves, and
         // hands it every key still. It has seen none of the panes since, so it
