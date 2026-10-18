@@ -9,7 +9,7 @@ use crate::fetch::Fetch;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
-use crate::menu::{Entry, Keys, Menu, SidebarMenu};
+use crate::menu::{Entry, Keys, Menu, Shown, SidebarMenu};
 use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
@@ -989,14 +989,65 @@ const MENU_RULE: usize = 9;
 /// Room for the keys under the entries.
 const MIN_MENU: usize = 28;
 
+/// Room for the keys under what a close key asks, spelled out.
+const MIN_ASKING: usize = 35;
+
 /// How wide the menu draws what is wrong with it.
 const MENU_NOTICE: usize = 48;
+
+/// What a menu draws: the title its rule names, whether the rule says on its
+/// right where an agent starts, the lines under the rule, and the keys under
+/// them.
+struct MenuParts {
+    title: String,
+    right: bool,
+    body: Vec<Painted>,
+    help: Painted,
+}
+
+/// The parts of a menu `inner` wide: the keys of the group open and what each
+/// does, what a close key asks before it goes ahead, where you are going on
+/// your way out of the session, or what is wrong.
+fn menu_parts(shown: Shown, inner: usize) -> MenuParts {
+    let lines = |text: &str, line: fn(&str, usize) -> Painted| -> Vec<Painted> {
+        wrap(text, inner).iter().map(|text| line(text, inner)).collect()
+    };
+    match shown {
+        Shown::Keys(keys) => MenuParts {
+            title: menu_title(keys),
+            right: true,
+            body: keys.entries().iter().map(|entry| menu_line(entry, inner)).collect(),
+            help: menu_help(inner, !keys.names().is_empty()),
+        },
+        Shown::Asking(keys, question) => MenuParts {
+            title: menu_title(keys),
+            right: true,
+            body: lines(question, menu_note),
+            help: keys_text(
+                inner,
+                &[("<y>", "Yes", "Yes"), ("<BS>", "Back", "Back"), ("<ESC>", "Close", "Close")],
+            ),
+        },
+        Shown::Leaving(to) => MenuParts {
+            title: TITLE.to_owned(),
+            right: false,
+            body: lines(&format!("Going to {to}; this session ends once you are there"), menu_note),
+            help: keys_text(inner, &[]),
+        },
+        Shown::Wrong(reason) => MenuParts {
+            title: TITLE.to_owned(),
+            right: false,
+            body: lines(reason, menu_error),
+            help: menu_help(inner, false),
+        },
+    }
+}
 
 /// The menu: the keys of the group open and what each does, under a rule that
 /// names the groups opened and says where an agent starts, and the keys that
 /// go back and close under them. Nothing once it asked zellij to close it.
 pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
-    let Some(shown) = menu.keys() else {
+    let Some(shown) = menu.shown() else {
         return;
     };
     let rect = Rect { x: 0, y: 0, width: cols, height: rows };
@@ -1004,17 +1055,8 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
         return;
     };
     let inner = rect.inner_width();
-    let (title, right, body, help) = match shown {
-        Ok(keys) => {
-            let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
-            let opened = !keys.names().is_empty();
-            (menu_title(keys), menu_where(menu.cwd()), body, menu_help(inner, opened))
-        },
-        Err(reason) => {
-            let body = wrap(reason, inner).iter().map(|text| menu_error(text, inner)).collect();
-            (TITLE.to_owned(), String::new(), body, menu_help(inner, false))
-        },
-    };
+    let MenuParts { title, right, body, help } = menu_parts(shown, inner);
+    let right = if right { menu_where(menu.cwd()) } else { String::new() };
     let mut lines: Vec<Painted> = body;
     lines.truncate(room.saturating_sub(1));
     lines.resize_with(room + 1, || blank_line(&rect));
@@ -1022,20 +1064,22 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
     print_at(&help, PAD, rect.inner_y() + room, inner);
 }
 
-/// How big the menu draws: tall enough for the group open, and wide enough
-/// for its entries and its rule. No size once it asked zellij to close it.
+/// How big the menu draws: tall enough for what it shows, and wide enough for
+/// the entries of the group open and its rule, whatever a close key asks. No
+/// size once it asked zellij to close it.
 pub fn menu_size(menu: &Menu) -> Option<(usize, usize)> {
-    let size = match menu.keys()? {
-        Ok(keys) => {
-            let entries = keys.entries();
-            let widest = entries.iter().map(menu_entry_width).max().unwrap_or(0);
+    let shown = menu.shown()?;
+    let width = match shown {
+        Shown::Keys(keys) | Shown::Asking(keys, _) => {
+            let widest = keys.entries().iter().map(menu_entry_width).max().unwrap_or(0);
             let rule = menu_title(keys).width() + menu_where(menu.cwd()).width() + MENU_RULE;
-            let width = (widest + PAD * 2).max(rule).max(MIN_MENU);
-            (width, entries.len() + MENU_CHROME)
+            let least = if matches!(shown, Shown::Asking(..)) { MIN_ASKING } else { MIN_MENU };
+            (widest + PAD * 2).max(rule).max(least)
         },
-        Err(reason) => (MENU_NOTICE, wrap(reason, MENU_NOTICE - PAD * 2).len() + MENU_CHROME),
+        Shown::Leaving(_) | Shown::Wrong(_) => MENU_NOTICE,
     };
-    Some(size)
+    let body = menu_parts(shown, width - PAD * 2).body.len();
+    Some((width, body + MENU_CHROME))
 }
 
 fn menu_title(keys: &Keys) -> String {
@@ -1053,6 +1097,7 @@ fn menu_entry_width(entry: &Entry) -> usize {
     let does = match entry {
         Entry::Group { name, .. } => name.width() + 1 + GROUP.width(),
         Entry::Start { prompt, .. } => prompt.width(),
+        Entry::Close { scope, .. } => scope.does().width(),
     };
     entry.key().to_string().width() + GAP + does
 }
@@ -1069,7 +1114,14 @@ fn menu_line(entry: &Entry, inner: usize) -> Painted {
             line.push(GROUP, TAG);
         },
         Entry::Start { prompt, .. } => line.push(&truncate(prompt, room), NAME),
+        Entry::Close { scope, .. } => line.push(&truncate(scope.does(), room), NAME),
     }
+    line.finish(inner)
+}
+
+fn menu_note(text: &str, inner: usize) -> Painted {
+    let mut line = Line::new();
+    line.push(text, NAME);
     line.finish(inner)
 }
 
@@ -1089,48 +1141,39 @@ fn menu_help(width: usize, opened: bool) -> Painted {
 }
 
 /// How many lines the menu takes at the bottom of a sidebar `cols` wide, with
-/// the room it wants: its rule, the keys of the group open or what is wrong,
-/// and the keys that go back and close. No line once it shows nothing.
+/// the room it wants: its rule, what it shows, and the keys under them. No
+/// line once it shows nothing.
 fn sidebar_menu_height(menu: &SidebarMenu, cols: usize) -> usize {
-    let body = match menu.keys() {
-        Some(Ok(keys)) => keys.entries().len(),
-        Some(Err(reason)) => wrap(reason, cols.saturating_sub(2)).len(),
-        None => return 0,
+    let Some(shown) = menu.shown() else {
+        return 0;
     };
-    body + 2
+    menu_parts(shown, cols.saturating_sub(2)).body.len() + 2
 }
 
 /// The menu at the bottom of the sidebar, in `lines` lines: the lines from
 /// its top, each as wide as the sidebar, and the keys under them. A rule
 /// names the groups opened and says where an agent starts, as the border of
-/// the floating menu does, over the keys of the group open or what is wrong.
-/// Short of room, the entries go first, then the rule.
+/// the floating menu does, over what the menu shows. Short of room, what it
+/// shows goes first, then the rule.
 fn sidebar_menu_lines(
     menu: &SidebarMenu,
     lines: usize,
     cols: usize,
 ) -> (Vec<Painted>, Option<Painted>) {
-    let inner = cols.saturating_sub(2);
-    let (title, body, opened): (String, Vec<Painted>, bool) = match menu.keys() {
-        Some(Ok(keys)) => {
-            let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
-            (menu_title(keys), body, !keys.names().is_empty())
-        },
-        Some(Err(reason)) => {
-            let body = wrap(reason, inner).iter().map(|text| menu_error(text, inner)).collect();
-            (TITLE.to_owned(), body, false)
-        },
-        None => return (Vec::new(), None),
+    let Some(shown) = menu.shown() else {
+        return (Vec::new(), None);
     };
+    let MenuParts { title, right, body, help } = menu_parts(shown, cols.saturating_sub(2));
     let Some(room) = lines.checked_sub(1) else {
         return (Vec::new(), None);
     };
     let mut drawn: Vec<Painted> = Vec::with_capacity(room);
     if room > 0 {
-        drawn.push(menu_rule(&title, &menu_where(menu.cwd()), cols));
+        let right = if right { menu_where(menu.cwd()) } else { String::new() };
+        drawn.push(menu_rule(&title, &right, cols));
     }
     drawn.extend(body.into_iter().take(room.saturating_sub(1)));
-    (drawn, Some(menu_help(inner, opened)))
+    (drawn, Some(help))
 }
 
 /// The rule over the menu in the sidebar: the groups opened, and where an
@@ -2436,6 +2479,7 @@ mod tests {
         Node::Pane(PaneNode {
             session: session.to_owned(),
             id,
+            tab: None,
             label: label.to_owned(),
             agent: agent.map(|(word, age)| Mark {
                 status: Status::parse(Some(word)),
@@ -2729,6 +2773,7 @@ mod tests {
             let node = PaneNode {
                 session: "a".to_owned(),
                 id: 0,
+                tab: None,
                 label: "misc".to_owned(),
                 agent: agent.map(|word| Mark {
                     status: Status::parse(Some(word)),
@@ -2922,7 +2967,15 @@ mod tests {
     fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
         let cwd = Some("/w/misc/unnamed".to_owned());
         let row = crate::menu::Row { pane: 0, cwd, branch: None, there: None };
-        SidebarMenu::open(Some(entries), row, key, 1, 0)
+        let pane = crate::close::Pane {
+            seat: crate::agents::Seat::Here("misc".to_owned()),
+            id: 0,
+            tab: None,
+            alone: false,
+            agents: Fetch::Ready(Vec::new()),
+            refuge: None,
+        };
+        SidebarMenu::open(Some(entries), row, key, &pane, 1, 0).0
     }
 
     /// The menu's lines in `lines` lines of a sidebar `cols` wide, the keys
@@ -3007,6 +3060,16 @@ mod tests {
         assert!(picture[1].starts_with(" menu: \"t\" takes one string"), "{picture:?}");
     }
 
+    /// The floating menu is wide enough, while a close key asks, to spell out
+    /// the keys that answer it, however narrow the group's keys are.
+    #[test]
+    fn the_keys_that_answer_a_close_key_are_spelled_out() {
+        let keys = Keys::parse(r#"d "Delete" { p close="pane"; }"#).expect("a menu");
+        let asking = Shown::Asking(&keys, "Close its tab? 2 agents, 1 busy");
+        let help = menu_parts(asking, MIN_ASKING - PAD * 2).help;
+        assert!(help.content().contains("<y> Yes"), "{}", help.content());
+    }
+
     /// The menu is as wide as its longest entry and its rule need, so that
     /// no prompt in it is cut, in the group open or at the root.
     #[test]
@@ -3019,7 +3082,7 @@ mod tests {
         let mut menu = Menu::new(0, &configuration);
         for opened in [false, true] {
             let (width, height) = menu_size(&menu).expect("a size");
-            let keys = menu.keys().and_then(Result::ok).expect("a menu");
+            let Some(Shown::Keys(keys)) = menu.shown() else { panic!("no keys") };
             assert_eq!(height, keys.entries().len() + MENU_CHROME, "opened: {opened}");
             for entry in keys.entries() {
                 let line = menu_line(entry, width - PAD * 2);

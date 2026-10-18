@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
+use zellij_tile::prelude::run_command;
 
 use crate::cursor::Cursor;
 use crate::elapsed::{Age, Held};
@@ -12,16 +13,32 @@ use crate::sessions::{Selection, Session};
 
 pub const QUERY: [&str; 1] = ["claude-ps"];
 
+/// What a configuration names claude-ps by, in place of `QUERY`.
+pub const COMMAND_KEY: &str = "agents_command";
+
 pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "agents";
 
 pub const CLOSE_VALUE: &str = "close";
 pub const LABEL_KEY: &str = "luneta_label";
 
-/// Closes a pane of another session; the plugin can only close its own
-/// session's.
-pub fn close<'a>(session: &'a str, pane: &'a str) -> [&'a str; 7] {
-    ["zellij", "--session", session, "action", "close-pane", "--pane-id", pane]
+/// The command a configuration names claude-ps by, if it names one.
+pub fn configured(configuration: &BTreeMap<String, String>) -> Option<String> {
+    configuration
+        .get(COMMAND_KEY)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Asks claude-ps, or the command a configuration names in its place, what
+/// the agents are doing.
+pub fn ask(configured: Option<&str>) {
+    let command: [&str; 1] = match configured {
+        Some(command) => [command],
+        None => QUERY,
+    };
+    run_command(&command, BTreeMap::from([(CONTEXT_KEY.to_owned(), CONTEXT_VALUE.to_owned())]));
 }
 
 #[derive(Deserialize)]

@@ -32,7 +32,8 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Jump to the agent that is waiting for you
 * Create a session in a directory you work in
 * Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
-* Start an agent on a skill with a few keys, from a [menu](#menu) of your own
+* Start an agent on a skill, or close a pane, a tab or a session, with a few keys,
+  from a [menu](#menu) of your own
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -66,12 +67,12 @@ the order their panes were opened within each. Which agent wants you is the job
 of the glyph, not of the order. The agent in the pane you came from is pinned
 above the list.
 
-`Del` closes the pane the highlighted agent is in, and its tab with it when that
-was the last pane there. With the sidebar, the tab closes only in a session
-someone is attached to; in one nobody is, it stays, with nothing in it but its
-column. When the pane is a guess, `Del` leaves it alone and says so: the agent
-names a session that is still running, but its pane turned up in another,
-matched by its id and directory alone.
+`Del` closes the pane the highlighted agent is in, and its tab with it when
+nothing else holds the tab open: neither the sidebar's column nor a floating
+pane does. That goes for a session nobody is attached to as well, where no dock
+is there to close the tab. When the pane is a guess, `Del` leaves it alone and
+says so: the agent names a session that is still running, but its pane turned
+up in another, matched by its id and directory alone.
 
 Needs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) on the server's
 `PATH`. Without it, the other two lists work exactly as before.
@@ -202,8 +203,8 @@ folds.
 ### Menu
 
 Keys, pressed one after another, that start an agent on a skill, beside the
-agent whose work it is for. The menu shows the keys of the group you are in and
-what each does, as which-key does in neovim.
+agent whose work it is for, or close what you are done with. The menu shows the
+keys of the group you are in and what each does, as which-key does in neovim.
 
 ```text
 ─ 2 sessions ──────────── ⠋1 ─
@@ -247,6 +248,30 @@ What a key starts on is the first message of the session, as
 `claude "/tigerstyle"` would take it: a skill, a skill and its arguments, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
+
+A key can close what the menu is for instead: the pane, its tab, or its
+session, as `d p`, `d t` and `d s` do with the keys [below](#open-the-menu). A
+pane that is the last in its tab to hold it open closes the tab with it, so no
+tab is left with nothing in it but the sidebar's column. A pane, a tab or a
+session of another session closes through `zellij --session`, and the sidebar's
+highlight moves to the row after it once it is gone. The session you are in is
+killed once you are in another, the newest, which the picker lists first; with
+no other session to go to, the menu says so and kills nothing. Closing the only
+tab of a session ends the session, as zellij does.
+
+When what a key closes would end an agent that is busy or waiting on you, the
+menu asks first, and says what goes:
+
+```text
+─ Delete ──────── luneta/main ─
+ Close its tab? 2 agents, 1
+ busy
+ <y> Yes <BS> Back <ESC> Close
+```
+
+`y`, or the key again, goes ahead; `n` or `Backspace` goes back to the keys. An
+idle agent or a shell goes without asking. Without `claude-ps`, luneta cannot
+tell, and asks every time.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 
@@ -350,8 +375,9 @@ keybinds {
 
 The menu is the plugin in `mode "menu"`. Its keys are a `menu`, a node to a
 key: a key's one string is what it starts an agent on, or, with keys inside
-it, the name of the group they make. Give them to the alias, so that the key
-that opens the menu and the sidebar show the same keys:
+it, the name of the group they make. A key with `close="pane"`, `"tab"` or
+`"session"` and nothing else closes that. Give them to the alias, so that the
+key that opens the menu and the sidebar show the same keys:
 
 ```kdl
 plugins {
@@ -361,6 +387,11 @@ plugins {
                 t "/thermo-nuclear-review"
                 m "/make-illegal-states-unrepresentable"
                 s "/tigerstyle"
+            }
+            d "Delete" {
+                s close="session"
+                t close="tab"
+                p close="pane"
             }
         }
     }
@@ -618,7 +649,7 @@ Press your key, type, press `Enter`.
 | `Enter` | act on the highlighted row — the prompt says which action |
 | `Tab` / `Shift-Tab` | next / previous list, keeping the search term |
 | `Ctrl-r` | rename the session you are in |
-| `Del` | kill a live session, or delete a dead one; close an agent's pane |
+| `Del` | kill a live session, or delete a dead one; close an agent's pane, and its tab once nothing else holds it open |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
 
@@ -657,8 +688,10 @@ In the menu:
 
 | key | does |
 |---|---|
-| *a key it shows* | open its group, or start its agent |
-| `Backspace` | back a group, or close from the first |
+| *a key it shows* | open its group, start its agent, or close what it closes |
+| `y`, or the key again | go ahead with a close that asked first |
+| `n` | back to the keys, from a close that asked first |
+| `Backspace` | back a group, or close from the first; back to the keys from a close that asked |
 | `Esc` / `Ctrl-c` | close |
 
 ---

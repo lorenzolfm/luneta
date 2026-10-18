@@ -8,11 +8,14 @@
 
 #[path = "../src/agents.rs"] mod agents;
 #[path = "../src/checkouts.rs"] mod checkouts;
+#[path = "../src/close.rs"] mod close;
 #[path = "../src/cursor.rs"] mod cursor;
 #[path = "../src/dirs.rs"] mod dirs;
+#[path = "../src/dock.rs"] mod dock;
 #[path = "../src/elapsed.rs"] mod elapsed;
 #[path = "../src/fetch.rs"] mod fetch;
 #[path = "../src/folds.rs"] mod folds;
+#[path = "../src/hiding.rs"] mod hiding;
 #[path = "../src/layout.rs"] mod layout;
 #[path = "../src/menu.rs"] mod menu;
 #[path = "../src/paint.rs"] mod paint;

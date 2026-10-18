@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zellij_tile::prelude::*;
 
+use crate::close;
 use crate::hiding::{Hiding, Said};
 use crate::tree::{is_placeholder, PLACEHOLDER};
 
@@ -182,8 +183,7 @@ struct Scene {
     /// Tabs showing their floating panes. zellij reports the floating panes'
     /// layout for such a tab, and applies theirs when asked for one.
     floating: BTreeSet<TabId>,
-    /// Tabs with a pane besides the sidebar and the placeholders that can
-    /// take the focus.
+    /// Tabs with a pane that holds them open, as `close::holds_tab` says.
     occupied: BTreeSet<TabId>,
 }
 
@@ -265,7 +265,7 @@ impl Scene {
                     scene.sidebars.push((tab, Seen::new(pane)));
                 } else if is_placeholder(pane) {
                     scene.placeholders.entry(tab).or_default().push(Seen::new(pane));
-                } else if pane.is_selectable && !pane.is_suppressed && !pane.is_floating {
+                } else if close::holds_tab(pane) {
                     scene.occupied.insert(tab);
                 }
             }
