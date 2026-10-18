@@ -229,7 +229,9 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
         ]);
         if self.is_sidebar() {
-            subscribe(&[EventType::Mouse]);
+            // zellij says `InputReceived` of every key, whichever pane it goes
+            // to: `Pass` tells it from a click.
+            subscribe(&[EventType::Mouse, EventType::InputReceived]);
         }
         set_timeout(0.0);
     }
@@ -277,6 +279,10 @@ impl ZellijPlugin for State {
             Event::Key(key) if self.is_sidebar() => self.handle_sidebar_key(&key),
             Event::Key(key) => self.handle_key(&key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::InputReceived => {
+                self.pass.input();
+                false
+            },
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 match context.get(dirs::CONTEXT_KEY).map(String::as_str) {
                     Some(dirs::CONTEXT_VALUE) => {
@@ -1136,14 +1142,16 @@ impl State {
             Role::Sidebar(tree) => tree.search().map(str::to_owned),
             _ => None,
         };
-        // A key goes by the cursor, so the view comes back to it.
-        if let Role::Sidebar(tree) = &mut self.role {
-            tree.unscroll();
-        }
+        // A key goes by the cursor, so the view comes back to it, whatever
+        // else the key does.
+        let unscrolled = match &mut self.role {
+            Role::Sidebar(tree) => tree.unscroll(),
+            _ => false,
+        };
         if let Some(term) = search {
-            return self.handle_search_box_key(key.bare_key, term);
+            return self.handle_search_box_key(key.bare_key, term) || unscrolled;
         }
-        match key.bare_key {
+        let drawn = match key.bare_key {
             BareKey::Down | BareKey::Char('j') => self.move_tree(1),
             BareKey::Up | BareKey::Char('k') => self.move_tree(-1),
             BareKey::Left | BareKey::Char('h') => self.fold(Some(true)),
@@ -1155,7 +1163,8 @@ impl State {
                 true
             },
             BareKey::Char('n') => {
-                self.go_to_next();
+                // A key comes only to the sidebar with the focus.
+                self.go_to_next(true);
                 false
             },
             BareKey::Esc => {
@@ -1163,7 +1172,8 @@ impl State {
                 false
             },
             _ => false,
-        }
+        };
+        drawn || unscrolled
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -1264,13 +1274,15 @@ impl State {
     /// are in is the pane you came from. A term unfolds what it finds, so a
     /// fold would show nothing, and the whole row goes there.
     fn press(&mut self, (place, fold): (Place, bool)) -> bool {
+        let (rows, cols) = self.size;
+        let focused = self.sidebar_focused();
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         let Some(index) = tree.rows.iter().position(|node| node.place() == place) else {
             return false;
         };
-        tree.rows.select(index);
+        render::select_sidebar_row(tree, &self.agents, focused, rows, cols, index);
         if fold && !tree.narrowed() {
             return self.fold(None);
         }
@@ -1318,7 +1330,8 @@ impl State {
 
     /// Going anywhere closes the search, so that the sidebar you come back to
     /// shows every row. The session you are in, found by a term, is the pane
-    /// you came from; with nothing typed, `Enter` on its row folds it.
+    /// you came from; with nothing typed, `Enter` on its row folds it. A key
+    /// or a click goes here, and both come only to the sidebar with the focus.
     fn go_to_selected(&mut self) {
         let Role::Sidebar(tree) = &self.role else {
             return;
@@ -1330,7 +1343,7 @@ impl State {
         self.close_search();
         let current = self.matches.current_session.as_deref();
         match place {
-            Place::Pane(session, pane) => self.go_to(&session, pane),
+            Place::Pane(session, pane) => self.go_to(&session, pane, true),
             Place::Session(session) if current == Some(session.as_str()) => {
                 if found {
                     self.go_back();
@@ -1338,23 +1351,25 @@ impl State {
                     self.fold(None);
                 }
             },
-            Place::Session(session) => self.switch_to(&session, None),
+            Place::Session(session) => self.switch_to(&session, None, true),
         }
     }
 
-    fn go_to(&self, session: &str, pane: u32) {
+    /// `focused` says whether the sidebar has the focus, for `switch_to`.
+    fn go_to(&self, session: &str, pane: u32, focused: bool) {
         if self.matches.current_session.as_deref() == Some(session) {
             focus_terminal_pane(pane, false, false);
         } else {
-            self.switch_to(session, Some(pane));
+            self.switch_to(session, Some(pane), focused);
         }
     }
 
     /// To another session, and to `pane` in it. zellij keeps where each
-    /// session's focus was, so the focus goes back to the pane you came from
-    /// first: a session left from the sidebar would have you back in it.
-    fn switch_to(&self, session: &str, pane: Option<u32>) {
-        if self.sidebar_focused() {
+    /// session's focus was, so a sidebar with the focus, as `focused` says,
+    /// hands it back to the pane you came from first: the session would have
+    /// you back in the sidebar.
+    fn switch_to(&self, session: &str, pane: Option<u32>, focused: bool) {
+        if focused {
             self.go_back();
         }
         match pane {
@@ -1363,21 +1378,21 @@ impl State {
         }
     }
 
-    fn go_to_next(&self) {
+    fn go_to_next(&self, focused: bool) {
         let here = self.matches.current_session.as_deref().zip(self.pane_now());
         if let Some(row) = self.agents.next_wanted(here) {
-            self.go_to(row.seat.session(), row.pane);
+            self.go_to(row.seat.session(), row.pane, focused);
         }
     }
 
-    fn go_to_after(&self) {
+    fn go_to_after(&self, focused: bool) {
         let Role::Sidebar(tree) = &self.role else {
             return;
         };
         let session = self.matches.current_session.clone();
         let here = session.zip(self.pane_now()).map(|(session, pane)| Place::Pane(session, pane));
         if let Some(Place::Pane(session, pane)) = tree.after(here.as_ref()) {
-            self.go_to(&session, pane);
+            self.go_to(&session, pane, focused);
         }
     }
 
@@ -1400,7 +1415,9 @@ impl State {
     /// A key binding broadcasts to every plugin in the session: the sidebar
     /// and the dock both hear it. The dock hides and shows the sidebar, and
     /// answers a `focus` while it is hidden, bringing it back first; the
-    /// sidebar waits for the focus, and keeps it.
+    /// sidebar waits for the focus, and keeps it. A binding comes wherever
+    /// the focus is, and to a hidden sidebar too, which holds the panes from
+    /// before, so zellij says whether the sidebar has the focus.
     fn sidebar_pipe(&mut self, ask: Ask) {
         match ask {
             Ask::Focus if self.hidden() => self.pass.ask(self.frame),
@@ -1409,8 +1426,8 @@ impl State {
                 self.pass.ask(self.frame);
                 focus_plugin_pane(self.plugin_id, false, false);
             },
-            Ask::Next => self.go_to_next(),
-            Ask::Cycle => self.go_to_after(),
+            Ask::Next => self.go_to_next(self.has_focus()),
+            Ask::Cycle => self.go_to_after(self.has_focus()),
             Ask::Toggle => {},
         }
     }
@@ -1667,7 +1684,8 @@ mod tests {
     /// zellij hands the click that focuses the sidebar to no one, but ends
     /// the hover over it first, where the click was: that click does what
     /// any other does. A hover that ended long before a key brought the focus
-    /// was the pointer leaving, and does nothing.
+    /// was the pointer leaving, and does nothing, and so does one that a key
+    /// came after, however soon.
     #[test]
     fn the_click_that_focuses_the_sidebar_acts_on_its_row() {
         let focus = |state: &mut State, sidebar: bool| {
@@ -1678,7 +1696,7 @@ mod tests {
             state.update(Event::PaneUpdate(manifest));
             state.update(Event::TabUpdate(state.tabs.clone()));
         };
-        for late in [false, true] {
+        for (late, keyed) in [(false, false), (true, false), (false, true)] {
             let mut state = focused_sidebar();
             focus(&mut state, false);
             // On the `▾` of `b`, the third row.
@@ -1687,9 +1705,12 @@ mod tests {
             if late {
                 state.frame += TICKS_PER_SECOND;
             }
+            if keyed {
+                state.update(Event::InputReceived);
+            }
             focus(&mut state, true);
-            let shut: &[&str] = if late { &[] } else { &["b"] };
-            assert_eq!(folded(&state), shut, "late: {late}");
+            let shut: &[&str] = if late || keyed { &[] } else { &["b"] };
+            assert_eq!(folded(&state), shut, "late: {late}, keyed: {keyed}");
         }
     }
 }

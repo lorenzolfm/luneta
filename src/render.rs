@@ -1036,8 +1036,7 @@ pub fn sidebar_row_at(
     cols: usize,
     line: usize,
 ) -> Option<usize> {
-    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
-    let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
+    let shelf = sidebar_shelf(tree, agents, focused, rows, cols);
     let line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
     let (Range { start, end }, _) = on_screen(tree, focused, shelf.tree);
     let index = start + line;
@@ -1054,16 +1053,41 @@ pub fn scroll_sidebar(
     cols: usize,
     delta: isize,
 ) -> bool {
-    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
-    let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
-    let (Range { start, .. }, lit) = on_screen(tree, focused, shelf.tree);
-    let last = tree.rows.len().saturating_sub(shelf.tree);
+    let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
+    let (Range { start, .. }, lit) = on_screen(tree, focused, height);
+    let last = tree.rows.len().saturating_sub(height);
     let top = start.saturating_add_signed(delta).min(last);
     if top == start {
         return false;
     }
     tree.scroll_to(top, lit);
     true
+}
+
+/// Puts the cursor on `row`, as a click does. A view the wheel moved stays
+/// where it is while the row is in it, so that the row stays under the
+/// pointer.
+pub fn select_sidebar_row(
+    tree: &mut Tree,
+    agents: &AgentSet,
+    focused: bool,
+    rows: usize,
+    cols: usize,
+    row: usize,
+) {
+    let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
+    let (shown, lit) = on_screen(tree, focused, height);
+    let wheeled = tree.top(lit).is_some();
+    tree.rows.select(row);
+    if wheeled && shown.contains(&row) {
+        tree.scroll_to(shown.start, lit_row(tree, focused));
+    }
+}
+
+/// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
+fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, cols: usize) -> Shelf {
+    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
+    Shelf::new(rows, notes, focused, tree.search().is_some())
 }
 
 /// Whether a click on `column` of a row folds it, where the rest of the row
@@ -1078,17 +1102,23 @@ pub fn folds_at(node: &Node, column: usize) -> bool {
 /// or around the cursor while none is, so a lit row is never out of sight
 /// until the wheel moves the view off it.
 fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
-    let lit = if focused {
-        tree.rows.selected()
-    } else {
-        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
-    };
+    let lit = lit_row(tree, focused);
     let total = tree.rows.len();
     let start = match tree.top(lit) {
         Some(top) => top.min(total.saturating_sub(height)),
         None => viewport(lit.or(tree.rows.selected()).unwrap_or(0), total, height).0,
     };
     (start..(start + height).min(total), lit)
+}
+
+/// The row a sidebar lights: the cursor while it has the focus, and the pane
+/// you are in while it does not.
+fn lit_row(tree: &Tree, focused: bool) -> Option<usize> {
+    if focused {
+        tree.rows.selected()
+    } else {
+        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
+    }
 }
 
 const UNFOLDED: &str = "▾";
@@ -2366,6 +2396,24 @@ mod tests {
         assert_eq!(top(&tree, true), Some(3));
         tree.unscroll();
         assert_eq!(top(&tree, true), Some(0));
+    }
+
+    /// A click on a row the wheel brought into view lights it where it is:
+    /// the view stays, and the row stays under the pointer.
+    #[test]
+    fn a_click_leaves_the_view_where_the_wheel_left_it() {
+        let mut tree = workday_tree(0);
+        let agents = AgentSet::default();
+        let row_at =
+            |tree: &Tree, line: usize| sidebar_row_at(tree, &agents, true, 6, 32, HEADER + line);
+        // Three rows of eight, under the header and over the keys.
+        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
+        assert_eq!(row_at(&tree, 0), Some(3));
+        let clicked = row_at(&tree, 1).expect("a row on the second line");
+        select_sidebar_row(&mut tree, &agents, true, 6, 32, clicked);
+        assert_eq!(tree.rows.selected(), Some(clicked));
+        assert_eq!(row_at(&tree, 0), Some(3));
+        assert_eq!(row_at(&tree, 1), Some(clicked));
     }
 
     #[test]

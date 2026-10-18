@@ -230,9 +230,9 @@ pub struct Tree {
     scrolled: Option<Scrolled>,
 }
 
-/// The row at the top of the view the wheel moved, and the row lit as it did.
-/// The view stays there until another row is lit, or a key moves the cursor,
-/// and then shows the lit row again.
+/// The row at the top of the view the wheel moved, and the row lit as it did,
+/// or since by a click. The view stays there until another row is lit, or a
+/// key moves the cursor, and then shows the lit row again.
 struct Scrolled {
     top: usize,
     lit: Option<Place>,
@@ -440,9 +440,9 @@ impl Tree {
         self.scrolled = Some(Scrolled { top, lit: self.place_of(lit) });
     }
 
-    /// Brings the view back to the lit row.
-    pub fn unscroll(&mut self) {
-        self.scrolled = None;
+    /// Brings the view back to the lit row, and says whether it was away.
+    pub fn unscroll(&mut self) -> bool {
+        self.scrolled.take().is_some()
     }
 
     fn place_of(&self, row: Option<usize>) -> Option<Place> {

@@ -145,9 +145,10 @@ pane. A folded session keeps its count and shows the dot of the agent that
 wants you most.
 
 The wheel scrolls the list and leaves the highlight where it is, until you go
-somewhere else or press a key. Leaving a session from the sidebar hands its
-focus back to the pane you came from first, so the session has you back there
-and not in the sidebar.
+somewhere else or press a key. A click on a row it scrolled to lights the row
+where it stands, and the list stays put. Leaving a session from the sidebar
+hands its focus back to the pane you came from first, so the session has you
+back there and not in the sidebar.
 
 Press `/` to search, as in less and vim. The tree narrows to the rows that
 match what you type, fuzzily, as the picker does: a session by its name, a pane

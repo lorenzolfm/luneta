@@ -11,7 +11,9 @@
 //! it. zellij hands a click that only focuses a pane to no one, but it ends the
 //! hover over the sidebar first, so a click comes as the hover's end just
 //! before the panes that show the sidebar focused. A key comes with none, and
-//! the hover's end when the pointer leaves comes long before any key.
+//! the hover's end when the pointer leaves comes long before any key, nearly
+//! always. zellij says when a key comes, before it acts on it: one since the
+//! hover's end keeps the focus, but the click acts on nothing.
 
 use zellij_tile::prelude::{Mouse, PaneId};
 
@@ -75,6 +77,8 @@ pub struct Pass {
     /// When the hover over the sidebar last ended, or a click came through to
     /// it, since the report before.
     pointed: Option<u64>,
+    /// Whether a key came after `pointed`.
+    keyed: bool,
     /// Whether the last report took the focus in by a click.
     clicked: bool,
 }
@@ -92,7 +96,17 @@ impl Pass {
     pub fn mouse(&mut self, mouse: Mouse, frame: u64) {
         if ends_hover(mouse) || matches!(mouse, Mouse::LeftClick(..)) {
             self.pointed = Some(frame);
+            self.keyed = false;
         }
+    }
+
+    /// Takes in a key, or any input but the mouse's. zellij tells every plugin
+    /// of one before it acts on it, and of a click only after the panes the
+    /// click changed: a key since the hover's end may be what brings the focus
+    /// in, and the click then acts on nothing. The focus stays, as a click's
+    /// does, since zellij tells of a key typed anywhere, even as a click comes.
+    pub fn input(&mut self) {
+        self.keyed = true;
     }
 
     /// Whether the focus is in the column only on its way somewhere else.
@@ -101,7 +115,8 @@ impl Pass {
     }
 
     /// Whether the last report took the focus in by a click, which zellij
-    /// handed to no one when it only focused the sidebar.
+    /// handed to no one when it only focused the sidebar, and no key came
+    /// between.
     pub fn clicked(&self) -> bool {
         self.clicked
     }
@@ -118,6 +133,7 @@ impl Pass {
         stands: impl Fn(PaneId) -> bool,
     ) -> Option<On> {
         let pointed = self.pointed.take().is_some_and(|at| frame.wrapping_sub(at) <= CLICK);
+        let keyed = std::mem::take(&mut self.keyed);
         self.clicked = false;
         if let Visit::Asked(asked) = self.visit {
             if frame.wrapping_sub(asked) > WAIT {
@@ -145,7 +161,7 @@ impl Pass {
             // A click never takes the focus to another tab.
             (At::Sidebar { tab }, Visit::Out) if pointed && self.came_within(tab) => {
                 self.visit = Visit::In;
-                self.clicked = true;
+                self.clicked = !keyed;
                 return None;
             },
             (At::Floating, _)
@@ -187,12 +203,34 @@ mod tests {
         See(At),
         Ask,
         Point(Mouse),
+        /// A key, anywhere.
+        Key,
         Wait(u64),
         /// The pane beside the column in this tab closes.
         Close(usize),
     }
 
-    use Step::{Ask, Close, Point, See, Wait};
+    use Step::{Ask, Close, Key, Point, See, Wait};
+
+    /// Takes in every step, in two tabs, and says where the sidebar sent the
+    /// focus on after each report.
+    fn walk(steps: Vec<Step>) -> (Pass, Vec<Option<On>>) {
+        let mut pass = Pass::default();
+        let mut frame = 0;
+        let mut closed = Vec::new();
+        let mut seen = Vec::new();
+        for step in steps {
+            match step {
+                See(at) => seen.push(pass.see(at, 2, frame, |pane| !closed.contains(&pane))),
+                Ask => pass.ask(frame),
+                Point(mouse) => pass.mouse(mouse, frame),
+                Key => pass.input(),
+                Wait(ticks) => frame += ticks,
+                Close(tab) => closed.push(neighbour(tab)),
+            }
+        }
+        (pass, seen)
+    }
 
     /// The pane that stands beside the column in `tab`.
     const fn neighbour(tab: usize) -> PaneId {
@@ -267,6 +305,11 @@ mod tests {
                 vec![None, Some(On::Back)],
             ),
             (
+                "a key just as the hover ends keeps the focus a click may have brought",
+                vec![pane(2, true), click(), Key, sidebar(2)],
+                vec![None, None],
+            ),
+            (
                 "in the sidebar, with floating panes shown and hidden again",
                 vec![pane(2, true), Ask, sidebar(2), floating(), sidebar(2)],
                 vec![None, None, None, None],
@@ -313,41 +356,24 @@ mod tests {
             ),
         ];
         for (case, steps, sent) in cases {
-            let mut pass = Pass::default();
-            let mut frame = 0;
-            let mut closed = Vec::new();
-            let mut seen = Vec::new();
-            for step in steps {
-                match step {
-                    See(at) => seen.push(pass.see(at, 2, frame, |pane| !closed.contains(&pane))),
-                    Ask => pass.ask(frame),
-                    Point(mouse) => pass.mouse(mouse, frame),
-                    Wait(ticks) => frame += ticks,
-                    Close(tab) => closed.push(neighbour(tab)),
-                }
-            }
-            assert_eq!(seen, sent, "{case}");
+            assert_eq!(walk(steps).1, sent, "{case}");
         }
     }
 
     /// The report that a click focuses the sidebar by says so, once. One that
-    /// `focus` brought does not, whatever the pointer did.
+    /// `focus` brought does not, whatever the pointer did, nor one that a key
+    /// since the hover's end may have brought.
     #[test]
     fn a_report_says_when_a_click_took_the_focus_in() {
-        let beside = At::Pane { tab: TabId(2), beside: Some(neighbour(2)) };
-        let sidebar = At::Sidebar { tab: TabId(2) };
-        let ended = Mouse::Hover(0, usize::from(u16::MAX));
-        for asked in [false, true] {
-            let mut pass = Pass::default();
-            pass.see(beside, 2, 0, |_| true);
-            if asked {
-                pass.ask(0);
-            }
-            pass.mouse(ended, 0);
-            pass.see(sidebar, 2, 0, |_| true);
-            assert_eq!(pass.clicked(), !asked, "asked: {asked}");
-            pass.see(sidebar, 2, 0, |_| true);
-            assert!(!pass.clicked(), "asked: {asked}");
+        let cases = [
+            ("a click", vec![pane(2, true), click(), sidebar(2)], true),
+            ("the report after it", vec![pane(2, true), click(), sidebar(2), sidebar(2)], false),
+            ("focus, and a click", vec![pane(2, true), Ask, click(), sidebar(2)], false),
+            ("a key, then a click", vec![pane(2, true), Key, click(), sidebar(2)], true),
+            ("a click, then a key", vec![pane(2, true), click(), Key, sidebar(2)], false),
+        ];
+        for (case, steps, clicked) in cases {
+            assert_eq!(walk(steps).0.clicked(), clicked, "{case}");
         }
     }
 
