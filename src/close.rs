@@ -4,6 +4,8 @@
 //! zellij closes a tab with its last tiled pane. The sidebar's column never
 //! closes, so a tab that keeps one would stay open with nothing of yours in
 //! it: closing the last pane that holds a tab open closes the tab instead.
+//! A session's only tab takes the session with it, and the menu deletes the
+//! session for it.
 
 use std::collections::BTreeMap;
 
@@ -55,6 +57,28 @@ pub fn alone(panes: &[PaneInfo], pane: u32) -> bool {
     !panes.iter().any(|other| {
         (other.is_plugin || other.id != pane) && (holds_tab(other) || suspended(other))
     })
+}
+
+/// What closing a pane closes with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closes {
+    /// The pane alone: something else holds its tab open.
+    Pane,
+    /// Its tab, as nothing else holds the tab open.
+    Tab,
+    /// Its session, as nothing else holds the tab open, and the session has
+    /// no other tab.
+    Session,
+}
+
+/// What closing the terminal `pane` closes, among its tab's `panes`, in a
+/// session of `tabs` tabs.
+pub fn closes(panes: &[PaneInfo], pane: u32, tabs: usize) -> Closes {
+    match (alone(panes, pane), tabs) {
+        (false, _) => Closes::Pane,
+        (true, 0 | 1) => Closes::Session,
+        (true, _) => Closes::Tab,
+    }
 }
 
 /// The live session the picker lists first, of `others`: the newest. Where
@@ -111,24 +135,26 @@ pub struct Pane {
     pub id: u32,
     /// Its tab, by its id, once its session has said.
     pub tab: Option<TabId>,
-    /// Whether nothing else keeps its tab open.
-    pub alone: bool,
+    /// What closing it closes with it.
+    pub closes: Closes,
 }
 
 impl Pane {
-    /// Pane `id`, among its session's `leaves`.
+    /// Pane `id`, among its session's `leaves`. One that is not among them
+    /// closes alone.
     pub fn of(id: u32, leaves: &[Leaf]) -> Self {
         let leaf = leaves.iter().find(|leaf| leaf.id == id);
         let tab = leaf.and_then(|leaf| leaf.tab_id);
-        Pane { id, tab, alone: leaf.is_some_and(|leaf| leaf.alone) }
+        Pane { id, tab, closes: leaf.map_or(Closes::Pane, |leaf| leaf.closes) }
     }
 
     /// Closes the pane, of the session `seat` names, or its tab once nothing
-    /// else holds the tab open.
+    /// else holds the tab open, which ends the session when it is its only
+    /// one.
     pub fn act(&self, seat: Seat) -> Act {
-        match self.tab.filter(|_| self.alone) {
-            Some(tab) => Act::Tab(seat, tab),
-            None => Act::Pane(seat, self.id),
+        match (self.closes, self.tab) {
+            (Closes::Tab | Closes::Session, Some(tab)) => Act::Tab(seat, tab),
+            (Closes::Pane, _) | (Closes::Tab | Closes::Session, None) => Act::Pane(seat, self.id),
         }
     }
 }
@@ -150,14 +176,17 @@ impl Subject {
     /// What the key that deletes `scope` does here, or why it does nothing.
     /// The pane closes, or its tab once nothing else holds the tab open; a
     /// session's row has only its session to delete, by a key that says so.
+    /// The last pane that holds a session's only tab open ends the session
+    /// with it, and deletes the session: the session you are in goes once
+    /// you are in another, as it would for a key that kills it.
     pub fn plan(&self, scope: Scope) -> Result<Plan, String> {
         let seat = self.seat.clone();
         let act = match (scope, &self.pane) {
-            (Scope::Pane, Some(pane)) => pane.act(seat),
             (Scope::Pane, None) => {
                 return Err(format!("menu: \"{}\" has no pane here to close", seat.session()));
             },
-            (Scope::Session, _) => match seat {
+            (Scope::Pane, Some(pane)) if pane.closes != Closes::Session => pane.act(seat),
+            (Scope::Pane, Some(_)) | (Scope::Session, _) => match seat {
                 Seat::There(session) => Act::Kill(session),
                 Seat::Here(session) => {
                     let Some(to) = self.refuge.clone() else {
@@ -401,9 +430,10 @@ mod tests {
         PaneInfo { id, is_selectable: true, ..PaneInfo::default() }
     }
 
-    /// zellij closes a tab with its last tiled pane, floating panes and all.
-    /// The sidebar and its placeholder never close, and hold no tab open. A
-    /// pane another stands in place of comes back once the other closes.
+    /// zellij closes a tab with its last tiled pane, floating panes and all,
+    /// and a session with its only tab. The sidebar and its placeholder never
+    /// close, and hold no tab open. A pane another stands in place of comes
+    /// back once the other closes.
     #[test]
     fn the_last_pane_that_holds_its_tab_open_closes_the_tab() {
         let sidebar = PaneInfo { is_plugin: true, title: SIDEBAR_TITLE.to_owned(), ..pane(1) };
@@ -426,6 +456,13 @@ mod tests {
             ([column, vec![suspended, pane(4)]].concat(), 4, false),
         ] {
             assert_eq!(alone(&panes, id), closes_tab, "pane {id} of {panes:?}");
+            let (of_two, of_one) = if closes_tab {
+                (Closes::Tab, Closes::Session)
+            } else {
+                (Closes::Pane, Closes::Pane)
+            };
+            assert_eq!(closes(&panes, id, 2), of_two, "pane {id} of {panes:?}, of two tabs");
+            assert_eq!(closes(&panes, id, 1), of_one, "pane {id} of {panes:?}, of one tab");
         }
     }
 
@@ -434,11 +471,16 @@ mod tests {
     }
 
     /// Pane `id` of `seat`, or the session's row with none: pane 2 in tab 7
-    /// beside pane 3, and pane 5 alone in tab 8.
+    /// beside pane 3, pane 5 alone in tab 8, and pane 6 alone in tab 9, as
+    /// though that were the session's only tab.
     fn of(seat: Seat, id: Option<u32>, agents: Fetch<Vec<Agent>>) -> Subject {
         let pane = id.map(|id| {
-            let (tab, alone) = if id == 5 { (8, true) } else { (7, false) };
-            Pane { id, tab: Some(TabId(tab)), alone }
+            let (tab, closes) = match id {
+                5 => (8, Closes::Tab),
+                6 => (9, Closes::Session),
+                _ => (7, Closes::Pane),
+            };
+            Pane { id, tab: Some(TabId(tab)), closes }
         });
         Subject { seat, pane, agents, refuge: Some("elo".to_owned()) }
     }
@@ -450,7 +492,8 @@ mod tests {
     /// A pane closes alone, or its tab with it once nothing else holds the
     /// tab open. Another session's goes by a command. A session other than
     /// yours is killed, and yours once you have gone to another; a session's
-    /// row deletes its session.
+    /// row deletes its session, and so does the last pane that holds its only
+    /// tab open, which would end it.
     #[test]
     fn each_key_deletes_what_it_names_and_what_goes_with_it() {
         let elo = Seat::There("elo".to_owned());
@@ -458,6 +501,8 @@ mod tests {
         for (seat, id, scope, act) in [
             (here(), Some(2), Scope::Pane, Act::Pane(here(), 2)),
             (here(), Some(5), Scope::Pane, Act::Tab(here(), TabId(8))),
+            (here(), Some(6), Scope::Pane, leave()),
+            (elo.clone(), Some(6), Scope::Pane, Act::Kill("elo".to_owned())),
             (elo.clone(), Some(2), Scope::Pane, Act::Pane(elo.clone(), 2)),
             (elo.clone(), Some(2), Scope::Session, Act::Kill("elo".to_owned())),
             (here(), Some(2), Scope::Session, leave()),
@@ -470,19 +515,22 @@ mod tests {
     }
 
     /// With nowhere to go, the session you are in stays: killed, it would
-    /// take you out of zellij. A session's row has no pane for a key that
-    /// closes one, and kills no session for it. A pane in a tab no one has
-    /// named yet closes alone.
+    /// take you out of zellij, and so would closing the last pane that holds
+    /// its only tab open. A session's row has no pane for a key that closes
+    /// one, and kills no session for it. A pane in a tab no one has named yet
+    /// closes alone.
     #[test]
     fn a_key_with_nothing_it_can_delete_says_why() {
-        let alone = Subject { refuge: None, ..of(here(), Some(2), Fetch::Ready(Vec::new())) };
-        let said = alone.plan(Scope::Session).err();
-        assert!(said.as_deref().is_some_and(|said| said.contains("only session")), "{said:?}");
+        for (id, scope) in [(Some(2), Scope::Session), (Some(6), Scope::Pane)] {
+            let alone = Subject { refuge: None, ..of(here(), id, Fetch::Ready(Vec::new())) };
+            let said = alone.plan(scope).err();
+            assert!(said.as_deref().is_some_and(|said| said.contains("only session")), "{said:?}");
+        }
         let row = of(Seat::There("elo".to_owned()), None, Fetch::Ready(Vec::new()));
         let said = row.plan(Scope::Pane).err();
         assert!(said.as_deref().is_some_and(|said| said.contains("no pane")), "{said:?}");
         let untold = Subject {
-            pane: Some(Pane { id: 5, tab: None, alone: true }),
+            pane: Some(Pane { id: 5, tab: None, closes: Closes::Tab }),
             ..of(here(), None, Fetch::Ready(Vec::new()))
         };
         let act = untold.plan(Scope::Pane).map(|plan| plan.act);
@@ -512,6 +560,7 @@ mod tests {
             (Some(5), Scope::Pane, Some("Close its tab? 1 agent, 1 waiting")),
             (Some(4), Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
             (Some(9), Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
+            (Some(6), Scope::Pane, Some(session)),
             (Some(2), Scope::Session, Some(session)),
             (None, Scope::Session, Some(session)),
         ] {

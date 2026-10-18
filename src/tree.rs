@@ -15,7 +15,7 @@ use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::checkouts::{Checkout, Checkouts, Said};
-use crate::close::{self, Act};
+use crate::close::{self, Act, Closes};
 use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
 use crate::dock::TabId;
@@ -64,8 +64,9 @@ pub struct Leaf {
     pub tab_id: Option<TabId>,
     pub cwd: Option<String>,
     pub checkout: Option<Checkout>,
-    /// Whether nothing else holds its tab open: closing it closes the tab.
-    pub alone: bool,
+    /// What closing it closes with it: its tab once nothing else holds the
+    /// tab open, and its session once that is the session's only tab.
+    pub closes: Closes,
 }
 
 impl Branch {
@@ -126,7 +127,7 @@ pub fn leaves(
                     tab_id,
                     cwd: cwd.map(str::to_owned),
                     checkout,
-                    alone: close::alone(panes, pane.id),
+                    closes: close::closes(panes, pane.id, manifest.panes.len()),
                 },
             ));
         }
@@ -765,7 +766,7 @@ mod tests {
                     tab_id: None,
                     cwd: None,
                     checkout: None,
-                    alone: false,
+                    closes: Closes::Pane,
                 })
                 .collect(),
         }
@@ -914,7 +915,7 @@ mod tests {
             tab_id: None,
             cwd: None,
             checkout: None,
-            alone: false,
+            closes: Closes::Pane,
         };
         assert_eq!(label(&leaf("✳ Claude Code", "liquid dual"), None), "liquid dual");
         assert_eq!(label(&leaf("✳ Claude Code", "Tab #13"), None), "Claude Code");
@@ -936,7 +937,7 @@ mod tests {
             tab_id: None,
             cwd: cwd.map(str::to_owned),
             checkout: None,
-            alone: false,
+            closes: Closes::Pane,
         };
         let main = Some("/home/you/Projects/misc/luneta/main");
         assert_eq!(label(&leaf("~/P/m/l/main", main), None), "luneta/main");
@@ -1021,6 +1022,23 @@ mod tests {
             .map(|leaf| leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str()))
             .collect();
         assert_eq!(branches, [Some("main"), None, None, None]);
+    }
+
+    /// A pane says what closing it closes: itself beside another, its tab
+    /// alone in it, and its session alone in the session's only tab.
+    #[test]
+    fn a_pane_says_what_closing_it_closes() {
+        let two = manifest(&[(0, vec![pane(2, "a"), pane(3, "b")]), (1, vec![pane(4, "c")])]);
+        let one = manifest(&[(0, vec![pane(4, "c")])]);
+        let (places, checkouts) = (Places::default(), Checkouts::default());
+        let closes = |manifest: &PaneManifest, tabs: &[TabInfo]| {
+            let leaves = leaves("s", tabs, manifest, &places, &checkouts, &[]);
+            leaves.iter().map(|leaf| (leaf.id, leaf.closes)).collect::<Vec<_>>()
+        };
+        let tabs = [tab(0, "code"), tab(1, "logs")];
+        let of_two = [(2, Closes::Pane), (3, Closes::Pane), (4, Closes::Tab)];
+        assert_eq!(closes(&two, &tabs), of_two);
+        assert_eq!(closes(&one, &tabs[..1]), [(4, Closes::Session)]);
     }
 
     /// A pane that moved keeps its branch until git answers for where it
@@ -1343,7 +1361,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             checkout: branch
                 .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
-            alone: false,
+            closes: Closes::Pane,
         };
         let branches = [Branch {
             name: "s".to_owned(),

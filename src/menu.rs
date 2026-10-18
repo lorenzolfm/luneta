@@ -1474,7 +1474,7 @@ mod tests {
             .collect();
         close::Subject {
             seat,
-            pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), alone: false }),
+            pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), closes: close::Closes::Pane }),
             agents: Fetch::Ready(agents),
             refuge: Some("elo".to_owned()),
         }
@@ -1687,7 +1687,7 @@ mod tests {
     #[test]
     fn going_ahead_closes_what_the_tab_holds_now() {
         let alone = close::Subject {
-            pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), alone: true }),
+            pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), closes: close::Closes::Tab }),
             ..closing(luneta(), &[(2, "busy")])
         };
         let joined = closing(luneta(), &[(2, "busy")]);
@@ -1873,12 +1873,15 @@ mod tests {
     #[test]
     fn the_key_binding_s_menu_goes_ahead_with_what_the_tab_holds_now() {
         let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
+        // Tab 7, and tab 8 with pane 9, for closing tab 7 to leave the
+        // session another.
         let tab = |ids: &[u32]| {
             let mut tab: Vec<PaneInfo> = ids.iter().map(|id| shell(*id)).collect();
             tab.push(PaneInfo { is_plugin: true, is_floating: true, ..shell(0) });
-            PaneManifest { panes: HashMap::from([(0, tab)]) }
+            PaneManifest { panes: HashMap::from([(0, tab), (1, vec![shell(9)])]) }
         };
         let mut menu = bound_for_two(true);
+        menu.tabs.push(TabInfo { position: 1, tab_id: 8, ..TabInfo::default() });
         menu.panes = Some(tab(&[3]));
         let busy = Beside { pane: 3, cwd: "/w/elo".to_owned() };
         menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(Origin::Sure(busy)));

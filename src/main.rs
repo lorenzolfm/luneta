@@ -1827,7 +1827,7 @@ mod tests {
             tab_id: None,
             cwd: None,
             checkout: None,
-            alone: false,
+            closes: close::Closes::Pane,
         };
         let mut state = State {
             role: Role::Sidebar(Tree::default()),

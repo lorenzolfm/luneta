@@ -263,8 +263,10 @@ tab open, since zellij brings that pane back. A pane of another session closes
 through `zellij --session`, and the sidebar's highlight moves to the row after
 it once it is gone. The session you are in is killed once you are in another,
 the newest, which the picker lists first; with no other session to go to, the
-menu says so and kills nothing. Closing the last pane of a session's only tab
-ends the session, as zellij does.
+menu says so and kills nothing. Closing the last pane that holds a session's
+only tab open would end the session, so `d d` there deletes the session, as
+`d s` does: it asks as for the session, and the session you are in goes once
+you are in another.
 
 When what a key deletes would end an agent that is busy or waiting on you, the
 menu asks first, and says what goes:
