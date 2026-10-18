@@ -115,13 +115,22 @@ pub struct Pane {
     pub alone: bool,
 }
 
-/// Which agents a delete takes along: those of a pane, of a pane and the
-/// rest of its tab, or of the whole session.
-#[derive(Clone, Copy)]
-enum Reach {
-    Pane(u32),
-    Tab(u32, usize),
-    Session,
+impl Pane {
+    /// Pane `id`, among its session's `leaves`.
+    pub fn of(id: u32, leaves: &[Leaf]) -> Self {
+        let leaf = leaves.iter().find(|leaf| leaf.id == id);
+        let tab = leaf.and_then(|leaf| leaf.tab_id);
+        Pane { id, tab, alone: leaf.is_some_and(|leaf| leaf.alone) }
+    }
+
+    /// Closes the pane, of the session `seat` names, or its tab once nothing
+    /// else holds the tab open.
+    pub fn act(&self, seat: Seat) -> Act {
+        match self.tab.filter(|_| self.alone) {
+            Some(tab) => Act::Tab(seat, tab),
+            None => Act::Pane(seat, self.id),
+        }
+    }
 }
 
 impl Subject {
@@ -134,29 +143,22 @@ impl Subject {
         agents: Fetch<Vec<Agent>>,
         refuge: Option<String>,
     ) -> Self {
-        let pane = id.map(|id| {
-            let leaf = leaves.iter().find(|leaf| leaf.id == id);
-            Pane {
-                id,
-                tab: leaf.and_then(|leaf| leaf.tab_id),
-                alone: leaf.is_some_and(|leaf| leaf.alone),
-            }
-        });
+        let pane = id.map(|id| Pane::of(id, leaves));
         Subject { seat, pane, agents, refuge }
     }
 
     /// What the key that deletes `scope` does here, or why it does nothing.
     /// The pane closes, or its tab once nothing else holds the tab open; a
-    /// session's row has only its session to delete.
+    /// session's row has only its session to delete, by a key that says so.
     pub fn plan(&self, scope: Scope) -> Result<Plan, String> {
         let seat = self.seat.clone();
-        let (act, reach) = match (scope, &self.pane) {
-            (Scope::Pane, Some(pane)) => match pane.tab.filter(|_| pane.alone) {
-                Some(tab) => (Act::Tab(seat, tab), Reach::Tab(pane.id, tab)),
-                None => (Act::Pane(seat, pane.id), Reach::Pane(pane.id)),
+        let act = match (scope, &self.pane) {
+            (Scope::Pane, Some(pane)) => pane.act(seat),
+            (Scope::Pane, None) => {
+                return Err(format!("menu: \"{}\" has no pane here to close", seat.session()));
             },
-            (Scope::Pane, None) | (Scope::Session, _) => match seat {
-                Seat::There(session) => (Act::Kill(session), Reach::Session),
+            (Scope::Session, _) => match seat {
+                Seat::There(session) => Act::Kill(session),
                 Seat::Here(session) => {
                     let Some(to) = self.refuge.clone() else {
                         return Err(format!(
@@ -164,14 +166,16 @@ impl Subject {
                              before it ends"
                         ));
                     };
-                    (Act::Leave { session, to }, Reach::Session)
+                    Act::Leave { session, to }
                 },
             },
         };
-        let takes = |agent: &&Agent| match reach {
-            Reach::Pane(pane) => agent.pane == pane,
-            Reach::Tab(pane, tab) => agent.pane == pane || agent.tab == Some(tab),
-            Reach::Session => true,
+        // The agents of the tab take in the pane's own: both have its tab from
+        // the session's leaves.
+        let takes = |agent: &&Agent| match &act {
+            Act::Pane(_, pane) => agent.pane == *pane,
+            Act::Tab(_, tab) => agent.tab == Some(*tab),
+            Act::Kill(_) | Act::Leave { .. } => true,
         };
         let ending = match &self.agents {
             Fetch::Ready(agents) => {
@@ -457,7 +461,7 @@ mod tests {
             (elo.clone(), Some(2), Scope::Pane, Act::Pane(elo.clone(), 2)),
             (elo.clone(), Some(2), Scope::Session, Act::Kill("elo".to_owned())),
             (here(), Some(2), Scope::Session, leave()),
-            (elo.clone(), None, Scope::Pane, Act::Kill("elo".to_owned())),
+            (elo.clone(), None, Scope::Session, Act::Kill("elo".to_owned())),
             (here(), None, Scope::Session, leave()),
         ] {
             let plan = of(seat.clone(), id, Fetch::Ready(Vec::new())).plan(scope);
@@ -466,13 +470,17 @@ mod tests {
     }
 
     /// With nowhere to go, the session you are in stays: killed, it would
-    /// take you out of zellij. A pane in a tab no one has named yet closes
-    /// alone.
+    /// take you out of zellij. A session's row has no pane for a key that
+    /// closes one, and kills no session for it. A pane in a tab no one has
+    /// named yet closes alone.
     #[test]
     fn a_key_with_nothing_it_can_delete_says_why() {
         let alone = Subject { refuge: None, ..of(here(), Some(2), Fetch::Ready(Vec::new())) };
         let said = alone.plan(Scope::Session).err();
         assert!(said.as_deref().is_some_and(|said| said.contains("only session")), "{said:?}");
+        let row = of(Seat::There("elo".to_owned()), None, Fetch::Ready(Vec::new()));
+        let said = row.plan(Scope::Pane).err();
+        assert!(said.as_deref().is_some_and(|said| said.contains("no pane")), "{said:?}");
         let untold = Subject {
             pane: Some(Pane { id: 5, tab: None, alone: true }),
             ..of(here(), None, Fetch::Ready(Vec::new()))

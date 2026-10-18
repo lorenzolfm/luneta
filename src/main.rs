@@ -27,7 +27,6 @@ use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
 use menu::{SidebarMenu, There};
 use elapsed::Age;
-use fetch::Fetch;
 use panes::Peeks;
 use pass::{At, Pass, Then};
 use places::Places;
@@ -1022,19 +1021,11 @@ impl State {
             self.error = Some(format!("kill \"{label}\": luneta is not sure which pane it sits in"));
             return;
         }
-        let subject = close::Subject::new(
-            row.seat.clone(),
-            Some(row.pane),
-            &self.leaves(row.seat.session()),
-            Fetch::Waiting,
-            None,
-        );
-        if let Ok(plan) = subject.plan(close::Scope::Pane) {
-            plan.act.run(BTreeMap::from([
-                (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
-                (agents::LABEL_KEY.to_owned(), row.label()),
-            ]));
-        }
+        let pane = close::Pane::of(row.pane, &self.leaves(row.seat.session()));
+        pane.act(row.seat.clone()).run(BTreeMap::from([
+            (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
+            (agents::LABEL_KEY.to_owned(), row.label()),
+        ]));
         self.agents.forget_selected();
         self.set_term(String::new());
     }
