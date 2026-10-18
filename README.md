@@ -138,8 +138,16 @@ accent. A shell at its prompt is named for its directory's last two parts, as
 `luneta/main`, where fish would title it `~/P/m/l/main`.
 
 Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
-and sessions alike. A folded session keeps its count and shows the dot of
-the agent that wants you most.
+and sessions alike. One click does it, whether the sidebar has the focus or
+not. On a session's row, the `▾` or `▸` folds or unfolds the session, and the
+name switches to it; the name of the session you are in takes you back to your
+pane. A folded session keeps its count and shows the dot of the agent that
+wants you most.
+
+The wheel scrolls the list and leaves the highlight where it is, until you go
+somewhere else or press a key. Leaving a session from the sidebar hands its
+focus back to the pane you came from first, so the session has you back there
+and not in the sidebar.
 
 Press `/` to search, as in less and vim. The tree narrows to the rows that
 match what you type, fuzzily, as the picker does: a session by its name, a pane
@@ -452,10 +460,12 @@ beside its column. `Ctrl b` and a click are the ways in. zellij does not say
 which key moved the focus, so one that moves it only within a tab, `h` in pane
 mode, goes on to the tab before too.
 
-zellij tells the sidebar of a click that only focuses it by the hover the click
-ends. With `mouse_hover_effects false` there is no hover, and such a click from
-the pane beside the column reads as `Alt h`; `mouse_click_through true` hands
-the sidebar the click itself.
+zellij hands the sidebar no click that only focuses it, but it ends the hover
+over the sidebar first, where the click was, and the sidebar acts on that. With
+`mouse_hover_effects false` there is no hover: such a click only focuses the
+sidebar, and from the pane beside the column reads as `Alt h`.
+`mouse_click_through true` hands the sidebar the click itself. zellij hands a
+plugin no right click, and no drag.
 
 Two clients on one session — a terminal and `zellij web`, say — share the one
 sidebar. It goes with whoever switched tabs last, and comes back from hidden to
@@ -491,6 +501,14 @@ In the sidebar, once it has the focus:
 | `n` | go to the next agent that wants you |
 | `/` | search |
 | `Esc` | back to the pane you came from |
+
+With the mouse, focused or not:
+
+| mouse | does |
+|---|---|
+| click a row | go there |
+| click `▾` / `▸` | fold / unfold the session |
+| wheel | scroll the list |
 
 While the search is open, every key types into it but these:
 

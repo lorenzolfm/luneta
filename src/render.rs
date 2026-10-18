@@ -1044,24 +1044,60 @@ pub fn sidebar_row_at(
     (index < end).then_some(index)
 }
 
+/// Moves the view of the sidebar `delta` rows down, or up, as far as there
+/// are rows to show, and says whether it moved.
+pub fn scroll_sidebar(
+    tree: &mut Tree,
+    agents: &AgentSet,
+    focused: bool,
+    rows: usize,
+    cols: usize,
+    delta: isize,
+) -> bool {
+    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
+    let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
+    let (Range { start, .. }, lit) = on_screen(tree, focused, shelf.tree);
+    let last = tree.rows.len().saturating_sub(shelf.tree);
+    let top = start.saturating_add_signed(delta).min(last);
+    if top == start {
+        return false;
+    }
+    tree.scroll_to(top, lit);
+    true
+}
+
+/// Whether a click on `column` of a row folds it, where the rest of the row
+/// goes there: a session's, on its fold.
+pub fn folds_at(node: &Node, column: usize) -> bool {
+    matches!(node, Node::Session(_)) && column < FOLD
+}
+
 /// The rows of the tree a sidebar shows in `height` rows, and the one of them
 /// that is lit: the cursor while the sidebar has the focus, and the pane you
 /// are in while it does not. The rows shown are the ones around the lit row,
-/// or around the cursor while none is, so a lit row is never out of sight.
+/// or around the cursor while none is, so a lit row is never out of sight
+/// until the wheel moves the view off it.
 fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
     let lit = if focused {
         tree.rows.selected()
     } else {
         tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
     };
-    let around = lit.or(tree.rows.selected()).unwrap_or(0);
-    let (start, end) = viewport(around, tree.rows.len(), height);
-    (start..end, lit)
+    let total = tree.rows.len();
+    let start = match tree.top(lit) {
+        Some(top) => top.min(total.saturating_sub(height)),
+        None => viewport(lit.or(tree.rows.selected()).unwrap_or(0), total, height).0,
+    };
+    (start..(start + height).min(total), lit)
 }
 
 const UNFOLDED: &str = "▾";
 
 const FOLDED: &str = "▸";
+
+/// The columns of a session's row a click folds it by: the `▾` or `▸`, and
+/// the column either side of it.
+const FOLD: usize = 3;
 
 /// What marks the pane you are in, in its first column, whether the sidebar
 /// has the focus or not.
@@ -2303,6 +2339,45 @@ mod tests {
             assert!(m.is_some(), "{agent:?}, here: {here}");
             assert_ne!(m, i, "{agent:?}, here: {here}");
         }
+    }
+
+    /// The wheel moves the view and leaves the cursor and the highlight where
+    /// they are, out of sight or not, until another row is lit.
+    #[test]
+    fn the_wheel_moves_the_view_until_another_row_is_lit() {
+        let mut tree = workday_tree(0);
+        let agents = AgentSet::default();
+        let top =
+            |tree: &Tree, focused: bool| sidebar_row_at(tree, &agents, focused, 6, 32, HEADER);
+        // Four rows of eight, around your pane on the seventh.
+        assert_eq!(top(&tree, false), Some(3));
+
+        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
+        assert_eq!(top(&tree, false), Some(0));
+        assert!(!scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
+        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, 99));
+        assert_eq!(top(&tree, false), Some(4));
+        assert_eq!(tree.rows.selected(), Some(0));
+        assert!(!sidebar_picture(&tree, &[], false, 6, 32)[HEADER].contains("bipa"));
+
+        // The focus lights the cursor instead, and the view goes to it.
+        assert_eq!(top(&tree, true), Some(0));
+        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
+        assert_eq!(top(&tree, true), Some(3));
+        tree.unscroll();
+        assert_eq!(top(&tree, true), Some(0));
+    }
+
+    #[test]
+    fn a_session_row_folds_on_its_fold_and_nowhere_else() {
+        let session = session_node("bipa", false, 0, None);
+        let Node::Session(node) = &session else { panic!("a session row") };
+        let line = branch_line(node, 30, 0);
+        let glyph = line.content().chars().position(|c| c.to_string() == UNFOLDED);
+        assert!(glyph.is_some_and(|at| folds_at(&session, at)), "{:?}", line.content());
+        let folds: Vec<bool> = (0..6).map(|column| folds_at(&session, column)).collect();
+        assert_eq!(folds, [true, true, true, false, false, false]);
+        assert!(!folds_at(&pane_node("bipa", 31, "handoff", None), 1));
     }
 
     #[test]

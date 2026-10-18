@@ -10,7 +10,8 @@
 //! It keeps the focus you ask for, with `focus`, and the focus a click gives
 //! it. zellij hands a click that only focuses a pane to no one, but it ends the
 //! hover over the sidebar first, so a click comes as the hover's end just
-//! before the panes that show the sidebar focused. A key comes with none.
+//! before the panes that show the sidebar focused. A key comes with none, and
+//! the hover's end when the pointer leaves comes long before any key.
 
 use zellij_tile::prelude::{Mouse, PaneId};
 
@@ -20,6 +21,16 @@ use crate::TICKS_PER_SECOND;
 /// How long the focus you asked for may take to come, in ticks. A hidden
 /// sidebar comes back before the dock moves the focus into it.
 const WAIT: u64 = 2 * TICKS_PER_SECOND;
+
+/// How long the panes that show a click's focus may take to come after the
+/// hover it ends, in ticks. zellij sends both at once.
+const CLICK: u64 = TICKS_PER_SECOND / 5;
+
+/// Whether zellij says the hover over a plugin pane ended: a move to its last
+/// column, when a click focuses the pane and when the pointer leaves it.
+pub fn ends_hover(mouse: Mouse) -> bool {
+    matches!(mouse, Mouse::Hover(0, column) if column == usize::from(u16::MAX))
+}
 
 /// Where this client's focus is, in one report of the panes and the tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,9 +72,11 @@ pub struct Pass {
     /// The pane the focus was on last, outside the column: its tab, and the
     /// pane when it stands beside the column.
     from: Option<(TabId, Option<PaneId>)>,
-    /// Whether the hover over the sidebar ended, or a click came through to
+    /// When the hover over the sidebar last ended, or a click came through to
     /// it, since the report before.
-    pointed: bool,
+    pointed: Option<u64>,
+    /// Whether the last report took the focus in by a click.
+    clicked: bool,
 }
 
 impl Pass {
@@ -73,18 +86,24 @@ impl Pass {
         }
     }
 
-    /// Takes in a mouse event on the sidebar. zellij ends the hover over a
-    /// plugin pane with a move to its last column, when a click focuses the
-    /// pane and when the pointer leaves it; a click through comes itself. A
-    /// pointer that moves on the sidebar, or scrolls it, is neither.
-    pub fn mouse(&mut self, mouse: Mouse) {
-        let ended = matches!(mouse, Mouse::Hover(0, column) if column == usize::from(u16::MAX));
-        self.pointed |= ended || matches!(mouse, Mouse::LeftClick(..));
+    /// Takes in a mouse event on the sidebar, at `frame`: the end of the
+    /// hover, or a click that comes through. A pointer that moves on the
+    /// sidebar, or scrolls it, is neither.
+    pub fn mouse(&mut self, mouse: Mouse, frame: u64) {
+        if ends_hover(mouse) || matches!(mouse, Mouse::LeftClick(..)) {
+            self.pointed = Some(frame);
+        }
     }
 
     /// Whether the focus is in the column only on its way somewhere else.
     pub fn passing(&self) -> bool {
         self.visit == Visit::Passing
+    }
+
+    /// Whether the last report took the focus in by a click, which zellij
+    /// handed to no one when it only focused the sidebar.
+    pub fn clicked(&self) -> bool {
+        self.clicked
     }
 
     /// Takes in where the focus is after a report, and says where to send it
@@ -98,7 +117,8 @@ impl Pass {
         frame: u64,
         stands: impl Fn(PaneId) -> bool,
     ) -> Option<On> {
-        let pointed = std::mem::take(&mut self.pointed);
+        let pointed = self.pointed.take().is_some_and(|at| frame.wrapping_sub(at) <= CLICK);
+        self.clicked = false;
         if let Visit::Asked(asked) = self.visit {
             if frame.wrapping_sub(asked) > WAIT {
                 self.visit = Visit::Out;
@@ -125,6 +145,7 @@ impl Pass {
             // A click never takes the focus to another tab.
             (At::Sidebar { tab }, Visit::Out) if pointed && self.came_within(tab) => {
                 self.visit = Visit::In;
+                self.clicked = true;
                 return None;
             },
             (At::Floating, _)
@@ -241,6 +262,11 @@ mod tests {
                 vec![None, Some(On::Beside)],
             ),
             (
+                "the pointer leaving the sidebar does not keep a key that comes later",
+                vec![pane(2, true), click(), Wait(CLICK + 1), sidebar(2)],
+                vec![None, Some(On::Back)],
+            ),
+            (
                 "in the sidebar, with floating panes shown and hidden again",
                 vec![pane(2, true), Ask, sidebar(2), floating(), sidebar(2)],
                 vec![None, None, None, None],
@@ -295,12 +321,33 @@ mod tests {
                 match step {
                     See(at) => seen.push(pass.see(at, 2, frame, |pane| !closed.contains(&pane))),
                     Ask => pass.ask(frame),
-                    Point(mouse) => pass.mouse(mouse),
+                    Point(mouse) => pass.mouse(mouse, frame),
                     Wait(ticks) => frame += ticks,
                     Close(tab) => closed.push(neighbour(tab)),
                 }
             }
             assert_eq!(seen, sent, "{case}");
+        }
+    }
+
+    /// The report that a click focuses the sidebar by says so, once. One that
+    /// `focus` brought does not, whatever the pointer did.
+    #[test]
+    fn a_report_says_when_a_click_took_the_focus_in() {
+        let beside = At::Pane { tab: TabId(2), beside: Some(neighbour(2)) };
+        let sidebar = At::Sidebar { tab: TabId(2) };
+        let ended = Mouse::Hover(0, usize::from(u16::MAX));
+        for asked in [false, true] {
+            let mut pass = Pass::default();
+            pass.see(beside, 2, 0, |_| true);
+            if asked {
+                pass.ask(0);
+            }
+            pass.mouse(ended, 0);
+            pass.see(sidebar, 2, 0, |_| true);
+            assert_eq!(pass.clicked(), !asked, "asked: {asked}");
+            pass.see(sidebar, 2, 0, |_| true);
+            assert!(!pass.clicked(), "asked: {asked}");
         }
     }
 

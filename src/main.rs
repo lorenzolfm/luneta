@@ -175,6 +175,11 @@ struct State {
     /// Whether `focus` came while the picker showed, for the sidebar. The
     /// picker closes once the sidebar has the focus, which hides it.
     leaving: bool,
+    /// Where the pointer last stood on the sidebar, line and column.
+    pointer: Option<(usize, usize)>,
+    /// What was under the pointer when its hover ended, as a click that only
+    /// focuses the sidebar ends it: the row, and whether on its fold.
+    pressed: Option<(Place, bool)>,
 }
 
 register_plugin!(State);
@@ -1062,6 +1067,10 @@ impl State {
             Some(On::Beside) => move_focus(Direction::Right),
             None => {},
         }
+        // The click that focused the sidebar does what any other does.
+        if let Some(pressed) = self.pressed.take().filter(|_| self.pass.clicked()) {
+            self.press(pressed);
+        }
     }
 
     fn wake(&mut self) {
@@ -1127,6 +1136,10 @@ impl State {
             Role::Sidebar(tree) => tree.search().map(str::to_owned),
             _ => None,
         };
+        // A key goes by the cursor, so the view comes back to it.
+        if let Role::Sidebar(tree) = &mut self.role {
+            tree.unscroll();
+        }
         if let Some(term) = search {
             return self.handle_search_box_key(key.bare_key, term);
         }
@@ -1198,45 +1211,86 @@ impl State {
         closed
     }
 
+    /// zellij hands the sidebar a click only once it has the focus; the click
+    /// that gives it the focus ends the hover over it instead, which says
+    /// where the click was. A right click, and a hold or a release, it hands
+    /// to no plugin.
     fn handle_mouse(&mut self, mouse: Mouse) -> bool {
         if !self.is_sidebar() {
             return false;
         }
-        self.pass.mouse(mouse);
+        self.pass.mouse(mouse, self.frame);
         match mouse {
-            Mouse::LeftClick(line, _) => {
+            Mouse::LeftClick(line, column) => {
+                self.pressed = None;
                 let Ok(line) = usize::try_from(line) else {
                     return false;
                 };
-                self.click(line)
+                self.hit(line, column).is_some_and(|hit| self.press(hit))
             },
-            Mouse::ScrollUp(lines) => self.move_tree(-(lines as isize)),
-            Mouse::ScrollDown(lines) => self.move_tree(lines as isize),
+            Mouse::Hover(..) if pass::ends_hover(mouse) => {
+                let pointer = self.pointer.take();
+                self.pressed = pointer.and_then(|(line, column)| self.hit(line, column));
+                false
+            },
+            Mouse::Hover(line, column) => {
+                self.pointer = usize::try_from(line).ok().map(|line| (line, column));
+                false
+            },
+            Mouse::ScrollUp(lines) => self.scroll(-(lines as isize)),
+            Mouse::ScrollDown(lines) => self.scroll(lines as isize),
             _ => false,
         }
     }
 
-    fn click(&mut self, line: usize) -> bool {
+    /// The row drawn at `line` and `column` of the sidebar, and whether that
+    /// is its fold. Past the last column is the pane's frame.
+    fn hit(&self, line: usize, column: usize) -> Option<(Place, bool)> {
+        let (rows, cols) = self.size;
+        let Role::Sidebar(tree) = &self.role else {
+            return None;
+        };
+        if column >= cols {
+            return None;
+        }
+        let focused = self.sidebar_focused();
+        let index = render::sidebar_row_at(tree, &self.agents, focused, rows, cols, line)?;
+        let node = tree.rows.get(index)?;
+        Some((node.place(), render::folds_at(node, column)))
+    }
+
+    /// A click on a row: on a session's fold, it folds or unfolds the
+    /// session, and anywhere else it goes there, which for the session you
+    /// are in is the pane you came from. A term unfolds what it finds, so a
+    /// fold would show nothing, and the whole row goes there.
+    fn press(&mut self, (place, fold): (Place, bool)) -> bool {
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        let Some(index) = tree.rows.iter().position(|node| node.place() == place) else {
+            return false;
+        };
+        tree.rows.select(index);
+        if fold && !tree.narrowed() {
+            return self.fold(None);
+        }
+        let current = self.matches.current_session.as_deref();
+        if matches!(&place, Place::Session(session) if Some(session.as_str()) == current) {
+            self.close_search();
+            self.go_back();
+        } else {
+            self.go_to_selected();
+        }
+        true
+    }
+
+    fn scroll(&mut self, delta: isize) -> bool {
         let (rows, cols) = self.size;
         let focused = self.sidebar_focused();
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
-        let Some(index) = render::sidebar_row_at(tree, &self.agents, focused, rows, cols, line)
-        else {
-            return false;
-        };
-        tree.rows.select(index);
-        let narrowed = tree.narrowed();
-        match tree.rows.selected_row() {
-            // A term unfolds what it finds, so a fold would show nothing.
-            Some(Node::Session(_)) if !narrowed => self.fold(None),
-            Some(_) => {
-                self.go_to_selected();
-                true
-            },
-            None => false,
-        }
+        render::scroll_sidebar(tree, &self.agents, focused, rows, cols, delta)
     }
 
     fn move_tree(&mut self, delta: isize) -> bool {
@@ -1264,7 +1318,7 @@ impl State {
 
     /// Going anywhere closes the search, so that the sidebar you come back to
     /// shows every row. The session you are in, found by a term, is the pane
-    /// you came from; with nothing typed, its row folds as it always does.
+    /// you came from; with nothing typed, `Enter` on its row folds it.
     fn go_to_selected(&mut self) {
         let Role::Sidebar(tree) = &self.role else {
             return;
@@ -1284,7 +1338,7 @@ impl State {
                     self.fold(None);
                 }
             },
-            Place::Session(session) => switch_session(Some(&session)),
+            Place::Session(session) => self.switch_to(&session, None),
         }
     }
 
@@ -1292,7 +1346,20 @@ impl State {
         if self.matches.current_session.as_deref() == Some(session) {
             focus_terminal_pane(pane, false, false);
         } else {
-            switch_session_with_focus(session, None, Some((pane, false)));
+            self.switch_to(session, Some(pane));
+        }
+    }
+
+    /// To another session, and to `pane` in it. zellij keeps where each
+    /// session's focus was, so the focus goes back to the pane you came from
+    /// first: a session left from the sidebar would have you back in it.
+    fn switch_to(&self, session: &str, pane: Option<u32>) {
+        if self.sidebar_focused() {
+            self.go_back();
+        }
+        match pane {
+            Some(pane) => switch_session_with_focus(session, None, Some((pane, false))),
+            None => switch_session(Some(session)),
         }
     }
 
@@ -1537,43 +1604,92 @@ mod tests {
         }
     }
 
-    /// With nothing typed, the search box changes nothing a session row does:
-    /// a click folds it, and so does `Enter` on your own. Found by a term,
-    /// both take you there instead, which for your own is back to your pane.
+    fn folded(state: &State) -> Vec<&str> {
+        let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+        tree.rows
+            .iter()
+            .filter_map(|node| match node {
+                Node::Session(session) if session.folded => Some(session.name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum By {
+        Enter,
+        /// A click on the row's `▾`.
+        Fold,
+        /// A click on the session's name.
+        Name,
+    }
+
+    /// With nothing typed, a click on a session's `▾` folds it, and so does
+    /// `Enter` on your own. A click on its name goes there, which for your
+    /// own is back to your pane. Found by a term, every row goes there.
     #[test]
-    fn a_session_row_folds_unless_a_term_found_it() {
-        // The header and the blank line under it take the first two lines.
-        let line_of = |row: usize| row + render::HEADER;
-        for (typed, row, click, folded) in [
-            ("", 0, false, &["a"][..]),
-            ("", 0, true, &["a"]),
-            ("", 2, true, &["b"]),
-            ("a", 0, false, &[]),
-            ("a", 0, true, &[]),
+    fn a_session_row_folds_on_its_fold_unless_a_term_found_it() {
+        for (typed, row, by, shut) in [
+            ("", 0, By::Enter, &["a"][..]),
+            ("", 0, By::Fold, &["a"]),
+            ("", 0, By::Name, &[]),
+            ("", 2, By::Fold, &["b"]),
+            ("", 2, By::Name, &[]),
+            ("a", 0, By::Enter, &[]),
+            ("a", 0, By::Fold, &[]),
         ] {
             let mut state = focused_sidebar();
             state.search_tree(typed.to_owned());
-            if click {
-                state.click(line_of(row));
-            } else {
-                if let Role::Sidebar(tree) = &mut state.role {
-                    tree.rows.select(row);
-                }
-                state.go_to_selected();
+            // The header and the blank line under it take the first two lines.
+            let line = (row + render::HEADER) as isize;
+            match by {
+                By::Enter => {
+                    if let Role::Sidebar(tree) = &mut state.role {
+                        tree.rows.select(row);
+                    }
+                    state.go_to_selected();
+                },
+                By::Fold => {
+                    state.handle_mouse(Mouse::LeftClick(line, 1));
+                },
+                By::Name => {
+                    state.handle_mouse(Mouse::LeftClick(line, 5));
+                },
             }
-            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
-            let shut: Vec<&str> = tree
-                .rows
-                .iter()
-                .filter_map(|node| match node {
-                    Node::Session(session) if session.folded => Some(session.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(shut, folded, "{typed:?}, row {row}, click: {click}");
+            assert_eq!(folded(&state), shut, "{typed:?}, row {row}, {by:?}");
             if !typed.is_empty() {
-                assert_eq!(tree.search(), None, "{typed:?}, row {row}, click: {click}");
+                let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+                assert_eq!(tree.search(), None, "{typed:?}, row {row}, {by:?}");
             }
+        }
+    }
+
+    /// zellij hands the click that focuses the sidebar to no one, but ends
+    /// the hover over it first, where the click was: that click does what
+    /// any other does. A hover that ended long before a key brought the focus
+    /// was the pointer leaving, and does nothing.
+    #[test]
+    fn the_click_that_focuses_the_sidebar_acts_on_its_row() {
+        let focus = |state: &mut State, sidebar: bool| {
+            let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
+            tab[0].is_focused = sidebar;
+            tab[1].is_focused = !sidebar;
+            let manifest = state.panes.clone().expect("the panes");
+            state.update(Event::PaneUpdate(manifest));
+            state.update(Event::TabUpdate(state.tabs.clone()));
+        };
+        for late in [false, true] {
+            let mut state = focused_sidebar();
+            focus(&mut state, false);
+            // On the `▾` of `b`, the third row.
+            state.handle_mouse(Mouse::Hover((render::HEADER + 2) as isize, 1));
+            state.handle_mouse(Mouse::Hover(0, usize::from(u16::MAX)));
+            if late {
+                state.frame += TICKS_PER_SECOND;
+            }
+            focus(&mut state, true);
+            let shut: &[&str] = if late { &[] } else { &["b"] };
+            assert_eq!(folded(&state), shut, "late: {late}");
         }
     }
 }

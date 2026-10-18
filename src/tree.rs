@@ -226,6 +226,16 @@ pub struct Tree {
     left: Option<Place>,
     /// The row the picker had highlighted when it handed the focus over.
     handed: Option<Place>,
+    /// Where the wheel left the view.
+    scrolled: Option<Scrolled>,
+}
+
+/// The row at the top of the view the wheel moved, and the row lit as it did.
+/// The view stays there until another row is lit, or a key moves the cursor,
+/// and then shows the lit row again.
+struct Scrolled {
+    top: usize,
+    lit: Option<Place>,
 }
 
 /// The search box, while it is open.
@@ -415,6 +425,28 @@ impl Tree {
     /// Where the cursor was when the sidebar lost the focus, once.
     pub fn take_left(&mut self) -> Option<Place> {
         self.left.take()
+    }
+
+    /// The row at the top of the view the wheel left, while the row it lit
+    /// then, `lit`, is lit still.
+    pub fn top(&self, lit: Option<usize>) -> Option<usize> {
+        let scrolled = self.scrolled.as_ref()?;
+        (self.place_of(lit) == scrolled.lit).then_some(scrolled.top)
+    }
+
+    /// Puts row `top` at the top of the view, until another row than `lit`
+    /// is lit.
+    pub fn scroll_to(&mut self, top: usize, lit: Option<usize>) {
+        self.scrolled = Some(Scrolled { top, lit: self.place_of(lit) });
+    }
+
+    /// Brings the view back to the lit row.
+    pub fn unscroll(&mut self) {
+        self.scrolled = None;
+    }
+
+    fn place_of(&self, row: Option<usize>) -> Option<Place> {
+        row.and_then(|row| self.rows.get(row)).map(Node::place)
     }
 
     /// The pane listed after `here`, or the first one when `here` is not
