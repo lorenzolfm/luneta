@@ -18,7 +18,6 @@ use zellij_tile::prelude::*;
 
 use crate::checkouts::DIR_KEY;
 use crate::fetch::Fetch;
-use crate::places::SESSION_KEY;
 use crate::render;
 use crate::tree::origin;
 
@@ -46,8 +45,10 @@ const CLAUDE: &str = "claude";
 /// What the menu asks of the host, as the context of a command it runs.
 const CONTEXT_KEY: &str = "luneta";
 const BRANCH_VALUE: &str = "branch";
-/// The sidebar's menu opening an agent's pane in another session.
+/// The sidebar's menu opening an agent's pane in another session, and the
+/// number of the menu that asked.
 pub const START_VALUE: &str = "start";
+const MENU_KEY: &str = "luneta_menu";
 
 /// Where a floating pane stands: x, y, columns, rows.
 type Spot = (usize, usize, usize, usize);
@@ -312,14 +313,15 @@ struct Target {
 }
 
 impl Target {
-    /// Starts Claude Code on `prompt` beside the pane. In the sidebar's own
-    /// session the pane opens at once. Another session opens it itself, and
-    /// the menu, with `keys` on show, waits for zellij to say it has.
-    fn start(self, keys: Keys, prompt: &str) -> Option<SidebarMenu> {
+    /// Starts Claude Code on `prompt` beside the pane, for the menu numbered
+    /// `menu`, at `frame`. In the sidebar's own session the pane opens at
+    /// once. Another session opens it itself, and the menu, with `keys` on
+    /// show, waits for zellij to say it has.
+    fn start(self, keys: Keys, prompt: &str, menu: u64, frame: u64) -> Stage {
         let command = claude(prompt, self.branch.as_deref());
         let Some(there) = self.there else {
             start_here(&command, &self.beside);
-            return None;
+            return Stage::Started(frame);
         };
         let new_pane = new_pane(&there, &self.beside.cwd, &command);
         let new_pane: Vec<&str> = new_pane.iter().map(String::as_str).collect();
@@ -327,17 +329,22 @@ impl Target {
             &new_pane,
             BTreeMap::from([
                 (CONTEXT_KEY.to_owned(), START_VALUE.to_owned()),
-                (SESSION_KEY.to_owned(), there.session.clone()),
+                (MENU_KEY.to_owned(), menu.to_string()),
             ]),
         );
-        Some(SidebarMenu(Stage::Starting(keys, self.beside, there)))
+        Stage::Starting(keys, self.beside, there)
     }
 }
 
 /// The menu at the bottom of the sidebar, for the pane whose row was
 /// highlighted when a key of the menu opened it. The sidebar keeps it while it
 /// has the focus.
-pub struct SidebarMenu(Stage);
+pub struct SidebarMenu {
+    /// Its number among the menus the sidebar has opened, which the answer to
+    /// an agent it starts in another session carries.
+    number: u64,
+    stage: Stage,
+}
 
 enum Stage {
     /// The keys of the group open, pressed one after another, for an agent
@@ -346,22 +353,33 @@ enum Stage {
     /// Another session is opening the agent's pane. Keys do nothing until
     /// zellij says it has, but close the menu.
     Starting(Keys, Beside, There),
+    /// The agent's pane opened in the sidebar's own session at this frame,
+    /// and the focus is on its way there. A key that comes soon after was on
+    /// its way already, and does nothing: a second press starts no second
+    /// agent. Nothing shows.
+    Started(u64),
     /// What is wrong with the keys, with the row, or with starting the agent.
     /// Any key closes the menu.
     Wrong(String),
 }
 
 impl SidebarMenu {
-    /// The menu for `row`, from the `entries` of the sidebar's configuration:
-    /// on the group `key` opens, or on the first with no key. A key that
-    /// starts an agent starts it, and the menu stays only while another
-    /// session opens the agent's pane. None for a key the menu has not, and
-    /// once an agent started.
-    pub fn open(entries: Option<&str>, row: Row, key: Option<char>) -> Option<Self> {
+    /// The menu numbered `number` for `row`, from the `entries` of the
+    /// sidebar's configuration, at `frame`: on the group `key` opens, or on
+    /// the first with no key. A key that starts an agent starts it. None for
+    /// a key the menu has not.
+    pub fn open(
+        entries: Option<&str>,
+        row: Row,
+        key: Option<char>,
+        number: u64,
+        frame: u64,
+    ) -> Option<Self> {
+        let menu = |stage| Some(SidebarMenu { number, stage });
         let mut keys = match entries.map(Keys::parse) {
             Some(Ok(keys)) => keys,
-            Some(Err(reason)) => return Some(SidebarMenu::wrong(reason)),
-            None if key.is_none() => return Some(SidebarMenu::wrong(NO_SIDEBAR_ENTRIES.to_owned())),
+            Some(Err(reason)) => return menu(wrong(reason)),
+            None if key.is_none() => return menu(wrong(NO_SIDEBAR_ENTRIES.to_owned())),
             None => return None,
         };
         let prompt = match key.map_or(Pressed::Moved, |key| keys.press(key)) {
@@ -370,7 +388,7 @@ impl SidebarMenu {
             Pressed::Close | Pressed::Nothing => return None,
         };
         let Some(cwd) = row.cwd else {
-            return Some(SidebarMenu::wrong(format!(
+            return menu(wrong(format!(
                 "menu: the sidebar does not know yet where pane {} works; try again in a moment",
                 row.pane
             )));
@@ -378,56 +396,60 @@ impl SidebarMenu {
         let target =
             Target { beside: Beside { pane: row.pane, cwd }, branch: row.branch, there: row.there };
         match prompt {
-            Some(prompt) => target.start(keys, &prompt),
-            None => Some(SidebarMenu(Stage::Choosing(keys, target))),
+            Some(prompt) => menu(target.start(keys, &prompt, number, frame)),
+            None => menu(Stage::Choosing(keys, target)),
         }
     }
 
-    fn wrong(reason: String) -> Self {
-        eprintln!("luneta {reason}");
-        SidebarMenu(Stage::Wrong(reason))
-    }
-
     /// The entries, or what is wrong with them, with the row, or with
-    /// starting an agent.
-    pub fn keys(&self) -> Result<&Keys, &str> {
-        match &self.0 {
-            Stage::Choosing(keys, _) | Stage::Starting(keys, ..) => Ok(keys),
-            Stage::Wrong(reason) => Err(reason),
+    /// starting an agent. Nothing once an agent started in the sidebar's own
+    /// session.
+    pub fn keys(&self) -> Option<Result<&Keys, &str>> {
+        match &self.stage {
+            Stage::Choosing(keys, _) | Stage::Starting(keys, ..) => Some(Ok(keys)),
+            Stage::Wrong(reason) => Some(Err(reason)),
+            Stage::Started(_) => None,
         }
     }
 
     /// The directory an agent the menu starts works in.
     pub fn cwd(&self) -> Option<&str> {
-        match &self.0 {
+        match &self.stage {
             Stage::Choosing(_, Target { beside, .. }) | Stage::Starting(_, beside, _) => {
                 Some(&beside.cwd)
             },
-            Stage::Wrong(_) => None,
+            Stage::Started(_) | Stage::Wrong(_) => None,
         }
     }
 
-    /// What `key` does to the menu. None once it closed, or started an agent
-    /// in the sidebar's own session.
-    pub fn key(self, key: &KeyWithModifier) -> Option<Self> {
-        match self.0 {
-            Stage::Wrong(_) => None,
-            Stage::Starting(..) if closes(key) => None,
-            Stage::Starting(..) => Some(self),
-            Stage::Choosing(mut keys, target) => match keys.key(key) {
-                Pressed::Close => None,
-                Pressed::Start(prompt) => target.start(keys, &prompt),
-                Pressed::Moved | Pressed::Nothing => {
-                    Some(SidebarMenu(Stage::Choosing(keys, target)))
-                },
-            },
+    /// The frame the menu started an agent at in the sidebar's own session,
+    /// for the sidebar to say when the keys on their way then have all come.
+    pub fn started_at(&self) -> Option<u64> {
+        match self.stage {
+            Stage::Started(at) => Some(at),
+            Stage::Choosing(..) | Stage::Starting(..) | Stage::Wrong(_) => None,
         }
+    }
+
+    /// What `key` does to the menu at `frame`. None once it closed.
+    pub fn key(self, key: &KeyWithModifier, frame: u64) -> Option<Self> {
+        let number = self.number;
+        let stage = match self.stage {
+            Stage::Wrong(_) => return None,
+            Stage::Starting(..) if closes(key) => return None,
+            Stage::Starting(..) | Stage::Started(_) => return Some(self),
+            Stage::Choosing(mut keys, target) => match keys.key(key) {
+                Pressed::Close => return None,
+                Pressed::Start(prompt) => target.start(keys, &prompt, number, frame),
+                Pressed::Moved | Pressed::Nothing => Stage::Choosing(keys, target),
+            },
+        };
+        Some(SidebarMenu { number, stage })
     }
 
     /// Goes to the session the agent started in, once zellij says it opened
     /// its pane, and to that pane when zellij says which. None once it has.
-    /// An answer for another session than the menu waits for is from a menu
-    /// closed before it came.
+    /// An answer for another menu is from one closed before it came.
     pub fn started(
         self,
         exit_code: Option<i32>,
@@ -435,17 +457,18 @@ impl SidebarMenu {
         stderr: &[u8],
         context: &BTreeMap<String, String>,
     ) -> Option<Self> {
-        let Stage::Starting(_, _, there) = &self.0 else {
+        let Stage::Starting(_, _, there) = &self.stage else {
             return Some(self);
         };
-        if context.get(SESSION_KEY) != Some(&there.session) {
+        if context.get(MENU_KEY) != Some(&self.number.to_string()) {
             return Some(self);
         }
         let Some(0) = exit_code else {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
             let reason = if reason.is_empty() { "zellij opened no pane" } else { reason };
-            return Some(SidebarMenu::wrong(format!("menu: the agent did not start: {reason}")));
+            let stage = wrong(format!("menu: the agent did not start: {reason}"));
+            return Some(SidebarMenu { number: self.number, stage });
         };
         if let Some(back) = there.back {
             focus_terminal_pane(back, false, false);
@@ -458,6 +481,12 @@ impl SidebarMenu {
         }
         None
     }
+}
+
+/// The sidebar's menu saying what is wrong, as the log does.
+fn wrong(reason: String) -> Stage {
+    eprintln!("luneta {reason}");
+    Stage::Wrong(reason)
 }
 
 /// Where the floating menu stands.
@@ -808,10 +837,15 @@ mod tests {
         Row { pane: 2, cwd: Some("/w/elo".to_owned()), branch: Some("main".to_owned()), there }
     }
 
+    /// The sidebar's menu numbered 1, opened at frame 0.
+    fn open(entries: Option<&str>, row: Row, key: Option<char>) -> Option<SidebarMenu> {
+        SidebarMenu::open(entries, row, key, 1, 0)
+    }
+
     /// What the sidebar's menu shows: the keys of the group open, or what is
     /// wrong.
     fn on_show(menu: Option<&SidebarMenu>) -> Option<Result<Vec<char>, &str>> {
-        menu.map(|menu| menu.keys().map(shown))
+        menu.and_then(SidebarMenu::keys).map(|keys| keys.map(shown))
     }
 
     /// A key of the menu opens it in the sidebar on its group, and `m` on the
@@ -823,16 +857,16 @@ mod tests {
             (None, Some(vec!['c', 'r'])),
             (Some('x'), None),
         ] {
-            let menu = SidebarMenu::open(Some(MENU), row(None), key);
+            let menu = open(Some(MENU), row(None), key);
             assert_eq!(on_show(menu.as_ref()), on.map(Ok), "{key:?}");
         }
-        let menu = SidebarMenu::open(Some(MENU), row(None), Some('c')).expect("a menu");
+        let menu = open(Some(MENU), row(None), Some('c')).expect("a menu");
         assert_eq!(menu.cwd(), Some("/w/elo"));
-        let menu = menu.key(&bare(BareKey::Backspace));
+        let menu = menu.key(&bare(BareKey::Backspace), 0);
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r'])));
-        let menu = menu.and_then(|menu| menu.key(&char('x')));
+        let menu = menu.and_then(|menu| menu.key(&char('x'), 0));
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r'])));
-        assert!(menu.and_then(|menu| menu.key(&bare(BareKey::Esc))).is_none());
+        assert!(menu.and_then(|menu| menu.key(&bare(BareKey::Esc), 0)).is_none());
     }
 
     /// A row the sidebar does not know the directory of yet has no agent to
@@ -851,28 +885,28 @@ mod tests {
             (None, row(None), Some('c'), None),
             (Some("t"), row(None), Some('x'), Some("menu: \"t\" takes one string")),
         ] {
-            let menu = SidebarMenu::open(entries, row, key);
-            let wrong = menu.as_ref().and_then(|menu| menu.keys().err());
+            let menu = open(entries, row, key);
+            let wrong = menu.as_ref().and_then(SidebarMenu::keys).and_then(Result::err);
             assert_eq!(wrong.is_some(), said.is_some(), "{entries:?} {key:?}");
             if let (Some(wrong), Some(said)) = (wrong, said) {
                 assert!(wrong.starts_with(said), "{wrong}");
             }
-            assert!(menu.and_then(|menu| menu.key(&char('c'))).is_none());
+            assert!(menu.and_then(|menu| menu.key(&char('c'), 0)).is_none());
         }
     }
 
     /// In another session, the menu takes no key while zellij opens the
     /// agent's pane but the one that closes it, and goes there once it has,
     /// though zellij say not which pane it is. When zellij fails, the menu
-    /// says what it said. An answer for another session is for a menu closed
-    /// before it came.
+    /// says what it said. An answer for another menu, as one that waited for
+    /// the same session, is for a menu closed before it came.
     #[test]
     fn an_agent_in_another_session_is_gone_to_once_its_pane_is_open() {
         let there = There { session: "elo".to_owned(), tab: Some(3), back: Some(1) };
-        let started = |session: &str| {
+        let started = |menu: u64| {
             BTreeMap::from([
                 (CONTEXT_KEY.to_owned(), START_VALUE.to_owned()),
-                (SESSION_KEY.to_owned(), session.to_owned()),
+                (MENU_KEY.to_owned(), menu.to_string()),
             ])
         };
         let none: &[u8] = b"";
@@ -887,18 +921,36 @@ mod tests {
             ),
             (None, none, none, Some("menu: the agent did not start: zellij opened no pane")),
         ] {
-            let menu = SidebarMenu::open(Some(MENU), row(Some(there.clone())), Some('r'));
-            let menu = menu.and_then(|menu| menu.key(&char('r'))).expect("a menu");
-            assert!(matches!(menu.0, Stage::Starting(..)));
-            let menu = menu.started(Some(0), b"terminal_7\n", none, &started("other"));
+            let menu = SidebarMenu::open(Some(MENU), row(Some(there.clone())), Some('r'), 2, 0);
+            let menu = menu.and_then(|menu| menu.key(&char('r'), 0)).expect("a menu");
+            assert!(matches!(menu.stage, Stage::Starting(..)));
+            let menu = menu.started(Some(0), b"terminal_7\n", none, &started(1));
             let menu = menu.expect("a menu");
-            assert!(matches!(menu.0, Stage::Starting(..)));
-            let menu = menu.started(exit_code, stdout, stderr, &started("elo"));
-            let wrong = menu.as_ref().map(|menu| menu.keys().err());
+            assert!(matches!(menu.stage, Stage::Starting(..)));
+            let menu = menu.started(exit_code, stdout, stderr, &started(2));
+            let wrong = menu.as_ref().map(|menu| menu.keys().and_then(Result::err));
             assert_eq!(wrong, said.map(Some), "{exit_code:?} {stdout:?}");
         }
-        let menu = SidebarMenu::open(Some(MENU), row(Some(there)), Some('r'));
-        assert!(menu.and_then(|menu| menu.key(&bare(BareKey::Esc))).is_none());
+        let menu = open(Some(MENU), row(Some(there)), Some('r'));
+        assert!(menu.and_then(|menu| menu.key(&bare(BareKey::Esc), 0)).is_none());
+    }
+
+    /// Once the agent's pane opened in the sidebar's own session, the menu
+    /// shows nothing, and takes a key that comes before the focus has gone to
+    /// that pane, `r` and `Esc` alike: a second press starts no second agent.
+    /// zellij answers the pane opened on stdin, which no test has, so the
+    /// menu stands here as starting one leaves it.
+    #[test]
+    fn a_key_on_its_way_after_an_agent_starts_here_does_nothing() {
+        let mut menu = SidebarMenu { number: 1, stage: Stage::Started(10) };
+        assert!(menu.keys().is_none());
+        assert_eq!(menu.cwd(), None);
+        for key in [char('r'), bare(BareKey::Esc)] {
+            menu = menu.key(&key, 11).expect("a menu");
+            assert_eq!(menu.started_at(), Some(10));
+        }
+        let choosing = open(Some(MENU), row(None), Some('c')).expect("a menu");
+        assert_eq!(choosing.started_at(), None);
     }
 
     /// The menu the key binding opens, floating, for the pane you came from.

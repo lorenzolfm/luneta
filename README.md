@@ -214,7 +214,7 @@ what each does, as which-key does in neovim.
      luneta/main
      main
  ▸ elo ──────────────────────
-─ Claude ─────── luneta/main ─
+─ Claude ──── luneta/sidebar ─
  t  /thermo-nuclear-review
  m  /make-illegal-states-unr…
  s  /tigerstyle
@@ -222,7 +222,7 @@ what each does, as which-key does in neovim.
 ```
 
 In the sidebar, the menu's keys are the sidebar's. On the row of a pane, here
-`luneta/main`, `c` opens the group you named Claude at the bottom of the
+the agent `fold`, `c` opens the group you named Claude at the bottom of the
 sidebar, and `t` starts Claude Code on `/thermo-nuclear-review` in a pane of its
 own, beside that pane in its tab, and in the directory it works in, which the
 rule over the keys names. For `/thermo-nuclear-review` that is the point: it

@@ -112,6 +112,11 @@ const PREVIEW_DELAY: u64 = 2;
 /// git how the work tree of each stands, so that a change or a checkout shows.
 const TICKS_PER_PLACES: u64 = 5 * TICKS_PER_SECOND;
 
+/// How long, in ticks, keys may take to come after the sidebar's menu starts
+/// an agent in its own session: zellij hands the sidebar the keys it took
+/// before it moved the focus to the agent's pane.
+const ON_THE_WAY: u64 = TICKS_PER_SECOND / 2;
+
 #[derive(Default)]
 pub enum Mode {
     #[default]
@@ -202,6 +207,9 @@ struct State {
     /// The menu's entries, as the configuration holds them, for the sidebar
     /// to open the menu at its bottom with.
     menu_entries: Option<String>,
+    /// How many menus the sidebar has opened, which numbers each: the answer
+    /// to an agent one starts in another session says which it is for.
+    menus: u64,
 }
 
 register_plugin!(State);
@@ -1239,10 +1247,15 @@ impl State {
     }
 
     fn handle_sidebar_key(&mut self, key: &KeyWithModifier) -> bool {
-        // The menu takes every key while it is open.
+        // The menu takes every key while it is open, and those on their way
+        // as an agent it started takes the focus.
+        let frame = self.frame;
+        let lapsed = |menu: &SidebarMenu| {
+            menu.started_at().is_some_and(|at| frame.wrapping_sub(at) > ON_THE_WAY)
+        };
         if let Role::Sidebar(tree) = &mut self.role {
-            if let Some(menu) = tree.menu.take() {
-                tree.menu = menu.key(key);
+            if let Some(menu) = tree.menu.take().filter(|menu| !lapsed(menu)) {
+                tree.menu = menu.key(key, frame);
                 return true;
             }
         }
@@ -1297,7 +1310,9 @@ impl State {
         let Some(row) = self.menu_row() else {
             return false;
         };
-        let menu = SidebarMenu::open(self.menu_entries.as_deref(), row, key);
+        self.menus = self.menus.wrapping_add(1);
+        let entries = self.menu_entries.as_deref();
+        let menu = SidebarMenu::open(entries, row, key, self.menus, self.frame);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
@@ -1890,10 +1905,12 @@ mod tests {
         }
     }
 
-    /// The groups the menu at the bottom of the sidebar has open, while it is.
+    /// The groups the menu at the bottom of the sidebar has open, while it
+    /// shows.
     fn menu_open(state: &State) -> Option<Vec<&str>> {
         let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
-        tree.menu.as_ref().map(|menu| menu.keys().map(Keys::names).unwrap_or_default())
+        let shown = tree.menu.as_ref().and_then(SidebarMenu::keys);
+        shown.map(|keys| keys.map(Keys::names).unwrap_or_default())
     }
 
     fn key(state: &mut State, key: BareKey) -> bool {

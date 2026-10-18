@@ -1090,11 +1090,12 @@ fn menu_help(width: usize, opened: bool) -> Painted {
 
 /// How many lines the menu takes at the bottom of a sidebar `cols` wide, with
 /// the room it wants: its rule, the keys of the group open or what is wrong,
-/// and the keys that go back and close.
+/// and the keys that go back and close. No line once it shows nothing.
 fn sidebar_menu_height(menu: &SidebarMenu, cols: usize) -> usize {
     let body = match menu.keys() {
-        Ok(keys) => keys.entries().len(),
-        Err(reason) => wrap(reason, cols.saturating_sub(2)).len(),
+        Some(Ok(keys)) => keys.entries().len(),
+        Some(Err(reason)) => wrap(reason, cols.saturating_sub(2)).len(),
+        None => return 0,
     };
     body + 2
 }
@@ -1111,14 +1112,15 @@ fn sidebar_menu_lines(
 ) -> (Vec<Painted>, Option<Painted>) {
     let inner = cols.saturating_sub(2);
     let (title, body, opened): (String, Vec<Painted>, bool) = match menu.keys() {
-        Ok(keys) => {
+        Some(Ok(keys)) => {
             let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
             (menu_title(keys), body, !keys.names().is_empty())
         },
-        Err(reason) => {
+        Some(Err(reason)) => {
             let body = wrap(reason, inner).iter().map(|text| menu_error(text, inner)).collect();
             (TITLE.to_owned(), body, false)
         },
+        None => return (Vec::new(), None),
     };
     let Some(room) = lines.checked_sub(1) else {
         return (Vec::new(), None);
@@ -1162,7 +1164,8 @@ fn menu_rule(title: &str, right: &str, cols: usize) -> Painted {
 /// before it would leave the tree no row.
 ///
 /// While the menu is open, it takes the place of the box and the keys, with
-/// as many of the `menu` lines it wants as leave the tree a row.
+/// as many of the `menu` lines it wants as leave the tree a row, and the notes
+/// leave the tree that row too: the menu is for the row the cursor is on.
 struct Shelf {
     header: usize,
     tree: usize,
@@ -1179,7 +1182,8 @@ impl Shelf {
         let help = usize::from(menu == 0 && focused && rows > search + 1);
         let below = menu + search + help;
         let header = if rows > below + notes + HEADER { HEADER } else { 0 };
-        let notes = notes.min(rows - below - header);
+        let kept = usize::from(menu > 0);
+        let notes = notes.min((rows - below - header).saturating_sub(kept));
         Shelf {
             header,
             tree: rows - below - header - notes,
@@ -2918,7 +2922,7 @@ mod tests {
     fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
         let cwd = Some("/w/misc/unnamed".to_owned());
         let row = crate::menu::Row { pane: 0, cwd, branch: None, there: None };
-        SidebarMenu::open(Some(entries), row, key)
+        SidebarMenu::open(Some(entries), row, key, 1, 0)
     }
 
     /// The menu's lines in `lines` lines of a sidebar `cols` wide, the keys
@@ -2972,13 +2976,18 @@ mod tests {
         );
     }
 
-    /// A sidebar too short for the whole menu leaves the tree a row, and cuts
-    /// the entries first, then the rule. A rule too narrow for where an agent
-    /// starts leaves it out, and a menu that cannot be read says why.
+    /// A sidebar too short for the whole menu leaves the tree a row, which a
+    /// note leaves it too, and cuts the entries first, then the rule. A rule
+    /// too narrow for where an agent starts leaves it out, and a menu that
+    /// cannot be read says why.
     #[test]
     fn a_short_sidebar_cuts_the_menu_and_keeps_its_keys() {
         let menu = sidebar_menu(MENU_KDL, Some('c')).expect("a menu");
         assert_eq!(Shelf::new(4, 0, true, false, 5).menu_y, Some(1));
+        for (rows, cut) in [(4, (1, 0, Some(1))), (7, (1, 1, Some(2)))] {
+            let shelf = Shelf::new(rows, 1, true, false, 5);
+            assert_eq!((shelf.tree, shelf.notes, shelf.menu_y), cut, "{rows}");
+        }
         assert_eq!(
             sidebar_menu_picture(&menu, 3, 30),
             [
