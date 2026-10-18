@@ -97,7 +97,7 @@ is doing. One sidebar for the whole session, which follows you from tab to tab.
 ▸ floresta                   ⠋
 ▾ unnamed
 › ⠋  orca-copy             12s
-     ~/P/m/unnamed
+     misc/unnamed
 ```
 
 Sessions keep their place, oldest first, so a row never moves under your eye
@@ -106,7 +106,9 @@ session's row, and the `next` key — not of the order.
 
 An agent's row is named for what it is doing: the name you gave it, or else
 the title Claude Code gives its pane. A pane with no agent in it is dimmed, and
-`›` marks the pane you are in.
+`›` marks the pane you are in. A shell at its prompt is named for its
+directory's last two parts, as `luneta/main`, where fish would title it
+`~/P/m/l/main`.
 
 Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
 and sessions alike. A folded session keeps its count and shows the glyph of
