@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use agents::{AgentSet, Live};
 use dirs::DirSet;
 use elapsed::Age;
+use paint::Colour;
 use panes::Peeks;
 use places::Places;
 use sessions::{MatchSet, Selection, Session, Sessions};
@@ -369,18 +370,18 @@ fn main() {
     let mut parts = Vec::new();
     parts.push(bench("Line build+finish (one 56-col row)", 50000, || {
         let mut line = layout::Line::new();
-        line.push("> ", 3);
-        line.push_hits("session-000-work", 1, 3, &[0, 1, 2]);
+        line.push("> ", Colour::Level3);
+        line.push_hits("session-000-work", Colour::Level1, Colour::Level3, &[0, 1, 2]);
         line.pad_to(40);
-        line.push("2h ago", 2);
+        line.push("2h ago", Colour::Level2);
         std::hint::black_box(line.finish(inner));
     }));
     parts.push(bench("that row onto the wire", 50000, || {
         let mut line = layout::Line::new();
-        line.push("> ", 3);
-        line.push_hits("session-000-work", 1, 3, &[0, 1, 2]);
+        line.push("> ", Colour::Level3);
+        line.push_hits("session-000-work", Colour::Level1, Colour::Level3, &[0, 1, 2]);
         line.pad_to(40);
-        line.push("2h ago", 2);
+        line.push("2h ago", Colour::Level2);
         paint::print_at(&line.finish(inner), 1, 1, inner + 2);
     }));
     let rect = layout::Rect { x: 0, y: 0, width: 60, height: 26 };

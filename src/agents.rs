@@ -440,6 +440,20 @@ fn glyph(status: &Status, frame: u64) -> &'static str {
     }
 }
 
+/// The sidebar's mark for a status: one column wide, whatever a terminal
+/// makes of an emoji, so that the labels after it line up and it takes the
+/// colour it is drawn in. The picker keeps the emoji.
+pub fn dot(status: &Status, frame: u64) -> String {
+    match status {
+        Status::Waiting => "●".to_owned(),
+        Status::Idle => "✓".to_owned(),
+        Status::Busy => SPINNER[(frame as usize) % SPINNER.len()].to_owned(),
+        Status::Shell => "$".to_owned(),
+        Status::Unknown(word) => word.initial().to_uppercase().collect(),
+        Status::Unreported => "?".to_owned(),
+    }
+}
+
 pub fn full_tag(status: &Status, frame: u64) -> String {
     format!("{} {}", glyph(status, frame), status.word().to_uppercase())
 }

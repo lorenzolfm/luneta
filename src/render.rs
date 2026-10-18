@@ -1,18 +1,22 @@
+use std::ops::Range;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::dirs::{short_cwd, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
-use crate::layout::{anchor, truncate, truncate_left, Border, Line, Rect, Screen, PAD, VERTICAL};
-use crate::paint::{self, Painted};
+use crate::layout::{
+    anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
+};
+use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
-use crate::tree::{Node, PaneNode, SessionNode, Tree};
+use crate::tree::{Node, PaneNode, SessionNode, Summary, Tree};
 
-const TAG: usize = 0;
-const NAME: usize = 1;
-const LABEL: usize = 2;
-const ACCENT: usize = 3;
+const TAG: Colour = Colour::Level0;
+const NAME: Colour = Colour::Level1;
+const LABEL: Colour = Colour::Level2;
+const ACCENT: Colour = Colour::Level3;
 
 const TITLE: &str = "luneta";
 
@@ -319,14 +323,14 @@ fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
     lines
 }
 
-fn preview_line(inner: usize, text: &str, level: usize) -> PreviewRow {
+fn preview_line(inner: usize, text: &str, colour: Colour) -> PreviewRow {
     let mut line = Line::new();
-    line.push(&truncate(text, inner), level);
+    line.push(&truncate(text, inner), colour);
     line.finish(inner).into()
 }
 
-fn wrapped_lines(inner: usize, text: &str, level: usize) -> Vec<PreviewRow> {
-    wrap(text, inner).iter().map(|line| preview_line(inner, line, level)).collect()
+fn wrapped_lines(inner: usize, text: &str, colour: Colour) -> Vec<PreviewRow> {
+    wrap(text, inner).iter().map(|line| preview_line(inner, line, colour)).collect()
 }
 
 fn error_lines(inner: usize, text: &str) -> Vec<PreviewRow> {
@@ -967,10 +971,13 @@ pub fn render_notice(text: &str, rows: usize, cols: usize) {
     }
 }
 
-/// How a sidebar `rows` tall is cut up: the tree from the top, the notes under
-/// it, the search box while it is open, and a line of keys at the bottom while
-/// the sidebar has the focus. The box opens at the bottom so that no row moves.
+/// How a sidebar `rows` tall is cut up: the header and a blank line under it
+/// at the top, the tree under them, the notes under it, the search box while
+/// it is open, and a line of keys at the bottom while the sidebar has the
+/// focus. The box opens at the bottom so that no row moves. The header goes
+/// before it would leave the tree no row.
 struct Shelf {
+    header: usize,
     tree: usize,
     notes: usize,
     search_y: Option<usize>,
@@ -981,15 +988,20 @@ impl Shelf {
     fn new(rows: usize, notes: usize, focused: bool, searching: bool) -> Self {
         let search = usize::from(searching && rows > 0);
         let help = usize::from(focused && rows > search + 1);
-        let notes = notes.min(rows - search - help);
+        let header = if rows > search + help + notes + HEADER { HEADER } else { 0 };
+        let notes = notes.min(rows - search - help - header);
         Shelf {
-            tree: rows - search - help - notes,
+            header,
+            tree: rows - search - help - header - notes,
             notes,
             search_y: (search == 1).then(|| rows - help - 1),
             help_y: (help == 1).then(|| rows - 1),
         }
     }
 }
+
+/// The header's rule, and the blank line under it.
+pub const HEADER: usize = 2;
 
 pub fn render_sidebar(
     tree: &Tree,
@@ -1026,21 +1038,48 @@ pub fn sidebar_row_at(
 ) -> Option<usize> {
     let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
     let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
-    if line >= shelf.tree {
-        return None;
-    }
-    let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
+    let line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
+    let (Range { start, end }, _) = on_screen(tree, focused, shelf.tree);
     let index = start + line;
     (index < end).then_some(index)
+}
+
+/// The rows of the tree a sidebar shows in `height` rows, and the one of them
+/// that is lit: the cursor while the sidebar has the focus, and the pane you
+/// are in while it does not. The rows shown are the ones around the lit row,
+/// or around the cursor while none is, so a lit row is never out of sight.
+fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
+    let lit = if focused {
+        tree.rows.selected()
+    } else {
+        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
+    };
+    let around = lit.or(tree.rows.selected()).unwrap_or(0);
+    let (start, end) = viewport(around, tree.rows.len(), height);
+    (start..end, lit)
 }
 
 const UNFOLDED: &str = "▾";
 
 const FOLDED: &str = "▸";
 
-const HERE_MARK: &str = "›";
+/// What marks the pane you are in, in its first column, whether the sidebar
+/// has the focus or not.
+const HERE_MARK: &str = "▌";
 
-const GLYPH: usize = 2;
+const RULE: &str = "─";
+
+/// The column every row leaves empty on its right.
+const MARGIN: usize = 1;
+
+const GLYPH: usize = 1;
+
+/// How wide the dots and the ages are across the rows on screen, so that
+/// every label is cut at the same column.
+struct Columns {
+    glyph: usize,
+    age: usize,
+}
 
 fn sidebar_lines(
     tree: &Tree,
@@ -1051,97 +1090,181 @@ fn sidebar_lines(
     frame: u64,
 ) -> Vec<Painted> {
     let inner = cols.saturating_sub(2);
-    let mut lines = Vec::with_capacity(shelf.tree + shelf.notes);
+    let mut lines = Vec::with_capacity(shelf.header + shelf.tree + shelf.notes);
+    if shelf.header > 0 {
+        lines.extend(header_lines(&tree.summary, cols, frame));
+    }
     if tree.rows.is_empty() {
         if shelf.tree > 0 {
             let empty = if tree.narrowed() { "no match" } else { "no sessions" };
             lines.push(note_within(inner, &Note::dim(empty)));
         }
     } else {
-        let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
+        let (Range { start, end }, lit) = on_screen(tree, focused, shelf.tree);
         let window = &tree.rows[start..end];
-        let glyphs = window
-            .iter()
-            .filter_map(|node| match node {
-                Node::Pane(PaneNode { agent: Some(mark), .. }) => {
-                    Some(agents::abbr_tag(&mark.status, frame).width())
-                },
+        let marks = || {
+            window.iter().filter_map(|node| match node {
+                Node::Pane(PaneNode { agent: Some(mark), .. }) => Some(mark),
                 _ => None,
             })
-            .max()
-            .unwrap_or(0)
-            .max(GLYPH);
+        };
+        let columns = Columns {
+            glyph: marks()
+                .map(|mark| agents::dot(&mark.status, frame).width())
+                .max()
+                .unwrap_or(0)
+                .max(GLYPH),
+            age: marks().map(|mark| mark.age.label().width()).max().unwrap_or(0),
+        };
         for (offset, node) in window.iter().enumerate() {
             let line = match node {
-                Node::Session(node) => branch_line(node, inner, frame),
-                Node::Pane(node) => leaf_line(node, glyphs, inner, frame),
+                Node::Session(node) => branch_line(node, cols, frame),
+                Node::Pane(node) => leaf_line(node, &columns, cols, frame),
             };
-            let selected = focused && tree.rows.selected() == Some(start + offset);
-            lines.push(if selected { line.selected() } else { line });
+            lines.push(if lit == Some(start + offset) { line.selected() } else { line });
         }
     }
-    lines.resize_with(shelf.tree, || Painted::new(" ".repeat(inner + 2)));
+    lines.resize_with(shelf.header + shelf.tree, || Painted::new(" ".repeat(cols)));
     lines.extend(notes.iter().take(shelf.notes).map(|note| note_within(inner, note)));
     lines
 }
 
-fn branch_line(node: &SessionNode, inner: usize, frame: u64) -> Painted {
-    let (badge, level) = branch_badge(node, frame);
-    let reserve = if badge.is_empty() { 0 } else { badge.width() + 1 };
+/// The lines the header takes, as many as `HEADER` says: its rule, and a
+/// blank line under it.
+fn header_lines(summary: &Summary, cols: usize, frame: u64) -> [Painted; HEADER] {
+    [header_line(summary, cols, frame), Painted::new(" ".repeat(cols))]
+}
+
+/// The rule along the top of the sidebar: how many sessions are live, and how
+/// many agents across them wait for you, are done, and are at work. A count
+/// of none is left out, and so is the word for the sessions where the counts
+/// need its room.
+fn header_line(summary: &Summary, cols: usize, frame: u64) -> Painted {
+    let counts: Vec<(Status, usize)> =
+        summary.counts().into_iter().filter(|(_, n)| *n > 0).collect();
+    let counted: usize = counts
+        .iter()
+        .map(|(status, n)| agents::dot(status, frame).width() + n.to_string().len())
+        .sum::<usize>()
+        + counts.len().saturating_sub(1);
+    // A space, the counts, a space and a last stretch of the rule.
+    let tail = if counted > 0 { counted + 2 + RULE.width() } else { 0 };
+    let word = (summary.sessions > 0)
+        .then(|| plural(summary.sessions, "session"))
+        .filter(|word| RULE.width() + word.width() + 2 + RULE.width() + tail <= cols);
+
     let mut line = Line::new();
-    line.push(if node.folded { FOLDED } else { UNFOLDED }, TAG);
-    line.gap(1);
-    let room = inner.saturating_sub(line.columns() + reserve);
-    // The session you are in has its name in the accent, so the letters a
-    // search lands on in it take the level the other names have.
-    let (name_level, hit_level) = if node.current { (ACCENT, NAME) } else { (NAME, ACCENT) };
-    let (name, hits) = lit(&node.name, room, &node.hits);
-    line.push_hits(&name, name_level, hit_level, &hits);
-    if !badge.is_empty() {
-        line.pad_to(inner.saturating_sub(badge.width()));
-        line.push(&badge, level);
+    if let Some(word) = &word {
+        line.push(RULE, Ink::Dim);
+        line.gap(1);
+        line.push(word, Ink::Dim);
+        line.gap(1);
     }
-    line.finish(inner)
+    if counted > 0 && line.columns() + RULE.width() + tail <= cols {
+        line.push(&RULE.repeat(cols - line.columns() - tail), Ink::Dim);
+        line.gap(1);
+        for (nth, (status, n)) in counts.iter().enumerate() {
+            if nth > 0 {
+                line.gap(1);
+            }
+            line.push(&agents::dot(status, frame), dot_ink(status));
+            let ink = if status.is_waiting() { Ink::Bold(ACCENT) } else { Ink::Plain };
+            line.push(&n.to_string(), ink);
+        }
+        line.gap(1);
+        line.push(RULE, Ink::Dim);
+    } else {
+        line.push(&RULE.repeat(cols.saturating_sub(line.columns())), Ink::Dim);
+    }
+    line.fill(cols)
+}
+
+/// A session's row: its name, and a rule out to what it says about its
+/// agents. The session you are in has its name in a colour and its rule in
+/// the accent.
+fn branch_line(node: &SessionNode, cols: usize, frame: u64) -> Painted {
+    let badge = branch_badge(node, frame);
+    let reserve = badge.as_ref().map_or(0, |(badge, _)| badge.width() + 1);
+    let mut line = Line::new();
+    line.gap(1);
+    line.push(if node.folded { FOLDED } else { UNFOLDED }, Ink::Dim);
+    line.gap(1);
+    let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
+    let name = if node.current { Ink::Bold(NAME) } else { Ink::Strong };
+    let (text, hits) = lit(&node.name, room, &node.hits);
+    line.push_hits(&text, name, Ink::Bold(ACCENT), &hits);
+    let rule = cols.saturating_sub(line.columns() + 1 + reserve + MARGIN);
+    if rule > 0 {
+        line.gap(1);
+        let ink = if node.current { Ink::Level(ACCENT) } else { Ink::Dim };
+        line.push(&RULE.repeat(rule), ink);
+    }
+    if let Some((badge, ink)) = badge {
+        line.pad_to(cols.saturating_sub(badge.width() + MARGIN));
+        line.push(&badge, ink);
+    }
+    line.fill(cols)
 }
 
 /// What a session says on its own row: how many of its agents wait for you,
-/// and once it is folded, the glyph of the one that wants you most.
-fn branch_badge(node: &SessionNode, frame: u64) -> (String, usize) {
+/// and once it is folded, the dot of the one that wants you most.
+fn branch_badge(node: &SessionNode, frame: u64) -> Option<(String, Ink)> {
     if node.waiting > 0 {
-        let glyph = agents::abbr_tag(&Status::Waiting, frame);
-        return (format!("{glyph}{}", node.waiting), ACCENT);
+        let dot = agents::dot(&Status::Waiting, frame);
+        return Some((format!("{dot}{}", node.waiting), Ink::Bold(ACCENT)));
     }
     match &node.loudest {
-        Some(status) if node.folded => (agents::abbr_tag(status, frame), TAG),
-        _ => (String::new(), TAG),
+        Some(status) if node.folded => Some((agents::dot(status, frame), dot_ink(status))),
+        _ => None,
     }
 }
 
-fn leaf_line(node: &PaneNode, glyphs: usize, inner: usize, frame: u64) -> Painted {
+/// The colour of a status: the accent for an agent that waits for you, the
+/// success colour for one that is done, the tag for one at work. A shell and
+/// an agent that says nothing are dimmed.
+fn dot_ink(status: &Status) -> Ink {
+    match status {
+        Status::Waiting => Ink::Bold(ACCENT),
+        Status::Idle => Ink::Bold(Colour::Success),
+        Status::Busy | Status::Unknown(_) => Ink::Level(TAG),
+        Status::Shell | Status::Unreported => Ink::Dim,
+    }
+}
+
+/// A pane's row: its dot, its label, and how long its agent has been in its
+/// state. The label is plain, in the accent while its agent waits for you,
+/// and dimmed with no agent. The pane you are in has the mark and a bold one.
+fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Painted {
     let mut line = Line::new();
     if node.here {
-        line.push(HERE_MARK, ACCENT);
+        line.push(HERE_MARK, Ink::Bold(ACCENT));
     } else {
         line.gap(1);
     }
-    line.gap(1);
+    line.gap(2);
+    let start = line.columns();
     if let Some(mark) = &node.agent {
-        let level = if mark.status.is_waiting() { ACCENT } else { TAG };
-        line.push(&agents::abbr_tag(&mark.status, frame), level);
+        line.push(&agents::dot(&mark.status, frame), dot_ink(&mark.status));
     }
-    line.pad_to(2 + glyphs);
+    line.pad_to(start + columns.glyph);
     line.gap(1);
-    let age = node.agent.as_ref().map(|mark| mark.age.label()).unwrap_or_default();
-    let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
-    let room = inner.saturating_sub(line.columns() + reserve);
-    let level = if node.agent.is_some() { NAME } else { TAG };
-    let (label, hits) = lit(&node.label, room, &node.hits);
-    line.push_hits(&label, level, ACCENT, &hits);
-    if !age.is_empty() {
-        line.pad_to(inner.saturating_sub(age.width()));
-        line.push(&age, LABEL);
+    // A label in the accent shows the letters a search lands on in a colour.
+    let (label, hit) = match &node.agent {
+        _ if node.here => (Ink::Strong, Ink::Bold(ACCENT)),
+        Some(mark) if mark.status.is_waiting() => (Ink::Bold(ACCENT), Ink::Bold(NAME)),
+        Some(_) => (Ink::Plain, Ink::Bold(ACCENT)),
+        None => (Ink::Dim, Ink::Bold(ACCENT)),
+    };
+    let reserve = if columns.age > 0 { columns.age + 1 } else { 0 };
+    let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
+    let (text, hits) = lit(&node.label, room, &node.hits);
+    line.push_hits(&text, label, hit, &hits);
+    if let Some(mark) = &node.agent {
+        let age = mark.age.label();
+        line.pad_to(cols.saturating_sub(age.width() + MARGIN));
+        line.push(&age, Ink::Dim);
     }
-    line.finish(inner)
+    line.fill(cols)
 }
 
 /// `text` cut to `room`, and the characters a search lit that are left in it.
@@ -1984,6 +2107,14 @@ mod tests {
         tree
     }
 
+    /// `workday`, and what its header counts: the busy agent folded away in
+    /// floresta as well as the ones on show.
+    fn workday_tree(selected: usize) -> Tree {
+        let mut tree = sidebar_tree(workday(), selected);
+        tree.summary = Summary { sessions: 3, waiting: 1, idle: 1, busy: 3 };
+        tree
+    }
+
     fn sidebar_picture(
         tree: &Tree,
         notes: &[Note],
@@ -2011,23 +2142,52 @@ mod tests {
         ]
     }
 
+    /// Every label is cut at one column, whatever its age, so the `…` line up.
     #[test]
     fn the_sidebar_draws_each_session_over_its_panes() {
-        let tree = sidebar_tree(workday(), 6);
+        let tree = workday_tree(6);
         assert_eq!(
-            sidebar_picture(&tree, &[], false, 9, 32),
+            sidebar_picture(&tree, &[], false, 11, 30),
             vec![
-                " ▾ bipa                     🙋1 ",
-                "   ☕ handoff-eng-11259-pr… 13h ",
-                "   🙋 dda-bank-slip-paid-fe… 3m ",
-                "   ⠋  Handoff pix outflow … 12s ",
-                " ▸ floresta                   ⠋ ",
-                " ▾ unnamed                      ",
-                " › ⠋  orca-copy             12s ",
-                "      ~/P/m/unnamed             ",
-                "                                ",
+                "─ 3 sessions ────── ●1 ✓1 ⠋3 ─",
+                "                              ",
+                " ▾ bipa ────────────────── ●1 ",
+                "   ✓ handoff-eng-11259-p… 13h ",
+                "   ● dda-bank-slip-paid-…  3m ",
+                "   ⠋ Handoff pix outflow… 12s ",
+                " ▸ floresta ─────────────── ⠋ ",
+                " ▾ unnamed ────────────────── ",
+                "▌  ⠋ orca-copy            12s ",
+                "     ~/P/m/unnamed            ",
+                "                              ",
             ]
         );
+    }
+
+    /// While the sidebar does not have the focus, the highlight shows where
+    /// you are; once it has it, the highlight goes with the cursor, and the
+    /// mark stays on the pane you are in.
+    #[test]
+    fn the_highlight_is_on_your_pane_until_the_sidebar_has_the_focus() {
+        let tree = workday_tree(2);
+        for (focused, row) in [(false, 6), (true, 2)] {
+            let shelf = Shelf::new(11, 0, focused, false);
+            let lines = sidebar_lines(&tree, &[], &shelf, focused, 30, 0);
+            let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
+            assert_eq!(lit, [HEADER + row], "focused: {focused}");
+            assert!(lines[HEADER + 6].content().starts_with(HERE_MARK), "focused: {focused}");
+        }
+    }
+
+    #[test]
+    fn the_header_leaves_out_what_there_is_none_of() {
+        let header =
+            |summary: Summary, cols: usize| header_line(&summary, cols, 0).content().to_owned();
+        let summary = Summary { sessions: 4, waiting: 2, idle: 0, busy: 1 };
+        assert_eq!(header(summary, 30), "─ 4 sessions ───────── ●2 ⠋1 ─");
+        assert_eq!(header(summary, 16), "──────── ●2 ⠋1 ─");
+        assert_eq!(header(Summary { sessions: 1, ..Summary::default() }, 16), "─ 1 session ────");
+        assert_eq!(header(Summary::default(), 6), "──────");
     }
 
     #[test]
@@ -2062,21 +2222,36 @@ mod tests {
         assert_eq!(search_line("handoff-eng-11259", 10).content(), " /…g-11259_ ");
 
         let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 6), Some(6));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 6), Some(4));
         assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 7), None);
     }
 
     #[test]
     fn the_sidebar_scrolls_to_keep_the_cursor_in_sight() {
         let tree = sidebar_tree(workday(), 7);
-        let lines = sidebar_picture(&tree, &[], false, 3, 32);
-        assert_eq!(lines.len(), 3);
-        assert!(lines[2].contains("~/P/m/unnamed"), "{lines:?}");
+        let lines = sidebar_picture(&tree, &[], true, 6, 32);
+        assert_eq!(lines.len(), 5);
+        assert!(lines[4].contains("~/P/m/unnamed"), "{lines:?}");
         let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 0), Some(5));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 2), Some(7));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 3, 32, 3), None);
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 3, 32, 2), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 6, 32, 2), Some(5));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 6, 32, 4), Some(7));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 6, 32, 5), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 5, 32, 4), None);
+    }
+
+    /// A sidebar too short for both the cursor and the pane you are in shows
+    /// your pane, lit, while it does not have the focus, and a click on it
+    /// lands on it.
+    #[test]
+    fn a_short_sidebar_keeps_your_pane_in_sight_until_it_has_the_focus() {
+        let tree = workday_tree(0);
+        let shelf = Shelf::new(5, 0, false, false);
+        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
+        let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
+        assert_eq!(lit, [HEADER + 2]);
+        assert!(lines[HEADER + 2].content().starts_with(HERE_MARK));
+        let agents = AgentSet::default();
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 5, 30, HEADER + 2), Some(6));
     }
 
     #[test]
@@ -2092,20 +2267,54 @@ mod tests {
             };
             let line = branch_line(&node, 20, 0);
             assert_eq!(line.content().chars().skip(3).take(4).collect::<String>(), "misc");
-            let [m, i, s, c] = [3, 4, 5, 6].map(|at| line.level_at(at));
+            let [m, i, s, c] = [3, 4, 5, 6].map(|at| line.colour_at(at));
             assert_eq!((m, i), (s, c), "current: {current}");
-            assert_ne!(m, i, "current: {current}");
-            assert_eq!(i, Some(if current { ACCENT } else { NAME }), "current: {current}");
+            assert_eq!(m, Some(ACCENT), "current: {current}");
+            assert_eq!(i, current.then_some(NAME), "current: {current}");
+        }
+    }
+
+    /// Whatever ink a label takes, the letters a search lands on in it take a
+    /// colour of their own.
+    #[test]
+    fn the_letters_a_search_lands_on_stand_out_on_every_pane_row() {
+        let columns = Columns { glyph: GLYPH, age: 2 };
+        for (here, agent) in [
+            (false, Some("waiting")),
+            (false, Some("idle")),
+            (false, None),
+            (true, Some("waiting")),
+        ] {
+            let node = PaneNode {
+                session: "a".to_owned(),
+                id: 0,
+                label: "misc".to_owned(),
+                agent: agent.map(|word| Mark {
+                    status: Status::parse(Some(word)),
+                    age: Held::from_secs(4),
+                }),
+                here,
+                hits: vec![0, 2],
+            };
+            let line = leaf_line(&node, &columns, 20, 0);
+            assert_eq!(line.content().chars().skip(5).take(4).collect::<String>(), "misc");
+            let [m, i, s, c] = [5, 6, 7, 8].map(|at| line.colour_at(at));
+            assert_eq!((m, i), (s, c), "{agent:?}, here: {here}");
+            assert!(m.is_some(), "{agent:?}, here: {here}");
+            assert_ne!(m, i, "{agent:?}, here: {here}");
         }
     }
 
     #[test]
-    fn a_click_below_the_last_row_lands_on_nothing() {
+    fn a_click_on_the_header_or_below_the_last_row_lands_on_nothing() {
         let tree = sidebar_tree(workday(), 0);
         let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 7), Some(7));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 8), None);
-        assert_eq!(sidebar_row_at(&Tree::default(), &agents, false, 20, 32, 0), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 0), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 1), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 2), Some(0));
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 9), Some(7));
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 10), None);
+        assert_eq!(sidebar_row_at(&Tree::default(), &agents, false, 20, 32, 2), None);
     }
 
     #[test]
@@ -2130,7 +2339,7 @@ mod tests {
             for rows in 1..12 {
                 for (focused, searching) in [(false, false), (true, false), (true, true)] {
                     for selected in [0, 3, 7] {
-                        let mut tree = sidebar_tree(workday(), selected);
+                        let mut tree = workday_tree(selected);
                         if searching {
                             tree.search_for("pix".to_owned());
                         }
@@ -2143,6 +2352,7 @@ mod tests {
                             "{cols}x{rows}"
                         );
                         assert!(below.iter().flatten().all(|y| *y >= lines.len()), "{rows}");
+                        assert!(shelf.header == 0 || shelf.tree > 0, "{cols}x{rows}");
                         for line in lines {
                             assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
                         }
