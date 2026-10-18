@@ -1498,7 +1498,7 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
 }
 
 /// The line under a pane's row: the branch checked out where the pane works,
-/// dimmed, under its label, and how its work tree stands, under the age. The
+/// in gray, under its label, and how its work tree stands, under the age. The
 /// branch is cut to leave the status room. The mark of the pane you are in
 /// runs down this line too.
 fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: usize) -> Painted {
@@ -1507,7 +1507,7 @@ fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: 
     let status = checkout.status.as_str();
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
-    line.push(&truncate(&checkout.branch, room), Ink::Dim);
+    line.push(&truncate(&checkout.branch, room), Ink::Gray);
     if !status.is_empty() {
         line.pad_to(cols.saturating_sub(status.width() + MARGIN));
         line.push(status, Ink::Plain);
@@ -2453,11 +2453,11 @@ mod tests {
         ]
     }
 
-    /// The branch goes on a line of its own under the label, dimmed and cut
+    /// The branch goes on a line of its own under the label, in gray and cut
     /// to leave its work tree's status room under the age, and is lit with
     /// its row.
     #[test]
-    fn a_pane_s_branch_is_dimmed_on_the_line_under_its_label() {
+    fn a_pane_s_branch_is_gray_on_the_line_under_its_label() {
         let tree = sidebar_tree(worktrees(), 0);
         let shelf = Shelf::new(11, 0, false, false);
         let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
@@ -2480,9 +2480,9 @@ mod tests {
         );
         let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
         assert_eq!(lit, [HEADER + 3, HEADER + 4]);
-        assert!((5..16).all(|at| lines[HEADER + 4].is_dim_at(at)));
-        assert!(!(26..29).any(|at| lines[HEADER + 4].is_dim_at(at)));
-        assert!(!lines[HEADER + 3].is_dim_at(5));
+        assert!((5..16).all(|at| lines[HEADER + 4].is_gray_at(at)));
+        assert!(!(26..29).any(|at| lines[HEADER + 4].is_gray_at(at)));
+        assert!(!lines[HEADER + 3].is_gray_at(5));
     }
 
     /// A row of two lines is one row: a click on either line lands on it, the

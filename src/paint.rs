@@ -9,9 +9,14 @@
 //! `Painted` holds the same content and the same index lists and writes the
 //! same bytes into one reused buffer. `same_bytes_as_zellij_tile` in the tests
 //! below pins the output to what `Text` would have produced.
+//!
+//! The component dims a character only while it draws it bold, so a run in
+//! gray and not bold is written past it, as plain escape codes.
 
 use std::cell::RefCell;
 use std::ops::{Bound, Range, RangeBounds};
+
+use unicode_width::UnicodeWidthChar;
 
 const DIM: usize = 4;
 const UNBOLD: usize = 5;
@@ -51,13 +56,16 @@ pub struct Painted {
     chars: usize,
     selected: bool,
     indices: Vec<Vec<usize>>,
+    /// The characters written again over the component in the terminal's
+    /// gray, in order.
+    gray: Vec<usize>,
 }
 
 impl Painted {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
         let chars = text.chars().count();
-        Painted { text, chars, selected: false, indices: Vec::new() }
+        Painted { text, chars, selected: false, indices: Vec::new(), gray: Vec::new() }
     }
 
     #[cfg(test)]
@@ -83,6 +91,11 @@ impl Painted {
     #[cfg(test)]
     pub fn is_bold_at(&self, index: usize) -> bool {
         !self.indices.get(UNBOLD).is_some_and(|at| at.contains(&index))
+    }
+
+    #[cfg(test)]
+    pub fn is_gray_at(&self, index: usize) -> bool {
+        self.gray.contains(&index)
     }
 
     #[cfg(test)]
@@ -133,6 +146,18 @@ impl Painted {
 
     pub fn error_color_range<R: RangeBounds<usize>>(self, range: R) -> Self {
         self.slot_range(ERROR, range)
+    }
+
+    pub fn gray_indices(mut self, indices: Vec<usize>) -> Self {
+        self.gray.extend(indices);
+        self.gray.sort_unstable();
+        self.gray.dedup();
+        self
+    }
+
+    pub fn gray_range<R: RangeBounds<usize>>(self, range: R) -> Self {
+        let range = self.bounds(range);
+        self.gray_indices(range.collect())
     }
 
     fn slot_indices(mut self, slot: usize, indices: Vec<usize>) -> Self {
@@ -190,6 +215,36 @@ impl Painted {
         }
     }
 
+    /// The gray characters of a row drawn at `x`, `y`, a run at a time, each
+    /// at its column: neither bold nor dim, in the terminal's bright black.
+    /// The component leaves the pen on its row's own style, so the runs keep
+    /// the row's background, lit or not.
+    fn write_gray(&self, out: &mut String, x: usize, y: usize) {
+        if self.gray.is_empty() {
+            return;
+        }
+        out.push_str("\u{1b}[22;90m");
+        let mut gray = self.gray.iter().copied().peekable();
+        let mut column = x;
+        let mut open = false;
+        for (index, character) in self.text.chars().enumerate() {
+            let lit = gray.next_if_eq(&index).is_some();
+            if lit && !open {
+                out.push_str("\u{1b}[");
+                digits(out, y + 1);
+                out.push(';');
+                digits(out, column + 1);
+                out.push('H');
+            }
+            if lit {
+                out.push(character);
+            }
+            open = lit;
+            column += character.width().unwrap_or(0);
+        }
+        out.push_str("\u{1b}[m");
+    }
+
     /// The payload on its own, in a fresh `String`. `print_at` writes through a
     /// reused buffer instead; this is only here for the tests below.
     #[cfg(test)]
@@ -209,17 +264,22 @@ thread_local! {
 pub fn print_at(painted: &Painted, x: usize, y: usize, width: usize) {
     WIRE.with_borrow_mut(|out| {
         out.clear();
-        out.push_str("\u{1b}Pztext;");
-        digits(out, x);
-        out.push('/');
-        digits(out, y);
-        out.push('/');
-        digits(out, width);
-        out.push_str("/;");
-        painted.write(out);
-        out.push_str("\u{1b}\\");
+        wire(out, painted, x, y, width);
         print!("{out}");
     });
+}
+
+fn wire(out: &mut String, painted: &Painted, x: usize, y: usize, width: usize) {
+    out.push_str("\u{1b}Pztext;");
+    digits(out, x);
+    out.push('/');
+    digits(out, y);
+    out.push('/');
+    digits(out, width);
+    out.push_str("/;");
+    painted.write(out);
+    out.push_str("\u{1b}\\");
+    painted.write_gray(out, x, y);
 }
 
 fn digits(out: &mut String, mut n: usize) {
@@ -302,6 +362,24 @@ mod tests {
             digits(&mut out, n);
             assert_eq!(out, n.to_string());
         }
+    }
+
+    /// A gray run goes on the wire after the component, at its own column,
+    /// counted in columns rather than characters.
+    #[test]
+    fn a_gray_run_is_written_over_the_component_at_its_column() {
+        let painted = Painted::new("日 ab cd").gray_indices(vec![5, 2, 3, 6]);
+        let mut out = String::new();
+        wire(&mut out, &painted, 4, 7, 9);
+        let component = format!("\u{1b}Pztext;4/7/9/;{}\u{1b}\\", painted.serialize());
+        assert_eq!(
+            out.strip_prefix(&component),
+            Some("\u{1b}[22;90m\u{1b}[8;8Hab\u{1b}[8;11Hcd\u{1b}[m")
+        );
+
+        let mut out = String::new();
+        wire(&mut out, &Painted::new("ab"), 0, 0, 2);
+        assert!(!out.contains("\u{1b}["), "a row with no gray run is the component alone");
     }
 
     #[test]
