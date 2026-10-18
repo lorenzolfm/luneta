@@ -19,6 +19,7 @@ use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
 use crate::elapsed::{Age, Held};
 use crate::folds::Folds;
+use crate::menu::SidebarMenu;
 use crate::places::Places;
 
 /// What a placeholder runs: the column each tab keeps for the sidebar, which
@@ -254,6 +255,8 @@ pub struct Tree {
     pub rows: Cursor<Node>,
     /// Counts every session and agent, whatever a search hides.
     pub summary: Summary,
+    /// The menu, while it is open at the bottom of the sidebar.
+    pub menu: Option<SidebarMenu>,
     folded: Folds,
     search: Option<Search>,
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
@@ -311,7 +314,8 @@ impl Tree {
     /// match when the term changes, and stays on its row otherwise.
     ///
     /// A search lasts while the sidebar has the focus, so `follow` closes it.
-    /// One left behind would keep the rows it hides out of sight.
+    /// One left behind would keep the rows it hides out of sight. So does the
+    /// menu, which is for the row the cursor was on.
     ///
     /// The row the cursor is on when `follow` comes is kept for the picker,
     /// and a row the picker handed over holds the cursor against `follow`
@@ -333,6 +337,7 @@ impl Tree {
         self.following = follow;
         if follow {
             self.search = None;
+            self.menu = None;
         }
         let seated: HashMap<(&str, u32), &AgentRow> =
             agents.rows.iter().map(|row| ((row.seat.session(), row.pane), row)).collect();

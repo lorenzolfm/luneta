@@ -24,7 +24,7 @@ use agents::{AgentRow, AgentSet, Live, Seat};
 use checkouts::Checkouts;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
-use menu::There;
+use menu::{SidebarMenu, There};
 use elapsed::Age;
 use panes::Peeks;
 use pass::{At, Pass, Then};
@@ -111,6 +111,11 @@ const PREVIEW_DELAY: u64 = 2;
 /// agent started in a new pane, or in a shell that moved, finds its row, and
 /// git how the work tree of each stands, so that a change or a checkout shows.
 const TICKS_PER_PLACES: u64 = 5 * TICKS_PER_SECOND;
+
+/// How long, in ticks, keys may take to come after the sidebar's menu starts
+/// an agent in its own session: zellij hands the sidebar the keys it took
+/// before it moved the focus to the agent's pane.
+const ON_THE_WAY: u64 = TICKS_PER_SECOND / 2;
 
 #[derive(Default)]
 pub enum Mode {
@@ -200,8 +205,11 @@ struct State {
     /// focuses the sidebar ends it: the row, and whether on its fold.
     pressed: Option<(Place, bool)>,
     /// The menu's entries, as the configuration holds them, for the sidebar
-    /// to open the menu with.
+    /// to open the menu at its bottom with.
     menu_entries: Option<String>,
+    /// How many menus the sidebar has opened, which numbers each: the answer
+    /// to an agent one starts in another session says which it is for.
+    menus: u64,
 }
 
 register_plugin!(State);
@@ -293,8 +301,9 @@ impl ZellijPlugin for State {
                     Event::Key(key) => menu.key(&key),
                     Event::TabUpdate(tabs) => menu.tabs(tabs),
                     Event::PaneUpdate(panes) => menu.panes(panes),
-                    Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                        menu.ran(exit_code, &stdout, &stderr, &context)
+                    Event::RunCommandResult(exit_code, stdout, _, context) => {
+                        menu.ran(exit_code, &stdout, &context);
+                        false
                     },
                     _ => false,
                 };
@@ -395,6 +404,16 @@ impl ZellijPlugin for State {
                         self.rebuild_agents(Selection::Hold);
                         true
                     },
+                    Some(menu::START_VALUE) => {
+                        let Role::Sidebar(tree) = &mut self.role else {
+                            return false;
+                        };
+                        let started = |menu: SidebarMenu| {
+                            menu.started(exit_code, &stdout, &stderr, &context)
+                        };
+                        tree.menu = tree.menu.take().and_then(started);
+                        true
+                    },
                     Some(agents::CLOSE_VALUE) if exit_code != Some(0) => {
                         let label = context.get(agents::LABEL_KEY).map_or("", String::as_str);
                         let reason = String::from_utf8_lossy(&stderr);
@@ -410,6 +429,9 @@ impl ZellijPlugin for State {
                 }
             },
             Event::PaneUpdate(manifest) => {
+                if let Role::Sidebar(tree) = &mut self.role {
+                    tree.menu = tree.menu.take().and_then(|menu| menu.panes(&manifest));
+                }
                 self.panes = Some(manifest);
                 self.settle()
             },
@@ -1228,6 +1250,18 @@ impl State {
     }
 
     fn handle_sidebar_key(&mut self, key: &KeyWithModifier) -> bool {
+        // The menu takes every key while it is open, and those on their way
+        // as an agent it started takes the focus.
+        let frame = self.frame;
+        let lapsed = |menu: &SidebarMenu| {
+            menu.started_at().is_some_and(|at| frame.wrapping_sub(at) > ON_THE_WAY)
+        };
+        if let Role::Sidebar(tree) = &mut self.role {
+            if let Some(menu) = tree.menu.take().filter(|menu| !lapsed(menu)) {
+                tree.menu = menu.key(key, frame);
+                return true;
+            }
+        }
         if !key.has_no_modifiers() {
             return false;
         }
@@ -1251,10 +1285,7 @@ impl State {
             BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
             BareKey::Char(' ') => self.fold(None),
             BareKey::Char('/') => self.search_tree(String::new()),
-            BareKey::Char('m') => {
-                self.open_menu();
-                false
-            },
+            BareKey::Char('m') => self.open_menu(None),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -1268,25 +1299,36 @@ impl State {
                 self.go_back();
                 false
             },
+            BareKey::Char(c) => self.open_menu(Some(c)),
             _ => false,
         };
         drawn || unscrolled
     }
 
-    /// Opens the menu over the tab for the highlighted pane, so that an agent
-    /// it starts opens beside that pane, in the directory it works in.
-    fn open_menu(&self) {
-        if let (Some(url), Some(configuration)) = (self.own_url(), self.menu_for_row()) {
-            open_plugin_pane_floating(&url, configuration, None, BTreeMap::new());
-        }
+    /// Opens the menu at the bottom of the sidebar for the highlighted pane,
+    /// on the group its `key` opens, or on the first: an agent it starts opens
+    /// beside that pane, in the directory it works in. A key the menu has not
+    /// does nothing. Says whether to draw.
+    fn open_menu(&mut self, key: Option<char>) -> bool {
+        let Some(row) = self.menu_row() else {
+            return false;
+        };
+        self.menus = self.menus.wrapping_add(1);
+        let entries = self.menu_entries.as_deref();
+        let menu = SidebarMenu::open(entries, row, key, self.menus, self.frame);
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        tree.menu = menu;
+        tree.menu.is_some()
     }
 
-    /// The configuration of a menu for the highlighted pane: the pane, the
-    /// directory it works in, as its session says or else as its agent does,
+    /// The highlighted pane, for the menu: the directory it works in, as its
+    /// session says or else as its agent does, the branch checked out there,
     /// and when that is another session, its session and its tab, and the
     /// pane you came from, for the menu to hand the focus back to before it
     /// goes there. A session's row has no pane to open a menu for.
-    fn menu_for_row(&self) -> Option<BTreeMap<String, String>> {
+    fn menu_row(&self) -> Option<menu::Row> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
         };
@@ -1303,23 +1345,11 @@ impl State {
         let cwd = leaf
             .and_then(|leaf| leaf.cwd.clone())
             .or_else(|| agent.and_then(|row| row.cwd.clone()));
+        let branch = leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.clone());
         let here = self.matches.current_session.as_deref() == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
         let there = (!here).then_some(There { session, tab, back: self.here });
-        let mut configuration = menu::configuration(pane, cwd.as_deref(), there.as_ref());
-        configuration.insert(MODE.to_owned(), MENU.to_owned());
-        if let Some(entries) = &self.menu_entries {
-            configuration.insert(menu::ENTRIES.to_owned(), entries.clone());
-        }
-        Some(configuration)
-    }
-
-    /// Where zellij loaded the plugin from, as its own pane says.
-    fn own_url(&self) -> Option<String> {
-        let manifest = self.panes.as_ref()?;
-        let mut panes = manifest.panes.values().flatten();
-        let own = panes.find(|p| p.is_plugin && p.id == self.plugin_id)?;
-        own.plugin_url.clone()
+        Some(menu::Row { pane, cwd, branch, there })
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -1382,7 +1412,13 @@ impl State {
                 let Ok(line) = usize::try_from(line) else {
                     return false;
                 };
-                self.hit(line, column).is_some_and(|hit| self.press(hit))
+                let hit = self.hit(line, column);
+                // A click closes the menu, and goes where it goes without it.
+                let closed = match &mut self.role {
+                    Role::Sidebar(tree) => tree.menu.take().is_some(),
+                    _ => false,
+                };
+                hit.is_some_and(|hit| self.press(hit)) || closed
             },
             // zellij ends the hover over a plugin pane with a move to its last
             // column, when a click focuses the pane and when the pointer
@@ -1693,6 +1729,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::checkouts::Checkout;
+    use crate::menu::Keys;
     use crate::tree::Leaf;
 
     /// A sidebar with the focus, in the one tab of session `a` beside its
@@ -1838,40 +1876,139 @@ mod tests {
         }
     }
 
-    /// `m` on a pane's row opens the menu for that pane: one of your own
-    /// session starts its agent here, one of another session there, in the
-    /// pane's tab. The directory is the pane's, as its session says. A
-    /// session's row has no pane.
+    /// A pane's row hands the menu its pane: one of your own session starts
+    /// its agent here, one of another session there, in the pane's tab. The
+    /// directory is the pane's, as its session says, and the branch the one
+    /// checked out there. A session's row has no pane.
     #[test]
     fn the_menu_a_row_opens_starts_its_agent_beside_that_pane() {
         let mut state = focused_sidebar();
-        state.menu_entries = Some(r#"t "/tigerstyle""#.to_owned());
         state.here = Some(1);
         let four = &mut state.branches[1].panes[0];
         four.cwd = Some("/w/b".to_owned());
         four.tab_id = Some(7);
+        four.checkout = Some(Checkout { branch: "feat/menu".to_owned(), status: String::new() });
         state.rebuild_tree();
-        let entry = |key: &str, value: &str| (key.to_owned(), value.to_owned());
-        let menu = [entry("mode", "menu"), entry("menu", r#"t "/tigerstyle""#)];
-        for (row, beside) in [
+        let there = There { session: "b".to_owned(), tab: Some(7), back: Some(1) };
+        let row = |pane, cwd: Option<&str>, branch: Option<&str>, there| menu::Row {
+            pane,
+            cwd: cwd.map(str::to_owned),
+            branch: branch.map(str::to_owned),
+            there,
+        };
+        for (at, expected) in [
             (0, None),
-            (1, Some(vec![entry("beside_pane", "1")])),
-            (
-                3,
-                Some(vec![
-                    entry("beside_pane", "4"),
-                    entry("beside_cwd", "/w/b"),
-                    entry("beside_session", "b"),
-                    entry("beside_tab", "7"),
-                    entry("back_pane", "1"),
-                ]),
-            ),
+            (1, Some(row(1, None, None, None))),
+            (3, Some(row(4, Some("/w/b"), Some("feat/menu"), Some(there)))),
         ] {
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(row);
+                tree.rows.select(at);
             }
-            let expected = beside.map(|beside| beside.into_iter().chain(menu.clone()).collect());
-            assert_eq!(state.menu_for_row(), expected, "row {row}");
+            assert_eq!(state.menu_row(), expected, "row {at}");
+        }
+    }
+
+    /// The groups the menu at the bottom of the sidebar has open, while it
+    /// shows.
+    fn menu_open(state: &State) -> Option<Vec<&str>> {
+        let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+        let shown = tree.menu.as_ref().and_then(SidebarMenu::keys);
+        shown.map(|keys| keys.map(Keys::names).unwrap_or_default())
+    }
+
+    fn key(state: &mut State, key: BareKey) -> bool {
+        state.update(Event::Key(KeyWithModifier::new(key)))
+    }
+
+    /// A key of the menu opens it at the bottom of the sidebar for the row
+    /// the cursor is on, and the menu takes every key until it closes. A key
+    /// the menu has not is the sidebar's, and so is a key the sidebar has,
+    /// which `m` opens the menu for. A session's row has no pane to open it
+    /// for.
+    #[test]
+    fn a_key_of_the_menu_opens_it_in_the_sidebar_and_takes_every_key() {
+        let mut state = focused_sidebar();
+        state.menu_entries = Some(r#"c "Claude" { t "/tigerstyle"; }; k "review""#.to_owned());
+        state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+        state.rebuild_tree();
+        let selected = |state: &State| {
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            tree.rows.selected()
+        };
+        assert!(!key(&mut state, BareKey::Char('c')));
+        assert_eq!(menu_open(&state), None);
+        if let Role::Sidebar(tree) = &mut state.role {
+            tree.rows.select(3);
+        }
+
+        assert!(!key(&mut state, BareKey::Char('x')));
+        assert_eq!(menu_open(&state), None);
+        assert!(key(&mut state, BareKey::Char('c')));
+        assert_eq!(menu_open(&state), Some(vec!["Claude"]));
+        assert!(key(&mut state, BareKey::Char('k')));
+        assert_eq!(selected(&state), Some(3));
+        assert_eq!(menu_open(&state), Some(vec!["Claude"]));
+        assert!(key(&mut state, BareKey::Backspace));
+        assert_eq!(menu_open(&state), Some(vec![]));
+        assert!(key(&mut state, BareKey::Esc));
+        assert_eq!(menu_open(&state), None);
+
+        assert!(key(&mut state, BareKey::Char('k')));
+        assert_eq!(selected(&state), Some(2));
+        assert_eq!(menu_open(&state), None);
+        assert!(key(&mut state, BareKey::Char('j')));
+        assert!(key(&mut state, BareKey::Char('m')));
+        assert_eq!(menu_open(&state), Some(vec![]));
+    }
+
+    /// The menu is for the row the cursor was on, and lasts while the sidebar
+    /// has the focus. A click goes where it goes, and closes it.
+    #[test]
+    fn the_menu_in_the_sidebar_closes_with_the_focus_or_a_click() {
+        for by_click in [false, true] {
+            let mut state = focused_sidebar();
+            state.menu_entries = Some(r#"c "Claude" { t "/tigerstyle"; }"#.to_owned());
+            state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+            state.rebuild_tree();
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(3);
+            }
+            assert!(key(&mut state, BareKey::Char('c')));
+            assert!(menu_open(&state).is_some(), "by click: {by_click}");
+            if by_click {
+                // On the `▾` of `b`, the third row.
+                assert!(state.handle_mouse(Mouse::LeftClick((render::HEADER + 2) as isize, 1)));
+                assert_eq!(folded(&state), ["b"]);
+            } else {
+                focus(&mut state, false);
+            }
+            assert_eq!(menu_open(&state), None, "by click: {by_click}");
+        }
+    }
+
+    /// The menu closes with the pane of your own session it is for, as the
+    /// row does: zellij would open the agent beside the sidebar instead. A
+    /// pane of another session is none of the panes your session reports.
+    #[test]
+    fn the_menu_in_the_sidebar_closes_with_its_pane() {
+        let mut state = focused_sidebar();
+        state.menu_entries = Some(r#"c "Claude" { t "/tigerstyle"; }"#.to_owned());
+        state.branches[0].panes[0].cwd = Some("/w/a".to_owned());
+        state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+        state.rebuild_tree();
+        let panes = state.panes.clone().expect("the panes");
+        let mut closed = panes.clone();
+        closed.panes.values_mut().for_each(|tab| tab.retain(|pane| pane.id != 1));
+        // Pane 1 is of your own session, and pane 4 of `b`.
+        for (at, open) in [(1, false), (3, true)] {
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(at);
+            }
+            assert!(key(&mut state, BareKey::Char('c')));
+            assert!(menu_open(&state).is_some(), "row {at}");
+            state.update(Event::PaneUpdate(closed.clone()));
+            assert_eq!(menu_open(&state).is_some(), open, "row {at}");
+            state.update(Event::PaneUpdate(panes.clone()));
         }
     }
 
