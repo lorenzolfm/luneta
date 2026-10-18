@@ -132,6 +132,8 @@ pub enum Ink {
     Strong,
     /// Dimmed, in the terminal's own colour.
     Dim,
+    /// The terminal's gray, not bold.
+    Gray,
 }
 
 impl From<Colour> for Ink {
@@ -144,7 +146,7 @@ impl Ink {
     fn colour(self) -> Option<Colour> {
         match self {
             Ink::Level(colour) | Ink::Bold(colour) => Some(colour),
-            Ink::Plain | Ink::Strong | Ink::Dim => None,
+            Ink::Plain | Ink::Strong | Ink::Dim | Ink::Gray => None,
         }
     }
 }
@@ -260,7 +262,7 @@ impl Line {
                 Style::Run(ink, _) | Style::Indices(ink, _) => match ink {
                     Ink::Level(_) | Ink::Plain => &mut unbold,
                     Ink::Dim => &mut dim,
-                    Ink::Bold(_) | Ink::Strong => continue,
+                    Ink::Bold(_) | Ink::Strong | Ink::Gray => continue,
                 },
                 Style::Error(_) => &mut unbold,
             };
@@ -282,6 +284,13 @@ impl Line {
         }
         for style in styles {
             text = match style {
+                Style::Run(Ink::Gray, range) => match clamp(range) {
+                    Some(range) => text.gray_range(range),
+                    None => text,
+                },
+                Style::Indices(Ink::Gray, indices) => text.gray_indices(
+                    indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
+                ),
                 Style::Run(ink, range) => match (ink.colour(), clamp(range)) {
                     (Some(colour), Some(range)) => text.color_range(colour, range),
                     _ => text,
@@ -418,7 +427,8 @@ mod tests {
     use super::*;
 
     /// zellij leaves a character undimmed when it is also told not to be
-    /// bold, so a dimmed run must stay out of the unbolded ones.
+    /// bold, so a dimmed run must stay out of the unbolded ones. A gray run
+    /// is written over the component, so the component is told nothing.
     #[test]
     fn each_ink_paints_the_way_zellij_reads_it() {
         let mut line = Line::new();
@@ -428,21 +438,26 @@ mod tests {
             ("c", Ink::Plain),
             ("d", Ink::Strong),
             ("e", Ink::Dim),
+            ("f", Ink::Gray),
         ] {
             line.push(text, ink);
         }
-        let painted = line.fill(5);
-        let seen: Vec<(Option<Colour>, bool, bool)> = (0..5)
-            .map(|at| (painted.colour_at(at), painted.is_bold_at(at), painted.is_dim_at(at)))
+        let painted = line.fill(6);
+        let seen: Vec<(Option<Colour>, bool, bool, bool)> = (0..6)
+            .map(|at| {
+                let (colour, bold) = (painted.colour_at(at), painted.is_bold_at(at));
+                (colour, bold, painted.is_dim_at(at), painted.is_gray_at(at))
+            })
             .collect();
         assert_eq!(
             seen,
             [
-                (Some(Colour::Level2), false, false),
-                (Some(Colour::Level2), true, false),
-                (None, false, false),
-                (None, true, false),
-                (None, true, true),
+                (Some(Colour::Level2), false, false, false),
+                (Some(Colour::Level2), true, false, false),
+                (None, false, false, false),
+                (None, true, false, false),
+                (None, true, true, false),
+                (None, true, false, true),
             ]
         );
     }
