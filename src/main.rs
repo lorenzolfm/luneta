@@ -5,6 +5,7 @@ mod dock;
 mod elapsed;
 mod fetch;
 mod folds;
+mod hiding;
 mod layout;
 mod paint;
 mod panes;
@@ -84,6 +85,10 @@ const AGENTS_COMMAND: &str = "agents_command";
 const FLOATING: (&str, &str, &str, &str) = ("20%", "20%", "60%", "60%");
 
 const TICK: f64 = 0.1;
+
+/// How often, in seconds, the dock takes up a sidebar hidden or brought back
+/// in another session.
+const DOCK_TICK: f64 = 1.0;
 
 const TICKS_PER_SECOND: u64 = 10;
 
@@ -196,7 +201,8 @@ impl ZellijPlugin for State {
             Some(DOCK) => {
                 let mut sidebar = configuration.clone();
                 sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
-                Role::Dock(dock::Dock::new(self.plugin_id, ids.client_id, sidebar))
+                let dock = dock::Dock::new(self.plugin_id, ids.client_id, sidebar);
+                Role::Dock(dock.shared(ids.zellij_pid))
             },
             Some(mode) => Role::Unknown(mode.to_owned()),
         };
@@ -207,7 +213,9 @@ impl ZellijPlugin for State {
                     EventType::PermissionRequestResult,
                     EventType::TabUpdate,
                     EventType::PaneUpdate,
+                    EventType::Timer,
                 ]);
+                set_timeout(DOCK_TICK);
                 return;
             },
             Role::Unknown(mode) => {
@@ -245,6 +253,10 @@ impl ZellijPlugin for State {
                     Event::PermissionRequestResult(PermissionStatus::Granted) => dock.grant(),
                     Event::TabUpdate(tabs) => dock.tabs(tabs),
                     Event::PaneUpdate(panes) => dock.panes(panes),
+                    Event::Timer(_) => {
+                        set_timeout(DOCK_TICK);
+                        dock.tick();
+                    },
                     _ => {},
                 }
                 return false;

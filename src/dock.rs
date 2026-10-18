@@ -10,7 +10,9 @@
 //!
 //! `toggle` hides the sidebar and every placeholder, the panes beside them
 //! taking their columns, and brings them back. Closing the sidebar hides it.
-//! A tab left with nothing but its column closes, as it would without one.
+//! Either goes for every session: the docks of the others take it up, and so
+//! does the dock of a session that starts later. A tab left with nothing but
+//! its column closes, as it would without one.
 //!
 //! zellij runs a dock for each client, and every dock sees the same panes and
 //! the tab every client is on. Only the dock of the client that attached first
@@ -23,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zellij_tile::prelude::*;
 
+use crate::hiding::{Hiding, Said};
 use crate::tree::{is_placeholder, PLACEHOLDER};
 
 /// The title the sidebar gives its pane, by which the dock knows it.
@@ -118,6 +121,11 @@ pub struct Dock {
     /// clean before. zellij arranges no pane that opens in such a tab until
     /// the swap layout is applied again, when the tab comes on screen.
     marked: BTreeSet<TabId>,
+    /// The id of this session's zellij server, by which the docks of every
+    /// session tell what their own said from what the others did.
+    server: u32,
+    /// Whether the sidebar is hidden, as a dock of some session said last.
+    hiding: Hiding,
 }
 
 /// What the sidebar is to be.
@@ -353,6 +361,12 @@ impl Dock {
         Dock { plugin_id, client, sidebar_configuration, behind: true, ..Dock::default() }
     }
 
+    /// The dock, hiding the sidebar and bringing it back for every session.
+    /// `server` is the id of this session's zellij server.
+    pub fn shared(self, server: u32) -> Self {
+        Dock { server, hiding: Hiding::shared(), ..self }
+    }
+
     pub fn grant(&mut self) {
         self.granted = true;
         self.step();
@@ -381,6 +395,28 @@ impl Dock {
             (Ask::Focus, Want::Hidden) => Want::Back { focus: true },
             (Ask::Focus | Ask::Next | Ask::Cycle, _) => return,
         };
+        if self.take(want) {
+            self.say(want == Want::Hidden);
+        }
+    }
+
+    /// Takes up what the dock of another session said since, once a second.
+    /// What this session's own said came to it as a key already. A dock that
+    /// is behind reads it as it catches up.
+    pub fn tick(&mut self) {
+        if self.behind {
+            return;
+        }
+        let Some(said) = self.hiding.read().filter(|said| said.by != self.server) else {
+            return;
+        };
+        if said.hidden != (self.want == Want::Hidden) {
+            self.take(if said.hidden { Want::Hidden } else { Want::Back { focus: false } });
+        }
+    }
+
+    /// Says whether the dock took it.
+    fn take(&mut self, want: Want) -> bool {
         // zellij keeps a client's dock running after the client leaves, and
         // hands it every key still. It has seen none of the panes since, so it
         // leaves them be, and catches up if its client comes back. When zellij
@@ -388,7 +424,7 @@ impl Dock {
         // is behind from the first key that came since.
         if self.granted && !attached().unwrap_or(!self.behind) {
             self.behind = true;
-            return;
+            return false;
         }
         self.want = want;
         // Back from hidden, it goes to the tab of the client that attached
@@ -398,6 +434,12 @@ impl Dock {
         }
         self.asked.clear();
         self.step();
+        true
+    }
+
+    /// Hides the sidebar of every session, or brings it back.
+    fn say(&mut self, hidden: bool) {
+        self.hiding.write(Said { hidden, by: self.server });
     }
 
     fn step(&mut self) {
@@ -442,10 +484,16 @@ impl Dock {
         acts
     }
 
-    /// Starts over from the panes as they are.
+    /// Starts over from the panes as they are, and from what a dock of some
+    /// session said last, whichever session's: a sidebar hidden elsewhere
+    /// hides, and one shown elsewhere comes back.
     fn catch_up(&mut self, scene: &Scene) {
         self.behind = false;
-        self.want = scene.resting();
+        self.want = match (self.hiding.read(), scene.resting()) {
+            (Some(Said { hidden: true, .. }), _) => Want::Hidden,
+            (Some(Said { hidden: false, .. }), Want::Hidden) => Want::Back { focus: false },
+            (_, resting) => resting,
+        };
         self.asked.clear();
         self.homes.clear();
         self.unsettled.clear();
@@ -482,6 +530,7 @@ impl Dock {
             return;
         }
         self.want = Want::Hidden;
+        self.say(true);
         self.reclaim = scene
             .placeholders
             .get(&stood)
@@ -1153,6 +1202,41 @@ mod tests {
         let shown = vec![Act::Show { pane: 1 }, Act::Show { pane: 3 }];
         assert_eq!(run(&mut first, &hidden(1)), shown);
         assert!(run(&mut second, &hidden(2)).is_empty());
+    }
+
+    /// `toggle` in one session hides the sidebar of every other, and brings
+    /// it back. A dock takes up only what another session said: the key its
+    /// own heard reaches each of its docks, and one that took it up from the
+    /// file first would undo it. A session that starts while the sidebar is
+    /// hidden starts with it hidden.
+    #[test]
+    fn hiding_in_one_session_hides_the_sidebar_of_every_other() {
+        let file = std::env::temp_dir().join(format!("luneta-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let of = |server, dock: Dock| Dock { server, hiding: Hiding::at(file.clone()), ..dock };
+        // Session 7 has two clients, session 8 one.
+        let (mut here, mut beside, mut there) = (of(7, going(1)), of(7, going(2)), of(8, going(1)));
+
+        here.pipe(Ask::Toggle);
+        beside.tick();
+        there.tick();
+        assert_eq!(there.want, Want::Hidden);
+        // The key comes to the second client's dock after its tick.
+        assert_eq!(beside.want, Want::Shown);
+        beside.pipe(Ask::Toggle);
+        assert_eq!(beside.want, Want::Hidden);
+
+        let mut later = of(9, dock());
+        let tabs = [tab(0, true)];
+        let docked = vec![(0, vec![sidebar(5, false), placeholder(1, true), terminal(2)])];
+        run(&mut later, &scene(&tabs, docked, None));
+        assert_eq!(later.want, Want::Hidden);
+
+        there.pipe(Ask::Toggle);
+        here.tick();
+        assert_eq!(here.want, Want::Back { focus: false });
+
+        std::fs::remove_file(file).unwrap();
     }
 
     #[test]
