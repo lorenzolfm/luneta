@@ -27,7 +27,7 @@ Sleep 1500ms
 Tab
 Sleep 2500ms
 
-# The waiting agent sorts first, and its preview shows the question it is stuck on.
+# A waiting agent's preview shows the question it is stuck on.
 Down@600ms 2
 Sleep 2500ms
 Up@600ms 2

@@ -47,7 +47,7 @@ Select an item to see a live preview of it.
   MEDIA SLOT — agents.gif
   Record with `vhs docs/media/agents.tape`; swap the <img> src for docs/media/agents.gif once it exists.
 -->
-<p align="center"><img src="docs/media/agents.png" alt="the agent picker: agents sorted by attention on the left, the highlighted agent's question on the right" width="900"></p>
+<p align="center"><img src="docs/media/agents.png" alt="the agent picker: the agents and their status on the left, the highlighted agent's question on the right" width="900"></p>
 
 Know which agents need your attention, and jump straight to them.
 
@@ -58,6 +58,19 @@ Know which agents need your attention, and jump straight to them.
 | ⠋⠙⠹⠸ | `busy` | a spinner — the one status that ends on its own |
 | 🐚 | `shell` | it is a shell |
 | 🛸 | anything else | unknown, and visibly so |
+
+Agents keep their place, as sessions do: in the order of their sessions in the
+session list, the one you are in first and then the others newest first, and in
+the order their panes were opened within each. Which agent wants you is the job
+of the glyph, not of the order. The agent in the pane you came from is pinned
+above the list.
+
+`Del` closes the pane the highlighted agent is in, and its tab with it when that
+was the last pane there. With the sidebar, the tab closes only in a session
+someone is attached to; in one nobody is, it stays, with nothing in it but its
+column. When the pane is a guess, `Del` leaves it alone and says so: the agent
+names a session that is still running, but its pane turned up in another,
+matched by its id and directory alone.
 
 Needs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) on the server's
 `PATH`. Without it, the other two lists work exactly as before.
@@ -449,7 +462,7 @@ Press your key, type, press `Enter`.
 | `Enter` | act on the highlighted row — the prompt says which action |
 | `Tab` / `Shift-Tab` | next / previous list, keeping the search term |
 | `Ctrl-r` | rename the session you are in |
-| `Del` | kill a live session, or delete a dead one |
+| `Del` | kill a live session, or delete a dead one; close an agent's pane |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
 

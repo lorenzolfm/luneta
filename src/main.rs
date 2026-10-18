@@ -325,6 +325,17 @@ impl ZellijPlugin for State {
                         self.rebuild_agents(Selection::Hold);
                         true
                     },
+                    Some(agents::CLOSE_VALUE) if exit_code != Some(0) => {
+                        let label = context.get(agents::LABEL_KEY).map_or("", String::as_str);
+                        let reason = String::from_utf8_lossy(&stderr);
+                        let reason = reason.lines().next().unwrap_or("").trim();
+                        let reason =
+                            if reason.is_empty() { "the pane did not close" } else { reason };
+                        self.error = Some(format!("kill \"{label}\": {reason}"));
+                        // Brings back the agent the pane still holds.
+                        self.ask_agents();
+                        true
+                    },
                     _ => false,
                 }
             },
@@ -402,7 +413,7 @@ impl ZellijPlugin for State {
         let Some(screen) = message.payload.as_deref().and_then(Screen::from_name) else {
             return false;
         };
-        self.screen = screen;
+        self.show(screen);
         true
     }
 
@@ -439,6 +450,7 @@ impl ZellijPlugin for State {
                     &self.agents,
                     &self.peeks,
                     &self.matches.search_term,
+                    self.error.as_deref(),
                     rows,
                     cols,
                     self.frame,
@@ -537,7 +549,8 @@ impl State {
     fn rebuild_agents(&mut self, policy: Selection) {
         let origin = if self.is_sidebar() { None } else { self.origin_pane() };
         let since = self.agents_since();
-        let live = Live::new(self.matches.current_session.as_deref(), &self.places);
+        let current = self.matches.current_session.as_deref();
+        let live = Live::new(current, &self.sessions.live, &self.places);
         self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
         self.land();
         self.rebuild_tree();
@@ -698,11 +711,11 @@ impl State {
     fn handle_search_key(&mut self, key: &KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Tab if key.has_no_modifiers() => {
-                self.screen = self.screen.next();
+                self.show(self.screen.next());
                 true
             },
             BareKey::Tab if key.has_modifiers(&[KeyModifier::Shift]) => {
-                self.screen = self.screen.prev();
+                self.show(self.screen.prev());
                 true
             },
             BareKey::Enter if key.has_no_modifiers() => {
@@ -721,9 +734,16 @@ impl State {
                 self.begin_rename();
                 true
             },
-            BareKey::Delete if key.has_no_modifiers() && self.screen == Screen::Sessions => {
-                self.delete_selected();
-                true
+            BareKey::Delete if key.has_no_modifiers() => match self.screen {
+                Screen::Sessions => {
+                    self.delete_selected();
+                    true
+                },
+                Screen::Agents => {
+                    self.kill_agent_pane();
+                    true
+                },
+                Screen::Dirs => false,
             },
             BareKey::Down if key.has_no_modifiers() => {
                 self.move_selection(1);
@@ -749,6 +769,12 @@ impl State {
             },
             _ => false,
         }
+    }
+
+    /// An error belongs to the list it was made on.
+    fn show(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.error = None;
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -869,6 +895,36 @@ impl State {
         self.set_term(String::new());
         self.error = result.err().map(|e| format!("{verb} \"{name}\": {e}"));
         self.poll();
+    }
+
+    /// Closes the pane the highlighted agent sits in, and with it its tab when
+    /// that was the last pane there. The plugin closes a pane of its own
+    /// session, and `zellij` one of another, whose answer comes later. A pane
+    /// that is only a guess may hold something else, and stays.
+    fn kill_agent_pane(&mut self) {
+        let Some(row) = self.agents.selected_row() else {
+            return;
+        };
+        if row.guessed {
+            let label = row.label();
+            self.error = Some(format!("kill \"{label}\": luneta is not sure which pane it sits in"));
+            return;
+        }
+        match &row.seat {
+            Seat::Here(_) => close_terminal_pane(row.pane),
+            Seat::There(session) => {
+                let id = panes::pane_id(row.pane);
+                run_command(
+                    &agents::close(session, &id),
+                    BTreeMap::from([
+                        (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
+                        (agents::LABEL_KEY.to_owned(), row.label()),
+                    ]),
+                );
+            },
+        }
+        self.agents.forget_selected();
+        self.set_term(String::new());
     }
 
     fn set_term(&mut self, term: String) {

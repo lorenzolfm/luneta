@@ -84,12 +84,14 @@ pub fn render_agents(
     agents: &AgentSet,
     peeks: &Peeks,
     term: &str,
+    error: Option<&str>,
     rows: usize,
     cols: usize,
     frame: u64,
 ) {
     let screen = Screen::new(rows, cols);
-    let notes = agent_note_texts(agents, help_width(cols));
+    let mut notes = note_texts(error);
+    notes.extend(agent_note_texts(agents, help_width(cols)));
 
     if let Some(rect) = &screen.results {
         let body = agent_body(agents, term, rect, notes.len(), frame);
@@ -744,13 +746,23 @@ fn agent_body(
     notes: usize,
     frame: u64,
 ) -> Vec<Painted> {
-    if agents.rows.is_empty() {
-        return vec![note_line(rect, &Note::dim(agent_empty_text(agents, term)))];
-    }
     let inner = rect.inner_width();
-    let capacity = rect.inner_height().saturating_sub(notes);
+    let mut capacity = rect.inner_height().saturating_sub(notes);
+    let mut body = Vec::new();
+
+    if let Some(current) = &agents.current {
+        if capacity == 0 {
+            return body;
+        }
+        body.push(here_line(&current.label(), inner));
+        capacity -= 1;
+    }
     if capacity == 0 {
-        return Vec::new();
+        return body;
+    }
+    if agents.rows.is_empty() {
+        body.push(note_line(rect, &Note::dim(agent_empty_text(agents, term))));
+        return body;
     }
     let (start, end) = viewport(agents.rows.selected().unwrap_or(0), agents.rows.len(), capacity);
     let window = &agents.rows[start..end];
@@ -784,23 +796,11 @@ fn agent_body(
         _ => None,
     };
 
-    window
-        .iter()
-        .enumerate()
-        .map(|(offset, row)| {
-            let selected = agents.rows.selected() == Some(start + offset);
-            agent_line(
-                row,
-                selected,
-                &fit,
-                name_column,
-                tag_column,
-                cwd_budget,
-                inner,
-                frame,
-            )
-        })
-        .collect()
+    body.extend(window.iter().enumerate().map(|(offset, row)| {
+        let selected = agents.rows.selected() == Some(start + offset);
+        agent_line(row, selected, &fit, name_column, tag_column, cwd_budget, inner, frame)
+    }));
+    body
 }
 
 fn agent_line(
@@ -884,6 +884,9 @@ fn agent_empty_text(agents: &AgentSet, term: &str) -> String {
     match &agents.status {
         Fetch::Waiting => "looking for agents…".to_owned(),
         Fetch::Failed(_) => "no agents".to_owned(),
+        Fetch::Ready(_) if term.is_empty() && agents.current.is_some() => {
+            "no other agents".to_owned()
+        },
         Fetch::Ready(_) if term.is_empty() => "no agents running".to_owned(),
         Fetch::Ready(_) => format!("no match for \"{term}\""),
     }
@@ -922,6 +925,7 @@ fn agents_help(width: usize) -> Painted {
             ("<↓↑>", "Navigate", "Nav"),
             ("<ENTER>", "Go to agent", "Go"),
             ("<TAB>", "Directories", "Dirs"),
+            ("<Del>", "Kill its pane", "Kill"),
             ("<ESC>", "Close", "Close"),
         ],
     )
@@ -1767,7 +1771,7 @@ mod tests {
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = agents::Live::new(Some("luneta"), &places);
+        let live = agents::Live::new(Some("luneta"), &[], &places);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
         assert_eq!(agents.rows.len(), 1);
@@ -1776,6 +1780,47 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].text, "1 agent sits in a pane luneta cannot find");
         assert!(!notes[0].error);
+    }
+
+    #[test]
+    fn the_agent_you_are_in_is_pinned_above_the_list() {
+        let json = r#"[{"status":"idle","status_age":60,"cwd":"/w/notes",
+            "name":"handoff","name_source":"user","zellij":{"session":"notes","pane":"1"}},
+            {"status":"busy","status_age":60,"cwd":"/w/luneta",
+             "zellij":{"session":"luneta","pane":"4"}}]"#;
+        let places = Places::of(&[("notes", &[(1, "/w/notes")]), ("luneta", &[(4, "/w/luneta")])]);
+        let rect = Rect { x: 0, y: 0, width: 42, height: 5 };
+        let body = |origin: Option<u32>, term: &str| -> Vec<String> {
+            let mut agents = AgentSet::default();
+            agents.ingest(Some(0), json.as_bytes(), b"");
+            let live = agents::Live::new(Some("notes"), &[], &places);
+            agents.rebuild(term, &live, origin, Age::ZERO, Selection::SnapToTop);
+            agent_body(&agents, term, &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect()
+        };
+        let banner = "   handoff ───────────────── 🏠 Current ";
+
+        let pinned = body(Some(1), "");
+        assert_eq!(pinned[0], banner);
+        assert!(pinned[1].starts_with(" > luneta "), "{pinned:?}");
+        assert_eq!(pinned.len(), 2);
+        assert_eq!(body(Some(1), "lun")[0], banner);
+        assert_eq!(body(Some(1), "zzz"), [banner, " no match for \"zzz\"                     "]);
+        assert!(body(None, "")[0].starts_with(" > handoff "));
+    }
+
+    #[test]
+    fn the_agent_you_are_in_alone_is_no_other_agent() {
+        let json = r#"[{"status":"idle","status_age":60,"cwd":"/w/notes",
+            "zellij":{"session":"notes","pane":"1"}}]"#;
+        let places = Places::of(&[("notes", &[(1, "/w/notes")])]);
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = agents::Live::new(Some("notes"), &[], &places);
+        agents.rebuild("", &live, Some(1), Age::ZERO, Selection::SnapToTop);
+        let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
+        let body: Vec<String> =
+            agent_body(&agents, "", &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect();
+        assert_eq!(body, ["   notes ─────── 🏠 Current ", " no other agents            "]);
     }
 
     #[test]
@@ -1816,8 +1861,8 @@ mod tests {
             ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
             ("notes", &[(7, "/home/lorenzo/Documents")]),
         ]);
-        let live = agents::Live::new(Some("notes"), &places);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        let live = agents::Live::new(Some("notes"), &sessions.live, &places);
+        agents.rebuild("", &live, Some(7), Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
         let body = agent_body(&agents, "", rect, notes.len(), 0);

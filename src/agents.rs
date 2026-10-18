@@ -8,12 +8,21 @@ use crate::cursor::Cursor;
 use crate::elapsed::{Age, Held};
 use crate::fetch::Fetch;
 use crate::places::Places;
-use crate::sessions::Selection;
+use crate::sessions::{Selection, Session};
 
 pub const QUERY: [&str; 1] = ["claude-ps"];
 
 pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "agents";
+
+pub const CLOSE_VALUE: &str = "close";
+pub const LABEL_KEY: &str = "luneta_label";
+
+/// Closes a pane of another session; the plugin can only close its own
+/// session's.
+pub fn close<'a>(session: &'a str, pane: &'a str) -> [&'a str; 7] {
+    ["zellij", "--session", session, "action", "close-pane", "--pane-id", pane]
+}
 
 #[derive(Deserialize)]
 struct Wire {
@@ -54,11 +63,29 @@ impl Seat {
 pub struct Live<'a> {
     current: Option<&'a str>,
     places: &'a Places,
+    /// The live sessions in the order the session list shows them: the one
+    /// you are in first, then the others, newest first.
+    order: Vec<&'a str>,
 }
 
 impl<'a> Live<'a> {
-    pub fn new(current: Option<&'a str>, places: &'a Places) -> Self {
-        Live { current, places }
+    /// `live` is the session list's live sessions, which leave out the one
+    /// you are in.
+    pub fn new(current: Option<&'a str>, live: &'a [Session], places: &'a Places) -> Self {
+        let mut others: Vec<&Session> = live.iter().collect();
+        others.sort_by(|a, b| a.age.cmp(&b.age).then_with(|| a.name.cmp(&b.name)));
+        let order = current.into_iter().chain(others.iter().map(|s| s.name.as_str())).collect();
+        Live { current, places, order }
+    }
+
+    /// Where `session` stands in the session list, for its agents to stand
+    /// with it. A session the list does not know goes last.
+    fn rank(&self, session: &str) -> usize {
+        self.order.iter().position(|name| *name == session).unwrap_or(self.order.len())
+    }
+
+    fn knows(&self, session: &str) -> bool {
+        self.order.contains(&session)
     }
 
     fn seat(&self, session: &str) -> Seat {
@@ -85,6 +112,11 @@ pub struct Agent {
     cwd: String,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a chosen name, a shared label, a guessed pane and an exact match are four facts \
+              about a row, not the states of one"
+)]
 pub struct AgentRow {
     reported: String,
     pub seat: Seat,
@@ -95,8 +127,12 @@ pub struct AgentRow {
     pub age: Held,
     pub cwd: String,
     pub shared: bool,
+    /// The agent names a session that is still running, but its pane turned
+    /// up in another, matched by its id and directory alone: where it sits is
+    /// a guess. A session that is gone is one renamed, and no guess.
+    pub guessed: bool,
     pub indices: Vec<usize>,
-    rank: u8,
+    rank: usize,
     score: i64,
     is_exact: bool,
 }
@@ -182,6 +218,9 @@ impl Status {
 pub struct AgentSet {
     pub status: Fetch<Vec<Agent>>,
     pub rows: Cursor<AgentRow>,
+    /// The agent in the pane the picker was opened from, kept out of the rows
+    /// as the session you are in is kept out of the session list.
+    pub current: Option<AgentRow>,
     asking: bool,
     pub unplaced: usize,
     matcher: Option<SkimMatcherV2>,
@@ -222,6 +261,9 @@ impl AgentSet {
         self.status = Fetch::Failed(reason.into());
     }
 
+    /// The rows keep their order, whatever the agents do: their sessions' in
+    /// the session list, and the order their panes were opened in within each.
+    /// A term puts the best match first, as it does in the session list.
     pub fn rebuild(
         &mut self,
         term: &str,
@@ -235,6 +277,7 @@ impl AgentSet {
             Selection::Hold => self.selected_row().map(|r| (r.reported.clone(), r.pane)),
         };
         let mut rows: Vec<AgentRow> = Vec::new();
+        let mut current = None;
         let mut unplaced = 0;
 
         if let Fetch::Ready(all) = &self.status {
@@ -247,49 +290,53 @@ impl AgentSet {
                     unplaced += 1;
                     continue;
                 };
-                if matches!(seat, Seat::Here(_)) && origin == Some(agent.pane) {
-                    continue;
-                }
-                let chosen = agent.name.is_some();
                 let display = agent
                     .name
                     .clone()
                     .unwrap_or_else(|| seat.session().to_owned());
-                let (score, indices, is_exact) = if term.is_empty() {
-                    (0, Vec::new(), false)
-                } else {
-                    match matcher.fuzzy_indices(&display, term) {
-                        Some((score, indices)) => (score, indices, display == term),
-                        None => continue,
-                    }
-                };
-                rows.push(AgentRow {
+                let mut row = AgentRow {
                     reported: agent.reported.clone(),
+                    rank: live.rank(seat.session()),
+                    guessed: agent.reported != seat.session() && live.knows(&agent.reported),
                     seat,
                     display,
-                    chosen,
+                    chosen: agent.name.is_some(),
                     pane: agent.pane,
                     status: agent.status.clone(),
                     age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
                     shared: false,
-                    indices,
-                    rank: status_rank(&agent.status),
-                    score,
-                    is_exact,
-                });
+                    indices: Vec::new(),
+                    score: 0,
+                    is_exact: false,
+                };
+                if matches!(row.seat, Seat::Here(_)) && origin == Some(agent.pane) {
+                    current = Some(row);
+                    continue;
+                }
+                if !term.is_empty() {
+                    let Some((score, indices)) = matcher.fuzzy_indices(&row.display, term) else {
+                        continue;
+                    };
+                    row.is_exact = row.display == term;
+                    row.score = score;
+                    row.indices = indices;
+                }
+                rows.push(row);
             }
         }
 
         rows.sort_by(|a, b| {
             b.is_exact
                 .cmp(&a.is_exact)
-                .then_with(|| a.rank.cmp(&b.rank))
-                .then_with(|| a.age.cmp(&b.age))
                 .then_with(|| b.score.cmp(&a.score))
+                .then_with(|| a.rank.cmp(&b.rank))
+                .then_with(|| a.seat.session().cmp(b.seat.session()))
+                .then_with(|| a.pane.cmp(&b.pane))
         });
 
-        mark_shared(&mut rows);
+        mark_shared(&mut rows.iter_mut().chain(current.as_mut()).collect::<Vec<_>>());
+        self.current = current;
         self.unplaced = unplaced;
 
         self.rows.replace(rows, |row| {
@@ -302,20 +349,35 @@ impl AgentSet {
         self.rows.selected_row()
     }
 
+    /// Leaves the highlighted agent out until claude-ps is next asked, for a
+    /// pane that is closing: the agent in it can outlive an ask made now, and
+    /// come back. The rows are only redrawn by the next `rebuild`.
+    pub fn forget_selected(&mut self) {
+        let Some(row) = self.rows.selected_row() else {
+            return;
+        };
+        let (reported, pane) = (row.reported.clone(), row.pane);
+        if let Fetch::Ready(all) = &mut self.status {
+            all.retain(|agent| agent.reported != reported || agent.pane != pane);
+        }
+    }
+
     pub fn any_busy(&self) -> bool {
         self.rows.iter().any(|row| row.status.is_busy())
     }
 
     /// The agent after the one you are in, among those that want you: the
-    /// waiting first, then the idle, the most recent first, which is the order
-    /// the rows are already in. Wraps around, and passes over the pane you are
-    /// in when it is the only one.
+    /// waiting first, then the idle, the most recent first. Wraps around, and
+    /// passes over the pane you are in when it is the only one.
     pub fn next_wanted(&self, here: Option<(&str, u32)>) -> Option<&AgentRow> {
-        let wanted: Vec<&AgentRow> = self
+        let mut wanted: Vec<&AgentRow> = self
             .rows
             .iter()
             .filter(|row| matches!(row.status, Status::Waiting | Status::Idle))
             .collect();
+        wanted.sort_by(|a, b| {
+            status_rank(&a.status).cmp(&status_rank(&b.status)).then_with(|| a.age.cmp(&b.age))
+        });
         let at = here.and_then(|(session, pane)| {
             wanted.iter().position(|row| row.seat.session() == session && row.pane == pane)
         });
@@ -341,7 +403,7 @@ impl AgentSet {
     }
 }
 
-fn mark_shared(rows: &mut [AgentRow]) {
+fn mark_shared(rows: &mut [&mut AgentRow]) {
     let shared: Vec<bool> = {
         let mut seen: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
         for row in rows.iter() {
@@ -430,7 +492,8 @@ mod tests {
     fn rows(json: &str, current: Option<&str>, places: &Places) -> AgentSet {
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        agents.rebuild("", &Live::new(current, places), None, Age::ZERO, Selection::SnapToTop);
+        let live = Live::new(current, &[], places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         agents
     }
 
@@ -452,7 +515,7 @@ mod tests {
         assert_eq!(agents.rows.len(), 1);
 
         agents.fail("claude-ps: gone");
-        agents.rebuild("", &Live::new(None, &places), None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &Live::new(None, &[], &places), None, Age::ZERO, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert!(agents.rows.selected().is_none());
     }
@@ -479,19 +542,30 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_you_are_in_is_dropped_by_its_pane_and_not_its_name() {
+    fn the_pane_you_are_in_is_pinned_by_its_pane_and_not_its_name() {
         let places = luneta_holds_both();
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
         agents.rebuild(
-            "",
-            &Live::new(Some("luneta"), &places),
+            "misc",
+            &Live::new(Some("luneta"), &[], &places),
             Some(0),
             Age::ZERO,
             Selection::SnapToTop,
         );
-        assert_eq!(agents.rows.len(), 1);
-        assert_eq!(agents.rows[0].pane, 6);
+        assert!(agents.rows.is_empty());
+        assert_eq!(agents.current.as_ref().map(|row| row.pane), Some(0));
+
+        agents.rebuild(
+            "",
+            &Live::new(Some("luneta"), &[], &places),
+            Some(0),
+            Age::ZERO,
+            Selection::SnapToTop,
+        );
+        let labels: Vec<String> = agents.rows.iter().map(AgentRow::label).collect();
+        assert_eq!(labels, ["luneta:6"]);
+        assert_eq!(agents.current.as_ref().map(AgentRow::label).as_deref(), Some("luneta:0"));
     }
 
     #[test]
@@ -566,7 +640,7 @@ mod tests {
         agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
         agents.rebuild(
             "luneta",
-            &Live::new(Some("luneta"), &places),
+            &Live::new(Some("luneta"), &[], &places),
             None,
             Age::ZERO,
             Selection::SnapToTop,
@@ -574,7 +648,7 @@ mod tests {
         assert_eq!(agents.rows.len(), 2);
         agents.rebuild(
             "misc",
-            &Live::new(Some("luneta"), &places),
+            &Live::new(Some("luneta"), &[], &places),
             None,
             Age::ZERO,
             Selection::SnapToTop,
@@ -673,6 +747,87 @@ mod tests {
         assert_eq!(next(Some(("b", 0))).as_deref(), Some("c"));
     }
 
+    /// Sessions `old` and `new` besides `here`, the one you are in, each with
+    /// agents in panes 2 and 5. `status` gives each agent its status and age.
+    fn three_sessions(status: impl Fn(&str, u32) -> (&'static str, u64)) -> AgentSet {
+        let mut json = Vec::new();
+        for session in ["old", "here", "new"] {
+            for pane in [2, 5] {
+                let (status, age) = status(session, pane);
+                json.push(format!(
+                    r#"{{"status":"{status}","status_age":{age},"cwd":"/w/{session}",
+                        "zellij":{{"session":"{session}","pane":"{pane}"}}}}"#
+                ));
+            }
+        }
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"");
+        rebuild_three(&mut agents);
+        agents
+    }
+
+    fn rebuild_three(agents: &mut AgentSet) {
+        let places = Places::of(&[
+            ("old", &[(2, "/w/old"), (5, "/w/old")]),
+            ("here", &[(2, "/w/here"), (5, "/w/here")]),
+            ("new", &[(2, "/w/new"), (5, "/w/new")]),
+        ]);
+        let named =
+            |name: &str, age: u64| Session { name: name.to_owned(), age: Age::from_secs(age) };
+        let sessions = [named("old", 900), named("new", 60)];
+        let live = Live::new(Some("here"), &sessions, &places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
+    }
+
+    fn seats(agents: &AgentSet) -> Vec<(&str, u32)> {
+        agents.rows.iter().map(|row| (row.seat.session(), row.pane)).collect()
+    }
+
+    #[test]
+    fn the_rows_stand_in_the_order_of_the_session_list_whatever_the_agents_do() {
+        let order = [("here", 2), ("here", 5), ("new", 2), ("new", 5), ("old", 2), ("old", 5)];
+        let quiet = three_sessions(|_, _| ("busy", 10));
+        assert_eq!(seats(&quiet), order);
+        let loud = three_sessions(|session, pane| match (session, pane) {
+            ("old", 5) => ("waiting", 1),
+            ("new", 2) => ("busy", 1),
+            (_, 2) => ("idle", 3000),
+            _ => ("waiting", 600),
+        });
+        assert_eq!(seats(&loud), order);
+    }
+
+    #[test]
+    fn a_closing_pane_takes_only_its_own_agent_out_of_the_list() {
+        let mut agents = three_sessions(|_, _| ("idle", 10));
+        agents.rows.select(3);
+        agents.forget_selected();
+        rebuild_three(&mut agents);
+        assert_eq!(seats(&agents), [("here", 2), ("here", 5), ("new", 2), ("old", 2), ("old", 5)]);
+    }
+
+    /// `foo` has not said what its panes are yet, and `notes` has a pane 2 in
+    /// the directory foo's agent works in. `misc-notes` is what `notes` was
+    /// called before a rename.
+    #[test]
+    fn a_pane_found_for_an_agent_that_names_another_running_session_is_a_guess() {
+        let json = r#"[
+            {"status":"idle","status_age":4,"cwd":"/w/foo","zellij":{"session":"foo","pane":"2"}},
+            {"status":"idle","status_age":4,"cwd":"/w/notes",
+             "zellij":{"session":"misc-notes","pane":"5"}},
+            {"status":"idle","status_age":4,"cwd":"/w/notes","zellij":{"session":"notes","pane":"7"}}]"#;
+        let places = Places::of(&[("notes", &[(2, "/w/foo"), (5, "/w/notes"), (7, "/w/notes")])]);
+        let named = |name: &str| Session { name: name.to_owned(), age: Age::ZERO };
+        let sessions = [named("foo"), named("notes")];
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = Live::new(None, &sessions, &places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        let guessed: Vec<(&str, u32, bool)> =
+            agents.rows.iter().map(|row| (row.seat.session(), row.pane, row.guessed)).collect();
+        assert_eq!(guessed, [("notes", 2, true), ("notes", 5, false), ("notes", 7, false)]);
+    }
+
     #[test]
     fn the_only_agent_that_wants_you_is_not_next_when_you_are_in_it() {
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
@@ -695,7 +850,7 @@ mod tests {
             ("s", Some(1), ("s", 1)),
             ("s", Some(9), ("s", 0)),
             ("s", None, ("s", 0)),
-            ("u", Some(0), ("s", 1)),
+            ("u", Some(0), ("t", 0)),
         ] {
             let mut agents = rows(json, None, &places);
             agents.rows.move_selection(2);
