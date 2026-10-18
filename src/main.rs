@@ -21,7 +21,7 @@ use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
 use elapsed::Age;
 use panes::Peeks;
-use pass::{At, On, Pass};
+use pass::{At, Pass, Then};
 use places::Places;
 use sessions::{Contents, Focus, Kind, MatchSet, Selection, Session, SessionName, Sessions};
 use tree::{is_placeholder, Branch, Node, Place, Tree};
@@ -1068,14 +1068,18 @@ impl State {
             return;
         };
         let stands = |pane| tiled(panes).any(|p| pane_id(p) == pane);
+        let pressed = self.pressed.take();
         match self.pass.see(at, self.tabs.len(), self.frame, stands) {
-            Some(On::Back) => move_focus_or_tab(Direction::Left),
-            Some(On::Beside) => move_focus(Direction::Right),
-            None => {},
-        }
-        // The click that focused the sidebar does what any other does.
-        if let Some(pressed) = self.pressed.take().filter(|_| self.pass.clicked()) {
-            self.press(pressed);
+            Then::Back => move_focus_or_tab(Direction::Left),
+            Then::Beside => move_focus(Direction::Right),
+            // The click that focused the sidebar does what any other does.
+            // One that came through did as it came, and left nothing pressed.
+            Then::Press => {
+                if let Some(pressed) = pressed {
+                    self.press(pressed);
+                }
+            },
+            Then::Stay => {},
         }
     }
 
@@ -1229,16 +1233,20 @@ impl State {
         if !self.is_sidebar() {
             return false;
         }
-        self.pass.mouse(mouse, self.frame);
         match mouse {
             Mouse::LeftClick(line, column) => {
+                self.pass.point(self.frame);
                 self.pressed = None;
                 let Ok(line) = usize::try_from(line) else {
                     return false;
                 };
                 self.hit(line, column).is_some_and(|hit| self.press(hit))
             },
-            Mouse::Hover(..) if pass::ends_hover(mouse) => {
+            // zellij ends the hover over a plugin pane with a move to its last
+            // column, when a click focuses the pane and when the pointer
+            // leaves it.
+            Mouse::Hover(0, column) if column == usize::from(u16::MAX) => {
+                self.pass.point(self.frame);
                 let pointer = self.pointer.take();
                 self.pressed = pointer.and_then(|(line, column)| self.hit(line, column));
                 false
@@ -1681,6 +1689,16 @@ mod tests {
         }
     }
 
+    /// The reports of the focus on the sidebar, or on the pane beside it.
+    fn focus(state: &mut State, sidebar: bool) {
+        let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
+        tab[0].is_focused = sidebar;
+        tab[1].is_focused = !sidebar;
+        let manifest = state.panes.clone().expect("the panes");
+        state.update(Event::PaneUpdate(manifest));
+        state.update(Event::TabUpdate(state.tabs.clone()));
+    }
+
     /// zellij hands the click that focuses the sidebar to no one, but ends
     /// the hover over it first, where the click was: that click does what
     /// any other does. A hover that ended long before a key brought the focus
@@ -1688,14 +1706,6 @@ mod tests {
     /// came after, however soon.
     #[test]
     fn the_click_that_focuses_the_sidebar_acts_on_its_row() {
-        let focus = |state: &mut State, sidebar: bool| {
-            let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
-            tab[0].is_focused = sidebar;
-            tab[1].is_focused = !sidebar;
-            let manifest = state.panes.clone().expect("the panes");
-            state.update(Event::PaneUpdate(manifest));
-            state.update(Event::TabUpdate(state.tabs.clone()));
-        };
         for (late, keyed) in [(false, false), (true, false), (false, true)] {
             let mut state = focused_sidebar();
             focus(&mut state, false);
@@ -1711,6 +1721,35 @@ mod tests {
             focus(&mut state, true);
             let shut: &[&str] = if late || keyed { &[] } else { &["b"] };
             assert_eq!(folded(&state), shut, "late: {late}, keyed: {keyed}");
+        }
+    }
+
+    /// A pointer that moves on the sidebar, or scrolls it, is no click: a key
+    /// that moves the focus in after it passes over the column. A click that
+    /// comes through acts as it comes, and only then, whatever hover's end
+    /// came before it.
+    #[test]
+    fn only_the_hover_s_end_or_a_click_through_is_a_click() {
+        // On the `▾` of `b`, the third row.
+        let line = (render::HEADER + 2) as isize;
+        let end = Mouse::Hover(0, usize::from(u16::MAX));
+        for (case, mice, shut, passed) in [
+            (
+                "moved, and scrolled",
+                vec![Mouse::Hover(line, 1), Mouse::ScrollDown(1)],
+                &[][..],
+                true,
+            ),
+            ("through", vec![Mouse::Hover(line, 1), end, Mouse::LeftClick(line, 1)], &["b"], false),
+        ] {
+            let mut state = focused_sidebar();
+            focus(&mut state, false);
+            for mouse in mice {
+                state.handle_mouse(mouse);
+            }
+            focus(&mut state, true);
+            assert_eq!(folded(&state), shut, "{case}");
+            assert_eq!(state.pass.passing(), passed, "{case}");
         }
     }
 }

@@ -1054,13 +1054,13 @@ pub fn scroll_sidebar(
     delta: isize,
 ) -> bool {
     let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
-    let (Range { start, .. }, lit) = on_screen(tree, focused, height);
+    let (Range { start, .. }, _) = on_screen(tree, focused, height);
     let last = tree.rows.len().saturating_sub(height);
     let top = start.saturating_add_signed(delta).min(last);
     if top == start {
         return false;
     }
-    tree.scroll_to(top, lit);
+    tree.scroll_to(top);
     true
 }
 
@@ -1076,11 +1076,11 @@ pub fn select_sidebar_row(
     row: usize,
 ) {
     let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
-    let (shown, lit) = on_screen(tree, focused, height);
-    let wheeled = tree.top(lit).is_some();
+    let (shown, _) = on_screen(tree, focused, height);
+    let wheeled = tree.top().is_some();
     tree.rows.select(row);
     if wheeled && shown.contains(&row) {
-        tree.scroll_to(shown.start, lit_row(tree, focused));
+        tree.scroll_to(shown.start);
     }
 }
 
@@ -1102,23 +1102,17 @@ pub fn folds_at(node: &Node, column: usize) -> bool {
 /// or around the cursor while none is, so a lit row is never out of sight
 /// until the wheel moves the view off it.
 fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
-    let lit = lit_row(tree, focused);
+    let lit = if focused {
+        tree.rows.selected()
+    } else {
+        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
+    };
     let total = tree.rows.len();
-    let start = match tree.top(lit) {
+    let start = match tree.top() {
         Some(top) => top.min(total.saturating_sub(height)),
         None => viewport(lit.or(tree.rows.selected()).unwrap_or(0), total, height).0,
     };
     (start..(start + height).min(total), lit)
-}
-
-/// The row a sidebar lights: the cursor while it has the focus, and the pane
-/// you are in while it does not.
-fn lit_row(tree: &Tree, focused: bool) -> Option<usize> {
-    if focused {
-        tree.rows.selected()
-    } else {
-        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
-    }
 }
 
 const UNFOLDED: &str = "▾";
@@ -2372,9 +2366,10 @@ mod tests {
     }
 
     /// The wheel moves the view and leaves the cursor and the highlight where
-    /// they are, out of sight or not, until another row is lit.
+    /// they are, out of sight or not, until a key comes or the cursor goes to
+    /// another row.
     #[test]
-    fn the_wheel_moves_the_view_until_another_row_is_lit() {
+    fn the_wheel_moves_the_view_until_the_cursor_moves() {
         let mut tree = workday_tree(0);
         let agents = AgentSet::default();
         let top =
@@ -2390,11 +2385,14 @@ mod tests {
         assert_eq!(tree.rows.selected(), Some(0));
         assert!(!sidebar_picture(&tree, &[], false, 6, 32)[HEADER].contains("bipa"));
 
-        // The focus lights the cursor instead, and the view goes to it.
+        // The focus lights the cursor instead, and the view stays.
+        assert_eq!(top(&tree, true), Some(4));
+        tree.unscroll();
         assert_eq!(top(&tree, true), Some(0));
+
         assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
         assert_eq!(top(&tree, true), Some(3));
-        tree.unscroll();
+        tree.rows.select(1);
         assert_eq!(top(&tree, true), Some(0));
     }
 
@@ -2414,6 +2412,30 @@ mod tests {
         assert_eq!(tree.rows.selected(), Some(clicked));
         assert_eq!(row_at(&tree, 0), Some(3));
         assert_eq!(row_at(&tree, 1), Some(clicked));
+    }
+
+    /// So does the click that brings the focus in, with your own session
+    /// folded: no row is lit before the focus comes, and the cursor is lit
+    /// after, but it is on your session's row both times.
+    #[test]
+    fn the_click_that_brings_the_focus_leaves_the_view_where_the_wheel_left_it() {
+        let mut nodes = workday();
+        nodes.truncate(5);
+        nodes.extend([
+            session_node("zeta", false, 0, None),
+            pane_node("zeta", 5, "one", None),
+            pane_node("zeta", 6, "two", None),
+            session_node("unnamed", true, 0, None),
+        ]);
+        let mut tree = sidebar_tree(nodes, 8);
+        let agents = AgentSet::default();
+        let row_at = |tree: &Tree, focused: bool| {
+            sidebar_row_at(tree, &agents, focused, 6, 32, HEADER + 1)
+        };
+        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
+        let clicked = row_at(&tree, false).expect("a row on the second line");
+        select_sidebar_row(&mut tree, &agents, true, 6, 32, clicked);
+        assert_eq!(row_at(&tree, true), Some(clicked));
     }
 
     #[test]

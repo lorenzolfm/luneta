@@ -230,12 +230,14 @@ pub struct Tree {
     scrolled: Option<Scrolled>,
 }
 
-/// The row at the top of the view the wheel moved, and the row lit as it did,
-/// or since by a click. The view stays there until another row is lit, or a
-/// key moves the cursor, and then shows the lit row again.
+/// The row at the top of the view the wheel moved, and the row the cursor was
+/// on as it did, or since by a click. The view stays there while the cursor
+/// stays on that row, with the focus or without: without, the cursor is on the
+/// pane you are in, or on its session's row. The cursor on another row, or a
+/// key, ends it, and the view shows the lit row again.
 struct Scrolled {
     top: usize,
-    lit: Option<Place>,
+    cursor: Option<Place>,
 }
 
 /// The search box, while it is open.
@@ -382,6 +384,11 @@ impl Tree {
                 .or(best),
         };
         self.rows.replace_at(rows, at);
+        // A view the wheel left for a row the cursor has left would come back
+        // with the cursor.
+        if self.top().is_none() {
+            self.scrolled = None;
+        }
     }
 
     /// What is typed in the search box, while it is open.
@@ -427,17 +434,16 @@ impl Tree {
         self.left.take()
     }
 
-    /// The row at the top of the view the wheel left, while the row it lit
-    /// then, `lit`, is lit still.
-    pub fn top(&self, lit: Option<usize>) -> Option<usize> {
+    /// The row at the top of the view the wheel left, while the cursor is on
+    /// the row it was on then.
+    pub fn top(&self) -> Option<usize> {
         let scrolled = self.scrolled.as_ref()?;
-        (self.place_of(lit) == scrolled.lit).then_some(scrolled.top)
+        (self.cursor() == scrolled.cursor).then_some(scrolled.top)
     }
 
-    /// Puts row `top` at the top of the view, until another row than `lit`
-    /// is lit.
-    pub fn scroll_to(&mut self, top: usize, lit: Option<usize>) {
-        self.scrolled = Some(Scrolled { top, lit: self.place_of(lit) });
+    /// Puts row `top` at the top of the view, until the cursor leaves its row.
+    pub fn scroll_to(&mut self, top: usize) {
+        self.scrolled = Some(Scrolled { top, cursor: self.cursor() });
     }
 
     /// Brings the view back to the lit row, and says whether it was away.
@@ -445,8 +451,8 @@ impl Tree {
         self.scrolled.take().is_some()
     }
 
-    fn place_of(&self, row: Option<usize>) -> Option<Place> {
-        row.and_then(|row| self.rows.get(row)).map(Node::place)
+    fn cursor(&self) -> Option<Place> {
+        self.rows.selected_row().map(Node::place)
     }
 
     /// The pane listed after `here`, or the first one when `here` is not
@@ -947,6 +953,26 @@ mod tests {
 
         tree.rebuild(&branches, Some("a"), &set, Some(0), true);
         assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
+    }
+
+    /// The view the wheel left holds while the cursor stays on its row, and
+    /// ends once you go to another pane, which the cursor follows. It does not
+    /// come back when you come back.
+    #[test]
+    fn the_view_the_wheel_left_ends_with_the_cursor_on_another_row() {
+        let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")])];
+        let set = agents(&[]);
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, Some("a"), &set, Some(1), true);
+        tree.scroll_to(0);
+
+        tree.rebuild(&branches, Some("a"), &set, Some(1), true);
+        assert_eq!(tree.top(), Some(0));
+
+        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+        assert_eq!(tree.top(), None);
+        tree.rebuild(&branches, Some("a"), &set, Some(1), true);
+        assert_eq!(tree.top(), None);
     }
 
     #[test]
