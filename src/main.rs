@@ -1,4 +1,5 @@
 mod agents;
+mod checkouts;
 mod cursor;
 mod dirs;
 mod dock;
@@ -19,6 +20,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use agents::{AgentSet, Live, Seat};
+use checkouts::Checkouts;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
 use elapsed::Age;
@@ -97,7 +99,8 @@ const TICKS_PER_POLL: u64 = TICKS_PER_SECOND;
 const PREVIEW_DELAY: u64 = 2;
 
 /// How often the sidebar asks each session for its panes again, so that an
-/// agent started in a new pane, or in a shell that moved, finds its row.
+/// agent started in a new pane, or in a shell that moved, finds its row, and
+/// git how the work tree of each stands, so that a change or a checkout shows.
 const TICKS_PER_PLACES: u64 = 5 * TICKS_PER_SECOND;
 
 #[derive(Default)]
@@ -159,6 +162,7 @@ struct State {
     panes: Option<PaneManifest>,
     live_names: Vec<String>,
     places: Places,
+    checkouts: Checkouts,
     active_tab: Option<usize>,
     sessions: Sessions,
     error: Option<String>,
@@ -332,6 +336,14 @@ impl ZellijPlugin for State {
                             },
                             None => false,
                         }
+                    },
+                    Some(checkouts::CONTEXT_VALUE) => match context.get(checkouts::DIR_KEY) {
+                        Some(dir) => {
+                            self.checkouts.ingest(dir.clone(), exit_code, &stdout, &stderr);
+                            self.rebuild_tree();
+                            true
+                        },
+                        None => false,
                     },
                     Some(places::CONTEXT_VALUE) => {
                         match context.get(places::SESSION_KEY) {
@@ -510,17 +522,22 @@ impl State {
                 return;
             }
             self.seat_from(&snapshot);
+            let before = std::mem::take(&mut self.branches);
             self.branches = snapshot
                 .live_sessions
                 .iter()
                 .map(|s| {
                     let age = Age::new(s.creation_time);
-                    Branch::new(s.name.clone(), age, &s.tabs, &s.panes, &self.places)
+                    let before = before.iter().find(|branch| branch.name == s.name);
+                    let before = before.map_or(&[][..], |branch| branch.panes.as_slice());
+                    let (places, checkouts) = (&self.places, &self.checkouts);
+                    Branch::new(s.name.clone(), age, &s.tabs, &s.panes, places, checkouts, before)
                 })
                 .collect();
             if self.frame.wrapping_sub(self.places_at) >= TICKS_PER_PLACES {
                 self.places_at = self.frame;
                 self.places.forget();
+                self.checkouts.forget();
             }
             self.ask_agents();
         }
@@ -614,6 +631,22 @@ impl State {
                 BTreeMap::from([
                     (dirs::CONTEXT_KEY.to_owned(), places::CONTEXT_VALUE.to_owned()),
                     (places::SESSION_KEY.to_owned(), session.clone()),
+                ]),
+            );
+        }
+    }
+
+    /// Asks git how the work tree stands in every directory a pane in the
+    /// sidebar works in, and that it has not asked about since it last forgot.
+    fn ask_checkouts(&mut self) {
+        let leaves = self.branches.iter().flat_map(|branch| &branch.panes);
+        let cwds = leaves.filter_map(|leaf| leaf.cwd.clone()).collect();
+        for dir in self.checkouts.ask(&cwds) {
+            run_command(
+                &checkouts::query(&dir),
+                BTreeMap::from([
+                    (dirs::CONTEXT_KEY.to_owned(), checkouts::CONTEXT_VALUE.to_owned()),
+                    (checkouts::DIR_KEY.to_owned(), dir.clone()),
                 ]),
             );
         }
@@ -1103,6 +1136,7 @@ impl State {
 
     fn wake(&mut self) {
         self.places.forget();
+        self.checkouts.wake();
         self.places_at = self.frame;
         self.poll();
     }
@@ -1117,8 +1151,13 @@ impl State {
         let current = self.matches.current_session.clone();
         if let (Some(current), Some(manifest)) = (current.as_deref(), self.panes.as_ref()) {
             if let Some(branch) = self.branches.iter_mut().find(|b| b.name == current) {
-                branch.panes = tree::leaves(current, &self.tabs, manifest, &self.places);
+                let (places, checkouts) = (&self.places, &self.checkouts);
+                branch.panes =
+                    tree::leaves(current, &self.tabs, manifest, places, checkouts, &branch.panes);
             }
+        }
+        if !self.away {
+            self.ask_checkouts();
         }
         let follow = !self.sidebar_focused();
         if let Role::Sidebar(tree) = &mut self.role {
@@ -1589,7 +1628,13 @@ mod tests {
             age: Age::from_secs(age),
             panes,
         };
-        let four = Leaf { id: 4, title: "pane 4".to_owned(), tab: String::new(), cwd: None };
+        let four = Leaf {
+            id: 4,
+            title: "pane 4".to_owned(),
+            tab: String::new(),
+            cwd: None,
+            checkout: None,
+        };
         let mut state = State {
             role: Role::Sidebar(Tree::default()),
             plugin_id: 9,
