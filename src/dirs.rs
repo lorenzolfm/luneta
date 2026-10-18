@@ -13,10 +13,12 @@ pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 /// Prints, of the directories that follow it, the linked git worktrees: those
 /// whose `.git` is a file naming a git directory that holds a `commondir`, as
 /// git writes for every worktree it adds. Each comes on a line of its own, and
-/// the `gitdir` its `.git` names on the line after. A repository's own checkout
-/// has a `.git` directory, the directory that holds a bare repository may have
-/// a `.git` file pointing at the repository, and a submodule's `.git` points
-/// into `modules`, wherever the submodule lives; none of those holds a
+/// on the line after, the repository's git directory, where the `commondir`
+/// leads: walked by `cd -P`, through any symlink on the way, as the disk has
+/// it and not as the path reads. A repository's own checkout has a `.git`
+/// directory, the directory that holds a bare repository may have a `.git`
+/// file pointing at the repository, and a submodule's `.git` points into
+/// `modules`, wherever the submodule lives; none of those holds a
 /// `commondir`. The check is an `if`, so that a last directory that is no
 /// worktree leaves the script a success. Builtins only, so that a long list
 /// starts no process per directory.
@@ -29,7 +31,10 @@ pub const WORKTREES: [&str; 4] = [
     case $line in "gitdir: "?*) ;; *) continue ;; esac
     gitdir=${line#gitdir: }
     case $gitdir in /*) at=$gitdir ;; *) at=$d/$gitdir ;; esac
-    if [ -f "$at/commondir" ]; then printf '%s\n%s\n' "$d" "$gitdir"; fi
+    common=
+    [ -f "$at/commondir" ] && IFS= read -r common < "$at/commondir"
+    case $common in "") continue ;; /*) ;; *) common=$at/$common ;; esac
+    if cd -P "$common" 2>/dev/null; then printf '%s\n%s\n' "$d" "$PWD"; fi
 done"#,
     "sh",
 ];
@@ -126,13 +131,13 @@ impl DirSet {
         if exit_code == Some(0) {
             let listed = String::from_utf8_lossy(stdout);
             let lines: Vec<&str> = listed.lines().collect();
-            let gitdirs: HashMap<&str, &str> =
-                lines.as_chunks::<2>().0.iter().map(|[path, gitdir]| (*path, *gitdir)).collect();
+            let commons: HashMap<&str, &str> =
+                lines.as_chunks::<2>().0.iter().map(|[path, common]| (*path, *common)).collect();
             for dir in &mut found {
-                let Some(gitdir) = gitdirs.get(dir.path.as_str()) else {
+                let Some(common) = commons.get(dir.path.as_str()) else {
                     continue;
                 };
-                if let Some(name) = worktree_name(&dir.path, gitdir) {
+                if let Some(name) = worktree_name(&dir.path, common) {
                     dir.name = name;
                 }
             }
@@ -324,29 +329,17 @@ fn derive_name(path: &str) -> Option<SessionName> {
 
 /// A worktree is named for its repository too, `luneta-main`, where `main`
 /// alone would name one of every repository, wherever the worktree lives. The
-/// repository is the directory whose `worktrees` the `gitdir` points into, less
-/// a bare repository's `.git`, or, when that directory is hidden, as a `.git`
-/// or a `.bare`, the directory that holds it. A worktree whose own name starts
-/// with its repository's, as `app-hotfix` beside `app`, keeps it, and so does
-/// one whose name would come out too long for zellij to make a session of.
-fn worktree_name(path: &str, gitdir: &str) -> Option<SessionName> {
+/// repository is its git directory, as `WORKTREES` found it, less a bare
+/// repository's `.git`, or, when that directory is hidden, as a `.git` or a
+/// `.bare`, the directory that holds it. A worktree whose own name starts with
+/// its repository's, as `app-hotfix` beside `app`, keeps it, and so does one
+/// whose name would come out too long for zellij to make a session of.
+fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
-    let common = gitdir.rsplit_once('/')?.0.strip_suffix("/worktrees")?;
-    // A relative `gitdir` is from the worktree, as git wrote it.
-    let from = if gitdir.starts_with('/') { "" } else { path };
-    let mut parts: Vec<&str> = Vec::new();
-    for part in from.split('/').chain(common.split('/')) {
-        match part {
-            "" | "." => {},
-            ".." => {
-                parts.pop();
-            },
-            part => parts.push(part),
-        }
-    }
-    let mut repository = parts.pop()?;
+    let mut parts = common.split('/').filter(|part| !part.is_empty());
+    let mut repository = parts.next_back()?;
     if repository.starts_with('.') {
-        repository = parts.pop()?;
+        repository = parts.next_back()?;
     }
     let repository =
         repository.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(repository);
@@ -495,6 +488,7 @@ mod tests {
     }
 
     /// Each shape a `.git` takes, on disk, through the `sh` zellij would run.
+    #[cfg(unix)]
     #[test]
     fn only_a_linked_worktree_is_found_a_worktree() {
         let root = std::env::temp_dir().join(format!("luneta-worktrees-{}", std::process::id()));
@@ -511,6 +505,10 @@ mod tests {
         // no newline at the end.
         write("repo/feat x/.git", "gitdir: ../.bare/worktrees/feat x".to_owned());
         write("repo/.bare/worktrees/feat x/commondir", "../..\n".to_owned());
+        // The same worktree, as zoxide keeps it once you `cd` through a
+        // symlink: its relative `gitdir` climbs out of where the worktree is,
+        // and not of where the symlink is.
+        std::os::unix::fs::symlink(at("repo/feat x"), at("linked")).expect("a symlink");
         // As git writes it for a submodule in a worktree.
         write("repo/main/lib/.git", "gitdir: ../../.bare/worktrees/main/modules/lib\n".to_owned());
         write("repo/.bare/worktrees/main/modules/lib/HEAD", "ref: refs/heads/main\n".to_owned());
@@ -526,6 +524,7 @@ mod tests {
             "repo",
             "repo/main",
             "repo/feat x",
+            "linked",
             "repo/main/lib",
             "sub",
             "app/worktrees/lib",
@@ -539,14 +538,14 @@ mod tests {
             .args(&paths)
             .output()
             .expect("sh runs");
+        let repository = std::fs::canonicalize(&repository).expect("a path").display().to_string();
         std::fs::remove_dir_all(&root).expect("the directories go");
 
         assert!(output.status.success());
         let found = String::from_utf8(output.stdout).expect("utf-8");
-        let main = format!("{}/worktrees/main", repository.display());
         assert_eq!(
             found.lines().collect::<Vec<_>>(),
-            [&paths[1], &main, &paths[2], "../.bare/worktrees/feat x"]
+            [&paths[1], &repository, &paths[2], &repository, &paths[3], &repository]
         );
     }
 
@@ -555,13 +554,14 @@ mod tests {
         let zoxide = b"30 /home/you/luneta\n25 /home/you/luneta/main\n20 /home/you/luneta/feat\n\
                        15 /home/you/infra.git/master\n10 /home/you/app/.claude/worktrees/fix\n\
                        5 /home/you/app-hotfix\n1 /main\n";
-        // Each worktree, and on the line after it the `gitdir` its `.git` names.
-        let checked = b"/home/you/luneta/main\n/home/you/luneta/.bare/worktrees/main\n\
-                        /home/you/luneta/feat\n../.bare/worktrees/feat\n\
-                        /home/you/infra.git/master\n/home/you/infra.git/worktrees/master\n\
-                        /home/you/app/.claude/worktrees/fix\n/home/you/app/.git/worktrees/fix\n\
-                        /home/you/app-hotfix\n/home/you/app/.git/worktrees/app-hotfix\n\
-                        /main\n/.bare/worktrees/main\n";
+        // Each worktree, and on the line after it its repository's git
+        // directory.
+        let checked = b"/home/you/luneta/main\n/home/you/luneta/.bare\n\
+                        /home/you/luneta/feat\n/home/you/luneta/.bare\n\
+                        /home/you/infra.git/master\n/home/you/infra.git\n\
+                        /home/you/app/.claude/worktrees/fix\n/home/you/app/.git\n\
+                        /home/you/app-hotfix\n/home/you/app/.git\n\
+                        /main\n/.bare\n";
         let names = |dirs: &mut DirSet| {
             dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
             dirs.rows.iter().map(|row| row.name.as_str().to_owned()).collect::<Vec<_>>()
@@ -584,13 +584,13 @@ mod tests {
         // The longest socket directory a uid gives zellij, and the longest
         // socket path it can make.
         let socket = "/run/user/4294967295/zellij/contract_version_1/";
-        let gitdir = "/home/you/app/.git/worktrees/wt";
+        let common = "/home/you/app/.git";
         let fits = "w".repeat(MAX_NAME_BYTES - "app-".len());
 
-        let name = worktree_name(&format!("/home/you/{fits}"), gitdir).expect("a name");
+        let name = worktree_name(&format!("/home/you/{fits}"), common).expect("a name");
         assert_eq!(name.as_str(), format!("app-{fits}"));
         assert!(socket.len() + name.len() <= 107);
-        assert_eq!(worktree_name(&format!("/home/you/{fits}w"), gitdir), None);
+        assert_eq!(worktree_name(&format!("/home/you/{fits}w"), common), None);
     }
 
     #[test]
