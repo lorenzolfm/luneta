@@ -66,7 +66,11 @@ of the glyph, not of the order. The agent in the pane you came from is pinned
 above the list.
 
 `Del` closes the pane the highlighted agent is in, and its tab with it when that
-was the last pane there.
+was the last pane there. With the sidebar, the tab closes only in a session
+someone is attached to; in one nobody is, it stays, with nothing in it but its
+column. When the pane is a guess, `Del` leaves it alone and says so: the agent
+names a session that is still running, but its pane turned up in another,
+matched by its id and directory alone.
 
 Needs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) on the server's
 `PATH`. Without it, the other two lists work exactly as before.

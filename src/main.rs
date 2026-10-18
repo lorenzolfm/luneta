@@ -899,11 +899,17 @@ impl State {
 
     /// Closes the pane the highlighted agent sits in, and with it its tab when
     /// that was the last pane there. The plugin closes a pane of its own
-    /// session, and `zellij` one of another, whose answer comes later.
+    /// session, and `zellij` one of another, whose answer comes later. A pane
+    /// that is only a guess may hold something else, and stays.
     fn kill_agent_pane(&mut self) {
         let Some(row) = self.agents.selected_row() else {
             return;
         };
+        if row.guessed {
+            let label = row.label();
+            self.error = Some(format!("kill \"{label}\": luneta is not sure which pane it sits in"));
+            return;
+        }
         match &row.seat {
             Seat::Here(_) => close_terminal_pane(row.pane),
             Seat::There(session) => {

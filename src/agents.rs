@@ -84,6 +84,10 @@ impl<'a> Live<'a> {
         self.order.iter().position(|name| *name == session).unwrap_or(self.order.len())
     }
 
+    fn knows(&self, session: &str) -> bool {
+        self.order.contains(&session)
+    }
+
     fn seat(&self, session: &str) -> Seat {
         if self.current == Some(session) {
             Seat::Here(session.to_owned())
@@ -108,6 +112,11 @@ pub struct Agent {
     cwd: String,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a chosen name, a shared label, a guessed pane and an exact match are four facts \
+              about a row, not the states of one"
+)]
 pub struct AgentRow {
     reported: String,
     pub seat: Seat,
@@ -118,6 +127,10 @@ pub struct AgentRow {
     pub age: Held,
     pub cwd: String,
     pub shared: bool,
+    /// The agent names a session that is still running, but its pane turned
+    /// up in another, matched by its id and directory alone: where it sits is
+    /// a guess. A session that is gone is one renamed, and no guess.
+    pub guessed: bool,
     pub indices: Vec<usize>,
     rank: usize,
     score: i64,
@@ -284,6 +297,7 @@ impl AgentSet {
                 let mut row = AgentRow {
                     reported: agent.reported.clone(),
                     rank: live.rank(seat.session()),
+                    guessed: agent.reported != seat.session() && live.knows(&agent.reported),
                     seat,
                     display,
                     chosen: agent.name.is_some(),
@@ -790,6 +804,28 @@ mod tests {
         agents.forget_selected();
         rebuild_three(&mut agents);
         assert_eq!(seats(&agents), [("here", 2), ("here", 5), ("new", 2), ("old", 2), ("old", 5)]);
+    }
+
+    /// `foo` has not said what its panes are yet, and `notes` has a pane 2 in
+    /// the directory foo's agent works in. `misc-notes` is what `notes` was
+    /// called before a rename.
+    #[test]
+    fn a_pane_found_for_an_agent_that_names_another_running_session_is_a_guess() {
+        let json = r#"[
+            {"status":"idle","status_age":4,"cwd":"/w/foo","zellij":{"session":"foo","pane":"2"}},
+            {"status":"idle","status_age":4,"cwd":"/w/notes",
+             "zellij":{"session":"misc-notes","pane":"5"}},
+            {"status":"idle","status_age":4,"cwd":"/w/notes","zellij":{"session":"notes","pane":"7"}}]"#;
+        let places = Places::of(&[("notes", &[(2, "/w/foo"), (5, "/w/notes"), (7, "/w/notes")])]);
+        let named = |name: &str| Session { name: name.to_owned(), age: Age::ZERO };
+        let sessions = [named("foo"), named("notes")];
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = Live::new(None, &sessions, &places);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        let guessed: Vec<(&str, u32, bool)> =
+            agents.rows.iter().map(|row| (row.seat.session(), row.pane, row.guessed)).collect();
+        assert_eq!(guessed, [("notes", 2, true), ("notes", 5, false), ("notes", 7, false)]);
     }
 
     #[test]
