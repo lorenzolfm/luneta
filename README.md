@@ -222,7 +222,9 @@ pane of its own, beside that pane in its tab, and in the directory it works in,
 which the rule on top names. For `/thermo-nuclear-review` that is the point: it
 reviews the branch checked out there. A row of another tab takes you to that
 tab, and a row of another session starts the agent in that session and takes
-you there, handing the session you leave the pane you came from.
+you there, handing the session you leave the pane you came from. In the sidebar,
+or any pane that is no terminal, your key has no pane to start an agent beside,
+and the menu says so in place of its keys.
 
 An agent started on a skill goes by the skill and the branch, as
 `thermo-nuclear-review: feat/sidebar`, as though you had named it with
@@ -371,6 +373,8 @@ alias too, as [below](#dock-the-sidebar).
 A key is one character, pressed bare. The key that opens the menu needs a
 modifier: zellij hands a bare `m` to the pane you are in. A menu luneta cannot
 read says what is wrong with it where its keys would be, and closes on any key.
+The sidebar's `m`, from a dock loaded by its location, has none of the alias's
+keys, and says to load the dock by the alias.
 
 ### Dock the sidebar
 

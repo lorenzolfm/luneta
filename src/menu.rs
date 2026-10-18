@@ -25,6 +25,17 @@ pub const ENTRIES: &str = "menu";
 /// What a menu with no entries says.
 const NO_ENTRIES: &str = "menu: no keys to show; give mode \"menu\" a menu { … } of them";
 
+/// What a menu the sidebar opens with no entries says: the sidebar has the
+/// keys of the dock that opened it, and a dock loaded by its location has
+/// none of the alias's.
+const NO_SIDEBAR_ENTRIES: &str =
+    "menu: the sidebar has no keys to show; load the dock by the alias that has your menu";
+
+/// What a menu says that has no pane to start an agent beside: the pane you
+/// opened it from is no terminal, as the sidebar is not.
+const NO_PANE: &str = "menu: the pane you are in is no terminal to start an agent beside; in the \
+                       sidebar, m opens the menu for the row you are on";
+
 /// What a key with nothing under it starts.
 const CLAUDE: &str = "claude";
 
@@ -256,7 +267,16 @@ fn skill(prompt: &str) -> Option<&str> {
 fn command_pane(command: &[String], cwd: Option<&str>) -> CommandToRun {
     let (path, args) =
         command.split_first().map_or((CLAUDE, &[][..]), |(path, args)| (path.as_str(), args));
-    CommandToRun { path: PathBuf::from(path), args: args.to_vec(), cwd: cwd.map(PathBuf::from) }
+    CommandToRun { path: PathBuf::from(path), args: args.to_vec(), cwd: cwd.map(host_dir) }
+}
+
+/// `cwd`, spelled so that zellij takes it for the host's. zellij reads a
+/// directory a plugin names under `/tmp`, `/data`, `/cache` or `/host` as one
+/// of the plugin's own, and a pane whose directory is not there starts
+/// wherever zellij runs. The root's parent is the root: by way of it, the path
+/// names the same directory, and is under none of them.
+fn host_dir(cwd: &str) -> PathBuf {
+    if cwd.starts_with('/') { PathBuf::from(format!("/..{cwd}")) } else { PathBuf::from(cwd) }
 }
 
 /// Opens a pane that runs `command` in a tab of another session, in `cwd`.
@@ -306,14 +326,15 @@ pub struct Menu {
 
 impl Menu {
     pub fn new(plugin_id: u32, configuration: &BTreeMap<String, String>) -> Self {
+        let beside = Beside::from_configuration(configuration);
         let keys = match configuration.get(ENTRIES) {
             Some(text) => Keys::parse(text),
+            None if beside.is_some() => Err(NO_SIDEBAR_ENTRIES.to_owned()),
             None => Err(NO_ENTRIES.to_owned()),
         };
         if let Err(reason) = &keys {
             eprintln!("luneta {reason}");
         }
-        let beside = Beside::from_configuration(configuration);
         Menu {
             keys,
             plugin_id,
@@ -328,8 +349,23 @@ impl Menu {
         }
     }
 
+    /// The entries, or what is wrong with them, or with the pane the menu is
+    /// for.
     pub fn keys(&self) -> Result<&Keys, &str> {
-        self.keys.as_ref().map_err(String::as_str)
+        let keys = self.keys.as_ref().map_err(String::as_str)?;
+        if self.stranded() {
+            return Err(NO_PANE);
+        }
+        Ok(keys)
+    }
+
+    /// Whether zellij has said what the tab holds, and none of it is a pane
+    /// for an agent to start beside: the key that opened the menu came in a
+    /// pane that is no terminal. An agent started anyway would start wherever
+    /// zellij put it.
+    fn stranded(&self) -> bool {
+        let known = self.panes.is_some() && self.tabs.iter().any(|tab| tab.active);
+        known && self.beside.is_none()
     }
 
     pub fn cwd(&self) -> Option<&str> {
@@ -358,7 +394,8 @@ impl Menu {
         if self.starting {
             return false;
         }
-        let Ok(keys) = &mut self.keys else {
+        let stranded = self.stranded();
+        let (Ok(keys), false) = (&mut self.keys, stranded) else {
             close_self();
             return false;
         };
@@ -522,6 +559,8 @@ fn corner(columns: usize, rows: usize, width: usize, height: usize) -> Option<Sp
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     /// The menu as zellij hands it over: the children of `menu`, as KDL.
@@ -641,6 +680,51 @@ mod tests {
         assert_eq!(opened(b"terminal_12\n"), Some(12));
         assert_eq!(opened(b"plugin_3\n"), None);
         assert_eq!(opened(b""), None);
+    }
+
+    /// zellij takes a directory a plugin names under `/tmp`, `/data`,
+    /// `/cache` or `/host` for one of the plugin's own. The pane the menu
+    /// opens in its own session is in the pane's directory all the same.
+    #[test]
+    fn an_agent_in_your_own_session_starts_in_its_pane_s_directory_wherever_that_is() {
+        let command = claude("/tigerstyle", None);
+        let dir = |cwd: &str| command_pane(&command, Some(cwd)).cwd.expect("a directory");
+        for cwd in ["/tmp/pr-123", "/data/w/luneta", "/cache", "/host/x", "/home/you/w"] {
+            let dir = dir(cwd);
+            for sandbox in ["/tmp", "/data", "/cache", "/host"] {
+                assert!(dir.strip_prefix(sandbox).is_err(), "{cwd} as {}", dir.display());
+            }
+        }
+        let here = std::env::temp_dir();
+        let there = dir(here.to_str().expect("a path"));
+        assert_eq!(there.canonicalize().expect("there"), here.canonicalize().expect("here"));
+    }
+
+    /// The key binding opens the menu for the pane you are in. Opened in the
+    /// sidebar, or any pane that is no terminal, it has none to start an agent
+    /// beside, and says so rather than start one wherever zellij puts it. The
+    /// sidebar's `m` hands it the pane of a row.
+    #[test]
+    fn a_menu_opened_in_no_terminal_says_so_instead_of_its_keys() {
+        let plugin = |id, is_floating| PaneInfo {
+            id,
+            is_plugin: true,
+            is_focused: true,
+            is_floating,
+            ..PaneInfo::default()
+        };
+        let shell = PaneInfo { id: 2, is_selectable: true, ..PaneInfo::default() };
+        let tab = vec![plugin(1, false), shell, plugin(9, true)];
+        let bound = BTreeMap::from([(ENTRIES.to_owned(), MENU.to_owned())]);
+        let mut handed = Beside { pane: 2, cwd: None, there: None }.to_configuration();
+        handed.insert(ENTRIES.to_owned(), MENU.to_owned());
+        for (configuration, said) in [(bound, Some(NO_PANE)), (handed, None)] {
+            let mut menu = Menu::new(9, &configuration);
+            menu.panes = Some(PaneManifest { panes: HashMap::from([(0, tab.clone())]) });
+            menu.tabs = vec![TabInfo { position: 0, active: true, ..TabInfo::default() }];
+            menu.follow();
+            assert_eq!(menu.keys().err(), said, "handed: {}", menu.handed);
+        }
     }
 
     #[test]
