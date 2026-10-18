@@ -986,7 +986,7 @@ impl Shelf {
     fn new(rows: usize, notes: usize, focused: bool, searching: bool) -> Self {
         let search = usize::from(searching && rows > 0);
         let help = usize::from(focused && rows > search + 1);
-        let header = if rows > search + help + HEADER { HEADER } else { 0 };
+        let header = if rows > search + help + notes + HEADER { HEADER } else { 0 };
         let notes = notes.min(rows - search - help - header);
         Shelf {
             header,
@@ -2298,6 +2298,7 @@ mod tests {
                             "{cols}x{rows}"
                         );
                         assert!(below.iter().flatten().all(|y| *y >= lines.len()), "{rows}");
+                        assert!(shelf.header == 0 || shelf.tree > 0, "{cols}x{rows}");
                         for line in lines {
                             assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
                         }
