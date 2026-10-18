@@ -1735,7 +1735,7 @@ fn focus_at(tab: &TabInfo, panes: &[PaneInfo], plugin_id: u32) -> Option<At> {
     if tab.are_floating_panes_visible {
         return Some(At::Floating);
     }
-    let id = TabId(tab.tab_id);
+    let id = TabId::of(tab);
     let own = |pane: &PaneInfo| pane.is_plugin && pane.id == plugin_id;
     let mut focused = tiled(panes).filter(|p| p.is_focused);
     let pane = if let (Some(pane), None) = (focused.next(), focused.next()) {
@@ -1956,10 +1956,10 @@ mod tests {
         state.here = Some(1);
         let four = &mut state.branches[1].panes[0];
         four.cwd = Some("/w/b".to_owned());
-        four.tab_id = Some(7);
+        four.tab_id = Some(TabId(7));
         four.checkout = Some(Checkout { branch: "feat/menu".to_owned(), status: String::new() });
         state.rebuild_tree();
-        let there = There { session: "b".to_owned(), tab: Some(7), back: Some(1) };
+        let there = There { session: "b".to_owned(), tab: Some(TabId(7)), back: Some(1) };
         let row = |pane, cwd: Option<&str>, branch: Option<&str>, there| menu::Row {
             pane,
             cwd: cwd.map(str::to_owned),

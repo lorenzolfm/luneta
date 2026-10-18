@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use crate::agents::{AgentSet, Seat, Status};
-use crate::dock::SIDEBAR_TITLE;
+use crate::dock::{TabId, SIDEBAR_TITLE};
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
 use crate::panes;
@@ -71,7 +71,7 @@ pub fn refuge<'a>(others: impl IntoIterator<Item = (&'a str, Age)>) -> Option<St
 #[derive(Debug)]
 pub struct Agent {
     pub pane: u32,
-    pub tab: Option<usize>,
+    pub tab: Option<TabId>,
     pub status: Status,
 }
 
@@ -110,7 +110,7 @@ pub struct Subject {
 pub struct Pane {
     pub id: u32,
     /// Its tab, by its id, once its session has said.
-    pub tab: Option<usize>,
+    pub tab: Option<TabId>,
     /// Whether nothing else keeps its tab open.
     pub alone: bool,
 }
@@ -271,7 +271,7 @@ pub enum Act {
     /// Close a terminal pane of the session the seat names.
     Pane(Seat, u32),
     /// Close a tab of the session the seat names, by its id.
-    Tab(Seat, usize),
+    Tab(Seat, TabId),
     /// Kill another session.
     Kill(String),
     /// Go to the session `to`, and kill the session you are in once you have
@@ -307,13 +307,13 @@ impl Act {
     pub fn run(&self, context: BTreeMap<String, String>) -> Ran {
         match self {
             Act::Pane(Seat::Here(_), pane) => close_terminal_pane(*pane),
-            Act::Tab(Seat::Here(_), tab) => close_tab_with_id(*tab as u64),
+            Act::Tab(Seat::Here(_), tab) => close_tab_with_id(tab.0 as u64),
             Act::Pane(Seat::There(session), pane) => {
                 run_command(&close_pane(session, &panes::pane_id(*pane)), context);
                 return Ran::Asked;
             },
             Act::Tab(Seat::There(session), tab) => {
-                run_command(&close_tab(session, &tab.to_string()), context);
+                run_command(&close_tab(session, &tab.0.to_string()), context);
                 return Ran::Asked;
             },
             Act::Kill(session) => {
@@ -430,7 +430,7 @@ mod tests {
     }
 
     fn agent(pane: u32, tab: usize, status: &str) -> Agent {
-        Agent { pane, tab: Some(tab), status: Status::parse(Some(status)) }
+        Agent { pane, tab: Some(TabId(tab)), status: Status::parse(Some(status)) }
     }
 
     /// Pane `id` of `seat`, or the session's row with none: pane 2 in tab 7
@@ -438,7 +438,7 @@ mod tests {
     fn of(seat: Seat, id: Option<u32>, agents: Fetch<Vec<Agent>>) -> Subject {
         let pane = id.map(|id| {
             let (tab, alone) = if id == 5 { (8, true) } else { (7, false) };
-            Pane { id, tab: Some(tab), alone }
+            Pane { id, tab: Some(TabId(tab)), alone }
         });
         Subject { seat, pane, agents, refuge: Some("elo".to_owned()) }
     }
@@ -457,7 +457,7 @@ mod tests {
         let leave = || Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() };
         for (seat, id, scope, act) in [
             (here(), Some(2), Scope::Pane, Act::Pane(here(), 2)),
-            (here(), Some(5), Scope::Pane, Act::Tab(here(), 8)),
+            (here(), Some(5), Scope::Pane, Act::Tab(here(), TabId(8))),
             (elo.clone(), Some(2), Scope::Pane, Act::Pane(elo.clone(), 2)),
             (elo.clone(), Some(2), Scope::Session, Act::Kill("elo".to_owned())),
             (here(), Some(2), Scope::Session, leave()),
@@ -502,7 +502,7 @@ mod tests {
                 agent(5, 8, "waiting"),
                 agent(6, 9, "shell"),
                 agent(4, 10, "compacting"),
-                Agent { pane: 9, tab: Some(11), status: Status::parse(None) },
+                Agent { pane: 9, tab: Some(TabId(11)), status: Status::parse(None) },
             ])
         };
         let session = "Kill session luneta? 5 agents, 1 busy, 1 waiting, 2 unknown";

@@ -18,6 +18,7 @@ use crate::checkouts::{Checkout, Checkouts, Said};
 use crate::close::{self, Act};
 use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
+use crate::dock::TabId;
 use crate::elapsed::{Age, Held};
 use crate::folds::Folds;
 use crate::menu::SidebarMenu;
@@ -60,7 +61,7 @@ pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
-    pub tab_id: Option<usize>,
+    pub tab_id: Option<TabId>,
     pub cwd: Option<String>,
     pub checkout: Option<Checkout>,
     /// Whether nothing else holds its tab open: closing it closes the tab.
@@ -101,7 +102,7 @@ pub fn leaves(
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
         let tab = tabs.iter().find(|tab| tab.position == *position);
-        let tab_id = tab.map(|tab| tab.tab_id);
+        let tab_id = tab.map(TabId::of);
         let tab = tab.map_or("", |tab| tab.name.as_str());
         for pane in panes {
             if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
@@ -189,7 +190,7 @@ pub struct PaneNode {
     pub session: String,
     pub id: u32,
     /// The id zellij keeps for its tab, once its session has said.
-    pub tab: Option<usize>,
+    pub tab: Option<TabId>,
     pub label: String,
     pub agent: Option<Mark>,
     /// What is checked out where the pane works, for the line under its row.
@@ -1249,7 +1250,7 @@ mod tests {
             let mut branch =
                 branch(name, age, &panes.iter().map(|(id, _)| (*id, "x")).collect::<Vec<_>>());
             for (leaf, (_, tab)) in branch.panes.iter_mut().zip(panes) {
-                leaf.tab_id = Some(*tab);
+                leaf.tab_id = Some(TabId(*tab));
             }
             branch
         };
@@ -1259,7 +1260,7 @@ mod tests {
         let pane = |session: &str, id| Some(Place::Pane(session.to_owned(), id));
         for (act, left, at) in [
             (Act::Pane(here("a"), 1), vec![a(&[(0, 10), (2, 11)]), b()], pane("a", 2)),
-            (Act::Tab(here("a"), 10), vec![a(&[(2, 11)]), b()], pane("a", 2)),
+            (Act::Tab(here("a"), TabId(10)), vec![a(&[(2, 11)]), b()], pane("a", 2)),
             (Act::Kill("a".to_owned()), vec![b()], Some(Place::Session("b".to_owned()))),
         ] {
             let mut tree = Tree::default();

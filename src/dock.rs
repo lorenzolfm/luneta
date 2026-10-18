@@ -44,6 +44,14 @@ type Spot = (usize, usize, usize, usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TabId(pub usize);
 
+impl TabId {
+    /// The id of `tab`, and not its position, which zellij hands over beside
+    /// it as a number of the same kind.
+    pub fn of(tab: &TabInfo) -> Self {
+        TabId(tab.tab_id)
+    }
+}
+
 /// What a key binding asks through the `sidebar` pipe. Every plugin in the
 /// session hears it, and the dock and the sidebar each answer their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,7 +236,7 @@ impl Scene {
         plugin_id: u32,
         sidebar: Option<u32>,
     ) -> Option<Self> {
-        let id = |tab: &TabInfo| TabId(tab.tab_id);
+        let id = TabId::of;
         let active = id(tabs.iter().find(|t| t.active)?);
         let mut seats: BTreeMap<ClientId, TabId> = tabs
             .iter()

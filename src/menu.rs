@@ -20,6 +20,7 @@ use zellij_tile::prelude::*;
 use crate::agents::{self, AgentSet, Live, Seat};
 use crate::checkouts::{Checkouts, DIR_KEY};
 use crate::close::{self, Act, Leaving, Plan, Ran, Scope};
+use crate::dock::TabId;
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
 use crate::places::{self, Places, SESSION_KEY};
@@ -371,7 +372,7 @@ impl Origin {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct There {
     pub session: String,
-    pub tab: Option<usize>,
+    pub tab: Option<TabId>,
     /// The pane of the menu's own session you came from. zellij keeps where
     /// each session's focus was, and the sidebar the menu is in has it: the
     /// session would have you back in the sidebar.
@@ -433,7 +434,7 @@ fn new_pane(there: &There, cwd: &str, command: &[String]) -> Vec<String> {
     let mut new_pane: Vec<String> =
         ["zellij", "--session", session, "action", "new-pane"].map(str::to_owned).to_vec();
     if let Some(tab) = there.tab {
-        new_pane.extend(["--tab-id".to_owned(), tab.to_string()]);
+        new_pane.extend(["--tab-id".to_owned(), tab.0.to_string()]);
     }
     new_pane.extend(["--cwd".to_owned(), cwd.to_owned(), "--".to_owned()]);
     new_pane.extend(command.iter().cloned());
@@ -1467,13 +1468,13 @@ mod tests {
             .iter()
             .map(|(pane, status)| close::Agent {
                 pane: *pane,
-                tab: Some(7),
+                tab: Some(TabId(7)),
                 status: Status::parse(Some(status)),
             })
             .collect();
         close::Subject {
             seat,
-            pane: Some(close::Pane { id: 2, tab: Some(7), alone: false }),
+            pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), alone: false }),
             agents: Fetch::Ready(agents),
             refuge: Some("elo".to_owned()),
         }
@@ -1577,7 +1578,7 @@ mod tests {
     /// the same session, is for a menu closed before it came.
     #[test]
     fn an_agent_in_another_session_is_gone_to_once_its_pane_is_open() {
-        let there = There { session: "elo".to_owned(), tab: Some(3), back: Some(1) };
+        let there = There { session: "elo".to_owned(), tab: Some(TabId(3)), back: Some(1) };
         let started = |menu: u64| {
             BTreeMap::from([
                 (CONTEXT_KEY.to_owned(), START_VALUE.to_owned()),
@@ -1686,7 +1687,7 @@ mod tests {
     #[test]
     fn going_ahead_closes_what_the_tab_holds_now() {
         let alone = close::Subject {
-            pane: Some(close::Pane { id: 2, tab: Some(7), alone: true }),
+            pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), alone: true }),
             ..closing(luneta(), &[(2, "busy")])
         };
         let joined = closing(luneta(), &[(2, "busy")]);
@@ -1698,7 +1699,7 @@ mod tests {
         };
         let (menu, closed) = asked().key(&char('y'), Some(&alone), 0);
         assert!(menu.is_none());
-        assert_eq!(closed, Some(Act::Tab(luneta(), 7)));
+        assert_eq!(closed, Some(Act::Tab(luneta(), TabId(7))));
         let (menu, closed) = asked().key(&char('y'), Some(&joined), 0);
         assert_eq!(closed, None);
         assert_eq!(asking(menu.as_ref()), Some("Close the pane? 1 agent, 1 busy"));
@@ -1713,7 +1714,7 @@ mod tests {
     /// for a menu closed before it came.
     #[test]
     fn a_pane_of_another_session_closes_by_a_command_the_menu_waits_on() {
-        let there = There { session: "elo".to_owned(), tab: Some(3), back: Some(1) };
+        let there = There { session: "elo".to_owned(), tab: Some(TabId(3)), back: Some(1) };
         let elo = Seat::There("elo".to_owned());
         let answer = |value: &str, menu: u64| {
             BTreeMap::from([
@@ -1961,7 +1962,7 @@ mod tests {
     #[test]
     fn an_agent_in_another_session_starts_in_its_tab_and_its_directory() {
         let command = claude("/tigerstyle", Some("main"));
-        let there = There { session: "elo".to_owned(), tab: Some(3), back: None };
+        let there = There { session: "elo".to_owned(), tab: Some(TabId(3)), back: None };
         assert_eq!(
             new_pane(&there, "/w/elo/main", &command),
             [
