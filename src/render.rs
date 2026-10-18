@@ -9,7 +9,7 @@ use crate::fetch::Fetch;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
-use crate::menu::{Entry, Keys, Menu};
+use crate::menu::{Entry, Keys, Menu, SidebarMenu};
 use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
@@ -1007,7 +1007,8 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
     let (title, right, body, help) = match shown {
         Ok(keys) => {
             let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
-            (menu_title(keys), menu_where(menu), body, menu_help(inner, !keys.names().is_empty()))
+            let opened = !keys.names().is_empty();
+            (menu_title(keys), menu_where(menu.cwd()), body, menu_help(inner, opened))
         },
         Err(reason) => {
             let body = wrap(reason, inner).iter().map(|text| menu_error(text, inner)).collect();
@@ -1028,7 +1029,7 @@ pub fn menu_size(menu: &Menu) -> Option<(usize, usize)> {
         Ok(keys) => {
             let entries = keys.entries();
             let widest = entries.iter().map(menu_entry_width).max().unwrap_or(0);
-            let rule = menu_title(keys).width() + menu_where(menu).width() + MENU_RULE;
+            let rule = menu_title(keys).width() + menu_where(menu.cwd()).width() + MENU_RULE;
             let width = (widest + PAD * 2).max(rule).max(MIN_MENU);
             (width, entries.len() + MENU_CHROME)
         },
@@ -1042,10 +1043,10 @@ fn menu_title(keys: &Keys) -> String {
     if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
 }
 
-/// Where an agent the menu starts works: the directory of the pane you came
-/// from, once zellij has said.
-fn menu_where(menu: &Menu) -> String {
-    menu.cwd().map(short_cwd).unwrap_or_default()
+/// Where an agent the menu starts works: the directory of the pane it is for,
+/// once the menu knows.
+fn menu_where(cwd: Option<&str>) -> String {
+    cwd.map(short_cwd).unwrap_or_default()
 }
 
 fn menu_entry_width(entry: &Entry) -> usize {
@@ -1087,31 +1088,105 @@ fn menu_help(width: usize, opened: bool) -> Painted {
     }
 }
 
+/// How many lines the menu takes at the bottom of a sidebar `cols` wide, with
+/// the room it wants: its rule, the keys of the group open or what is wrong,
+/// and the keys that go back and close.
+fn sidebar_menu_height(menu: &SidebarMenu, cols: usize) -> usize {
+    let body = match menu.keys() {
+        Ok(keys) => keys.entries().len(),
+        Err(reason) => wrap(reason, cols.saturating_sub(2)).len(),
+    };
+    body + 2
+}
+
+/// The menu at the bottom of the sidebar, in `lines` lines: the lines from
+/// its top, each as wide as the sidebar, and the keys under them. A rule
+/// names the groups opened and says where an agent starts, as the border of
+/// the floating menu does, over the keys of the group open or what is wrong.
+/// Short of room, the entries go first, then the rule.
+fn sidebar_menu_lines(
+    menu: &SidebarMenu,
+    lines: usize,
+    cols: usize,
+) -> (Vec<Painted>, Option<Painted>) {
+    let inner = cols.saturating_sub(2);
+    let (title, body, opened): (String, Vec<Painted>, bool) = match menu.keys() {
+        Ok(keys) => {
+            let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
+            (menu_title(keys), body, !keys.names().is_empty())
+        },
+        Err(reason) => {
+            let body = wrap(reason, inner).iter().map(|text| menu_error(text, inner)).collect();
+            (TITLE.to_owned(), body, false)
+        },
+    };
+    let Some(room) = lines.checked_sub(1) else {
+        return (Vec::new(), None);
+    };
+    let mut drawn: Vec<Painted> = Vec::with_capacity(room);
+    if room > 0 {
+        drawn.push(menu_rule(&title, &menu_where(menu.cwd()), cols));
+    }
+    drawn.extend(body.into_iter().take(room.saturating_sub(1)));
+    (drawn, Some(menu_help(inner, opened)))
+}
+
+/// The rule over the menu in the sidebar: the groups opened, and where an
+/// agent starts while the rule has room for all of both.
+fn menu_rule(title: &str, right: &str, cols: usize) -> Painted {
+    let mut line = Line::new();
+    line.push(RULE, Ink::Dim);
+    line.gap(1);
+    // A space, the right, a space and a last stretch of the rule.
+    let tail = right.width() + 2 + RULE.width();
+    let fits =
+        !right.is_empty() && line.columns() + title.width() + 1 + RULE.width() + tail <= cols;
+    let tail = if fits { tail } else { 0 };
+    let room = cols.saturating_sub(line.columns() + 1 + RULE.width() + tail);
+    line.push(&truncate(title, room), Ink::Bold(LABEL));
+    line.gap(1);
+    line.push(&RULE.repeat(cols.saturating_sub(line.columns() + tail)), Ink::Dim);
+    if fits {
+        line.gap(1);
+        line.push(right, TAG);
+        line.gap(1);
+        line.push(RULE, Ink::Dim);
+    }
+    line.fill(cols)
+}
+
 /// How a sidebar `rows` tall is cut up: the header and a blank line under it
 /// at the top, the tree under them, the notes under it, the search box while
 /// it is open, and a line of keys at the bottom while the sidebar has the
 /// focus. The box opens at the bottom so that no row moves. The header goes
 /// before it would leave the tree no row.
+///
+/// While the menu is open, it takes the place of the box and the keys, with
+/// as many of the `menu` lines it wants as leave the tree a row.
 struct Shelf {
     header: usize,
     tree: usize,
     notes: usize,
     search_y: Option<usize>,
     help_y: Option<usize>,
+    menu_y: Option<usize>,
 }
 
 impl Shelf {
-    fn new(rows: usize, notes: usize, focused: bool, searching: bool) -> Self {
-        let search = usize::from(searching && rows > 0);
-        let help = usize::from(focused && rows > search + 1);
-        let header = if rows > search + help + notes + HEADER { HEADER } else { 0 };
-        let notes = notes.min(rows - search - help - header);
+    fn new(rows: usize, notes: usize, focused: bool, searching: bool, menu: usize) -> Self {
+        let menu = menu.min(rows.saturating_sub(1));
+        let search = usize::from(menu == 0 && searching && rows > 0);
+        let help = usize::from(menu == 0 && focused && rows > search + 1);
+        let below = menu + search + help;
+        let header = if rows > below + notes + HEADER { HEADER } else { 0 };
+        let notes = notes.min(rows - below - header);
         Shelf {
             header,
-            tree: rows - search - help - header - notes,
+            tree: rows - below - header - notes,
             notes,
             search_y: (search == 1).then(|| rows - help - 1),
             help_y: (help == 1).then(|| rows - 1),
+            menu_y: (menu > 0).then(|| rows - menu),
         }
     }
 }
@@ -1130,7 +1205,8 @@ pub fn render_sidebar(
     let inner = cols.saturating_sub(2);
     let notes = agent_note_texts(agents, inner);
     let term = tree.search();
-    let shelf = Shelf::new(rows, notes.len(), focused, term.is_some());
+    let menu = tree.menu.as_ref().map_or(0, |menu| sidebar_menu_height(menu, cols));
+    let shelf = Shelf::new(rows, notes.len(), focused, term.is_some(), menu);
     for (y, line) in sidebar_lines(tree, &notes, &shelf, focused, cols, frame).iter().enumerate() {
         print_at(line, 0, y, cols);
     }
@@ -1140,6 +1216,15 @@ pub fn render_sidebar(
     if let Some(y) = shelf.help_y {
         let help = if term.is_some() { search_help_line(inner) } else { sidebar_help(inner) };
         print_at(&help, 1, y, inner);
+    }
+    if let Some((y, menu)) = shelf.menu_y.zip(tree.menu.as_ref()) {
+        let (lines, help) = sidebar_menu_lines(menu, rows - y, cols);
+        for (at, line) in lines.iter().enumerate() {
+            print_at(line, 0, y + at, cols);
+        }
+        if let Some(help) = help {
+            print_at(&help, 1, rows - 1, inner);
+        }
     }
 }
 
@@ -1227,7 +1312,8 @@ pub fn select_sidebar_row(
 /// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
 fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, cols: usize) -> Shelf {
     let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
-    Shelf::new(rows, notes, focused, tree.search().is_some())
+    let menu = tree.menu.as_ref().map_or(0, |menu| sidebar_menu_height(menu, cols));
+    Shelf::new(rows, notes, focused, tree.search().is_some(), menu)
 }
 
 /// Whether a click on `column` of a row folds it, where the rest of the row
@@ -2394,7 +2480,8 @@ mod tests {
         rows: usize,
         cols: usize,
     ) -> Vec<String> {
-        let shelf = Shelf::new(rows, notes.len(), focused, tree.search().is_some());
+        let menu = tree.menu.as_ref().map_or(0, |menu| sidebar_menu_height(menu, cols));
+        let shelf = Shelf::new(rows, notes.len(), focused, tree.search().is_some(), menu);
         sidebar_lines(tree, notes, &shelf, focused, cols, 0)
             .iter()
             .map(|line| line.content().to_owned())
@@ -2459,7 +2546,7 @@ mod tests {
     #[test]
     fn a_pane_s_branch_is_dimmed_on_the_line_under_its_label() {
         let tree = sidebar_tree(worktrees(), 0);
-        let shelf = Shelf::new(11, 0, false, false);
+        let shelf = Shelf::new(11, 0, false, false, 0);
         let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
         let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
         assert_eq!(
@@ -2521,7 +2608,7 @@ mod tests {
     fn the_highlight_is_on_your_pane_until_the_sidebar_has_the_focus() {
         let tree = workday_tree(2);
         for (focused, row) in [(false, 6), (true, 2)] {
-            let shelf = Shelf::new(11, 0, focused, false);
+            let shelf = Shelf::new(11, 0, focused, false, 0);
             let lines = sidebar_lines(&tree, &[], &shelf, focused, 30, 0);
             let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
             assert_eq!(lit, [HEADER + row], "focused: {focused}");
@@ -2547,12 +2634,12 @@ mod tests {
         let unfocused = sidebar_picture(&tree, &notes, false, 6, 32);
         assert_eq!(unfocused.len(), 6);
         assert_eq!(unfocused[5], " claude-ps: gone                ");
-        assert!(Shelf::new(6, 1, false, false).help_y.is_none());
+        assert!(Shelf::new(6, 1, false, false, 0).help_y.is_none());
 
         let focused = sidebar_picture(&tree, &notes, true, 6, 32);
         assert_eq!(focused.len(), 5);
         assert_eq!(focused[4], " claude-ps: gone                ");
-        assert_eq!(Shelf::new(6, 1, true, false).help_y, Some(5));
+        assert_eq!(Shelf::new(6, 1, true, false, 0).help_y, Some(5));
         assert!(sidebar_help(30).content().width() <= 30);
         assert!(search_help_line(30).content().width() <= 30);
     }
@@ -2566,7 +2653,7 @@ mod tests {
         assert_eq!(open.len(), closed.len() - 1);
         assert_eq!(open[..], closed[..open.len()]);
 
-        let shelf = Shelf::new(9, 0, true, true);
+        let shelf = Shelf::new(9, 0, true, true, 0);
         assert_eq!((shelf.search_y, shelf.help_y), (Some(7), Some(8)));
         assert_eq!(search_line("pix", 30).content(), " /pix_                          ");
         assert_eq!(search_line("handoff-eng-11259", 10).content(), " /…g-11259_ ");
@@ -2595,7 +2682,7 @@ mod tests {
     #[test]
     fn a_short_sidebar_keeps_your_pane_in_sight_until_it_has_the_focus() {
         let tree = workday_tree(0);
-        let shelf = Shelf::new(5, 0, false, false);
+        let shelf = Shelf::new(5, 0, false, false, 0);
         let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
         let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
         assert_eq!(lit, [HEADER + 2]);
@@ -2773,7 +2860,12 @@ mod tests {
             let search = search_line("handoff pix outflow", cols - 2);
             assert_eq!(search.content().width(), cols, "{cols}: {}", search.content());
             for rows in 1..12 {
-                for (focused, searching) in [(false, false), (true, false), (true, true)] {
+                for (focused, searching, menu) in [
+                    (false, false, None),
+                    (true, false, None),
+                    (true, true, None),
+                    (true, false, Some('c')),
+                ] {
                     let trees = [0, 3, 7].into_iter().flat_map(|selected| {
                         [workday_tree(selected), sidebar_tree(worktrees(), selected)]
                     });
@@ -2781,23 +2873,129 @@ mod tests {
                         if searching {
                             tree.search_for("pix".to_owned());
                         }
+                        tree.menu = menu.and_then(|key| sidebar_menu(MENU_KDL, Some(key)));
                         let lines = sidebar_picture(&tree, &notes, focused, rows, cols);
-                        let shelf = Shelf::new(rows, notes.len(), focused, searching);
+                        let agents = AgentSet::default();
+                        let shelf = sidebar_shelf(&tree, &agents, focused, rows, cols);
+                        let menu_lines = shelf.menu_y.map_or(0, |y| rows - y);
                         let below = [shelf.search_y, shelf.help_y];
                         assert_eq!(
-                            lines.len() + below.iter().flatten().count(),
+                            lines.len() + below.iter().flatten().count() + menu_lines,
                             rows,
                             "{cols}x{rows}"
                         );
                         assert!(below.iter().flatten().all(|y| *y >= lines.len()), "{rows}");
+                        assert!(shelf.menu_y.is_none_or(|y| y == lines.len()), "{rows}");
                         assert!(shelf.header == 0 || shelf.tree > 0, "{cols}x{rows}");
                         for line in lines {
+                            assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
+                        }
+                        let Some(menu) = &tree.menu else {
+                            continue;
+                        };
+                        let (drawn, help) = sidebar_menu_lines(menu, menu_lines, cols);
+                        let shown = drawn.len() + usize::from(help.is_some());
+                        assert_eq!(shown, menu_lines, "{cols}x{rows}");
+                        for line in drawn.iter().map(Painted::content) {
                             assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
                         }
                     }
                 }
             }
         }
+    }
+
+    const MENU_KDL: &str = r#"
+        c "Claude" {
+            t "/thermo-nuclear-review"
+            m "/make-illegal-states-unrepresentable"
+            s "/tigerstyle"
+        }
+    "#;
+
+    /// The menu in the sidebar, as `key` opens it for a pane that works in
+    /// `/w/misc/unnamed`.
+    fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
+        let cwd = Some("/w/misc/unnamed".to_owned());
+        let row = crate::menu::Row { pane: 0, cwd, branch: None, there: None };
+        SidebarMenu::open(Some(entries), row, key)
+    }
+
+    /// The menu's lines in `lines` lines of a sidebar `cols` wide, the keys
+    /// under them last.
+    fn sidebar_menu_picture(menu: &SidebarMenu, lines: usize, cols: usize) -> Vec<String> {
+        let (drawn, help) = sidebar_menu_lines(menu, lines, cols);
+        let drawn = drawn.iter().map(|line| line.content().to_owned());
+        drawn.chain(help.map(|help| format!(" {}", help.content()))).collect()
+    }
+
+    /// The menu opens at the bottom of the sidebar, in the place of its keys:
+    /// a rule that names the group open and where an agent starts, the keys
+    /// of the group, and the keys that go back and close. The tree makes room
+    /// for it and keeps the row it is for in sight.
+    #[test]
+    fn the_menu_opens_at_the_bottom_of_the_sidebar() {
+        let mut tree = workday_tree(6);
+        tree.menu = sidebar_menu(MENU_KDL, Some('c'));
+        let agents = AgentSet::default();
+        let shelf = sidebar_shelf(&tree, &agents, true, 13, 30);
+        assert_eq!((shelf.tree, shelf.menu_y), (6, Some(8)));
+        assert_eq!((shelf.help_y, shelf.search_y), (None, None));
+        let menu = tree.menu.as_ref().expect("a menu");
+        let mut picture = sidebar_picture(&tree, &[], true, 13, 30);
+        picture.extend(sidebar_menu_picture(menu, 13 - 8, 30));
+        assert_eq!(
+            picture,
+            [
+                "─ 3 sessions ────── ●1 ✓1 ⠋3 ─",
+                "                              ",
+                "   ✓ handoff-eng-11259-p… 13h ",
+                "   ● dda-bank-slip-paid-…  3m ",
+                "   ⠋ Handoff pix outflow… 12s ",
+                " ▸ floresta ─────────────── ⠋ ",
+                " ▾ unnamed ────────────────── ",
+                "▌  ⠋ orca-copy            12s ",
+                "─ Claude ────── misc/unnamed ─",
+                " t  /thermo-nuclear-review    ",
+                " m  /make-illegal-states-unr… ",
+                " s  /tigerstyle               ",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, HEADER + 5), Some(6));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, 8), None);
+
+        let root = sidebar_menu(MENU_KDL, None).expect("a menu");
+        assert_eq!(
+            sidebar_menu_picture(&root, 3, 30),
+            ["─ luneta ────── misc/unnamed ─", " c  Claude ▸                  ", " <ESC> - Close"]
+        );
+    }
+
+    /// A sidebar too short for the whole menu leaves the tree a row, and cuts
+    /// the entries first, then the rule. A rule too narrow for where an agent
+    /// starts leaves it out, and a menu that cannot be read says why.
+    #[test]
+    fn a_short_sidebar_cuts_the_menu_and_keeps_its_keys() {
+        let menu = sidebar_menu(MENU_KDL, Some('c')).expect("a menu");
+        assert_eq!(Shelf::new(4, 0, true, false, 5).menu_y, Some(1));
+        assert_eq!(
+            sidebar_menu_picture(&menu, 3, 30),
+            [
+                "─ Claude ────── misc/unnamed ─",
+                " t  /thermo-nuclear-review    ",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(sidebar_menu_picture(&menu, 1, 30), [" <BS> - Back, <ESC> - Close"]);
+        assert!(sidebar_menu_picture(&menu, 0, 30).is_empty());
+        assert_eq!(menu_rule("Claude", "misc/unnamed", 20).content(), "─ Claude ───────────");
+        assert_eq!(menu_rule("Claude", "", 8).content(), "─ Cla… ─");
+
+        let wrong = sidebar_menu("t", Some('t')).expect("a menu");
+        let picture = sidebar_menu_picture(&wrong, sidebar_menu_height(&wrong, 30), 30);
+        assert!(picture[0].starts_with("─ luneta ──"), "{picture:?}");
+        assert!(picture[1].starts_with(" menu: \"t\" takes one string"), "{picture:?}");
     }
 
     /// The menu is as wide as its longest entry and its rule need, so that

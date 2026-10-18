@@ -206,26 +206,38 @@ agent whose work it is for. The menu shows the keys of the group you are in and
 what each does, as which-key does in neovim.
 
 ```text
-╭─ Claude ────────────────── luneta/main ─╮
-│ t  /thermo-nuclear-review               │
-│ m  /make-illegal-states-unrepresentable │
-│ s  /tigerstyle                          │
-│                                         │
-│ <BS> - Back, <ESC> - Close              │
-╰─────────────────────────────────────────╯
+─ 2 sessions ──────────── ⠋1 ─
+
+ ▾ luneta ───────────────────
+▌  ⠋ fold                 12s
+▌    feat/sidebar           !
+     luneta/main
+     main
+ ▸ elo ──────────────────────
+─ Claude ─────── luneta/main ─
+ t  /thermo-nuclear-review
+ m  /make-illegal-states-unr…
+ s  /tigerstyle
+ <BS> - Back, <ESC> - Close
 ```
 
-Your key opens it at the bottom right of the tab for the pane you are in, and
-`m` in the sidebar for the pane whose row is highlighted. `c` opens the group
-you named Claude, and `t` starts Claude Code on `/thermo-nuclear-review` in a
-pane of its own, beside that pane in its tab, and in the directory it works in,
-which the rule on top names. For `/thermo-nuclear-review` that is the point: it
+In the sidebar, the menu's keys are the sidebar's. On the row of a pane, here
+`luneta/main`, `c` opens the group you named Claude at the bottom of the
+sidebar, and `t` starts Claude Code on `/thermo-nuclear-review` in a pane of its
+own, beside that pane in its tab, and in the directory it works in, which the
+rule over the keys names. For `/thermo-nuclear-review` that is the point: it
 reviews the branch checked out there. A row of another tab takes you to that
 tab, and a row of another session starts the agent in that session and takes
-you there, handing the session you leave the pane you came from. In the sidebar,
-or any pane that is no terminal, your key has no pane to start an agent beside,
-and the menu says so in place of its keys. So it does for a pane whose directory
-zellij has yet to say: an agent starts where its pane works, or not at all.
+you there, handing the session you leave the pane you came from. A key the
+sidebar has a use of its own for, as `j` or `n`, stays the sidebar's: `m` opens
+the menu on its first group, where every key is the menu's. The menu closes
+when the sidebar loses the focus, and with a click.
+
+Your key opens the same menu floating at the bottom right of the tab, for the
+pane you are in. In the sidebar, or any pane that is no terminal, it has no
+pane to start an agent beside, and says so in place of its keys. So it does for
+a pane whose directory zellij has yet to say: an agent starts where its pane
+works, or not at all.
 
 An agent started on a skill goes by the skill and the branch, as
 `thermo-nuclear-review: feat/sidebar`, as though you had named it with
@@ -269,7 +281,7 @@ Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
 `ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
 luneta reaches `zoxide`, `eza`, `claude-ps`, `git` and `zellij` itself, and how
 the [menu](#menu) starts `claude`; `OpenTerminalsOrPlugins` is how the
-[dock](#dock-the-sidebar) opens the sidebar, and the sidebar the menu.
+[dock](#dock-the-sidebar) opens the sidebar.
 Every mode asks for all four, since zellij keeps one grant for a plugin.
 
 <details>
@@ -339,7 +351,7 @@ keybinds {
 The menu is the plugin in `mode "menu"`. Its keys are a `menu`, a node to a
 key: a key's one string is what it starts an agent on, or, with keys inside
 it, the name of the group they make. Give them to the alias, so that the key
-that opens the menu and the sidebar's `m` show the same keys:
+that opens the menu and the sidebar show the same keys:
 
 ```kdl
 plugins {
@@ -374,8 +386,8 @@ alias too, as [below](#dock-the-sidebar).
 A key is one character, pressed bare. The key that opens the menu needs a
 modifier: zellij hands a bare `m` to the pane you are in. A menu luneta cannot
 read says what is wrong with it where its keys would be, and closes on any key.
-The sidebar's `m`, from a dock loaded by its location, has none of the alias's
-keys, and says to load the dock by the alias.
+A sidebar from a dock loaded by its location has none of the alias's keys, and
+its `m` says to load the dock by the alias.
 
 ### Dock the sidebar
 
@@ -619,7 +631,8 @@ In the sidebar, once it has the focus:
 | `←` `→` / `h` `l` | fold / unfold the session |
 | `Space` | fold or unfold |
 | `n` | go to the next agent that wants you |
-| `m` | open the [menu](#menu) for the highlighted pane |
+| *a key of the [menu](#menu)* | open its group, or start its agent, for the highlighted pane |
+| `m` | open the menu on its first group, for the highlighted pane |
 | `/` | search |
 | `Esc` | back to the pane you came from |
 
