@@ -239,10 +239,12 @@ fn answer(key: &KeyWithModifier, asked: char) -> Answer {
 }
 
 /// A delete key that asks before it goes ahead: the key, which goes ahead
-/// pressed again, what it does, and what it asks.
+/// pressed again, what it deletes, what it would do as it asked, and what it
+/// asks.
 struct Asked {
     key: char,
-    plan: Plan,
+    scope: Scope,
+    act: Act,
     question: String,
 }
 
@@ -254,11 +256,22 @@ enum Then {
 }
 
 impl Asked {
-    fn then(key: char, plan: Plan) -> Then {
+    fn then(key: char, scope: Scope, plan: Plan) -> Then {
         match plan.question() {
-            Some(question) => Then::Ask(Asked { key, plan, question }),
+            Some(question) => Then::Ask(Asked { key, scope, act: plan.act, question }),
             None => Then::Go(plan.act),
         }
+    }
+
+    /// What going ahead does, with what the key deletes planned again `now`:
+    /// what you were asked about, or, once that changed while you read, what
+    /// the key does now. A pane that opened in the tab since holds the tab
+    /// open, and does not close with it.
+    fn yes(self, now: Plan) -> Then {
+        if now.act == self.act {
+            return Then::Go(now.act);
+        }
+        Asked::then(self.key, self.scope, now)
     }
 }
 
@@ -604,9 +617,10 @@ impl SidebarMenu {
     }
 
     /// The pane the menu is for, none on a session's row, and its session
-    /// when that is another, while a key of the menu can delete it.
+    /// when that is another, while a key of the menu can delete it, or a
+    /// delete key asks before it does.
     pub fn pane(&self) -> Option<(Option<u32>, Option<&str>)> {
-        let Stage::Choosing(_, target) = &self.stage else {
+        let (Stage::Choosing(_, target) | Stage::Asking(_, target, _)) = &self.stage else {
             return None;
         };
         Some((target.pane, target.there.as_ref().map(|there| there.session.as_str())))
@@ -621,7 +635,8 @@ impl SidebarMenu {
     /// What `key` does to the menu at `frame`: the menu left, none once it
     /// closed or deleted what a key asked in the sidebar's own session, and
     /// what a delete key asked zellij for. `subject` is what the menu is for,
-    /// as a delete key deletes it.
+    /// as a delete key deletes it, as zellij says it stands now: going ahead
+    /// after a delete key asked plans it again.
     pub fn key(
         self,
         key: &KeyWithModifier,
@@ -641,7 +656,7 @@ impl SidebarMenu {
                 Pressed::Delete { key, scope } => match subject.map(|it| it.plan(scope)) {
                     None => (Some(Stage::Choosing(keys, target)), None),
                     Some(Err(reason)) => (Some(wrong(reason)), None),
-                    Some(Ok(plan)) => match Asked::then(key, plan) {
+                    Some(Ok(plan)) => match Asked::then(key, scope, plan) {
                         Then::Ask(asked) => (Some(Stage::Asking(keys, target, asked)), None),
                         Then::Go(act) => target.close(keys, act, number),
                     },
@@ -649,7 +664,14 @@ impl SidebarMenu {
                 Pressed::Moved | Pressed::Nothing => (Some(Stage::Choosing(keys, target)), None),
             },
             Stage::Asking(keys, target, asked) => match answer(key, asked.key) {
-                Answer::Yes => target.close(keys, asked.plan.act, number),
+                Answer::Yes => match subject.map(|it| it.plan(asked.scope)) {
+                    None => (Some(Stage::Asking(keys, target, asked)), None),
+                    Some(Err(reason)) => (Some(wrong(reason)), None),
+                    Some(Ok(now)) => match asked.yes(now) {
+                        Then::Ask(again) => (Some(Stage::Asking(keys, target, again)), None),
+                        Then::Go(act) => target.close(keys, act, number),
+                    },
+                },
                 Answer::Back => (Some(Stage::Choosing(keys, target)), None),
                 Answer::Close => return (None, None),
                 Answer::Nothing => (Some(Stage::Asking(keys, target, asked)), None),
@@ -972,31 +994,33 @@ impl Menu {
         let Phase::Choosing(_, Fetch::Ready(beside)) = &self.phase else {
             return false;
         };
-        let plan = if scope == Scope::Pane && self.floats_a_terminal() {
-            Err(UNSURE_PANE.to_owned())
-        } else {
-            match self.subject(beside.pane) {
-                Some(subject) => subject.plan(scope),
-                None => Err(NO_SESSION.to_owned()),
-            }
+        let then = self.plan(beside.pane, scope).map(|plan| Asked::then(key, scope, plan));
+        let Phase::Choosing(keys, Fetch::Ready(beside)) = std::mem::take(&mut self.phase) else {
+            return false;
         };
-        match plan.map(|plan| Asked::then(key, plan)) {
-            Err(reason) => {
-                self.phase = Phase::Wrong(reason);
-                self.place();
-                true
-            },
-            Ok(Then::Go(act)) => self.run(&act),
-            Ok(Then::Ask(asked)) => {
-                let Phase::Choosing(keys, Fetch::Ready(beside)) = std::mem::take(&mut self.phase)
-                else {
-                    return false;
-                };
-                self.phase = Phase::Asking(keys, beside, asked);
-                self.place();
-                true
-            },
+        self.then(keys, beside, then)
+    }
+
+    /// What the delete key for `scope` does to pane `id` you came from, as
+    /// zellij says it stands now, or why it does nothing: over a tab with a
+    /// floating terminal, no pane closes.
+    fn plan(&self, id: u32, scope: Scope) -> Result<Plan, String> {
+        if scope == Scope::Pane && self.floats_a_terminal() {
+            return Err(UNSURE_PANE.to_owned());
         }
+        self.subject(id).ok_or_else(|| NO_SESSION.to_owned())?.plan(scope)
+    }
+
+    /// Goes ahead with what a delete key does, asks first, or says why it
+    /// does nothing, for the pane `beside`. Says whether to draw.
+    fn then(&mut self, keys: Keys, beside: Beside, then: Result<Then, String>) -> bool {
+        match then {
+            Err(reason) => self.phase = Phase::Wrong(reason),
+            Ok(Then::Go(act)) => return self.run(&act),
+            Ok(Then::Ask(asked)) => self.phase = Phase::Asking(keys, beside, asked),
+        }
+        self.place();
+        true
     }
 
     /// The pane `id` you came from, as a delete key deletes it or its
@@ -1016,12 +1040,16 @@ impl Menu {
         Some(close::Subject::new(seat, Some(id), &leaves, agents, self.refuge.clone()))
     }
 
-    /// Goes ahead with the delete key that asked. Says whether to draw.
+    /// Goes ahead with the delete key that asked, planned again from what
+    /// zellij says now: once that changed while you read, the key does what
+    /// it does now, and asks again when that ends an agent at work. Says
+    /// whether to draw.
     fn go_ahead(&mut self) -> bool {
-        let Phase::Asking(_, _, asked) = std::mem::take(&mut self.phase) else {
+        let Phase::Asking(keys, beside, asked) = std::mem::take(&mut self.phase) else {
             return false;
         };
-        self.run(&asked.plan.act)
+        let then = self.plan(beside.pane, asked.scope).map(|now| asked.yes(now));
+        self.then(keys, beside, then)
     }
 
     /// Back to the keys, from a delete key that asked. Says whether to draw.
@@ -1582,6 +1610,34 @@ mod tests {
         assert_eq!(closed, None);
     }
 
+    /// Going ahead plans the delete key again, from what zellij says now. A
+    /// pane that opened in the tab while you read holds the tab open, and the
+    /// key asks again, to close the pane alone; what did not change goes
+    /// ahead.
+    #[test]
+    fn going_ahead_closes_what_the_tab_holds_now() {
+        let alone = close::Subject {
+            pane: Some(close::Pane { id: 2, tab: Some(7), alone: true }),
+            ..closing(luneta(), &[(2, "busy")])
+        };
+        let joined = closing(luneta(), &[(2, "busy")]);
+        let asked = || {
+            let menu = open(Some(MENU), row(None), Some('d')).expect("a menu");
+            let (menu, _) = menu.key(&char('d'), Some(&alone), 0);
+            assert_eq!(asking(menu.as_ref()), Some("Close its tab? 1 agent, 1 busy"));
+            menu.expect("a menu")
+        };
+        let (menu, closed) = asked().key(&char('y'), Some(&alone), 0);
+        assert!(menu.is_none());
+        assert_eq!(closed, Some(Act::Tab(luneta(), 7)));
+        let (menu, closed) = asked().key(&char('y'), Some(&joined), 0);
+        assert_eq!(closed, None);
+        assert_eq!(asking(menu.as_ref()), Some("Close the pane? 1 agent, 1 busy"));
+        let (menu, closed) = menu.expect("a menu").key(&char('y'), Some(&joined), 0);
+        assert!(menu.is_none());
+        assert_eq!(closed, Some(Act::Pane(luneta(), 2)));
+    }
+
     /// A pane of another session closes by a command, and the menu waits for
     /// its answer: gone once it closed, saying what zellij said when it did
     /// not. An answer to a command of another kind, or for another menu, is
@@ -1739,6 +1795,31 @@ mod tests {
         menu.key(&char('d'));
         assert!(menu.key(&char('d')));
         assert_eq!(question(&menu), Some("Close the pane? luneta does not know its agents yet"));
+    }
+
+    /// Going ahead plans the delete key again: a pane that opened in the tab
+    /// while you read holds it open, and the key asks again, to close the
+    /// pane you came from alone.
+    #[test]
+    fn the_key_binding_s_menu_goes_ahead_with_what_the_tab_holds_now() {
+        let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
+        let tab = |ids: &[u32]| {
+            let mut tab: Vec<PaneInfo> = ids.iter().map(|id| shell(*id)).collect();
+            tab.push(PaneInfo { is_plugin: true, is_floating: true, ..shell(0) });
+            PaneManifest { panes: HashMap::from([(0, tab)]) }
+        };
+        let mut menu = bound_for_two(true);
+        menu.panes = Some(tab(&[3]));
+        let busy = Beside { pane: 3, cwd: "/w/elo".to_owned() };
+        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(busy));
+        menu.key(&char('d'));
+        assert!(menu.key(&char('d')));
+        assert_eq!(question(&menu), Some("Close its tab? 1 agent, 1 busy"));
+        menu.panes = Some(tab(&[3, 4]));
+        assert!(menu.key(&char('y')));
+        assert_eq!(question(&menu), Some("Close the pane? 1 agent, 1 busy"));
+        assert!(!menu.key(&char('y')));
+        assert!(menu.shown().is_none());
     }
 
     /// The menu takes the floating focus from the pane you were in as it
