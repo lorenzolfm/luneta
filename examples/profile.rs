@@ -11,6 +11,7 @@
 #[path = "../src/dirs.rs"] mod dirs;
 #[path = "../src/elapsed.rs"] mod elapsed;
 #[path = "../src/fetch.rs"] mod fetch;
+#[path = "../src/folds.rs"] mod folds;
 #[path = "../src/layout.rs"] mod layout;
 #[path = "../src/paint.rs"] mod paint;
 #[path = "../src/panes.rs"] mod panes;

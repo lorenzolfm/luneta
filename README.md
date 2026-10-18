@@ -142,7 +142,10 @@ and sessions alike. One click does it, whether the sidebar has the focus or
 not. On a session's row, the `▾` or `▸` folds or unfolds the session, and the
 name switches to it; the name of the session you are in takes you back to your
 pane. A folded session keeps its count and shows the dot of the agent that
-wants you most.
+wants you most. A fold holds in the sidebar of every session, and after zellij
+restarts: the sidebars keep their folds in the cache zellij gives the plugin,
+one for each location it loads from, so every session's `load_plugins` names
+the same one.
 
 The wheel scrolls the list and leaves the highlight where it is, until you go
 somewhere else or press a key. A click on a row it scrolled to lights the row
@@ -168,7 +171,9 @@ highlights, in the sidebar, the session or the agent the picker had, unfolding
 its session.
 
 One key hides the sidebar, the panes beside it taking its columns in every tab,
-and brings it back.
+and brings it back. Either goes for every session, within a second, and for a
+session started later: the docks keep it in the plugin's cache, beside the
+folds.
 
 ## Getting started
 
@@ -308,9 +313,9 @@ tab bar, and draws no line between it and the panes beside it.
 When another tab comes on screen, the sidebar hands its tab back the placeholder
 and takes the new tab's, in its place, so the panes beside it never change size.
 The dock opens the sidebar when the session starts, and again if the tab that
-held it closes. Closing the sidebar hides it. A tab closes with the last pane
-beside its column, as it would without one, and the session ends with its last
-tab.
+held it closes. Closing the sidebar hides it, in every session. A tab closes
+with the last pane beside its column, as it would without one, and the session
+ends with its last tab.
 
 zellij opens every new tab of a session from the layout the session was made
 with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every new
