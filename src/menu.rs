@@ -19,7 +19,7 @@ use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentSet, Live, Seat};
 use crate::checkouts::{Checkouts, DIR_KEY};
-use crate::close::{self, Act, Leaving, Left, Plan, Ran, Scope};
+use crate::close::{self, Act, Leaving, Plan, Ran, Scope};
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
 use crate::places::{self, Places, SESSION_KEY};
@@ -763,18 +763,27 @@ impl SidebarMenu {
         None
     }
 
-    /// While the client leaves the session: kills the session once the
-    /// client is gone. None once it is on its way out.
-    pub fn tick(self) -> Option<Self> {
+    /// While the client leaves the session: asks zellij whether it is gone,
+    /// and says why the session stays once it has taken too long.
+    pub fn tick(self) -> Self {
         let Stage::Leaving(mut leaving) = self.stage else {
-            return Some(self);
+            return self;
         };
         let stage = match leaving.tick() {
-            Left::Not => Stage::Leaving(leaving),
-            Left::Killed => return None,
-            Left::Stayed(reason) => wrong(reason),
+            Ok(()) => Stage::Leaving(leaving),
+            Err(reason) => wrong(reason),
         };
-        Some(SidebarMenu { number: self.number, stage })
+        SidebarMenu { number: self.number, stage }
+    }
+
+    /// What zellij says of the `clients` in the session, while the client
+    /// leaves it: kills the session once the client is gone. None once it
+    /// has.
+    pub fn clients(self, clients: &[ClientInfo]) -> Option<Self> {
+        match &self.stage {
+            Stage::Leaving(leaving) if leaving.listed(clients) => None,
+            _ => Some(self),
+        }
     }
 }
 
@@ -1112,27 +1121,36 @@ impl Menu {
         true
     }
 
-    /// While you leave the session the menu is in: kills the session once you
-    /// are gone. Says whether to draw.
+    /// While you leave the session the menu is in: asks zellij whether you
+    /// are gone, and says why the session stays once you have taken too long.
+    /// Says whether to draw.
     pub fn tick(&mut self) -> bool {
         let Phase::Leaving(leaving) = &mut self.phase else {
             return false;
         };
         match leaving.tick() {
-            Left::Not => {
+            Ok(()) => {
                 set_timeout(LEAVING_TICK);
                 false
             },
-            Left::Killed => {
-                self.phase = Phase::Done;
-                false
-            },
-            Left::Stayed(reason) => {
+            Err(reason) => {
                 self.phase = Phase::Wrong(reason);
                 self.place();
                 true
             },
         }
+    }
+
+    /// What zellij says of the `clients` in the session, while you leave it:
+    /// kills the session once you are gone. Says whether to draw.
+    pub fn clients(&mut self, clients: &[ClientInfo]) -> bool {
+        let Phase::Leaving(leaving) = &self.phase else {
+            return false;
+        };
+        if leaving.listed(clients) {
+            self.phase = Phase::Done;
+        }
+        false
     }
 
     /// Keeps the pane you came from, and the directory it works in, as the

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use crate::agents::{AgentSet, Seat, Status};
-use crate::dock::{self, SIDEBAR_TITLE};
+use crate::dock::SIDEBAR_TITLE;
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
 use crate::panes;
@@ -350,17 +350,6 @@ pub struct Leaving {
     ticks: u32,
 }
 
-/// What a tick found.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Left {
-    /// The client is still here.
-    Not,
-    /// The client is gone, and the session it left is being killed.
-    Killed,
-    /// The client never left, and the session stays.
-    Stayed(String),
-}
-
 impl Leaving {
     fn go(session: &str, to: &str) -> Self {
         switch_session(Some(to));
@@ -372,22 +361,31 @@ impl Leaving {
         &self.to
     }
 
-    /// Kills the session once zellij knows this plugin's client no longer in
-    /// it. A `zellij` of its own kills it: the plugin asking would wait on the
-    /// session it ends.
-    pub fn tick(&mut self) -> Left {
-        if dock::attached() == Some(false) {
-            run_command(&kill_session(&self.session), BTreeMap::new());
-            return Left::Killed;
-        }
+    /// Asks zellij which clients the session has, for `listed` to kill it
+    /// once this plugin's is not among them. Says why the session stays once
+    /// the client has taken too long to leave.
+    pub fn tick(&mut self) -> Result<(), String> {
         self.ticks += 1;
-        if self.ticks < PATIENCE {
-            return Left::Not;
+        if self.ticks >= PATIENCE {
+            return Err(format!(
+                "menu: \"{}\" did not take you, and \"{}\" stays",
+                self.to, self.session
+            ));
         }
-        Left::Stayed(format!(
-            "menu: \"{}\" did not take you, and \"{}\" stays",
-            self.to, self.session
-        ))
+        list_clients();
+        Ok(())
+    }
+
+    /// Kills the session once the `clients` zellij lists in it leave out this
+    /// plugin's, and says whether it did. That the client is gone is what
+    /// zellij says, not an answer it could not give. A `zellij` of its own
+    /// kills it: the plugin asking would wait on the session it ends.
+    pub fn listed(&self, clients: &[ClientInfo]) -> bool {
+        if clients.iter().any(|client| client.is_current_client) {
+            return false;
+        }
+        run_command(&kill_session(&self.session), BTreeMap::new());
+        true
     }
 }
 
@@ -516,6 +514,28 @@ mod tests {
             let plan = of(here(), Some(2), agents).plan(Scope::Pane).expect("a plan");
             assert!(plan.question().is_some());
         }
+    }
+
+    /// The session you leave is killed once zellij lists its clients without
+    /// yours, and not while it lists yours. A client that takes too long to
+    /// leave leaves the session be.
+    #[test]
+    fn the_session_you_leave_ends_once_zellij_lists_you_out_of_it() {
+        let client = |id, is_current_client| ClientInfo {
+            client_id: id,
+            pane_id: PaneId::Terminal(1),
+            running_command: String::new(),
+            is_current_client,
+        };
+        let mut leaving = Leaving { session: "luneta".to_owned(), to: "elo".to_owned(), ticks: 0 };
+        assert!(!leaving.listed(&[client(1, true), client(2, false)]));
+        assert!(leaving.listed(&[client(2, false)]));
+        assert!(leaving.listed(&[]));
+        for _ in 1..PATIENCE {
+            assert_eq!(leaving.tick(), Ok(()));
+        }
+        let stayed = leaving.tick().err();
+        assert!(stayed.as_deref().is_some_and(|said| said.contains("stays")), "{stayed:?}");
     }
 
     #[test]

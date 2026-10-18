@@ -252,6 +252,7 @@ impl ZellijPlugin for State {
                     EventType::PaneUpdate,
                     EventType::RunCommandResult,
                     EventType::Timer,
+                    EventType::ListClients,
                 ]);
                 return;
             },
@@ -273,8 +274,9 @@ impl ZellijPlugin for State {
         ]);
         if self.is_sidebar() {
             // zellij says `InputReceived` of every key, whichever pane it goes
-            // to: `Pass` tells it from a click.
-            subscribe(&[EventType::Mouse, EventType::InputReceived]);
+            // to: `Pass` tells it from a click. Its menu asks which clients
+            // the session has, while it takes yours out of it.
+            subscribe(&[EventType::Mouse, EventType::InputReceived, EventType::ListClients]);
         }
         set_timeout(0.0);
     }
@@ -301,6 +303,7 @@ impl ZellijPlugin for State {
                     Event::TabUpdate(tabs) => menu.tabs(tabs),
                     Event::PaneUpdate(panes) => menu.panes(panes),
                     Event::Timer(_) => menu.tick(),
+                    Event::ListClients(clients) => menu.clients(&clients),
                     Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                         menu.ran(exit_code, &stdout, &stderr, &context);
                         false
@@ -337,6 +340,7 @@ impl ZellijPlugin for State {
                 let left = self.leave_session();
                 polled || self.spinning() || asked || left
             },
+            Event::ListClients(clients) => self.listed(&clients),
             Event::Key(key) if self.is_sidebar() => self.handle_sidebar_key(&key),
             Event::Key(key) => self.handle_key(&key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -1336,8 +1340,8 @@ impl State {
     }
 
     /// While the menu takes the client out of the session, which a key of it
-    /// killed: kills the session once the client is gone. Says whether to
-    /// draw.
+    /// killed: asks zellij whether the client is gone, for `listed` to kill
+    /// the session once it is. Says whether to draw.
     fn leave_session(&mut self) -> bool {
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
@@ -1345,8 +1349,22 @@ impl State {
         if !tree.menu.as_ref().is_some_and(SidebarMenu::lasts) {
             return false;
         }
-        tree.menu = tree.menu.take().and_then(SidebarMenu::tick);
+        tree.menu = tree.menu.take().map(SidebarMenu::tick);
         true
+    }
+
+    /// The clients zellij lists in the session, while the menu takes the
+    /// client out of it: the session is killed once the client is gone. Says
+    /// whether to draw.
+    fn listed(&mut self, clients: &[ClientInfo]) -> bool {
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        if !tree.menu.as_ref().is_some_and(SidebarMenu::lasts) {
+            return false;
+        }
+        tree.menu = tree.menu.take().and_then(|menu| menu.clients(clients));
+        tree.menu.is_none()
     }
 
     /// What the open menu is for, as a key of it deletes the pane or the
@@ -2083,6 +2101,19 @@ mod tests {
                     assert!(!others && said.contains("only session"), "{case}");
                 },
                 _ => panic!("{case}: neither leaving nor wrong"),
+            }
+            if others {
+                // The session ends once zellij lists your client out of it.
+                let you = ClientInfo {
+                    client_id: 1,
+                    pane_id: PaneId::Terminal(1),
+                    running_command: String::new(),
+                    is_current_client: true,
+                };
+                assert!(!state.update(Event::ListClients(vec![you])), "{case}");
+                assert!(state.update(Event::ListClients(Vec::new())), "{case}");
+                let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+                assert!(tree.menu.is_none(), "{case}");
             }
         }
     }
