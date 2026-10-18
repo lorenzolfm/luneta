@@ -85,20 +85,38 @@ pub struct DirRow {
     is_exact: bool,
 }
 
+/// What the directories wait on: zoxide, and then `WORKTREES`, with the
+/// directories zoxide listed until it says which are worktrees, and so what
+/// each is named. The list from before stays up meanwhile, so that no name
+/// changes under your eye.
+#[derive(Default)]
+enum Asking {
+    #[default]
+    Nothing,
+    Zoxide,
+    Worktrees(Vec<Dir>),
+}
+
 #[derive(Default)]
 pub struct DirSet {
     pub status: Fetch<Vec<Dir>>,
     pub rows: Cursor<DirRow>,
-    pub asking: bool,
-    /// The directories zoxide listed, until `WORKTREES` says which are
-    /// worktrees, and so what each is named. The list from before stays up
-    /// meanwhile, so that no name changes under your eye.
-    found: Option<Vec<Dir>>,
+    asking: Asking,
     listings: BTreeMap<String, Listing>,
     matcher: Option<SkimMatcherV2>,
 }
 
 impl DirSet {
+    /// Whether to ask zoxide: not while an answer to the last question is
+    /// still to come.
+    pub fn ask(&mut self) -> bool {
+        if !matches!(self.asking, Asking::Nothing) {
+            return false;
+        }
+        self.asking = Asking::Zoxide;
+        true
+    }
+
     pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
@@ -110,12 +128,14 @@ impl DirSet {
             });
             return;
         }
-        self.found = Some(parse(&String::from_utf8_lossy(stdout)));
+        self.asking = Asking::Worktrees(parse(&String::from_utf8_lossy(stdout)));
     }
 
     /// `WORKTREES` with the directories zoxide listed, while they wait on it.
     pub fn worktrees_query(&self) -> Option<Vec<&str>> {
-        let found = self.found.as_ref()?;
+        let Asking::Worktrees(found) = &self.asking else {
+            return None;
+        };
         let mut command = WORKTREES.to_vec();
         command.extend(found.iter().map(|dir| dir.path.as_str()));
         Some(command)
@@ -125,8 +145,12 @@ impl DirSet {
     /// repository too. A check that failed leaves every directory its own
     /// name.
     pub fn ingest_worktrees(&mut self, exit_code: Option<i32>, stdout: &[u8]) {
-        let Some(mut found) = self.found.take() else {
-            return;
+        let mut found = match std::mem::take(&mut self.asking) {
+            Asking::Worktrees(found) => found,
+            asking => {
+                self.asking = asking;
+                return;
+            },
         };
         if exit_code == Some(0) {
             let listed = String::from_utf8_lossy(stdout);
@@ -142,12 +166,11 @@ impl DirSet {
                 }
             }
         }
-        self.asking = false;
         self.status = Fetch::Ready(found);
     }
 
     pub fn fail(&mut self, reason: impl Into<String>) {
-        self.asking = false;
+        self.asking = Asking::Nothing;
         self.status = Fetch::Failed(reason.into());
     }
 
@@ -577,6 +600,26 @@ mod tests {
             dirs.ingest_worktrees(exit_code, checked);
             assert_eq!(names(&mut dirs), named, "{exit_code:?}");
         }
+    }
+
+    #[test]
+    fn zoxide_is_asked_again_only_once_both_answers_are_in() {
+        let mut dirs = DirSet::default();
+        assert!(dirs.ask());
+        assert!(!dirs.ask());
+        // An answer from `WORKTREES` that nothing waits on yet.
+        dirs.ingest_worktrees(Some(0), b"");
+        assert!(!dirs.ask());
+
+        dirs.ingest(Some(0), b"30 /home/you/luneta\n", b"");
+        assert!(dirs.worktrees_query().is_some());
+        assert!(!dirs.ask());
+        dirs.ingest_worktrees(Some(0), b"");
+        assert!(dirs.worktrees_query().is_none());
+        assert!(dirs.ask());
+
+        dirs.ingest(Some(1), b"", b"");
+        assert!(dirs.ask());
     }
 
     #[test]

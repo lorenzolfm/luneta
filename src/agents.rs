@@ -182,12 +182,21 @@ impl Status {
 pub struct AgentSet {
     pub status: Fetch<Vec<Agent>>,
     pub rows: Cursor<AgentRow>,
-    pub asking: bool,
+    asking: bool,
     pub unplaced: usize,
     matcher: Option<SkimMatcherV2>,
 }
 
 impl AgentSet {
+    /// Whether to ask claude-ps: not while its last answer is still to come.
+    pub fn ask(&mut self) -> bool {
+        if self.asking {
+            return false;
+        }
+        self.asking = true;
+        true
+    }
+
     pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);

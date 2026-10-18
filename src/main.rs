@@ -526,10 +526,9 @@ impl State {
     }
 
     fn ask_agents(&mut self) {
-        if self.agents.asking {
+        if !self.agents.ask() {
             return;
         }
-        self.agents.asking = true;
         let command: [&str; 1] = match self.agents_command.as_deref() {
             Some(command) => [command],
             None => agents::QUERY,
@@ -623,10 +622,9 @@ impl State {
     }
 
     fn ask_zoxide(&mut self) {
-        if self.dirs.asking {
+        if !self.dirs.ask() {
             return;
         }
-        self.dirs.asking = true;
         run_command(
             &dirs::QUERY,
             BTreeMap::from([(dirs::CONTEXT_KEY.to_owned(), dirs::CONTEXT_VALUE.to_owned())]),
