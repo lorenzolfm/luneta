@@ -1248,14 +1248,13 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
     }
     line.pad_to(start + columns.glyph);
     line.gap(1);
-    let label = match &node.agent {
-        _ if node.here => Ink::Strong,
-        Some(mark) if mark.status.is_waiting() => Ink::Bold(ACCENT),
-        Some(_) => Ink::Plain,
-        None => Ink::Dim,
-    };
     // A label in the accent shows the letters a search lands on in a colour.
-    let hit = if label == Ink::Bold(ACCENT) { Ink::Bold(NAME) } else { Ink::Bold(ACCENT) };
+    let (label, hit) = match &node.agent {
+        _ if node.here => (Ink::Strong, Ink::Bold(ACCENT)),
+        Some(mark) if mark.status.is_waiting() => (Ink::Bold(ACCENT), Ink::Bold(NAME)),
+        Some(_) => (Ink::Plain, Ink::Bold(ACCENT)),
+        None => (Ink::Dim, Ink::Bold(ACCENT)),
+    };
     let reserve = if columns.age > 0 { columns.age + 1 } else { 0 };
     let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
     let (text, hits) = lit(&node.label, room, &node.hits);
@@ -2272,6 +2271,37 @@ mod tests {
             assert_eq!((m, i), (s, c), "current: {current}");
             assert_eq!(m, Some(ACCENT), "current: {current}");
             assert_eq!(i, current.then_some(NAME), "current: {current}");
+        }
+    }
+
+    /// Whatever ink a label takes, the letters a search lands on in it take a
+    /// colour of their own.
+    #[test]
+    fn the_letters_a_search_lands_on_stand_out_on_every_pane_row() {
+        let columns = Columns { glyph: GLYPH, age: 2 };
+        for (here, agent) in [
+            (false, Some("waiting")),
+            (false, Some("idle")),
+            (false, None),
+            (true, Some("waiting")),
+        ] {
+            let node = PaneNode {
+                session: "a".to_owned(),
+                id: 0,
+                label: "misc".to_owned(),
+                agent: agent.map(|word| Mark {
+                    status: Status::parse(Some(word)),
+                    age: Held::from_secs(4),
+                }),
+                here,
+                hits: vec![0, 2],
+            };
+            let line = leaf_line(&node, &columns, 20, 0);
+            assert_eq!(line.content().chars().skip(5).take(4).collect::<String>(), "misc");
+            let [m, i, s, c] = [5, 6, 7, 8].map(|at| line.colour_at(at));
+            assert_eq!((m, i), (s, c), "{agent:?}, here: {here}");
+            assert!(m.is_some(), "{agent:?}, here: {here}");
+            assert_ne!(m, i, "{agent:?}, here: {here}");
         }
     }
 
