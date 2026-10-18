@@ -30,6 +30,18 @@ pub fn is_placeholder(pane: &PaneInfo) -> bool {
         && pane.terminal_command.as_deref().is_some_and(|c| c.split(' ').eq(PLACEHOLDER))
 }
 
+/// The terminal you are in, of a tab's panes: the focused tiled one, or else
+/// the focused floating one. The picker and the menu float over the tab with
+/// the focus, and are no terminal.
+pub fn origin(panes: &[PaneInfo]) -> Option<u32> {
+    let focused = |floating: bool| {
+        panes.iter().find(move |p| {
+            p.is_focused && !p.is_plugin && !p.is_suppressed && p.is_floating == floating
+        })
+    };
+    focused(false).or_else(|| focused(true)).map(|p| p.id)
+}
+
 /// A live session and its panes, as the sidebar is handed it.
 pub struct Branch {
     pub name: String,
@@ -37,14 +49,16 @@ pub struct Branch {
     pub panes: Vec<Leaf>,
 }
 
-/// A terminal pane, the name of the tab that holds it, the directory it works
-/// in, as its session last said, and what is checked out there, as git last
-/// said. For the few seconds after a `cd` that git has yet to answer for the
-/// new directory, it is what was checked out in the old one.
+/// A terminal pane, the name of the tab that holds it and the id zellij keeps
+/// for that tab, the directory it works in, as its session last said, and
+/// what is checked out there, as git last said. For the few seconds after a
+/// `cd` that git has yet to answer for the new directory, it is what was
+/// checked out in the old one.
 pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
+    pub tab_id: Option<usize>,
     pub cwd: Option<String>,
     pub checkout: Option<Checkout>,
 }
@@ -82,10 +96,9 @@ pub fn leaves(
 ) -> Vec<Leaf> {
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
-        let tab = tabs
-            .iter()
-            .find(|tab| tab.position == *position)
-            .map_or("", |tab| tab.name.as_str());
+        let tab = tabs.iter().find(|tab| tab.position == *position);
+        let tab_id = tab.map(|tab| tab.tab_id);
+        let tab = tab.map_or("", |tab| tab.name.as_str());
         for pane in panes {
             if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
                 continue;
@@ -105,6 +118,7 @@ pub fn leaves(
                     id: pane.id,
                     title: pane.title.clone(),
                     tab: tab.to_owned(),
+                    tab_id,
                     cwd: cwd.map(str::to_owned),
                     checkout,
                 },
@@ -597,8 +611,8 @@ fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if is_named_tab(&leaf.tab) {
         return leaf.tab.clone();
     }
-    if let Some(agent) = agent.filter(|agent| !agent.cwd.is_empty()) {
-        return short_cwd(&agent.cwd);
+    if let Some(cwd) = agent.and_then(|agent| agent.cwd.as_deref()) {
+        return short_cwd(cwd);
     }
     if title.is_empty() {
         return format!("pane {}", leaf.id);
@@ -687,6 +701,7 @@ mod tests {
                     id: *id,
                     title: (*title).to_owned(),
                     tab: String::new(),
+                    tab_id: None,
                     cwd: None,
                     checkout: None,
                 })
@@ -834,6 +849,7 @@ mod tests {
             id: 7,
             title: title.to_owned(),
             tab: tab.to_owned(),
+            tab_id: None,
             cwd: None,
             checkout: None,
         };
@@ -854,6 +870,7 @@ mod tests {
             id: 7,
             title: title.to_owned(),
             tab: String::new(),
+            tab_id: None,
             cwd: cwd.map(str::to_owned),
             checkout: None,
         };
@@ -1214,6 +1231,7 @@ mod tests {
             id,
             title: "nvim".to_owned(),
             tab: tab.to_owned(),
+            tab_id: None,
             cwd: cwd.map(str::to_owned),
             checkout: branch
                 .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),

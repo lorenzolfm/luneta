@@ -9,6 +9,7 @@ use crate::fetch::Fetch;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
+use crate::menu::{Entry, Keys, Menu};
 use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
@@ -841,7 +842,8 @@ fn agent_line(
             line.pad_to(CARET + name_column + GAP + tag_column);
             line.gap(GAP);
             line.push(&age, LABEL);
-            let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
+            let cwd = row.cwd.as_deref().map(short_cwd).unwrap_or_default();
+            let (cwd, _) = truncate_left(&cwd, cwd_budget);
             line.pad_to(inner.saturating_sub(cwd.width()));
             line.push(&cwd, LABEL);
         },
@@ -969,6 +971,119 @@ fn keys_text(width: usize, keys: &[Key]) -> Painted {
 pub fn render_notice(text: &str, rows: usize, cols: usize) {
     if rows > 0 {
         print_at(&note_within(cols.saturating_sub(2), &Note::error(text)), 0, 0, cols);
+    }
+}
+
+/// What follows a group's name in the menu: it opens, as a folded session
+/// does in the sidebar.
+const GROUP: &str = "▸";
+
+/// The rows of the menu that are not its entries: the rule on top, a blank
+/// line and the keys under them, and the bottom.
+const MENU_CHROME: usize = 4;
+
+/// What the rule on top takes besides its title and its right: the corners,
+/// and the dashes and spaces around the two.
+const MENU_RULE: usize = 9;
+
+/// Room for the keys under the entries.
+const MIN_MENU: usize = 28;
+
+/// How wide the menu draws what is wrong with it.
+const MENU_NOTICE: usize = 48;
+
+/// The menu: the keys of the group open and what each does, under a rule that
+/// names the groups opened and says where an agent starts, and the keys that
+/// go back and close under them. Nothing once it asked zellij to close it.
+pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
+    let Some(shown) = menu.keys() else {
+        return;
+    };
+    let rect = Rect { x: 0, y: 0, width: cols, height: rows };
+    let Some(room) = rect.inner_height().checked_sub(1) else {
+        return;
+    };
+    let inner = rect.inner_width();
+    let (title, right, body, help) = match shown {
+        Ok(keys) => {
+            let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
+            (menu_title(keys), menu_where(menu), body, menu_help(inner, !keys.names().is_empty()))
+        },
+        Err(reason) => {
+            let body = wrap(reason, inner).iter().map(|text| menu_error(text, inner)).collect();
+            (TITLE.to_owned(), String::new(), body, menu_help(inner, false))
+        },
+    };
+    let mut lines: Vec<Painted> = body;
+    lines.truncate(room.saturating_sub(1));
+    lines.resize_with(room + 1, || blank_line(&rect));
+    draw(&rect, &title, &right, lines);
+    print_at(&help, PAD, rect.inner_y() + room, inner);
+}
+
+/// How big the menu draws: tall enough for the group open, and wide enough
+/// for its entries and its rule. No size once it asked zellij to close it.
+pub fn menu_size(menu: &Menu) -> Option<(usize, usize)> {
+    let size = match menu.keys()? {
+        Ok(keys) => {
+            let entries = keys.entries();
+            let widest = entries.iter().map(menu_entry_width).max().unwrap_or(0);
+            let rule = menu_title(keys).width() + menu_where(menu).width() + MENU_RULE;
+            let width = (widest + PAD * 2).max(rule).max(MIN_MENU);
+            (width, entries.len() + MENU_CHROME)
+        },
+        Err(reason) => (MENU_NOTICE, wrap(reason, MENU_NOTICE - PAD * 2).len() + MENU_CHROME),
+    };
+    Some(size)
+}
+
+fn menu_title(keys: &Keys) -> String {
+    let names = keys.names();
+    if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
+}
+
+/// Where an agent the menu starts works: the directory of the pane you came
+/// from, once zellij has said.
+fn menu_where(menu: &Menu) -> String {
+    menu.cwd().map(short_cwd).unwrap_or_default()
+}
+
+fn menu_entry_width(entry: &Entry) -> usize {
+    let does = match entry {
+        Entry::Group { name, .. } => name.width() + 1 + GROUP.width(),
+        Entry::Start { prompt, .. } => prompt.width(),
+    };
+    entry.key().to_string().width() + GAP + does
+}
+
+fn menu_line(entry: &Entry, inner: usize) -> Painted {
+    let mut line = Line::new();
+    line.push(&entry.key().to_string(), ACCENT);
+    line.gap(GAP);
+    let room = inner.saturating_sub(line.columns());
+    match entry {
+        Entry::Group { name, .. } => {
+            line.push(&truncate(name, room.saturating_sub(1 + GROUP.width())), LABEL);
+            line.gap(1);
+            line.push(GROUP, TAG);
+        },
+        Entry::Start { prompt, .. } => line.push(&truncate(prompt, room), NAME),
+    }
+    line.finish(inner)
+}
+
+fn menu_error(text: &str, inner: usize) -> Painted {
+    let mut line = Line::new();
+    line.push_error(text);
+    line.finish(inner)
+}
+
+fn menu_help(width: usize, opened: bool) -> Painted {
+    let close = ("<ESC>", "Close", "Close");
+    if opened {
+        keys_text(width, &[("<BS>", "Back", "Back"), close])
+    } else {
+        keys_text(width, &[close])
     }
 }
 
@@ -1440,6 +1555,7 @@ fn sidebar_help(width: usize) -> Painted {
             ("<ENTER>", "Go", "Go"),
             ("<←→>", "Fold", "Fold"),
             ("<n>", "Next", "Next"),
+            ("<m>", "Menu", "Menu"),
             ("<ESC>", "Back", "Back"),
             ("</>", "Search", "Search"),
         ],
@@ -2681,6 +2797,30 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The menu is as wide as its longest entry and its rule need, so that
+    /// no prompt in it is cut, in the group open or at the root.
+    #[test]
+    fn the_menu_is_wide_enough_for_every_entry_it_shows() {
+        let configuration = std::collections::BTreeMap::from([(
+            crate::menu::ENTRIES.to_owned(),
+            r#"c "Claude" { m "/make-illegal-states-unrepresentable"; t "/tigerstyle"; }"#
+                .to_owned(),
+        )]);
+        let mut menu = Menu::new(0, &configuration);
+        for opened in [false, true] {
+            let (width, height) = menu_size(&menu).expect("a size");
+            let keys = menu.keys().and_then(Result::ok).expect("a menu");
+            assert_eq!(height, keys.entries().len() + MENU_CHROME, "opened: {opened}");
+            for entry in keys.entries() {
+                let line = menu_line(entry, width - PAD * 2);
+                assert!(!line.content().contains('…'), "opened: {opened}: {}", line.content());
+            }
+            menu.key(&zellij_tile::prelude::KeyWithModifier::new(
+                zellij_tile::prelude::BareKey::Char('c'),
+            ));
         }
     }
 }

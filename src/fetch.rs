@@ -1,3 +1,4 @@
+#[derive(Debug, PartialEq, Eq)]
 pub enum Fetch<T> {
     Waiting,
     Ready(T),

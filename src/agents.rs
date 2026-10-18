@@ -98,7 +98,7 @@ impl<'a> Live<'a> {
 
     fn place(&self, agent: &Agent) -> Option<Seat> {
         self.places
-            .find(agent.pane, &agent.cwd, &agent.reported)
+            .find(agent.pane, agent.cwd.as_deref()?, &agent.reported)
             .map(|session| self.seat(session))
     }
 }
@@ -109,7 +109,8 @@ pub struct Agent {
     pane: u32,
     status: Status,
     age: Held,
-    cwd: String,
+    /// Where the agent works, when claude-ps says.
+    cwd: Option<String>,
 }
 
 #[expect(
@@ -125,7 +126,7 @@ pub struct AgentRow {
     pub pane: u32,
     pub status: Status,
     pub age: Held,
-    pub cwd: String,
+    pub cwd: Option<String>,
     pub shared: bool,
     /// The agent names a session that is still running, but its pane turned
     /// up in another, matched by its id and directory alone: where it sits is
@@ -482,7 +483,7 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
             pane,
             status: Status::parse(row.status.as_deref()),
             age: Held::from_secs(row.status_age),
-            cwd: row.cwd.unwrap_or_default(),
+            cwd: row.cwd.filter(|cwd| !cwd.is_empty()),
         });
     }
     Ok(agents)
