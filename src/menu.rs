@@ -347,6 +347,26 @@ struct Beside {
     cwd: String,
 }
 
+/// The terminal the floating menu was opened from, as far as zellij says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The terminal with the focus, in a tab with no floating terminal.
+    Sure(Beside),
+    /// The terminal with the focus, in a tab with a floating terminal. The
+    /// menu takes the floating focus from the pane you were in as it opens,
+    /// and zellij then says the pane under it has the focus: you came from
+    /// that pane, or from a floating one.
+    Guess(Beside),
+}
+
+impl Origin {
+    fn beside(&self) -> &Beside {
+        match self {
+            Origin::Sure(beside) | Origin::Guess(beside) => beside,
+        }
+    }
+}
+
 /// A session other than the menu's, and the tab in it, by its id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct There {
@@ -771,10 +791,10 @@ enum Phase {
     /// beside the pane you came from, as zellij last said: `Waiting` until it
     /// has, and `Failed` when what you came from is no terminal, or zellij
     /// cannot say where it works.
-    Choosing(Keys, Fetch<Beside>),
+    Choosing(Keys, Fetch<Origin>),
     /// A delete key that asks before it goes ahead, for the pane you came
     /// from.
-    Asking(Keys, Beside, Asked),
+    Asking(Keys, Origin, Asked),
     /// On your way to another session, and the session the menu is in ends
     /// once you are gone. Keys do nothing.
     Leaving(Leaving),
@@ -857,8 +877,8 @@ impl Menu {
     /// The directory an agent the menu starts works in, once the menu knows.
     pub fn cwd(&self) -> Option<&str> {
         match &self.phase {
-            Phase::Choosing(_, Fetch::Ready(beside)) | Phase::Asking(_, beside, _) => {
-                Some(&beside.cwd)
+            Phase::Choosing(_, Fetch::Ready(origin)) | Phase::Asking(_, origin, _) => {
+                Some(&origin.beside().cwd)
             },
             Phase::Choosing(..) | Phase::Leaving(_) | Phase::Wrong(_) | Phase::Done => None,
         }
@@ -980,9 +1000,12 @@ impl Menu {
     /// zellij says which pane you came from starts nothing. Says whether to
     /// draw.
     fn start(&mut self, prompt: &str) -> bool {
-        let Phase::Choosing(_, Fetch::Ready(beside)) = &self.phase else {
+        let Phase::Choosing(_, Fetch::Ready(origin)) = &self.phase else {
             return false;
         };
+        // Over a floating terminal, beside the pane under the menu, which you
+        // may not have come from.
+        let (Origin::Sure(beside) | Origin::Guess(beside)) = origin;
         let beside = beside.clone();
         let command = claude(prompt, self.branch(&beside.cwd));
         self.close();
@@ -996,39 +1019,39 @@ impl Menu {
     /// from closes nothing, and over a tab with a floating terminal, which
     /// may be the one you came from, no pane closes. Says whether to draw.
     fn delete(&mut self, key: char, scope: Scope) -> bool {
-        let Phase::Choosing(_, Fetch::Ready(beside)) = &self.phase else {
+        let Phase::Choosing(_, Fetch::Ready(origin)) = &self.phase else {
             return false;
         };
-        let then = self.plan(beside.pane, scope).map(|plan| Asked::then(key, scope, plan));
-        let Phase::Choosing(keys, Fetch::Ready(beside)) = std::mem::take(&mut self.phase) else {
+        let then = self.plan(origin, scope).map(|plan| Asked::then(key, scope, plan));
+        let Phase::Choosing(keys, Fetch::Ready(origin)) = std::mem::take(&mut self.phase) else {
             return false;
         };
-        self.then(keys, beside, then)
+        self.then(keys, origin, then)
     }
 
-    /// What the delete key for `scope` does to pane `id` you came from, as
-    /// zellij says it stands now, or why it does nothing: no pane closes over
-    /// a tab with a floating terminal, nor while what zellij said of the tabs
-    /// and of the panes disagrees on which tab is yours.
-    fn plan(&self, id: u32, scope: Scope) -> Result<Plan, String> {
-        if scope == Scope::Pane {
-            if self.tab_panes().is_none() {
-                return Err(BEHIND.to_owned());
-            }
-            if self.floats_a_terminal() {
-                return Err(UNSURE_PANE.to_owned());
-            }
+    /// What the delete key for `scope` does to the pane you came from, as
+    /// zellij says it stands now, or why it does nothing: no pane closes that
+    /// is a guess, nor while what zellij said of the tabs and of the panes
+    /// disagrees on which tab is yours. The session is the same whichever
+    /// pane you came from.
+    fn plan(&self, origin: &Origin, scope: Scope) -> Result<Plan, String> {
+        let beside = match (origin, scope) {
+            (Origin::Guess(_), Scope::Pane) => return Err(UNSURE_PANE.to_owned()),
+            (Origin::Sure(beside) | Origin::Guess(beside), _) => beside,
+        };
+        if scope == Scope::Pane && self.tab_panes().is_none() {
+            return Err(BEHIND.to_owned());
         }
-        self.subject(id).ok_or_else(|| NO_SESSION.to_owned())?.plan(scope)
+        self.subject(beside.pane).ok_or_else(|| NO_SESSION.to_owned())?.plan(scope)
     }
 
     /// Goes ahead with what a delete key does, asks first, or says why it
-    /// does nothing, for the pane `beside`. Says whether to draw.
-    fn then(&mut self, keys: Keys, beside: Beside, then: Result<Then, String>) -> bool {
+    /// does nothing, for the pane you came from. Says whether to draw.
+    fn then(&mut self, keys: Keys, origin: Origin, then: Result<Then, String>) -> bool {
         match then {
             Err(reason) => self.phase = Phase::Wrong(reason),
             Ok(Then::Go(act)) => return self.run(&act),
-            Ok(Then::Ask(asked)) => self.phase = Phase::Asking(keys, beside, asked),
+            Ok(Then::Ask(asked)) => self.phase = Phase::Asking(keys, origin, asked),
         }
         self.place();
         true
@@ -1056,19 +1079,19 @@ impl Menu {
     /// it does now, and asks again when that ends an agent at work. Says
     /// whether to draw.
     fn go_ahead(&mut self) -> bool {
-        let Phase::Asking(keys, beside, asked) = std::mem::take(&mut self.phase) else {
+        let Phase::Asking(keys, origin, asked) = std::mem::take(&mut self.phase) else {
             return false;
         };
-        let then = self.plan(beside.pane, asked.scope).map(|now| asked.yes(now));
-        self.then(keys, beside, then)
+        let then = self.plan(&origin, asked.scope).map(|now| asked.yes(now));
+        self.then(keys, origin, then)
     }
 
     /// Back to the keys, from a delete key that asked. Says whether to draw.
     fn back(&mut self) -> bool {
-        let Phase::Asking(keys, beside, _) = std::mem::take(&mut self.phase) else {
+        let Phase::Asking(keys, origin, _) = std::mem::take(&mut self.phase) else {
             return false;
         };
-        self.phase = Phase::Choosing(keys, Fetch::Ready(beside));
+        self.phase = Phase::Choosing(keys, Fetch::Ready(origin));
         self.place();
         true
     }
@@ -1164,22 +1187,32 @@ impl Menu {
         self.session = Some(session);
     }
 
+    /// Keeps the terminal you came from as zellij says, and whether that is a
+    /// guess. A pane that was a guess stays one: once a floating terminal you
+    /// may have come from closes, the pane under it is no surer.
     fn follow_origin(&mut self) -> bool {
         let pane = match self.origin_pane() {
             Fetch::Waiting => return false,
             Fetch::Ready(pane) => Some(pane),
             Fetch::Failed(_) => None,
         };
+        let floats = self.floats_a_terminal();
         let Phase::Choosing(_, origin) = &mut self.phase else {
             return false;
         };
-        if matches!(origin, Fetch::Ready(beside) if Some(beside.pane) == pane) {
-            return false;
-        }
-        let now = match pane {
-            None => Fetch::Failed(NO_PANE.to_owned()),
-            Some(pane) => match get_pane_cwd(PaneId::Terminal(pane)) {
-                Ok(cwd) => Fetch::Ready(Beside { pane, cwd: cwd.to_string_lossy().into_owned() }),
+        let was = match &*origin {
+            Fetch::Ready(was) if Some(was.beside().pane) == pane => Some(was),
+            Fetch::Ready(_) | Fetch::Waiting | Fetch::Failed(_) => None,
+        };
+        let guess = floats || matches!(was, Some(Origin::Guess(_)));
+        let came: fn(Beside) -> Origin = if guess { Origin::Guess } else { Origin::Sure };
+        let now = match (pane, was) {
+            (None, _) => Fetch::Failed(NO_PANE.to_owned()),
+            (Some(_), Some(was)) => Fetch::Ready(came(was.beside().clone())),
+            (Some(pane), None) => match get_pane_cwd(PaneId::Terminal(pane)) {
+                Ok(cwd) => {
+                    Fetch::Ready(came(Beside { pane, cwd: cwd.to_string_lossy().into_owned() }))
+                },
                 Err(error) => Fetch::Failed(format!(
                     "menu: zellij cannot say where pane {pane} works: {error}"
                 )),
@@ -1734,7 +1767,7 @@ mod tests {
     fn a_late_git_answer_for_another_directory_names_no_agent() {
         let mut menu = bound();
         let elo = Beside { pane: 2, cwd: "/w/elo".to_owned() };
-        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(elo));
+        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(Origin::Sure(elo)));
         // Which session it is in, which zellij answers on stdin.
         menu.session = Some("luneta".to_owned());
         menu.follow();
@@ -1758,11 +1791,11 @@ mod tests {
         let mut menu = bound();
         let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
         let itself = PaneInfo { is_plugin: true, is_floating: true, ..shell(0) };
-        let tab = vec![shell(2), shell(3), itself];
+        let tab = vec![PaneInfo { is_focused: true, ..shell(2) }, shell(3), itself];
         menu.panes = Some(PaneManifest { panes: HashMap::from([(0, tab)]) });
         menu.tabs = vec![TabInfo { position: 0, tab_id: 7, active: true, ..TabInfo::default() }];
         let elo = Beside { pane: 2, cwd: "/w/elo".to_owned() };
-        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(elo));
+        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(Origin::Sure(elo)));
         menu.session = Some("luneta".to_owned());
         menu.refuge = Some("elo".to_owned());
         if answered {
@@ -1829,7 +1862,7 @@ mod tests {
         let mut menu = bound_for_two(true);
         menu.panes = Some(tab(&[3]));
         let busy = Beside { pane: 3, cwd: "/w/elo".to_owned() };
-        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(busy));
+        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(Origin::Sure(busy)));
         menu.key(&char('d'));
         assert!(menu.key(&char('d')));
         assert_eq!(question(&menu), Some("Close its tab? 1 agent, 1 busy"));
@@ -1843,8 +1876,9 @@ mod tests {
     /// The menu takes the floating focus from the pane you were in as it
     /// opens, and zellij then says the pane under it has the focus: over a
     /// tab with a floating terminal, you may have come from either. `d d`
-    /// closes neither and says so. The session is the same either way, and
-    /// `d s` kills it.
+    /// closes neither and says so, and goes on doing so once the floating
+    /// terminal closes. The session is the same either way, and `d s` kills
+    /// it.
     #[test]
     fn over_a_floating_terminal_the_key_binding_s_menu_closes_no_pane() {
         let floating = || {
@@ -1854,13 +1888,22 @@ mod tests {
             if let Some(manifest) = &mut menu.panes {
                 manifest.panes.entry(0).or_default().push(terminal);
             }
+            menu.follow();
             menu
         };
+        let closes_none = |menu: &mut Menu| {
+            menu.key(&char('d'));
+            assert!(menu.key(&char('d')));
+            let Some(Shown::Wrong(said)) = menu.shown() else { panic!("no reason") };
+            assert!(said.contains("floating"), "{said}");
+        };
+        closes_none(&mut floating());
         let mut menu = floating();
-        menu.key(&char('d'));
-        assert!(menu.key(&char('d')));
-        let Some(Shown::Wrong(said)) = menu.shown() else { panic!("no reason") };
-        assert!(said.contains("floating"), "{said}");
+        if let Some(manifest) = &mut menu.panes {
+            manifest.panes.entry(0).or_default().retain(|pane| pane.id != 5);
+        }
+        menu.follow();
+        closes_none(&mut menu);
         let mut menu = floating();
         menu.key(&char('d'));
         menu.key(&char('s'));

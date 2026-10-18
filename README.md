@@ -255,8 +255,8 @@ pane's row, `d d` closes the pane; on a session's row, it kills the session. The
 floating menu does the same for the pane you are in, except in a tab with a
 floating pane: the menu takes the floating focus from the pane you were in as
 it opens, and zellij then says the pane under it has the focus, so luneta cannot
-tell which you came from. There `d d` closes neither and says so; `d s` still
-kills the session. A pane that is the last in
+tell which you came from. There `d d` closes neither and says so, and goes on
+doing so once the floating pane closes; `d s` still kills the session. A pane that is the last in
 its tab to hold it open closes the tab with it, so no tab is left with nothing
 in it but the sidebar's column; a pane another was opened in place of keeps the
 tab open, since zellij brings that pane back. A pane of another session closes
