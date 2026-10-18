@@ -52,6 +52,12 @@ const NO_ROW_PANE: &str =
 /// session it is in.
 const NO_SESSION: &str = "menu: zellij has not said which session this is; try again in a moment";
 
+/// What the floating menu says of `d d` over a tab with a floating terminal,
+/// which may be the pane you came from.
+const UNSURE_PANE: &str = "menu: luneta cannot tell whether you came from a floating pane of this \
+                           tab or from the pane under it, and closes neither; in the sidebar, d d \
+                           closes the row you are on";
+
 /// What a key with nothing under it starts.
 const CLAUDE: &str = "claude";
 
@@ -960,14 +966,19 @@ impl Menu {
     /// Closes the pane you came from, and its tab once nothing else holds the
     /// tab open, or kills its session, or asks first when that would end an
     /// agent at work. A key pressed before zellij says which pane you came
-    /// from closes nothing. Says whether to draw.
+    /// from closes nothing, and over a tab with a floating terminal, which
+    /// may be the one you came from, no pane closes. Says whether to draw.
     fn delete(&mut self, key: char, scope: Scope) -> bool {
         let Phase::Choosing(_, Fetch::Ready(beside)) = &self.phase else {
             return false;
         };
-        let plan = match self.subject(beside.pane) {
-            Some(subject) => subject.plan(scope),
-            None => Err(NO_SESSION.to_owned()),
+        let plan = if scope == Scope::Pane && self.floats_a_terminal() {
+            Err(UNSURE_PANE.to_owned())
+        } else {
+            match self.subject(beside.pane) {
+                Some(subject) => subject.plan(scope),
+                None => Err(NO_SESSION.to_owned()),
+            }
         };
         match plan.map(|plan| Asked::then(key, plan)) {
             Err(reason) => {
@@ -1144,14 +1155,24 @@ impl Menu {
     /// tab you are in holds, and `Failed` when that is no terminal with the
     /// focus.
     fn origin_pane(&self) -> Fetch<u32> {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.active) else {
-            return Fetch::Waiting;
-        };
-        let Some(panes) = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab.position))
-        else {
+        let Some(panes) = self.tab_panes() else {
             return Fetch::Waiting;
         };
         origin(panes).map_or_else(|| Fetch::Failed(NO_PANE.to_owned()), Fetch::Ready)
+    }
+
+    /// Whether the tab you are in has a floating terminal. The menu takes the
+    /// floating focus from the pane you were in as it opens, and zellij then
+    /// says the pane under it has the focus: you may have come from either.
+    fn floats_a_terminal(&self) -> bool {
+        let floating = |pane: &PaneInfo| pane.is_floating && !pane.is_plugin && !pane.is_suppressed;
+        self.tab_panes().is_some_and(|panes| panes.iter().any(floating))
+    }
+
+    /// The panes of the tab you are in, once zellij has said.
+    fn tab_panes(&self) -> Option<&[PaneInfo]> {
+        let tab = self.tabs.iter().find(|tab| tab.active)?;
+        self.panes.as_ref()?.panes.get(&tab.position).map(Vec::as_slice)
     }
 
     /// Stands the menu at the bottom right of the tab, as big as the group
@@ -1655,13 +1676,16 @@ mod tests {
         assert_eq!(menu.branch("/w/elo"), Some("feat/menu"));
     }
 
-    /// The key binding's menu, for pane 2 of session `luneta`, which shares
-    /// tab 7 with pane 3, with `elo` to go to before `luneta` ends, and
-    /// claude-ps saying a busy agent sits in pane 3, once `answered`.
+    /// The key binding's menu, floating over pane 2 of session `luneta`,
+    /// which shares tab 7 with pane 3, with `elo` to go to before `luneta`
+    /// ends, and claude-ps saying a busy agent sits in pane 3, once
+    /// `answered`.
     fn bound_for_two(answered: bool) -> Menu {
         let mut menu = bound();
         let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
-        menu.panes = Some(PaneManifest { panes: HashMap::from([(0, vec![shell(2), shell(3)])]) });
+        let itself = PaneInfo { is_plugin: true, is_floating: true, ..shell(0) };
+        let tab = vec![shell(2), shell(3), itself];
+        menu.panes = Some(PaneManifest { panes: HashMap::from([(0, tab)]) });
         menu.tabs = vec![TabInfo { position: 0, tab_id: 7, active: true, ..TabInfo::default() }];
         let elo = Beside { pane: 2, cwd: "/w/elo".to_owned() };
         menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(elo));
@@ -1715,6 +1739,33 @@ mod tests {
         menu.key(&char('d'));
         assert!(menu.key(&char('d')));
         assert_eq!(question(&menu), Some("Close the pane? luneta does not know its agents yet"));
+    }
+
+    /// The menu takes the floating focus from the pane you were in as it
+    /// opens, and zellij then says the pane under it has the focus: over a
+    /// tab with a floating terminal, you may have come from either. `d d`
+    /// closes neither and says so. The session is the same either way, and
+    /// `d s` kills it.
+    #[test]
+    fn over_a_floating_terminal_the_key_binding_s_menu_closes_no_pane() {
+        let floating = || {
+            let mut menu = bound_for_two(true);
+            let terminal =
+                PaneInfo { id: 5, is_selectable: true, is_floating: true, ..PaneInfo::default() };
+            if let Some(manifest) = &mut menu.panes {
+                manifest.panes.entry(0).or_default().push(terminal);
+            }
+            menu
+        };
+        let mut menu = floating();
+        menu.key(&char('d'));
+        assert!(menu.key(&char('d')));
+        let Some(Shown::Wrong(said)) = menu.shown() else { panic!("no reason") };
+        assert!(said.contains("floating"), "{said}");
+        let mut menu = floating();
+        menu.key(&char('d'));
+        menu.key(&char('s'));
+        assert_eq!(question(&menu), Some("Kill session luneta? 1 agent, 1 busy"));
     }
 
     /// In another session, zellij opens the pane in the agent's tab and its
