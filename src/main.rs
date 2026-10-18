@@ -429,6 +429,9 @@ impl ZellijPlugin for State {
                 }
             },
             Event::PaneUpdate(manifest) => {
+                if let Role::Sidebar(tree) = &mut self.role {
+                    tree.menu = tree.menu.take().and_then(|menu| menu.panes(&manifest));
+                }
                 self.panes = Some(manifest);
                 self.settle()
             },
@@ -1980,6 +1983,32 @@ mod tests {
                 focus(&mut state, false);
             }
             assert_eq!(menu_open(&state), None, "by click: {by_click}");
+        }
+    }
+
+    /// The menu closes with the pane of your own session it is for, as the
+    /// row does: zellij would open the agent beside the sidebar instead. A
+    /// pane of another session is none of the panes your session reports.
+    #[test]
+    fn the_menu_in_the_sidebar_closes_with_its_pane() {
+        let mut state = focused_sidebar();
+        state.menu_entries = Some(r#"c "Claude" { t "/tigerstyle"; }"#.to_owned());
+        state.branches[0].panes[0].cwd = Some("/w/a".to_owned());
+        state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+        state.rebuild_tree();
+        let panes = state.panes.clone().expect("the panes");
+        let mut closed = panes.clone();
+        closed.panes.values_mut().for_each(|tab| tab.retain(|pane| pane.id != 1));
+        // Pane 1 is of your own session, and pane 4 of `b`.
+        for (at, open) in [(1, false), (3, true)] {
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(at);
+            }
+            assert!(key(&mut state, BareKey::Char('c')));
+            assert!(menu_open(&state).is_some(), "row {at}");
+            state.update(Event::PaneUpdate(closed.clone()));
+            assert_eq!(menu_open(&state).is_some(), open, "row {at}");
+            state.update(Event::PaneUpdate(panes.clone()));
         }
     }
 

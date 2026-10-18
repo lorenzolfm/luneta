@@ -338,7 +338,7 @@ impl Target {
 
 /// The menu at the bottom of the sidebar, for the pane whose row was
 /// highlighted when a key of the menu opened it. The sidebar keeps it while it
-/// has the focus.
+/// has the focus, and while that pane is open.
 pub struct SidebarMenu {
     /// Its number among the menus the sidebar has opened, which the answer to
     /// an agent it starts in another session carries.
@@ -445,6 +445,18 @@ impl SidebarMenu {
             },
         };
         Some(SidebarMenu { number, stage })
+    }
+
+    /// Closes the menu once the pane an agent would start beside, in the
+    /// sidebar's own session, has closed: zellij would open the agent beside
+    /// the pane with the focus, which is the sidebar. None once it has.
+    pub fn panes(self, manifest: &PaneManifest) -> Option<Self> {
+        let Stage::Choosing(_, Target { beside, there: None, .. }) = &self.stage else {
+            return Some(self);
+        };
+        let pane = beside.pane;
+        let open = manifest.panes.values().flatten().any(|p| !p.is_plugin && p.id == pane);
+        open.then_some(self)
     }
 
     /// Goes to the session the agent started in, once zellij says it opened
