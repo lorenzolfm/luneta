@@ -277,12 +277,12 @@ pub struct Tree {
     handed: Option<Place>,
     /// Where the wheel left the view.
     scrolled: Option<Scrolled>,
-    /// The row the cursor was on when a close key closed it, and the row to
+    /// The row the cursor was on when a delete key closed it, and the row to
     /// go to once it is gone.
     closed: Option<Closed>,
 }
 
-/// A row a close key closed, and the first row after it that stays, or else
+/// A row a delete key closed, and the first row after it that stays, or else
 /// the last before it.
 struct Closed {
     row: Place,
@@ -334,7 +334,7 @@ impl Tree {
     /// menu, which is for the row the cursor was on, but one that takes the
     /// client out of the session: the focus leaves with the client.
     ///
-    /// The row the cursor was on when a close key closed it hands the cursor
+    /// The row the cursor was on when a delete key closed it hands the cursor
     /// to the row after it, once it is gone.
     ///
     /// The row the cursor is on when `follow` comes is kept for the picker,
@@ -1238,7 +1238,7 @@ mod tests {
         assert_eq!(drawn(&tree), ["▾ a", "  - x"]);
     }
 
-    /// Once what a close key closed is gone, the cursor is on the row after
+    /// Once what a delete key closed is gone, the cursor is on the row after
     /// it, or else the one before, and not back at the top: a pane's row, a
     /// tab's panes, or a whole session. Moved away first, it stays where it
     /// was moved.

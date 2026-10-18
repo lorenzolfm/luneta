@@ -989,7 +989,7 @@ const MENU_RULE: usize = 9;
 /// Room for the keys under the entries.
 const MIN_MENU: usize = 28;
 
-/// Room for the keys under what a close key asks, spelled out.
+/// Room for the keys under what a delete key asks, spelled out.
 const MIN_ASKING: usize = 35;
 
 /// How wide the menu draws what is wrong with it.
@@ -1006,7 +1006,7 @@ struct MenuParts {
 }
 
 /// The parts of a menu `inner` wide: the keys of the group open and what each
-/// does, what a close key asks before it goes ahead, where you are going on
+/// does, what a delete key asks before it goes ahead, where you are going on
 /// your way out of the session, or what is wrong.
 fn menu_parts(shown: Shown, inner: usize) -> MenuParts {
     let lines = |text: &str, line: fn(&str, usize) -> Painted| -> Vec<Painted> {
@@ -1065,7 +1065,7 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
 }
 
 /// How big the menu draws: tall enough for what it shows, and wide enough for
-/// the entries of the group open and its rule, whatever a close key asks. No
+/// the entries of the group open and its rule, whatever a delete key asks. No
 /// size once it asked zellij to close it.
 pub fn menu_size(menu: &Menu) -> Option<(usize, usize)> {
     let shown = menu.shown()?;
@@ -2966,16 +2966,8 @@ mod tests {
     /// `/w/misc/unnamed`.
     fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
         let cwd = Some("/w/misc/unnamed".to_owned());
-        let row = crate::menu::Row { pane: 0, cwd, branch: None, there: None };
-        let pane = crate::close::Pane {
-            seat: crate::agents::Seat::Here("misc".to_owned()),
-            id: 0,
-            tab: None,
-            alone: false,
-            agents: Fetch::Ready(Vec::new()),
-            refuge: None,
-        };
-        SidebarMenu::open(Some(entries), row, key, &pane, 1, 0).0
+        let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
+        SidebarMenu::open(Some(entries), row, key, 1, 0)
     }
 
     /// The menu's lines in `lines` lines of a sidebar `cols` wide, the keys
@@ -3060,11 +3052,11 @@ mod tests {
         assert!(picture[1].starts_with(" menu: \"t\" takes one string"), "{picture:?}");
     }
 
-    /// The floating menu is wide enough, while a close key asks, to spell out
+    /// The floating menu is wide enough, while a delete key asks, to spell out
     /// the keys that answer it, however narrow the group's keys are.
     #[test]
     fn the_keys_that_answer_a_close_key_are_spelled_out() {
-        let keys = Keys::parse(r#"d "Delete" { p close="pane"; }"#).expect("a menu");
+        let keys = Keys::new(None, crate::close::Scope::Pane).expect("a menu");
         let asking = Shown::Asking(&keys, "Close its tab? 2 agents, 1 busy");
         let help = menu_parts(asking, MIN_ASKING - PAD * 2).help;
         assert!(help.content().contains("<y> Yes"), "{}", help.content());

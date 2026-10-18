@@ -69,7 +69,7 @@ enum Role {
     Picker,
     Sidebar(Tree),
     Dock(dock::Dock),
-    /// Boxed: the menu keeps what claude-ps says, for a close key to ask
+    /// Boxed: the menu keeps what claude-ps says, for a delete key to ask
     /// first, and is larger than every other role.
     Menu(Box<menu::Menu>),
     /// A `mode` luneta does not know. It says so, and does nothing else.
@@ -1005,10 +1005,10 @@ impl State {
     }
 
     /// Closes the pane the highlighted agent sits in, and with it its tab when
-    /// nothing else holds the tab open, as the menu's close key for a pane
-    /// does. The plugin closes a pane of its own session, and `zellij` one of
-    /// another, whose answer comes later. A pane that is only a guess may hold
-    /// something else, and stays.
+    /// nothing else holds the tab open, as the menu's `d d` does. The plugin
+    /// closes a pane of its own session, and `zellij` one of another, whose
+    /// answer comes later. A pane that is only a guess may hold something
+    /// else, and stays.
     fn kill_agent_pane(&mut self) {
         let Some(row) = self.agents.selected_row() else {
             return;
@@ -1018,14 +1018,14 @@ impl State {
             self.error = Some(format!("kill \"{label}\": luneta is not sure which pane it sits in"));
             return;
         }
-        let pane = close::Pane::new(
+        let subject = close::Subject::new(
             row.seat.clone(),
-            row.pane,
+            Some(row.pane),
             &self.leaves(row.seat.session()),
             Fetch::Waiting,
             None,
         );
-        if let Ok(plan) = pane.plan(close::Scope::Pane) {
+        if let Ok(plan) = subject.plan(close::Scope::Pane) {
             plan.act.run(BTreeMap::from([
                 (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
                 (agents::LABEL_KEY.to_owned(), row.label()),
@@ -1262,10 +1262,10 @@ impl State {
         let lapsed = |menu: &SidebarMenu| {
             menu.started_at().is_some_and(|at| frame.wrapping_sub(at) > ON_THE_WAY)
         };
-        let pane = self.menu_pane();
+        let subject = self.menu_subject();
         if let Role::Sidebar(tree) = &mut self.role {
             if let Some(menu) = tree.menu.take().filter(|menu| !lapsed(menu)) {
-                let (menu, closed) = menu.key(key, pane.as_ref(), frame);
+                let (menu, closed) = menu.key(key, subject.as_ref(), frame);
                 tree.menu = menu;
                 if let Some(act) = closed {
                     tree.closing(&act);
@@ -1316,30 +1316,23 @@ impl State {
         drawn || unscrolled
     }
 
-    /// Opens the menu at the bottom of the sidebar for the highlighted pane,
-    /// on the group its `key` opens, or on the first: an agent it starts opens
-    /// beside that pane, in the directory it works in, and a key that closes
-    /// something closes that pane, its tab or its session. A key the menu has
-    /// not does nothing. Says whether to draw.
+    /// Opens the menu at the bottom of the sidebar for the highlighted row, on
+    /// the group its `key` opens, or on the first: an agent it starts opens
+    /// beside that row's pane, in the directory it works in, and its Delete
+    /// group closes the pane or kills the session. A key the menu has not
+    /// does nothing. Says whether to draw.
     fn open_menu(&mut self, key: Option<char>) -> bool {
         let Some(row) = self.menu_row() else {
             return false;
         };
-        let session = row.there.as_ref().map(|there| there.session.clone());
-        let Some(pane) = self.closing(row.pane, session.as_deref()) else {
-            return false;
-        };
         self.menus = self.menus.wrapping_add(1);
         let entries = self.menu_entries.as_deref();
-        let (menu, closed) = SidebarMenu::open(entries, row, key, &pane, self.menus, self.frame);
+        let menu = SidebarMenu::open(entries, row, key, self.menus, self.frame);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         tree.menu = menu;
-        if let Some(act) = &closed {
-            tree.closing(act);
-        }
-        tree.menu.is_some() || closed.is_some()
+        tree.menu.is_some()
     }
 
     /// While the menu takes the client out of the session, which a key of it
@@ -1356,9 +1349,9 @@ impl State {
         true
     }
 
-    /// The pane the open menu is for, as a key of it closes the pane, its tab
-    /// or its session.
-    fn menu_pane(&self) -> Option<close::Pane> {
+    /// What the open menu is for, as a key of it deletes the pane or the
+    /// session.
+    fn menu_subject(&self) -> Option<close::Subject> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
         };
@@ -1366,11 +1359,11 @@ impl State {
         self.closing(pane, session)
     }
 
-    /// `pane`, of `session` or of the session you are in, as a key of the menu
-    /// closes it, its tab or its session: its tab, whether anything else holds
-    /// the tab open, the agents of its session, and the session to go to
-    /// before the session you are in is killed.
-    fn closing(&self, pane: u32, session: Option<&str>) -> Option<close::Pane> {
+    /// `pane` of `session` or of the session you are in, or that session's
+    /// row with no `pane`, as a key of the menu deletes it: the pane's tab,
+    /// whether anything else holds the tab open, the agents of its session,
+    /// and the session to go to before the session you are in is killed.
+    fn closing(&self, pane: Option<u32>, session: Option<&str>) -> Option<close::Subject> {
         let current = self.matches.current_session.as_deref();
         let name = session.or(current)?;
         let seat = if Some(name) == current {
@@ -1382,20 +1375,26 @@ impl State {
         let leaves = branch.map_or(&[][..], |branch| branch.panes.as_slice());
         let agents = close::agents_of(&self.agents, name, leaves);
         let others = self.sessions.live.iter().map(|other| (other.name.as_str(), other.age));
-        Some(close::Pane::new(seat, pane, leaves, agents, close::refuge(others)))
+        Some(close::Subject::new(seat, pane, leaves, agents, close::refuge(others)))
     }
 
-    /// The highlighted pane, for the menu: the directory it works in, as its
-    /// session says or else as its agent does, the branch checked out there,
-    /// and when that is another session, its session and its tab, and the
-    /// pane you came from, for the menu to hand the focus back to before it
-    /// goes there. A session's row has no pane to open a menu for.
+    /// The highlighted row, for the menu: its pane, the directory it works
+    /// in, as its session says or else as its agent does, the branch checked
+    /// out there, and when that is another session, its session and its tab,
+    /// and the pane you came from, for the menu to hand the focus back to
+    /// before it goes there. A session's row has its session alone.
     fn menu_row(&self) -> Option<menu::Row> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
         };
-        let Some(Place::Pane(session, pane)) = tree.rows.selected_row().map(Node::place) else {
-            return None;
+        let current = self.matches.current_session.as_deref();
+        let (session, pane) = match tree.rows.selected_row().map(Node::place)? {
+            Place::Pane(session, pane) => (session, pane),
+            Place::Session(session) => {
+                let here = current == Some(session.as_str());
+                let there = (!here).then_some(There { session, tab: None, back: self.here });
+                return Some(menu::Row { pane: None, cwd: None, branch: None, there });
+            },
         };
         let leaf = self
             .branches
@@ -1408,10 +1407,10 @@ impl State {
             .and_then(|leaf| leaf.cwd.clone())
             .or_else(|| agent.and_then(|row| row.cwd.clone()));
         let branch = leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.clone());
-        let here = self.matches.current_session.as_deref() == Some(session.as_str());
+        let here = current == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
         let there = (!here).then_some(There { session, tab, back: self.here });
-        Some(menu::Row { pane, cwd, branch, there })
+        Some(menu::Row { pane: Some(pane), cwd, branch, there })
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -1941,7 +1940,7 @@ mod tests {
     /// A pane's row hands the menu its pane: one of your own session starts
     /// its agent here, one of another session there, in the pane's tab. The
     /// directory is the pane's, as its session says, and the branch the one
-    /// checked out there. A session's row has no pane.
+    /// checked out there. A session's row has its session alone, to delete.
     #[test]
     fn the_menu_a_row_opens_starts_its_agent_beside_that_pane() {
         let mut state = focused_sidebar();
@@ -1958,10 +1957,12 @@ mod tests {
             branch: branch.map(str::to_owned),
             there,
         };
+        let b = There { session: "b".to_owned(), tab: None, back: Some(1) };
         for (at, expected) in [
-            (0, None),
-            (1, Some(row(1, None, None, None))),
-            (3, Some(row(4, Some("/w/b"), Some("feat/menu"), Some(there)))),
+            (0, Some(row(None, None, None, None))),
+            (1, Some(row(Some(1), None, None, None))),
+            (2, Some(row(None, None, None, Some(b)))),
+            (3, Some(row(Some(4), Some("/w/b"), Some("feat/menu"), Some(there)))),
         ] {
             if let Role::Sidebar(tree) = &mut state.role {
                 tree.rows.select(at);
@@ -1987,8 +1988,8 @@ mod tests {
     /// A key of the menu opens it at the bottom of the sidebar for the row
     /// the cursor is on, and the menu takes every key until it closes. A key
     /// the menu has not is the sidebar's, and so is a key the sidebar has,
-    /// which `m` opens the menu for. A session's row has no pane to open it
-    /// for.
+    /// which `m` opens the menu for. A session's row opens it too, for the
+    /// session.
     #[test]
     fn a_key_of_the_menu_opens_it_in_the_sidebar_and_takes_every_key() {
         let mut state = focused_sidebar();
@@ -1999,8 +2000,9 @@ mod tests {
             let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
             tree.rows.selected()
         };
-        assert!(!key(&mut state, BareKey::Char('c')));
-        assert_eq!(menu_open(&state), None);
+        assert!(key(&mut state, BareKey::Char('c')));
+        assert_eq!(menu_open(&state), Some(vec!["Claude"]));
+        assert!(key(&mut state, BareKey::Esc));
         if let Role::Sidebar(tree) = &mut state.role {
             tree.rows.select(3);
         }
@@ -2025,19 +2027,19 @@ mod tests {
         assert_eq!(menu_open(&state), Some(vec![]));
     }
 
-    /// A key of the menu that closes the highlighted pane closes it: one of
+    /// `d d` closes the highlighted pane, with no menu of yours: one of
     /// another session by a command, which the menu waits on. Once the pane
     /// is gone, the cursor is on the row before it, and not back at the top.
     #[test]
-    fn a_close_key_in_the_sidebar_closes_the_highlighted_pane() {
+    fn d_d_in_the_sidebar_closes_the_highlighted_pane() {
         let mut state = focused_sidebar();
-        state.menu_entries = Some(r#"d "Delete" { p close="pane"; }"#.to_owned());
+        state.menu_entries = None;
         state.agents.ingest(Some(0), b"[]", b"");
         if let Role::Sidebar(tree) = &mut state.role {
             tree.rows.select(3);
         }
         assert!(key(&mut state, BareKey::Char('d')));
-        assert!(key(&mut state, BareKey::Char('p')));
+        assert!(key(&mut state, BareKey::Char('d')));
         assert_eq!(menu_open(&state), Some(vec!["Delete"]));
         let closed = BTreeMap::from([
             (agents::CONTEXT_KEY.to_owned(), menu::CLOSING_VALUE.to_owned()),
@@ -2051,31 +2053,36 @@ mod tests {
         assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Session("b".to_owned())));
     }
 
-    /// `s` on a pane of the session you are in goes to another session first,
-    /// and the menu outlasts the focus on the way, to kill the session once
-    /// the client is gone. With no other session, it says so.
+    /// `d s` on a pane of the session you are in, and `d d` on its row, go to
+    /// another session first, and the menu outlasts the focus on the way, to
+    /// kill the session once the client is gone. With no other session, it
+    /// says so.
     #[test]
-    fn closing_the_session_you_are_in_goes_to_another_first() {
-        for others in [false, true] {
+    fn deleting_the_session_you_are_in_goes_to_another_first() {
+        for (others, row, then) in [(false, 1, 's'), (true, 1, 's'), (false, 0, 'd'), (true, 0, 'd')]
+        {
             let mut state = focused_sidebar();
-            state.menu_entries = Some(r#"s close="session""#.to_owned());
             state.agents.ingest(Some(0), b"[]", b"");
             if others {
                 state.sessions.live =
                     vec![Session { name: "b".to_owned(), age: Age::from_secs(1) }];
             }
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(1);
+                tree.rows.select(row);
             }
-            assert!(key(&mut state, BareKey::Char('s')), "others: {others}");
+            let case = format!("others: {others}, row {row}, d {then}");
+            assert!(key(&mut state, BareKey::Char('d')), "{case}");
+            assert!(key(&mut state, BareKey::Char(then)), "{case}");
             if others {
                 focus(&mut state, false);
             }
             let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
             match tree.menu.as_ref().and_then(SidebarMenu::shown) {
-                Some(Shown::Leaving(to)) => assert!(others && to == "b"),
-                Some(Shown::Wrong(said)) => assert!(!others && said.contains("only session")),
-                _ => panic!("others: {others}: neither leaving nor wrong"),
+                Some(Shown::Leaving(to)) => assert!(others && to == "b", "{case}"),
+                Some(Shown::Wrong(said)) => {
+                    assert!(!others && said.contains("only session"), "{case}");
+                },
+                _ => panic!("{case}: neither leaving nor wrong"),
             }
         }
     }

@@ -5,16 +5,16 @@
 //! group, the keys of the group. The menu shows the keys of the group open and
 //! what each does. A key with nothing under it starts Claude Code on its
 //! prompt, in a pane of its own beside a pane, in the directory that pane
-//! works in, or, with `close`, closes that pane, its tab or its session. In
-//! the sidebar, a key of the menu opens it at the bottom of the sidebar, for
-//! the pane whose row is highlighted. `mode "menu"` makes the plugin the menu
-//! for the pane you came from, floating at the bottom right of the tab you are
-//! in.
+//! works in. Every menu has luneta's own Delete group besides, under `d`,
+//! which closes that pane or kills its session. In the sidebar, a key of the
+//! menu opens it at the bottom of the sidebar, for the row highlighted.
+//! `mode "menu"` makes the plugin the menu for the pane you came from,
+//! floating at the bottom right of the tab you are in.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use kdl::{KdlDocument, KdlIdentifier, KdlNode};
+use kdl::{KdlDocument, KdlNode};
 use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentSet, Live, Seat};
@@ -31,25 +31,24 @@ use crate::tree::{self, origin};
 /// which zellij hands over as their KDL.
 pub const ENTRIES: &str = "menu";
 
-/// What a key that closes something names it by: `close="pane"`, `"tab"` or
-/// `"session"`.
-const CLOSE: &str = "close";
-
-/// What a menu with no entries says.
-const NO_ENTRIES: &str = "menu: no keys to show; give mode \"menu\" a menu { … } of them";
-
-/// What the sidebar's menu says with no entries: the sidebar has the keys of
-/// the dock that opened it, and a dock loaded by its location has none of the
-/// alias's.
-const NO_SIDEBAR_ENTRIES: &str =
-    "menu: the sidebar has no keys to show; load the dock by the alias that has your menu";
+/// The key of luneta's own Delete group, its name, and its keys: one deletes
+/// what the menu is for, the other its session.
+const DELETE: char = 'd';
+const DELETE_NAME: &str = "Delete";
+const DELETE_ROW: char = 'd';
+const DELETE_SESSION: char = 's';
 
 /// What a menu says that has no pane to start an agent beside, or to close:
 /// the pane you opened it from is no terminal, as the sidebar is not.
 const NO_PANE: &str = "menu: the pane you are in is no terminal, to start an agent beside or to \
                        close; in the sidebar, the menu's keys open it for the row you are on";
 
-/// What the floating menu says of a close key when zellij has not said which
+/// What the sidebar's menu says of a key that starts an agent, on a session's
+/// row.
+const NO_ROW_PANE: &str =
+    "menu: a session's row has no pane to start an agent beside; highlight one of its panes";
+
+/// What the floating menu says of a delete key when zellij has not said which
 /// session it is in.
 const NO_SESSION: &str = "menu: zellij has not said which session this is; try again in a moment";
 
@@ -78,7 +77,8 @@ pub enum Entry {
     Group { key: char, name: String, entries: Vec<Entry> },
     /// A key that starts an agent on a prompt.
     Start { key: char, prompt: String },
-    /// A key that closes the pane the menu is for, its tab or its session.
+    /// A key of the Delete group: closes the pane the menu is for, or kills
+    /// its session.
     Close { key: char, scope: Scope },
 }
 
@@ -97,7 +97,7 @@ pub enum Pressed {
     Moved,
     /// Starts an agent on the prompt.
     Start(String),
-    /// Closes the pane the menu is for, its tab or its session, by `key`.
+    /// Closes the pane the menu is for, or kills its session, by `key`.
     Delete { key: char, scope: Scope },
     /// Closes the menu.
     Close,
@@ -113,12 +113,34 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// The entries, from the KDL zellij hands over: a node for each key, its
-    /// one string the prompt the key starts an agent on, or the name of the
-    /// group its children are, or its `close` what it closes.
-    pub fn parse(text: &str) -> Result<Self, String> {
-        let document: KdlDocument = text.parse().map_err(|error| format!("menu: {error}"))?;
-        Ok(Keys { root: entries(&document, "")?, open: Vec::new() })
+    /// The entries, from the KDL zellij hands over if it hands any: a node
+    /// for each key, its one string the prompt the key starts an agent on, or
+    /// the name of the group its children are. luneta's Delete group comes
+    /// after them: `d d` deletes what the menu is for, as `row` says, and
+    /// `d s` kills its session. A key of yours can take neither.
+    pub fn new(configured: Option<&str>, row: Scope) -> Result<Self, String> {
+        let mut root = match configured {
+            Some(text) => {
+                let document: KdlDocument =
+                    text.parse().map_err(|error| format!("menu: {error}"))?;
+                entries(&document, "")?
+            },
+            None => Vec::new(),
+        };
+        if root.iter().any(|entry| entry.key() == DELETE) {
+            return Err(format!(
+                "menu: \"{DELETE}\" is luneta's, for its Delete group; give your key another"
+            ));
+        }
+        root.push(Entry::Group {
+            key: DELETE,
+            name: DELETE_NAME.to_owned(),
+            entries: vec![
+                Entry::Close { key: DELETE_ROW, scope: row },
+                Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
+            ],
+        });
+        Ok(Keys { root, open: Vec::new() })
     }
 
     /// The groups opened, each its name and its entries.
@@ -142,18 +164,6 @@ impl Keys {
     /// The names of the groups opened, the first one first.
     pub fn names(&self) -> Vec<&str> {
         self.trail().into_iter().map(|(name, _)| name).collect()
-    }
-
-    /// Whether any key, in any group, closes something.
-    fn closes_anything(&self) -> bool {
-        fn closes(entries: &[Entry]) -> bool {
-            entries.iter().any(|entry| match entry {
-                Entry::Close { .. } => true,
-                Entry::Group { entries, .. } => closes(entries),
-                Entry::Start { .. } => false,
-            })
-        }
-        closes(&self.root)
     }
 
     /// What `key` does: a key the group open shows opens its group, starts
@@ -197,7 +207,7 @@ fn closes(key: &KeyWithModifier) -> bool {
     }
 }
 
-/// What a key says to a close key that asks before it goes ahead.
+/// What a key says to a delete key that asks before it goes ahead.
 #[derive(Debug, PartialEq, Eq)]
 enum Answer {
     Yes,
@@ -206,7 +216,7 @@ enum Answer {
     Nothing,
 }
 
-/// `y`, or the close key `asked` again, goes ahead; `n` and `Backspace` go
+/// `y`, or the delete key `asked` again, goes ahead; `n` and `Backspace` go
 /// back to the keys; `Esc` closes the menu.
 fn answer(key: &KeyWithModifier, asked: char) -> Answer {
     if closes(key) {
@@ -222,7 +232,7 @@ fn answer(key: &KeyWithModifier, asked: char) -> Answer {
     }
 }
 
-/// A close key that asks before it goes ahead: the key, which goes ahead
+/// A delete key that asks before it goes ahead: the key, which goes ahead
 /// pressed again, what it does, and what it asks.
 struct Asked {
     key: char,
@@ -230,7 +240,7 @@ struct Asked {
     question: String,
 }
 
-/// What a close key does once it knows what it closes: ask first, or go
+/// What a delete key does once it knows what it closes: ask first, or go
 /// ahead.
 enum Then {
     Ask(Asked),
@@ -251,7 +261,7 @@ impl Asked {
 pub enum Shown<'a> {
     /// The keys of the group open.
     Keys(&'a Keys),
-    /// What a close key asks before it goes ahead, in the group open.
+    /// What a delete key asks before it goes ahead, in the group open.
     Asking(&'a Keys, &'a str),
     /// The session you are on your way to, which the session you leave ends
     /// after.
@@ -261,7 +271,8 @@ pub enum Shown<'a> {
 }
 
 /// The entries of `document`, the children of the group `path` names, as the
-/// keys pressed to open it.
+/// keys pressed to open it. A group has keys; the menu itself may have none of
+/// yours, and has luneta's.
 fn entries(document: &KdlDocument, path: &str) -> Result<Vec<Entry>, String> {
     let mut entries: Vec<Entry> = Vec::new();
     for node in document.nodes() {
@@ -271,11 +282,9 @@ fn entries(document: &KdlDocument, path: &str) -> Result<Vec<Entry>, String> {
         }
         entries.push(entry);
     }
-    if entries.is_empty() {
-        return Err(match path.trim_end() {
-            "" => NO_ENTRIES.to_owned(),
-            group => format!("menu: no keys under \"{group}\""),
-        });
+    let group = path.trim_end();
+    if entries.is_empty() && !group.is_empty() {
+        return Err(format!("menu: no keys under \"{group}\""));
     }
     Ok(entries)
 }
@@ -286,34 +295,8 @@ fn entry(node: &KdlNode, path: &str) -> Result<Entry, String> {
     let (Some(key), None) = (chars.next(), chars.next()) else {
         return Err(format!("menu: \"{path}{name}\" is no key; a key is one character"));
     };
-    let mut strings = Vec::new();
-    let mut close = None;
-    for entry in node.entries() {
-        match entry.name().map(KdlIdentifier::value) {
-            None => strings.push(entry.value()),
-            Some(CLOSE) => close = Some(entry.value()),
-            Some(other) => {
-                return Err(format!(
-                    "menu: \"{path}{key}\" has no {other}=; a key takes one string, or \
-                     close=\"pane\", \"tab\" or \"session\""
-                ));
-            },
-        }
-    }
-    if let Some(value) = close {
-        let Some(scope) = value.as_string().and_then(Scope::parse) else {
-            return Err(format!(
-                "menu: \"{path}{key}\" closes {value}; a key closes \"pane\", \"tab\" or \
-                 \"session\""
-            ));
-        };
-        if !strings.is_empty() || node.children().is_some() {
-            return Err(format!("menu: \"{path}{key}\" closes something, and takes nothing else"));
-        }
-        return Ok(Entry::Close { key, scope });
-    }
-    let text = match strings.as_slice() {
-        [only] => only.as_string().map(str::trim),
+    let text = match node.entries() {
+        [only] if only.name().is_none() => only.value().as_string().map(str::trim),
         _ => None,
     };
     let Some(text) = text.filter(|text| !text.is_empty()) else {
@@ -418,22 +401,24 @@ fn opened(stdout: &[u8]) -> Option<u32> {
     String::from_utf8_lossy(stdout).trim().strip_prefix("terminal_")?.parse().ok()
 }
 
-/// A row of the sidebar, for its menu: the pane an agent starts beside, the
-/// directory it works in and the branch checked out there, as far as the
-/// sidebar knows, and when it is in another session, the session, its tab,
-/// and the pane to hand the focus back to before going there.
+/// A row of the sidebar, for its menu: the pane an agent starts beside, none
+/// on a session's row, the directory it works in and the branch checked out
+/// there, as far as the sidebar knows, and when it is in another session, the
+/// session, its tab, and the pane to hand the focus back to before going
+/// there.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Row {
-    pub pane: u32,
+    pub pane: Option<u32>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub there: Option<There>,
 }
 
-/// What the sidebar's menu is for: a row's pane, in the sidebar's own session
-/// or `there`, where an agent starts beside it, and what a close key closes.
+/// What the sidebar's menu is for: a row's pane, or none on a session's row,
+/// in the sidebar's own session or `there`, where an agent starts beside it,
+/// and what the Delete group deletes.
 struct Target {
-    pane: u32,
+    pane: Option<u32>,
     cwd: Option<String>,
     branch: Option<String>,
     there: Option<There>,
@@ -445,15 +430,18 @@ impl Target {
     /// own session the pane opens at once. Another session opens it itself,
     /// and the menu, with `keys` on show, waits for zellij to say it has. A
     /// pane the sidebar does not know the directory of yet starts none,
-    /// rather than one wherever zellij runs.
+    /// rather than one wherever zellij runs, and a session's row has no pane.
     fn start(self, keys: Keys, prompt: &str, menu: u64, frame: u64) -> Stage {
+        let Some(pane) = self.pane else {
+            return wrong(NO_ROW_PANE.to_owned());
+        };
         let Some(cwd) = self.cwd else {
             return wrong(format!(
-                "menu: the sidebar does not know yet where pane {} works; try again in a moment",
-                self.pane
+                "menu: the sidebar does not know yet where pane {pane} works; try again in a \
+                 moment"
             ));
         };
-        let beside = Beside { pane: self.pane, cwd };
+        let beside = Beside { pane, cwd };
         let command = claude(prompt, self.branch.as_deref());
         let Some(there) = self.there else {
             start_here(&command, &beside);
@@ -471,10 +459,10 @@ impl Target {
         Stage::Waiting(keys, Wait::Start(beside, there))
     }
 
-    /// Asks zellij for what a close key closes, for the menu numbered `menu`,
-    /// with what that is. A pane or a tab of another session leaves the menu
-    /// waiting for its answer, and the session you are in leaves it showing
-    /// where you are going. No stage once the menu is done.
+    /// Asks zellij for what a delete key deletes, for the menu numbered
+    /// `menu`, with what that is. A pane or a tab of another session leaves
+    /// the menu waiting for its answer, and the session you are in leaves it
+    /// showing where you are going. No stage once the menu is done.
     fn close(self, keys: Keys, act: Act, menu: u64) -> (Option<Stage>, Option<Act>) {
         let context = BTreeMap::from([
             (CONTEXT_KEY.to_owned(), CLOSING_VALUE.to_owned()),
@@ -490,8 +478,8 @@ impl Target {
     }
 }
 
-/// The menu at the bottom of the sidebar, for the pane whose row was
-/// highlighted when a key of the menu opened it. The sidebar keeps it while it
+/// The menu at the bottom of the sidebar, for the row highlighted when a key
+/// of the menu opened it: a pane, or a session. The sidebar keeps it while it
 /// has the focus, and while that pane is open.
 pub struct SidebarMenu {
     /// Its number among the menus the sidebar has opened, which the answer to
@@ -501,13 +489,13 @@ pub struct SidebarMenu {
 }
 
 enum Stage {
-    /// The keys of the group open, pressed one after another, for a pane.
+    /// The keys of the group open, pressed one after another, for a row.
     Choosing(Keys, Target),
-    /// A close key that asks before it goes ahead.
+    /// A delete key that asks before it goes ahead.
     Asking(Keys, Target, Asked),
-    /// Another session is opening the agent's pane, or closing what a close
-    /// key closes. Keys do nothing until zellij says it has, but close the
-    /// menu.
+    /// Another session is opening the agent's pane, or closing the pane a
+    /// delete key closes. Keys do nothing until zellij says it has, but close
+    /// the menu.
     Waiting(Keys, Wait),
     /// The agent's pane opened in the sidebar's own session at this frame,
     /// and the focus is on its way there. A key that comes soon after was on
@@ -542,40 +530,37 @@ impl Wait {
 
 impl SidebarMenu {
     /// The menu numbered `number` for `row`, from the `entries` of the
-    /// sidebar's configuration, at `frame`: on the group `key` opens, or on
-    /// the first with no key. A key that starts an agent or closes something
-    /// does it, and the menu stays only to ask first, or while another
-    /// session does it, or while the keys on their way to an agent it started
-    /// come. None for a key the menu has not. `pane` is the row's pane as a
-    /// close key closes it. With the menu, what a close key asked zellij for.
+    /// sidebar's configuration and luneta's Delete group, at `frame`: on the
+    /// group `key` opens, or on the first with no key. A key that starts an
+    /// agent starts it, and the menu stays only while another session does
+    /// it, or while the keys on their way to an agent it started come. None
+    /// for a key the menu has not. On a session's row, `d d` kills the
+    /// session.
     pub fn open(
         entries: Option<&str>,
         row: Row,
         key: Option<char>,
-        pane: &close::Pane,
         number: u64,
         frame: u64,
-    ) -> (Option<Self>, Option<Act>) {
-        let menu = |stage| Some(SidebarMenu { number, stage });
-        let keys = match entries.map(Keys::parse) {
-            Some(Ok(keys)) => keys,
-            Some(Err(reason)) => return (menu(wrong(reason)), None),
-            None if key.is_none() => return (menu(wrong(NO_SIDEBAR_ENTRIES.to_owned())), None),
-            None => return (None, None),
+    ) -> Option<Self> {
+        let deletes = if row.pane.is_some() { Scope::Pane } else { Scope::Session };
+        let keys = match Keys::new(entries, deletes) {
+            Ok(keys) => keys,
+            Err(reason) => return Some(SidebarMenu { number, stage: wrong(reason) }),
         };
         let has = |key: char| keys.entries().iter().any(|entry| entry.key() == key);
         if key.is_some_and(|key| !has(key)) {
-            return (None, None);
+            return None;
         }
         let target = Target { pane: row.pane, cwd: row.cwd, branch: row.branch, there: row.there };
         let choosing = SidebarMenu { number, stage: Stage::Choosing(keys, target) };
         match key {
-            Some(key) => choosing.key(&KeyWithModifier::new(BareKey::Char(key)), Some(pane), frame),
-            None => (Some(choosing), None),
+            Some(key) => choosing.key(&KeyWithModifier::new(BareKey::Char(key)), None, frame).0,
+            None => Some(choosing),
         }
     }
 
-    /// What the menu shows: the keys, what a close key asks, where you are
+    /// What the menu shows: the keys, what a delete key asks, where you are
     /// going, or what is wrong with the keys, with the row, or with what a key
     /// asked for. Nothing once an agent started in the sidebar's own session.
     pub fn shown(&self) -> Option<Shown<'_>> {
@@ -612,9 +597,9 @@ impl SidebarMenu {
         }
     }
 
-    /// The pane the menu is for, and its session when that is another, while
-    /// a key of the menu can close it.
-    pub fn pane(&self) -> Option<(u32, Option<&str>)> {
+    /// The pane the menu is for, none on a session's row, and its session
+    /// when that is another, while a key of the menu can delete it.
+    pub fn pane(&self) -> Option<(Option<u32>, Option<&str>)> {
         let Stage::Choosing(_, target) = &self.stage else {
             return None;
         };
@@ -628,13 +613,13 @@ impl SidebarMenu {
     }
 
     /// What `key` does to the menu at `frame`: the menu left, none once it
-    /// closed or closed what a key asked in the sidebar's own session, and
-    /// what a close key asked zellij for. `pane` is the menu's pane as a close
-    /// key closes it.
+    /// closed or deleted what a key asked in the sidebar's own session, and
+    /// what a delete key asked zellij for. `subject` is what the menu is for,
+    /// as a delete key deletes it.
     pub fn key(
         self,
         key: &KeyWithModifier,
-        pane: Option<&close::Pane>,
+        subject: Option<&close::Subject>,
         frame: u64,
     ) -> (Option<Self>, Option<Act>) {
         let number = self.number;
@@ -647,7 +632,7 @@ impl SidebarMenu {
             Stage::Choosing(mut keys, target) => match keys.key(key) {
                 Pressed::Close => return (None, None),
                 Pressed::Start(prompt) => (Some(target.start(keys, &prompt, number, frame)), None),
-                Pressed::Delete { key, scope } => match pane.map(|pane| pane.plan(scope)) {
+                Pressed::Delete { key, scope } => match subject.map(|it| it.plan(scope)) {
                     None => (Some(Stage::Choosing(keys, target)), None),
                     Some(Err(reason)) => (Some(wrong(reason)), None),
                     Some(Ok(plan)) => match Asked::then(key, plan) {
@@ -671,7 +656,7 @@ impl SidebarMenu {
     /// sidebar's own session, has closed: zellij would open the agent beside
     /// the pane with the focus, which is the sidebar. None once it has.
     pub fn panes(self, manifest: &PaneManifest) -> Option<Self> {
-        let Stage::Choosing(_, Target { pane, there: None, .. }) = &self.stage else {
+        let Stage::Choosing(_, Target { pane: Some(pane), there: None, .. }) = &self.stage else {
             return Some(self);
         };
         let pane = *pane;
@@ -680,7 +665,7 @@ impl SidebarMenu {
     }
 
     /// What another session said of what the menu waits for: the agent's
-    /// pane open, or what a close key closes closed. The menu goes to the
+    /// pane open, or what a delete key closes closed. The menu goes to the
     /// agent's pane, and to the session when zellij says not which pane it
     /// is, or closes, or says what zellij said went wrong. None once it went
     /// or closed. An answer for anything the menu does not wait for, or for
@@ -754,7 +739,7 @@ enum Phase {
     /// has, and `Failed` when what you came from is no terminal, or zellij
     /// cannot say where it works.
     Choosing(Keys, Fetch<Beside>),
-    /// A close key that asks before it goes ahead, for the pane you came
+    /// A delete key that asks before it goes ahead, for the pane you came
     /// from.
     Asking(Keys, Beside, Asked),
     /// On your way to another session, and the session the menu is in ends
@@ -783,7 +768,7 @@ pub struct Menu {
     placed: Option<Spot>,
     /// The command the configuration names claude-ps by, if it names one.
     agents_command: Option<String>,
-    /// What the agents are doing, for a close key to ask first before it ends
+    /// What the agents are doing, for a delete key to ask first before it ends
     /// one at work.
     agents: AgentSet,
     /// Where the panes of the session work, by which an agent is placed in
@@ -798,10 +783,9 @@ pub struct Menu {
 
 impl Menu {
     pub fn new(plugin_id: u32, configuration: &BTreeMap<String, String>) -> Self {
-        let phase = match configuration.get(ENTRIES).map(|text| Keys::parse(text)) {
-            Some(Ok(keys)) => Phase::Choosing(keys, Fetch::Waiting),
-            Some(Err(reason)) => Phase::Wrong(reason),
-            None => Phase::Wrong(NO_ENTRIES.to_owned()),
+        let phase = match Keys::new(configuration.get(ENTRIES).map(String::as_str), Scope::Pane) {
+            Ok(keys) => Phase::Choosing(keys, Fetch::Waiting),
+            Err(reason) => Phase::Wrong(reason),
         };
         if let Phase::Wrong(reason) = &phase {
             eprintln!("luneta {reason}");
@@ -822,7 +806,7 @@ impl Menu {
         }
     }
 
-    /// What the menu shows: the keys, what a close key asks, where you are
+    /// What the menu shows: the keys, what a delete key asks, where you are
     /// going, or what is wrong with the keys or with the pane you came from.
     /// Nothing once it asked zellij to close it.
     pub fn shown(&self) -> Option<Shown<'_>> {
@@ -973,15 +957,16 @@ impl Menu {
         false
     }
 
-    /// Closes the pane you came from, its tab or its session, or asks first
-    /// when that would end an agent at work. A key pressed before zellij says
-    /// which pane you came from closes nothing. Says whether to draw.
+    /// Closes the pane you came from, and its tab once nothing else holds the
+    /// tab open, or kills its session, or asks first when that would end an
+    /// agent at work. A key pressed before zellij says which pane you came
+    /// from closes nothing. Says whether to draw.
     fn delete(&mut self, key: char, scope: Scope) -> bool {
         let Phase::Choosing(_, Fetch::Ready(beside)) = &self.phase else {
             return false;
         };
-        let plan = match self.pane(beside.pane) {
-            Some(pane) => pane.plan(scope),
+        let plan = match self.subject(beside.pane) {
+            Some(subject) => subject.plan(scope),
             None => Err(NO_SESSION.to_owned()),
         };
         match plan.map(|plan| Asked::then(key, plan)) {
@@ -1003,11 +988,11 @@ impl Menu {
         }
     }
 
-    /// The pane `id` you came from, as a close key closes it, its tab or its
+    /// The pane `id` you came from, as a delete key deletes it or its
     /// session: what the session holds, and its agents once claude-ps and the
     /// session have said where they are. None until zellij has said which
     /// session the menu is in.
-    fn pane(&self, id: u32) -> Option<close::Pane> {
+    fn subject(&self, id: u32) -> Option<close::Subject> {
         let session = self.session.as_deref()?;
         let manifest = self.panes.as_ref()?;
         let leaves =
@@ -1017,10 +1002,10 @@ impl Menu {
             _ => close::agents_of(&self.agents, session, &leaves),
         };
         let seat = Seat::Here(session.to_owned());
-        Some(close::Pane::new(seat, id, &leaves, agents, self.refuge.clone()))
+        Some(close::Subject::new(seat, Some(id), &leaves, agents, self.refuge.clone()))
     }
 
-    /// Goes ahead with the close key that asked. Says whether to draw.
+    /// Goes ahead with the delete key that asked. Says whether to draw.
     fn go_ahead(&mut self) -> bool {
         let Phase::Asking(_, _, asked) = std::mem::take(&mut self.phase) else {
             return false;
@@ -1028,7 +1013,7 @@ impl Menu {
         self.run(&asked.plan.act)
     }
 
-    /// Back to the keys, from a close key that asked. Says whether to draw.
+    /// Back to the keys, from a delete key that asked. Says whether to draw.
     fn back(&mut self) -> bool {
         let Phase::Asking(keys, beside, _) = std::mem::take(&mut self.phase) else {
             return false;
@@ -1038,7 +1023,7 @@ impl Menu {
         true
     }
 
-    /// Asks zellij for what a close key closes, in the session the menu is
+    /// Asks zellij for what a delete key closes, in the session the menu is
     /// in. The menu closes, but stays while you leave the session, for the
     /// session to end once you are gone. Says whether to draw.
     fn run(&mut self, act: &Act) -> bool {
@@ -1099,17 +1084,12 @@ impl Menu {
     }
 
     /// Asks once which session the menu is in, and then claude-ps what the
-    /// agents are doing and the session where its panes work: a close key
-    /// asks first before it ends an agent at work. A menu with no key that
-    /// closes anything asks none of it.
+    /// agents are doing and the session where its panes work: a delete key
+    /// asks first before it ends an agent at work. A menu over no terminal
+    /// has nothing to delete, and asks none of it.
     fn ask_agents(&mut self) {
-        if self.session.is_some() {
-            return;
-        }
-        let Phase::Choosing(keys, _) = &self.phase else {
-            return;
-        };
-        if !keys.closes_anything() {
+        let over_a_pane = matches!(self.phase, Phase::Choosing(_, Fetch::Ready(_)));
+        if self.session.is_some() || !over_a_pane {
             return;
         }
         let Ok(snapshot) = get_session_list() else {
@@ -1230,18 +1210,8 @@ mod tests {
         r "review the diff against main"
     "#;
 
-    /// A menu with keys that close what it is for, as the issue has them.
-    const DELETE: &str = r#"
-        d "Delete" {
-            s close="session"
-            t close="tab"
-            p close="pane"
-        }
-        r "review the diff against main"
-    "#;
-
     fn keys(text: &str) -> Keys {
-        Keys::parse(text).expect("a menu")
+        Keys::new(Some(text), Scope::Pane).expect("a menu")
     }
 
     fn shown(keys: &Keys) -> Vec<char> {
@@ -1259,7 +1229,7 @@ mod tests {
     #[test]
     fn a_key_opens_its_group_and_a_key_in_it_starts_its_prompt() {
         let mut keys = keys(MENU);
-        assert_eq!(shown(&keys), ['c', 'r']);
+        assert_eq!(shown(&keys), ['c', 'r', 'd']);
         assert!(keys.names().is_empty());
 
         assert_eq!(keys.key(&char('x')), Pressed::Nothing);
@@ -1271,7 +1241,7 @@ mod tests {
         assert_eq!(keys.key(&char('s')), Pressed::Start("/tigerstyle".to_owned()));
 
         assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Moved);
-        assert_eq!(shown(&keys), ['c', 'r']);
+        assert_eq!(shown(&keys), ['c', 'r', 'd']);
         assert_eq!(keys.key(&char('r')), Pressed::Start("review the diff against main".to_owned()));
         assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Close);
         keys.key(&char('c'));
@@ -1279,26 +1249,33 @@ mod tests {
         assert_eq!(keys.key(&char('c').with_ctrl_modifier()), Pressed::Close);
     }
 
-    /// A key's `close` names what it closes, and the keys stay yours.
+    /// Every menu has luneta's Delete group after your keys, and one with
+    /// none of yours too: `d d` deletes what the menu is for, a pane or a
+    /// session's row, and `d s` its session.
     #[test]
-    fn a_key_closes_what_its_close_names() {
-        let mut keys = keys(DELETE);
-        assert!(keys.closes_anything());
-        assert!(!self::keys(MENU).closes_anything());
-        assert_eq!(keys.key(&char('d')), Pressed::Moved);
-        assert_eq!(keys.names(), ["Delete"]);
-        for (key, scope) in [('s', Scope::Session), ('t', Scope::Tab), ('p', Scope::Pane)] {
-            assert_eq!(keys.key(&char(key)), Pressed::Delete { key, scope });
+    fn every_menu_has_luneta_s_delete_keys() {
+        for (configured, root) in [
+            (Some(MENU), &['c', 'r', 'd'][..]),
+            (None, &['d']),
+            (Some(""), &['d']),
+            (Some("// nothing but a comment"), &['d']),
+        ] {
+            let mut keys = Keys::new(configured, Scope::Pane).expect("a menu");
+            assert_eq!(shown(&keys), root, "{configured:?}");
+            assert_eq!(keys.key(&char('d')), Pressed::Moved);
+            assert_eq!(keys.names(), ["Delete"]);
+            assert_eq!(keys.key(&char('d')), Pressed::Delete { key: 'd', scope: Scope::Pane });
+            assert_eq!(keys.key(&char('s')), Pressed::Delete { key: 's', scope: Scope::Session });
         }
+        let mut row = Keys::new(Some(MENU), Scope::Session).expect("a menu");
+        row.key(&char('d'));
+        assert_eq!(row.key(&char('d')), Pressed::Delete { key: 'd', scope: Scope::Session });
     }
 
     #[test]
     fn a_menu_that_cannot_be_read_says_which_key_is_wrong() {
         let one_string = "menu: \"t\" takes one string";
-        let alone = "closes something, and takes nothing else";
         for (text, reason) in [
-            ("", NO_ENTRIES),
-            ("// nothing but a comment", NO_ENTRIES),
             (r#"c "Claude" {}"#, "menu: no keys under \"c\""),
             (r#"c "Claude" { tn "/tigerstyle"; }"#, "menu: \"c tn\" is no key"),
             (r#"c "Claude" { t "/tigerstyle"; t "/a"; }"#, "menu: two entries for \"c t\""),
@@ -1306,13 +1283,11 @@ mod tests {
             (r#"t " ""#, one_string),
             (r#"t "/tigerstyle" "/thermo-nuclear-review""#, one_string),
             ("t 1", one_string),
-            (r#"t prompt="/tigerstyle""#, "menu: \"t\" has no prompt="),
-            (r#"d "Delete" { s close="window"; }"#, "menu: \"d s\" closes \"window\""),
-            (r"s close=1", "menu: \"s\" closes 1"),
-            (r#"s "the session" close="session""#, &format!("menu: \"s\" {alone}")),
-            (r#"d "Delete" close="pane" { p close="pane"; }"#, &format!("menu: \"d\" {alone}")),
+            (r#"t prompt="/tigerstyle""#, one_string),
+            (r#"d "/tigerstyle""#, "menu: \"d\" is luneta's"),
         ] {
-            let error = Keys::parse(text).err().unwrap_or_else(|| panic!("{text:?} parsed"));
+            let parsed = Keys::new(Some(text), Scope::Pane);
+            let error = parsed.err().unwrap_or_else(|| panic!("{text:?} parsed"));
             assert!(error.starts_with(reason), "{text:?}: {error}");
         }
     }
@@ -1335,35 +1310,41 @@ mod tests {
         }
     }
 
-    /// `y`, or the close key again, goes ahead; `n` and `Backspace` go back;
+    /// `y`, or the delete key again, goes ahead; `n` and `Backspace` go back;
     /// `Esc` and `Ctrl c` close the menu; anything else does nothing.
     #[test]
-    fn a_close_key_that_asks_goes_ahead_on_yes_or_on_itself() {
+    fn a_delete_key_that_asks_goes_ahead_on_yes_or_on_itself() {
         for (key, said) in [
             (char('y'), Answer::Yes),
-            (char('p'), Answer::Yes),
+            (char('d'), Answer::Yes),
             (char('n'), Answer::Back),
             (bare(BareKey::Backspace), Answer::Back),
             (bare(BareKey::Esc), Answer::Close),
             (char('c').with_ctrl_modifier(), Answer::Close),
-            (char('t'), Answer::Nothing),
+            (char('s'), Answer::Nothing),
             (char('y').with_ctrl_modifier(), Answer::Nothing),
             (bare(BareKey::Enter), Answer::Nothing),
         ] {
-            assert_eq!(answer(&key, 'p'), said, "{key:?}");
+            assert_eq!(answer(&key, 'd'), said, "{key:?}");
         }
     }
 
     /// Pane 2 of the sidebar, working in `/w/elo`, of the sidebar's own
     /// session or of `there`.
     fn row(there: Option<There>) -> Row {
-        Row { pane: 2, cwd: Some("/w/elo".to_owned()), branch: Some("main".to_owned()), there }
+        let branch = Some("main".to_owned());
+        Row { pane: Some(2), cwd: Some("/w/elo".to_owned()), branch, there }
     }
 
-    /// Pane 2 as a close key closes it: in tab 7 of `seat`'s session, beside
+    /// The row of the sidebar's own session, or of `there`.
+    fn session_row(there: Option<There>) -> Row {
+        Row { pane: None, cwd: None, branch: None, there }
+    }
+
+    /// Pane 2 as a delete key closes it: in tab 7 of `seat`'s session, beside
     /// another pane, with the agents `seated`, each its pane and its status,
     /// and `elo` to go to before the session you are in ends.
-    fn closing(seat: Seat, seated: &[(u32, &str)]) -> close::Pane {
+    fn closing(seat: Seat, seated: &[(u32, &str)]) -> close::Subject {
         let agents = seated
             .iter()
             .map(|(pane, status)| close::Agent {
@@ -1372,11 +1353,9 @@ mod tests {
                 status: Status::parse(Some(status)),
             })
             .collect();
-        close::Pane {
+        close::Subject {
             seat,
-            id: 2,
-            tab: Some(7),
-            alone: false,
+            pane: Some(close::Pane { id: 2, tab: Some(7), alone: false }),
             agents: Fetch::Ready(agents),
             refuge: Some("elo".to_owned()),
         }
@@ -1386,10 +1365,9 @@ mod tests {
         Seat::Here("luneta".to_owned())
     }
 
-    /// The sidebar's menu numbered 1 for `row`, opened by `key` at frame 0,
-    /// its pane in the sidebar's own session with no agent.
+    /// The sidebar's menu numbered 1 for `row`, opened by `key` at frame 0.
     fn open(entries: Option<&str>, row: Row, key: Option<char>) -> Option<SidebarMenu> {
-        SidebarMenu::open(entries, row, key, &closing(luneta(), &[]), 1, 0).0
+        SidebarMenu::open(entries, row, key, 1, 0)
     }
 
     /// `key` pressed in the sidebar's menu at frame 0, its pane with no agent.
@@ -1426,7 +1404,8 @@ mod tests {
     fn a_key_of_the_menu_opens_it_on_its_group() {
         for (key, on) in [
             (Some('c'), Some(vec!['t', 'm', 's'])),
-            (None, Some(vec!['c', 'r'])),
+            (None, Some(vec!['c', 'r', 'd'])),
+            (Some('d'), Some(vec!['d', 's'])),
             (Some('x'), None),
         ] {
             let menu = open(Some(MENU), row(None), key);
@@ -1435,17 +1414,17 @@ mod tests {
         let menu = open(Some(MENU), row(None), Some('c'));
         assert_eq!(menu.as_ref().and_then(SidebarMenu::cwd), Some("/w/elo"));
         let menu = press(menu, &bare(BareKey::Backspace));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'd'])));
         let menu = press(menu, &char('x'));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'd'])));
         assert!(press(menu, &bare(BareKey::Esc)).is_none());
     }
 
     /// A row the sidebar does not know the directory of yet has no agent to
     /// start, and the menu says so rather than start one wherever zellij
-    /// runs. A sidebar with no menu says how to give it one when asked for
-    /// it, and a menu that cannot be read says what is wrong with it for any
-    /// key it might have had. Any key closes what is wrong.
+    /// runs. Nor has a session's row, which has no pane. A menu that cannot
+    /// be read says what is wrong with it for any key it might have had. Any
+    /// key closes what is wrong.
     #[test]
     fn a_menu_that_cannot_start_an_agent_beside_its_row_says_why() {
         let unknown = || Row { cwd: None, ..row(None) };
@@ -1453,7 +1432,7 @@ mod tests {
         for (entries, row, key, said) in [
             (Some(MENU), unknown(), Some('r'), Some(where_unknown)),
             (Some(MENU), unknown(), Some('x'), None),
-            (None, row(None), None, Some(NO_SIDEBAR_ENTRIES)),
+            (Some(MENU), session_row(None), Some('r'), Some(NO_ROW_PANE)),
             (None, row(None), Some('c'), None),
             (Some("t"), row(None), Some('x'), Some("menu: \"t\" takes one string")),
         ] {
@@ -1465,9 +1444,12 @@ mod tests {
             }
             assert!(press(menu, &char('c')).is_none());
         }
-        // Closing it needs no directory.
-        let menu = open(Some(DELETE), unknown(), Some('d'));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['s', 't', 'p'])));
+        // Deleting it needs no directory, nor a menu of yours.
+        for (entries, row) in [(Some(MENU), unknown()), (None, row(None)), (None, session_row(None))]
+        {
+            let menu = open(entries, row, Some('d'));
+            assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['d', 's'])), "{entries:?}");
+        }
     }
 
     /// In another session, the menu takes no key while zellij opens the
@@ -1528,62 +1510,61 @@ mod tests {
         assert_eq!(choosing.started_at(), None);
     }
 
-    /// A close key with no agent at work to end closes at once, and says what
-    /// it closed, for the sidebar's cursor to go past it. The session you are
-    /// in is left first, and the menu lasts while you leave.
+    /// A delete key with no agent at work to end deletes at once, and says
+    /// what it deleted, for the sidebar's cursor to go past it. The session
+    /// you are in is left first, and the menu lasts while you leave. On a
+    /// session's row, `d d` deletes the session.
     #[test]
-    fn a_close_key_with_no_agent_at_work_to_end_closes_at_once() {
+    fn a_delete_key_with_no_agent_at_work_to_end_deletes_at_once() {
         let idle = closing(luneta(), &[(2, "idle"), (3, "shell")]);
-        for (key, act) in [
-            ('p', Act::Pane(luneta(), 2)),
-            ('t', Act::Tab(luneta(), 7)),
-            ('s', Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() }),
+        let leave = || Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() };
+        let session = close::Subject { pane: None, ..closing(luneta(), &[]) };
+        for (row, subject, key, act) in [
+            (row(None), &idle, 'd', Act::Pane(luneta(), 2)),
+            (row(None), &idle, 's', leave()),
+            (session_row(None), &session, 'd', leave()),
         ] {
-            let menu = open(Some(DELETE), row(None), Some('d')).expect("a menu");
-            let (menu, closed) = menu.key(&char(key), Some(&idle), 0);
+            let menu = open(Some(MENU), row, Some('d')).expect("a menu");
+            let (menu, closed) = menu.key(&char(key), Some(subject), 0);
+            let leaves = matches!(act, Act::Leave { .. });
             assert_eq!(closed, Some(act), "{key}");
-            assert_eq!(menu.as_ref().is_some_and(SidebarMenu::lasts), key == 's', "{key}");
+            assert_eq!(menu.as_ref().is_some_and(SidebarMenu::lasts), leaves, "{key}");
         }
-        // A top-level close key closes as the sidebar's key opens the menu.
-        let (menu, closed) =
-            SidebarMenu::open(Some(r#"x close="pane""#), row(None), Some('x'), &idle, 1, 0);
-        assert!(menu.is_none());
-        assert_eq!(closed, Some(Act::Pane(luneta(), 2)));
     }
 
-    /// A close key that would end an agent busy or waiting on you asks
+    /// A delete key that would end an agent busy or waiting on you asks
     /// first, and says what goes. `y`, or the key again, goes ahead; `n` goes
-    /// back to the keys, and `Esc` closes the menu, closing nothing.
+    /// back to the keys, and `Esc` closes the menu, deleting nothing.
     #[test]
-    fn a_close_key_that_would_end_an_agent_at_work_asks_first() {
+    fn a_delete_key_that_would_end_an_agent_at_work_asks_first() {
         let busy = closing(luneta(), &[(2, "busy"), (3, "waiting")]);
         let asked = || {
-            let menu = open(Some(DELETE), row(None), Some('d')).expect("a menu");
-            let (menu, closed) = menu.key(&char('t'), Some(&busy), 0);
+            let menu = open(Some(MENU), row(None), Some('d')).expect("a menu");
+            let (menu, closed) = menu.key(&char('d'), Some(&busy), 0);
             assert_eq!(closed, None);
-            assert_eq!(asking(menu.as_ref()), Some("Close its tab? 2 agents, 1 busy, 1 waiting"));
+            assert_eq!(asking(menu.as_ref()), Some("Close the pane? 1 agent, 1 busy"));
             menu.expect("a menu")
         };
-        for key in [char('y'), char('t')] {
+        for key in [char('y'), char('d')] {
             let (menu, closed) = asked().key(&key, Some(&busy), 0);
             assert!(menu.is_none(), "{key:?}");
-            assert_eq!(closed, Some(Act::Tab(luneta(), 7)), "{key:?}");
+            assert_eq!(closed, Some(Act::Pane(luneta(), 2)), "{key:?}");
         }
         let (menu, closed) = asked().key(&char('x'), Some(&busy), 0);
         assert!(asking(menu.as_ref()).is_some());
         assert_eq!(closed, None);
         let (menu, closed) = asked().key(&char('n'), Some(&busy), 0);
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['s', 't', 'p'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['d', 's'])));
         assert_eq!(closed, None);
         let (menu, closed) = asked().key(&bare(BareKey::Esc), Some(&busy), 0);
         assert!(menu.is_none());
         assert_eq!(closed, None);
     }
 
-    /// A pane or a tab of another session closes by a command, and the menu
-    /// waits for its answer: gone once it closed, saying what zellij said when
-    /// it did not. An answer to a command of another kind, or for another
-    /// menu, is for a menu closed before it came.
+    /// A pane of another session closes by a command, and the menu waits for
+    /// its answer: gone once it closed, saying what zellij said when it did
+    /// not. An answer to a command of another kind, or for another menu, is
+    /// for a menu closed before it came.
     #[test]
     fn a_pane_of_another_session_closes_by_a_command_the_menu_waits_on() {
         let there = There { session: "elo".to_owned(), tab: Some(3), back: Some(1) };
@@ -1603,9 +1584,9 @@ mod tests {
                 Some("menu: nothing closed: No pane with id terminal_2"),
             ),
         ] {
-            let menu = open(Some(DELETE), row(Some(there.clone())), Some('d'));
+            let menu = open(Some(MENU), row(Some(there.clone())), Some('d'));
             let pane = closing(elo.clone(), &[]);
-            let (menu, closed) = menu.expect("a menu").key(&char('p'), Some(&pane), 0);
+            let (menu, closed) = menu.expect("a menu").key(&char('d'), Some(&pane), 0);
             assert_eq!(closed, Some(Act::Pane(elo.clone(), 2)));
             let menu = menu.expect("a menu waiting");
             let menu = menu.answered(Some(0), none, none, &answer(START_VALUE, 1));
@@ -1659,6 +1640,8 @@ mod tests {
         let mut menu = bound();
         let elo = Beside { pane: 2, cwd: "/w/elo".to_owned() };
         menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(elo));
+        // Which session it is in, which zellij answers on stdin.
+        menu.session = Some("luneta".to_owned());
         menu.follow();
         let branch = |dir: &str| {
             BTreeMap::from([
@@ -1673,16 +1656,17 @@ mod tests {
     }
 
     /// The key binding's menu, for pane 2 of session `luneta`, which shares
-    /// tab 7 with pane 3, and claude-ps saying a busy agent sits in pane 3,
-    /// once `answered`.
+    /// tab 7 with pane 3, with `elo` to go to before `luneta` ends, and
+    /// claude-ps saying a busy agent sits in pane 3, once `answered`.
     fn bound_for_two(answered: bool) -> Menu {
-        let mut menu = Menu::new(0, &BTreeMap::from([(ENTRIES.to_owned(), DELETE.to_owned())]));
+        let mut menu = bound();
         let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
         menu.panes = Some(PaneManifest { panes: HashMap::from([(0, vec![shell(2), shell(3)])]) });
         menu.tabs = vec![TabInfo { position: 0, tab_id: 7, active: true, ..TabInfo::default() }];
         let elo = Beside { pane: 2, cwd: "/w/elo".to_owned() };
-        menu.phase = Phase::Choosing(keys(DELETE), Fetch::Ready(elo));
+        menu.phase = Phase::Choosing(keys(MENU), Fetch::Ready(elo));
         menu.session = Some("luneta".to_owned());
+        menu.refuge = Some("elo".to_owned());
         if answered {
             let context = |value: &str| {
                 BTreeMap::from([
@@ -1706,30 +1690,30 @@ mod tests {
         }
     }
 
-    /// The key binding's menu closes the pane you came from, or its tab, as
-    /// the sidebar's does: at once with no agent at work to end, and asking
-    /// first, until claude-ps and the session have said where the agents
-    /// sit.
+    /// The key binding's menu closes the pane you came from, or kills its
+    /// session, as the sidebar's does: at once with no agent at work to end,
+    /// and asking first, until claude-ps and the session have said where the
+    /// agents sit.
     #[test]
-    fn the_key_binding_s_menu_closes_the_pane_you_came_from() {
+    fn the_key_binding_s_menu_deletes_the_pane_you_came_from() {
         let mut menu = bound_for_two(true);
         assert!(menu.key(&char('d')));
-        assert!(menu.key(&char('t')));
-        assert_eq!(question(&menu), Some("Close its tab? 1 agent, 1 busy"));
+        assert!(menu.key(&char('s')));
+        assert_eq!(question(&menu), Some("Kill session luneta? 1 agent, 1 busy"));
         assert!(menu.key(&bare(BareKey::Backspace)));
         assert!(question(&menu).is_none());
-        assert!(menu.key(&char('t')));
-        assert!(!menu.key(&char('t')));
-        assert!(menu.shown().is_none());
+        assert!(menu.key(&char('s')));
+        assert!(menu.key(&char('s')));
+        assert!(matches!(menu.shown(), Some(Shown::Leaving("elo"))));
 
         let mut menu = bound_for_two(true);
         menu.key(&char('d'));
-        assert!(!menu.key(&char('p')));
+        assert!(!menu.key(&char('d')));
         assert!(menu.shown().is_none());
 
         let mut menu = bound_for_two(false);
         menu.key(&char('d'));
-        assert!(menu.key(&char('p')));
+        assert!(menu.key(&char('d')));
         assert_eq!(question(&menu), Some("Close the pane? luneta does not know its agents yet"));
     }
 
