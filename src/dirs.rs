@@ -342,7 +342,7 @@ fn derive_name(path: &str) -> Option<String> {
 /// a bare repository's `.git`, or, when that directory is hidden, as a `.git`
 /// or a `.bare`, the directory that holds it. A worktree whose own name starts
 /// with its repository's, as `app-hotfix` beside `app`, keeps it, and so does
-/// one whose name would come out longer than `MAX_WORKTREE_NAME_BYTES`.
+/// one whose name would come out too long for zellij to make a session of.
 fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
     let common = gitdir.rsplit_once('/')?.0.strip_suffix("/worktrees")?;
@@ -368,15 +368,8 @@ fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
         return None;
     }
     let name = format!("{repository}-{base}");
-    (name.len() <= MAX_WORKTREE_NAME_BYTES && validate_name(&name).is_none()).then_some(name)
+    validate_name(&name).is_none().then_some(name)
 }
-
-/// The longest name a worktree is given with its repository's in it. zellij
-/// makes a session's socket at `/run/user/<uid>/zellij/contract_version_1/`
-/// and the name, a socket path holds 107 bytes at most, and a uid has ten
-/// digits at most: that leaves 60 for the name. A session with a longer name
-/// is one zellij cannot make, and the terminal that asks for it hangs.
-const MAX_WORKTREE_NAME_BYTES: usize = 60;
 
 #[cfg(test)]
 mod tests {
@@ -603,7 +596,7 @@ mod tests {
         // socket path it can make.
         let socket = "/run/user/4294967295/zellij/contract_version_1/";
         let gitdir = "/home/you/app/.git/worktrees/wt";
-        let fits = "w".repeat(MAX_WORKTREE_NAME_BYTES - "app-".len());
+        let fits = "w".repeat(MAX_NAME_BYTES - "app-".len());
 
         let name = worktree_name(&format!("/home/you/{fits}"), gitdir).expect("a name");
         assert_eq!(name, format!("app-{fits}"));
@@ -615,7 +608,7 @@ mod tests {
     fn a_directory_without_a_usable_name_is_dropped() {
         assert_eq!(derive_name("/"), None);
         assert_eq!(derive_name(""), None);
-        assert_eq!(derive_name(&format!("/home/{}", "d".repeat(108))), None);
+        assert_eq!(derive_name(&format!("/home/{}", "d".repeat(MAX_NAME_BYTES + 1))), None);
     }
 
     #[test]
@@ -678,13 +671,13 @@ mod tests {
 
     #[test]
     fn a_long_name_is_cut_between_characters() {
-        let base = format!("a{}x", "の".repeat(35));
+        let base = format!("ab{}x", "の".repeat(19));
         assert_eq!(base.len(), MAX_NAME_BYTES);
         assert!(!base.is_char_boundary(MAX_NAME_BYTES - 2));
         let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
 
         let name = free_name(&base, &sessions.taken(None));
-        assert_eq!(name, format!("a{}-2", "の".repeat(34)));
+        assert_eq!(name, format!("ab{}-2", "の".repeat(18)));
         assert!(name.len() < MAX_NAME_BYTES);
         assert!(validate_name(&name).is_none());
     }

@@ -178,7 +178,14 @@ impl MatchSet {
     }
 }
 
-pub const MAX_NAME_BYTES: usize = 107;
+/// The longest name zellij can make a session of. zellij makes a session's
+/// socket at `/run/user/<uid>/zellij/contract_version_1/` and the name, a
+/// socket path holds 107 bytes at most, and a uid has ten digits at most: that
+/// leaves 60 for the name. A session with a longer name is one zellij cannot
+/// make, and the terminal that asks for it hangs. A `ZELLIJ_SOCKET_DIR`, or an
+/// `XDG_RUNTIME_DIR` longer than `/run/user/<uid>`, leaves less, and luneta
+/// cannot tell.
+pub const MAX_NAME_BYTES: usize = 60;
 
 pub fn validate_name(name: &str) -> Option<&'static str> {
     if name.is_empty() {
@@ -194,7 +201,7 @@ pub fn validate_name(name: &str) -> Option<&'static str> {
         return Some("name cannot contain '/'");
     }
     if name.len() > MAX_NAME_BYTES {
-        return Some("name must be shorter than 108 bytes");
+        return Some("name must be shorter than 61 bytes");
     }
     None
 }
