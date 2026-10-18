@@ -341,7 +341,8 @@ fn derive_name(path: &str) -> Option<String> {
 /// repository is the directory whose `worktrees` the `gitdir` points into, less
 /// a bare repository's `.git`, or, when that directory is hidden, as a `.git`
 /// or a `.bare`, the directory that holds it. A worktree whose own name starts
-/// with its repository's, as `app-hotfix` beside `app`, keeps it.
+/// with its repository's, as `app-hotfix` beside `app`, keeps it, and so does
+/// one whose name would come out longer than `MAX_WORKTREE_NAME_BYTES`.
 fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
     let common = gitdir.rsplit_once('/')?.0.strip_suffix("/worktrees")?;
@@ -367,8 +368,15 @@ fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
         return None;
     }
     let name = format!("{repository}-{base}");
-    validate_name(&name).is_none().then_some(name)
+    (name.len() <= MAX_WORKTREE_NAME_BYTES && validate_name(&name).is_none()).then_some(name)
 }
+
+/// The longest name a worktree is given with its repository's in it. zellij
+/// makes a session's socket at `/run/user/<uid>/zellij/contract_version_1/`
+/// and the name, a socket path holds 107 bytes at most, and a uid has ten
+/// digits at most: that leaves 60 for the name. A session with a longer name
+/// is one zellij cannot make, and the terminal that asks for it hangs.
+const MAX_WORKTREE_NAME_BYTES: usize = 60;
 
 #[cfg(test)]
 mod tests {
@@ -587,6 +595,20 @@ mod tests {
             dirs.ingest_worktrees(exit_code, checked);
             assert_eq!(names(&mut dirs), named, "{exit_code:?}");
         }
+    }
+
+    #[test]
+    fn a_worktree_too_long_for_zellij_keeps_its_own_name() {
+        // The longest socket directory a uid gives zellij, and the longest
+        // socket path it can make.
+        let socket = "/run/user/4294967295/zellij/contract_version_1/";
+        let gitdir = "/home/you/app/.git/worktrees/wt";
+        let fits = "w".repeat(MAX_WORKTREE_NAME_BYTES - "app-".len());
+
+        let name = worktree_name(&format!("/home/you/{fits}"), gitdir).expect("a name");
+        assert_eq!(name, format!("app-{fits}"));
+        assert!(socket.len() + name.len() <= 107);
+        assert_eq!(worktree_name(&format!("/home/you/{fits}w"), gitdir), None);
     }
 
     #[test]
