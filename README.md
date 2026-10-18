@@ -117,11 +117,13 @@ Sessions keep their place, oldest first, so a row never moves under your eye
 or your mouse. Which agent wants you is the job of the glyph, the count on its
 session's row, and the `next` key — not of the order.
 
-An agent's row is named for what it is doing: the name you gave it, or else
-the title Claude Code gives its pane. A pane with no agent in it is dimmed, and
-`›` marks the pane you are in. A shell at its prompt is named for its
-directory's last two parts, as `luneta/main`, where fish would title it
-`~/P/m/l/main`.
+An agent's row is named for what it is doing: the name you gave it with
+`/rename`, or else the title Claude Code gives its pane. That title is a bare
+`Claude Code` until the agent has a topic, and some never get one; such a row
+goes by its tab, if you named it, or else by the directory the agent works in.
+A pane with no agent in it is dimmed, and `›` marks the pane you are in. A
+shell at its prompt is named for its directory's last two parts, as
+`luneta/main`, where fish would title it `~/P/m/l/main`.
 
 Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
 and sessions alike. A folded session keeps its count and shows the glyph of

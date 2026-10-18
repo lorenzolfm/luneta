@@ -471,11 +471,12 @@ impl Finder<'_> {
 }
 
 /// A name a person gave the agent, or else what the pane says it is doing.
-/// Claude Code titles a pane `✳ Claude Code` until it has a topic, and a tab
-/// that someone renamed says more than that. A shell at its prompt titles its
-/// pane with its cwd cut down to initials, and is shown its cwd's last two
-/// parts instead, as the agent list shows a cwd: `luneta/main`, where
-/// `~/P/m/l/main` hides the repository behind an `l`.
+/// Claude Code titles a pane `✳ Claude Code` until it has a topic, and some
+/// never get one. A tab that someone renamed says more than that, and else the
+/// directory the agent works in, which tells two such agents apart. A shell at
+/// its prompt titles its pane with its cwd cut down to initials, and is shown
+/// its cwd's last two parts instead, as the agent list shows a cwd:
+/// `luneta/main`, where `~/P/m/l/main` hides the repository behind an `l`.
 fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if let Some(agent) = agent.filter(|agent| agent.chosen) {
         return agent.display.clone();
@@ -484,8 +485,14 @@ fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if let Some(cwd) = leaf.cwd.as_deref().filter(|cwd| abbreviates(title, cwd)) {
         return short_cwd(cwd);
     }
-    if (title.is_empty() || title == GENERIC_TITLE) && is_named_tab(&leaf.tab) {
+    if !title.is_empty() && title != GENERIC_TITLE {
+        return title.to_owned();
+    }
+    if is_named_tab(&leaf.tab) {
         return leaf.tab.clone();
+    }
+    if let Some(agent) = agent.filter(|agent| !agent.cwd.is_empty()) {
+        return short_cwd(&agent.cwd);
     }
     if title.is_empty() {
         return format!("pane {}", leaf.id);
@@ -684,6 +691,24 @@ mod tests {
         let mut tree = Tree::default();
         tree.rebuild(&[branch("s", 1, &[(0, "⠂ Building the sidebar")])], None, &set, None, true);
         assert_eq!(drawn(&tree), ["▾ s", "  busy orca-copy"]);
+    }
+
+    #[test]
+    fn agents_with_no_topic_and_no_tab_name_go_by_where_they_work() {
+        let json = r#"[
+            {"status":"busy","status_age":4,"name":"main-60","name_source":"derived",
+             "cwd":"/w/luneta/main","zellij":{"session":"luneta","pane":"1"}},
+            {"status":"idle","status_age":4,"name":"agents-tab-9a","name_source":"derived",
+             "cwd":"/w/luneta/agents-tab","zellij":{"session":"luneta","pane":"4"}}]"#;
+        let mut set = AgentSet::default();
+        set.ingest(Some(0), json.as_bytes(), b"");
+        let places = Places::of(&[("luneta", &[(1, "/w/luneta/main"), (4, "/w/luneta/agents-tab")])]);
+        set.rebuild("", &Live::new(None, &[], &places), None, Age::from_secs(0), Selection::SnapToTop);
+
+        let branches = [branch("luneta", 1, &[(1, "✳ Claude Code"), (4, "✳ Claude Code")])];
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, None, &set, None, true);
+        assert_eq!(drawn(&tree), ["▾ luneta", "  busy luneta/main", "  idle luneta/agents-tab"]);
     }
 
     #[test]
