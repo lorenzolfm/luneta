@@ -1036,32 +1036,92 @@ pub fn sidebar_row_at(
     cols: usize,
     line: usize,
 ) -> Option<usize> {
-    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
-    let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
+    let shelf = sidebar_shelf(tree, agents, focused, rows, cols);
     let line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
     let (Range { start, end }, _) = on_screen(tree, focused, shelf.tree);
     let index = start + line;
     (index < end).then_some(index)
 }
 
+/// Moves the view of the sidebar `delta` rows down, or up, as far as there
+/// are rows to show, and says whether it moved.
+pub fn scroll_sidebar(
+    tree: &mut Tree,
+    agents: &AgentSet,
+    focused: bool,
+    rows: usize,
+    cols: usize,
+    delta: isize,
+) -> bool {
+    let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
+    let (Range { start, .. }, _) = on_screen(tree, focused, height);
+    let last = tree.rows.len().saturating_sub(height);
+    let top = start.saturating_add_signed(delta).min(last);
+    if top == start {
+        return false;
+    }
+    tree.scroll_to(top);
+    true
+}
+
+/// Puts the cursor on `row`, as a click does. A view the wheel moved stays
+/// where it is while the row is in it, so that the row stays under the
+/// pointer.
+pub fn select_sidebar_row(
+    tree: &mut Tree,
+    agents: &AgentSet,
+    focused: bool,
+    rows: usize,
+    cols: usize,
+    row: usize,
+) {
+    let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
+    let (shown, _) = on_screen(tree, focused, height);
+    let wheeled = tree.top().is_some();
+    tree.rows.select(row);
+    if wheeled && shown.contains(&row) {
+        tree.scroll_to(shown.start);
+    }
+}
+
+/// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
+fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, cols: usize) -> Shelf {
+    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
+    Shelf::new(rows, notes, focused, tree.search().is_some())
+}
+
+/// Whether a click on `column` of a row folds it, where the rest of the row
+/// goes there: a session's, on its fold.
+pub fn folds_at(node: &Node, column: usize) -> bool {
+    matches!(node, Node::Session(_)) && column < FOLD
+}
+
 /// The rows of the tree a sidebar shows in `height` rows, and the one of them
 /// that is lit: the cursor while the sidebar has the focus, and the pane you
 /// are in while it does not. The rows shown are the ones around the lit row,
-/// or around the cursor while none is, so a lit row is never out of sight.
+/// or around the cursor while none is, so a lit row is never out of sight
+/// until the wheel moves the view off it.
 fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
     let lit = if focused {
         tree.rows.selected()
     } else {
         tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
     };
-    let around = lit.or(tree.rows.selected()).unwrap_or(0);
-    let (start, end) = viewport(around, tree.rows.len(), height);
-    (start..end, lit)
+    let total = tree.rows.len();
+    let start = match tree.top() {
+        Some(top) => top.min(total.saturating_sub(height)),
+        None => viewport(lit.or(tree.rows.selected()).unwrap_or(0), total, height).0,
+    };
+    (start..(start + height).min(total), lit)
 }
 
 const UNFOLDED: &str = "▾";
 
 const FOLDED: &str = "▸";
+
+/// The columns of a session's row a click folds it by: the `▾` or `▸`, and
+/// the column either side of it.
+const FOLD: usize = 3;
 
 /// What marks the pane you are in, in its first column, whether the sidebar
 /// has the focus or not.
@@ -2303,6 +2363,91 @@ mod tests {
             assert!(m.is_some(), "{agent:?}, here: {here}");
             assert_ne!(m, i, "{agent:?}, here: {here}");
         }
+    }
+
+    /// The wheel moves the view and leaves the cursor and the highlight where
+    /// they are, out of sight or not, until a key comes or the cursor goes to
+    /// another row.
+    #[test]
+    fn the_wheel_moves_the_view_until_the_cursor_moves() {
+        let mut tree = workday_tree(0);
+        let agents = AgentSet::default();
+        let top =
+            |tree: &Tree, focused: bool| sidebar_row_at(tree, &agents, focused, 6, 32, HEADER);
+        // Four rows of eight, around your pane on the seventh.
+        assert_eq!(top(&tree, false), Some(3));
+
+        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
+        assert_eq!(top(&tree, false), Some(0));
+        assert!(!scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
+        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, 99));
+        assert_eq!(top(&tree, false), Some(4));
+        assert_eq!(tree.rows.selected(), Some(0));
+        assert!(!sidebar_picture(&tree, &[], false, 6, 32)[HEADER].contains("bipa"));
+
+        // The focus lights the cursor instead, and the view stays.
+        assert_eq!(top(&tree, true), Some(4));
+        tree.unscroll();
+        assert_eq!(top(&tree, true), Some(0));
+
+        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
+        assert_eq!(top(&tree, true), Some(3));
+        tree.rows.select(1);
+        assert_eq!(top(&tree, true), Some(0));
+    }
+
+    /// A click on a row the wheel brought into view lights it where it is:
+    /// the view stays, and the row stays under the pointer.
+    #[test]
+    fn a_click_leaves_the_view_where_the_wheel_left_it() {
+        let mut tree = workday_tree(0);
+        let agents = AgentSet::default();
+        let row_at =
+            |tree: &Tree, line: usize| sidebar_row_at(tree, &agents, true, 6, 32, HEADER + line);
+        // Three rows of eight, under the header and over the keys.
+        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
+        assert_eq!(row_at(&tree, 0), Some(3));
+        let clicked = row_at(&tree, 1).expect("a row on the second line");
+        select_sidebar_row(&mut tree, &agents, true, 6, 32, clicked);
+        assert_eq!(tree.rows.selected(), Some(clicked));
+        assert_eq!(row_at(&tree, 0), Some(3));
+        assert_eq!(row_at(&tree, 1), Some(clicked));
+    }
+
+    /// So does the click that brings the focus in, with your own session
+    /// folded: no row is lit before the focus comes, and the cursor is lit
+    /// after, but it is on your session's row both times.
+    #[test]
+    fn the_click_that_brings_the_focus_leaves_the_view_where_the_wheel_left_it() {
+        let mut nodes = workday();
+        nodes.truncate(5);
+        nodes.extend([
+            session_node("zeta", false, 0, None),
+            pane_node("zeta", 5, "one", None),
+            pane_node("zeta", 6, "two", None),
+            session_node("unnamed", true, 0, None),
+        ]);
+        let mut tree = sidebar_tree(nodes, 8);
+        let agents = AgentSet::default();
+        let row_at = |tree: &Tree, focused: bool| {
+            sidebar_row_at(tree, &agents, focused, 6, 32, HEADER + 1)
+        };
+        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
+        let clicked = row_at(&tree, false).expect("a row on the second line");
+        select_sidebar_row(&mut tree, &agents, true, 6, 32, clicked);
+        assert_eq!(row_at(&tree, true), Some(clicked));
+    }
+
+    #[test]
+    fn a_session_row_folds_on_its_fold_and_nowhere_else() {
+        let session = session_node("bipa", false, 0, None);
+        let Node::Session(node) = &session else { panic!("a session row") };
+        let line = branch_line(node, 30, 0);
+        let glyph = line.content().chars().position(|c| c.to_string() == UNFOLDED);
+        assert!(glyph.is_some_and(|at| folds_at(&session, at)), "{:?}", line.content());
+        let folds: Vec<bool> = (0..6).map(|column| folds_at(&session, column)).collect();
+        assert_eq!(folds, [true, true, true, false, false, false]);
+        assert!(!folds_at(&pane_node("bipa", 31, "handoff", None), 1));
     }
 
     #[test]
