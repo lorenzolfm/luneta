@@ -7,7 +7,7 @@
 //! A search hides the rows that do not match and leaves the rest in that
 //! order; the cursor, not the order, says which matches best.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -17,6 +17,7 @@ use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
 use crate::elapsed::{Age, Held};
+use crate::folds::Folds;
 use crate::places::Places;
 
 /// What a placeholder runs: the column each tab keeps for the sidebar, which
@@ -214,7 +215,7 @@ pub struct Tree {
     pub rows: Cursor<Node>,
     /// Counts every session and agent, whatever a search hides.
     pub summary: Summary,
-    folded: BTreeSet<String>,
+    folded: Folds,
     search: Option<Search>,
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
     /// that is never searched needs none.
@@ -250,6 +251,17 @@ enum Search {
 }
 
 impl Tree {
+    /// A tree whose folds are every session's sidebar's.
+    pub fn shared() -> Self {
+        Tree { folded: Folds::shared(), ..Tree::default() }
+    }
+
+    /// Takes up what the sidebars of other sessions folded and unfolded
+    /// since. The rows are only redrawn by the next `rebuild`.
+    pub fn refold(&mut self) {
+        self.folded.reload();
+    }
+
     /// `follow` puts the cursor on the pane you are in, which is where it
     /// belongs while the sidebar does not have the focus. Otherwise the cursor
     /// stays on the row it was on, or on its session once that is folded.
@@ -424,7 +436,7 @@ impl Tree {
     /// the focus. A pane in a folded session unfolds it, to show the row.
     pub fn hand(&mut self, place: Place) {
         if let Place::Pane(session, _) = &place {
-            self.folded.remove(session);
+            self.folded.set(session, false);
         }
         self.handed = Some(place);
     }
@@ -483,11 +495,7 @@ impl Tree {
         let Some(name) = self.rows.selected_row().map(|node| node.session().to_owned()) else {
             return false;
         };
-        if folded {
-            self.folded.insert(name)
-        } else {
-            self.folded.remove(&name)
-        }
+        self.folded.set(&name, folded)
     }
 
     pub fn toggle(&mut self) -> bool {

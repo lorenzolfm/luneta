@@ -4,6 +4,7 @@ mod dirs;
 mod dock;
 mod elapsed;
 mod fetch;
+mod folds;
 mod layout;
 mod paint;
 mod panes;
@@ -191,7 +192,7 @@ impl ZellijPlugin for State {
         request_permission(&PERMISSIONS);
         self.role = match configuration.get(MODE).map(|value| value.trim()) {
             None => Role::Picker,
-            Some(SIDEBAR) => Role::Sidebar(Tree::default()),
+            Some(SIDEBAR) => Role::Sidebar(Tree::shared()),
             Some(DOCK) => {
                 let mut sidebar = configuration.clone();
                 sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
@@ -483,6 +484,11 @@ impl State {
         let Ok(snapshot) = get_session_list() else {
             return;
         };
+        if let Role::Sidebar(tree) = &mut self.role {
+            // Before anyone comes back to this session, so that its first
+            // rows show what was folded elsewhere.
+            tree.refold();
+        }
         if self.is_sidebar() {
             // zellij keeps a client's plugins running after the client leaves,
             // timers and all, and knows no focused pane for it. A sidebar its

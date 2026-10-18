@@ -142,7 +142,10 @@ and sessions alike. One click does it, whether the sidebar has the focus or
 not. On a session's row, the `▾` or `▸` folds or unfolds the session, and the
 name switches to it; the name of the session you are in takes you back to your
 pane. A folded session keeps its count and shows the dot of the agent that
-wants you most.
+wants you most. A fold holds in the sidebar of every session, and after zellij
+restarts: the sidebars keep their folds in the cache zellij gives the plugin,
+one for each location it loads from, so every session's `load_plugins` names
+the same one.
 
 The wheel scrolls the list and leaves the highlight where it is, until you go
 somewhere else or press a key. A click on a row it scrolled to lights the row
