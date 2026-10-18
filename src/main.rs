@@ -187,6 +187,9 @@ struct State {
     agents_taken_at: u64,
     role: Role,
     plugin_id: u32,
+    /// This plugin's client, which the sidebar's menu takes out of the
+    /// session before a delete key kills it.
+    client_id: ClientId,
     tabs: Vec<TabInfo>,
     branches: Vec<Branch>,
     here: Option<u32>,
@@ -219,6 +222,7 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         let ids = get_plugin_ids();
         self.plugin_id = ids.plugin_id;
+        self.client_id = ids.client_id;
         request_permission(&PERMISSIONS);
         self.role = match configuration.get(MODE).map(|value| value.trim()) {
             None => Role::Picker,
@@ -229,7 +233,9 @@ impl ZellijPlugin for State {
                 let dock = dock::Dock::new(self.plugin_id, ids.client_id, sidebar);
                 Role::Dock(dock.shared(ids.zellij_pid))
             },
-            Some(MENU) => Role::Menu(Box::new(menu::Menu::new(self.plugin_id, &configuration))),
+            Some(MENU) => {
+                Role::Menu(Box::new(menu::Menu::new(self.plugin_id, ids.client_id, &configuration)))
+            },
             Some(mode) => Role::Unknown(mode.to_owned()),
         };
         match &self.role {
@@ -251,7 +257,6 @@ impl ZellijPlugin for State {
                     EventType::PaneUpdate,
                     EventType::RunCommandResult,
                     EventType::Timer,
-                    EventType::ListClients,
                 ]);
                 return;
             },
@@ -273,9 +278,8 @@ impl ZellijPlugin for State {
         ]);
         if self.is_sidebar() {
             // zellij says `InputReceived` of every key, whichever pane it goes
-            // to: `Pass` tells it from a click. Its menu asks which clients
-            // the session has, while it takes yours out of it.
-            subscribe(&[EventType::Mouse, EventType::InputReceived, EventType::ListClients]);
+            // to: `Pass` tells it from a click.
+            subscribe(&[EventType::Mouse, EventType::InputReceived]);
         }
         set_timeout(0.0);
     }
@@ -302,7 +306,6 @@ impl ZellijPlugin for State {
                     Event::TabUpdate(tabs) => menu.tabs(tabs),
                     Event::PaneUpdate(panes) => menu.panes(panes),
                     Event::Timer(_) => menu.tick(),
-                    Event::ListClients(clients) => menu.clients(&clients),
                     Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                         menu.ran(exit_code, &stdout, &stderr, &context);
                         false
@@ -339,7 +342,6 @@ impl ZellijPlugin for State {
                 let left = self.leave_session();
                 polled || self.spinning() || asked || left
             },
-            Event::ListClients(clients) => self.listed(&clients),
             Event::Key(key) if self.is_sidebar() => self.handle_sidebar_key(&key),
             Event::Key(key) => self.handle_key(&key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -418,6 +420,7 @@ impl ZellijPlugin for State {
                         tree.menu = tree.menu.take().and_then(answered);
                         true
                     },
+                    Some(close::CLIENTS_VALUE) => self.listed(exit_code, &stdout),
                     Some(agents::CLOSE_VALUE) if exit_code != Some(0) => {
                         let label = context.get(agents::LABEL_KEY).map_or("", String::as_str);
                         let reason = String::from_utf8_lossy(&stderr);
@@ -1344,17 +1347,18 @@ impl State {
         true
     }
 
-    /// The clients zellij lists in the session, while the menu takes the
-    /// client out of it: the session is killed once the client is gone. Says
-    /// whether to draw.
-    fn listed(&mut self, clients: &[ClientInfo]) -> bool {
+    /// What zellij said, as it listed the clients of the session, while the
+    /// menu takes the client out of it: the session is killed once the client
+    /// is gone. Says whether to draw.
+    fn listed(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         if !tree.menu.as_ref().is_some_and(SidebarMenu::lasts) {
             return false;
         }
-        tree.menu = tree.menu.take().and_then(|menu| menu.clients(clients));
+        let client = self.client_id;
+        tree.menu = tree.menu.take().and_then(|menu| menu.clients(client, exit_code, stdout));
         tree.menu.is_none()
     }
 
@@ -2094,15 +2098,19 @@ mod tests {
                 _ => panic!("{case}: neither leaving nor wrong"),
             }
             if others {
-                // The session ends once zellij lists your client out of it.
-                let you = ClientInfo {
-                    client_id: 1,
-                    pane_id: PaneId::Terminal(1),
-                    running_command: String::new(),
-                    is_current_client: true,
+                // The session ends once zellij lists the sidebar's client, 1,
+                // out of it.
+                state.client_id = 1;
+                let listed = |clients: &str| {
+                    let context = BTreeMap::from([(
+                        agents::CONTEXT_KEY.to_owned(),
+                        close::CLIENTS_VALUE.to_owned(),
+                    )]);
+                    let stdout = format!("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n{clients}");
+                    Event::RunCommandResult(Some(0), stdout.into_bytes(), Vec::new(), context)
                 };
-                assert!(!state.update(Event::ListClients(vec![you])), "{case}");
-                assert!(state.update(Event::ListClients(Vec::new())), "{case}");
+                assert!(!state.update(listed("1         plugin_3       N/A\n")), "{case}");
+                assert!(state.update(listed("")), "{case}");
                 let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
                 assert!(tree.menu.is_none(), "{case}");
             }

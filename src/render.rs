@@ -3071,7 +3071,7 @@ mod tests {
             r#"c "Claude" { m "/make-illegal-states-unrepresentable"; t "/tigerstyle"; }"#
                 .to_owned(),
         )]);
-        let mut menu = Menu::new(0, &configuration);
+        let mut menu = Menu::new(0, 1, &configuration);
         for opened in [false, true] {
             let (width, height) = menu_size(&menu).expect("a size");
             let Some(Shown::Keys(keys)) = menu.shown() else { panic!("no keys") };

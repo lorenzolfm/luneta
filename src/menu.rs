@@ -777,14 +777,19 @@ impl SidebarMenu {
         SidebarMenu { number: self.number, stage }
     }
 
-    /// What zellij says of the `clients` in the session, while the client
-    /// leaves it: kills the session once the client is gone. None once it
-    /// has.
-    pub fn clients(self, clients: &[ClientInfo]) -> Option<Self> {
-        match &self.stage {
-            Stage::Leaving(leaving) if leaving.listed(clients) => None,
-            _ => Some(self),
-        }
+    /// What zellij said, as it listed the clients of the session, while
+    /// `client`, the sidebar's, leaves it: kills the session once the client
+    /// is gone. None once it has.
+    pub fn clients(
+        mut self,
+        client: ClientId,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+    ) -> Option<Self> {
+        let Stage::Leaving(leaving) = &mut self.stage else {
+            return Some(self);
+        };
+        (!leaving.listed(client, exit_code, stdout)).then_some(self)
     }
 }
 
@@ -822,6 +827,9 @@ enum Phase {
 pub struct Menu {
     phase: Phase,
     plugin_id: u32,
+    /// This plugin's client, which the menu takes out of the session before
+    /// a delete key kills it.
+    client: ClientId,
     panes: Option<PaneManifest>,
     tabs: Vec<TabInfo>,
     /// The directory git was last asked the branch of, and the branch checked
@@ -845,7 +853,7 @@ pub struct Menu {
 }
 
 impl Menu {
-    pub fn new(plugin_id: u32, configuration: &BTreeMap<String, String>) -> Self {
+    pub fn new(plugin_id: u32, client: ClientId, configuration: &BTreeMap<String, String>) -> Self {
         let phase = match Keys::new(configuration.get(ENTRIES).map(String::as_str), Scope::Pane) {
             Ok(keys) => Phase::Choosing(keys, Fetch::Waiting),
             Err(reason) => Phase::Wrong(reason),
@@ -856,6 +864,7 @@ impl Menu {
         Menu {
             phase,
             plugin_id,
+            client,
             panes: None,
             tabs: Vec::new(),
             asked: None,
@@ -953,8 +962,8 @@ impl Menu {
     }
 
     /// What came of a command the menu ran: the branch checked out where an
-    /// agent starts, what the agents are doing, and where the panes of the
-    /// session work.
+    /// agent starts, what the agents are doing, where the panes of the
+    /// session work, and the clients of the session while you leave it.
     pub fn ran(
         &mut self,
         exit_code: Option<i32>,
@@ -976,6 +985,7 @@ impl Menu {
                 self.places_in = true;
                 self.seat_agents();
             },
+            Some(close::CLIENTS_VALUE) => self.clients(exit_code, stdout),
             _ => {},
         }
     }
@@ -1142,16 +1152,15 @@ impl Menu {
         }
     }
 
-    /// What zellij says of the `clients` in the session, while you leave it:
-    /// kills the session once you are gone. Says whether to draw.
-    pub fn clients(&mut self, clients: &[ClientInfo]) -> bool {
-        let Phase::Leaving(leaving) = &self.phase else {
-            return false;
+    /// What zellij said, as it listed the clients of the session, while you
+    /// leave it: kills the session once your client is gone.
+    fn clients(&mut self, exit_code: Option<i32>, stdout: &[u8]) {
+        let Phase::Leaving(leaving) = &mut self.phase else {
+            return;
         };
-        if leaving.listed(clients) {
+        if leaving.listed(self.client, exit_code, stdout) {
             self.phase = Phase::Done;
         }
-        false
     }
 
     /// Keeps the pane you came from, and the directory it works in, as the
@@ -1748,7 +1757,7 @@ mod tests {
 
     /// The menu the key binding opens, floating, for the pane you came from.
     fn bound() -> Menu {
-        Menu::new(0, &BTreeMap::from([(ENTRIES.to_owned(), MENU.to_owned())]))
+        Menu::new(0, 1, &BTreeMap::from([(ENTRIES.to_owned(), MENU.to_owned())]))
     }
 
     /// The key binding opens the menu for the pane you are in, which zellij

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use crate::agents::{AgentSet, Seat, Status};
+use crate::agents::{AgentSet, Seat, Status, CONTEXT_KEY};
 use crate::dock::{TabId, SIDEBAR_TITLE};
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
@@ -375,18 +375,45 @@ fn kill_session(session: &str) -> [&str; 3] {
 /// stays after all.
 const PATIENCE: u32 = 50;
 
+/// What the command that lists a session's clients is run with, as its
+/// context, for its answer to come back to the menu that leaves.
+pub const CLIENTS_VALUE: &str = "clients";
+
+/// What `zellij action list-clients` heads its list with.
+const CLIENTS_HEADER: &str = "CLIENT_ID";
+
+/// Lists the clients of `session`, a client to a line under a header, its id
+/// first. zellij's own answer to a plugin leaves out a client whose focus is
+/// on that plugin, as the focus of the client leaving is on the menu.
+fn clients_of(session: &str) -> [&str; 5] {
+    ["zellij", "--session", session, "action", "list-clients"]
+}
+
+/// The clients a list of them names, by id, or none for what is no such list.
+fn clients_listed(stdout: &[u8]) -> Option<Vec<ClientId>> {
+    let listed = String::from_utf8_lossy(stdout);
+    let mut lines = listed.lines().filter(|line| !line.trim().is_empty());
+    let header = lines.next()?.split_whitespace().next()?;
+    if header != CLIENTS_HEADER {
+        return None;
+    }
+    lines.map(|line| line.split_whitespace().next()?.parse().ok()).collect()
+}
+
 /// The client on its way to another session, and the session it leaves, to
 /// kill once it has: killed first, the session would take the client with it.
 pub struct Leaving {
     session: String,
     to: String,
     ticks: u32,
+    /// Whether zellij has yet to answer the last ask for the clients.
+    asking: bool,
 }
 
 impl Leaving {
     fn go(session: &str, to: &str) -> Self {
         switch_session(Some(to));
-        Leaving { session: session.to_owned(), to: to.to_owned(), ticks: 0 }
+        Leaving { session: session.to_owned(), to: to.to_owned(), ticks: 0, asking: false }
     }
 
     /// The session the client is on its way to.
@@ -394,9 +421,10 @@ impl Leaving {
         &self.to
     }
 
-    /// Asks zellij which clients the session has, for `listed` to kill it
-    /// once this plugin's is not among them. Says why the session stays once
-    /// the client has taken too long to leave.
+    /// Asks zellij which clients the session has, once it has answered the
+    /// last ask, for `listed` to kill the session once the plugin's client is
+    /// not among them. Says why the session stays once the client has taken
+    /// too long to leave.
     pub fn tick(&mut self) -> Result<(), String> {
         self.ticks += 1;
         if self.ticks >= PATIENCE {
@@ -405,20 +433,27 @@ impl Leaving {
                 self.to, self.session
             ));
         }
-        list_clients();
+        if !self.asking {
+            let context = BTreeMap::from([(CONTEXT_KEY.to_owned(), CLIENTS_VALUE.to_owned())]);
+            run_command(&clients_of(&self.session), context);
+            self.asking = true;
+        }
         Ok(())
     }
 
-    /// Kills the session once the `clients` zellij lists in it leave out this
+    /// Kills the session once zellij lists its clients without `client`, the
     /// plugin's, and says whether it did. That the client is gone is what
-    /// zellij says, not an answer it could not give. A `zellij` of its own
-    /// kills it: the plugin asking would wait on the session it ends.
-    pub fn listed(&self, clients: &[ClientInfo]) -> bool {
-        if clients.iter().any(|client| client.is_current_client) {
-            return false;
+    /// zellij says: an answer that is no list of the clients kills nothing.
+    /// A `zellij` of its own kills it: the plugin asking would wait on the
+    /// session it ends.
+    pub fn listed(&mut self, client: ClientId, exit_code: Option<i32>, stdout: &[u8]) -> bool {
+        self.asking = false;
+        let gone = exit_code == Some(0)
+            && clients_listed(stdout).is_some_and(|clients| !clients.contains(&client));
+        if gone {
+            run_command(&kill_session(&self.session), BTreeMap::new());
         }
-        run_command(&kill_session(&self.session), BTreeMap::new());
-        true
+        gone
     }
 }
 
@@ -574,21 +609,32 @@ mod tests {
     }
 
     /// The session you leave is killed once zellij lists its clients without
-    /// yours, and not while it lists yours. A client that takes too long to
-    /// leave leaves the session be.
+    /// yours, client 1, and not while it lists yours, nor on an answer that
+    /// is no list of them. Each tick asks once zellij has answered the last.
+    /// A client that takes too long to leave leaves the session be.
     #[test]
     fn the_session_you_leave_ends_once_zellij_lists_you_out_of_it() {
-        let client = |id, is_current_client| ClientInfo {
-            client_id: id,
-            pane_id: PaneId::Terminal(1),
-            running_command: String::new(),
-            is_current_client,
-        };
-        let mut leaving = Leaving { session: "luneta".to_owned(), to: "elo".to_owned(), ticks: 0 };
-        assert!(!leaving.listed(&[client(1, true), client(2, false)]));
-        assert!(leaving.listed(&[client(2, false)]));
-        assert!(leaving.listed(&[]));
-        for _ in 1..PATIENCE {
+        let header = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n";
+        let yours = "1         plugin_3       file:/p/luneta.wasm\n";
+        let other = "2         terminal_4     N/A\n";
+        let mut leaving =
+            Leaving { session: "luneta".to_owned(), to: "elo".to_owned(), ticks: 0, asking: false };
+        for (exit_code, stdout, killed) in [
+            (Some(0), format!("{header}{yours}{other}"), false),
+            (Some(0), format!("{header}{other}"), true),
+            (Some(0), header.to_owned(), true),
+            (Some(0), String::new(), false),
+            (Some(0), "Session 'luneta' not found\n".to_owned(), false),
+            (Some(1), header.to_owned(), false),
+        ] {
+            let said = leaving.listed(1, exit_code, stdout.as_bytes());
+            assert_eq!(said, killed, "{exit_code:?}: {stdout:?}");
+        }
+        assert_eq!(leaving.tick(), Ok(()));
+        assert!(leaving.asking);
+        leaving.listed(1, Some(0), format!("{header}{yours}").as_bytes());
+        assert!(!leaving.asking);
+        for _ in 2..PATIENCE {
             assert_eq!(leaving.tick(), Ok(()));
         }
         let stayed = leaving.tick().err();
