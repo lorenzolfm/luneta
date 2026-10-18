@@ -293,7 +293,7 @@ fn main() {
     agents.ingest(Some(0), &ps, b"");
 
     stats.push(bench("AgentSet::rebuild (empty term)", 2000, || {
-        let live = Live::new(Some("session-000-work"), &places);
+        let live = Live::new(Some("session-000-work"), &sess.live, &places);
         agents.rebuild("", &live, None, Age::from_secs(1), Selection::Hold);
         std::hint::black_box(&agents);
     }));
@@ -337,7 +337,7 @@ fn main() {
     ag.ingest(Some(0), &ps, b"");
     ag.rebuild(
         "",
-        &Live::new(Some("session-000-work"), &places),
+        &Live::new(Some("session-000-work"), &sess.live, &places),
         None,
         Age::from_secs(1),
         Selection::Hold,
@@ -360,7 +360,7 @@ fn main() {
         render::render_dirs(&dirs, "", ROWS, COLS);
     }));
     frames.push(bench("render::render_agents", reps, || {
-        render::render_agents(&ag, &peeks, "", ROWS, COLS, 7);
+        render::render_agents(&ag, &peeks, "", None, ROWS, COLS, 7);
     }));
     report("render (one frame, 10 frames/sec budget = 100 ms)", &frames);
 

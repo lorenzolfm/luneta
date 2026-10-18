@@ -612,7 +612,8 @@ mod tests {
 
         let mut set = AgentSet::default();
         set.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"");
-        set.rebuild("", &Live::new(None, &places), None, Age::from_secs(0), Selection::SnapToTop);
+        let live = Live::new(None, &[], &places);
+        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
         set
     }
 
@@ -677,7 +678,8 @@ mod tests {
         let mut set = AgentSet::default();
         set.ingest(Some(0), json.as_bytes(), b"");
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
-        set.rebuild("", &Live::new(None, &places), None, Age::from_secs(0), Selection::SnapToTop);
+        let live = Live::new(None, &[], &places);
+        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
 
         let mut tree = Tree::default();
         tree.rebuild(&[branch("s", 1, &[(0, "⠂ Building the sidebar")])], None, &set, None, true);
