@@ -326,7 +326,7 @@ impl ZellijPlugin for State {
                     },
                     Some(checkouts::CONTEXT_VALUE) => match context.get(checkouts::DIR_KEY) {
                         Some(dir) => {
-                            self.checkouts.ingest(dir.clone(), exit_code, &stdout);
+                            self.checkouts.ingest(dir.clone(), exit_code, &stdout, &stderr);
                             self.rebuild_tree();
                             true
                         },
@@ -504,13 +504,16 @@ impl State {
                 return;
             }
             self.seat_from(&snapshot);
+            let before = std::mem::take(&mut self.branches);
             self.branches = snapshot
                 .live_sessions
                 .iter()
                 .map(|s| {
                     let age = Age::new(s.creation_time);
-                    let checkouts = &self.checkouts;
-                    Branch::new(s.name.clone(), age, &s.tabs, &s.panes, &self.places, checkouts)
+                    let before = before.iter().find(|branch| branch.name == s.name);
+                    let before = before.map_or(&[][..], |branch| branch.panes.as_slice());
+                    let (places, checkouts) = (&self.places, &self.checkouts);
+                    Branch::new(s.name.clone(), age, &s.tabs, &s.panes, places, checkouts, before)
                 })
                 .collect();
             if self.frame.wrapping_sub(self.places_at) >= TICKS_PER_PLACES {
@@ -1115,6 +1118,7 @@ impl State {
 
     fn wake(&mut self) {
         self.places.forget();
+        self.checkouts.wake();
         self.places_at = self.frame;
         self.poll();
     }
@@ -1129,8 +1133,9 @@ impl State {
         let current = self.matches.current_session.clone();
         if let (Some(current), Some(manifest)) = (current.as_deref(), self.panes.as_ref()) {
             if let Some(branch) = self.branches.iter_mut().find(|b| b.name == current) {
+                let (places, checkouts) = (&self.places, &self.checkouts);
                 branch.panes =
-                    tree::leaves(current, &self.tabs, manifest, &self.places, &self.checkouts);
+                    tree::leaves(current, &self.tabs, manifest, places, checkouts, &branch.panes);
             }
         }
         if !self.away {

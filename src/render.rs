@@ -1050,7 +1050,7 @@ pub fn sidebar_row_at(
     None
 }
 
-/// Moves the view of the sidebar `delta` rows down, or up, as far as there
+/// Moves the view of the sidebar `delta` lines down, or up, as far as there
 /// are rows to show, and says whether it moved.
 pub fn scroll_sidebar(
     tree: &mut Tree,
@@ -1063,12 +1063,30 @@ pub fn scroll_sidebar(
     let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
     let (Range { start, .. }, _) = on_screen(tree, focused, height);
     let last = top_ending_at(&tree.rows, tree.rows.len().saturating_sub(1), height);
-    let top = start.saturating_add_signed(delta).min(last);
+    let top = top_after(&tree.rows, start, delta).min(last);
     if top == start {
         return false;
     }
     tree.scroll_to(top);
     true
+}
+
+/// The top row of a view moved `delta` lines from row `top`: a row the move
+/// takes any of goes out of the view whole, or comes into it whole.
+fn top_after(rows: &[Node], mut top: usize, delta: isize) -> usize {
+    let mut lines = delta.unsigned_abs();
+    while lines > 0 {
+        if delta > 0 && top + 1 < rows.len() {
+            lines = lines.saturating_sub(span(&rows[top]));
+            top += 1;
+        } else if delta < 0 && top > 0 {
+            top -= 1;
+            lines = lines.saturating_sub(span(&rows[top]));
+        } else {
+            break;
+        }
+    }
+    top
 }
 
 /// Puts the cursor on `row`, as a click does. A view the wheel moved stays
@@ -2353,8 +2371,8 @@ mod tests {
 
     /// A row of two lines is one row: a click on either line lands on it, the
     /// view keeps the whole of the lit row in sight and cuts the last row it
-    /// has no room for, and the wheel stops once the whole of the last row is
-    /// in sight.
+    /// has no room for, the wheel counts both of its lines, and stops once the
+    /// whole of the last row is in sight.
     #[test]
     fn a_row_of_two_lines_is_one_row_to_the_view_and_the_mouse() {
         let agents = AgentSet::default();
@@ -2369,7 +2387,12 @@ mod tests {
         // Your pane is the third row.
         assert_eq!(view(&tree, false, 6), [1, 1, 2, 2]);
 
-        // Four lines of tree, under the header and over the keys.
+        // Four lines of tree, under the header and over the keys. Three lines
+        // of the wheel take the session's row and the two of the pane under it.
+        assert!(scroll_sidebar(&mut tree, &agents, true, 7, 30, 3));
+        assert_eq!(view(&tree, true, 7), [2, 2, 3, 4]);
+        assert!(scroll_sidebar(&mut tree, &agents, true, 7, 30, -1));
+        assert_eq!(view(&tree, true, 7), [1, 1, 2, 2]);
         assert!(scroll_sidebar(&mut tree, &agents, true, 7, 30, 99));
         assert_eq!(view(&tree, true, 7), [3, 4, 5, 5]);
         assert!(!scroll_sidebar(&mut tree, &agents, true, 7, 30, 1));

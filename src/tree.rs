@@ -14,7 +14,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
-use crate::checkouts::{Checkout, Checkouts};
+use crate::checkouts::{Checkout, Checkouts, Said};
 use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
 use crate::elapsed::{Age, Held};
@@ -36,9 +36,10 @@ pub struct Branch {
     pub panes: Vec<Leaf>,
 }
 
-/// A terminal pane, the name of the tab that holds it, and the directory it
-/// works in, once its session has said, and what is checked out there, once
-/// git has.
+/// A terminal pane, the name of the tab that holds it, the directory it works
+/// in, as its session last said, and what is checked out there, as git last
+/// said. For the few seconds after a `cd` that git has yet to answer for the
+/// new directory, it is what was checked out in the old one.
 pub struct Leaf {
     pub id: u32,
     pub title: String,
@@ -48,6 +49,7 @@ pub struct Leaf {
 }
 
 impl Branch {
+    /// `before` is the session's panes as the sidebar last had them.
     pub fn new(
         name: String,
         age: Age,
@@ -55,21 +57,27 @@ impl Branch {
         manifest: &PaneManifest,
         places: &Places,
         checkouts: &Checkouts,
+        before: &[Leaf],
     ) -> Self {
-        let panes = leaves(&name, tabs, manifest, places, checkouts);
+        let panes = leaves(&name, tabs, manifest, places, checkouts, before);
         Branch { name, age, panes }
     }
 }
 
 /// The panes a person can go to, in tab order, the tiled ones of a tab before
 /// its floating ones, and in the order they were opened within each. The
-/// sidebar's placeholders are not among them.
+/// sidebar's placeholders are not among them. A pane keeps what was checked
+/// out where it worked, as it stood `before`, until git says what is checked
+/// out where it works now, so that a `cd` does not take its branch's line away
+/// and back. A session that leaves a pane out of one answer has not said it
+/// moved, and the pane keeps its directory too, for git to be asked about.
 pub fn leaves(
     session: &str,
     tabs: &[TabInfo],
     manifest: &PaneManifest,
     places: &Places,
     checkouts: &Checkouts,
+    before: &[Leaf],
 ) -> Vec<Leaf> {
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
@@ -81,7 +89,15 @@ pub fn leaves(
             if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
                 continue;
             }
-            let cwd = places.cwd(session, pane.id);
+            let held = before.iter().find(|leaf| leaf.id == pane.id);
+            let cwd = places
+                .cwd(session, pane.id)
+                .or_else(|| held.and_then(|leaf| leaf.cwd.as_deref()));
+            let checkout = match cwd.map_or(Said::Nothing, |cwd| checkouts.said(cwd)) {
+                Said::Branch(checkout) => Some(checkout.clone()),
+                Said::NoBranch => None,
+                Said::Nothing => held.and_then(|leaf| leaf.checkout.clone()),
+            };
             keyed.push((
                 (*position, pane.is_floating, pane.id),
                 Leaf {
@@ -89,7 +105,7 @@ pub fn leaves(
                     title: pane.title.clone(),
                     tab: tab.to_owned(),
                     cwd: cwd.map(str::to_owned),
-                    checkout: cwd.and_then(|cwd| checkouts.of(cwd)).cloned(),
+                    checkout,
                 },
             ));
         }
@@ -893,10 +909,10 @@ mod tests {
         ]);
         let places = Places::of(&[("s", &[(3, "/w/s"), (2, "/w/logs")]), ("t", &[(5, "/w/t")])]);
         let mut checkouts = Checkouts::default();
-        checkouts.ingest("/w/s".to_owned(), Some(0), b"# branch.head main\n");
-        checkouts.ingest("/w/t".to_owned(), Some(0), b"# branch.head fold\n");
+        checkouts.ingest("/w/s".to_owned(), Some(0), b"# branch.head main\n", b"");
+        checkouts.ingest("/w/t".to_owned(), Some(0), b"# branch.head fold\n", b"");
         let tabs = [tab(0, "code"), tab(1, "logs")];
-        let leaves = leaves("s", &tabs, &manifest, &places, &checkouts);
+        let leaves = leaves("s", &tabs, &manifest, &places, &checkouts, &[]);
         let seen: Vec<(u32, &str, &str, Option<&str>)> = leaves
             .iter()
             .map(|leaf| (leaf.id, leaf.title.as_str(), leaf.tab.as_str(), leaf.cwd.as_deref()))
@@ -916,6 +932,37 @@ mod tests {
             .map(|leaf| leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str()))
             .collect();
         assert_eq!(branches, [Some("main"), None, None, None]);
+    }
+
+    /// A pane that moved keeps its branch until git answers for where it
+    /// works now. One its session left out of an answer keeps its directory,
+    /// and shows what git says is checked out there. Only git saying there is
+    /// no branch takes it away.
+    #[test]
+    fn a_pane_keeps_its_branch_until_git_answers_for_where_it_works_now() {
+        let manifest = manifest(&[(0, vec![pane(1, "fish"), pane(2, "fish"), pane(3, "fish")])]);
+        let tabs = [tab(0, "code")];
+        let mut checkouts = Checkouts::default();
+        checkouts.ingest("/w/repo".to_owned(), Some(0), b"# branch.head main\n", b"");
+        let places = Places::of(&[("s", &[(1, "/w/repo"), (2, "/w/repo"), (3, "/w/repo")])]);
+        let before = leaves("s", &tabs, &manifest, &places, &checkouts, &[]);
+
+        // Pane 1 went down into `src`, pane 2 out of the repository, and pane
+        // 3's directory is missing from the session's answer.
+        checkouts.ingest("/w/plain".to_owned(), Some(128), b"", b"");
+        let places = Places::of(&[("s", &[(1, "/w/repo/src"), (2, "/w/plain")])]);
+        let after = leaves("s", &tabs, &manifest, &places, &checkouts, &before);
+        let branches: Vec<Option<&str>> = after
+            .iter()
+            .map(|leaf| leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str()))
+            .collect();
+        assert_eq!(branches, [Some("main"), None, Some("main")]);
+
+        // The repository changes branch, and pane 3, still left out, shows it.
+        checkouts.ingest("/w/repo".to_owned(), Some(0), b"# branch.head fold\n", b"");
+        let again = leaves("s", &tabs, &manifest, &places, &checkouts, &after);
+        assert_eq!(again[2].cwd.as_deref(), Some("/w/repo"));
+        assert_eq!(again[2].checkout.as_ref().map(|c| c.branch.as_str()), Some("fold"));
     }
 
     #[test]
