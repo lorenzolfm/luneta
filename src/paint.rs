@@ -16,6 +16,8 @@ use std::ops::{Bound, Range, RangeBounds};
 const DIM: usize = 4;
 const UNBOLD: usize = 5;
 const ERROR: usize = 6;
+/// zellij's success colour: green in most themes, the level past the error.
+pub const SUCCESS: usize = 7;
 
 /// A row, and which of its characters carry which style level.
 #[derive(Default)]
@@ -38,11 +40,29 @@ impl Painted {
         &self.text
     }
 
-    /// The colour level zellij draws the character at `index` in: the highest
-    /// of the four that holds it, as its text component picks.
+    /// The colour level zellij draws the character at `index` in, as its text
+    /// component picks: the error colour over the success colour, and either
+    /// over the highest of the four emphasis levels that holds it.
     #[cfg(test)]
     pub fn level_at(&self, index: usize) -> Option<usize> {
-        (0..=3).rev().find(|level| self.indices.get(*level).is_some_and(|at| at.contains(&index)))
+        [ERROR, SUCCESS, 3, 2, 1, 0]
+            .into_iter()
+            .find(|level| self.indices.get(*level).is_some_and(|at| at.contains(&index)))
+    }
+
+    #[cfg(test)]
+    pub fn is_dim_at(&self, index: usize) -> bool {
+        self.indices.get(DIM).is_some_and(|at| at.contains(&index))
+    }
+
+    #[cfg(test)]
+    pub fn is_bold_at(&self, index: usize) -> bool {
+        !self.indices.get(UNBOLD).is_some_and(|at| at.contains(&index))
+    }
+
+    #[cfg(test)]
+    pub fn is_selected(&self) -> bool {
+        self.selected
     }
 
     pub fn selected(mut self) -> Self {
@@ -215,6 +235,10 @@ mod tests {
             (
                 Painted::new(row).error_color_range(1..4),
                 Text::new(row).error_color_range(1..4),
+            ),
+            (
+                Painted::new(row).color_range(SUCCESS, 1..4),
+                Text::new(row).success_color_range(1..4),
             ),
             (
                 Painted::new(row).color_substring(3, "session"),

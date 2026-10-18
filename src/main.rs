@@ -1542,6 +1542,8 @@ mod tests {
     /// both take you there instead, which for your own is back to your pane.
     #[test]
     fn a_session_row_folds_unless_a_term_found_it() {
+        // The header and the blank line under it take the first two lines.
+        let line_of = |row: usize| row + 2;
         for (typed, row, click, folded) in [
             ("", 0, false, &["a"][..]),
             ("", 0, true, &["a"]),
@@ -1552,7 +1554,7 @@ mod tests {
             let mut state = focused_sidebar();
             state.search_tree(typed.to_owned());
             if click {
-                state.click(row);
+                state.click(line_of(row));
             } else {
                 if let Role::Sidebar(tree) = &mut state.role {
                     tree.rows.select(row);

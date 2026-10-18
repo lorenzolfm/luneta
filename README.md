@@ -103,30 +103,42 @@ over it: every live session, the panes in it, and what the agent in each pane
 is doing. One sidebar for the whole session, which follows you from tab to tab.
 
 ```text
-▾ bipa                     🙋1
-  ☕ handoff-eng-11259-pr… 13h
-  🙋 dda-bank-slip-paid-fe… 3m
-  ⠋  Handoff pix outflow … 12s
-▸ floresta                   ⠋
-▾ unnamed
-› ⠋  orca-copy             12s
+─ 3 sessions ────── ●1 ✓1 ⠋3 ─
+
+ ▾ bipa ────────────────── ●1
+   ✓ handoff-eng-11259-p… 13h
+   ● dda-bank-slip-paid-…  3m
+   ⠋ Handoff pix outflow… 12s
+ ▸ floresta ─────────────── ⠋
+ ▾ unnamed ──────────────────
+▌  ⠋ orca-copy            12s
      misc/unnamed
 ```
 
 Sessions keep their place, oldest first, so a row never moves under your eye
-or your mouse. Which agent wants you is the job of the glyph, the count on its
+or your mouse. Which agent wants you is the job of the dot, the count on its
 session's row, and the `next` key — not of the order.
+
+The sidebar marks a status with a dot one column wide where the picker has an
+emoji, so that every label starts at the same column and the dot can take a
+colour: `●` in the accent for `waiting`, `✓` in green for `idle`, the spinner
+for `busy`, and `$`, dimmed, for `shell`. Any other status shows its initial.
+The rule along the top counts the live sessions, and the agents across all of
+them in each of the first three, a folded session's too. A count of none is
+left out.
 
 An agent's row is named for what it is doing: the name you gave it with
 `/rename`, or else the title Claude Code gives its pane. That title is a bare
 `Claude Code` until the agent has a topic, and some never get one; such a row
 goes by its tab, if you named it, or else by the directory the agent works in.
-A pane with no agent in it is dimmed, and `›` marks the pane you are in. A
-shell at its prompt is named for its directory's last two parts, as
+A pane with no agent in it is dimmed. `▌` marks the pane you are in, and the
+highlight stays on it while the sidebar does not have the focus; once it has,
+the highlight goes with the cursor. The session you are in has its rule in the
+accent. A shell at its prompt is named for its directory's last two parts, as
 `luneta/main`, where fish would title it `~/P/m/l/main`.
 
 Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
-and sessions alike. A folded session keeps its count and shows the glyph of
+and sessions alike. A folded session keeps its count and shows the dot of
 the agent that wants you most.
 
 Press `/` to search, as in less and vim. The tree narrows to the rows that

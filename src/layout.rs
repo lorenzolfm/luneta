@@ -118,9 +118,40 @@ pub struct Line {
     styles: Vec<Style>,
 }
 
+/// How a run of a `Line` is drawn. zellij draws text bold, in the theme's
+/// base colour, unless it is told otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    /// An emphasis level, not bold. A bare level is this one.
+    Level(usize),
+    /// An emphasis level, bold.
+    Bold(usize),
+    /// The theme's base colour, not bold.
+    Plain,
+    /// The theme's base colour, bold.
+    Strong,
+    /// Dimmed, in the terminal's own colour.
+    Dim,
+}
+
+impl From<usize> for Ink {
+    fn from(level: usize) -> Self {
+        Ink::Level(level)
+    }
+}
+
+impl Ink {
+    fn level(self) -> Option<usize> {
+        match self {
+            Ink::Level(level) | Ink::Bold(level) => Some(level),
+            Ink::Plain | Ink::Strong | Ink::Dim => None,
+        }
+    }
+}
+
 enum Style {
-    Level(usize, Range<usize>),
-    Indices(usize, Vec<usize>),
+    Run(Ink, Range<usize>),
+    Indices(Ink, Vec<usize>),
     Error(Range<usize>),
 }
 
@@ -139,20 +170,26 @@ impl Line {
         self.columns
     }
 
-    pub fn push(&mut self, text: &str, level: usize) {
+    pub fn push(&mut self, text: &str, ink: impl Into<Ink>) {
         let range = self.raw(text);
-        self.styles.push(Style::Level(level, range));
+        self.styles.push(Style::Run(ink.into(), range));
     }
 
-    /// `text` in `level`, and the characters at `hits` in `accent`. zellij
-    /// colours a character held in two levels with the higher one, so `level`
+    /// `text` in `ink`, and the characters at `hits` in `accent`. zellij
+    /// colours a character held in two levels with the higher one, so `ink`
     /// leaves the hits out: they show whichever of the two is higher.
-    pub fn push_hits(&mut self, text: &str, level: usize, accent: usize, hits: &[usize]) {
+    pub fn push_hits(
+        &mut self,
+        text: &str,
+        ink: impl Into<Ink>,
+        accent: impl Into<Ink>,
+        hits: &[usize],
+    ) {
         let range = self.raw(text);
         let start = range.start;
         let (lit, rest) = range.partition(|i| hits.contains(&(i - start)));
-        self.styles.push(Style::Indices(level, rest));
-        self.styles.push(Style::Indices(accent, lit));
+        self.styles.push(Style::Indices(ink.into(), rest));
+        self.styles.push(Style::Indices(accent.into(), lit));
     }
 
     pub fn push_error(&mut self, text: &str) {
@@ -178,25 +215,36 @@ impl Line {
         start..self.chars
     }
 
+    /// The line in a box `inner_width` columns wide, and a column of margin
+    /// on either side of it.
     pub fn finish(self, inner_width: usize) -> Painted {
+        self.paint(inner_width, 1)
+    }
+
+    /// The line in exactly `width` columns, with no margin: for a row that
+    /// draws in its first column.
+    pub fn fill(self, width: usize) -> Painted {
+        self.paint(width, 0)
+    }
+
+    fn paint(self, width: usize, margin: usize) -> Painted {
         let Line { mut text, mut chars, mut columns, styles } = self;
-        if columns > inner_width {
-            text = truncate(&text, inner_width);
+        if columns > width {
+            text = truncate(&text, width);
             chars = text.chars().count();
             columns = text.width();
         }
         let visible = chars;
 
-        // `truncate` promises `columns <= inner_width`; saturate anyway, since
-        // the alternative is a panic that takes the whole plugin down.
-        let fill = inner_width.saturating_sub(columns);
-        let mut line = String::with_capacity(text.len() + fill + 2);
-        line.push(' ');
+        // `truncate` promises `columns <= width`; saturate anyway, since the
+        // alternative is a panic that takes the whole plugin down.
+        let fill = width.saturating_sub(columns);
+        let mut line = String::with_capacity(text.len() + fill + margin * 2);
+        line.extend(std::iter::repeat_n(' ', margin));
         line.push_str(&text);
-        line.extend(std::iter::repeat_n(' ', fill));
-        line.push(' ');
+        line.extend(std::iter::repeat_n(' ', fill + margin));
 
-        let shift = |i: usize| i + 1;
+        let shift = |i: usize| i + margin;
         let clamp = |range: Range<usize>| {
             let start = range.start.min(visible);
             let end = range.end.min(visible);
@@ -204,32 +252,47 @@ impl Line {
         };
 
         // Every position no style covers is a space — padding, a gap, or the
-        // border margin — so it needs no index list of its own to look right.
-        let mut styled: Vec<usize> = Vec::new();
+        // margin — so it needs no index list of its own to look right.
+        let mut unbold: Vec<usize> = Vec::new();
+        let mut dim: Vec<usize> = Vec::new();
         for style in &styles {
+            let into = match style {
+                Style::Run(ink, _) | Style::Indices(ink, _) => match ink {
+                    Ink::Level(_) | Ink::Plain => &mut unbold,
+                    Ink::Dim => &mut dim,
+                    Ink::Bold(_) | Ink::Strong => continue,
+                },
+                Style::Error(_) => &mut unbold,
+            };
             match style {
-                Style::Level(_, range) | Style::Error(range) => {
+                Style::Run(_, range) | Style::Error(range) => {
                     if let Some(range) = clamp(range.clone()) {
-                        styled.extend(range);
+                        into.extend(range);
                     }
                 },
                 Style::Indices(_, indices) => {
-                    styled.extend(indices.iter().filter(|i| **i < visible).map(|i| shift(*i)));
+                    into.extend(indices.iter().filter(|i| **i < visible).map(|i| shift(*i)));
                 },
             }
         }
 
-        let mut text = Painted::new(&line).unbold_indices(styled);
+        let mut text = Painted::new(&line).unbold_indices(unbold);
+        if !dim.is_empty() {
+            text = text.dim_indices(dim);
+        }
         for style in styles {
             text = match style {
-                Style::Level(level, range) => match clamp(range) {
-                    Some(range) => text.color_range(level, range),
+                Style::Run(ink, range) => match (ink.level(), clamp(range)) {
+                    (Some(level), Some(range)) => text.color_range(level, range),
+                    _ => text,
+                },
+                Style::Indices(ink, indices) => match ink.level() {
+                    Some(level) => text.color_indices(
+                        level,
+                        indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
+                    ),
                     None => text,
                 },
-                Style::Indices(level, indices) => text.color_indices(
-                    level,
-                    indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
-                ),
                 Style::Error(range) => match clamp(range) {
                     Some(range) => text.error_color_range(range),
                     None => text,
@@ -317,8 +380,10 @@ pub fn truncate(text: &str, max: usize) -> String {
         }
         end = next;
     }
-    let mut out = String::with_capacity(end + '…'.len_utf8());
-    out.push_str(&text[..end]);
+    // A cut that lands on a space leaves the `…` after the word, not a gap.
+    let kept = text[..end].trim_end_matches(' ');
+    let mut out = String::with_capacity(kept.len() + '…'.len_utf8());
+    out.push_str(kept);
     out.push('…');
     out
 }
@@ -351,6 +416,36 @@ pub fn truncate_left(text: &str, max: usize) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zellij leaves a character undimmed when it is also told not to be
+    /// bold, so a dimmed run must stay out of the unbolded ones.
+    #[test]
+    fn each_ink_paints_the_way_zellij_reads_it() {
+        let mut line = Line::new();
+        for (text, ink) in [
+            ("a", Ink::Level(2)),
+            ("b", Ink::Bold(2)),
+            ("c", Ink::Plain),
+            ("d", Ink::Strong),
+            ("e", Ink::Dim),
+        ] {
+            line.push(text, ink);
+        }
+        let painted = line.fill(5);
+        let seen: Vec<(Option<usize>, bool, bool)> = (0..5)
+            .map(|at| (painted.level_at(at), painted.is_bold_at(at), painted.is_dim_at(at)))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (Some(2), false, false),
+                (Some(2), true, false),
+                (None, false, false),
+                (None, true, false),
+                (None, true, true),
+            ]
+        );
+    }
 
     #[test]
     fn a_tall_pane_gets_both_boxes() {
@@ -520,6 +615,7 @@ mod tests {
     #[test]
     fn truncate_pays_for_its_own_marker() {
         assert_eq!(truncate("despesas", 5), "desp…");
+        assert_eq!(truncate("pix outflow", 5), "pix…");
         assert_eq!(truncate("despesas", 1), "…");
         assert_eq!(truncate("despesas", 0), "");
         for max in 0..12 {

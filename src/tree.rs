@@ -183,9 +183,21 @@ impl Node {
     }
 }
 
+/// The live sessions, and how many of the agents in them are in each state
+/// worth counting, folded or not: what the sidebar's header says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub sessions: usize,
+    pub waiting: usize,
+    pub idle: usize,
+    pub busy: usize,
+}
+
 #[derive(Default)]
 pub struct Tree {
     pub rows: Cursor<Node>,
+    /// Counts every session and agent, whatever a search hides.
+    pub summary: Summary,
     folded: BTreeSet<String>,
     search: Option<Search>,
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
@@ -260,6 +272,7 @@ impl Tree {
             term,
         });
 
+        let mut summary = Summary { sessions: branches.len(), ..Summary::default() };
         let mut rows = Vec::new();
         let mut best: Option<(usize, Fit)> = None;
         let mut weigh = |at: usize, fit: Fit| {
@@ -277,6 +290,14 @@ impl Tree {
                 .collect();
             let statuses =
                 || panes.iter().filter_map(|(_, agent)| agent.map(|agent| &agent.status));
+            for status in statuses() {
+                match status {
+                    Status::Waiting => summary.waiting += 1,
+                    Status::Idle => summary.idle += 1,
+                    Status::Busy => summary.busy += 1,
+                    _ => {},
+                }
+            }
             // A search looks inside a folded session too.
             let open = if finder.is_some() || !folded { panes.as_slice() } else { &[] };
             let mut shown = Vec::new();
@@ -323,6 +344,7 @@ impl Tree {
             }
         }
         let best = best.map(|(at, _)| at);
+        self.summary = summary;
 
         let followed = if follow {
             current.zip(here).map(|(session, pane)| Place::Pane(session.to_owned(), pane))
@@ -842,6 +864,28 @@ mod tests {
         assert!(tree.toggle());
         tree.rebuild(&branches, None, &set, None, false);
         assert_eq!(tree.rows.len(), 5);
+    }
+
+    /// The header sums up every agent, so neither a fold nor a search takes
+    /// one out of its count.
+    #[test]
+    fn the_summary_counts_the_agents_a_fold_or_a_search_hides() {
+        let branches = [
+            branch("a", 9, &[(0, "✳ one"), (1, "✳ two"), (2, "~/w/a")]),
+            branch("b", 1, &[(0, "✳ three")]),
+        ];
+        let set = agents(&[("a", 0, "waiting"), ("a", 1, "busy"), ("b", 0, "idle")]);
+        let all = Summary { sessions: 2, waiting: 1, idle: 1, busy: 1 };
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, None, &set, None, false);
+        assert_eq!(tree.summary, all);
+        assert!(tree.fold(true));
+        tree.rebuild(&branches, None, &set, None, false);
+        assert_eq!(tree.summary, all);
+        tree.search_for("three".to_owned());
+        tree.rebuild(&branches, None, &set, None, false);
+        assert_eq!(drawn(&tree), ["▾ b", "  idle three"]);
+        assert_eq!(tree.summary, all);
     }
 
     #[test]
