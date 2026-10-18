@@ -478,7 +478,7 @@ fn dir_preview(dirs: &DirSet, rect: &Rect) -> (String, String, Vec<PreviewRow>) 
             lines.extend(entries.iter().map(|entry| entry_line(rect, entry)));
         },
     }
-    (row.name.clone(), right, lines)
+    (row.name.as_str().to_owned(), right, lines)
 }
 
 fn entry_line(rect: &Rect, entry: &str) -> PreviewRow {
@@ -710,7 +710,7 @@ fn dir_prompt(dirs: &DirSet, term: &str) -> Prompt {
     let Some(row) = dirs.selected_row() else {
         return (term.to_owned(), None, false);
     };
-    (term.to_owned(), Some(format!("Create \"{}\"", row.name)), false)
+    (term.to_owned(), Some(format!("Create \"{}\"", row.name.as_str())), false)
 }
 
 fn dir_note_texts(dirs: &DirSet) -> Vec<Note> {
@@ -1683,6 +1683,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/you/misc/luneta".to_owned(),
@@ -1713,6 +1714,7 @@ mod tests {
             let rect = Rect { x: 0, y: 0, width, height: 10 };
             let mut dirs = DirSet::default();
             dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+            dirs.ingest_worktrees(Some(0), b"");
             dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
             dirs.ingest_listing(
                 "/home/you/misc/luneta".to_owned(),
@@ -1732,6 +1734,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 26, height: 8 };
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), b"18 /home/you/misc/luneta\n", b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
 
         let unasked = dir_preview(&dirs, &rect).2;
@@ -1833,6 +1836,7 @@ mod tests {
 
         let mut dirs = DirSet::default();
         dirs.ingest(Some(0), ZOXIDE.as_bytes(), b"");
+        dirs.ingest_worktrees(Some(0), b"");
         dirs.rebuild("", &sessions, Some("notes"), Selection::SnapToTop);
         dirs.ingest_listing(
             "/home/lorenzo/Projects/misc/luneta".to_owned(),

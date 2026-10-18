@@ -472,12 +472,18 @@ impl Finder<'_> {
 
 /// A name a person gave the agent, or else what the pane says it is doing.
 /// Claude Code titles a pane `✳ Claude Code` until it has a topic, and a tab
-/// that someone renamed says more than that.
+/// that someone renamed says more than that. A shell at its prompt titles its
+/// pane with its cwd cut down to initials, and is shown its cwd's last two
+/// parts instead, as the agent list shows a cwd: `luneta/main`, where
+/// `~/P/m/l/main` hides the repository behind an `l`.
 fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if let Some(agent) = agent.filter(|agent| agent.chosen) {
         return agent.display.clone();
     }
     let title = bare_title(&leaf.title);
+    if let Some(cwd) = leaf.cwd.as_deref().filter(|cwd| abbreviates(title, cwd)) {
+        return short_cwd(cwd);
+    }
     if (title.is_empty() || title == GENERIC_TITLE) && is_named_tab(&leaf.tab) {
         return leaf.tab.clone();
     }
@@ -488,6 +494,31 @@ fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
 }
 
 const GENERIC_TITLE: &str = "Claude Code";
+
+/// Whether a title is the cwd, as a shell writes it: whole, or with `~` for
+/// home and any part but the last cut short, as fish's `~/P/m/l/main` is
+/// `/home/you/Projects/misc/luneta/main`. Each part of the title begins the
+/// part of the cwd in its place, counting from the end. A cwd the sidebar has
+/// not caught up with since a `cd` is not the one the title writes, and the
+/// title stays until it has.
+fn abbreviates(title: &str, cwd: &str) -> bool {
+    let (written, rooted) = if title.starts_with('/') {
+        (title, true)
+    } else if let Some(rest) =
+        title.strip_prefix('~').filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    {
+        (rest, false)
+    } else {
+        return false;
+    };
+    let written: Vec<&str> = written.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = cwd.split('/').filter(|part| !part.is_empty()).collect();
+    // `~` stands for a part or more.
+    let fits = if rooted { written.len() == parts.len() } else { written.len() < parts.len() };
+    let begins = |(written, part): (&&str, &&str)| part.starts_with(written);
+    fits && written.last().is_some_and(|last| parts.last() == Some(last))
+        && written.iter().rev().zip(parts.iter().rev()).all(begins)
+}
 
 /// The title without the glyph an agent leads it with: Claude Code's `✳` at
 /// rest, and a turning frame while it works.
@@ -680,6 +711,49 @@ mod tests {
         assert!(is_named_tab("Tab #"));
         assert!(is_named_tab("Tab #4b"));
         assert!(!is_named_tab("  "));
+    }
+
+    #[test]
+    fn a_shell_at_its_prompt_is_named_for_its_cwd() {
+        let leaf = |title: &str, cwd: Option<&str>| Leaf {
+            id: 7,
+            title: title.to_owned(),
+            tab: String::new(),
+            cwd: cwd.map(str::to_owned),
+        };
+        let main = Some("/home/you/Projects/misc/luneta/main");
+        assert_eq!(label(&leaf("~/P/m/l/main", main), None), "luneta/main");
+        assert_eq!(label(&leaf("~/Projects/misc/luneta/main", main), None), "luneta/main");
+        assert_eq!(label(&leaf("/home/you/Projects/misc/luneta/main", main), None), "luneta/main");
+        // Before the sidebar is told the cwd, and after a `cd` it has not yet
+        // caught up with.
+        assert_eq!(label(&leaf("~/P/m/l/main", None), None), "~/P/m/l/main");
+        let before = Some("/home/you/Projects/misc/luneta");
+        assert_eq!(label(&leaf("~/P/m/l/main", before), None), "~/P/m/l/main");
+        assert_eq!(label(&leaf("nvim ~/P/m/l/main", main), None), "nvim ~/P/m/l/main");
+        assert_eq!(label(&leaf("~", Some("/home/you")), None), "~");
+    }
+
+    #[test]
+    fn a_title_abbreviates_a_cwd_only_part_for_part() {
+        let main = "/home/you/Projects/misc/luneta/main";
+        assert!(abbreviates("~/P/m/l/main", main));
+        assert!(abbreviates("~/l/main", main));
+        assert!(abbreviates("~/main", main));
+        assert!(abbreviates("~/.c/fish", "/home/you/.config/fish"));
+        assert!(abbreviates("/etc/nixos", "/etc/nixos"));
+        assert!(abbreviates("/h/y/P/m/l/main/", main));
+        // A part that begins another, a last part cut short, and too many or
+        // too few parts for what `~` and `/` stand for.
+        assert!(!abbreviates("~/P/m/x/main", main));
+        assert!(!abbreviates("~/P/m/l/ma", main));
+        assert!(!abbreviates("/P/m/l/main", main));
+        assert!(!abbreviates("~/home/you/Projects/misc/luneta/main", main));
+        // Someone else's home, home itself, the root, and no path at all.
+        assert!(!abbreviates("~luneta/main", main));
+        assert!(!abbreviates("~", "/home/you"));
+        assert!(!abbreviates("/", "/"));
+        assert!(!abbreviates("main", main));
     }
 
     #[test]

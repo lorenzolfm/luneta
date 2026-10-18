@@ -173,30 +173,86 @@ impl MatchSet {
             && self.current_session.as_deref() == Some(self.search_term.as_str())
     }
 
+    /// The session the term makes: none for an empty term, which leaves zellij
+    /// to pick the name.
+    pub fn new_name(&self) -> Result<Option<SessionName>, &'static str> {
+        if self.search_term.is_empty() {
+            return Ok(None);
+        }
+        SessionName::parse(&self.search_term).map(Some)
+    }
+
     pub fn name_error(&self) -> Option<&'static str> {
-        validate_name(&self.search_term)
+        self.new_name().err()
     }
 }
 
-pub const MAX_NAME_BYTES: usize = 107;
+/// The longest name zellij can make a session of. zellij makes a session's
+/// socket at `/run/user/<uid>/zellij/contract_version_1/` and the name, a
+/// socket path holds 107 bytes at most, and a uid has ten digits at most: that
+/// leaves 60 for the name. A session with a longer name is one zellij cannot
+/// make, and the terminal that asks for it hangs. A `ZELLIJ_SOCKET_DIR`, or an
+/// `XDG_RUNTIME_DIR` longer than `/run/user/<uid>`, leaves less, and luneta
+/// cannot tell.
+pub const MAX_NAME_BYTES: usize = 60;
 
-pub fn validate_name(name: &str) -> Option<&'static str> {
-    if name.is_empty() {
-        return None;
+/// A name zellij can make a session of. `parse` is the one way to make one and
+/// `with_postfix` the one way to make another from it, so a name that reaches
+/// zellij as one has been held to what zellij takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionName(String);
+
+impl SessionName {
+    pub fn parse(name: &str) -> Result<Self, &'static str> {
+        if name.is_empty() {
+            return Err("name must not be empty");
+        }
+        if name.trim().is_empty() {
+            return Err("name cannot be only whitespace");
+        }
+        if name == "." || name == ".." {
+            return Err("name cannot be '.' or '..'");
+        }
+        if name.contains('/') {
+            return Err("name cannot contain '/'");
+        }
+        if name.len() > MAX_NAME_BYTES {
+            return Err("name must be shorter than 61 bytes");
+        }
+        Ok(SessionName(name.to_owned()))
     }
-    if name.trim().is_empty() {
-        return Some("name cannot be only whitespace");
+
+    /// The name with `-n` after it, cut between characters where it must be
+    /// for the two to fit. What is left of a name holds no `/`, and the postfix
+    /// is neither whitespace nor a dot, so the two are a name too.
+    pub fn with_postfix(&self, n: usize) -> Self {
+        let postfix = format!("-{n}");
+        let kept = head(&self.0, MAX_NAME_BYTES.saturating_sub(postfix.len()));
+        SessionName(format!("{kept}{postfix}"))
     }
-    if name == "." || name == ".." {
-        return Some("name cannot be '.' or '..'");
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
-    if name.contains('/') {
-        return Some("name cannot contain '/'");
+}
+
+impl std::ops::Deref for SessionName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
     }
-    if name.len() > MAX_NAME_BYTES {
-        return Some("name must be shorter than 108 bytes");
+}
+
+fn head(text: &str, bytes: usize) -> &str {
+    if text.len() <= bytes {
+        return text;
     }
-    None
+    let mut end = bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 impl Row {

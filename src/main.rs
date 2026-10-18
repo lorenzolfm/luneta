@@ -23,7 +23,7 @@ use elapsed::Age;
 use panes::Peeks;
 use pass::{At, On, Pass};
 use places::Places;
-use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
+use sessions::{Contents, Focus, Kind, MatchSet, Selection, Session, SessionName, Sessions};
 use tree::{is_placeholder, Branch, Node, Place, Tree};
 use zellij_tile::prelude::*;
 
@@ -276,6 +276,20 @@ impl ZellijPlugin for State {
                 match context.get(dirs::CONTEXT_KEY).map(String::as_str) {
                     Some(dirs::CONTEXT_VALUE) => {
                         self.dirs.ingest(exit_code, &stdout, &stderr);
+                        if let Some(command) = self.dirs.worktrees_query() {
+                            run_command(
+                                &command,
+                                BTreeMap::from([(
+                                    dirs::CONTEXT_KEY.to_owned(),
+                                    dirs::WORKTREES_VALUE.to_owned(),
+                                )]),
+                            );
+                        }
+                        self.rebuild_dirs(Selection::Hold);
+                        true
+                    },
+                    Some(dirs::WORKTREES_VALUE) => {
+                        self.dirs.ingest_worktrees(exit_code, &stdout);
                         self.rebuild_dirs(Selection::Hold);
                         true
                     },
@@ -564,10 +578,9 @@ impl State {
     }
 
     fn ask_agents(&mut self) {
-        if self.agents.asking {
+        if !self.agents.ask() {
             return;
         }
-        self.agents.asking = true;
         let command: [&str; 1] = match self.agents_command.as_deref() {
             Some(command) => [command],
             None => agents::QUERY,
@@ -661,10 +674,9 @@ impl State {
     }
 
     fn ask_zoxide(&mut self) {
-        if self.dirs.asking {
+        if !self.dirs.ask() {
             return;
         }
-        self.dirs.asking = true;
         run_command(
             &dirs::QUERY,
             BTreeMap::from([(dirs::CONTEXT_KEY.to_owned(), dirs::CONTEXT_VALUE.to_owned())]),
@@ -754,12 +766,13 @@ impl State {
             return;
         }
 
-        if self.matches.is_own_name() || self.matches.name_error().is_some() {
+        if self.matches.is_own_name() {
             return;
         }
-
-        let term = self.matches.search_term.clone();
-        switch_session(if term.is_empty() { None } else { Some(term.as_str()) });
+        let Ok(name) = self.matches.new_name() else {
+            return;
+        };
+        switch_session(name.as_deref());
         close_self();
     }
 
@@ -767,7 +780,7 @@ impl State {
         let Some(row) = self.dirs.selected_row() else {
             return;
         };
-        switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)));
+        switch_session_with_cwd(Some(row.name.as_str()), Some(PathBuf::from(&row.path)));
         close_self();
     }
 
@@ -820,14 +833,16 @@ impl State {
     }
 
     fn rename_error(&self, current: &str, name: &str) -> Option<&'static str> {
-        if name.is_empty() {
-            Some("name must not be empty")
-        } else if current == name {
-            Some("already called that")
+        self.rename_to(current, name).err()
+    }
+
+    fn rename_to(&self, current: &str, name: &str) -> Result<SessionName, &'static str> {
+        if current == name {
+            Err("already called that")
         } else if self.sessions.any_named(name) {
-            Some("a session by that name already exists")
+            Err("a session by that name already exists")
         } else {
-            validate_name(name)
+            SessionName::parse(name)
         }
     }
 
@@ -835,10 +850,10 @@ impl State {
         let Mode::Rename { current, input } = &self.mode else {
             return;
         };
-        if self.rename_error(current, input).is_some() {
+        let Ok(name) = self.rename_to(current, input) else {
             return;
-        }
-        rename_session(input);
+        };
+        rename_session(&name);
         self.mode = Mode::Search;
     }
 
