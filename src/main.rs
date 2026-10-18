@@ -24,7 +24,7 @@ use agents::{AgentRow, AgentSet, Live, Seat};
 use checkouts::Checkouts;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
-use menu::{Beside, There};
+use menu::There;
 use elapsed::Age;
 use panes::Peeks;
 use pass::{At, Pass, Then};
@@ -1302,11 +1302,11 @@ impl State {
         let agent = self.agents.rows.iter().find(seated);
         let cwd = leaf
             .and_then(|leaf| leaf.cwd.clone())
-            .or_else(|| agent.map(|row| row.cwd.clone()).filter(|cwd| !cwd.is_empty()));
+            .or_else(|| agent.and_then(|row| row.cwd.clone()));
         let here = self.matches.current_session.as_deref() == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
         let there = (!here).then_some(There { session, tab, back: self.here });
-        let mut configuration = Beside { pane, cwd, there }.to_configuration();
+        let mut configuration = menu::configuration(pane, cwd.as_deref(), there.as_ref());
         configuration.insert(MODE.to_owned(), MENU.to_owned());
         if let Some(entries) = &self.menu_entries {
             configuration.insert(menu::ENTRIES.to_owned(), entries.clone());

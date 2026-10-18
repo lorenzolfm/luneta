@@ -100,9 +100,6 @@ impl Places {
     }
 
     pub fn find(&self, pane: u32, cwd: &str, reported: &str) -> Option<&str> {
-        if cwd.is_empty() {
-            return None;
-        }
         let holders = self.holders.get(&pane)?;
         let held = || holders.iter().filter(|held| held.cwd == cwd);
         let mut only = held();
@@ -129,7 +126,7 @@ fn parse(stdout: &str) -> Vec<Pane> {
         .filter_map(|pane| {
             Some(Pane {
                 id: pane.id,
-                cwd: pane.pane_cwd?,
+                cwd: pane.pane_cwd.filter(|cwd| !cwd.is_empty())?,
                 claude: is_claude(pane.pane_command.as_deref(), pane.title.as_deref()),
             })
         })
@@ -198,14 +195,17 @@ mod tests {
         assert_eq!(places.sessions["ghostty"].len(), 2);
     }
 
+    /// A pane whose session says no directory for it has none, rather than
+    /// one spelled `""` for an agent with none to be found at.
     #[test]
-    fn an_agent_with_no_cwd_is_not_guessed_at() {
+    fn a_pane_with_no_cwd_has_none() {
         let mut places = Places::default();
         places.ingest(
             "s".to_owned(),
             Some(0),
             br#"[{"id":0,"is_plugin":false,"pane_cwd":"","pane_command":"claude"}]"#,
         );
+        assert_eq!(places.cwd("s", 0), None);
         assert_eq!(places.find(0, "", ""), None);
     }
 

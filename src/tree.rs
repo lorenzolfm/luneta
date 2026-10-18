@@ -611,8 +611,8 @@ fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if is_named_tab(&leaf.tab) {
         return leaf.tab.clone();
     }
-    if let Some(agent) = agent.filter(|agent| !agent.cwd.is_empty()) {
-        return short_cwd(&agent.cwd);
+    if let Some(cwd) = agent.and_then(|agent| agent.cwd.as_deref()) {
+        return short_cwd(cwd);
     }
     if title.is_empty() {
         return format!("pane {}", leaf.id);

@@ -842,7 +842,8 @@ fn agent_line(
             line.pad_to(CARET + name_column + GAP + tag_column);
             line.gap(GAP);
             line.push(&age, LABEL);
-            let (cwd, _) = truncate_left(&short_cwd(&row.cwd), cwd_budget);
+            let cwd = row.cwd.as_deref().map(short_cwd).unwrap_or_default();
+            let (cwd, _) = truncate_left(&cwd, cwd_budget);
             line.pad_to(inner.saturating_sub(cwd.width()));
             line.push(&cwd, LABEL);
         },
@@ -993,14 +994,17 @@ const MENU_NOTICE: usize = 48;
 
 /// The menu: the keys of the group open and what each does, under a rule that
 /// names the groups opened and says where an agent starts, and the keys that
-/// go back and close under them.
+/// go back and close under them. Nothing once it asked zellij to close it.
 pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
+    let Some(shown) = menu.keys() else {
+        return;
+    };
     let rect = Rect { x: 0, y: 0, width: cols, height: rows };
     let Some(room) = rect.inner_height().checked_sub(1) else {
         return;
     };
     let inner = rect.inner_width();
-    let (title, right, body, help) = match menu.keys() {
+    let (title, right, body, help) = match shown {
         Ok(keys) => {
             let body = keys.entries().iter().map(|entry| menu_line(entry, inner)).collect();
             (menu_title(keys), menu_where(menu), body, menu_help(inner, !keys.names().is_empty()))
@@ -1018,9 +1022,9 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
 }
 
 /// How big the menu draws: tall enough for the group open, and wide enough
-/// for its entries and its rule.
-pub fn menu_size(menu: &Menu) -> (usize, usize) {
-    match menu.keys() {
+/// for its entries and its rule. No size once it asked zellij to close it.
+pub fn menu_size(menu: &Menu) -> Option<(usize, usize)> {
+    let size = match menu.keys()? {
         Ok(keys) => {
             let entries = keys.entries();
             let widest = entries.iter().map(menu_entry_width).max().unwrap_or(0);
@@ -1029,7 +1033,8 @@ pub fn menu_size(menu: &Menu) -> (usize, usize) {
             (width, entries.len() + MENU_CHROME)
         },
         Err(reason) => (MENU_NOTICE, wrap(reason, MENU_NOTICE - PAD * 2).len() + MENU_CHROME),
-    }
+    };
+    Some(size)
 }
 
 fn menu_title(keys: &Keys) -> String {
@@ -2806,8 +2811,8 @@ mod tests {
         )]);
         let mut menu = Menu::new(0, &configuration);
         for opened in [false, true] {
-            let (width, height) = menu_size(&menu);
-            let keys = menu.keys().expect("a menu");
+            let (width, height) = menu_size(&menu).expect("a size");
+            let keys = menu.keys().and_then(Result::ok).expect("a menu");
             assert_eq!(height, keys.entries().len() + MENU_CHROME, "opened: {opened}");
             for entry in keys.entries() {
                 let line = menu_line(entry, width - PAD * 2);

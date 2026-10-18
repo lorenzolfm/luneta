@@ -11,10 +11,13 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use kdl::{KdlDocument, KdlNode};
 use zellij_tile::prelude::*;
 
+use crate::checkouts::DIR_KEY;
+use crate::fetch::Fetch;
 use crate::render;
 use crate::tree::origin;
 
@@ -192,9 +195,7 @@ fn entry(node: &KdlNode, path: &str) -> Result<Entry, String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Beside {
     pub pane: u32,
-    pub cwd: Option<String>,
-    /// Where the pane is when that is another session than the menu's.
-    pub there: Option<There>,
+    pub cwd: String,
 }
 
 /// A session other than the menu's, and the tab in it, by its id.
@@ -208,35 +209,108 @@ pub struct There {
     pub back: Option<u32>,
 }
 
-impl Beside {
-    /// The pane as entries of the configuration of a menu, for the sidebar to
-    /// open one with.
-    pub fn to_configuration(&self) -> BTreeMap<String, String> {
-        let mut configuration = BTreeMap::from([(BESIDE_PANE.to_owned(), self.pane.to_string())]);
-        if let Some(cwd) = &self.cwd {
-            configuration.insert(BESIDE_CWD.to_owned(), cwd.clone());
-        }
-        if let Some(there) = &self.there {
-            configuration.insert(BESIDE_SESSION.to_owned(), there.session.clone());
-            if let Some(tab) = there.tab {
-                configuration.insert(BESIDE_TAB.to_owned(), tab.to_string());
-            }
-            if let Some(back) = there.back {
-                configuration.insert(BACK_PANE.to_owned(), back.to_string());
-            }
-        }
-        configuration
-    }
+/// Which pane the menu is for.
+#[derive(Debug, PartialEq, Eq)]
+enum For {
+    /// The row the sidebar had highlighted, for the menu's whole life, in
+    /// another session when `There` says so.
+    Row(Beside, Option<There>),
+    /// The pane you came from, as zellij last said: `Waiting` until it has,
+    /// and `Failed` when what you came from is no terminal, or zellij cannot
+    /// say where it works.
+    Origin(Fetch<Beside>),
+}
 
-    fn from_configuration(configuration: &BTreeMap<String, String>) -> Option<Self> {
-        let pane = configuration.get(BESIDE_PANE)?.parse().ok()?;
-        let there = configuration.get(BESIDE_SESSION).map(|session| There {
-            session: session.clone(),
-            tab: configuration.get(BESIDE_TAB).and_then(|tab| tab.parse().ok()),
-            back: configuration.get(BACK_PANE).and_then(|back| back.parse().ok()),
-        });
-        Some(Beside { pane, cwd: configuration.get(BESIDE_CWD).cloned(), there })
+impl For {
+    /// The pane an agent starts beside, and the session it is in when that is
+    /// another, once the menu knows.
+    fn ready(&self) -> Option<(&Beside, Option<&There>)> {
+        match self {
+            For::Row(beside, there) => Some((beside, there.as_ref())),
+            For::Origin(Fetch::Ready(beside)) => Some((beside, None)),
+            For::Origin(Fetch::Waiting | Fetch::Failed(_)) => None,
+        }
     }
+}
+
+/// Where the menu stands.
+#[derive(Default)]
+enum Phase {
+    /// The keys of the group open, pressed one after another, for an agent
+    /// beside a pane.
+    Choosing(Keys, For),
+    /// Another session is opening the agent's pane. Keys do nothing until
+    /// zellij says which it opened.
+    Starting(Keys, Beside, There),
+    /// What is wrong with the keys, with the pane the sidebar handed over, or
+    /// with starting the agent. Any key closes the menu.
+    Wrong(String),
+    /// The menu asked zellij to close it, and a key already on its way does
+    /// nothing.
+    #[default]
+    Done,
+}
+
+/// A row's pane as entries of the configuration of a menu, for the sidebar
+/// to open one with: the pane, the directory it works in as far as the
+/// sidebar knows, and when that is another session, the session, the tab,
+/// and the pane to hand the focus back to before going there.
+pub fn configuration(
+    pane: u32,
+    cwd: Option<&str>,
+    there: Option<&There>,
+) -> BTreeMap<String, String> {
+    let mut configuration = BTreeMap::from([(BESIDE_PANE.to_owned(), pane.to_string())]);
+    if let Some(cwd) = cwd {
+        configuration.insert(BESIDE_CWD.to_owned(), cwd.to_owned());
+    }
+    if let Some(there) = there {
+        configuration.insert(BESIDE_SESSION.to_owned(), there.session.clone());
+        if let Some(tab) = there.tab {
+            configuration.insert(BESIDE_TAB.to_owned(), tab.to_string());
+        }
+        if let Some(back) = there.back {
+            configuration.insert(BACK_PANE.to_owned(), back.to_string());
+        }
+    }
+    configuration
+}
+
+/// The row the sidebar handed over in the menu's configuration: none for a
+/// menu a key opened, and what is wrong when the sidebar could not say where
+/// the row's pane works.
+fn handed(
+    configuration: &BTreeMap<String, String>,
+) -> Result<Option<(Beside, Option<There>)>, String> {
+    let Some(pane) = number(configuration, BESIDE_PANE)? else {
+        return Ok(None);
+    };
+    let Some(cwd) = configuration.get(BESIDE_CWD) else {
+        return Err(format!(
+            "menu: the sidebar does not know yet where pane {pane} works; try m again in a \
+             moment"
+        ));
+    };
+    let there = match configuration.get(BESIDE_SESSION) {
+        Some(session) => Some(There {
+            session: session.clone(),
+            tab: number(configuration, BESIDE_TAB)?,
+            back: number(configuration, BACK_PANE)?,
+        }),
+        None => None,
+    };
+    Ok(Some((Beside { pane, cwd: cwd.clone() }, there)))
+}
+
+/// The number `key` holds in the configuration, if it holds one.
+fn number<T: FromStr>(
+    configuration: &BTreeMap<String, String>,
+    key: &str,
+) -> Result<Option<T>, String> {
+    let Some(value) = configuration.get(key) else {
+        return Ok(None);
+    };
+    value.parse().map(Some).map_err(|_| format!("menu: {key} {value:?} is no number"))
 }
 
 /// Claude Code on `prompt`, as a command line. A prompt that runs a skill
@@ -264,10 +338,10 @@ fn skill(prompt: &str) -> Option<&str> {
 }
 
 /// A pane of the menu's own session that runs `command`, in `cwd`.
-fn command_pane(command: &[String], cwd: Option<&str>) -> CommandToRun {
+fn command_pane(command: &[String], cwd: &str) -> CommandToRun {
     let (path, args) =
         command.split_first().map_or((CLAUDE, &[][..]), |(path, args)| (path.as_str(), args));
-    CommandToRun { path: PathBuf::from(path), args: args.to_vec(), cwd: cwd.map(host_dir) }
+    CommandToRun { path: PathBuf::from(path), args: args.to_vec(), cwd: Some(host_dir(cwd)) }
 }
 
 /// `cwd`, spelled so that zellij takes it for the host's. zellij reads a
@@ -281,17 +355,14 @@ fn host_dir(cwd: &str) -> PathBuf {
 
 /// Opens a pane that runs `command` in a tab of another session, in `cwd`.
 /// zellij says which pane it opened, as `terminal_<id>`.
-fn new_pane(there: &There, cwd: Option<&str>, command: &[String]) -> Vec<String> {
+fn new_pane(there: &There, cwd: &str, command: &[String]) -> Vec<String> {
     let session = there.session.as_str();
     let mut new_pane: Vec<String> =
         ["zellij", "--session", session, "action", "new-pane"].map(str::to_owned).to_vec();
     if let Some(tab) = there.tab {
         new_pane.extend(["--tab-id".to_owned(), tab.to_string()]);
     }
-    if let Some(cwd) = cwd {
-        new_pane.extend(["--cwd".to_owned(), cwd.to_owned()]);
-    }
-    new_pane.push("--".to_owned());
+    new_pane.extend(["--cwd".to_owned(), cwd.to_owned(), "--".to_owned()]);
     new_pane.extend(command.iter().cloned());
     new_pane
 }
@@ -302,74 +373,65 @@ fn opened(stdout: &[u8]) -> Option<u32> {
 }
 
 pub struct Menu {
-    /// The entries, or what is wrong with them, or with starting an agent.
-    keys: Result<Keys, String>,
+    phase: Phase,
     plugin_id: u32,
     panes: Option<PaneManifest>,
     tabs: Vec<TabInfo>,
-    /// The pane an agent starts beside: the row the sidebar handed over, or
-    /// else the pane you came from.
-    beside: Option<Beside>,
-    /// Whether the sidebar handed the pane over, which then stays whatever
-    /// has the focus.
-    handed: bool,
-    /// The directory git was last asked the branch of.
-    asked: Option<String>,
-    /// The branch checked out where an agent starts, once git has said.
-    branch: Option<String>,
-    /// Whether an agent is starting in another session, for the menu to go
-    /// there once zellij says which pane it opened.
-    starting: bool,
+    /// The directory git was last asked the branch of, and the branch checked
+    /// out there once git has said.
+    asked: Option<(String, Option<String>)>,
     /// Where the menu last asked zellij to stand it.
     placed: Option<Spot>,
 }
 
 impl Menu {
     pub fn new(plugin_id: u32, configuration: &BTreeMap<String, String>) -> Self {
-        let beside = Beside::from_configuration(configuration);
+        let handed = handed(configuration);
         let keys = match configuration.get(ENTRIES) {
             Some(text) => Keys::parse(text),
-            None if beside.is_some() => Err(NO_SIDEBAR_ENTRIES.to_owned()),
+            None if !matches!(handed, Ok(None)) => Err(NO_SIDEBAR_ENTRIES.to_owned()),
             None => Err(NO_ENTRIES.to_owned()),
         };
-        if let Err(reason) = &keys {
+        let phase = match (keys, handed) {
+            (Err(reason), _) | (Ok(_), Err(reason)) => Phase::Wrong(reason),
+            (Ok(keys), Ok(Some((beside, there)))) => Phase::Choosing(keys, For::Row(beside, there)),
+            (Ok(keys), Ok(None)) => Phase::Choosing(keys, For::Origin(Fetch::Waiting)),
+        };
+        if let Phase::Wrong(reason) = &phase {
             eprintln!("luneta {reason}");
         }
-        Menu {
-            keys,
-            plugin_id,
-            panes: None,
-            tabs: Vec::new(),
-            handed: beside.is_some(),
-            beside,
-            asked: None,
-            branch: None,
-            starting: false,
-            placed: None,
+        Menu { phase, plugin_id, panes: None, tabs: Vec::new(), asked: None, placed: None }
+    }
+
+    /// The entries, or what is wrong with them, with the pane the menu is
+    /// for, or with starting an agent. Nothing once the menu asked zellij to
+    /// close it.
+    pub fn keys(&self) -> Option<Result<&Keys, &str>> {
+        match &self.phase {
+            Phase::Wrong(reason) | Phase::Choosing(_, For::Origin(Fetch::Failed(reason))) => {
+                Some(Err(reason))
+            },
+            Phase::Choosing(keys, _) | Phase::Starting(keys, ..) => Some(Ok(keys)),
+            Phase::Done => None,
         }
     }
 
-    /// The entries, or what is wrong with them, or with the pane the menu is
-    /// for.
-    pub fn keys(&self) -> Result<&Keys, &str> {
-        let keys = self.keys.as_ref().map_err(String::as_str)?;
-        if self.stranded() {
-            return Err(NO_PANE);
-        }
-        Ok(keys)
-    }
-
-    /// Whether zellij has said what the tab holds, and none of it is a pane
-    /// for an agent to start beside: the key that opened the menu came in a
-    /// pane that is no terminal. An agent started anyway would start wherever
-    /// zellij put it.
-    fn stranded(&self) -> bool {
-        let known = self.panes.is_some() && self.tabs.iter().any(|tab| tab.active);
-        known && self.beside.is_none()
-    }
-
+    /// The directory an agent the menu starts works in, once the menu knows.
     pub fn cwd(&self) -> Option<&str> {
-        self.beside.as_ref()?.cwd.as_deref()
+        match &self.phase {
+            Phase::Choosing(_, beside) => beside.ready().map(|(beside, _)| beside.cwd.as_str()),
+            Phase::Starting(_, beside, _) => Some(&beside.cwd),
+            Phase::Wrong(_) | Phase::Done => None,
+        }
+    }
+
+    /// What git said is checked out in `cwd`, once it has.
+    fn branch(&self, cwd: &str) -> Option<&str> {
+        let (asked, branch) = self.asked.as_ref()?;
+        if asked != cwd {
+            return None;
+        }
+        branch.as_deref()
     }
 
     /// Says whether to draw.
@@ -391,35 +453,40 @@ impl Menu {
     /// Says whether to draw. A menu that cannot show its keys has nothing to
     /// do but close, and any key closes it.
     pub fn key(&mut self, key: &KeyWithModifier) -> bool {
-        if self.starting {
-            return false;
-        }
-        let stranded = self.stranded();
-        let (Ok(keys), false) = (&mut self.keys, stranded) else {
-            close_self();
-            return false;
+        let keys = match &mut self.phase {
+            Phase::Starting(..) | Phase::Done => return false,
+            Phase::Wrong(_) | Phase::Choosing(_, For::Origin(Fetch::Failed(_))) => {
+                return self.close();
+            },
+            Phase::Choosing(keys, _) => keys,
         };
         match key.bare_key {
-            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => close_self(),
-            BareKey::Esc if key.has_no_modifiers() => close_self(),
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => self.close(),
+            BareKey::Esc if key.has_no_modifiers() => self.close(),
             BareKey::Backspace if key.has_no_modifiers() => {
                 if !keys.back() {
-                    close_self();
-                    return false;
+                    return self.close();
                 }
                 self.place();
-                return true;
+                true
             },
             BareKey::Char(c) if key.has_no_modifiers() => match keys.press(c) {
                 Pressed::Opened => {
                     self.place();
-                    return true;
+                    true
                 },
                 Pressed::Start(prompt) => self.start(&prompt),
-                Pressed::Nothing => {},
+                Pressed::Nothing => false,
             },
-            _ => {},
+            _ => false,
         }
+    }
+
+    /// Asks zellij to close the menu, which takes no key from then on. Says
+    /// whether to draw.
+    fn close(&mut self) -> bool {
+        self.phase = Phase::Done;
+        close_self();
         false
     }
 
@@ -433,91 +500,137 @@ impl Menu {
     ) -> bool {
         match context.get(CONTEXT_KEY).map(String::as_str) {
             Some(BRANCH_VALUE) => {
-                let branch = String::from_utf8_lossy(stdout).trim().to_owned();
-                self.branch = (exit_code == Some(0) && !branch.is_empty()).then_some(branch);
-                false
-            },
-            Some(START_VALUE) => {
-                self.starting = false;
-                let there = self.beside.as_ref().and_then(|beside| beside.there.as_ref());
-                if let (Some(0), Some(pane), Some(there)) = (exit_code, opened(stdout), there) {
-                    if let Some(back) = there.back {
-                        focus_terminal_pane(back, false, false);
-                    }
-                    switch_session_with_focus(&there.session, None, Some((pane, false)));
-                    close_self();
+                let Some((asked, branch)) = &mut self.asked else {
+                    return false;
+                };
+                // What is checked out where an agent no longer starts.
+                if context.get(DIR_KEY) != Some(&*asked) {
                     return false;
                 }
-                let reason = String::from_utf8_lossy(stderr);
-                let reason = reason.lines().next().unwrap_or("").trim();
-                let reason = if reason.is_empty() { "zellij opened no pane" } else { reason };
-                self.keys = Err(format!("menu: the agent did not start: {reason}"));
-                self.place();
-                true
+                let said = String::from_utf8_lossy(stdout).trim().to_owned();
+                *branch = (exit_code == Some(0) && !said.is_empty()).then_some(said);
+                false
             },
+            Some(START_VALUE) => self.started(exit_code, stdout, stderr),
             _ => false,
         }
     }
 
-    /// Starts Claude Code on `prompt` in a pane of its own, beside the pane
-    /// the menu was opened for, in the directory that pane works in. In the
-    /// menu's own session the menu closes first, the focus goes to that pane,
-    /// across tabs, and the new pane opens beside it. Another session opens
-    /// the pane itself, in that pane's tab, and the menu goes there once it
-    /// has.
-    fn start(&mut self, prompt: &str) {
-        let command = claude(prompt, self.branch.as_deref());
-        let cwd = self.cwd();
-        let Some(there) = self.beside.as_ref().and_then(|beside| beside.there.as_ref()) else {
-            close_self();
-            if let Some(beside) = &self.beside {
-                focus_terminal_pane(beside.pane, false, false);
-            }
-            open_command_pane(command_pane(&command, cwd), BTreeMap::new());
-            return;
+    /// Goes to the session another agent started in, once zellij says it
+    /// opened its pane, and to that pane when zellij says which. Says whether
+    /// to draw.
+    fn started(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> bool {
+        let Phase::Starting(_, _, there) = &self.phase else {
+            return false;
         };
-        let new_pane = new_pane(there, cwd, &command);
-        let new_pane: Vec<&str> = new_pane.iter().map(String::as_str).collect();
-        run_command(
-            &new_pane,
-            BTreeMap::from([(CONTEXT_KEY.to_owned(), START_VALUE.to_owned())]),
-        );
-        self.starting = true;
+        let Some(0) = exit_code else {
+            let reason = String::from_utf8_lossy(stderr);
+            let reason = reason.lines().next().unwrap_or("").trim();
+            let reason = if reason.is_empty() { "zellij opened no pane" } else { reason };
+            self.phase = Phase::Wrong(format!("menu: the agent did not start: {reason}"));
+            self.place();
+            return true;
+        };
+        if let Some(back) = there.back {
+            focus_terminal_pane(back, false, false);
+        }
+        match opened(stdout) {
+            Some(pane) => switch_session_with_focus(&there.session, None, Some((pane, false))),
+            // The pane is open, and zellij did not say which it is: the
+            // session, as it stands.
+            None => switch_session(Some(&there.session)),
+        }
+        self.close()
+    }
+
+    /// Starts Claude Code on `prompt` in a pane of its own, beside the pane
+    /// the menu is for, in the directory that pane works in. In the menu's
+    /// own session the menu closes first, the focus goes to that pane, across
+    /// tabs, and the new pane opens beside it. Another session opens the pane
+    /// itself, in that pane's tab, and the menu goes there once it has. A key
+    /// pressed before zellij says which pane you came from starts nothing.
+    /// Says whether to draw.
+    fn start(&mut self, prompt: &str) -> bool {
+        match std::mem::take(&mut self.phase) {
+            Phase::Choosing(keys, For::Row(beside, Some(there))) => {
+                let command = claude(prompt, self.branch(&beside.cwd));
+                let new_pane = new_pane(&there, &beside.cwd, &command);
+                let new_pane: Vec<&str> = new_pane.iter().map(String::as_str).collect();
+                run_command(
+                    &new_pane,
+                    BTreeMap::from([(CONTEXT_KEY.to_owned(), START_VALUE.to_owned())]),
+                );
+                self.phase = Phase::Starting(keys, beside, there);
+            },
+            Phase::Choosing(_, For::Row(beside, None) | For::Origin(Fetch::Ready(beside))) => {
+                let command = claude(prompt, self.branch(&beside.cwd));
+                close_self();
+                focus_terminal_pane(beside.pane, false, false);
+                open_command_pane(command_pane(&command, &beside.cwd), BTreeMap::new());
+            },
+            phase => self.phase = phase,
+        }
+        false
     }
 
     /// Keeps the pane you came from, and the directory it works in, as the
     /// panes and the tabs change, unless the sidebar handed one over, and
     /// asks git the branch checked out there. Says whether the pane changed.
     fn follow(&mut self) -> bool {
-        let followed = !self.handed && self.follow_origin();
-        if let Some(cwd) = self.cwd().filter(|cwd| self.asked.as_deref() != Some(*cwd)) {
+        let followed = self.follow_origin();
+        let asked = self.asked.as_ref().map(|(asked, _)| asked.as_str());
+        if let Some(cwd) = self.cwd().filter(|cwd| asked != Some(*cwd)) {
             let cwd = cwd.to_owned();
-            self.branch = None;
             run_command(
                 &["git", "-C", &cwd, "branch", "--show-current"],
-                BTreeMap::from([(CONTEXT_KEY.to_owned(), BRANCH_VALUE.to_owned())]),
+                BTreeMap::from([
+                    (CONTEXT_KEY.to_owned(), BRANCH_VALUE.to_owned()),
+                    (DIR_KEY.to_owned(), cwd.clone()),
+                ]),
             );
-            self.asked = Some(cwd);
+            self.asked = Some((cwd, None));
         }
         followed
     }
 
     fn follow_origin(&mut self) -> bool {
-        let Some(pane) = self.origin_pane() else {
+        let pane = match self.origin_pane() {
+            Fetch::Waiting => return false,
+            Fetch::Ready(pane) => Some(pane),
+            Fetch::Failed(_) => None,
+        };
+        let Phase::Choosing(_, For::Origin(origin)) = &mut self.phase else {
             return false;
         };
-        if self.beside.as_ref().is_some_and(|beside| beside.pane == pane) {
+        if matches!(origin, Fetch::Ready(beside) if Some(beside.pane) == pane) {
             return false;
         }
-        let cwd = get_pane_cwd(PaneId::Terminal(pane)).ok();
-        let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
-        self.beside = Some(Beside { pane, cwd, there: None });
-        true
+        let now = match pane {
+            None => Fetch::Failed(NO_PANE.to_owned()),
+            Some(pane) => match get_pane_cwd(PaneId::Terminal(pane)) {
+                Ok(cwd) => Fetch::Ready(Beside { pane, cwd: cwd.to_string_lossy().into_owned() }),
+                Err(error) => Fetch::Failed(format!(
+                    "menu: zellij cannot say where pane {pane} works: {error}"
+                )),
+            },
+        };
+        let followed = *origin != now;
+        *origin = now;
+        followed
     }
 
-    fn origin_pane(&self) -> Option<u32> {
-        let tab = self.tabs.iter().find(|tab| tab.active)?;
-        origin(self.panes.as_ref()?.panes.get(&tab.position)?)
+    /// The terminal you came from: `Waiting` until zellij has said what the
+    /// tab you are in holds, and `Failed` when that is no terminal with the
+    /// focus.
+    fn origin_pane(&self) -> Fetch<u32> {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.active) else {
+            return Fetch::Waiting;
+        };
+        let Some(panes) = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab.position))
+        else {
+            return Fetch::Waiting;
+        };
+        origin(panes).map_or_else(|| Fetch::Failed(NO_PANE.to_owned()), Fetch::Ready)
     }
 
     /// Stands the menu at the bottom right of the tab, as big as the group
@@ -526,7 +639,9 @@ impl Menu {
         let Some(tab) = self.tabs.iter().find(|tab| tab.active) else {
             return;
         };
-        let (width, height) = render::menu_size(self);
+        let Some((width, height)) = render::menu_size(self) else {
+            return;
+        };
         let Some(spot) = corner(tab.viewport_columns, tab.viewport_rows, width, height) else {
             return;
         };
@@ -639,24 +754,136 @@ mod tests {
         }
     }
 
+    /// The pane the menu is for, while it shows its keys.
+    fn beside_of(menu: &Menu) -> Option<&For> {
+        match &menu.phase {
+            Phase::Choosing(_, beside) => Some(beside),
+            _ => None,
+        }
+    }
+
+    /// The menu as the sidebar opens it for pane 2, working in `/w/elo`, of
+    /// the menu's own session or of `there`.
+    fn row_menu(there: Option<&There>) -> Menu {
+        let mut configuration = configuration(2, Some("/w/elo"), there);
+        configuration.insert(ENTRIES.to_owned(), MENU.to_owned());
+        Menu::new(0, &configuration)
+    }
+
+    fn press(menu: &mut Menu, key: char) -> bool {
+        menu.key(&KeyWithModifier::new(BareKey::Char(key)))
+    }
+
     /// The sidebar opens a menu with the row it has highlighted, and the
     /// menu reads it back from its configuration as it was.
     #[test]
     fn the_pane_the_sidebar_hands_over_reaches_the_menu_whole() {
-        let there = |tab, back| Some(There { session: "elo".to_owned(), tab, back });
-        for beside in [
-            Beside { pane: 4, cwd: Some("/w/luneta/main".to_owned()), there: None },
-            Beside { pane: 0, cwd: None, there: None },
-            Beside { pane: 2, cwd: Some("/w/elo".to_owned()), there: there(Some(3), Some(1)) },
-            Beside { pane: 2, cwd: None, there: there(None, None) },
+        let there = |tab, back| There { session: "elo".to_owned(), tab, back };
+        let pane = |pane, cwd: &str| Beside { pane, cwd: cwd.to_owned() };
+        for (beside, there) in [
+            (pane(4, "/w/luneta/main"), None),
+            (pane(2, "/w/elo"), Some(there(Some(3), Some(1)))),
+            (pane(2, "/w/elo"), Some(there(None, None))),
         ] {
-            let mut configuration = beside.to_configuration();
+            let mut configuration = configuration(beside.pane, Some(&beside.cwd), there.as_ref());
             configuration.insert(ENTRIES.to_owned(), MENU.to_owned());
             let menu = Menu::new(0, &configuration);
-            assert_eq!(menu.beside.as_ref(), Some(&beside));
-            assert!(menu.handed);
+            assert_eq!(beside_of(&menu), Some(&For::Row(beside, there)));
         }
-        assert_eq!(Menu::new(0, &BTreeMap::new()).beside, None);
+        let bound = BTreeMap::from([(ENTRIES.to_owned(), MENU.to_owned())]);
+        assert_eq!(beside_of(&Menu::new(0, &bound)), Some(&For::Origin(Fetch::Waiting)));
+    }
+
+    /// A row the sidebar does not know the directory of yet has no agent to
+    /// start, and the menu says so rather than start one wherever zellij
+    /// runs. A row it cannot read says what is wrong with it.
+    #[test]
+    fn a_row_the_menu_cannot_start_an_agent_beside_says_why() {
+        let mut garbled = configuration(2, Some("/w/elo"), None);
+        garbled.insert(BESIDE_SESSION.to_owned(), "elo".to_owned());
+        garbled.insert(BESIDE_TAB.to_owned(), "third".to_owned());
+        let unknown = configuration(2, None, None);
+        for (mut configuration, reason) in [
+            (unknown, "menu: the sidebar does not know yet where pane 2 works"),
+            (garbled, "menu: beside_tab \"third\" is no number"),
+        ] {
+            configuration.insert(ENTRIES.to_owned(), MENU.to_owned());
+            let said = Menu::new(0, &configuration).keys().and_then(Result::err).map(str::to_owned);
+            assert!(said.as_deref().is_some_and(|said| said.starts_with(reason)), "{said:?}");
+        }
+    }
+
+    /// The key binding opens the menu for the pane you are in, which zellij
+    /// says a moment later. A key that starts an agent before then starts
+    /// none, rather than one beside no pane, wherever zellij runs.
+    #[test]
+    fn a_key_pressed_before_zellij_says_where_you_are_starts_nothing() {
+        let mut menu = Menu::new(0, &BTreeMap::from([(ENTRIES.to_owned(), MENU.to_owned())]));
+        assert!(press(&mut menu, 'c'));
+        assert!(!press(&mut menu, 't'));
+        assert_eq!(beside_of(&menu), Some(&For::Origin(Fetch::Waiting)));
+        assert_eq!(menu.keys().and_then(Result::ok).map(Keys::names), Some(vec!["Claude"]));
+    }
+
+    /// A menu that asked zellij to close it, as one that started an agent in
+    /// your own session has, takes no key on its way before zellij has: a
+    /// second press starts no second agent.
+    #[test]
+    fn a_menu_that_closed_takes_no_more_keys() {
+        let mut menu = row_menu(None);
+        assert!(!menu.key(&KeyWithModifier::new(BareKey::Esc)));
+        assert!(menu.keys().is_none());
+        // An agent started here would ask zellij for its pane, and no zellij
+        // answers a test.
+        assert!(!press(&mut menu, 'r'));
+        assert!(menu.keys().is_none());
+    }
+
+    /// In another session, the menu takes no key while zellij opens the
+    /// agent's pane, and goes there once it has, though zellij say not which
+    /// pane it is. When zellij fails, the menu says what it said.
+    #[test]
+    fn an_agent_in_another_session_is_gone_to_once_its_pane_is_open() {
+        let there = There { session: "elo".to_owned(), tab: Some(3), back: Some(1) };
+        let started = BTreeMap::from([(CONTEXT_KEY.to_owned(), START_VALUE.to_owned())]);
+        let none: &[u8] = b"";
+        for (exit_code, stdout, stderr, said) in [
+            (Some(0), &b"terminal_12\n"[..], none, None),
+            (Some(0), none, none, None),
+            (
+                Some(1),
+                none,
+                &b"There is no active session!\n"[..],
+                Some("menu: the agent did not start: There is no active session!"),
+            ),
+            (None, none, none, Some("menu: the agent did not start: zellij opened no pane")),
+        ] {
+            let mut menu = row_menu(Some(&there));
+            assert!(!press(&mut menu, 'r'));
+            assert!(!press(&mut menu, 'r'));
+            assert!(matches!(menu.phase, Phase::Starting(..)));
+            menu.ran(exit_code, stdout, stderr, &started);
+            assert_eq!(menu.keys().map(Result::err), said.map(Some), "{exit_code:?} {stdout:?}");
+        }
+    }
+
+    /// The agent is named for the branch checked out where it starts. An
+    /// answer git gives late, for a directory asked about before, names it
+    /// for none.
+    #[test]
+    fn a_late_git_answer_for_another_directory_names_no_agent() {
+        let mut menu = row_menu(None);
+        menu.follow();
+        let branch = |dir: &str| {
+            BTreeMap::from([
+                (CONTEXT_KEY.to_owned(), BRANCH_VALUE.to_owned()),
+                (DIR_KEY.to_owned(), dir.to_owned()),
+            ])
+        };
+        menu.ran(Some(0), b"main\n", b"", &branch("/w/old"));
+        assert_eq!(menu.branch("/w/elo"), None);
+        menu.ran(Some(0), b"feat/menu\n", b"", &branch("/w/elo"));
+        assert_eq!(menu.branch("/w/elo"), Some("feat/menu"));
     }
 
     /// In another session, zellij opens the pane in the agent's tab and its
@@ -666,7 +893,7 @@ mod tests {
         let command = claude("/tigerstyle", Some("main"));
         let there = There { session: "elo".to_owned(), tab: Some(3), back: None };
         assert_eq!(
-            new_pane(&there, Some("/w/elo/main"), &command),
+            new_pane(&there, "/w/elo/main", &command),
             [
                 "zellij", "--session", "elo", "action", "new-pane", "--tab-id", "3", "--cwd",
                 "/w/elo/main", "--", "claude", "--name", "tigerstyle: main", "/tigerstyle",
@@ -674,8 +901,8 @@ mod tests {
         );
         let somewhere = There { session: "elo".to_owned(), tab: None, back: None };
         assert_eq!(
-            new_pane(&somewhere, None, &command)[..7],
-            ["zellij", "--session", "elo", "action", "new-pane", "--", "claude"]
+            new_pane(&somewhere, "/w/elo", &command)[..8],
+            ["zellij", "--session", "elo", "action", "new-pane", "--cwd", "/w/elo", "--"]
         );
         assert_eq!(opened(b"terminal_12\n"), Some(12));
         assert_eq!(opened(b"plugin_3\n"), None);
@@ -688,7 +915,7 @@ mod tests {
     #[test]
     fn an_agent_in_your_own_session_starts_in_its_pane_s_directory_wherever_that_is() {
         let command = claude("/tigerstyle", None);
-        let dir = |cwd: &str| command_pane(&command, Some(cwd)).cwd.expect("a directory");
+        let dir = |cwd: &str| command_pane(&command, cwd).cwd.expect("a directory");
         for cwd in ["/tmp/pr-123", "/data/w/luneta", "/cache", "/host/x", "/home/you/w"] {
             let dir = dir(cwd);
             for sandbox in ["/tmp", "/data", "/cache", "/host"] {
@@ -716,14 +943,14 @@ mod tests {
         let shell = PaneInfo { id: 2, is_selectable: true, ..PaneInfo::default() };
         let tab = vec![plugin(1, false), shell, plugin(9, true)];
         let bound = BTreeMap::from([(ENTRIES.to_owned(), MENU.to_owned())]);
-        let mut handed = Beside { pane: 2, cwd: None, there: None }.to_configuration();
+        let mut handed = configuration(2, Some("/w/elo"), None);
         handed.insert(ENTRIES.to_owned(), MENU.to_owned());
         for (configuration, said) in [(bound, Some(NO_PANE)), (handed, None)] {
             let mut menu = Menu::new(9, &configuration);
             menu.panes = Some(PaneManifest { panes: HashMap::from([(0, tab.clone())]) });
             menu.tabs = vec![TabInfo { position: 0, active: true, ..TabInfo::default() }];
             menu.follow();
-            assert_eq!(menu.keys().err(), said, "handed: {}", menu.handed);
+            assert_eq!(menu.keys().and_then(Result::err), said, "{configuration:?}");
         }
     }
 

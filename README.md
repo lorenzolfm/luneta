@@ -224,7 +224,8 @@ reviews the branch checked out there. A row of another tab takes you to that
 tab, and a row of another session starts the agent in that session and takes
 you there, handing the session you leave the pane you came from. In the sidebar,
 or any pane that is no terminal, your key has no pane to start an agent beside,
-and the menu says so in place of its keys.
+and the menu says so in place of its keys. So it does for a pane whose directory
+zellij has yet to say: an agent starts where its pane works, or not at all.
 
 An agent started on a skill goes by the skill and the branch, as
 `thermo-nuclear-review: feat/sidebar`, as though you had named it with
