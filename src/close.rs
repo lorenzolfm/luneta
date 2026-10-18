@@ -190,6 +190,9 @@ struct Ending {
     agents: usize,
     busy: usize,
     waiting: usize,
+    /// Agents claude-ps said a word luneta does not know for, or nothing:
+    /// they may be at work.
+    unknown: usize,
 }
 
 impl Ending {
@@ -200,17 +203,18 @@ impl Ending {
                 Status::Shell => continue,
                 Status::Busy => ending.busy += 1,
                 Status::Waiting => ending.waiting += 1,
-                Status::Idle | Status::Unknown(_) | Status::Unreported => {},
+                Status::Unknown(_) | Status::Unreported => ending.unknown += 1,
+                Status::Idle => {},
             }
             ending.agents += 1;
         }
         ending
     }
 
-    /// Whether an agent that would end is in the middle of something: busy,
-    /// or waiting on you.
+    /// Whether an agent that would end may be in the middle of something:
+    /// busy, waiting on you, or doing what luneta cannot tell.
     fn at_work(self) -> bool {
-        self.busy + self.waiting > 0
+        self.busy + self.waiting + self.unknown > 0
     }
 
     /// As `2 agents, 1 busy`.
@@ -224,6 +228,9 @@ impl Ending {
         }
         if self.waiting > 0 {
             said.push(format!("{} waiting", self.waiting));
+        }
+        if self.unknown > 0 {
+            said.push(format!("{} unknown", self.unknown));
         }
         said.join(", ")
     }
@@ -239,7 +246,8 @@ pub struct Plan {
 impl Plan {
     /// What to ask before going ahead, as `Kill session elo? 2 agents, 1
     /// busy`. Nothing when luneta knows that no agent busy or waiting on you
-    /// would end: an idle agent or a shell goes without asking.
+    /// would end: an idle agent or a shell goes without asking, and one whose
+    /// status luneta cannot read asks.
     pub fn question(&self) -> Option<String> {
         let what = self.act.what();
         match &self.ending {
@@ -476,7 +484,9 @@ mod tests {
     }
 
     /// A key asks first only when an agent it ends is busy or waiting on you,
-    /// and says what goes. One that luneta cannot tell about asks too.
+    /// and says what goes. One that luneta cannot tell about asks too: an
+    /// agent with a status luneta does not know or none, or every agent when
+    /// claude-ps has not said.
     #[test]
     fn a_key_asks_first_only_when_an_agent_at_work_would_end() {
         let agents = || {
@@ -485,14 +495,19 @@ mod tests {
                 agent(3, 7, "busy"),
                 agent(5, 8, "waiting"),
                 agent(6, 9, "shell"),
+                agent(4, 10, "compacting"),
+                Agent { pane: 9, tab: Some(11), status: Status::parse(None) },
             ])
         };
+        let session = "Kill session luneta? 5 agents, 1 busy, 1 waiting, 2 unknown";
         for (id, scope, asked) in [
             (Some(2), Scope::Pane, None),
             (Some(3), Scope::Pane, Some("Close the pane? 1 agent, 1 busy")),
             (Some(5), Scope::Pane, Some("Close its tab? 1 agent, 1 waiting")),
-            (Some(2), Scope::Session, Some("Kill session luneta? 3 agents, 1 busy, 1 waiting")),
-            (None, Scope::Session, Some("Kill session luneta? 3 agents, 1 busy, 1 waiting")),
+            (Some(4), Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
+            (Some(9), Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
+            (Some(2), Scope::Session, Some(session)),
+            (None, Scope::Session, Some(session)),
         ] {
             let plan = of(here(), id, agents()).plan(scope).expect("a plan");
             assert_eq!(plan.question().as_deref(), asked, "{scope:?} of {id:?}");

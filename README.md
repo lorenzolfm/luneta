@@ -277,8 +277,9 @@ menu asks first, and says what goes:
 ```
 
 `y`, or the key again, goes ahead; `n` or `Backspace` goes back to the keys. An
-idle agent or a shell goes without asking. Without `claude-ps`, luneta cannot
-tell, and asks every time.
+idle agent or a shell goes without asking. An agent whose status luneta does
+not know, or that reports none, may be at work, and asks. Without `claude-ps`,
+luneta cannot tell, and asks every time.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 
