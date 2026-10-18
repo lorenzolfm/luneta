@@ -32,6 +32,7 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Jump to the agent that is waiting for you
 * Create a session in a directory you work in
 * Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
+* Start an agent on a skill with a few keys, from a [menu](#menu) of your own
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -198,6 +199,42 @@ and brings it back. Either goes for every session, within a second, and for a
 session started later: the docks keep it in the plugin's cache, beside the
 folds.
 
+### Menu
+
+Keys, pressed one after another, that start an agent on a skill, beside the
+agent whose work it is for. The menu shows the keys of the group you are in and
+what each does, as which-key does in neovim.
+
+```text
+╭─ Claude ────────────────── luneta/main ─╮
+│ t  /thermo-nuclear-review               │
+│ m  /make-illegal-states-unrepresentable │
+│ s  /tigerstyle                          │
+│                                         │
+│ <BS> - Back, <ESC> - Close              │
+╰─────────────────────────────────────────╯
+```
+
+Your key opens it at the bottom right of the tab for the pane you are in, and
+`m` in the sidebar for the pane whose row is highlighted. `c` opens the group
+you named Claude, and `t` starts Claude Code on `/thermo-nuclear-review` in a
+pane of its own, beside that pane in its tab, and in the directory it works in,
+which the rule on top names. For `/thermo-nuclear-review` that is the point: it
+reviews the branch checked out there. A row of another tab takes you to that
+tab, and a row of another session starts the agent in that session and takes
+you there, handing the session you leave the pane you came from.
+
+An agent started on a skill goes by the skill and the branch, as
+`thermo-nuclear-review: feat/sidebar`, as though you had named it with
+`/rename`, so the sidebar and the picker say what it is doing from the start.
+
+What a key starts on is the first message of the session, as
+`claude "/tigerstyle"` would take it: a skill, a skill and its arguments, as
+`/code-review since main`, or words. `Backspace` goes back a group, and out of
+the menu from the first; `Esc` closes it.
+
+Needs `claude` on the server's `PATH`, and `git` for the branch.
+
 ## Getting started
 
 ### Requirements
@@ -206,6 +243,8 @@ folds.
 |---|---|---|
 | **zellij 0.45.0** | | everything |
 | [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | optional | the agent list |
+| [`claude`](https://claude.com/claude-code) | optional | the menu |
+| `git` | optional | the branch in the name of an agent the menu starts |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
@@ -225,8 +264,9 @@ plugins {
 
 Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
 `ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
-luneta reaches `zoxide`, `eza`, `claude-ps` and `zellij` itself;
-`OpenTerminalsOrPlugins` is how the [dock](#dock-the-sidebar) opens the sidebar.
+luneta reaches `zoxide`, `eza`, `claude-ps`, `git` and `zellij` itself, and how
+the [menu](#menu) starts `claude`; `OpenTerminalsOrPlugins` is how the
+[dock](#dock-the-sidebar) opens the sidebar, and the sidebar the menu.
 Every mode asks for all four, since zellij keeps one grant for a plugin.
 
 <details>
@@ -291,6 +331,47 @@ keybinds {
 }
 ```
 
+### Open the menu
+
+The menu is the plugin in `mode "menu"`. Its keys are a `menu`, a node to a
+key: a key's one string is what it starts an agent on, or, with keys inside
+it, the name of the group they make. Give them to the alias, so that the key
+that opens the menu and the sidebar's `m` show the same keys:
+
+```kdl
+plugins {
+    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+        menu {
+            c "Claude" {
+                t "/thermo-nuclear-review"
+                m "/make-illegal-states-unrepresentable"
+                s "/tigerstyle"
+            }
+        }
+    }
+}
+
+keybinds {
+    normal {
+        bind "Alt m" {
+            LaunchOrFocusPlugin "luneta" {
+                floating true
+                move_to_focused_tab true
+                mode "menu"
+            }
+            SwitchToMode "normal"
+        }
+    }
+}
+```
+
+The sidebar has the keys of the dock that opened it, so load the dock by the
+alias too, as [below](#dock-the-sidebar).
+
+A key is one character, pressed bare. The key that opens the menu needs a
+modifier: zellij hands a bare `m` to the pane you are in. A menu luneta cannot
+read says what is wrong with it where its keys would be, and closes on any key.
+
 ### Dock the sidebar
 
 The sidebar is one pane for the whole session. The dock keeps it in the tab on
@@ -299,11 +380,15 @@ screen: the same plugin, in the background, loaded with every session in
 
 ```kdl
 load_plugins {
-    "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+    luneta {
         mode "dock"
     }
 }
 ```
+
+`luneta` is the alias from [Install](#install), so the dock, and the sidebar it
+opens, have whatever the alias is given: the [menu](#open-the-menu)'s keys, for
+one.
 
 A `mode` luneta does not know does nothing but say so, in its pane if it has
 one and in zellij's log.
@@ -529,6 +614,7 @@ In the sidebar, once it has the focus:
 | `←` `→` / `h` `l` | fold / unfold the session |
 | `Space` | fold or unfold |
 | `n` | go to the next agent that wants you |
+| `m` | open the [menu](#menu) for the highlighted pane |
 | `/` | search |
 | `Esc` | back to the pane you came from |
 
@@ -548,6 +634,14 @@ While the search is open, every key types into it but these:
 | `Enter` | go to the highlighted row, and close the search |
 | `Esc` | close the search, and clear it |
 | `Backspace` | delete a character, or close the search once it is empty |
+
+In the menu:
+
+| key | does |
+|---|---|
+| *a key it shows* | open its group, or start its agent |
+| `Backspace` | back a group, or close from the first |
+| `Esc` / `Ctrl-c` | close |
 
 ---
 

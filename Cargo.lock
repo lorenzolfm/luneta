@@ -1105,6 +1105,7 @@ name = "luneta"
 version = "0.2.2"
 dependencies = [
  "fuzzy-matcher",
+ "kdl",
  "serde",
  "serde_json",
  "unicode-width 0.2.2",

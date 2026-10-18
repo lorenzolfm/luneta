@@ -8,6 +8,7 @@ mod fetch;
 mod folds;
 mod hiding;
 mod layout;
+mod menu;
 mod paint;
 mod panes;
 mod pass;
@@ -19,16 +20,17 @@ mod tree;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agents::{AgentSet, Live, Seat};
+use agents::{AgentRow, AgentSet, Live, Seat};
 use checkouts::Checkouts;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
+use menu::{Beside, There};
 use elapsed::Age;
 use panes::Peeks;
 use pass::{At, Pass, Then};
 use places::Places;
 use sessions::{Contents, Focus, Kind, MatchSet, Selection, Session, SessionName, Sessions};
-use tree::{is_placeholder, Branch, Node, Place, Tree};
+use tree::{is_placeholder, origin, Branch, Node, Place, Tree};
 use zellij_tile::prelude::*;
 
 const SCREEN_PIPE: &str = "screen";
@@ -53,6 +55,10 @@ const SIDEBAR: &str = "sidebar";
 
 const DOCK: &str = "dock";
 
+/// `mode "menu"` makes the plugin the menu: keys, pressed one after another,
+/// that start an agent.
+const MENU: &str = "menu";
+
 /// What a load of the plugin is, by its `mode`.
 #[derive(Default)]
 enum Role {
@@ -61,6 +67,7 @@ enum Role {
     Picker,
     Sidebar(Tree),
     Dock(dock::Dock),
+    Menu(menu::Menu),
     /// A `mode` luneta does not know. It says so, and does nothing else.
     Unknown(String),
 }
@@ -68,7 +75,9 @@ enum Role {
 /// What a load with a `mode` luneta does not know says, in its pane if it has
 /// one, and in zellij's log.
 fn unknown_mode(mode: &str) -> String {
-    format!("luneta has no mode {mode:?}: \"{SIDEBAR}\", \"{DOCK}\", or none for the picker")
+    format!(
+        "luneta has no mode {mode:?}: \"{SIDEBAR}\", \"{DOCK}\", \"{MENU}\", or none for the picker"
+    )
 }
 
 /// Every mode asks for the same. zellij keeps one grant for a plugin's file,
@@ -190,6 +199,9 @@ struct State {
     /// What was under the pointer when its hover ended, as a click that only
     /// focuses the sidebar ends it: the row, and whether on its fold.
     pressed: Option<(Place, bool)>,
+    /// The menu's entries, as the configuration holds them, for the sidebar
+    /// to open the menu with.
+    menu_entries: Option<String>,
 }
 
 register_plugin!(State);
@@ -208,6 +220,7 @@ impl ZellijPlugin for State {
                 let dock = dock::Dock::new(self.plugin_id, ids.client_id, sidebar);
                 Role::Dock(dock.shared(ids.zellij_pid))
             },
+            Some(MENU) => Role::Menu(menu::Menu::new(self.plugin_id, &configuration)),
             Some(mode) => Role::Unknown(mode.to_owned()),
         };
         match &self.role {
@@ -222,6 +235,15 @@ impl ZellijPlugin for State {
                 set_timeout(DOCK_TICK);
                 return;
             },
+            Role::Menu(_) => {
+                subscribe(&[
+                    EventType::Key,
+                    EventType::TabUpdate,
+                    EventType::PaneUpdate,
+                    EventType::RunCommandResult,
+                ]);
+                return;
+            },
             Role::Unknown(mode) => {
                 eprintln!("{}", unknown_mode(mode));
                 return;
@@ -232,6 +254,7 @@ impl ZellijPlugin for State {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
+        self.menu_entries = configuration.get(menu::ENTRIES).cloned();
         subscribe(&[
             EventType::PermissionRequestResult,
             EventType::Timer,
@@ -264,6 +287,17 @@ impl ZellijPlugin for State {
                     _ => {},
                 }
                 return false;
+            },
+            Role::Menu(ref mut menu) => {
+                return match event {
+                    Event::Key(key) => menu.key(&key),
+                    Event::TabUpdate(tabs) => menu.tabs(tabs),
+                    Event::PaneUpdate(panes) => menu.panes(panes),
+                    Event::RunCommandResult(exit_code, stdout, stderr, context) => {
+                        menu.ran(exit_code, &stdout, &stderr, &context)
+                    },
+                    _ => false,
+                };
             },
             Role::Unknown(_) => return false,
         }
@@ -432,7 +466,7 @@ impl ZellijPlugin for State {
                 }
                 return false;
             },
-            Role::Unknown(_) => return false,
+            Role::Menu(_) | Role::Unknown(_) => return false,
         }
         if ask == Some(Ask::Focus) {
             self.leave();
@@ -463,6 +497,10 @@ impl ZellijPlugin for State {
                 return;
             },
             Role::Dock(_) => return,
+            Role::Menu(menu) => {
+                render::render_menu(menu, rows, cols);
+                return;
+            },
             Role::Unknown(mode) => {
                 render::render_notice(&unknown_mode(mode), rows, cols);
                 return;
@@ -583,13 +621,7 @@ impl State {
 
     fn origin_pane(&self) -> Option<u32> {
         let tab = self.active_tab?;
-        let panes = self.panes.as_ref()?.panes.get(&tab)?;
-        let focused = |floating: bool| {
-            panes.iter().find(move |p| {
-                p.is_focused && !p.is_plugin && !p.is_suppressed && p.is_floating == floating
-            })
-        };
-        focused(false).or_else(|| focused(true)).map(|p| p.id)
+        origin(self.panes.as_ref()?.panes.get(&tab)?)
     }
 
     fn rebuild_agents(&mut self, policy: Selection) {
@@ -1219,6 +1251,10 @@ impl State {
             BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
             BareKey::Char(' ') => self.fold(None),
             BareKey::Char('/') => self.search_tree(String::new()),
+            BareKey::Char('m') => {
+                self.open_menu();
+                false
+            },
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -1235,6 +1271,55 @@ impl State {
             _ => false,
         };
         drawn || unscrolled
+    }
+
+    /// Opens the menu over the tab for the highlighted pane, so that an agent
+    /// it starts opens beside that pane, in the directory it works in.
+    fn open_menu(&self) {
+        if let (Some(url), Some(configuration)) = (self.own_url(), self.menu_for_row()) {
+            open_plugin_pane_floating(&url, configuration, None, BTreeMap::new());
+        }
+    }
+
+    /// The configuration of a menu for the highlighted pane: the pane, the
+    /// directory it works in, as its session says or else as its agent does,
+    /// and when that is another session, its session and its tab, and the
+    /// pane you came from, for the menu to hand the focus back to before it
+    /// goes there. A session's row has no pane to open a menu for.
+    fn menu_for_row(&self) -> Option<BTreeMap<String, String>> {
+        let Role::Sidebar(tree) = &self.role else {
+            return None;
+        };
+        let Some(Place::Pane(session, pane)) = tree.rows.selected_row().map(Node::place) else {
+            return None;
+        };
+        let leaf = self
+            .branches
+            .iter()
+            .find(|branch| branch.name == session)
+            .and_then(|branch| branch.panes.iter().find(|leaf| leaf.id == pane));
+        let seated = |row: &&AgentRow| row.seat.session() == session && row.pane == pane;
+        let agent = self.agents.rows.iter().find(seated);
+        let cwd = leaf
+            .and_then(|leaf| leaf.cwd.clone())
+            .or_else(|| agent.map(|row| row.cwd.clone()).filter(|cwd| !cwd.is_empty()));
+        let here = self.matches.current_session.as_deref() == Some(session.as_str());
+        let tab = leaf.and_then(|leaf| leaf.tab_id);
+        let there = (!here).then_some(There { session, tab, back: self.here });
+        let mut configuration = Beside { pane, cwd, there }.to_configuration();
+        configuration.insert(MODE.to_owned(), MENU.to_owned());
+        if let Some(entries) = &self.menu_entries {
+            configuration.insert(menu::ENTRIES.to_owned(), entries.clone());
+        }
+        Some(configuration)
+    }
+
+    /// Where zellij loaded the plugin from, as its own pane says.
+    fn own_url(&self) -> Option<String> {
+        let manifest = self.panes.as_ref()?;
+        let mut panes = manifest.panes.values().flatten();
+        let own = panes.find(|p| p.is_plugin && p.id == self.plugin_id)?;
+        own.plugin_url.clone()
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -1632,6 +1717,7 @@ mod tests {
             id: 4,
             title: "pane 4".to_owned(),
             tab: String::new(),
+            tab_id: None,
             cwd: None,
             checkout: None,
         };
@@ -1749,6 +1835,43 @@ mod tests {
                 let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
                 assert_eq!(tree.search(), None, "{typed:?}, row {row}, {by:?}");
             }
+        }
+    }
+
+    /// `m` on a pane's row opens the menu for that pane: one of your own
+    /// session starts its agent here, one of another session there, in the
+    /// pane's tab. The directory is the pane's, as its session says. A
+    /// session's row has no pane.
+    #[test]
+    fn the_menu_a_row_opens_starts_its_agent_beside_that_pane() {
+        let mut state = focused_sidebar();
+        state.menu_entries = Some(r#"t "/tigerstyle""#.to_owned());
+        state.here = Some(1);
+        let four = &mut state.branches[1].panes[0];
+        four.cwd = Some("/w/b".to_owned());
+        four.tab_id = Some(7);
+        state.rebuild_tree();
+        let entry = |key: &str, value: &str| (key.to_owned(), value.to_owned());
+        let menu = [entry("mode", "menu"), entry("menu", r#"t "/tigerstyle""#)];
+        for (row, beside) in [
+            (0, None),
+            (1, Some(vec![entry("beside_pane", "1")])),
+            (
+                3,
+                Some(vec![
+                    entry("beside_pane", "4"),
+                    entry("beside_cwd", "/w/b"),
+                    entry("beside_session", "b"),
+                    entry("beside_tab", "7"),
+                    entry("back_pane", "1"),
+                ]),
+            ),
+        ] {
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(row);
+            }
+            let expected = beside.map(|beside| beside.into_iter().chain(menu.clone()).collect());
+            assert_eq!(state.menu_for_row(), expected, "row {row}");
         }
     }
 
