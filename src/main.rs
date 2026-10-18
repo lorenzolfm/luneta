@@ -1543,7 +1543,7 @@ mod tests {
     #[test]
     fn a_session_row_folds_unless_a_term_found_it() {
         // The header and the blank line under it take the first two lines.
-        let line_of = |row: usize| row + 2;
+        let line_of = |row: usize| row + render::HEADER;
         for (typed, row, click, folded) in [
             ("", 0, false, &["a"][..]),
             ("", 0, true, &["a"]),

@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
-use crate::paint::Painted;
+use crate::paint::{Colour, Painted};
 
 const TOP_LEFT: char = '╭';
 const TOP_RIGHT: char = '╮';
@@ -122,10 +122,10 @@ pub struct Line {
 /// base colour, unless it is told otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ink {
-    /// An emphasis level, not bold. A bare level is this one.
-    Level(usize),
-    /// An emphasis level, bold.
-    Bold(usize),
+    /// A colour, not bold. A bare colour is this one.
+    Level(Colour),
+    /// A colour, bold.
+    Bold(Colour),
     /// The theme's base colour, not bold.
     Plain,
     /// The theme's base colour, bold.
@@ -134,16 +134,16 @@ pub enum Ink {
     Dim,
 }
 
-impl From<usize> for Ink {
-    fn from(level: usize) -> Self {
-        Ink::Level(level)
+impl From<Colour> for Ink {
+    fn from(colour: Colour) -> Self {
+        Ink::Level(colour)
     }
 }
 
 impl Ink {
-    fn level(self) -> Option<usize> {
+    fn colour(self) -> Option<Colour> {
         match self {
-            Ink::Level(level) | Ink::Bold(level) => Some(level),
+            Ink::Level(colour) | Ink::Bold(colour) => Some(colour),
             Ink::Plain | Ink::Strong | Ink::Dim => None,
         }
     }
@@ -282,13 +282,13 @@ impl Line {
         }
         for style in styles {
             text = match style {
-                Style::Run(ink, range) => match (ink.level(), clamp(range)) {
-                    (Some(level), Some(range)) => text.color_range(level, range),
+                Style::Run(ink, range) => match (ink.colour(), clamp(range)) {
+                    (Some(colour), Some(range)) => text.color_range(colour, range),
                     _ => text,
                 },
-                Style::Indices(ink, indices) => match ink.level() {
-                    Some(level) => text.color_indices(
-                        level,
+                Style::Indices(ink, indices) => match ink.colour() {
+                    Some(colour) => text.color_indices(
+                        colour,
                         indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
                     ),
                     None => text,
@@ -423,8 +423,8 @@ mod tests {
     fn each_ink_paints_the_way_zellij_reads_it() {
         let mut line = Line::new();
         for (text, ink) in [
-            ("a", Ink::Level(2)),
-            ("b", Ink::Bold(2)),
+            ("a", Ink::Level(Colour::Level2)),
+            ("b", Ink::Bold(Colour::Level2)),
             ("c", Ink::Plain),
             ("d", Ink::Strong),
             ("e", Ink::Dim),
@@ -432,14 +432,14 @@ mod tests {
             line.push(text, ink);
         }
         let painted = line.fill(5);
-        let seen: Vec<(Option<usize>, bool, bool)> = (0..5)
-            .map(|at| (painted.level_at(at), painted.is_bold_at(at), painted.is_dim_at(at)))
+        let seen: Vec<(Option<Colour>, bool, bool)> = (0..5)
+            .map(|at| (painted.colour_at(at), painted.is_bold_at(at), painted.is_dim_at(at)))
             .collect();
         assert_eq!(
             seen,
             [
-                (Some(2), false, false),
-                (Some(2), true, false),
+                (Some(Colour::Level2), false, false),
+                (Some(Colour::Level2), true, false),
                 (None, false, false),
                 (None, true, false),
                 (None, true, true),
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn a_line_is_padded_to_the_interior_and_carries_no_border() {
         let mut line = Line::new();
-        line.push("luneta", 1);
+        line.push("luneta", Colour::Level1);
         assert_eq!(line.columns(), 6);
         assert_eq!(line.finish(12).content(), " luneta       ");
     }
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn a_line_pads_in_columns_not_characters() {
         let mut line = Line::new();
-        line.push("日本語版", 1);
+        line.push("日本語版", Colour::Level1);
         assert_eq!(line.columns(), 8);
         assert_eq!(line.finish(12).content().width(), 14);
     }
@@ -597,9 +597,9 @@ mod tests {
     #[test]
     fn an_overlong_line_is_cut_back_to_the_box() {
         let mut line = Line::new();
-        line.push("a-very-long-session-name", 1);
+        line.push("a-very-long-session-name", Colour::Level1);
         line.gap(2);
-        line.push("[R]", 0);
+        line.push("[R]", Colour::Level0);
         let text = line.finish(10);
         assert_eq!(text.content(), " a-very-lo… ");
         assert_eq!(text.content().width(), 12);
@@ -667,18 +667,18 @@ mod tests {
         // truncate to "…" and then pad `0 - 1` columns: a capacity overflow in
         // release, where the subtraction wraps.
         let mut line = Line::new();
-        line.push("/home/you/projects/luneta", 0);
+        line.push("/home/you/projects/luneta", Colour::Level0);
         assert_eq!(line.finish(0).content(), "  ");
         let mut line = Line::new();
-        line.push("日本語", 0);
+        line.push("日本語", Colour::Level0);
         assert_eq!(line.finish(1).content(), " … ");
         // An emoji presentation sequence right at the cut used to leave the
         // line one column wider than the box, and the same subtraction wrapped.
         let mut line = Line::new();
-        line.push("❤\u{FE0F}abc", 0);
+        line.push("❤\u{FE0F}abc", Colour::Level0);
         assert_eq!(line.finish(2).content(), " ❤… ");
         let mut line = Line::new();
-        line.push("\t\tabc", 0);
+        line.push("\t\tabc", Colour::Level0);
         assert_eq!(line.finish(1).content(), " … ");
     }
 }

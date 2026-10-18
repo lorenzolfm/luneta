@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
@@ -6,15 +8,15 @@ use crate::fetch::Fetch;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
-use crate::paint::{self, Painted, SUCCESS};
+use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
 use crate::tree::{Node, PaneNode, SessionNode, Summary, Tree};
 
-const TAG: usize = 0;
-const NAME: usize = 1;
-const LABEL: usize = 2;
-const ACCENT: usize = 3;
+const TAG: Colour = Colour::Level0;
+const NAME: Colour = Colour::Level1;
+const LABEL: Colour = Colour::Level2;
+const ACCENT: Colour = Colour::Level3;
 
 const TITLE: &str = "luneta";
 
@@ -321,14 +323,14 @@ fn filled(rect: &Rect, mut lines: Vec<PreviewRow>) -> Vec<PreviewRow> {
     lines
 }
 
-fn preview_line(inner: usize, text: &str, level: usize) -> PreviewRow {
+fn preview_line(inner: usize, text: &str, colour: Colour) -> PreviewRow {
     let mut line = Line::new();
-    line.push(&truncate(text, inner), level);
+    line.push(&truncate(text, inner), colour);
     line.finish(inner).into()
 }
 
-fn wrapped_lines(inner: usize, text: &str, level: usize) -> Vec<PreviewRow> {
-    wrap(text, inner).iter().map(|line| preview_line(inner, line, level)).collect()
+fn wrapped_lines(inner: usize, text: &str, colour: Colour) -> Vec<PreviewRow> {
+    wrap(text, inner).iter().map(|line| preview_line(inner, line, colour)).collect()
 }
 
 fn error_lines(inner: usize, text: &str) -> Vec<PreviewRow> {
@@ -999,7 +1001,7 @@ impl Shelf {
 }
 
 /// The header's rule, and the blank line under it.
-const HEADER: usize = 2;
+pub const HEADER: usize = 2;
 
 pub fn render_sidebar(
     tree: &Tree,
@@ -1037,9 +1039,24 @@ pub fn sidebar_row_at(
     let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
     let shelf = Shelf::new(rows, notes, focused, tree.search().is_some());
     let line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
-    let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
+    let (Range { start, end }, _) = on_screen(tree, focused, shelf.tree);
     let index = start + line;
     (index < end).then_some(index)
+}
+
+/// The rows of the tree a sidebar shows in `height` rows, and the one of them
+/// that is lit: the cursor while the sidebar has the focus, and the pane you
+/// are in while it does not. The rows shown are the ones around the lit row,
+/// or around the cursor while none is, so a lit row is never out of sight.
+fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
+    let lit = if focused {
+        tree.rows.selected()
+    } else {
+        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
+    };
+    let around = lit.or(tree.rows.selected()).unwrap_or(0);
+    let (start, end) = viewport(around, tree.rows.len(), height);
+    (start..end, lit)
 }
 
 const UNFOLDED: &str = "▾";
@@ -1075,8 +1092,7 @@ fn sidebar_lines(
     let inner = cols.saturating_sub(2);
     let mut lines = Vec::with_capacity(shelf.header + shelf.tree + shelf.notes);
     if shelf.header > 0 {
-        lines.push(header_line(&tree.summary, cols, frame));
-        lines.push(Painted::new(" ".repeat(cols)));
+        lines.extend(header_lines(&tree.summary, cols, frame));
     }
     if tree.rows.is_empty() {
         if shelf.tree > 0 {
@@ -1084,7 +1100,7 @@ fn sidebar_lines(
             lines.push(note_within(inner, &Note::dim(empty)));
         }
     } else {
-        let (start, end) = viewport(tree.rows.selected().unwrap_or(0), tree.rows.len(), shelf.tree);
+        let (Range { start, end }, lit) = on_screen(tree, focused, shelf.tree);
         let window = &tree.rows[start..end];
         let marks = || {
             window.iter().filter_map(|node| match node {
@@ -1100,13 +1116,6 @@ fn sidebar_lines(
                 .max(GLYPH),
             age: marks().map(|mark| mark.age.label().width()).max().unwrap_or(0),
         };
-        // The highlight is on the cursor while the sidebar has the focus, and
-        // on the pane you are in while it does not.
-        let lit = if focused {
-            tree.rows.selected()
-        } else {
-            tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
-        };
         for (offset, node) in window.iter().enumerate() {
             let line = match node {
                 Node::Session(node) => branch_line(node, cols, frame),
@@ -1120,19 +1129,19 @@ fn sidebar_lines(
     lines
 }
 
+/// The lines the header takes, as many as `HEADER` says: its rule, and a
+/// blank line under it.
+fn header_lines(summary: &Summary, cols: usize, frame: u64) -> [Painted; HEADER] {
+    [header_line(summary, cols, frame), Painted::new(" ".repeat(cols))]
+}
+
 /// The rule along the top of the sidebar: how many sessions are live, and how
 /// many agents across them wait for you, are done, and are at work. A count
 /// of none is left out, and so is the word for the sessions where the counts
 /// need its room.
 fn header_line(summary: &Summary, cols: usize, frame: u64) -> Painted {
-    let counts: Vec<(Status, usize)> = [
-        (Status::Waiting, summary.waiting),
-        (Status::Idle, summary.idle),
-        (Status::Busy, summary.busy),
-    ]
-    .into_iter()
-    .filter(|(_, n)| *n > 0)
-    .collect();
+    let counts: Vec<(Status, usize)> =
+        summary.counts().into_iter().filter(|(_, n)| *n > 0).collect();
     let counted: usize = counts
         .iter()
         .map(|(status, n)| agents::dot(status, frame).width() + n.to_string().len())
@@ -1216,7 +1225,7 @@ fn branch_badge(node: &SessionNode, frame: u64) -> Option<(String, Ink)> {
 fn dot_ink(status: &Status) -> Ink {
     match status {
         Status::Waiting => Ink::Bold(ACCENT),
-        Status::Idle => Ink::Bold(SUCCESS),
+        Status::Idle => Ink::Bold(Colour::Success),
         Status::Busy | Status::Unknown(_) => Ink::Level(TAG),
         Status::Shell | Status::Unreported => Ink::Dim,
     }
@@ -2221,14 +2230,29 @@ mod tests {
     #[test]
     fn the_sidebar_scrolls_to_keep_the_cursor_in_sight() {
         let tree = sidebar_tree(workday(), 7);
-        let lines = sidebar_picture(&tree, &[], false, 5, 32);
+        let lines = sidebar_picture(&tree, &[], true, 6, 32);
         assert_eq!(lines.len(), 5);
         assert!(lines[4].contains("~/P/m/unnamed"), "{lines:?}");
         let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 5, 32, 2), Some(5));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 5, 32, 4), Some(7));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 5, 32, 5), None);
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 6, 32, 2), Some(5));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 6, 32, 4), Some(7));
+        assert_eq!(sidebar_row_at(&tree, &agents, true, 6, 32, 5), None);
         assert_eq!(sidebar_row_at(&tree, &agents, true, 5, 32, 4), None);
+    }
+
+    /// A sidebar too short for both the cursor and the pane you are in shows
+    /// your pane, lit, while it does not have the focus, and a click on it
+    /// lands on it.
+    #[test]
+    fn a_short_sidebar_keeps_your_pane_in_sight_until_it_has_the_focus() {
+        let tree = workday_tree(0);
+        let shelf = Shelf::new(5, 0, false, false);
+        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
+        let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
+        assert_eq!(lit, [HEADER + 2]);
+        assert!(lines[HEADER + 2].content().starts_with(HERE_MARK));
+        let agents = AgentSet::default();
+        assert_eq!(sidebar_row_at(&tree, &agents, false, 5, 30, HEADER + 2), Some(6));
     }
 
     #[test]
@@ -2244,7 +2268,7 @@ mod tests {
             };
             let line = branch_line(&node, 20, 0);
             assert_eq!(line.content().chars().skip(3).take(4).collect::<String>(), "misc");
-            let [m, i, s, c] = [3, 4, 5, 6].map(|at| line.level_at(at));
+            let [m, i, s, c] = [3, 4, 5, 6].map(|at| line.colour_at(at));
             assert_eq!((m, i), (s, c), "current: {current}");
             assert_eq!(m, Some(ACCENT), "current: {current}");
             assert_eq!(i, current.then_some(NAME), "current: {current}");

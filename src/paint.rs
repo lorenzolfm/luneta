@@ -17,7 +17,32 @@ const DIM: usize = 4;
 const UNBOLD: usize = 5;
 const ERROR: usize = 6;
 /// zellij's success colour: green in most themes, the level past the error.
-pub const SUCCESS: usize = 7;
+const SUCCESS: usize = 7;
+
+/// A colour zellij's text component draws a run in: one of the theme's four
+/// emphasis levels, or its success colour. Dim, unbold and the error colour
+/// have calls of their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Colour {
+    Level0,
+    Level1,
+    Level2,
+    Level3,
+    Success,
+}
+
+impl Colour {
+    /// The index list zellij reads this colour from.
+    fn slot(self) -> usize {
+        match self {
+            Colour::Level0 => 0,
+            Colour::Level1 => 1,
+            Colour::Level2 => 2,
+            Colour::Level3 => 3,
+            Colour::Success => SUCCESS,
+        }
+    }
+}
 
 /// A row, and which of its characters carry which style level.
 #[derive(Default)]
@@ -40,14 +65,14 @@ impl Painted {
         &self.text
     }
 
-    /// The colour level zellij draws the character at `index` in, as its text
-    /// component picks: the error colour over the success colour, and either
-    /// over the highest of the four emphasis levels that holds it.
+    /// The colour zellij draws the character at `index` in, as its text
+    /// component picks: the success colour over the highest of the four
+    /// emphasis levels that holds it.
     #[cfg(test)]
-    pub fn level_at(&self, index: usize) -> Option<usize> {
-        [ERROR, SUCCESS, 3, 2, 1, 0]
+    pub fn colour_at(&self, index: usize) -> Option<Colour> {
+        [Colour::Success, Colour::Level3, Colour::Level2, Colour::Level1, Colour::Level0]
             .into_iter()
-            .find(|level| self.indices.get(*level).is_some_and(|at| at.contains(&index)))
+            .find(|colour| self.indices.get(colour.slot()).is_some_and(|at| at.contains(&index)))
     }
 
     #[cfg(test)]
@@ -70,57 +95,65 @@ impl Painted {
         self
     }
 
-    pub fn color_indices(mut self, level: usize, indices: Vec<usize>) -> Self {
-        self.level(level).extend(indices);
-        self
+    pub fn color_indices(self, colour: Colour, indices: Vec<usize>) -> Self {
+        self.slot_indices(colour.slot(), indices)
     }
 
-    pub fn color_range<R: RangeBounds<usize>>(mut self, level: usize, range: R) -> Self {
-        let range = self.bounds(range);
-        self.level(level).extend(range);
-        self
+    pub fn color_range<R: RangeBounds<usize>>(self, colour: Colour, range: R) -> Self {
+        self.slot_range(colour.slot(), range)
     }
 
-    pub fn color_substring(mut self, level: usize, substr: &str) -> Self {
+    pub fn color_substring(mut self, colour: Colour, substr: &str) -> Self {
         let mut from = 0;
         while let Some(at) = self.text[from..].find(substr) {
             let at = from + at;
             let start = self.text[..at].chars().count();
             let end = start + substr.chars().count();
-            self.level(level).extend(start..end);
+            self.slot(colour.slot()).extend(start..end);
             from = at + substr.len();
         }
         self
     }
 
     pub fn dim_indices(self, indices: Vec<usize>) -> Self {
-        self.color_indices(DIM, indices)
+        self.slot_indices(DIM, indices)
     }
 
     pub fn dim_all(self) -> Self {
-        self.color_range(DIM, ..)
+        self.slot_range(DIM, ..)
     }
 
     pub fn unbold_indices(self, indices: Vec<usize>) -> Self {
-        self.color_indices(UNBOLD, indices)
+        self.slot_indices(UNBOLD, indices)
     }
 
     pub fn unbold_range<R: RangeBounds<usize>>(self, range: R) -> Self {
-        self.color_range(UNBOLD, range)
+        self.slot_range(UNBOLD, range)
     }
 
     pub fn error_color_range<R: RangeBounds<usize>>(self, range: R) -> Self {
-        self.color_range(ERROR, range)
+        self.slot_range(ERROR, range)
     }
 
-    /// Grows the index lists to cover `level`. The empty lists in between are
+    fn slot_indices(mut self, slot: usize, indices: Vec<usize>) -> Self {
+        self.slot(slot).extend(indices);
+        self
+    }
+
+    fn slot_range<R: RangeBounds<usize>>(mut self, slot: usize, range: R) -> Self {
+        let range = self.bounds(range);
+        self.slot(slot).extend(range);
+        self
+    }
+
+    /// Grows the index lists to cover `slot`. The empty lists in between are
     /// part of the payload: each one is a `$` the component counts off to know
-    /// which level the next list belongs to.
-    fn level(&mut self, level: usize) -> &mut Vec<usize> {
-        if self.indices.len() <= level {
-            self.indices.resize_with(level + 1, Vec::new);
+    /// which slot the next list belongs to.
+    fn slot(&mut self, slot: usize) -> &mut Vec<usize> {
+        if self.indices.len() <= slot {
+            self.indices.resize_with(slot + 1, Vec::new);
         }
-        &mut self.indices[level]
+        &mut self.indices[slot]
     }
 
     fn bounds<R: RangeBounds<usize>>(&self, range: R) -> Range<usize> {
@@ -225,11 +258,13 @@ mod tests {
                 Text::new(row).dim_indices(vec![0, 4]).unbold_indices(vec![2]),
             ),
             (
-                Painted::new(row).color_range(1, 3..8).color_indices(3, vec![4, 6]),
+                Painted::new(row)
+                    .color_range(Colour::Level1, 3..8)
+                    .color_indices(Colour::Level3, vec![4, 6]),
                 Text::new(row).color_range(1, 3..8).color_indices(3, vec![4, 6]),
             ),
             (
-                Painted::new(row).unbold_range(2..5).color_range(0, 2..5),
+                Painted::new(row).unbold_range(2..5).color_range(Colour::Level0, 2..5),
                 Text::new(row).unbold_range(2..5).color_range(0, 2..5),
             ),
             (
@@ -237,11 +272,11 @@ mod tests {
                 Text::new(row).error_color_range(1..4),
             ),
             (
-                Painted::new(row).color_range(SUCCESS, 1..4),
+                Painted::new(row).color_range(Colour::Success, 1..4),
                 Text::new(row).success_color_range(1..4),
             ),
             (
-                Painted::new(row).color_substring(3, "session"),
+                Painted::new(row).color_substring(Colour::Level3, "session"),
                 Text::new(row).color_substring(3, "session"),
             ),
             (
@@ -250,7 +285,7 @@ mod tests {
             ),
             (Painted::new("").dim_all(), Text::new("").dim_all()),
             (
-                Painted::new(row).color_range(2, ..).color_range(1, 0..0),
+                Painted::new(row).color_range(Colour::Level2, ..).color_range(Colour::Level1, 0..0),
                 Text::new(row).color_range(2, ..).color_range(1, 0..0),
             ),
         ];
@@ -273,7 +308,7 @@ mod tests {
     fn a_substring_is_coloured_wherever_it_appears() {
         let text = "ab ab";
         assert_eq!(
-            Painted::new(text).color_substring(0, "ab").serialize(),
+            Painted::new(text).color_substring(Colour::Level0, "ab").serialize(),
             Text::new(text).color_substring(0, "ab").serialize()
         );
     }

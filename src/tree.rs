@@ -193,6 +193,22 @@ pub struct Summary {
     pub busy: usize,
 }
 
+impl Summary {
+    fn count(&mut self, status: &Status) {
+        match status {
+            Status::Waiting => self.waiting += 1,
+            Status::Idle => self.idle += 1,
+            Status::Busy => self.busy += 1,
+            Status::Shell | Status::Unknown(_) | Status::Unreported => {},
+        }
+    }
+
+    /// The counts the header shows, each with the status it counts.
+    pub fn counts(&self) -> [(Status, usize); 3] {
+        [(Status::Waiting, self.waiting), (Status::Idle, self.idle), (Status::Busy, self.busy)]
+    }
+}
+
 #[derive(Default)]
 pub struct Tree {
     pub rows: Cursor<Node>,
@@ -291,12 +307,7 @@ impl Tree {
             let statuses =
                 || panes.iter().filter_map(|(_, agent)| agent.map(|agent| &agent.status));
             for status in statuses() {
-                match status {
-                    Status::Waiting => summary.waiting += 1,
-                    Status::Idle => summary.idle += 1,
-                    Status::Busy => summary.busy += 1,
-                    _ => {},
-                }
+                summary.count(status);
             }
             // A search looks inside a folded session too.
             let open = if finder.is_some() || !folded { panes.as_slice() } else { &[] };
