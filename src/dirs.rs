@@ -6,7 +6,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use crate::cursor::Cursor;
 use crate::fetch::Fetch;
 use crate::panes;
-use crate::sessions::{validate_name, MAX_NAME_BYTES, Selection, Sessions, Taken};
+use crate::sessions::{Selection, SessionName, Sessions, Taken};
 
 pub const QUERY: [&str; 4] = ["zoxide", "query", "--list", "--score"];
 
@@ -67,13 +67,13 @@ const MAX_LISTINGS: usize = 64;
 
 pub struct Dir {
     path: String,
-    name: String,
+    name: SessionName,
     frecency: f64,
 }
 
 pub struct DirRow {
     pub path: String,
-    pub name: String,
+    pub name: SessionName,
     pub indices: Vec<usize>,
     score: i64,
     frecency: f64,
@@ -175,7 +175,7 @@ impl DirSet {
                     let Some((score, indices)) = match_dir(matcher, term, &dir.path, &name) else {
                         continue;
                     };
-                    let is_exact = name == term || dir.name == term;
+                    let is_exact = name.as_str() == term || dir.name.as_str() == term;
                     rows.push(DirRow::new(dir, name, score, indices, is_exact));
                 }
             }
@@ -260,7 +260,7 @@ fn cut_at<'a>(text: &'a str, marker: &str) -> &'a str {
 }
 
 impl DirRow {
-    fn new(dir: &Dir, name: String, score: i64, indices: Vec<usize>, is_exact: bool) -> Self {
+    fn new(dir: &Dir, name: SessionName, score: i64, indices: Vec<usize>, is_exact: bool) -> Self {
         DirRow { path: dir.path.clone(), name, indices, score, frecency: dir.frecency, is_exact }
     }
 }
@@ -281,28 +281,14 @@ fn match_dir(
     clippy::maybe_infinite_iter,
     reason = "the snapshot is finite, so some postfix in `2..` is free; `find` stops there"
 )]
-fn free_name(base: &str, taken: &Taken) -> String {
+fn free_name(base: &SessionName, taken: &Taken) -> SessionName {
     if !taken.holds(base) {
-        return base.to_owned();
+        return base.clone();
     }
     (2..)
-        .map(|n| {
-            let postfix = format!("-{n}");
-            format!("{}{}", head(base, MAX_NAME_BYTES.saturating_sub(postfix.len())), postfix)
-        })
+        .map(|n| base.with_postfix(n))
         .find(|candidate| !taken.holds(candidate))
         .expect("a finite snapshot cannot hold every postfix")
-}
-
-fn head(text: &str, bytes: usize) -> &str {
-    if text.len() <= bytes {
-        return text;
-    }
-    let mut end = bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn parse(stdout: &str) -> Vec<Dir> {
@@ -331,9 +317,9 @@ pub fn short_cwd(path: &str) -> String {
     }
 }
 
-fn derive_name(path: &str) -> Option<String> {
+fn derive_name(path: &str) -> Option<SessionName> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
-    validate_name(base).is_none().then(|| base.to_owned())
+    SessionName::parse(base).ok()
 }
 
 /// A worktree is named for its repository too, `luneta-main`, where `main`
@@ -343,7 +329,7 @@ fn derive_name(path: &str) -> Option<String> {
 /// or a `.bare`, the directory that holds it. A worktree whose own name starts
 /// with its repository's, as `app-hotfix` beside `app`, keeps it, and so does
 /// one whose name would come out too long for zellij to make a session of.
-fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
+fn worktree_name(path: &str, gitdir: &str) -> Option<SessionName> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
     let common = gitdir.rsplit_once('/')?.0.strip_suffix("/worktrees")?;
     // A relative `gitdir` is from the worktree, as git wrote it.
@@ -367,8 +353,7 @@ fn worktree_name(path: &str, gitdir: &str) -> Option<String> {
     if base.strip_prefix(repository).is_some_and(|rest| !rest.starts_with(char::is_alphanumeric)) {
         return None;
     }
-    let name = format!("{repository}-{base}");
-    validate_name(&name).is_none().then_some(name)
+    SessionName::parse(&format!("{repository}-{base}")).ok()
 }
 
 #[cfg(test)]
@@ -378,10 +363,14 @@ mod tests {
 
     use super::*;
     use crate::elapsed::Age;
-    use crate::sessions::Session;
+    use crate::sessions::{Session, MAX_NAME_BYTES};
 
     fn named(name: &str) -> Session {
         Session { name: name.to_owned(), age: Age::ZERO }
+    }
+
+    fn parsed(name: &str) -> SessionName {
+        SessionName::parse(name).expect("a name")
     }
 
     fn listed(stdout: &[u8]) -> DirSet {
@@ -575,7 +564,7 @@ mod tests {
                         /main\n/.bare/worktrees/main\n";
         let names = |dirs: &mut DirSet| {
             dirs.rebuild("", &Sessions::default(), None, Selection::SnapToTop);
-            dirs.rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>()
+            dirs.rows.iter().map(|row| row.name.as_str().to_owned()).collect::<Vec<_>>()
         };
         let worktrees = [
             "luneta", "luneta-main", "luneta-feat", "infra-master", "app-fix", "app-hotfix", "main",
@@ -599,7 +588,7 @@ mod tests {
         let fits = "w".repeat(MAX_NAME_BYTES - "app-".len());
 
         let name = worktree_name(&format!("/home/you/{fits}"), gitdir).expect("a name");
-        assert_eq!(name, format!("app-{fits}"));
+        assert_eq!(name.as_str(), format!("app-{fits}"));
         assert!(socket.len() + name.len() <= 107);
         assert_eq!(worktree_name(&format!("/home/you/{fits}w"), gitdir), None);
     }
@@ -618,9 +607,9 @@ mod tests {
             dead: vec![named("other")],
         };
 
-        assert_eq!(free_name("absent", &sessions.taken(None)), "absent");
-        assert_eq!(free_name("thing", &sessions.taken(None)), "thing-2");
-        assert_eq!(free_name("other", &sessions.taken(None)), "other-2");
+        assert_eq!(free_name(&parsed("absent"), &sessions.taken(None)).as_str(), "absent");
+        assert_eq!(free_name(&parsed("thing"), &sessions.taken(None)).as_str(), "thing-2");
+        assert_eq!(free_name(&parsed("other"), &sessions.taken(None)).as_str(), "other-2");
     }
 
     #[test]
@@ -631,8 +620,7 @@ mod tests {
         let sessions = Sessions { live: vec![named("luneta")], dead: vec![] };
 
         dirs.rebuild("", &sessions, None, Selection::SnapToTop);
-        let shown = dirs.selected_row().unwrap().name.clone();
-        assert_eq!(shown, "luneta-2");
+        assert_eq!(dirs.selected_row().unwrap().name.as_str(), "luneta-2");
 
         for term in ["luneta", "luneta-2"] {
             dirs.rebuild(term, &sessions, None, Selection::SnapToTop);
@@ -646,7 +634,7 @@ mod tests {
     #[test]
     fn the_session_you_are_in_holds_its_name_too() {
         let sessions = Sessions::default();
-        assert_eq!(free_name("here", &sessions.taken(Some("here"))), "here-2");
+        assert_eq!(free_name(&parsed("here"), &sessions.taken(Some("here"))).as_str(), "here-2");
     }
 
     #[test]
@@ -655,7 +643,7 @@ mod tests {
             live: vec![named("thing"), named("thing-2")],
             dead: vec![named("thing-3")],
         };
-        assert_eq!(free_name("thing", &sessions.taken(None)), "thing-4");
+        assert_eq!(free_name(&parsed("thing"), &sessions.taken(None)).as_str(), "thing-4");
     }
 
     #[test]
@@ -663,10 +651,10 @@ mod tests {
         let base = "d".repeat(MAX_NAME_BYTES);
         let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
 
-        let name = free_name(&base, &sessions.taken(None));
+        let name = free_name(&parsed(&base), &sessions.taken(None));
         assert_eq!(name.len(), MAX_NAME_BYTES);
         assert!(name.ends_with("-2"));
-        assert!(validate_name(&name).is_none());
+        assert_eq!(SessionName::parse(&name), Ok(name.clone()));
     }
 
     #[test]
@@ -676,10 +664,10 @@ mod tests {
         assert!(!base.is_char_boundary(MAX_NAME_BYTES - 2));
         let sessions = Sessions { live: vec![named(&base)], dead: vec![] };
 
-        let name = free_name(&base, &sessions.taken(None));
-        assert_eq!(name, format!("ab{}-2", "の".repeat(18)));
+        let name = free_name(&parsed(&base), &sessions.taken(None));
+        assert_eq!(name.as_str(), format!("ab{}-2", "の".repeat(18)));
         assert!(name.len() < MAX_NAME_BYTES);
-        assert!(validate_name(&name).is_none());
+        assert_eq!(SessionName::parse(&name), Ok(name.clone()));
     }
 
     #[test]

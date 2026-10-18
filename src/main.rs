@@ -23,7 +23,7 @@ use elapsed::Age;
 use panes::Peeks;
 use pass::{At, On, Pass};
 use places::Places;
-use sessions::{validate_name, Contents, Focus, Kind, MatchSet, Selection, Session, Sessions};
+use sessions::{Contents, Focus, Kind, MatchSet, Selection, Session, SessionName, Sessions};
 use tree::{is_placeholder, Branch, Node, Place, Tree};
 use zellij_tile::prelude::*;
 
@@ -715,12 +715,13 @@ impl State {
             return;
         }
 
-        if self.matches.is_own_name() || self.matches.name_error().is_some() {
+        if self.matches.is_own_name() {
             return;
         }
-
-        let term = self.matches.search_term.clone();
-        switch_session(if term.is_empty() { None } else { Some(term.as_str()) });
+        let Ok(name) = self.matches.new_name() else {
+            return;
+        };
+        switch_session(name.as_deref());
         close_self();
     }
 
@@ -728,7 +729,7 @@ impl State {
         let Some(row) = self.dirs.selected_row() else {
             return;
         };
-        switch_session_with_cwd(Some(&row.name), Some(PathBuf::from(&row.path)));
+        switch_session_with_cwd(Some(row.name.as_str()), Some(PathBuf::from(&row.path)));
         close_self();
     }
 
@@ -781,14 +782,16 @@ impl State {
     }
 
     fn rename_error(&self, current: &str, name: &str) -> Option<&'static str> {
-        if name.is_empty() {
-            Some("name must not be empty")
-        } else if current == name {
-            Some("already called that")
+        self.rename_to(current, name).err()
+    }
+
+    fn rename_to(&self, current: &str, name: &str) -> Result<SessionName, &'static str> {
+        if current == name {
+            Err("already called that")
         } else if self.sessions.any_named(name) {
-            Some("a session by that name already exists")
+            Err("a session by that name already exists")
         } else {
-            validate_name(name)
+            SessionName::parse(name)
         }
     }
 
@@ -796,10 +799,10 @@ impl State {
         let Mode::Rename { current, input } = &self.mode else {
             return;
         };
-        if self.rename_error(current, input).is_some() {
+        let Ok(name) = self.rename_to(current, input) else {
             return;
-        }
-        rename_session(input);
+        };
+        rename_session(&name);
         self.mode = Mode::Search;
     }
 
