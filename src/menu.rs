@@ -52,6 +52,11 @@ const NO_ROW_PANE: &str =
 /// session it is in.
 const NO_SESSION: &str = "menu: zellij has not said which session this is; try again in a moment";
 
+/// What the floating menu says of `d d` while what zellij said of the tabs
+/// and of the panes disagrees.
+const BEHIND: &str = "menu: zellij has not said all of what the tabs hold since one opened or \
+                      closed; try again in a moment";
+
 /// What the floating menu says of `d d` over a tab with a floating terminal,
 /// which may be the pane you came from.
 const UNSURE_PANE: &str = "menu: luneta cannot tell whether you came from a floating pane of this \
@@ -1002,11 +1007,17 @@ impl Menu {
     }
 
     /// What the delete key for `scope` does to pane `id` you came from, as
-    /// zellij says it stands now, or why it does nothing: over a tab with a
-    /// floating terminal, no pane closes.
+    /// zellij says it stands now, or why it does nothing: no pane closes over
+    /// a tab with a floating terminal, nor while what zellij said of the tabs
+    /// and of the panes disagrees on which tab is yours.
     fn plan(&self, id: u32, scope: Scope) -> Result<Plan, String> {
-        if scope == Scope::Pane && self.floats_a_terminal() {
-            return Err(UNSURE_PANE.to_owned());
+        if scope == Scope::Pane {
+            if self.tab_panes().is_none() {
+                return Err(BEHIND.to_owned());
+            }
+            if self.floats_a_terminal() {
+                return Err(UNSURE_PANE.to_owned());
+            }
         }
         self.subject(id).ok_or_else(|| NO_SESSION.to_owned())?.plan(scope)
     }
@@ -1180,8 +1191,8 @@ impl Menu {
     }
 
     /// The terminal you came from: `Waiting` until zellij has said what the
-    /// tab you are in holds, and `Failed` when that is no terminal with the
-    /// focus.
+    /// tab you are in holds, and while it is saying so, and `Failed` when that
+    /// is no terminal with the focus.
     fn origin_pane(&self) -> Fetch<u32> {
         let Some(panes) = self.tab_panes() else {
             return Fetch::Waiting;
@@ -1197,10 +1208,17 @@ impl Menu {
         self.tab_panes().is_some_and(|panes| panes.iter().any(floating))
     }
 
-    /// The panes of the tab you are in, once zellij has said.
+    /// The panes of the tab you are in, once zellij has said, and while what
+    /// it said of the tabs and of the panes agrees. The two come one after the
+    /// other, the panes by the position of their tab, and a tab that opens or
+    /// closes before yours moves that position: until both have said so, the
+    /// panes at the active tab's position are another tab's. The menu floats
+    /// in the tab you are in, so the panes it stands among are that tab's.
     fn tab_panes(&self) -> Option<&[PaneInfo]> {
         let tab = self.tabs.iter().find(|tab| tab.active)?;
-        self.panes.as_ref()?.panes.get(&tab.position).map(Vec::as_slice)
+        let panes = self.panes.as_ref()?.panes.get(&tab.position)?;
+        let itself = |pane: &PaneInfo| pane.is_plugin && pane.id == self.plugin_id;
+        panes.iter().any(itself).then_some(panes.as_slice())
     }
 
     /// Stands the menu at the bottom right of the tab, as big as the group
@@ -1849,6 +1867,34 @@ mod tests {
         assert_eq!(question(&menu), Some("Kill session luneta? 1 agent, 1 busy"));
     }
 
+    /// zellij says what the tabs are and what the panes are one after the
+    /// other, the panes by the position of their tab. Once tab 6, before
+    /// yours, closes, tab 7 moves to its position, and until both have said
+    /// so, the panes at the active tab's position may be tab 6's: pane 5,
+    /// alone in it, is not the pane you came from, and `d d` closes nothing,
+    /// rather than tab 7 for it.
+    #[test]
+    fn a_tab_that_moved_before_zellij_said_so_closes_nothing() {
+        let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
+        let focused = PaneInfo { is_focused: true, ..shell(5) };
+        let itself = PaneInfo { is_plugin: true, is_floating: true, ..shell(0) };
+        let tab =
+            |position, tab_id, active| TabInfo { position, tab_id, active, ..TabInfo::default() };
+        let yours = vec![shell(2), shell(3), itself];
+        for (tabs, panes) in [
+            (vec![tab(0, 7, true)], HashMap::from([(0, vec![focused]), (1, yours.clone())])),
+            (vec![tab(0, 6, false), tab(1, 7, true)], HashMap::from([(0, yours)])),
+        ] {
+            let mut menu = bound_for_two(true);
+            menu.tabs = tabs;
+            menu.panes = Some(PaneManifest { panes });
+            assert_eq!(menu.origin_pane(), Fetch::Waiting);
+            menu.key(&char('d'));
+            assert!(menu.key(&char('d')));
+            assert!(matches!(menu.shown(), Some(Shown::Wrong(BEHIND))));
+        }
+    }
+
     /// In another session, zellij opens the pane in the agent's tab and its
     /// directory, and says which pane it opened, for the menu to go there.
     #[test]
@@ -1903,7 +1949,8 @@ mod tests {
             ..PaneInfo::default()
         };
         let shell = PaneInfo { id: 2, is_selectable: true, ..PaneInfo::default() };
-        let tab = vec![plugin(1, false), shell, plugin(9, true)];
+        // The sidebar, and the menu itself floating.
+        let tab = vec![plugin(1, false), shell, plugin(0, true)];
         let mut menu = bound();
         menu.panes = Some(PaneManifest { panes: HashMap::from([(0, tab)]) });
         menu.tabs = vec![TabInfo { position: 0, active: true, ..TabInfo::default() }];
