@@ -14,6 +14,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
+use crate::checkouts::{Checkout, Checkouts};
 use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
 use crate::elapsed::{Age, Held};
@@ -36,12 +37,14 @@ pub struct Branch {
 }
 
 /// A terminal pane, the name of the tab that holds it, and the directory it
-/// works in, once its session has said.
+/// works in, once its session has said, and what is checked out there, once
+/// git has.
 pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
     pub cwd: Option<String>,
+    pub checkout: Option<Checkout>,
 }
 
 impl Branch {
@@ -51,8 +54,9 @@ impl Branch {
         tabs: &[TabInfo],
         manifest: &PaneManifest,
         places: &Places,
+        checkouts: &Checkouts,
     ) -> Self {
-        let panes = leaves(&name, tabs, manifest, places);
+        let panes = leaves(&name, tabs, manifest, places, checkouts);
         Branch { name, age, panes }
     }
 }
@@ -65,6 +69,7 @@ pub fn leaves(
     tabs: &[TabInfo],
     manifest: &PaneManifest,
     places: &Places,
+    checkouts: &Checkouts,
 ) -> Vec<Leaf> {
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
@@ -76,13 +81,15 @@ pub fn leaves(
             if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
                 continue;
             }
+            let cwd = places.cwd(session, pane.id);
             keyed.push((
                 (*position, pane.is_floating, pane.id),
                 Leaf {
                     id: pane.id,
                     title: pane.title.clone(),
                     tab: tab.to_owned(),
-                    cwd: places.cwd(session, pane.id).map(str::to_owned),
+                    cwd: cwd.map(str::to_owned),
+                    checkout: cwd.and_then(|cwd| checkouts.of(cwd)).cloned(),
                 },
             ));
         }
@@ -147,6 +154,8 @@ pub struct PaneNode {
     pub id: u32,
     pub label: String,
     pub agent: Option<Mark>,
+    /// What is checked out where the pane works, for the line under its row.
+    pub checkout: Option<Checkout>,
     pub here: bool,
     /// The characters of the label a search lands on.
     pub hits: Vec<usize>,
@@ -338,6 +347,7 @@ impl Tree {
                     id: leaf.id,
                     label,
                     agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
+                    checkout: leaf.checkout.clone(),
                     here: is_current && here == Some(leaf.id),
                     hits,
                 };
@@ -514,14 +524,15 @@ impl Finder<'_> {
         self.find(name, &[])
     }
 
-    /// A pane by its label, the tab it is in, and its cwd. Only the label is
-    /// on screen to light up. A tab zellij named `Tab #N` is no name to find,
+    /// A pane by its label, its branch, the tab it is in, and its cwd. Only
+    /// the label is lit up. A tab zellij named `Tab #N` is no name to find,
     /// and a cwd is its last two parts, as the agent list shows it: a whole
     /// path has the letters for a few typed ones to land on nearly any of it.
     fn pane(&self, label: &str, leaf: &Leaf) -> Option<(Fit, Vec<usize>)> {
         let tab = is_named_tab(&leaf.tab).then_some(leaf.tab.as_str());
         let cwd = leaf.cwd.as_deref().map(short_cwd);
-        self.find(label, &[tab, cwd.as_deref()])
+        let branch = leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str());
+        self.find(label, &[branch, tab, cwd.as_deref()])
     }
 
     /// The term against what a row shows, which has the characters it lands
@@ -653,6 +664,7 @@ mod tests {
                     title: (*title).to_owned(),
                     tab: String::new(),
                     cwd: None,
+                    checkout: None,
                 })
                 .collect(),
         }
@@ -799,6 +811,7 @@ mod tests {
             title: title.to_owned(),
             tab: tab.to_owned(),
             cwd: None,
+            checkout: None,
         };
         assert_eq!(label(&leaf("✳ Claude Code", "liquid dual"), None), "liquid dual");
         assert_eq!(label(&leaf("✳ Claude Code", "Tab #13"), None), "Claude Code");
@@ -818,6 +831,7 @@ mod tests {
             title: title.to_owned(),
             tab: String::new(),
             cwd: cwd.map(str::to_owned),
+            checkout: None,
         };
         let main = Some("/home/you/Projects/misc/luneta/main");
         assert_eq!(label(&leaf("~/P/m/l/main", main), None), "luneta/main");
@@ -878,7 +892,11 @@ mod tests {
             ),
         ]);
         let places = Places::of(&[("s", &[(3, "/w/s"), (2, "/w/logs")]), ("t", &[(5, "/w/t")])]);
-        let leaves = leaves("s", &[tab(0, "code"), tab(1, "logs")], &manifest, &places);
+        let mut checkouts = Checkouts::default();
+        checkouts.ingest("/w/s".to_owned(), Some(0), b"# branch.head main\n");
+        checkouts.ingest("/w/t".to_owned(), Some(0), b"# branch.head fold\n");
+        let tabs = [tab(0, "code"), tab(1, "logs")];
+        let leaves = leaves("s", &tabs, &manifest, &places, &checkouts);
         let seen: Vec<(u32, &str, &str, Option<&str>)> = leaves
             .iter()
             .map(|leaf| (leaf.id, leaf.title.as_str(), leaf.tab.as_str(), leaf.cwd.as_deref()))
@@ -892,6 +910,12 @@ mod tests {
                 (2, "second tab", "logs", Some("/w/logs")),
             ]
         );
+        // Pane 5's directory is session `t`'s, not this one's.
+        let branches: Vec<Option<&str>> = leaves
+            .iter()
+            .map(|leaf| leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str()))
+            .collect();
+        assert_eq!(branches, [Some("main"), None, None, None]);
     }
 
     #[test]
@@ -1130,20 +1154,22 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_is_found_by_its_tab_and_its_cwd_but_lit_only_where_it_shows() {
-        let leaf = |id: u32, tab: &str, cwd: Option<&str>| Leaf {
+    fn a_pane_is_found_by_its_branch_tab_and_cwd_but_lit_only_in_its_label() {
+        let leaf = |id: u32, tab: &str, cwd: Option<&str>, branch: Option<&str>| Leaf {
             id,
             title: "nvim".to_owned(),
             tab: tab.to_owned(),
             cwd: cwd.map(str::to_owned),
+            checkout: branch
+                .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
         };
         let branches = [Branch {
             name: "s".to_owned(),
             age: Age::from_secs(1),
             panes: vec![
-                leaf(0, "notes", Some("/w/a")),
-                leaf(1, "Tab #2", Some("/home/lorenzo/Projects/misc/luneta")),
-                leaf(2, "", None),
+                leaf(0, "notes", Some("/w/a"), None),
+                leaf(1, "Tab #2", Some("/home/lorenzo/Projects/misc/luneta"), None),
+                leaf(2, "", None, Some("feature/sidebar")),
             ],
         }];
         let found = |term: &str| {
@@ -1160,6 +1186,7 @@ mod tests {
         };
         assert_eq!(found("notes"), [(0, vec![])]);
         assert_eq!(found("luneta"), [(1, vec![])]);
+        assert_eq!(found("sidebar"), [(2, vec![])]);
         assert_eq!(found("tab"), []);
         assert_eq!(found("loren"), []);
         assert_eq!(found("vi"), [(0, vec![1, 2]), (1, vec![1, 2]), (2, vec![1, 2])]);

@@ -3,6 +3,7 @@ use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
+use crate::checkouts::Checkout;
 use crate::dirs::{short_cwd, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
 use crate::layout::{
@@ -1037,10 +1038,16 @@ pub fn sidebar_row_at(
     line: usize,
 ) -> Option<usize> {
     let shelf = sidebar_shelf(tree, agents, focused, rows, cols);
-    let line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
-    let (Range { start, end }, _) = on_screen(tree, focused, shelf.tree);
-    let index = start + line;
-    (index < end).then_some(index)
+    let mut line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
+    let (shown, _) = on_screen(tree, focused, shelf.tree);
+    for index in shown {
+        let span = span(&tree.rows[index]);
+        if line < span {
+            return Some(index);
+        }
+        line -= span;
+    }
+    None
 }
 
 /// Moves the view of the sidebar `delta` rows down, or up, as far as there
@@ -1055,7 +1062,7 @@ pub fn scroll_sidebar(
 ) -> bool {
     let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
     let (Range { start, .. }, _) = on_screen(tree, focused, height);
-    let last = tree.rows.len().saturating_sub(height);
+    let last = top_ending_at(&tree.rows, tree.rows.len().saturating_sub(1), height);
     let top = start.saturating_add_signed(delta).min(last);
     if top == start {
         return false;
@@ -1096,23 +1103,52 @@ pub fn folds_at(node: &Node, column: usize) -> bool {
     matches!(node, Node::Session(_)) && column < FOLD
 }
 
-/// The rows of the tree a sidebar shows in `height` rows, and the one of them
+/// The rows of the tree a sidebar shows in `height` lines, and the one of them
 /// that is lit: the cursor while the sidebar has the focus, and the pane you
 /// are in while it does not. The rows shown are the ones around the lit row,
 /// or around the cursor while none is, so a lit row is never out of sight
-/// until the wheel moves the view off it.
+/// until the wheel moves the view off it. The last row shown can be cut short
+/// by the bottom of the view.
 fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
     let lit = if focused {
         tree.rows.selected()
     } else {
         tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
     };
-    let total = tree.rows.len();
+    let last = tree.rows.len().saturating_sub(1);
     let start = match tree.top() {
-        Some(top) => top.min(total.saturating_sub(height)),
-        None => viewport(lit.or(tree.rows.selected()).unwrap_or(0), total, height).0,
+        Some(top) => top.min(top_ending_at(&tree.rows, last, height)),
+        None => top_ending_at(&tree.rows, lit.or(tree.rows.selected()).unwrap_or(0), height),
     };
-    (start..(start + height).min(total), lit)
+    let mut end = start;
+    let mut used = 0;
+    while end < tree.rows.len() && used < height {
+        used += span(&tree.rows[end]);
+        end += 1;
+    }
+    (start..end, lit)
+}
+
+/// The top row of a view `height` lines tall that ends with all of row
+/// `last`: as many of the rows before it as fit with it. A row taller than
+/// the view is the top of its own.
+fn top_ending_at(rows: &[Node], last: usize, height: usize) -> usize {
+    let mut top = last;
+    let mut used = rows.get(last).map_or(0, span);
+    while top > 0 && used + span(&rows[top - 1]) <= height {
+        top -= 1;
+        used += span(&rows[top]);
+    }
+    top
+}
+
+/// How many lines a row takes: a pane's takes one more for its branch, where
+/// it has one.
+fn span(node: &Node) -> usize {
+    match node {
+        Node::Pane(PaneNode { checkout: Some(_), .. }) => 2,
+        Node::Pane(_) | Node::Session(_) => 1,
+    }
 }
 
 const UNFOLDED: &str = "▾";
@@ -1177,13 +1213,20 @@ fn sidebar_lines(
             age: marks().map(|mark| mark.age.label().width()).max().unwrap_or(0),
         };
         for (offset, node) in window.iter().enumerate() {
-            let line = match node {
-                Node::Session(node) => branch_line(node, cols, frame),
-                Node::Pane(node) => leaf_line(node, &columns, cols, frame),
-            };
-            lines.push(if lit == Some(start + offset) { line.selected() } else { line });
+            let lit = lit == Some(start + offset);
+            let light = |line: Painted| if lit { line.selected() } else { line };
+            match node {
+                Node::Session(node) => lines.push(light(branch_line(node, cols, frame))),
+                Node::Pane(node) => {
+                    lines.push(light(leaf_line(node, &columns, cols, frame)));
+                    if let Some(checkout) = &node.checkout {
+                        lines.push(light(checkout_line(node, checkout, &columns, cols)));
+                    }
+                },
+            }
         }
     }
+    // The last row on screen can run past the bottom of the tree.
     lines.resize_with(shelf.header + shelf.tree, || Painted::new(" ".repeat(cols)));
     lines.extend(notes.iter().take(shelf.notes).map(|note| note_within(inner, note)));
     lines
@@ -1295,13 +1338,7 @@ fn dot_ink(status: &Status) -> Ink {
 /// state. The label is plain, in the accent while its agent waits for you,
 /// and dimmed with no agent. The pane you are in has the mark and a bold one.
 fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Painted {
-    let mut line = Line::new();
-    if node.here {
-        line.push(HERE_MARK, Ink::Bold(ACCENT));
-    } else {
-        line.gap(1);
-    }
-    line.gap(2);
+    let mut line = pane_margin(node);
     let start = line.columns();
     if let Some(mark) = &node.agent {
         line.push(&agents::dot(&mark.status, frame), dot_ink(&mark.status));
@@ -1325,6 +1362,37 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
         line.push(&age, Ink::Dim);
     }
     line.fill(cols)
+}
+
+/// The line under a pane's row: the branch checked out where the pane works,
+/// dimmed, under its label, and how its work tree stands, under the age. The
+/// branch is cut to leave the status room. The mark of the pane you are in
+/// runs down this line too.
+fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: usize) -> Painted {
+    let mut line = pane_margin(node);
+    line.gap(columns.glyph + 1);
+    let status = checkout.status.as_str();
+    let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
+    let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
+    line.push(&truncate(&checkout.branch, room), Ink::Dim);
+    if !status.is_empty() {
+        line.pad_to(cols.saturating_sub(status.width() + MARGIN));
+        line.push(status, Ink::Plain);
+    }
+    line.fill(cols)
+}
+
+/// The columns of a pane's lines before its dot: the mark of the pane you are
+/// in, or a blank where it goes, and the indent under its session.
+fn pane_margin(node: &PaneNode) -> Line {
+    let mut line = Line::new();
+    if node.here {
+        line.push(HERE_MARK, Ink::Bold(ACCENT));
+    } else {
+        line.gap(1);
+    }
+    line.gap(2);
+    line
 }
 
 /// `text` cut to `room`, and the characters a search lit that are left in it.
@@ -2149,6 +2217,7 @@ mod tests {
                 status: Status::parse(Some(word)),
                 age: Held::from_secs(age),
             }),
+            checkout: None,
             here: false,
             hits: Vec::new(),
         })
@@ -2157,6 +2226,15 @@ mod tests {
     fn here(node: Node) -> Node {
         match node {
             Node::Pane(pane) => Node::Pane(PaneNode { here: true, ..pane }),
+            session @ Node::Session(_) => session,
+        }
+    }
+
+    /// `node`, in a work tree on `branch` that stands as `status` says.
+    fn on(branch: &str, status: &str, node: Node) -> Node {
+        let checkout = Checkout { branch: branch.to_owned(), status: status.to_owned() };
+        match node {
+            Node::Pane(pane) => Node::Pane(PaneNode { checkout: Some(checkout), ..pane }),
             session @ Node::Session(_) => session,
         }
     }
@@ -2222,6 +2300,79 @@ mod tests {
                 "                              ",
             ]
         );
+    }
+
+    /// Agents in worktrees, a shell in no repository, and a branch too long
+    /// for the pane beside its work tree's status.
+    fn worktrees() -> Vec<Node> {
+        vec![
+            session_node("luneta", false, 0, None),
+            on("main", "", pane_node("luneta", 1, "fold", Some(("busy", 12)))),
+            here(on(
+                "branch-name",
+                "!?⇡",
+                pane_node("luneta", 2, "branch-name", Some(("idle", 60))),
+            )),
+            pane_node("luneta", 3, "~/notes", None),
+            session_node("elo", false, 0, None),
+            on("feature/very-long-branch-name", "+", pane_node("elo", 4, "elo/main", None)),
+        ]
+    }
+
+    /// The branch goes on a line of its own under the label, dimmed and cut
+    /// to leave its work tree's status room under the age, and is lit with
+    /// its row.
+    #[test]
+    fn a_pane_s_branch_is_dimmed_on_the_line_under_its_label() {
+        let tree = sidebar_tree(worktrees(), 0);
+        let shelf = Shelf::new(11, 0, false, false);
+        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
+        let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
+        assert_eq!(
+            drawn,
+            [
+                "──────────────────────────────",
+                "                              ",
+                " ▾ luneta ─────────────────── ",
+                "   ⠋ fold                 12s ",
+                "     main                     ",
+                "▌  ✓ branch-name           1m ",
+                "▌    branch-name          !?⇡ ",
+                "     ~/notes                  ",
+                " ▾ elo ────────────────────── ",
+                "     elo/main                 ",
+                "     feature/very-long-bra… + ",
+            ]
+        );
+        let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
+        assert_eq!(lit, [HEADER + 3, HEADER + 4]);
+        assert!((5..16).all(|at| lines[HEADER + 4].is_dim_at(at)));
+        assert!(!(26..29).any(|at| lines[HEADER + 4].is_dim_at(at)));
+        assert!(!lines[HEADER + 3].is_dim_at(5));
+    }
+
+    /// A row of two lines is one row: a click on either line lands on it, the
+    /// view keeps the whole of the lit row in sight and cuts the last row it
+    /// has no room for, and the wheel stops once the whole of the last row is
+    /// in sight.
+    #[test]
+    fn a_row_of_two_lines_is_one_row_to_the_view_and_the_mouse() {
+        let agents = AgentSet::default();
+        let view = |tree: &Tree, focused: bool, rows: usize| -> Vec<usize> {
+            (0..rows)
+                .filter_map(|line| sidebar_row_at(tree, &agents, focused, rows, 30, line))
+                .collect()
+        };
+        let mut tree = sidebar_tree(worktrees(), 0);
+        assert_eq!(view(&tree, false, 11), [0, 1, 1, 2, 2, 3, 4, 5, 5]);
+        assert_eq!(view(&tree, false, 10), [0, 1, 1, 2, 2, 3, 4, 5]);
+        // Your pane is the third row.
+        assert_eq!(view(&tree, false, 6), [1, 1, 2, 2]);
+
+        // Four lines of tree, under the header and over the keys.
+        assert!(scroll_sidebar(&mut tree, &agents, true, 7, 30, 99));
+        assert_eq!(view(&tree, true, 7), [3, 4, 5, 5]);
+        assert!(!scroll_sidebar(&mut tree, &agents, true, 7, 30, 1));
     }
 
     /// While the sidebar does not have the focus, the highlight shows where
@@ -2353,6 +2504,7 @@ mod tests {
                     status: Status::parse(Some(word)),
                     age: Held::from_secs(4),
                 }),
+                checkout: None,
                 here,
                 hits: vec![0, 2],
             };
@@ -2483,8 +2635,10 @@ mod tests {
             assert_eq!(search.content().width(), cols, "{cols}: {}", search.content());
             for rows in 1..12 {
                 for (focused, searching) in [(false, false), (true, false), (true, true)] {
-                    for selected in [0, 3, 7] {
-                        let mut tree = workday_tree(selected);
+                    let trees = [0, 3, 7].into_iter().flat_map(|selected| {
+                        [workday_tree(selected), sidebar_tree(worktrees(), selected)]
+                    });
+                    for mut tree in trees {
                         if searching {
                             tree.search_for("pix".to_owned());
                         }

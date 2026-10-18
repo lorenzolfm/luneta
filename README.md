@@ -107,11 +107,15 @@ is doing. One sidebar for the whole session, which follows you from tab to tab.
 
  ▾ bipa ────────────────── ●1
    ✓ handoff-eng-11259-p… 13h
+     eng-11259-pr4b         ⇡
    ● dda-bank-slip-paid-…  3m
+     dda-bank-slip-paid    !?
    ⠋ Handoff pix outflow… 12s
+     pix-outflow-readback !+?
  ▸ floresta ─────────────── ⠋
  ▾ unnamed ──────────────────
 ▌  ⠋ orca-copy            12s
+▌    main
      misc/unnamed
 ```
 
@@ -137,6 +141,25 @@ the highlight goes with the cursor. The session you are in has its rule in the
 accent. A shell at its prompt is named for its directory's last two parts, as
 `luneta/main`, where fish would title it `~/P/m/l/main`.
 
+Under a pane's row, dimmed, is the branch checked out in the directory the pane
+works in, and under the age, how its work tree stands, in the glyphs
+[starship](https://starship.rs/config/#git-status) shows by default:
+
+| | means |
+|---|---|
+| `=` | a conflict |
+| `$` | a stash |
+| `✘` | a deleted file |
+| `»` | a renamed file |
+| `!` | a modified file |
+| `+` | a staged change |
+| `?` | an untracked file |
+| `⇡` `⇣` `⇕` | commits ahead of the upstream, behind it, or both |
+
+A pane outside a repository, or on a detached `HEAD`, has no branch, and its row
+stays one line. `git` is asked again every five seconds, so a change or a
+checkout shows a few seconds later.
+
 Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
 and sessions alike. One click does it, whether the sidebar has the focus or
 not. On a session's row, the `▾` or `▸` folds or unfolds the session, and the
@@ -152,7 +175,7 @@ back there and not in the sidebar.
 
 Press `/` to search, as in less and vim. The tree narrows to the rows that
 match what you type, fuzzily, as the picker does: a session by its name, a pane
-by its row, its tab or its directory. The rows left keep their order, and the
+by its row, its branch, its tab or its directory. The rows left keep their order, and the
 highlight lands on the best match, so `Ctrl b` `/` *a few characters* `Enter`
 takes you anywhere. A folded session opens to show the panes found in it.
 
@@ -180,6 +203,7 @@ and brings it back.
 | [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | optional | the agent list |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
+| [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 
 The session list needs nothing but zellij. The optional tools are looked up by
 name on the `PATH` of the zellij **server**, which is inherited from whatever

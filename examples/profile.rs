@@ -7,6 +7,7 @@
 )]
 
 #[path = "../src/agents.rs"] mod agents;
+#[path = "../src/checkouts.rs"] mod checkouts;
 #[path = "../src/cursor.rs"] mod cursor;
 #[path = "../src/dirs.rs"] mod dirs;
 #[path = "../src/elapsed.rs"] mod elapsed;
