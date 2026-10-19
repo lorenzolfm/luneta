@@ -29,8 +29,44 @@ use crate::close;
 use crate::hiding::{Hiding, Said};
 use crate::tree::{is_placeholder, PLACEHOLDER};
 
-/// The title the sidebar gives its pane, by which the dock knows it.
-pub const SIDEBAR_TITLE: &str = "luneta sidebar";
+/// The title the sidebar and the picker give their panes where they belong:
+/// the sidebar in its column, the picker floating over the tab. They are the
+/// same plugin, and zellij reports nothing else of a pane that sets them
+/// apart: anywhere else, each takes a title of its own.
+pub const TITLE: &str = "luneta";
+
+/// The sidebar's title while it floats, floated out of its column by hand.
+const FLOATING_SIDEBAR_TITLE: &str = "luneta sidebar";
+
+/// The picker's title while it does not float: opened in place of a pane,
+/// without `floating true`, or by a layout.
+const TILED_PICKER_TITLE: &str = "luneta picker";
+
+/// Whether `pane` is a sidebar, by its title: a plugin pane titled `luneta`
+/// that stands in a column, or one with the title of a floating sidebar.
+pub fn is_sidebar(pane: &PaneInfo) -> bool {
+    let title = pane.title.as_str();
+    pane.is_plugin && (title == TITLE && !pane.is_floating || title == FLOATING_SIDEBAR_TITLE)
+}
+
+/// The title the sidebar's `pane` is to have where it stands, when not the
+/// one it has. A sidebar the dock is still docking floats before it has a
+/// title, and takes one once it stands in its column.
+pub fn sidebar_title(pane: &PaneInfo) -> Option<&'static str> {
+    let title = match (pane.is_floating, pane.title.as_str()) {
+        (false, _) => TITLE,
+        (true, TITLE | FLOATING_SIDEBAR_TITLE) => FLOATING_SIDEBAR_TITLE,
+        (true, _) => return None,
+    };
+    (pane.title != title).then_some(title)
+}
+
+/// The title the picker's `pane` is to have where it stands, when not the one
+/// it has.
+pub fn picker_title(pane: &PaneInfo) -> Option<&'static str> {
+    let title = if pane.is_floating { TITLE } else { TILED_PICKER_TITLE };
+    (pane.title != title).then_some(title)
+}
 
 /// How many reports of the panes and tabs zellij may take to show what the
 /// dock asked for before the dock asks again.
@@ -267,9 +303,7 @@ impl Scene {
             for pane in panes {
                 if pane.is_plugin && pane.id == plugin_id {
                     scene.url.clone_from(&pane.plugin_url);
-                } else if pane.is_plugin
-                    && (pane.title == SIDEBAR_TITLE || Some(pane.id) == sidebar)
-                {
+                } else if is_sidebar(pane) || pane.is_plugin && Some(pane.id) == sidebar {
                     scene.sidebars.push((tab, Seen::new(pane)));
                 } else if is_placeholder(pane) {
                     scene.placeholders.entry(tab).or_default().push(Seen::new(pane));
@@ -888,7 +922,7 @@ mod tests {
             id,
             is_plugin: true,
             is_suppressed: hidden,
-            title: SIDEBAR_TITLE.to_owned(),
+            title: TITLE.to_owned(),
             ..PaneInfo::default()
         }
     }
@@ -1566,21 +1600,64 @@ mod tests {
         }
     }
 
+    /// The picker, floating over the tab, has the sidebar's title and is no
+    /// extra sidebar.
     #[test]
     fn extra_sidebars_and_placeholders_close() {
         let tabs = [tab(0, true)];
+        let picker = PaneInfo { is_floating: true, ..sidebar(9, false) };
         let panes = vec![
             sidebar(7, false),
             sidebar(5, false),
             placeholder(1, true),
             placeholder(2, true),
             terminal(3),
+            picker,
         ];
         let scene = scene(&tabs, vec![(0, panes)], None);
         assert_eq!(
             dock().plan(&scene),
             vec![Act::Close { pane: PaneId::Plugin(7) }, Act::Close { pane: PaneId::Terminal(2) }],
         );
+    }
+
+    /// A picker opened in place of a tab's only terminal stands in the tab's
+    /// columns, and holds the tab open as the terminal it hides did. It is no
+    /// extra sidebar: the dock closes neither it nor the tab.
+    #[test]
+    fn a_picker_that_does_not_float_is_no_sidebar() {
+        let tabs = [tab(0, true), tab(1, false)];
+        let opened = PaneInfo {
+            id: 9,
+            is_plugin: true,
+            is_selectable: true,
+            title: "(/w) - luneta".to_owned(),
+            ..PaneInfo::default()
+        };
+        let title = picker_title(&opened).expect("the picker titles its pane");
+        let picker = PaneInfo { title: title.to_owned(), ..opened };
+        let hidden = PaneInfo { is_suppressed: true, ..terminal(3) };
+        let panes = vec![sidebar(5, false), placeholder(1, true), hidden, picker];
+        let scene = scene(
+            &tabs,
+            vec![(0, panes), (1, vec![placeholder(2, false), terminal(4)])],
+            None,
+        );
+        assert_eq!(dock().plan(&scene), Vec::new());
+    }
+
+    /// A sidebar floated out of its column by hand is still the sidebar to a
+    /// dock that never saw it docked, as that of a client that attached since:
+    /// no second one opens.
+    #[test]
+    fn a_sidebar_floated_by_hand_is_still_the_sidebar() {
+        let tabs = [tab(0, true)];
+        let floated = PaneInfo { is_floating: true, ..sidebar(5, false) };
+        let title = sidebar_title(&floated).expect("the sidebar titles its pane");
+        let floating = PaneInfo { title: title.to_owned(), ..floated };
+        let panes = vec![floating, placeholder(1, false), terminal(2)];
+        let scene = scene(&tabs, vec![(0, panes)], None);
+        assert_eq!(dock().plan(&scene), Vec::new());
     }
 
     #[test]

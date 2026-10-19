@@ -49,9 +49,6 @@ const SIDEBAR_PIPE: &str = "sidebar";
 /// arguments a `Place`.
 const PLACE_PIPE: &str = "place";
 
-/// The title the picker gives its pane, by which the sidebar knows it.
-const PICKER_TITLE: &str = "luneta";
-
 /// `mode "dock"`, in `load_plugins`, makes the plugin the dock: one to a
 /// session, in the background, keeping a sidebar in the tab on screen. The
 /// sidebar it opens, `mode "sidebar"`, is a pane that never closes itself.
@@ -328,8 +325,9 @@ impl ZellijPlugin for State {
         match event {
             Event::PermissionRequestResult(status) => {
                 if matches!(status, PermissionStatus::Granted) {
-                    let title = if self.is_sidebar() { dock::SIDEBAR_TITLE } else { PICKER_TITLE };
-                    rename_plugin_pane(self.plugin_id, title);
+                    if let Some(pane) = get_pane_info(PaneId::Plugin(self.plugin_id)) {
+                        self.retitle(&pane);
+                    }
                     if !self.is_sidebar() {
                         resize_self(self.plugin_id);
                         self.ask_zoxide();
@@ -493,6 +491,9 @@ impl ZellijPlugin for State {
                     tree.menu = tree.menu.take().and_then(|menu| menu.panes(&manifest));
                 }
                 self.panes = Some(manifest);
+                if let Some(pane) = self.own_pane() {
+                    self.retitle(pane);
+                }
                 self.settle()
             },
             Event::TabUpdate(tabs) => {
@@ -1136,6 +1137,24 @@ impl State {
         self.active_tab = current.tabs.iter().find(|t| t.active).map(|t| t.position);
     }
 
+    fn own_pane(&self) -> Option<&PaneInfo> {
+        let manifest = self.panes.as_ref()?;
+        manifest.panes.values().flatten().find(|p| p.is_plugin && p.id == self.plugin_id)
+    }
+
+    /// Gives the pane the title the picker's or the sidebar's is to have where
+    /// it stands, as it floats or stands in a column.
+    fn retitle(&self, pane: &PaneInfo) {
+        let title = match self.role {
+            Role::Picker => dock::picker_title(pane),
+            Role::Sidebar(_) => dock::sidebar_title(pane),
+            Role::Dock(_) | Role::Menu(_) | Role::Unknown(_) => None,
+        };
+        if let Some(title) = title {
+            rename_plugin_pane(self.plugin_id, title);
+        }
+    }
+
     fn own_tab(&self) -> Option<usize> {
         let manifest = self.panes.as_ref()?;
         manifest
@@ -1224,7 +1243,7 @@ impl State {
     fn sidebar_pane(&self) -> Option<u32> {
         let manifest = self.panes.as_ref()?;
         let panes = manifest.panes.values().flatten();
-        panes.filter(|p| p.is_plugin && p.title == dock::SIDEBAR_TITLE).map(|p| p.id).min()
+        panes.filter(|p| dock::is_sidebar(p)).map(|p| p.id).min()
     }
 
     /// The picker's highlighted row, as the sidebar lists it. A directory is
@@ -1323,7 +1342,7 @@ impl State {
             .into_iter()
             .flatten()
             .find(|p| p.is_floating && p.is_focused && !p.is_suppressed)
-            .filter(|p| p.is_plugin && p.title == PICKER_TITLE)
+            .filter(|p| p.is_plugin && p.title == dock::TITLE)
             .map(|p| p.id);
         let Role::Sidebar(tree) = &mut self.role else {
             return None;
@@ -2083,7 +2102,7 @@ mod tests {
 
             let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
             tab.retain(|pane| pane.id != 20);
-            tab.push(picker(PICKER_TITLE));
+            tab.push(picker(dock::TITLE));
             state.tabs[0].are_floating_panes_visible = true;
             let handed = to_the_picker.then(|| (20, four.clone()));
             assert_eq!(state.handing(), handed, "to the picker: {to_the_picker}");

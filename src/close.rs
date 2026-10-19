@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use crate::agents::{AgentSet, Seat, Status};
-use crate::dock::{TabId, SIDEBAR_TITLE};
+use crate::dock::{self, TabId};
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
 use crate::panes;
@@ -39,12 +39,11 @@ impl Scope {
 /// sidebar's column. A tab left with none closes, as it would without the
 /// column.
 pub fn holds_tab(pane: &PaneInfo) -> bool {
-    let sidebar = pane.is_plugin && pane.title == SIDEBAR_TITLE;
     pane.is_selectable
         && !pane.is_suppressed
         && !pane.is_floating
         && !is_placeholder(pane)
-        && !sidebar
+        && !dock::is_sidebar(pane)
 }
 
 /// Whether nothing among a tab's `panes` but the terminal `pane` keeps the tab
@@ -472,7 +471,7 @@ mod tests {
     /// back once the other closes.
     #[test]
     fn the_last_pane_that_holds_its_tab_open_closes_the_tab() {
-        let sidebar = PaneInfo { is_plugin: true, title: SIDEBAR_TITLE.to_owned(), ..pane(1) };
+        let sidebar = PaneInfo { is_plugin: true, title: dock::TITLE.to_owned(), ..pane(1) };
         let placeholder =
             PaneInfo { terminal_command: Some("tail -f /dev/null".to_owned()), ..pane(2) };
         let hidden = PaneInfo { is_suppressed: true, ..placeholder.clone() };
