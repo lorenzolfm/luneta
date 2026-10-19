@@ -85,6 +85,14 @@ impl Branch {
     }
 }
 
+/// The sessions in the order the sidebar draws them: the oldest first, so that
+/// a row never moves.
+pub fn in_order(branches: &[Branch]) -> Vec<&Branch> {
+    let mut order: Vec<&Branch> = branches.iter().collect();
+    order.sort_by(|a, b| b.age.cmp(&a.age).then_with(|| a.name.cmp(&b.name)));
+    order
+}
+
 /// The panes a person can go to, in tab order, the tiled ones of a tab before
 /// its floating ones, and in the order they were opened within each. The
 /// sidebar's placeholders are not among them. A pane keeps what was checked
@@ -364,8 +372,7 @@ impl Tree {
         let seated: HashMap<(&str, u32), &AgentRow> =
             agents.rows.iter().map(|row| ((row.seat.session(), row.pane), row)).collect();
 
-        let mut order: Vec<&Branch> = branches.iter().collect();
-        order.sort_by(|a, b| b.age.cmp(&a.age).then_with(|| a.name.cmp(&b.name)));
+        let order = in_order(branches);
 
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
@@ -659,7 +666,7 @@ impl Finder<'_> {
 /// its prompt titles its pane with its cwd cut down to initials, and is shown
 /// its cwd's last two parts instead, as the agent list shows a cwd:
 /// `luneta/main`, where `~/P/m/l/main` hides the repository behind an `l`.
-fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
+pub fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if let Some(agent) = agent.filter(|agent| agent.chosen) {
         return agent.display.clone();
     }

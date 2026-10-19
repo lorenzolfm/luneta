@@ -18,6 +18,7 @@ use kdl::{KdlDocument, KdlNode};
 use zellij_tile::prelude::*;
 
 use crate::agents::{self, AgentSet, Live, Seat};
+use crate::brief;
 use crate::checkouts::{Checkouts, DIR_KEY};
 use crate::close::{self, Act, Leaving, Plan, Ran, Scope};
 use crate::dock::TabId;
@@ -84,7 +85,9 @@ const LEAVING_TICK: f64 = 0.1;
 type Spot = (usize, usize, usize, usize);
 
 /// A key of the sidebar's own that does more than move the cursor or fold a
-/// session. `?` lists each one beside the menu's keys.
+/// session. `?` lists each one beside the menu's keys. A command in a group
+/// is a key of that group, which a key of the sidebar's opens, as `b` then
+/// `s` briefs you on a session.
 ///
 /// The sidebar finds the command a key runs in `ALL`, by `of`, and `?` lists
 /// `ALL`, so no key runs a command that `?` leaves out. `key` and `does` match
@@ -101,21 +104,45 @@ pub enum Command {
     Search,
     /// Goes to the next agent that wants you.
     Next,
+    /// Briefs you on what the agents the scope covers are doing.
+    Brief(brief::Scope),
 }
 
 impl Command {
     /// Every command, in the order `?` lists them.
-    pub const ALL: &[Command] = &[Command::Search, Command::Next];
+    pub const ALL: &[Command] = &[
+        Command::Search,
+        Command::Next,
+        Command::Brief(brief::Scope::Every),
+        Command::Brief(brief::Scope::Session),
+        Command::Brief(brief::Scope::Highlighted),
+    ];
 
-    /// The command `key` runs, if any.
+    /// The command `key` runs at the top of the sidebar, if any: a command in
+    /// a group is the group's key.
     pub fn of(key: char) -> Option<Command> {
-        Command::ALL.iter().copied().find(|command| command.key() == key)
+        let at_the_top = |command: &Command| command.group().is_none() && command.key() == key;
+        Command::ALL.iter().copied().find(at_the_top)
     }
 
+    /// Whether `key` opens a group of commands at the top of the sidebar.
+    pub fn opens(key: char) -> bool {
+        Command::ALL.iter().any(|command| command.group().is_some_and(|(at, _)| at == key))
+    }
+
+    /// Whether `key`, at the top of the sidebar, is the sidebar's.
+    fn takes(key: char) -> bool {
+        Command::of(key).is_some() || Command::opens(key)
+    }
+
+    /// The command's key, in its group if it has one.
     pub const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Next => 'n',
+            Command::Brief(brief::Scope::Every) => 'z',
+            Command::Brief(brief::Scope::Session) => 's',
+            Command::Brief(brief::Scope::Highlighted) => 'h',
         }
     }
 
@@ -124,18 +151,41 @@ impl Command {
         match self {
             Command::Search => "Search",
             Command::Next => "Next agent",
+            Command::Brief(brief::Scope::Every) => "Every session",
+            Command::Brief(brief::Scope::Session) => "This session",
+            Command::Brief(brief::Scope::Highlighted) => "Highlighted",
+        }
+    }
+
+    /// The group the command is in, by the key that opens it and the name
+    /// `?` shows for it. None for a command its own key runs.
+    const fn group(self) -> Option<(char, &'static str)> {
+        match self {
+            Command::Search | Command::Next => None,
+            Command::Brief(_) => Some(('b', "Brief")),
         }
     }
 }
 
-/// No two commands share a key: `of` would find the first, and `?` would
-/// show both.
+/// No two commands share a key where they are, at the top of the sidebar or
+/// in one group, and no group opens on the key of a command at the top: `of`
+/// would find the first, and `?` would show both.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
-        let mut other = at + 1;
+        let one = Command::ALL[at];
+        let mut other = 0;
         while other < Command::ALL.len() {
-            assert!(Command::ALL[at].key() != Command::ALL[other].key(), "two commands on one key");
+            let two = Command::ALL[other];
+            let together = match (one.group(), two.group()) {
+                (None, None) => true,
+                (Some((group, _)), Some((other, _))) => group == other,
+                (Some(_), None) | (None, Some(_)) => false,
+            };
+            assert!(at == other || !together || one.key() != two.key(), "two commands on one key");
+            if let (Some((group, _)), None) = (one.group(), two.group()) {
+                assert!(group != two.key(), "a group of commands on a command's key");
+            }
             other += 1;
         }
         at += 1;
@@ -225,8 +275,25 @@ impl Keys {
     /// as it does at the top of the sidebar.
     pub fn help(menu: Keys) -> Self {
         let mut root = menu.root;
-        root.retain(|entry| Command::of(entry.key()).is_none());
-        root.extend(Command::ALL.iter().copied().map(Entry::Command));
+        root.retain(|entry| !Command::takes(entry.key()));
+        for command in Command::ALL.iter().copied() {
+            let Some((key, name)) = command.group() else {
+                root.push(Entry::Command(command));
+                continue;
+            };
+            let group = root.iter_mut().find_map(|entry| match entry {
+                Entry::Group { key: at, entries, .. } if *at == key => Some(entries),
+                _ => None,
+            });
+            match group {
+                Some(entries) => entries.push(Entry::Command(command)),
+                None => root.push(Entry::Group {
+                    key,
+                    name: name.to_owned(),
+                    entries: vec![Entry::Command(command)],
+                }),
+            }
+        }
         Keys { root, open: Vec::new() }
     }
 
@@ -716,14 +783,32 @@ impl SidebarMenu {
     }
 
     /// What `?` opens, numbered next among `numbers`: the keys at the top of
-    /// the menu for `row`, as `m` opens it, and then the sidebar's commands.
-    pub fn help(entries: Option<&str>, row: Row, numbers: &mut Numbers) -> Self {
+    /// the menu for `row`, as `m` opens it, and then the sidebar's commands,
+    /// on the group of commands `group` opens, or on the first.
+    pub fn help(
+        entries: Option<&str>,
+        row: Row,
+        group: Option<char>,
+        numbers: &mut Numbers,
+    ) -> Self {
         let number = numbers.next();
         let stage = match row.menu(entries) {
-            Ok((keys, target)) => Stage::Choosing(Keys::help(keys), target),
+            Ok((keys, target)) => {
+                let mut keys = Keys::help(keys);
+                if let Some(group) = group.filter(|group| Command::opens(*group)) {
+                    keys.press(group);
+                }
+                Stage::Choosing(keys, target)
+            },
             Err(reason) => wrong(reason),
         };
         SidebarMenu { number, stage }
+    }
+
+    /// The menu numbered next among `numbers`, saying what is wrong, until
+    /// any key closes it.
+    pub fn wrong(reason: String, numbers: &mut Numbers) -> Self {
+        SidebarMenu { number: numbers.next(), stage: wrong(reason) }
     }
 
     /// What the menu shows: the keys, what a delete key asks, where you are
@@ -1623,6 +1708,11 @@ mod tests {
         SidebarMenu::open(entries, row, key, &mut Numbers::default(), 0)
     }
 
+    /// `?` numbered 1 for `row`, on the group of commands `group` opens.
+    fn help(entries: Option<&str>, row: Row, group: Option<char>) -> SidebarMenu {
+        SidebarMenu::help(entries, row, group, &mut Numbers::default())
+    }
+
     /// `key` pressed in the sidebar's menu at frame 0, its pane with no agent.
     fn press(menu: Option<SidebarMenu>, key: &KeyWithModifier) -> Option<SidebarMenu> {
         menu.and_then(|menu| menu.key(key, Some(&closing(luneta(), &[])), 0).0)
@@ -1673,9 +1763,10 @@ mod tests {
         assert!(press(menu, &bare(BareKey::Esc)).is_none());
     }
 
-    /// A menu whose `n` the sidebar's `Next` has, as it has at the top of the
-    /// sidebar.
-    const SHADOWED: &str = r#"n "notes"; c "Claude" { t "/tigerstyle"; }"#;
+    /// A menu whose `n` the sidebar's `Next` has, and whose `b` the brief's
+    /// group has, as they have at the top of the sidebar. Its `s` is a key of
+    /// the brief's group, and not of the top: the menu keeps it.
+    const SHADOWED: &str = r#"n "notes"; b "build"; s "status"; c "Claude" { t "/tigerstyle"; }"#;
 
     /// `?` shows the keys at the top of the menu, as `m` does, luneta's Delete
     /// group among them, and then the sidebar's commands, which keep their
@@ -1684,19 +1775,19 @@ mod tests {
     #[test]
     fn help_shows_the_top_of_the_menu_and_then_the_sidebar_s_commands() {
         for (entries, on_row, on) in [
-            (Some(MENU), row(None), vec!['c', 'r', 'd', '/', 'n']),
-            (Some(SHADOWED), row(None), vec!['c', 'd', '/', 'n']),
-            (Some(MENU), session_row(None), vec!['c', 'r', 'd', '/', 'n']),
-            (None, row(None), vec!['d', '/', 'n']),
+            (Some(MENU), row(None), vec!['c', 'r', 'd', '/', 'n', 'b']),
+            (Some(SHADOWED), row(None), vec!['s', 'c', 'd', '/', 'n', 'b']),
+            (Some(MENU), session_row(None), vec!['c', 'r', 'd', '/', 'n', 'b']),
+            (None, row(None), vec!['d', '/', 'n', 'b']),
         ] {
-            let menu = SidebarMenu::help(entries, on_row, &mut Numbers::default());
+            let menu = help(entries, on_row, None);
             assert_eq!(on_show(Some(&menu)), Some(Ok(on)), "{entries:?}");
         }
         for (entries, said) in [
             ("t", "menu: \"t\" takes one string"),
             (r#"d "notes""#, "menu: \"d\" is luneta's"),
         ] {
-            let menu = SidebarMenu::help(Some(entries), row(None), &mut Numbers::default());
+            let menu = help(Some(entries), row(None), None);
             let wrong = wrong(Some(&menu)).expect("what is wrong");
             assert!(wrong.starts_with(said), "{wrong}");
         }
@@ -1704,29 +1795,43 @@ mod tests {
 
     /// A group of the menu opens from `?`, and `Backspace` comes back to it.
     /// A delete key deletes as it does from `m`. A command closes the menu,
-    /// for the sidebar to run it, on a session's row too.
+    /// for the sidebar to run it, on a session's row too, and so does a
+    /// command in a group of commands, which `?` opens on as the group's key
+    /// does at the top of the sidebar.
     #[test]
     fn a_key_of_help_opens_its_group_or_hands_the_sidebar_its_command() {
-        let help = || Some(SidebarMenu::help(Some(MENU), row(None), &mut Numbers::default()));
-        let menu = press(help(), &char('c'));
+        let top = || Some(help(Some(MENU), row(None), None));
+        let menu = press(top(), &char('c'));
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['t', 'm', 's'])));
         let menu = press(menu, &bare(BareKey::Backspace));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'd', '/', 'n'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'd', '/', 'n', 'b'])));
         assert!(press(menu, &bare(BareKey::Esc)).is_none());
 
-        let menu = press(help(), &char('d'));
+        let menu = press(top(), &char('d'));
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['d', 's'])));
         let idle = closing(luneta(), &[]);
         let (menu, did) = menu.expect("a menu").key(&char('d'), Some(&idle), 0);
         assert!(menu.is_none());
         assert_eq!(did, Some(Did::Closed(Act::Pane(luneta(), 2))));
 
+        for on_session in [false, true] {
+            let on_row = || if on_session { session_row(None) } else { row(None) };
+            let brief = || help(Some(MENU), on_row(), Some('b'));
+            assert_eq!(on_show(Some(&brief())), Some(Ok(vec!['z', 's', 'h'])), "{on_session}");
+            let (menu, did) = brief().key(&char('s'), None, 0);
+            assert!(menu.is_none(), "{on_session}");
+            assert_eq!(did, Some(Did::Command(Command::Brief(brief::Scope::Session))));
+            let back = press(Some(brief()), &bare(BareKey::Backspace));
+            let top = vec!['c', 'r', 'd', '/', 'n', 'b'];
+            assert_eq!(on_show(back.as_ref()), Some(Ok(top)), "{on_session}");
+        }
+
         for (entries, on_row, key, command) in [
             (MENU, row(None), '/', Command::Search),
             (SHADOWED, row(None), 'n', Command::Next),
             (MENU, session_row(None), '/', Command::Search),
         ] {
-            let menu = SidebarMenu::help(Some(entries), on_row, &mut Numbers::default());
+            let menu = help(Some(entries), on_row, None);
             let (menu, did) = menu.key(&char(key), None, 0);
             assert!(menu.is_none(), "{key}");
             assert_eq!(did, Some(Did::Command(command)), "{key}");
@@ -1745,10 +1850,10 @@ mod tests {
                 (MENU_KEY.to_owned(), menu.to_string()),
             ])
         };
-        let help = SidebarMenu::help(Some(MENU), row(Some(there)), &mut Numbers(1));
+        let help = SidebarMenu::help(Some(MENU), row(Some(there)), None, &mut Numbers(1));
         let menu = press(Some(help), &char('r')).expect("a menu");
         let menu = menu.answered(None, b"", b"", &answer(1)).expect("a menu");
-        assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['c', 'r', 'd', '/', 'n'])));
+        assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['c', 'r', 'd', '/', 'n', 'b'])));
         let menu = menu.answered(None, b"", b"", &answer(2));
         let said = wrong(menu.as_ref());
         assert_eq!(said, Some("menu: the agent did not start: zellij opened no pane"));

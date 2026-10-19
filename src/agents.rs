@@ -55,6 +55,8 @@ struct Wire {
     name: Option<String>,
     #[serde(default)]
     name_source: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +130,8 @@ pub struct Agent {
     age: Held,
     /// Where the agent works, when claude-ps says.
     cwd: Option<String>,
+    /// The id of its Claude Code session, which names its transcript.
+    transcript: Option<String>,
 }
 
 #[expect(
@@ -144,6 +148,9 @@ pub struct AgentRow {
     pub status: Status,
     pub age: Held,
     pub cwd: Option<String>,
+    /// The id of its Claude Code session, which names its transcript, when
+    /// claude-ps says.
+    pub transcript: Option<String>,
     pub shared: bool,
     /// The agent names a session that is still running, but its pane turned
     /// up in another, matched by its id and directory alone: where it sits is
@@ -323,6 +330,7 @@ impl AgentSet {
                     status: agent.status.clone(),
                     age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
+                    transcript: agent.transcript.clone(),
                     shared: false,
                     indices: Vec::new(),
                     score: 0,
@@ -501,6 +509,7 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
             status: Status::parse(row.status.as_deref()),
             age: Held::from_secs(row.status_age),
             cwd: row.cwd.filter(|cwd| !cwd.is_empty()),
+            transcript: row.session_id.filter(|id| !id.is_empty()),
         });
     }
     Ok(agents)

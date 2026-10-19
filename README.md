@@ -34,6 +34,7 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
 * Start an agent on a skill with a few keys, from a [menu](#menu) of your own, and
   close a pane or kill a session with two
+* Come back from a break to a [brief](#brief) of what your agents are doing
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -230,13 +231,14 @@ rule over the keys names. For `/thermo-nuclear-review` that is the point: it
 reviews the branch checked out there. A row of another tab takes you to that
 tab, and a row of another session starts the agent in that session and takes
 you there, handing the session you leave the pane you came from. A key the
-sidebar has a use of its own for, as `j` or `n`, stays the sidebar's: `m` opens
-the menu on its first group, where every key is the menu's. The menu closes
-when the sidebar loses the focus, and with a click.
+sidebar has a use of its own for, as `j`, `n` or `b`, stays the sidebar's: `m`
+opens the menu on its first group, where every key is the menu's. The menu
+closes when the sidebar loses the focus, and with a click.
 
 `?` opens it on its first group too, and under its keys, the sidebar's own
-commands: `/` to search, and `n` to go to the next agent that wants you. A key
-of the menu that a command has stays the command's, as it does in the sidebar.
+commands: `/` to search, `n` to go to the next agent that wants you, and the
+[brief](#brief)'s keys, in a group `b` opens. A key of the menu that a command
+has stays the command's, as it does in the sidebar.
 
 ```text
 ─ luneta ──── luneta/sidebar ─
@@ -244,6 +246,7 @@ of the menu that a command has stays the command's, as it does in the sidebar.
  d  Delete ▸
  /  Search
  n  Next agent
+ b  Brief ▸
  <ESC> - Close
 ```
 
@@ -298,6 +301,54 @@ luneta cannot tell, and asks every time.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 
+### Brief
+
+A few lines on what your agents are doing, for coming back to them after a
+break, written by a fast model from what each one's transcript says last.
+
+```text
+┌ luneta: brief of every session ──────────────────────────────────┐
+│Brief of every session, at 18:42                                  │
+│                                                                  │
+│You have 3 sessions open:                                         │
+│- cipher: an agent waits for CI to finish, to report how it went  │
+│- luneta: the sidebar fold is done and waits for your review      │
+│- dotfiles: your nvim config is fixed                             │
+│                                                                  │
+│<any key> - Close                                                 │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+In the sidebar, `b` opens `?` on the brief's keys, for the row the cursor is
+on, and `Backspace` goes back to the rest of `?`:
+
+| keys | brief |
+|---|---|
+| `b` `z` | every session, a line each |
+| `b` `s` | the row's session, a line for each agent in it |
+| `b` `h` | the agent in the row's pane, in a few lines; on a session's row, its session |
+
+The brief opens floating over the tab, and any key closes it. It says when it
+was made, and nothing is kept: each key asks again, so a brief costs only when
+you ask for one. With no agent to brief you on, the sidebar says so where the
+keys were.
+
+For each agent, the model is told its session, its row's name, its status and
+for how long, and its branch, as the sidebar knows them, and from the last
+256 KiB of its transcript: the title Claude Code gave it, what you last asked
+of it, and its last few steps, what it said and what it ran. It is asked to
+use those alone. The transcript is the one Claude Code keeps in
+`~/.claude/projects`, or under `CLAUDE_CONFIG_DIR`, by the session id
+claude-ps gives.
+
+The model is `claude -p --model haiku`, on your Claude Code login, with no
+tools, and in `--safe-mode`, so that none of your hooks, `CLAUDE.md` or MCP
+servers come into it. A brief takes a few seconds. While it is asked, the
+`claude` it runs has no zellij in its environment, and claude-ps places it in
+no pane.
+
+Needs `claude` and `claude-ps` on the server's `PATH`.
+
 ## Getting started
 
 ### Requirements
@@ -305,8 +356,8 @@ Needs `claude` on the server's `PATH`, and `git` for the branch.
 | | | needed for |
 |---|---|---|
 | **zellij 0.45.0** | | everything |
-| [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | optional | the agent list |
-| [`claude`](https://claude.com/claude-code) | optional | the menu |
+| [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | optional | the agent list and the brief |
+| [`claude`](https://claude.com/claude-code) | optional | the menu and the brief |
 | `git` | optional | the branch in the name of an agent the menu starts |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
@@ -683,6 +734,7 @@ In the sidebar, once it has the focus:
 | *a key of the [menu](#menu)* | open its group, or start its agent, for the highlighted pane |
 | `m` | open the menu on its first group, for the highlighted pane |
 | `?` | open the menu on its first group, with the sidebar's commands under its keys |
+| `b` | open `?` on the [brief](#brief)'s keys, for the highlighted row |
 | `/` | search |
 | `Esc` | back to the pane you came from |
 
