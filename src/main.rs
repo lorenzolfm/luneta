@@ -1122,10 +1122,7 @@ impl State {
         let Some(tab) = self.own_tab().filter(|tab| Some(*tab) == self.active_tab) else {
             return false;
         };
-        let floating = self
-            .tabs
-            .iter()
-            .any(|t| t.position == tab && t.are_floating_panes_visible);
+        let floating = self.shows_floating(tab);
         let focused = self
             .panes
             .as_ref()
@@ -1143,15 +1140,22 @@ impl State {
         let Some(tab) = self.own_tab().filter(|tab| Some(*tab) == self.active_tab) else {
             return false;
         };
-        let floating = self
-            .tabs
-            .iter()
-            .any(|t| t.position == tab && t.are_floating_panes_visible);
+        let floating = self.shows_floating(tab);
         let panes = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab));
         let panes = panes.map_or(&[][..], Vec::as_slice);
         let own = panes.iter().any(|p| p.is_focused && p.is_plugin && p.id == self.plugin_id);
         let over = panes.iter().any(|p| p.is_focused && p.is_floating && brief::is_brief(p));
         floating && own && over
+    }
+
+    /// Whether `tab` shows its floating panes. zellij hides them as the last
+    /// one closes, and tells of the panes before the tabs: a tab whose panes
+    /// have none floating shows none, whatever the tabs said last.
+    fn shows_floating(&self, tab: usize) -> bool {
+        let shown = self.tabs.iter().any(|t| t.position == tab && t.are_floating_panes_visible);
+        let panes = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab));
+        let floating = |p: &PaneInfo| p.is_floating && !p.is_suppressed;
+        shown && panes.is_some_and(|panes| panes.iter().any(floating))
     }
 
     /// After the panes or the tabs change. Says whether to draw.
@@ -2271,7 +2275,9 @@ mod tests {
     /// A brief floats over the tab with the focus, and hands it back to the
     /// sidebar as it closes. It is no row of the sidebar's, nor the pane you
     /// are in: the cursor stays on the row it was asked on, and `Esc` goes
-    /// back to the pane you came from, as it did before the brief.
+    /// back to the pane you came from, as it did before the brief. zellij
+    /// tells of the panes before the tabs, so the sidebar hears the brief is
+    /// gone while the tabs still show the floating panes it hid with it.
     #[test]
     fn a_brief_leaves_the_sidebar_as_it_found_it() {
         let mut state = focused_sidebar();
@@ -2279,7 +2285,9 @@ mod tests {
         if let Role::Sidebar(tree) = &mut state.role {
             tree.rows.select(3);
         }
-        state.rebuild_tree();
+        // The focus you asked for, as `focus` brings it.
+        state.pass.ask(state.frame);
+        state.update(Event::TabUpdate(state.tabs.clone()));
         let note = brief::Note {
             session: "b".to_owned(),
             pane: 4,
@@ -2316,15 +2324,21 @@ mod tests {
             Place::Session("b".to_owned()),
             Place::Pane("b".to_owned(), 4),
         ];
-        for (brief_open, manifest) in [(true, open), (false, closed)] {
-            state.tabs[0].are_floating_panes_visible = brief_open;
-            state.update(Event::PaneUpdate(manifest));
+        let as_found = |state: &State, told: &str| {
             let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
             let shown: Vec<Place> = tree.rows.iter().map(Node::place).collect();
-            assert_eq!(shown, rows, "brief open: {brief_open}");
+            assert_eq!(shown, rows, "{told}");
             let at = tree.rows.selected_row().map(Node::place);
-            assert_eq!(at.as_ref(), rows.get(3), "brief open: {brief_open}");
-            assert_eq!(state.here, Some(1), "brief open: {brief_open}");
+            assert_eq!(at.as_ref(), rows.get(3), "{told}");
+            assert_eq!(state.here, Some(1), "{told}");
+        };
+        for (brief_open, manifest) in [(true, open), (false, closed)] {
+            state.update(Event::PaneUpdate(manifest));
+            as_found(&state, &format!("brief open: {brief_open}, as the panes come"));
+            let mut tabs = state.tabs.clone();
+            tabs[0].are_floating_panes_visible = brief_open;
+            state.update(Event::TabUpdate(tabs));
+            as_found(&state, &format!("brief open: {brief_open}, as the tabs come"));
         }
     }
 
