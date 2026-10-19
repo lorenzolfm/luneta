@@ -1506,19 +1506,22 @@ const MARGIN: usize = 1;
 const GLYPH: usize = 1;
 
 /// How wide the dots and the ages are across the rows on screen, and the
-/// icons wherever they are, so that every label starts at the same column and
-/// is cut at the same column. No icons take no column.
-struct Columns {
+/// icons the rows draw, wherever they are, so that every label starts at the
+/// same column and is cut at the same column. No icons take no column.
+struct Columns<'a> {
     glyph: usize,
-    icon: usize,
+    icons: &'a Icons,
     age: usize,
 }
 
-impl Columns {
+impl Columns<'_> {
     /// How far a label starts from where the dot does: past the dot, and the
     /// icon, and a space after each.
     fn label(&self) -> usize {
-        let icon = if self.icon > 0 { self.icon + 1 } else { 0 };
+        let icon = match self.icons.width() {
+            0 => 0,
+            width => width + 1,
+        };
         self.glyph + 1 + icon
     }
 }
@@ -1556,7 +1559,7 @@ fn sidebar_lines(
                 .max()
                 .unwrap_or(0)
                 .max(GLYPH),
-            icon: tree.icons.as_ref().map_or(0, Icons::width),
+            icons: &tree.icons,
             age: marks().map(|mark| mark.age.label().width()).max().unwrap_or(0),
         };
         for (offset, node) in window.iter().enumerate() {
@@ -1565,9 +1568,7 @@ fn sidebar_lines(
             match node {
                 Node::Session(node) => lines.push(light(branch_line(node, cols, frame))),
                 Node::Pane(node) => {
-                    let icon = tree.icons.as_ref().zip(node.program.as_deref());
-                    let icon = icon.and_then(|(icons, program)| icons.of(program));
-                    lines.push(light(leaf_line(node, icon, &columns, cols, frame)));
+                    lines.push(light(leaf_line(node, &columns, cols, frame)));
                     if let Some(checkout) = &node.checkout {
                         lines.push(light(checkout_line(node, checkout, &columns, cols)));
                     }
@@ -1683,17 +1684,11 @@ fn dot_ink(status: &Status) -> Ink {
     }
 }
 
-/// A pane's row: its dot, the `icon` of its program, its label, and how long
+/// A pane's row: its dot, the icon of its program, its label, and how long
 /// its agent has been in its state. The label is plain, in the accent while
 /// its agent waits for you, and dimmed with no agent, and the icon is drawn
 /// as the label is. The pane you are in has the mark and a bold one.
-fn leaf_line(
-    node: &PaneNode,
-    icon: Option<&str>,
-    columns: &Columns,
-    cols: usize,
-    frame: u64,
-) -> Painted {
+fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Painted {
     let mut line = pane_margin(node);
     let start = line.columns();
     if let Some(mark) = &node.agent {
@@ -1706,7 +1701,7 @@ fn leaf_line(
         Some(_) => (Ink::Plain, Ink::Bold(ACCENT)),
         None => (Ink::Dim, Ink::Bold(ACCENT)),
     };
-    if let Some(icon) = icon {
+    if let Some(icon) = node.program().and_then(|program| columns.icons.of(program)) {
         line.pad_to(start + columns.glyph + 1);
         line.push(icon, label);
     }
@@ -2564,7 +2559,7 @@ mod tests {
                 status: Status::parse(Some(word)),
                 age: Held::from_secs(age),
             }),
-            program: None,
+            runs: None,
             checkout: None,
             here: false,
             hits: Vec::new(),
@@ -2587,10 +2582,10 @@ mod tests {
         }
     }
 
-    /// `node`, running `program`.
+    /// `node`, its terminal running `program`.
     fn running(program: &str, node: Node) -> Node {
         match node {
-            Node::Pane(pane) => Node::Pane(PaneNode { program: Some(program.to_owned()), ..pane }),
+            Node::Pane(pane) => Node::Pane(PaneNode { runs: Some(program.to_owned()), ..pane }),
             session @ Node::Session(_) => session,
         }
     }
@@ -2661,10 +2656,11 @@ mod tests {
     fn worktrees() -> Vec<Node> {
         vec![
             session_node("luneta", false, 0, None),
-            running("claude", on("main", "", pane_node("luneta", 1, "fold", Some(("busy", 12))))),
-            here(running(
-                "claude",
-                on("branch-name", "!?⇡", pane_node("luneta", 2, "branch-name", Some(("idle", 60)))),
+            on("main", "", pane_node("luneta", 1, "fold", Some(("busy", 12)))),
+            here(on(
+                "branch-name",
+                "!?⇡",
+                pane_node("luneta", 2, "branch-name", Some(("idle", 60))),
             )),
             running("fish", pane_node("luneta", 3, "~/notes", None)),
             session_node("elo", false, 0, None),
@@ -2927,7 +2923,7 @@ mod tests {
     /// colour of their own.
     #[test]
     fn the_letters_a_search_lands_on_stand_out_on_every_pane_row() {
-        let columns = Columns { glyph: GLYPH, icon: 0, age: 2 };
+        let columns = Columns { glyph: GLYPH, icons: &Icons::default(), age: 2 };
         for (here, agent) in [
             (false, Some("waiting")),
             (false, Some("idle")),
@@ -2943,12 +2939,12 @@ mod tests {
                     status: Status::parse(Some(word)),
                     age: Held::from_secs(4),
                 }),
-                program: None,
+                runs: None,
                 checkout: None,
                 here,
                 hits: vec![0, 2],
             };
-            let line = leaf_line(&node, None, &columns, 20, 0);
+            let line = leaf_line(&node, &columns, 20, 0);
             assert_eq!(line.content().chars().skip(5).take(4).collect::<String>(), "misc");
             let [m, i, s, c] = [5, 6, 7, 8].map(|at| line.colour_at(at));
             assert_eq!((m, i), (s, c), "{agent:?}, here: {here}");
@@ -3082,7 +3078,7 @@ mod tests {
                 ] {
                     let trees = [0, 3, 7].into_iter().flat_map(|selected| {
                         let mut iconed = sidebar_tree(worktrees(), selected);
-                        iconed.icons = Some(Icons::default());
+                        iconed.icons = Icons::luneta();
                         [workday_tree(selected), sidebar_tree(worktrees(), selected), iconed]
                     });
                     for mut tree in trees {

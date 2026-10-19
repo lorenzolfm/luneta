@@ -189,8 +189,9 @@ plugins {
 }
 ```
 
-An `icons` luneta cannot read says what is wrong with it under the sidebar's
-tree, and leaves luneta's in its place.
+An icon takes one column or two. An `icons` luneta cannot read, or an icon of
+another width, says what is wrong with it under the sidebar's tree, and
+leaves luneta's in its place.
 
 An agent's row is named for what it is doing: the name you gave it with
 `/rename`, or else the title Claude Code gives its pane. That title is a bare

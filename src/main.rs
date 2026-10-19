@@ -239,6 +239,9 @@ impl ZellijPlugin for State {
                 let entries = configuration.get(menu::ENTRIES).map(String::as_str);
                 let (icons, wrong) =
                     icons::configured(configuration.get(icons::KEY).map(String::as_str));
+                if let Some(wrong) = &wrong {
+                    eprintln!("luneta {wrong}");
+                }
                 Role::Sidebar(Tree::shared(menu::Legend::new(entries), icons, wrong))
             },
             Some(DOCK) => {

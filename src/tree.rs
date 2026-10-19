@@ -223,13 +223,25 @@ pub struct PaneNode {
     pub tab: Option<TabId>,
     pub label: String,
     pub agent: Option<Mark>,
-    /// The program that runs in the pane, by its binary's name, for its icon.
-    pub program: Option<String>,
+    /// What the pane's terminal runs in the foreground, by its binary's name.
+    pub runs: Option<String>,
     /// What is checked out where the pane works, for the line under its row.
     pub checkout: Option<Checkout>,
     pub here: bool,
     /// The characters of the label a search lands on.
     pub hits: Vec<usize>,
+}
+
+impl PaneNode {
+    /// The program that runs in the pane, by its binary's name, for its icon:
+    /// Claude Code for an agent claude-ps finds there, whatever its terminal
+    /// has in front.
+    pub fn program(&self) -> Option<&str> {
+        match self.agent {
+            Some(_) => Some(icons::AGENT),
+            None => self.runs.as_deref(),
+        }
+    }
 }
 
 pub struct Mark {
@@ -338,7 +350,7 @@ pub struct Tree {
     pub legend: Option<Legend>,
     /// The icons on the panes' rows, none once the configuration turns them
     /// off.
-    pub icons: Option<Icons>,
+    pub icons: Icons,
     /// What is wrong with the icons the configuration gives, for a note under
     /// the tree.
     pub icons_wrong: Option<String>,
@@ -392,7 +404,7 @@ impl Tree {
     /// A tree whose folds are every session's sidebar's, over `legend`, and
     /// that draws `icons`, and says what is wrong with the ones the
     /// configuration gives.
-    pub fn shared(legend: Legend, icons: Option<Icons>, icons_wrong: Option<String>) -> Self {
+    pub fn shared(legend: Legend, icons: Icons, icons_wrong: Option<String>) -> Self {
         let folded = Folds::shared();
         Tree { folded, legend: Some(legend), icons, icons_wrong, ..Tree::default() }
     }
@@ -511,7 +523,7 @@ impl Tree {
                     tab: leaf.tab_id,
                     label,
                     agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
-                    program: program(leaf, *agent).map(str::to_owned),
+                    runs: leaf.command.as_deref().and_then(icons::program).map(str::to_owned),
                     checkout: leaf.checkout.clone(),
                     here: is_current && here == Some(leaf.id),
                     hits: hits.unwrap_or_default(),
@@ -792,16 +804,6 @@ pub fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
         return format!("pane {}", leaf.id);
     }
     title.to_owned()
-}
-
-/// The program that runs in a pane, by its binary's name: Claude Code for an
-/// agent claude-ps finds there, or else what the pane's terminal runs in the
-/// foreground, as its session last said.
-fn program<'a>(leaf: &'a Leaf, agent: Option<&AgentRow>) -> Option<&'a str> {
-    if agent.is_some() {
-        return Some(icons::AGENT);
-    }
-    leaf.command.as_deref().and_then(icons::program)
 }
 
 const GENERIC_TITLE: &str = "Claude Code";
@@ -1236,7 +1238,7 @@ mod tests {
             .rows
             .iter()
             .filter_map(|node| match node {
-                Node::Pane(node) => Some((node.id, node.program.as_deref())),
+                Node::Pane(node) => Some((node.id, node.program())),
                 Node::Session(_) => None,
             })
             .collect();

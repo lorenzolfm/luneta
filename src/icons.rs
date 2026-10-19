@@ -62,15 +62,20 @@ pub struct Icons {
 }
 
 impl Default for Icons {
-    /// luneta's.
+    /// None, as `icons false` asks: no row keeps a column for one.
     fn default() -> Self {
-        let by_name =
-            DEFAULTS.iter().map(|(name, icon)| ((*name).to_owned(), (*icon).to_owned())).collect();
-        Icons::new(by_name)
+        Icons::new(BTreeMap::new())
     }
 }
 
 impl Icons {
+    /// luneta's.
+    pub fn luneta() -> Self {
+        let by_name =
+            DEFAULTS.iter().map(|(name, icon)| ((*name).to_owned(), (*icon).to_owned())).collect();
+        Icons::new(by_name)
+    }
+
     fn new(by_name: BTreeMap<String, String>) -> Self {
         let width = by_name.values().map(|icon| icon.width()).max().unwrap_or(0);
         Icons { by_name, width }
@@ -91,21 +96,21 @@ impl Icons {
 /// over them for a node with children, each a program by its binary's name
 /// and its icon. An icon of `""` leaves its program none. Icons luneta cannot
 /// read leave luneta's in their place.
-pub fn configured(value: Option<&str>) -> (Option<Icons>, Option<String>) {
+pub fn configured(value: Option<&str>) -> (Icons, Option<String>) {
     match read(value) {
         Ok(icons) => (icons, None),
-        Err(wrong) => (Some(Icons::default()), Some(wrong)),
+        Err(wrong) => (Icons::luneta(), Some(wrong)),
     }
 }
 
-fn read(value: Option<&str>) -> Result<Option<Icons>, String> {
+fn read(value: Option<&str>) -> Result<Icons, String> {
     let text = match value.map(str::trim) {
-        None | Some("true") => return Ok(Some(Icons::default())),
-        Some("false") => return Ok(None),
+        None | Some("true") => return Ok(Icons::luneta()),
+        Some("false") => return Ok(Icons::default()),
         Some(text) => text,
     };
     let document: KdlDocument = text.parse().map_err(|error| format!("icons: {error}"))?;
-    let mut by_name = Icons::default().by_name;
+    let mut by_name = Icons::luneta().by_name;
     let mut seen: Vec<&str> = Vec::new();
     for node in document.nodes() {
         let (name, icon) = icon(node)?;
@@ -113,18 +118,17 @@ fn read(value: Option<&str>) -> Result<Option<Icons>, String> {
             return Err(format!("icons: two icons for \"{name}\""));
         }
         seen.push(name);
-        if icon.is_empty() {
-            by_name.remove(name);
-        } else {
-            by_name.insert(name.to_owned(), icon.to_owned());
-        }
+        match icon {
+            Some(icon) => by_name.insert(name.to_owned(), icon.to_owned()),
+            None => by_name.remove(name),
+        };
     }
-    Ok(Some(Icons::new(by_name)))
+    Ok(Icons::new(by_name))
 }
 
 /// A child of `icons`: the name of a program's binary, and its icon, the one
-/// string it takes.
-fn icon(node: &KdlNode) -> Result<(&str, &str), String> {
+/// string it takes, one or two columns wide, or none for `""`.
+fn icon(node: &KdlNode) -> Result<(&str, Option<&str>), String> {
     let name = node.name().value();
     let icon = match node.entries() {
         [only] if only.name().is_none() && node.children().is_none() => {
@@ -135,10 +139,17 @@ fn icon(node: &KdlNode) -> Result<(&str, &str), String> {
     let Some(icon) = icon else {
         return Err(format!("icons: \"{name}\" takes one string, its icon"));
     };
+    if icon.is_empty() {
+        return Ok((name, None));
+    }
     if icon.chars().any(char::is_control) {
         return Err(format!("icons: the icon of \"{name}\" has a control character"));
     }
-    Ok((name, icon))
+    let width = icon.width();
+    if !(1..=2).contains(&width) {
+        return Err(format!("icons: the icon of \"{name}\" takes {width} columns, not one or two"));
+    }
+    Ok((name, Some(icon)))
 }
 
 /// The name of the binary a command line runs, as zellij spells a command:
@@ -266,16 +277,14 @@ mod tests {
     fn a_configuration_puts_its_icons_over_luneta_s_or_turns_them_off() {
         for value in [None, Some("true"), Some(" ")] {
             let (icons, wrong) = configured(value);
-            let icons = icons.unwrap_or_else(|| panic!("{value:?}: icons"));
             let (claude, nvim) = (icons.of("claude"), icons.of("nvim"));
             assert_eq!((claude, nvim), (Some("\u{ec82}"), Some("\u{e6ae}")), "{value:?}");
             assert_eq!((icons.width(), wrong), (1, None), "{value:?}");
         }
         let (off, wrong) = configured(Some("false"));
-        assert!(off.is_none() && wrong.is_none());
+        assert_eq!((off.of("claude"), off.width(), wrong), (None, 0, None));
 
         let (icons, wrong) = configured(Some(r#"nvim "N"; make "M"; cargo "\u{1F980}"; htop """#));
-        let icons = icons.expect("icons");
         assert_eq!(wrong, None);
         assert_eq!(icons.of("nvim"), Some("N"));
         assert_eq!(icons.of("make"), Some("M"));
@@ -299,14 +308,18 @@ mod tests {
             ("nvim 1", one_string),
             (r#"nvim "a"; nvim "b""#, r#"icons: two icons for "nvim""#),
             (r#"nvim "\u{1b}[31m""#, r#"icons: the icon of "nvim" has a control character"#),
+            // A word for an icon, an escape a raw string leaves as it is, and a
+            // character that takes no column.
+            (r#"nvim "nvim""#, r#"icons: the icon of "nvim" takes 4 columns, not one or two"#),
+            (r#"nvim r"\u{e6ae}""#, r#"icons: the icon of "nvim" takes 8 columns, not one or two"#),
+            (r#"nvim "\u{200b}""#, r#"icons: the icon of "nvim" takes 0 columns, not one or two"#),
         ] {
             let (icons, wrong) = configured(Some(value));
             assert_eq!(wrong.as_deref(), Some(said), "{value:?}");
-            let icons = icons.unwrap_or_else(|| panic!("{value:?}: luneta's icons"));
             assert_eq!(icons.of("nvim"), Some("\u{e6ae}"), "{value:?}");
         }
         let (icons, wrong) = configured(Some(r#"nvim ""#));
-        assert!(icons.is_some());
+        assert_eq!(icons.of("nvim"), Some("\u{e6ae}"));
         assert!(wrong.is_some_and(|wrong| wrong.starts_with("icons: ")));
     }
 }
