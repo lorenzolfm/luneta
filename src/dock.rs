@@ -29,8 +29,16 @@ use crate::close;
 use crate::hiding::{Hiding, Said};
 use crate::tree::{is_placeholder, PLACEHOLDER};
 
-/// The title the sidebar gives its pane, by which the dock knows it.
-pub const SIDEBAR_TITLE: &str = "luneta sidebar";
+/// The title the sidebar and the picker give their panes. They are the same
+/// plugin, and what tells them apart is where they stand: the sidebar in its
+/// column, the picker floating over the tab.
+pub const TITLE: &str = "luneta";
+
+/// Whether `pane` is a sidebar, by its title: a plugin pane titled as the
+/// sidebar is, and not floating, as the picker is.
+pub fn is_sidebar(pane: &PaneInfo) -> bool {
+    pane.is_plugin && !pane.is_floating && pane.title == TITLE
+}
 
 /// How many reports of the panes and tabs zellij may take to show what the
 /// dock asked for before the dock asks again.
@@ -267,9 +275,7 @@ impl Scene {
             for pane in panes {
                 if pane.is_plugin && pane.id == plugin_id {
                     scene.url.clone_from(&pane.plugin_url);
-                } else if pane.is_plugin
-                    && (pane.title == SIDEBAR_TITLE || Some(pane.id) == sidebar)
-                {
+                } else if is_sidebar(pane) || pane.is_plugin && Some(pane.id) == sidebar {
                     scene.sidebars.push((tab, Seen::new(pane)));
                 } else if is_placeholder(pane) {
                     scene.placeholders.entry(tab).or_default().push(Seen::new(pane));
@@ -888,7 +894,7 @@ mod tests {
             id,
             is_plugin: true,
             is_suppressed: hidden,
-            title: SIDEBAR_TITLE.to_owned(),
+            title: TITLE.to_owned(),
             ..PaneInfo::default()
         }
     }
@@ -1566,15 +1572,19 @@ mod tests {
         }
     }
 
+    /// The picker, floating over the tab, has the sidebar's title and is no
+    /// extra sidebar.
     #[test]
     fn extra_sidebars_and_placeholders_close() {
         let tabs = [tab(0, true)];
+        let picker = PaneInfo { is_floating: true, ..sidebar(9, false) };
         let panes = vec![
             sidebar(7, false),
             sidebar(5, false),
             placeholder(1, true),
             placeholder(2, true),
             terminal(3),
+            picker,
         ];
         let scene = scene(&tabs, vec![(0, panes)], None);
         assert_eq!(
