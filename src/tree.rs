@@ -891,7 +891,7 @@ mod tests {
 
         let mut set = AgentSet::default();
         set.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"");
-        let live = Live::new(None, &[], &places);
+        let live = Live::new(None, &[], &places, &[]);
         set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
         set
     }
@@ -957,7 +957,7 @@ mod tests {
         let mut set = AgentSet::default();
         set.ingest(Some(0), json.as_bytes(), b"");
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
-        let live = Live::new(None, &[], &places);
+        let live = Live::new(None, &[], &places, &[]);
         set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
 
         let mut tree = Tree::default();
@@ -975,7 +975,8 @@ mod tests {
         let mut set = AgentSet::default();
         set.ingest(Some(0), json.as_bytes(), b"");
         let places = Places::of(&[("luneta", &[(1, "/w/luneta/main"), (4, "/w/luneta/agents-tab")])]);
-        set.rebuild("", &Live::new(None, &[], &places), None, Age::from_secs(0), Selection::SnapToTop);
+        let live = Live::new(None, &[], &places, &[]);
+        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
 
         let branches = [branch("luneta", 1, &[(1, "✳ Claude Code"), (4, "✳ Claude Code")])];
         let mut tree = Tree::default();

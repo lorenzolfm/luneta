@@ -302,7 +302,7 @@ fn main() {
     agents.ingest(Some(0), &ps, b"");
 
     stats.push(bench("AgentSet::rebuild (empty term)", 2000, || {
-        let live = Live::new(Some("session-000-work"), &sess.live, &places);
+        let live = Live::new(Some("session-000-work"), &sess.live, &places, &[]);
         agents.rebuild("", &live, None, Age::from_secs(1), Selection::Hold);
         std::hint::black_box(&agents);
     }));
@@ -346,7 +346,7 @@ fn main() {
     ag.ingest(Some(0), &ps, b"");
     ag.rebuild(
         "",
-        &Live::new(Some("session-000-work"), &sess.live, &places),
+        &Live::new(Some("session-000-work"), &sess.live, &places, &[]),
         None,
         Age::from_secs(1),
         Selection::Hold,

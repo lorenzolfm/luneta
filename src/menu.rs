@@ -1667,7 +1667,7 @@ impl Menu {
 
     /// Puts each agent in the pane of the session it sits in.
     fn seat_agents(&mut self) {
-        let live = Live::new(self.session.as_deref(), &[], &self.places);
+        let live = Live::new(self.session.as_deref(), &[], &self.places, &[]);
         self.agents.rebuild("", &live, None, Age::from_secs(0), Selection::Hold);
     }
 

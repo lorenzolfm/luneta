@@ -11,6 +11,7 @@ use crate::fetch::Fetch;
 use crate::places::Places;
 use crate::sessions::{Selection, Session};
 use crate::context::CONTEXT_KEY;
+use crate::tree::{self, Branch, Leaf};
 
 pub const QUERY: [&str; 1] = ["claude-ps"];
 
@@ -101,16 +102,29 @@ pub struct Live<'a> {
     /// The live sessions in the order the session list shows them: the one
     /// you are in first, then the others, newest first.
     order: Vec<&'a str>,
+    /// Every live session's panes, the one you are in too, as zellij last
+    /// listed them.
+    branches: &'a [Branch],
 }
 
 impl<'a> Live<'a> {
     /// `live` is the session list's live sessions, which leave out the one
     /// you are in.
-    pub fn new(current: Option<&'a str>, live: &'a [Session], places: &'a Places) -> Self {
+    pub fn new(
+        current: Option<&'a str>,
+        live: &'a [Session],
+        places: &'a Places,
+        branches: &'a [Branch],
+    ) -> Self {
         let mut others: Vec<&Session> = live.iter().collect();
         others.sort_by(|a, b| a.age.cmp(&b.age).then_with(|| a.name.cmp(&b.name)));
         let order = current.into_iter().chain(others.iter().map(|s| s.name.as_str())).collect();
-        Live { current, places, order }
+        Live { current, places, order, branches }
+    }
+
+    fn leaf(&self, session: &str, pane: u32) -> Option<&'a Leaf> {
+        let branch = self.branches.iter().find(|branch| branch.name == session)?;
+        branch.panes.iter().find(|leaf| leaf.id == pane)
     }
 
     /// Where `session` stands in the session list, for its agents to stand
@@ -150,14 +164,11 @@ pub struct Agent {
     transcript: Option<SessionId>,
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "a chosen name, a shared label, a guessed pane and an exact match are four facts \
-              about a row, not the states of one"
-)]
 pub struct AgentRow {
     reported: String,
     pub seat: Seat,
+    /// What the sidebar names the agent's row. Before zellij has listed its
+    /// pane, the name it was given, or else its session's.
     pub display: String,
     pub chosen: bool,
     pub pane: u32,
@@ -167,7 +178,7 @@ pub struct AgentRow {
     /// The id of its Claude Code session, which names its transcript, when
     /// claude-ps says.
     pub transcript: Option<SessionId>,
-    pub shared: bool,
+    shared: Shared,
     /// The agent names a session that is still running, but its pane turned
     /// up in another, matched by its id and directory alone: where it sits is
     /// a guess. A session that is gone is one renamed, and no guess.
@@ -182,12 +193,25 @@ impl Stops for AgentRow {}
 
 impl AgentRow {
     pub fn label(&self) -> String {
-        if self.shared {
-            format!("{}:{}", self.display, self.pane)
-        } else {
-            self.display.clone()
+        match self.shared {
+            Shared::Not => self.display.clone(),
+            Shared::InSession => format!("{}:{}", self.display, self.pane),
+            Shared::AcrossSessions => {
+                format!("{} ({}:{})", self.display, self.seat.session(), self.pane)
+            },
         }
     }
+}
+
+/// Whether another agent goes by a row's name, and so what tells them apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shared {
+    Not,
+    /// Only agents of its session do, and its pane tells it from them.
+    InSession,
+    /// An agent of another session does, whose panes count from 0 as well:
+    /// its session and its pane.
+    AcrossSessions,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -306,7 +330,9 @@ impl AgentSet {
 
     /// The rows keep their order, whatever the agents do: their sessions' in
     /// the session list, and the order their panes were opened in within each.
-    /// A term puts the best match first, as it does in the session list.
+    /// A term puts the best match first, as it does in the session list. An
+    /// agent is found by its name or by its session's, as the sidebar finds a
+    /// session's panes, and only its name is lit up.
     pub fn rebuild(
         &mut self,
         term: &str,
@@ -349,22 +375,28 @@ impl AgentSet {
                     age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
                     transcript: agent.transcript.clone(),
-                    shared: false,
+                    shared: Shared::Not,
                     indices: Vec::new(),
                     score: 0,
                     is_exact: false,
                 };
+                if let Some(leaf) = live.leaf(row.seat.session(), agent.pane) {
+                    row.display = tree::label(leaf, Some(&row));
+                }
                 if matches!(row.seat, Seat::Here(_)) && origin == Some(agent.pane) {
                     current = Some(row);
                     continue;
                 }
                 if !term.is_empty() {
-                    let Some((score, indices)) = matcher.fuzzy_indices(&row.display, term) else {
+                    let lit = matcher.fuzzy_indices(&row.display, term);
+                    let session = matcher.fuzzy_match(row.seat.session(), term);
+                    let Some(score) = lit.iter().map(|(score, _)| *score).chain(session).max()
+                    else {
                         continue;
                     };
-                    row.is_exact = row.display == term;
+                    row.is_exact = row.display == term || row.seat.session() == term;
                     row.score = score;
-                    row.indices = indices;
+                    row.indices = lit.map(|(_, indices)| indices).unwrap_or_default();
                 }
                 rows.push(row);
             }
@@ -448,12 +480,20 @@ impl AgentSet {
 }
 
 fn mark_shared(rows: &mut [&mut AgentRow]) {
-    let shared: Vec<bool> = {
-        let mut seen: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
+    let shared: Vec<Shared> = {
+        let mut seen: HashMap<&str, Vec<&str>> = HashMap::with_capacity(rows.len());
         for row in rows.iter() {
-            *seen.entry(row.display.as_str()).or_insert(0) += 1;
+            seen.entry(row.display.as_str()).or_default().push(row.seat.session());
         }
-        rows.iter().map(|row| seen[row.display.as_str()] > 1).collect()
+        rows.iter()
+            .map(|row| match seen[row.display.as_str()].as_slice() {
+                [_] => Shared::Not,
+                alike if alike.iter().all(|session| *session == row.seat.session()) => {
+                    Shared::InSession
+                },
+                _ => Shared::AcrossSessions,
+            })
+            .collect()
     };
     for (row, shared) in rows.iter_mut().zip(shared) {
         row.shared = shared;
@@ -547,11 +587,12 @@ fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::close::Closes;
 
     fn rows(json: &str, current: Option<&str>, places: &Places) -> AgentSet {
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = Live::new(current, &[], places);
+        let live = Live::new(current, &[], places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         agents
     }
@@ -574,7 +615,8 @@ mod tests {
         assert_eq!(agents.rows.len(), 1);
 
         agents.fail("claude-ps: gone");
-        agents.rebuild("", &Live::new(None, &[], &places), None, Age::ZERO, Selection::SnapToTop);
+        let live = Live::new(None, &[], &places, &[]);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert!(agents.rows.selected().is_none());
     }
@@ -600,6 +642,83 @@ mod tests {
         assert_eq!(agents.unplaced, 0);
     }
 
+    /// A pane of `/w/luneta`, as zellij lists it.
+    fn leaf(id: u32, title: &str, tab: &str) -> Leaf {
+        Leaf {
+            id,
+            title: title.to_owned(),
+            tab: tab.to_owned(),
+            tab_id: None,
+            cwd: Some("/w/luneta".to_owned()),
+            checkout: None,
+            closes: Closes::Pane,
+        }
+    }
+
+    /// `luneta` has an agent with a topic in pane 29, and one in pane 31 that
+    /// has none yet, in a tab named `review`.
+    #[test]
+    fn an_agent_goes_by_the_name_the_sidebar_gives_its_pane() {
+        let json = r#"[
+            {"status":"busy","status_age":4,"cwd":"/w/luneta","zellij":{"session":"luneta","pane":"29"}},
+            {"status":"idle","status_age":4,"cwd":"/w/luneta","zellij":{"session":"luneta","pane":"31"}}]"#;
+        let places = Places::of(&[("luneta", &[(29, "/w/luneta"), (31, "/w/luneta")])]);
+        let branches = [Branch {
+            name: "luneta".to_owned(),
+            age: Age::ZERO,
+            panes: vec![
+                leaf(29, "✳ Name agents as the sidebar does", "Tab #1"),
+                leaf(31, "✳ Claude Code", "review"),
+            ],
+        }];
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let named = |agents: &AgentSet| -> Vec<String> {
+            agents.rows.iter().map(AgentRow::label).collect()
+        };
+
+        let unlisted = Live::new(Some("luneta"), &[], &places, &[]);
+        agents.rebuild("", &unlisted, None, Age::ZERO, Selection::SnapToTop);
+        assert_eq!(named(&agents), ["luneta:29", "luneta:31"]);
+
+        let live = Live::new(Some("luneta"), &[], &places, &branches);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        assert_eq!(named(&agents), ["Name agents as the sidebar does", "review"]);
+
+        agents.rebuild("luneta", &live, None, Age::ZERO, Selection::SnapToTop);
+        assert_eq!(named(&agents), ["Name agents as the sidebar does", "review"]);
+        assert!(agents.rows.iter().all(|row| row.indices.is_empty()));
+
+        agents.rebuild("rev", &live, None, Age::ZERO, Selection::SnapToTop);
+        assert_eq!(named(&agents), ["review"]);
+        assert_eq!(agents.rows[0].indices, [0, 1, 2]);
+    }
+
+    /// `a` and `b` each have an agent in their pane 0, in `/w/luneta`, with no
+    /// topic yet, in a tab nobody named: both go by `w/luneta`, and a pane's
+    /// id alone names a pane in either.
+    #[test]
+    fn agents_named_alike_in_two_sessions_are_told_apart_by_their_sessions() {
+        let json = r#"[
+            {"status":"busy","status_age":4,"cwd":"/w/luneta","zellij":{"session":"a","pane":"0"}},
+            {"status":"idle","status_age":4,"cwd":"/w/luneta","zellij":{"session":"b","pane":"0"}}]"#;
+        let places = Places::of(&[("a", &[(0, "/w/luneta")]), ("b", &[(0, "/w/luneta")])]);
+        let branch = |name: &str| Branch {
+            name: name.to_owned(),
+            age: Age::ZERO,
+            panes: vec![leaf(0, "✳ Claude Code", "Tab #1")],
+        };
+        let branches = [branch("a"), branch("b")];
+        let sessions = [Session { name: "b".to_owned(), age: Age::from_secs(5) }];
+        let mut agents = AgentSet::default();
+        agents.ingest(Some(0), json.as_bytes(), b"");
+        let live = Live::new(Some("a"), &sessions, &places, &branches);
+        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+
+        let labels: Vec<String> = agents.rows.iter().map(AgentRow::label).collect();
+        assert_eq!(labels, ["w/luneta (a:0)", "w/luneta (b:0)"]);
+    }
+
     #[test]
     fn the_pane_you_are_in_is_pinned_by_its_pane_and_not_its_name() {
         let places = luneta_holds_both();
@@ -607,7 +726,7 @@ mod tests {
         agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
         agents.rebuild(
             "misc",
-            &Live::new(Some("luneta"), &[], &places),
+            &Live::new(Some("luneta"), &[], &places, &[]),
             Some(0),
             Age::ZERO,
             Selection::SnapToTop,
@@ -617,7 +736,7 @@ mod tests {
 
         agents.rebuild(
             "",
-            &Live::new(Some("luneta"), &[], &places),
+            &Live::new(Some("luneta"), &[], &places, &[]),
             Some(0),
             Age::ZERO,
             Selection::SnapToTop,
@@ -699,7 +818,7 @@ mod tests {
         agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
         agents.rebuild(
             "luneta",
-            &Live::new(Some("luneta"), &[], &places),
+            &Live::new(Some("luneta"), &[], &places, &[]),
             None,
             Age::ZERO,
             Selection::SnapToTop,
@@ -707,7 +826,7 @@ mod tests {
         assert_eq!(agents.rows.len(), 2);
         agents.rebuild(
             "misc",
-            &Live::new(Some("luneta"), &[], &places),
+            &Live::new(Some("luneta"), &[], &places, &[]),
             None,
             Age::ZERO,
             Selection::SnapToTop,
@@ -851,7 +970,7 @@ mod tests {
         let named =
             |name: &str, age: u64| Session { name: name.to_owned(), age: Age::from_secs(age) };
         let sessions = [named("old", 900), named("new", 60)];
-        let live = Live::new(Some("here"), &sessions, &places);
+        let live = Live::new(Some("here"), &sessions, &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
     }
 
@@ -897,7 +1016,7 @@ mod tests {
         let sessions = [named("foo"), named("notes")];
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = Live::new(None, &sessions, &places);
+        let live = Live::new(None, &sessions, &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         let guessed: Vec<(&str, u32, bool)> =
             agents.rows.iter().map(|row| (row.seat.session(), row.pane, row.guessed)).collect();

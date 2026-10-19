@@ -2293,7 +2293,7 @@ mod tests {
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = agents::Live::new(Some("luneta"), &[], &places);
+        let live = agents::Live::new(Some("luneta"), &[], &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
         assert_eq!(agents.rows.len(), 1);
@@ -2315,7 +2315,7 @@ mod tests {
         let body = |origin: Option<u32>, term: &str| -> Vec<String> {
             let mut agents = AgentSet::default();
             agents.ingest(Some(0), json.as_bytes(), b"");
-            let live = agents::Live::new(Some("notes"), &[], &places);
+            let live = agents::Live::new(Some("notes"), &[], &places, &[]);
             agents.rebuild(term, &live, origin, Age::ZERO, Selection::SnapToTop);
             agent_body(&agents, term, &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect()
         };
@@ -2337,7 +2337,7 @@ mod tests {
         let places = Places::of(&[("notes", &[(1, "/w/notes")])]);
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = agents::Live::new(Some("notes"), &[], &places);
+        let live = agents::Live::new(Some("notes"), &[], &places, &[]);
         agents.rebuild("", &live, Some(1), Age::ZERO, Selection::SnapToTop);
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
         let body: Vec<String> =
@@ -2383,7 +2383,7 @@ mod tests {
             ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
             ("notes", &[(7, "/home/lorenzo/Documents")]),
         ]);
-        let live = agents::Live::new(Some("notes"), &sessions.live, &places);
+        let live = agents::Live::new(Some("notes"), &sessions.live, &places, &[]);
         agents.rebuild("", &live, Some(7), Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
