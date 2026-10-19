@@ -1,10 +1,10 @@
-/// Which rows of a list the cursor can be on: every row, unless the rows say
-/// otherwise. A row that heads others can be one the cursor passes over, but
-/// a list that is not empty has a row to be on, so that the cursor is absent
-/// only where there are no rows.
-pub trait Stops: Sized {
-    fn stops(_rows: &[Self], _at: usize) -> bool {
-        true
+/// Which rows of a list the cursor passes over: a row that heads the row
+/// after it, where the rows say so, and no other. The last row heads none, so
+/// a list that is not empty has a row to be on, and the cursor is absent only
+/// where there are no rows.
+pub trait Stops {
+    fn heads(&self, _next: &Self) -> bool {
+        false
     }
 }
 
@@ -64,9 +64,12 @@ impl<T: Stops> Cursor<T> {
         self.selected = Some(at);
     }
 
-    /// Whether the cursor can be on row `index`.
+    /// Whether the cursor can be on row `index`: one that is there, and heads
+    /// no row after it.
     fn stops_at(&self, index: usize) -> bool {
-        index < self.rows.len() && T::stops(&self.rows, index)
+        self.rows
+            .get(index)
+            .is_some_and(|row| self.rows.get(index + 1).is_none_or(|next| !row.heads(next)))
     }
 
     fn stop_from(&self, from: usize) -> Option<usize> {
@@ -101,8 +104,8 @@ mod tests {
     /// A `#` row heads the rows under it, and is passed over while it heads
     /// any.
     impl Stops for &str {
-        fn stops(rows: &[Self], at: usize) -> bool {
-            !rows[at].starts_with('#') || rows.get(at + 1).is_none_or(|next| next.starts_with('#'))
+        fn heads(&self, next: &Self) -> bool {
+            self.starts_with('#') && !next.starts_with('#')
         }
     }
 

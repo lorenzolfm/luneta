@@ -233,17 +233,13 @@ impl Node {
 }
 
 impl Stops for Node {
-    /// The cursor stops on a pane's row, and on a session's that lists none of
-    /// its panes, folded or with none to list, which stands in for them. The
-    /// row of a session that lists its panes is their heading, and no place to
-    /// go to. A session lists its panes in the rows right after its own, as
-    /// `Tree::rebuild`, the one maker of the rows, puts them.
-    fn stops(rows: &[Node], at: usize) -> bool {
-        match rows.get(at) {
-            Some(Node::Pane(_)) => true,
-            Some(Node::Session(_)) => !matches!(rows.get(at + 1), Some(Node::Pane(_))),
-            None => false,
-        }
+    /// The row of a session that lists its panes is their heading, and no
+    /// place to go to. The cursor stops on a pane's row, and on a session's
+    /// that lists none of its panes, folded or with none to list, which
+    /// stands in for them. A session lists its panes in the rows right after
+    /// its own, as `Tree::rebuild`, the one maker of the rows, puts them.
+    fn heads(&self, next: &Node) -> bool {
+        matches!((self, next), (Node::Session(_), Node::Pane(_)))
     }
 }
 
