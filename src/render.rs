@@ -15,7 +15,7 @@ use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
 use crate::skills::{Search, Skill};
-use crate::tree::{Mark, Node, PaneNode, SessionNode, Summary, Tree};
+use crate::tree::{Mark, Node, Outcome, PaneNode, SessionNode, Summary, Tree};
 
 const TAG: Colour = Colour::Level0;
 const NAME: Colour = Colour::Level1;
@@ -1787,9 +1787,11 @@ fn glyph(mark: &Mark, frame: u64) -> (String, Ink) {
     match mark {
         Mark::Agent { status: Status::Idle, .. } => (agents::dot(&Status::Idle, frame), Ink::Dim),
         Mark::Agent { status, .. } => dot(status),
-        Mark::Finished { .. } | Mark::Ran { ok: Some(true), .. } => dot(&Status::Idle),
-        Mark::Ran { ok: Some(false), .. } => (FAILED.to_owned(), Ink::Error),
-        Mark::Ran { ok: None, .. } => (agents::dot(&Status::Shell, frame), Ink::Plain),
+        Mark::Finished { .. } | Mark::Ran { outcome: Outcome::Passed, .. } => dot(&Status::Idle),
+        Mark::Ran { outcome: Outcome::Failed, .. } => (FAILED.to_owned(), Ink::Error),
+        Mark::Ran { outcome: Outcome::Untold, .. } => {
+            (agents::dot(&Status::Shell, frame), Ink::Plain)
+        },
         Mark::Running { .. } => dot(&Status::Busy),
         Mark::Asking { .. } => dot(&Status::Waiting),
     }
@@ -2681,9 +2683,9 @@ mod tests {
         let age = Held::from_secs(age);
         match word {
             "finished" => Mark::Finished { age },
-            "ran" => Mark::Ran { age, ok: None },
-            "passed" => Mark::Ran { age, ok: Some(true) },
-            "failed" => Mark::Ran { age, ok: Some(false) },
+            "ran" => Mark::Ran { age, outcome: Outcome::Untold },
+            "passed" => Mark::Ran { age, outcome: Outcome::Passed },
+            "failed" => Mark::Ran { age, outcome: Outcome::Failed },
             "running" => Mark::Running { age },
             "asking" => Mark::Asking { age },
             _ => Mark::Agent { status: Status::parse(Some(word)), age },

@@ -258,12 +258,23 @@ pub enum Mark {
     /// it has been idle.
     Finished { age: Held },
     /// A command its shell finished since you were last in its pane, how
-    /// long ago, and whether it ended well, once its shell's hook says.
-    Ran { age: Held, ok: Option<bool> },
+    /// long ago, and how it ended.
+    Ran { age: Held, outcome: Outcome },
     /// A command its shell has run for a while, and for how long.
     Running { age: Held },
     /// A command that waits for you to type, and how long it has run.
     Asking { age: Held },
+}
+
+/// How a command ended, as far as its shell says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// With an exit status of 0, as its shell's hook says.
+    Passed,
+    /// With any other.
+    Failed,
+    /// Its shell has no hook, and its title says only that it ended.
+    Untold,
 }
 
 impl Mark {
@@ -1088,9 +1099,9 @@ mod tests {
                     node.mark.as_ref().map_or("-", |mark| match mark {
                         Mark::Agent { status, .. } => status.word(),
                         Mark::Finished { .. } => "finished",
-                        Mark::Ran { ok: None, .. } => "ran",
-                        Mark::Ran { ok: Some(true), .. } => "passed",
-                        Mark::Ran { ok: Some(false), .. } => "failed",
+                        Mark::Ran { outcome: Outcome::Untold, .. } => "ran",
+                        Mark::Ran { outcome: Outcome::Passed, .. } => "passed",
+                        Mark::Ran { outcome: Outcome::Failed, .. } => "failed",
                         Mark::Running { .. } => "running",
                         Mark::Asking { .. } => "asking",
                     }),

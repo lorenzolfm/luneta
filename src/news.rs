@@ -34,7 +34,7 @@ use crate::agents::{AgentRow, AgentSet, Status};
 use crate::elapsed::{Held, Moment};
 use crate::ledger::{Ledger, Record};
 use crate::shells::{Front, Said, Shells};
-use crate::tree::{self, Branch, Doing, Mark};
+use crate::tree::{self, Branch, Doing, Mark, Outcome};
 
 const VISITED: &str = "/cache/visited";
 
@@ -349,7 +349,7 @@ impl News {
 
     /// The command the shell in `pane` of `session` finished since you were
     /// last there, and how long ago.
-    pub fn ran(&self, session: &str, pane: u32) -> Option<(&str, Held)> {
+    fn ran(&self, session: &str, pane: u32) -> Option<(&str, Held)> {
         let visit = self.visits.get(session, pane);
         match self.runs.get(session, pane)? {
             Run::Ended { command, at } if visit.is_none_or(|visit| !visit.saw_end(command, *at)) => {
@@ -367,7 +367,7 @@ impl News {
     pub fn command(&self, session: &str, pane: u32, here: bool) -> Option<(Mark, &str)> {
         let Some(said) = self.said(session, pane) else {
             let (command, age) = self.ran(session, pane).filter(|_| !here)?;
-            return Some((Mark::Ran { age, ok: None }, command));
+            return Some((Mark::Ran { age, outcome: Outcome::Untold }, command));
         };
         match said {
             Said::Going { command, since, tty } => {
@@ -386,8 +386,8 @@ impl News {
                 if here || *took < LONG || visit.is_some_and(|visit| *at <= visit.at) {
                     return None;
                 }
-                let ok = Some(*status == 0);
-                Some((Mark::Ran { age: self.now.since(*at), ok }, command))
+                let outcome = if *status == 0 { Outcome::Passed } else { Outcome::Failed };
+                Some((Mark::Ran { age: self.now.since(*at), outcome }, command))
             },
             // A job stopped with `Ctrl z` neither runs nor ended.
             Said::Stopped => None,
@@ -687,8 +687,8 @@ mod tests {
         let (branches, agents) = session("~/w/s", "busy", 0, at(110));
         let age = Held::from_secs(7);
         for (said, mark) in [
-            (ended("make", at(103), 0, 3_000), Some(Mark::Ran { age, ok: Some(true) })),
-            (ended("make", at(103), 2, 3_000), Some(Mark::Ran { age, ok: Some(false) })),
+            (ended("make", at(103), 0, 3_000), Some(Mark::Ran { age, outcome: Outcome::Passed })),
+            (ended("make", at(103), 2, 3_000), Some(Mark::Ran { age, outcome: Outcome::Failed })),
             (ended("make", at(103), 0, 999), None),
             (Said::Stopped, None),
         ] {
@@ -705,7 +705,7 @@ mod tests {
 
         let mut later = branches;
         later[0].age = Age::from_secs(10);
-        let passed = Some(Mark::Ran { age, ok: Some(true) });
+        let passed = Some(Mark::Ran { age, outcome: Outcome::Passed });
         for (started, mark) in [(at(50), None), (at(100), passed)] {
             let said = ended("make", at(103), 0, 3_000);
             let shells = Shells::of(vec![("s", 1, started, said)], vec![]);
@@ -727,7 +727,8 @@ mod tests {
         news.watch(&prompt, &agents, None, untitled, at(104));
         news.watch(&prompt, &agents, None, untitled, at(106));
         let age = Held::from_secs(2);
-        assert_eq!(command_of(&news, false), Some((Mark::Ran { age, ok: None }, "make".to_owned())));
+        let ran = Mark::Ran { age, outcome: Outcome::Untold };
+        assert_eq!(command_of(&news, false), Some((ran, "make".to_owned())));
     }
 
     /// The pane you stay in takes no visit while nothing in it is new, so
