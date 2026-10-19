@@ -316,8 +316,7 @@ impl ZellijPlugin for State {
                     Event::PaneUpdate(panes) => menu.panes(panes),
                     Event::Timer(_) => menu.tick(),
                     Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                        menu.ran(exit_code, &stdout, &stderr, &context);
-                        false
+                        menu.ran(exit_code, &stdout, &stderr, &context)
                     },
                     _ => false,
                 };
@@ -445,12 +444,18 @@ impl ZellijPlugin for State {
                         tree.menu = Some(SidebarMenu::wrong(reason, &mut self.menus));
                         true
                     },
-                    Some(menu::START_VALUE | menu::CLOSING_VALUE) => {
+                    Some(
+                        menu::START_VALUE
+                        | menu::OPENING_VALUE
+                        | menu::CLOSING_VALUE
+                        | menu::NAMING_VALUE,
+                    ) => {
                         let Role::Sidebar(tree) = &mut self.role else {
                             return false;
                         };
+                        let taken = self.sessions.taken(self.matches.current_session.as_deref());
                         let answered = |menu: SidebarMenu| {
-                            menu.answered(exit_code, &stdout, &stderr, &context)
+                            menu.answered(exit_code, &stdout, &stderr, &context, &taken)
                         };
                         tree.menu = tree.menu.take().and_then(answered);
                         true
@@ -1385,11 +1390,6 @@ impl State {
     fn command(&mut self, command: Command) -> bool {
         match command {
             Command::Search => self.search_tree(String::new()),
-            Command::Next => {
-                // A key comes only to the sidebar with the focus.
-                self.go_to_next(true);
-                false
-            },
             Command::Brief(scope) => {
                 self.brief(scope);
                 true
@@ -1508,8 +1508,9 @@ impl State {
     }
 
     /// While the menu takes the client out of the session, which a key of it
-    /// killed: asks zellij whether the client is gone, for `listed` to kill
-    /// the session once it is. Says whether to draw.
+    /// killed, or to another, where a key of it opens a tab: asks zellij
+    /// whether the client is gone, or there, for `listed` to kill the session,
+    /// or open the tab, once it is. Says whether to draw.
     fn leave_session(&mut self) -> bool {
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
@@ -1521,9 +1522,10 @@ impl State {
         true
     }
 
-    /// What zellij said, as it listed the clients of the session, while the
-    /// menu takes the client out of it: the session is killed once the client
-    /// is gone. Says whether to draw.
+    /// What zellij said, as it listed the clients of a session, while the
+    /// menu takes the client out of the session or to another: the session is
+    /// killed once the client is gone, or the tab opens once it is there. Says
+    /// whether to draw.
     fn listed(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
@@ -1567,21 +1569,22 @@ impl State {
 
     /// The highlighted row, for the menu: its pane, the directory it works
     /// in, as its session says or else as its agent does, the branch checked
-    /// out there, and when that is another session, its session and its tab,
-    /// and the pane you came from, for the menu to hand the focus back to
-    /// before it goes there. The row of a session that lists none of its
-    /// panes has its session alone.
+    /// out there, when that is another session, its session and its tab, and
+    /// the pane you came from, for the menu to hand the focus back to before
+    /// it takes you out of this session. The row of a session that lists none
+    /// of its panes has its session alone.
     fn menu_row(&self) -> Option<menu::Row> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
         };
         let current = self.matches.current_session.as_deref();
+        let back = self.here;
         let (session, pane) = match tree.rows.selected_row().map(Node::place)? {
             Place::Pane(session, pane) => (session, pane),
             Place::Session(session) => {
                 let here = current == Some(session.as_str());
-                let there = (!here).then_some(There { session, tab: None, back: self.here });
-                return Some(menu::Row { pane: None, cwd: None, branch: None, there });
+                let there = (!here).then_some(There { session, tab: None });
+                return Some(menu::Row { pane: None, cwd: None, branch: None, there, back });
             },
         };
         let leaf = self
@@ -1597,8 +1600,8 @@ impl State {
         let branch = leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.clone());
         let here = current == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
-        let there = (!here).then_some(There { session, tab, back: self.here });
-        Some(menu::Row { pane: Some(pane), cwd, branch, there })
+        let there = (!here).then_some(There { session, tab });
+        Some(menu::Row { pane: Some(pane), cwd, branch, there, back })
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -2206,14 +2209,15 @@ mod tests {
         four.tab_id = Some(TabId(7));
         four.checkout = Some(Checkout { branch: "feat/menu".to_owned(), status: String::new() });
         state.rebuild_tree();
-        let there = There { session: "b".to_owned(), tab: Some(TabId(7)), back: Some(1) };
+        let there = There { session: "b".to_owned(), tab: Some(TabId(7)) };
         let row = |pane, cwd: Option<&str>, branch: Option<&str>, there| menu::Row {
             pane,
             cwd: cwd.map(str::to_owned),
             branch: branch.map(str::to_owned),
             there,
+            back: Some(1),
         };
-        let b = There { session: "b".to_owned(), tab: None, back: Some(1) };
+        let b = There { session: "b".to_owned(), tab: None };
         let menu_row = |state: &mut State, at| {
             if let Role::Sidebar(tree) = &mut state.role {
                 assert!(tree.rows.select(at));
@@ -2494,6 +2498,45 @@ mod tests {
         assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Session("b".to_owned())));
     }
 
+    /// `n p` on a pane of another session waits for zellij to open your
+    /// shell there, `n s` for the name of the session it starts, and `n t`,
+    /// once the focus has gone, for zellij to list a client of that session:
+    /// the sidebar hands the menu each answer, and the menu goes, rather than
+    /// wait for good.
+    #[test]
+    fn the_new_keys_in_the_sidebar_wait_for_their_answers() {
+        let listed = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1 terminal_2 sh";
+        for (new, value, said) in [
+            ('p', menu::OPENING_VALUE, ""),
+            ('s', menu::NAMING_VALUE, ""),
+            ('t', close::CLIENTS_VALUE, listed),
+        ] {
+            let mut state = focused_sidebar();
+            state.menu_entries = None;
+            state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+            state.rebuild_tree();
+            if let Role::Sidebar(tree) = &mut state.role {
+                assert!(tree.rows.select(3), "n {new}");
+            }
+            assert!(key(&mut state, BareKey::Char('n')), "n {new}");
+            key(&mut state, BareKey::Char(new));
+            if new == 't' {
+                focus(&mut state, false);
+                assert!(state.leave_session());
+            }
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert!(tree.menu.is_some(), "n {new}");
+            let answer = BTreeMap::from([
+                (agents::CONTEXT_KEY.to_owned(), value.to_owned()),
+                (menu::MENU_KEY.to_owned(), "1".to_owned()),
+            ]);
+            let said = said.as_bytes().to_vec();
+            state.update(Event::RunCommandResult(Some(0), said, Vec::new(), answer));
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert!(tree.menu.is_none(), "n {new}");
+        }
+    }
+
     /// `d s` on a pane of the session you are in, and `d d` on its row, once
     /// it is folded, go to another session first, and the menu outlasts the
     /// focus on the way, to kill the session once the client is gone. With no
@@ -2628,7 +2671,7 @@ mod tests {
             }
             if through_help {
                 assert!(key(&mut state, BareKey::Char('?')), "row {at}");
-                assert_eq!(shown(&state), ['c', 'd', '/', 'n', 'b'], "row {at}");
+                assert_eq!(shown(&state), ['c', 'n', 'd', '/', 'b'], "row {at}");
             }
             assert!(key(&mut state, BareKey::Char('/')), "row {at}, through help: {through_help}");
             assert_eq!(menu_open(&state), None, "row {at}, through help: {through_help}");
