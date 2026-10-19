@@ -1365,8 +1365,7 @@ fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, col
     Shelf::new(rows, notes, focused, tree.search().is_some(), menu)
 }
 
-/// Whether a click on `column` of a row folds it, where the rest of the row
-/// goes there: a session's, on its fold.
+/// Whether a click on `column` of a row folds it: a session's, on its fold.
 pub fn folds_at(node: &Node, column: usize) -> bool {
     matches!(node, Node::Session(_)) && column < FOLD
 }
@@ -2511,7 +2510,7 @@ mod tests {
 
     fn sidebar_tree(nodes: Vec<Node>, selected: usize) -> Tree {
         let mut tree = Tree::default();
-        tree.rows = Cursor::seeded(nodes, selected);
+        tree.rows.replace_at(nodes, Some(selected));
         tree
     }
 
@@ -2800,7 +2799,7 @@ mod tests {
     /// another row.
     #[test]
     fn the_wheel_moves_the_view_until_the_cursor_moves() {
-        let mut tree = workday_tree(0);
+        let mut tree = workday_tree(1);
         let agents = AgentSet::default();
         let top =
             |tree: &Tree, focused: bool| sidebar_row_at(tree, &agents, focused, 6, 32, HEADER);
@@ -2812,7 +2811,7 @@ mod tests {
         assert!(!scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
         assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, 99));
         assert_eq!(top(&tree, false), Some(4));
-        assert_eq!(tree.rows.selected(), Some(0));
+        assert_eq!(tree.rows.selected(), Some(1));
         assert!(!sidebar_picture(&tree, &[], false, 6, 32)[HEADER].contains("bipa"));
 
         // The focus lights the cursor instead, and the view stays.
@@ -2822,7 +2821,7 @@ mod tests {
 
         assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
         assert_eq!(top(&tree, true), Some(3));
-        tree.rows.select(1);
+        tree.rows.select(2);
         assert_eq!(top(&tree, true), Some(0));
     }
 

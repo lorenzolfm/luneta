@@ -162,15 +162,18 @@ A pane outside a repository, or on a detached `HEAD`, has no branch, and its row
 stays one line. `git` is asked again every five seconds, so a change or a
 checkout shows a few seconds later.
 
-Click a row, or focus the sidebar and press `Enter`, to go there — across tabs
-and sessions alike. One click does it, whether the sidebar has the focus or
-not. On a session's row, the `▾` or `▸` folds or unfolds the session, and the
-name switches to it; the name of the session you are in takes you back to your
-pane. A folded session keeps its count and shows the dot of the agent that
-wants you most. A fold holds in the sidebar of every session, and after zellij
-restarts: the sidebars keep their folds in the cache zellij gives the plugin,
-one for each location it loads from, so every session's `load_plugins` names
-the same one.
+Click a pane's row, or focus the sidebar and press `Enter`, to go there — across
+tabs and sessions alike. One click does it, whether the sidebar has the focus or
+not. A session's row heads its panes, and is no place to go: the highlight
+passes over it, from the last pane of one session to the first of the next, and
+a click on its name does nothing. On a session's row, the `▾` or `▸` folds or
+unfolds the session. A folded session stands in for its panes: the highlight
+stops on its row, and it switches to the session, on the pane it last had the
+focus on; the session you are in takes you back to your pane. It keeps its
+count and shows the dot of the agent that wants you most. A fold holds in the
+sidebar of every session, and after zellij restarts: the sidebars keep their
+folds in the cache zellij gives the plugin, one for each location it loads
+from, so every session's `load_plugins` names the same one.
 
 The wheel scrolls the list and leaves the highlight where it is, until you go
 somewhere else or press a key. A click on a row it scrolled to lights the row
@@ -182,7 +185,8 @@ Press `/` to search, as in less and vim. The tree narrows to the rows that
 match what you type, fuzzily, as the picker does: a session by its name, a pane
 by its row, its branch, its tab or its directory. The rows left keep their order, and the
 highlight lands on the best match, so `Ctrl b` `/` *a few characters* `Enter`
-takes you anywhere. A folded session opens to show the panes found in it.
+takes you anywhere. A folded session opens to show the panes found in it, and
+a session found by its name shows all of its panes.
 
 One key goes to the next pane listed, and from the last back to the first, so
 pressing it again and again takes you down the sidebar, across sessions. A
@@ -192,8 +196,8 @@ The sidebar and the picker keep your place as you go from one to the other.
 A key that opens the picker from the sidebar opens it on the row you had
 highlighted: Sessions on its session, Agents on the agent in its pane, or else
 the first agent in its session. `Ctrl b` from the picker closes it and
-highlights, in the sidebar, the session or the agent the picker had, unfolding
-its session.
+highlights, in the sidebar, the agent the picker had, unfolding its session, or
+the first pane of the session it had, or that session's row while it is folded.
 
 One key hides the sidebar, the panes beside it taking its columns in every tab,
 and brings it back. Either goes for every session, within a second, and for a
@@ -264,8 +268,8 @@ the menu from the first; `Esc` closes it.
 
 Every menu has luneta's own Delete group too, under `d`, with nothing to
 configure: `d d` deletes the highlighted row, and `d s` kills its session. On a
-pane's row, `d d` closes the pane; on a session's row, it kills the session. The
-floating menu does the same for the pane you are in, except in a tab with a
+pane's row, `d d` closes the pane; on a folded session's row, it kills the
+session. The floating menu does the same for the pane you are in, except in a tab with a
 floating pane: the menu takes the floating focus from the pane you were in as
 it opens, and zellij then says the pane under it has the focus, so luneta cannot
 tell which you came from. There `d d` closes neither and says so, and goes on
@@ -675,8 +679,8 @@ In the sidebar, once it has the focus:
 
 | key | does |
 |---|---|
-| `↓` `↑` / `j` `k` | move the highlight |
-| `Enter` | go to the highlighted pane, or switch to the highlighted session |
+| `↓` `↑` / `j` `k` | move the highlight, from pane to pane |
+| `Enter` | go to the highlighted pane, or switch to the highlighted folded session |
 | `←` `→` / `h` `l` | fold / unfold the session |
 | `Space` | fold or unfold |
 | `n` | go to the next agent that wants you |
@@ -690,7 +694,7 @@ With the mouse, focused or not:
 
 | mouse | does |
 |---|---|
-| click a row | go there |
+| click a pane, or a folded session | go there |
 | click `▾` / `▸` | fold / unfold the session |
 | wheel | scroll the list |
 

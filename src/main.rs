@@ -1436,7 +1436,8 @@ impl State {
     /// in, as its session says or else as its agent does, the branch checked
     /// out there, and when that is another session, its session and its tab,
     /// and the pane you came from, for the menu to hand the focus back to
-    /// before it goes there. A session's row has its session alone.
+    /// before it goes there. The row of a session that lists none of its
+    /// panes has its session alone.
     fn menu_row(&self) -> Option<menu::Row> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
@@ -1571,9 +1572,10 @@ impl State {
     }
 
     /// A click on a row: on a session's fold, it folds or unfolds the
-    /// session, and anywhere else it goes there, which for the session you
-    /// are in is the pane you came from. A term unfolds what it finds, so a
-    /// fold would show nothing, and the whole row goes there.
+    /// session, and anywhere else it goes there, on a row the cursor stops on.
+    /// The row of a session that lists its panes heads them, and a click on
+    /// its name does nothing. A term unfolds what it finds, so a fold would
+    /// show nothing, and a click on it is a click on its row.
     fn press(&mut self, (place, fold): (Place, bool)) -> bool {
         let (rows, cols) = self.size;
         let focused = self.sidebar_focused();
@@ -1585,15 +1587,16 @@ impl State {
         };
         render::select_sidebar_row(tree, &self.agents, focused, rows, cols, index);
         if fold && !tree.narrowed() {
-            return self.fold(None);
+            let changed = tree.toggle_row(index);
+            if changed {
+                self.rebuild_tree();
+            }
+            return changed;
         }
-        let current = self.matches.current_session.as_deref();
-        if matches!(&place, Place::Session(session) if Some(session.as_str()) == current) {
-            self.close_search();
-            self.go_back();
-        } else {
-            self.go_to_selected();
+        if !tree.rows.stops_at(index) {
+            return false;
         }
+        self.go_to_selected();
         true
     }
 
@@ -1630,9 +1633,10 @@ impl State {
     }
 
     /// Going anywhere closes the search, so that the sidebar you come back to
-    /// shows every row. The session you are in, found by a term, is the pane
-    /// you came from; with nothing typed, `Enter` on its row folds it. A key
-    /// or a click goes here, and both come only to the sidebar with the focus.
+    /// shows every row. A session's row, which stands in for the panes it does
+    /// not list, goes to the pane the session last had the focus on: for the
+    /// session you are in, the pane you came from. A key or a click goes here,
+    /// and both come only to the sidebar with the focus.
     fn go_to_selected(&mut self) {
         let Role::Sidebar(tree) = &self.role else {
             return;
@@ -1640,18 +1644,11 @@ impl State {
         let Some(place) = tree.rows.selected_row().map(Node::place) else {
             return;
         };
-        let found = tree.narrowed();
         self.close_search();
         let current = self.matches.current_session.as_deref();
         match place {
             Place::Pane(session, pane) => self.go_to(&session, pane, true),
-            Place::Session(session) if current == Some(session.as_str()) => {
-                if found {
-                    self.go_back();
-                } else {
-                    self.fold(None);
-                }
-            },
+            Place::Session(session) if current == Some(session.as_str()) => self.go_back(),
             Place::Session(session) => self.switch_to(&session, None, true),
         }
     }
@@ -1951,30 +1948,48 @@ mod tests {
         Name,
     }
 
-    /// With nothing typed, a click on a session's `▾` folds it, and so does
-    /// `Enter` on your own. A click on its name goes there, which for your
-    /// own is back to your pane. Found by a term, every row goes there.
+    /// A click on a session's `▾` or `▸` folds or unfolds it, wherever the
+    /// cursor is. A session that lists its panes heads them, and a click on
+    /// its name does nothing. Folded, its row stands in for them: a click on
+    /// its name goes there, and so does `Enter`, which for your own is back to
+    /// your pane. Found by a term, a session lists its panes, and its fold
+    /// does nothing either. Going anywhere closes the search box, open with
+    /// nothing typed where no term is.
     #[test]
-    fn a_session_row_folds_on_its_fold_unless_a_term_found_it() {
-        for (typed, row, by, shut) in [
-            ("", 0, By::Enter, &["a"][..]),
-            ("", 0, By::Fold, &["a"]),
-            ("", 0, By::Name, &[]),
-            ("", 2, By::Fold, &["b"]),
-            ("", 2, By::Name, &[]),
-            ("a", 0, By::Enter, &[]),
-            ("a", 0, By::Fold, &[]),
+    fn a_session_row_folds_on_its_fold_and_goes_there_only_once_folded() {
+        let row_of = |state: &State, name: &str| {
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            let heads = |node: &Node| matches!(node, Node::Session(node) if node.name == name);
+            tree.rows.iter().position(heads).expect("the session's row")
+        };
+        for (typed, before, name, by, after, went) in [
+            ("", &[][..], "a", By::Fold, &["a"][..], false),
+            ("", &[], "a", By::Name, &[], false),
+            ("", &[], "b", By::Fold, &["b"], false),
+            ("", &[], "b", By::Name, &[], false),
+            ("", &["b"], "b", By::Fold, &[], false),
+            ("", &["b"], "b", By::Name, &["b"], true),
+            ("", &["a"], "a", By::Enter, &["a"], true),
+            ("a", &[], "a", By::Fold, &[], false),
+            ("a", &[], "a", By::Name, &[], false),
         ] {
             let mut state = focused_sidebar();
+            for shut in before {
+                let at = row_of(&state, shut);
+                if let Role::Sidebar(tree) = &mut state.role {
+                    tree.toggle_row(at);
+                }
+            }
             state.search_tree(typed.to_owned());
+            let case = format!("{typed:?}, folded {before:?}, {name} by {by:?}");
+            let row = row_of(&state, name);
             // The header and the blank line under it take the first two lines.
             let line = (row + render::HEADER) as isize;
             match by {
                 By::Enter => {
-                    if let Role::Sidebar(tree) = &mut state.role {
-                        tree.rows.select(row);
-                    }
-                    state.go_to_selected();
+                    let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+                    assert_eq!(tree.rows.selected(), Some(row), "{case}");
+                    key(&mut state, BareKey::Enter);
                 },
                 By::Fold => {
                     state.handle_mouse(Mouse::LeftClick(line, 1));
@@ -1983,18 +1998,17 @@ mod tests {
                     state.handle_mouse(Mouse::LeftClick(line, 5));
                 },
             }
-            assert_eq!(folded(&state), shut, "{typed:?}, row {row}, {by:?}");
-            if !typed.is_empty() {
-                let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
-                assert_eq!(tree.search(), None, "{typed:?}, row {row}, {by:?}");
-            }
+            assert_eq!(folded(&state), after, "{case}");
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert_eq!(tree.search().is_none(), went, "{case}");
         }
     }
 
     /// A pane's row hands the menu its pane: one of your own session starts
     /// its agent here, one of another session there, in the pane's tab. The
     /// directory is the pane's, as its session says, and the branch the one
-    /// checked out there. A session's row has its session alone, to delete.
+    /// checked out there. A folded session's row has its session alone, to
+    /// delete.
     #[test]
     fn the_menu_a_row_opens_starts_its_agent_beside_that_pane() {
         let mut state = focused_sidebar();
@@ -2012,17 +2026,22 @@ mod tests {
             there,
         };
         let b = There { session: "b".to_owned(), tab: None, back: Some(1) };
-        for (at, expected) in [
-            (0, Some(row(None, None, None, None))),
-            (1, Some(row(Some(1), None, None, None))),
-            (2, Some(row(None, None, None, Some(b)))),
-            (3, Some(row(Some(4), Some("/w/b"), Some("feat/menu"), Some(there)))),
-        ] {
+        let menu_row = |state: &mut State, at| {
             if let Role::Sidebar(tree) = &mut state.role {
                 tree.rows.select(at);
             }
-            assert_eq!(state.menu_row(), expected, "row {at}");
+            state.menu_row()
+        };
+        assert_eq!(menu_row(&mut state, 1), Some(row(Some(1), None, None, None)));
+        let four = row(Some(4), Some("/w/b"), Some("feat/menu"), Some(there));
+        assert_eq!(menu_row(&mut state, 3), Some(four));
+        if let Role::Sidebar(tree) = &mut state.role {
+            tree.toggle_row(0);
+            tree.toggle_row(2);
         }
+        state.rebuild_tree();
+        assert_eq!(menu_row(&mut state, 0), Some(row(None, None, None, None)));
+        assert_eq!(menu_row(&mut state, 1), Some(row(None, None, None, Some(b))));
     }
 
     /// The groups the menu at the bottom of the sidebar has open, while it
@@ -2042,8 +2061,7 @@ mod tests {
     /// A key of the menu opens it at the bottom of the sidebar for the row
     /// the cursor is on, and the menu takes every key until it closes. A key
     /// the menu has not is the sidebar's, and so is a key the sidebar has,
-    /// which `m` opens the menu for. A session's row opens it too, for the
-    /// session.
+    /// which `m` opens the menu for.
     #[test]
     fn a_key_of_the_menu_opens_it_in_the_sidebar_and_takes_every_key() {
         let mut state = focused_sidebar();
@@ -2073,8 +2091,9 @@ mod tests {
         assert!(key(&mut state, BareKey::Esc));
         assert_eq!(menu_open(&state), None);
 
+        // Up from pane 4, over the row of `b`, to pane 1.
         assert!(key(&mut state, BareKey::Char('k')));
-        assert_eq!(selected(&state), Some(2));
+        assert_eq!(selected(&state), Some(1));
         assert_eq!(menu_open(&state), None);
         assert!(key(&mut state, BareKey::Char('j')));
         assert!(key(&mut state, BareKey::Char('m')));
@@ -2083,7 +2102,7 @@ mod tests {
 
     /// `d d` closes the highlighted pane, with no menu of yours: one of
     /// another session by a command, which the menu waits on. Once the pane
-    /// is gone, the cursor is on the row before it, and not back at the top.
+    /// is gone, the cursor is on the pane before it, and not back at the top.
     #[test]
     fn d_d_in_the_sidebar_closes_the_highlighted_pane() {
         let mut state = focused_sidebar();
@@ -2104,17 +2123,17 @@ mod tests {
         state.branches[1].panes.clear();
         state.rebuild_tree();
         let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
-        assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Session("b".to_owned())));
+        assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Pane("a".to_owned(), 1)));
     }
 
-    /// `d s` on a pane of the session you are in, and `d d` on its row, go to
-    /// another session first, and the menu outlasts the focus on the way, to
-    /// kill the session once the client is gone. With no other session, it
-    /// says so.
+    /// `d s` on a pane of the session you are in, and `d d` on its row, once
+    /// it is folded, go to another session first, and the menu outlasts the
+    /// focus on the way, to kill the session once the client is gone. With no
+    /// other session, it says so.
     #[test]
     fn deleting_the_session_you_are_in_goes_to_another_first() {
-        for (others, row, then) in [(false, 1, 's'), (true, 1, 's'), (false, 0, 'd'), (true, 0, 'd')]
-        {
+        let cases = [(false, false, 's'), (true, false, 's'), (false, true, 'd'), (true, true, 'd')];
+        for (others, folded, then) in cases {
             let mut state = focused_sidebar();
             state.agents.ingest(Some(0), b"[]", b"");
             if others {
@@ -2122,9 +2141,14 @@ mod tests {
                     vec![Session { name: "b".to_owned(), age: Age::from_secs(1) }];
             }
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(row);
+                if folded {
+                    tree.toggle_row(0);
+                } else {
+                    tree.rows.select(1);
+                }
             }
-            let case = format!("others: {others}, row {row}, d {then}");
+            state.rebuild_tree();
+            let case = format!("others: {others}, folded: {folded}, d {then}");
             assert!(key(&mut state, BareKey::Char('d')), "{case}");
             assert!(key(&mut state, BareKey::Char(then)), "{case}");
             if others {
@@ -2222,11 +2246,14 @@ mod tests {
                 _ => Vec::new(),
             }
         };
-        // Row 0 is the session `a`, and row 3 pane 4 of `b`.
-        for (at, through_help) in [(0, false), (0, true), (3, true)] {
+        // Row 0 is the session `a`, folded, and row 2 pane 4 of `b`.
+        for (at, through_help) in [(0, false), (0, true), (2, true)] {
             let mut state = focused_sidebar();
             state.menu_entries = Some(r#"c "Claude" { t "/tigerstyle"; }"#.to_owned());
             state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.toggle_row(0);
+            }
             state.rebuild_tree();
             if let Role::Sidebar(tree) = &mut state.role {
                 tree.rows.select(at);
