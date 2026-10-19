@@ -364,9 +364,11 @@ you ask for one. With no agent to brief you on, or transcripts that could not
 be read, the sidebar says so where the keys were.
 
 For each agent, the model is told its session, its row's name, its status and
-for how long, and its branch, as the sidebar knows them, and from the last
-256 KiB of its transcript: the title Claude Code gave it, what you last asked
-of it, and its last few steps, what it said and what it ran. It is asked to
+for how long, and its branch, as the sidebar knows them, and from the end of
+its transcript: the title Claude Code gave it, what you last asked of it, and
+its last few steps, what it said and what it ran. A brief reads 512 KiB of
+those records at most, shared among the agents it covers: one of many agents
+may tell fewer steps of each. It is asked to
 use those alone. The transcript is the one Claude Code keeps in
 `~/.claude/projects`, or under `CLAUDE_CONFIG_DIR`, by the session id
 claude-ps gives; the model is told when it was not found there. Two agents a

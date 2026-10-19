@@ -23,9 +23,17 @@ pub const NUMBER_KEY: &str = "luneta_brief";
 /// The model that writes the brief: a fast one, for a brief in seconds.
 const MODEL: &str = "haiku";
 
-/// How much of the end of a transcript to read. A transcript runs to
-/// megabytes, and one tool's output can take a good part of its end.
-const TAIL_BYTES: usize = 256 * 1024;
+/// How much of the end of a transcript to look through. A transcript runs to
+/// megabytes, and most of its end is what Claude Code asked of the API and
+/// what a tool answered.
+const WINDOW_BYTES: usize = 2 * 1024 * 1024;
+
+/// The most the ends of the transcripts a brief covers can take together,
+/// each an equal share. zellij hands them to the plugin as a JSON array of
+/// numbers, some four bytes to a byte, which the plugin reads into a string
+/// that doubles as it grows, in a memory zellij stops the plugin at past
+/// 16 MiB.
+const TAILS_BYTES: usize = 512 * 1024;
 
 /// The most agents a brief tells of.
 const MAX_NOTES: usize = 32;
@@ -44,19 +52,24 @@ const NOTES_BYTES: usize = 100 * 1024;
 /// out.
 const LEFT_OUT_BYTES: usize = 4 * 1024;
 
-/// Prints, for each transcript id after the first argument, the id and the
-/// last bytes of its transcript, as many as the first argument says, each
-/// ending in a NUL. A transcript is in a directory named for where its session
-/// started, which the id alone finds. One that is not found prints nothing,
-/// not even its id.
-const TAILS: &str = r#"bytes=$1
-shift
+/// Prints, for each transcript id after the first two arguments, the id and
+/// the last bytes of its records of the kinds `digest` reads, as many as the
+/// second argument says, among as many last bytes of the transcript as the
+/// first says, each ending in a NUL. A transcript is in a directory named for
+/// where its session started, which the id alone finds. One that is not found
+/// prints nothing, not even its id. `grep` reads in the C locale, where an end
+/// that starts partway into a character is still text.
+const TAILS: &str = r#"window=$1
+bytes=$2
+shift 2
 projects=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
 for id do
     for f in "$projects"/*/"$id".jsonl; do
         if [ -f "$f" ]; then
             printf '%s\0' "$id"
-            tail -c "$bytes" "$f"
+            tail -c "$window" "$f" |
+                LC_ALL=C grep -E '"type":"(ai-title|last-prompt|user|assistant)"' |
+                tail -c "$bytes"
             printf '\0'
         fi
         break
@@ -231,13 +244,20 @@ impl Brief {
     }
 
     /// The command that prints the end of each transcript the brief has room
-    /// for.
+    /// for, each its share of `TAILS_BYTES`.
     pub fn tails(&self) -> Vec<String> {
+        let ids: Vec<&str> = self
+            .notes
+            .iter()
+            .take(MAX_NOTES)
+            .filter_map(|note| note.transcript.as_ref().map(SessionId::as_str))
+            .collect();
+        let share = TAILS_BYTES / ids.len().max(1);
         let mut command: Vec<String> =
             ["sh", "-c", TAILS, "sh"].iter().map(|arg| (*arg).to_owned()).collect();
-        command.push(TAIL_BYTES.to_string());
-        let ids = self.notes.iter().take(MAX_NOTES).filter_map(|note| note.transcript.as_ref());
-        command.extend(ids.map(|id| id.as_str().to_owned()));
+        command.push(WINDOW_BYTES.to_string());
+        command.push(share.to_string());
+        command.extend(ids.into_iter().map(str::to_owned));
         command
     }
 
@@ -667,6 +687,65 @@ Works in /w/b
 Its transcript is unknown: claude-ps names none for it.
 "
         );
+    }
+
+    /// A brief reads no more than `TAILS_BYTES` of the transcripts it covers
+    /// together, however many agents it covers: zellij hands what it read to
+    /// the plugin in a memory it stops at 16 MiB. What it reads is of the
+    /// records the notes tell of, so that what Claude Code asked of the API,
+    /// which takes most of the end of a transcript, leaves room for what each
+    /// agent did last.
+    #[test]
+    fn a_brief_reads_a_share_of_each_transcript_of_what_the_notes_tell() {
+        use serde_json::json;
+
+        let root = std::env::temp_dir().join(format!("luneta-shares-{}", std::process::id()));
+        let project = root.join("projects").join("-w");
+        std::fs::create_dir_all(&project).expect("a directory");
+        let asked = json!({"type": "api-request", "params": {"system": "x".repeat(64 * 1024)}});
+        let ids: Vec<String> =
+            (0..MAX_NOTES).map(|n| format!("{n:08x}-0000-4000-8000-000000000000")).collect();
+        for (n, id) in ids.iter().enumerate() {
+            let said = |step: usize| {
+                let text = format!("agent {n}, step {step}: {}", "y".repeat(1024));
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+            };
+            let mut records: Vec<String> = (0..64).map(|step| said(step).to_string()).collect();
+            records.push(asked.to_string());
+            let transcript = records.join("\n") + "\n";
+            std::fs::write(project.join(format!("{id}.jsonl")), transcript).expect("a file");
+        }
+
+        let note = |(n, id): (usize, &String)| Note {
+            session: "a".to_owned(),
+            pane: n as u32,
+            name: format!("agent {n}"),
+            status: "busy".to_owned(),
+            held: "1m".to_owned(),
+            branch: None,
+            cwd: None,
+            transcript: Some(SessionId::parse(id).expect("a UUID")),
+        };
+        let notes = ids.iter().enumerate().map(note).collect();
+        let brief = Brief::new(1, Over::Sessions(vec!["a".to_owned()]), notes).expect("a brief");
+        let tails = brief.tails();
+        let output = std::process::Command::new(&tails[0])
+            .args(&tails[1..])
+            .env("CLAUDE_CONFIG_DIR", &root)
+            .output()
+            .expect("sh runs");
+        std::fs::remove_dir_all(&root).expect("the directories go");
+
+        assert!(output.status.success());
+        // Each end comes with its id and two NULs.
+        let framing = MAX_NOTES * (ids[0].len() + 2);
+        assert!(output.stdout.len() <= TAILS_BYTES + framing, "{}", output.stdout.len());
+        let ends = super::tails(&output.stdout);
+        for (n, id) in ids.iter().enumerate() {
+            let digest = digest(&ends[id.as_str()], Over::Sessions(Vec::new()).steps());
+            let last = digest.steps.last().map(String::as_str).unwrap_or_default();
+            assert!(last.starts_with(&format!("said: agent {n}, step 63: ")), "{last}");
+        }
     }
 
     /// A brief tells of as many agents as it has room for, in the order the
