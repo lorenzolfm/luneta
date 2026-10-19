@@ -10,10 +10,11 @@ use crate::icons::Icons;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
-use crate::menu::{Entry, Keys, Legend, Menu, Shown, SidebarMenu};
+use crate::menu::{self, Entry, Keys, Legend, Menu, Shown, SidebarMenu};
 use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
+use crate::skills::{Search, Skill};
 use crate::tree::{Mark, Node, PaneNode, SessionNode, Summary, Tree};
 
 const TAG: Colour = Colour::Level0;
@@ -1006,6 +1007,16 @@ const MIN_ASKING: usize = 35;
 /// How wide the menu draws what is wrong with it.
 const MENU_NOTICE: usize = 48;
 
+/// How wide the menu draws the search box over the skills: room for a
+/// skill's name and the start of what it does.
+const SEARCH_WIDTH: usize = 64;
+
+/// The most skills the search box shows at once. The list scrolls under it.
+const SEARCH_ROWS: usize = 8;
+
+/// What the rule over the search box names it.
+const SEARCH_TITLE: &str = "Skills";
+
 /// What a menu draws: the title its rule names, whether the rule says on its
 /// right where an agent starts, the lines under the rule, and the keys under
 /// them.
@@ -1016,14 +1027,22 @@ struct MenuParts {
     help: Painted,
 }
 
-/// The parts of a menu `inner` wide: the keys of the group open and what each
-/// does, what a delete key asks before it goes ahead, where you are going on
-/// your way out of the session, or what is wrong.
-fn menu_parts(shown: Shown, inner: usize) -> MenuParts {
+/// The parts of a menu `inner` wide, with `room` lines for what it shows:
+/// the keys of the group open and what each does, the search box over the
+/// skills, what a delete key asks before it goes ahead, where you are going on
+/// your way out of the session, or what is wrong. Only the search box goes by
+/// the room, to keep the skill the cursor is on in it.
+fn menu_parts(shown: Shown, inner: usize, room: usize) -> MenuParts {
     let lines = |text: &str, line: fn(&str, usize) -> Painted| -> Vec<Painted> {
         wrap(text, inner).iter().map(|text| line(text, inner)).collect()
     };
     match shown {
+        Shown::Keys(keys) if let Some(search) = keys.search() => MenuParts {
+            title: menu_title(keys),
+            right: true,
+            body: search_lines(search, inner, room),
+            help: search_box_help(inner),
+        },
         Shown::Keys(keys) => MenuParts {
             title: menu_title(keys),
             right: true,
@@ -1066,7 +1085,7 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
         return;
     };
     let inner = rect.inner_width();
-    let MenuParts { title, right, body, help } = menu_parts(shown, inner);
+    let MenuParts { title, right, body, help } = menu_parts(shown, inner, room.saturating_sub(1));
     let right = if right { menu_where(menu.cwd()) } else { String::new() };
     let mut lines: Vec<Painted> = body;
     lines.truncate(room.saturating_sub(1));
@@ -1076,24 +1095,32 @@ pub fn render_menu(menu: &Menu, rows: usize, cols: usize) {
 }
 
 /// How big the menu draws: tall enough for what it shows, and wide enough for
-/// the entries of the group open and its rule, whatever a delete key asks. No
-/// size once it asked zellij to close it.
+/// the entries of the group open and its rule, whatever a delete key asks, or
+/// for the search box. No size once it asked zellij to close it.
 pub fn menu_size(menu: &Menu) -> Option<(usize, usize)> {
     let shown = menu.shown()?;
     let width = match shown {
         Shown::Keys(keys) | Shown::Asking(keys, _) => {
             let widest = keys.entries().iter().map(menu_entry_width).max().unwrap_or(0);
             let rule = menu_title(keys).width() + menu_where(menu.cwd()).width() + MENU_RULE;
-            let least = if matches!(shown, Shown::Asking(..)) { MIN_ASKING } else { MIN_MENU };
+            let least = match shown {
+                Shown::Keys(keys) if keys.search().is_some() => SEARCH_WIDTH,
+                Shown::Asking(..) => MIN_ASKING,
+                Shown::Keys(_) | Shown::Leaving(_) | Shown::Wrong(_) => MIN_MENU,
+            };
             (widest + PAD * 2).max(rule).max(least)
         },
         Shown::Leaving(_) | Shown::Wrong(_) => MENU_NOTICE,
     };
-    let body = menu_parts(shown, width - PAD * 2).body.len();
+    let body = menu_parts(shown, width - PAD * 2, usize::MAX).body.len();
     Some((width, body + MENU_CHROME))
 }
 
+/// What the rule over the menu names: the groups opened, or the search box.
 fn menu_title(keys: &Keys) -> String {
+    if keys.search().is_some() {
+        return SEARCH_TITLE.to_owned();
+    }
     let names = keys.names();
     if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
 }
@@ -1111,6 +1138,7 @@ fn menu_entry_width(entry: &Entry) -> usize {
         Entry::New(new) => new.does().width(),
         Entry::Close { scope, .. } => scope.does().width(),
         Entry::Command(command) => command.does().width(),
+        Entry::Search => menu::SEARCH_DOES.width(),
     };
     entry.key().to_string().width() + GAP + does
 }
@@ -1130,8 +1158,71 @@ fn menu_line(entry: &Entry, inner: usize) -> Painted {
         Entry::New(new) => line.push(&truncate(new.does(), room), NAME),
         Entry::Close { scope, .. } => line.push(&truncate(scope.does(), room), NAME),
         Entry::Command(command) => line.push(&truncate(command.does(), room), NAME),
+        Entry::Search => line.push(&truncate(menu::SEARCH_DOES, room), NAME),
     }
     line.finish(inner)
+}
+
+/// The search box over the skills, in at most `room` lines `inner` wide:
+/// what is typed, and under it the skills that match, best first, as many as
+/// `SEARCH_ROWS` and the room show around the one the cursor is on, or a line
+/// that says why there are none. It keeps the lines the skills found fill,
+/// however many of them match, so the menu keeps its size as you type.
+fn search_lines(search: &Search, inner: usize, room: usize) -> Vec<Painted> {
+    let Some(list) = room.checked_sub(1) else {
+        return Vec::new();
+    };
+    let found = match search.skills() {
+        Fetch::Ready(skills) => skills.len(),
+        Fetch::Waiting | Fetch::Failed(_) => 0,
+    };
+    let list = found.clamp(1, SEARCH_ROWS).min(list);
+    let mut lines = Vec::with_capacity(1 + list);
+    lines.push(search_line(search.term(), inner));
+    let note = match search.skills() {
+        Fetch::Waiting => Some(Note::dim("finding skills…")),
+        Fetch::Failed(reason) => Some(Note::error(reason.as_str())),
+        Fetch::Ready(skills) if skills.is_empty() => Some(Note::dim("no skills here")),
+        Fetch::Ready(_) if search.count() == 0 => Some(Note::dim("no match")),
+        Fetch::Ready(_) => None,
+    };
+    if let Some(note) = note {
+        lines.extend((list > 0).then(|| note_within(inner, &note)));
+    } else {
+        let selected = search.selected().unwrap_or(0);
+        let (start, end) = viewport(selected, search.count(), list);
+        let shown = search.found().enumerate().skip(start).take(end - start);
+        lines.extend(
+            shown.map(|(at, (skill, hits))| skill_line(skill, hits, at == selected, inner)),
+        );
+    }
+    lines.resize_with(1 + list, || Painted::new(" ".repeat(inner + 2)));
+    lines
+}
+
+/// A skill in the search box: its name as a prompt runs it, with the
+/// characters the term lit in the accent, and what it does, dimmed, cut to
+/// the room its name leaves.
+fn skill_line(skill: &Skill, hits: &[usize], selected: bool, inner: usize) -> Painted {
+    // The `/` before the name is none of the characters the term lit.
+    let hits: Vec<usize> = hits.iter().map(|hit| hit + 1).collect();
+    let (name, hits) = lit(&format!("/{}", skill.name), inner, &hits);
+    let mut line = Line::new();
+    line.push_hits(&name, NAME, Ink::Bold(ACCENT), &hits);
+    let room = inner.saturating_sub(line.columns() + GAP);
+    if room > 0 && !skill.description.is_empty() {
+        line.gap(GAP);
+        line.push(&truncate(&skill.description, room), Ink::Dim);
+    }
+    let line = line.finish(inner);
+    if selected { line.selected() } else { line }
+}
+
+fn search_box_help(width: usize) -> Painted {
+    keys_text(
+        width,
+        &[("<↓↑>", "Move", "Move"), ("<ENTER>", "Start", "Start"), ("<ESC>", "Back", "Back")],
+    )
 }
 
 fn menu_note(text: &str, inner: usize) -> Painted {
@@ -1188,7 +1279,7 @@ impl<'a> Bottom<'a> {
         let wants = match self {
             Bottom::Menu(menu) => sidebar_menu_height(menu, cols),
             Bottom::Legend(legend) => {
-                menu_parts(legend.shown(), cols.saturating_sub(2)).body.len() + 1
+                menu_parts(legend.shown(), cols.saturating_sub(2), usize::MAX).body.len() + 1
             },
             Bottom::Search { keys, .. } => {
                 return usize::from(rows > 0) + usize::from(*keys && rows > 2);
@@ -1220,7 +1311,7 @@ fn sidebar_menu_height(menu: &SidebarMenu, cols: usize) -> usize {
     let Some(shown) = menu.shown() else {
         return 0;
     };
-    menu_parts(shown, cols.saturating_sub(2)).body.len() + 2
+    menu_parts(shown, cols.saturating_sub(2), usize::MAX).body.len() + 2
 }
 
 /// The menu at the bottom of the sidebar, in `lines` lines: the lines from
@@ -1242,7 +1333,9 @@ fn sidebar_menu_lines(
 /// in `cwd`, as the border of the floating menu does, over what the menu
 /// shows. Short of room, what it shows goes first, then the rule.
 fn ruled(shown: Shown, cwd: Option<&str>, room: usize, cols: usize) -> (Vec<Painted>, Painted) {
-    let MenuParts { title, right, body, help } = menu_parts(shown, cols.saturating_sub(2));
+    let body_room = room.saturating_sub(1);
+    let MenuParts { title, right, body, help } =
+        menu_parts(shown, cols.saturating_sub(2), body_room);
     let mut drawn: Vec<Painted> = Vec::with_capacity(room);
     if room > 0 {
         let right = if right { menu_where(cwd) } else { String::new() };
@@ -3258,8 +3351,13 @@ mod tests {
 
         let root = sidebar_menu(MENU_KDL, None).expect("a menu");
         assert_eq!(
-            sidebar_menu_picture(&root, 3, 30),
-            ["─ luneta ────── misc/unnamed ─", " c  Claude ▸                  ", " <ESC> - Close"]
+            sidebar_menu_picture(&root, 4, 30),
+            [
+                "─ luneta ────── misc/unnamed ─",
+                " /  Search skills             ",
+                " c  Claude ▸                  ",
+                " <ESC> - Close",
+            ]
         );
 
         let cwd = Some("/w/misc/unnamed".to_owned());
@@ -3295,6 +3393,119 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
+    }
+
+    /// The sidebar's menu for `/w/misc/unnamed`, its search box open with
+    /// `typed` in it, once the finder found `skills`, each its name and what
+    /// it does.
+    fn searching(skills: &[(&str, &str)], typed: &str) -> SidebarMenu {
+        use zellij_tile::prelude::{BareKey, KeyWithModifier};
+        let menu = sidebar_menu(MENU_KDL, None).expect("a menu");
+        let slash = KeyWithModifier::new(BareKey::Char('/'));
+        let menu = menu.key(&slash, None, 0).0.expect("a menu");
+        let mut stdout = String::from("[]\0");
+        for (name, does) in skills {
+            stdout.extend(["\0skills/", name, "/SKILL.md\0description: ", does, "\0"]);
+        }
+        let context = std::collections::BTreeMap::from([
+            (crate::context::CONTEXT_KEY.to_owned(), crate::skills::CONTEXT_VALUE.to_owned()),
+            (menu::MENU_KEY.to_owned(), "1".to_owned()),
+        ]);
+        let mut menu = menu.found(Some(0), stdout.as_bytes(), b"", &context);
+        for c in typed.chars() {
+            menu = menu.key(&KeyWithModifier::new(BareKey::Char(c)), None, 0).0.expect("a menu");
+        }
+        menu
+    }
+
+    /// The skills of a test's finder: more than the box shows at once.
+    const SKILLS: &[(&str, &str)] = &[
+        ("code-review", "Review the changes since a fixed point."),
+        ("codebase-design", "Design deep modules."),
+        ("diagnosing-bugs", "Diagnose hard bugs."),
+        ("grilling", "Grill the user about a plan."),
+        ("handoff", "Hand off to the next agent."),
+        ("prototype", "Build a throwaway prototype."),
+        ("research", "Research a topic."),
+        ("test-audit", "Audit tests."),
+        ("tigerstyle", "Apply TigerStyle."),
+        ("triage", "Triage issues."),
+    ];
+
+    /// The search box takes the place of the menu's keys: what is typed, and
+    /// under it the skills that match, best first, the one the cursor is on
+    /// lit, each with what it does, dimmed and cut to fit. It keeps the lines
+    /// the skills found fill, `SEARCH_ROWS` at most, however many match, so
+    /// the tree above it stays put as you type.
+    #[test]
+    fn the_search_box_lists_the_skills_that_match() {
+        let menu = searching(SKILLS, "");
+        assert_eq!(sidebar_menu_height(&menu, 30), SEARCH_ROWS + 3);
+        let picture = sidebar_menu_picture(&menu, 11, 30);
+        assert_eq!(
+            picture[..4],
+            [
+                "─ Skills ────── misc/unnamed ─",
+                " /_                           ",
+                " /code-review  Review the ch… ",
+                " /codebase-design  Design de… ",
+            ]
+        );
+        assert_eq!(picture[9], " /test-audit  Audit tests.    ");
+        assert_eq!(picture[10], " <↓↑>/<ENTER>/<ESC>");
+        let (lines, _) = sidebar_menu_lines(&menu, 11, 30);
+        let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
+        assert_eq!(lit, [2]);
+        assert!(lines[2].is_dim_at(16), "{}", lines[2].content());
+
+        let menu = searching(SKILLS, "rev");
+        let (lines, _) = sidebar_menu_lines(&menu, 11, 30);
+        assert_eq!(lines.len(), SEARCH_ROWS + 2);
+        assert_eq!(lines[1].content(), " /rev_                        ");
+        assert_eq!(lines[2].content(), " /code-review  Review the ch… ");
+        assert!(lines[3..].iter().all(|line| line.content().trim().is_empty()));
+        // The margin, the `/`, then `code-`: `rev` lands on the rest.
+        let colours: Vec<_> = (6..=9).map(|at| lines[2].colour_at(at)).collect();
+        assert_eq!(colours, [Some(NAME), Some(ACCENT), Some(ACCENT), Some(ACCENT)]);
+
+        let menu = searching(SKILLS, "zzz");
+        assert_eq!(sidebar_menu_picture(&menu, 11, 30)[2], " no match                     ");
+        let menu = searching(&[], "");
+        assert_eq!(
+            sidebar_menu_picture(&menu, 11, 30),
+            [
+                "─ Skills ────── misc/unnamed ─",
+                " /_                           ",
+                " no skills here               ",
+                " <↓↑>/<ENTER>/<ESC>",
+            ]
+        );
+    }
+
+    /// The search box scrolls to keep the skill the cursor is on in sight,
+    /// in what room the sidebar has.
+    #[test]
+    fn the_search_box_scrolls_to_the_cursor() {
+        use zellij_tile::prelude::{BareKey, KeyWithModifier};
+        let mut menu = searching(SKILLS, "");
+        for _ in 0..SKILLS.len() {
+            menu = menu.key(&KeyWithModifier::new(BareKey::Down), None, 0).0.expect("a menu");
+        }
+        let picture = sidebar_menu_picture(&menu, 11, 30);
+        assert_eq!(picture[2], " /diagnosing-bugs  Diagnose…  ");
+        assert_eq!(picture[9], " /triage  Triage issues.      ");
+        let (lines, _) = sidebar_menu_lines(&menu, 5, 30);
+        let shown: Vec<&str> = lines.iter().map(Painted::content).collect();
+        assert_eq!(
+            shown,
+            [
+                "─ Skills ────── misc/unnamed ─",
+                " /_                           ",
+                " /tigerstyle  Apply TigerSty… ",
+                " /triage  Triage issues.      ",
+            ]
+        );
+        assert!(lines[3].is_selected());
     }
 
     /// A sidebar too short for the whole menu leaves the tree a row, which a
@@ -3336,7 +3547,7 @@ mod tests {
     fn the_keys_that_answer_a_close_key_are_spelled_out() {
         let keys = Keys::new(None, crate::close::Scope::Pane).expect("a menu");
         let asking = Shown::Asking(&keys, "Close its tab? 2 agents, 1 busy");
-        let help = menu_parts(asking, MIN_ASKING - PAD * 2).help;
+        let help = menu_parts(asking, MIN_ASKING - PAD * 2, usize::MAX).help;
         assert!(help.content().contains("<y> Yes"), "{}", help.content());
     }
 

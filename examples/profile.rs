@@ -28,6 +28,7 @@
 #[path = "../src/places.rs"] mod places;
 #[path = "../src/render.rs"] mod render;
 #[path = "../src/sessions.rs"] mod sessions;
+#[path = "../src/skills.rs"] mod skills;
 #[path = "../src/tree.rs"] mod tree;
 
 use std::alloc::{GlobalAlloc, Layout, System};

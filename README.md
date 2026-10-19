@@ -365,6 +365,47 @@ What a key starts on is the first message of the session, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
 
+Your keys are for the few skills you run all the time. For any other, `/` at
+the top of the menu searches every skill the pane's directory can run, as the
+sidebar's `/` searches its rows: what you type narrows the list, fuzzily, by a
+skill's name and by what it says it does, the skills whose names match first,
+and `Enter` starts an agent on the one highlighted, beside the pane, as a key
+does. `↓` and `↑` move; `Esc` goes back to the keys, and so does `Backspace`
+once there is nothing to take back. In the sidebar, `m` `/` opens it.
+
+```text
+─ Skills ─────── luneta/main ─
+ /_
+ /code-review  Review the ch…
+ /diagnosing-bugs  Diagnose…
+ /handoff  Hand the work off…
+ /make-illegal-states-unrepr…
+ /prototype  Build a throwaw…
+ /research  Research a topic…
+ /thermo-nuclear-review  Rev…
+ /tigerstyle  Apply TigerSty…
+ <↓↑>/<ENTER>/<ESC>
+```
+
+The list shows eight skills at most, and scrolls under the cursor. It keeps
+the height of the skills found as you type, so nothing above it moves.
+
+The skills are the ones Claude Code finds for that directory, as slash
+commands, where it finds them:
+
+- yours, in `~/.claude`, or in `CLAUDE_CONFIG_DIR`
+- the project's, in the `.claude` of the directory and of each one above it,
+  up to the top of its repository
+- each plugin's that `claude plugin list` says is on there, as
+  `/plugin:skill`, where the plugin's manifest says it keeps them
+
+A skill is a `skills/<name>/SKILL.md`, a command a `commands/<name>.md`, and a
+workflow a `workflows/<file>.js`, named as its `meta` names it. A skill whose
+frontmatter says `user-invocable: false` is left out. The skills built into
+Claude Code, and the ones it brings from claude.ai, are not where luneta looks,
+and the list leaves them out. It is made again each time `/` opens it, which
+takes a moment, mostly `claude plugin list`'s.
+
 Every menu has luneta's own New group too, under `n`, with nothing to
 configure, which opens where the highlighted pane works: `n p` your shell in a
 pane of its own beside that pane, `n t` a tab of its session, and `n s` a
@@ -577,8 +618,9 @@ keybinds {
 
 The menu is the plugin in `mode "menu"`. Its keys are a `menu`, a node to a
 key: a key's one string is what it starts an agent on, or, with keys inside
-it, the name of the group they make. `d` is luneta's, for its Delete group, and
-a menu that gives it a key of yours says so. Give them to the alias, so that
+it, the name of the group they make. At the top of the menu, `/`, `n` and `d`
+are luneta's, for its search, its New group and its Delete group, and a menu
+that gives one of them a key of yours says so. Give them to the alias, so that
 the key that opens the menu and the sidebar show the same keys:
 
 ```kdl
