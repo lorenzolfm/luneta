@@ -213,7 +213,7 @@ struct State {
     menu_entries: Option<String>,
     /// How many menus the sidebar has opened, which numbers each: the answer
     /// to an agent one starts in another session says which it is for.
-    menus: u64,
+    menus: menu::Numbers,
 }
 
 register_plugin!(State);
@@ -1286,7 +1286,8 @@ impl State {
             return self.handle_search_box_key(key.bare_key, term) || unscrolled;
         }
         // A key that does more than move the cursor, fold or open the menu
-        // is a `Command`, for `?` to list it.
+        // is a `Command`, which it comes to by `Command::of` below, for `?`
+        // to list it.
         let drawn = match key.bare_key {
             BareKey::Down | BareKey::Char('j') => self.move_tree(1),
             BareKey::Up | BareKey::Char('k') => self.move_tree(-1),
@@ -1347,8 +1348,7 @@ impl State {
         let Some(row) = self.menu_row() else {
             return false;
         };
-        self.menus = self.menus.wrapping_add(1);
-        let menu = SidebarMenu::help(self.menu_entries.as_deref(), row, self.menus);
+        let menu = SidebarMenu::help(self.menu_entries.as_deref(), row, &mut self.menus);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
@@ -1365,9 +1365,8 @@ impl State {
         let Some(row) = self.menu_row() else {
             return false;
         };
-        self.menus = self.menus.wrapping_add(1);
         let entries = self.menu_entries.as_deref();
-        let menu = SidebarMenu::open(entries, row, key, self.menus, self.frame);
+        let menu = SidebarMenu::open(entries, row, key, &mut self.menus, self.frame);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
@@ -2098,7 +2097,7 @@ mod tests {
         assert_eq!(menu_open(&state), Some(vec!["Delete"]));
         let closed = BTreeMap::from([
             (agents::CONTEXT_KEY.to_owned(), menu::CLOSING_VALUE.to_owned()),
-            (menu::MENU_KEY.to_owned(), state.menus.to_string()),
+            (menu::MENU_KEY.to_owned(), "1".to_owned()),
         ]);
         state.update(Event::RunCommandResult(Some(0), Vec::new(), Vec::new(), closed));
         assert_eq!(menu_open(&state), None);

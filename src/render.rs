@@ -2970,7 +2970,7 @@ mod tests {
     fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
         let cwd = Some("/w/misc/unnamed".to_owned());
         let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
-        SidebarMenu::open(Some(entries), row, key, 1, 0)
+        SidebarMenu::open(Some(entries), row, key, &mut crate::menu::Numbers::default(), 0)
     }
 
     /// The menu's lines in `lines` lines of a sidebar `cols` wide, the keys
@@ -3025,7 +3025,7 @@ mod tests {
 
         let cwd = Some("/w/misc/unnamed".to_owned());
         let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
-        let help = SidebarMenu::help(Some(MENU_KDL), row, 1);
+        let help = SidebarMenu::help(Some(MENU_KDL), row, &mut crate::menu::Numbers::default());
         assert_eq!(
             sidebar_menu_picture(&help, 6, 30),
             [

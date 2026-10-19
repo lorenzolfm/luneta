@@ -86,12 +86,14 @@ type Spot = (usize, usize, usize, usize);
 /// A key of the sidebar's own that does more than move the cursor or fold a
 /// session. `?` lists each one beside the menu's keys.
 ///
-/// The sidebar finds the command a key runs in `ALL`, and `?` lists `ALL`, so
-/// no key runs a command that `?` leaves out. `key` and `does` match every
-/// command, so a command does not compile until it says what `?` shows for
-/// it, and the sidebar's `command` matches every command too. A command left
-/// out of `ALL` is one no key runs, and it is dead code, which does not
-/// compile either.
+/// The sidebar finds the command a key runs in `ALL`, by `of`, and `?` lists
+/// `ALL`, so no key runs a command that `?` leaves out. `key` and `does` match
+/// every command, so a command does not compile until it says what `?` shows
+/// for it, and the sidebar's `command` matches every command too. A command
+/// left out of `ALL` is dead code, which does not compile either, unless a
+/// key of the sidebar's names it: that compiles, and `?` leaves it out. Only
+/// `dev clippy` stops it, by way of `examples/profile.rs`, which compiles this
+/// module without the sidebar's keys.
 #[deny(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -110,7 +112,7 @@ impl Command {
         Command::ALL.iter().copied().find(|command| command.key() == key)
     }
 
-    pub fn key(self) -> char {
+    pub const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Next => 'n',
@@ -125,6 +127,20 @@ impl Command {
         }
     }
 }
+
+/// No two commands share a key: `of` would find the first, and `?` would
+/// show both.
+const _: () = {
+    let mut at = 0;
+    while at < Command::ALL.len() {
+        let mut other = at + 1;
+        while other < Command::ALL.len() {
+            assert!(Command::ALL[at].key() != Command::ALL[other].key(), "two commands on one key");
+            other += 1;
+        }
+        at += 1;
+    }
+};
 
 pub enum Entry {
     /// A key that opens a group, the name the menu shows for it, and the keys
@@ -605,6 +621,19 @@ pub enum Did {
     Command(Command),
 }
 
+/// How many menus the sidebar has opened. A menu takes the next number as it
+/// opens, and only as it opens: the answer to an agent it starts in another
+/// session carries it.
+#[derive(Default)]
+pub struct Numbers(u64);
+
+impl Numbers {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(1);
+        self.0
+    }
+}
+
 /// The menu at the bottom of the sidebar, for the row highlighted when a key
 /// of the menu, or `?`, opened it: a pane, or a session. The sidebar keeps it
 /// while it has the focus, and while that pane is open.
@@ -656,20 +685,21 @@ impl Wait {
 }
 
 impl SidebarMenu {
-    /// The menu numbered `number` for `row`, from the `entries` of the
-    /// sidebar's configuration and luneta's Delete group, at `frame`: on the
-    /// group `key` opens, or on the first with no key. A key that starts an
-    /// agent starts it, and the menu stays only while another session does
-    /// it, or while the keys on their way to an agent it started come. None
-    /// for a key the menu has not. On a session's row, `d d` kills the
-    /// session.
+    /// The menu for `row`, numbered next among `numbers`, from the `entries`
+    /// of the sidebar's configuration and luneta's Delete group, at `frame`:
+    /// on the group `key` opens, or on the first with no key. A key that
+    /// starts an agent starts it, and the menu stays only while another
+    /// session does it, or while the keys on their way to an agent it started
+    /// come. None for a key the menu has not. On a session's row, `d d` kills
+    /// the session.
     pub fn open(
         entries: Option<&str>,
         row: Row,
         key: Option<char>,
-        number: u64,
+        numbers: &mut Numbers,
         frame: u64,
     ) -> Option<Self> {
+        let number = numbers.next();
         let (keys, target) = match row.menu(entries) {
             Ok(menu) => menu,
             Err(reason) => return Some(SidebarMenu { number, stage: wrong(reason) }),
@@ -685,9 +715,10 @@ impl SidebarMenu {
         }
     }
 
-    /// What `?` opens, numbered `number`: the keys at the top of the menu for
-    /// `row`, as `m` opens it, and then the sidebar's commands.
-    pub fn help(entries: Option<&str>, row: Row, number: u64) -> Self {
+    /// What `?` opens, numbered next among `numbers`: the keys at the top of
+    /// the menu for `row`, as `m` opens it, and then the sidebar's commands.
+    pub fn help(entries: Option<&str>, row: Row, numbers: &mut Numbers) -> Self {
+        let number = numbers.next();
         let stage = match row.menu(entries) {
             Ok((keys, target)) => Stage::Choosing(Keys::help(keys), target),
             Err(reason) => wrong(reason),
@@ -1589,7 +1620,7 @@ mod tests {
 
     /// The sidebar's menu numbered 1 for `row`, opened by `key` at frame 0.
     fn open(entries: Option<&str>, row: Row, key: Option<char>) -> Option<SidebarMenu> {
-        SidebarMenu::open(entries, row, key, 1, 0)
+        SidebarMenu::open(entries, row, key, &mut Numbers::default(), 0)
     }
 
     /// `key` pressed in the sidebar's menu at frame 0, its pane with no agent.
@@ -1658,14 +1689,14 @@ mod tests {
             (Some(MENU), session_row(None), vec!['c', 'r', 'd', '/', 'n']),
             (None, row(None), vec!['d', '/', 'n']),
         ] {
-            let menu = SidebarMenu::help(entries, on_row, 1);
+            let menu = SidebarMenu::help(entries, on_row, &mut Numbers::default());
             assert_eq!(on_show(Some(&menu)), Some(Ok(on)), "{entries:?}");
         }
         for (entries, said) in [
             ("t", "menu: \"t\" takes one string"),
             (r#"d "notes""#, "menu: \"d\" is luneta's"),
         ] {
-            let menu = SidebarMenu::help(Some(entries), row(None), 1);
+            let menu = SidebarMenu::help(Some(entries), row(None), &mut Numbers::default());
             let wrong = wrong(Some(&menu)).expect("what is wrong");
             assert!(wrong.starts_with(said), "{wrong}");
         }
@@ -1676,7 +1707,7 @@ mod tests {
     /// for the sidebar to run it, on a session's row too.
     #[test]
     fn a_key_of_help_opens_its_group_or_hands_the_sidebar_its_command() {
-        let help = || Some(SidebarMenu::help(Some(MENU), row(None), 1));
+        let help = || Some(SidebarMenu::help(Some(MENU), row(None), &mut Numbers::default()));
         let menu = press(help(), &char('c'));
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['t', 'm', 's'])));
         let menu = press(menu, &bare(BareKey::Backspace));
@@ -1695,7 +1726,7 @@ mod tests {
             (SHADOWED, row(None), 'n', Command::Next),
             (MENU, session_row(None), '/', Command::Search),
         ] {
-            let menu = SidebarMenu::help(Some(entries), on_row, 1);
+            let menu = SidebarMenu::help(Some(entries), on_row, &mut Numbers::default());
             let (menu, did) = menu.key(&char(key), None, 0);
             assert!(menu.is_none(), "{key}");
             assert_eq!(did, Some(Did::Command(command)), "{key}");
@@ -1714,7 +1745,7 @@ mod tests {
                 (MENU_KEY.to_owned(), menu.to_string()),
             ])
         };
-        let help = SidebarMenu::help(Some(MENU), row(Some(there)), 2);
+        let help = SidebarMenu::help(Some(MENU), row(Some(there)), &mut Numbers(1));
         let menu = press(Some(help), &char('r')).expect("a menu");
         let menu = menu.answered(None, b"", b"", &answer(1)).expect("a menu");
         assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['c', 'r', 'd', '/', 'n'])));
