@@ -163,13 +163,20 @@ command it runs, cut to twenty characters, before its directory, and the
 directory alone at the prompt. A command finished when the one gives way to
 the other. One that ends within a second is never seen running, and gets no
 `•`; nor does a command in a shell whose title says neither, as bash's and
-zsh's do not, or one in a program that titles the pane itself.
+zsh's do not, or one in a program that titles the pane itself. zellij lists
+every session's titles some seconds late, so a command you watch end, and
+leave the pane or the session right after, is seen by the title its pane gives
+itself at once.
 
 What you have seen, and what each shell ran, is the same in the sidebar of
 every session, and outlasts zellij: the sidebars keep it in the plugin's cache,
 beside the folds. A session renamed takes it along, whether the picker or
 zellij renamed it, and a session gone for good takes it with it: one made
-later by the same name starts with none of it.
+later by the same name starts with none of it, as a pane closed for good does.
+Each session's sidebar asks claude-ps itself, which dates a status to the
+whole second, so they may date one finish two seconds apart: an agent that
+finishes within three seconds of your last time in its pane counts as one you
+saw.
 
 After the dot, an icon says what runs in the pane: Claude's for an agent, a
 terminal for a shell, neovim's for nvim. It has a column of its own, so every

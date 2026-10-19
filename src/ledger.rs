@@ -146,6 +146,11 @@ impl<T: Record> Ledger<T> {
         self.records.keys().map(String::as_str)
     }
 
+    /// The panes of `session` it keeps records of.
+    pub fn panes(&self, session: &str) -> impl Iterator<Item = u32> + '_ {
+        self.records.get(session).into_iter().flat_map(BTreeMap::keys).copied()
+    }
+
     /// Takes away every record of `session`, for every sidebar.
     pub fn forget(&mut self, session: &str) {
         self.records.remove(session);

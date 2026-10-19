@@ -650,8 +650,14 @@ impl State {
             // zellij keeps a client's plugins running after the client leaves,
             // timers and all, and knows no focused pane for it. A sidebar its
             // client left asks nothing until the client comes back.
+            let was_away = self.away;
             self.away = dock::attached() == Some(false);
             if self.away {
+                if !was_away {
+                    // Its client left this session, and so the pane it was
+                    // in: what that pane finished as it left, it saw.
+                    self.watch_news(None);
+                }
                 return;
             }
             self.seat_from(&snapshot);
@@ -721,11 +727,13 @@ impl State {
             return;
         }
         let here = current.zip(self.pane_now());
+        let panes = self.panes.as_ref();
         let Role::Sidebar(tree) = &mut self.role else {
             return;
         };
         tree.news.reload();
-        tree.news.watch(&self.branches, &self.agents, here, Moment::now());
+        let own = |pane| own_title(panes, pane);
+        tree.news.watch(&self.branches, &self.agents, here, own, Moment::now());
         tree.news.prune(&self.live_names);
     }
 
@@ -1992,6 +2000,13 @@ fn contents_of(session: SessionInfo) -> Contents {
         }
     }
     Contents { panes: total, focus }
+}
+
+/// The title terminal `pane` gives itself in `manifest`, which zellij sends
+/// as it changes, where the session list's is seconds behind.
+fn own_title(manifest: Option<&PaneManifest>, pane: u32) -> Option<String> {
+    let mut panes = manifest?.panes.values().flatten();
+    panes.find(|info| !info.is_plugin && info.id == pane).map(|info| info.title.clone())
 }
 
 /// Where this client's focus is, in the tab it is on, last reported, and that

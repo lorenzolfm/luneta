@@ -13,6 +13,12 @@
 //! and the cwd once it is back at its prompt. A command finished once a title
 //! that named it gives way to the prompt.
 //!
+//! Every sidebar reads what the shells ran from the session list, whose
+//! titles are the same for all of them, and seconds late. A visit reads the
+//! title the pane gives itself too, which zellij sends as it changes: a
+//! command you saw end, the session list may say ended only once you have
+//! left.
+//!
 //! The ledgers keep a session's records by its name, and a session is its
 //! name and when it was made: what a pane ran before its session was made, a
 //! session made earlier by the same name ran, in a pane of its own. And a
@@ -34,14 +40,27 @@ const RAN: &str = "/cache/ran";
 /// How long you stay in a pane before it counts as a visit.
 const DWELL: Held = Held::from_secs(1);
 
-/// How many `prune`s in a row a session is missing from before its records
-/// go: a session can drop out of one list as zellij writes it again.
+/// How many lists in a row a session, or a pane of one, is missing from
+/// before its records go: one can drop out of a list as zellij writes it
+/// again.
 const GONE: u32 = 5;
 
 /// How far apart two readings of when a session was made may be and still
 /// be the same moment: zellij counts a session's age in whole seconds, from
 /// a list it read a moment before.
 const MADE: Held = Held::from_secs(3);
+
+/// How much later than another a sidebar may date the moment an agent
+/// finished. Each dates it from its own answer of claude-ps, which counts
+/// whole seconds from a whole second: one may put it two seconds after
+/// another, and so after the visit the other wrote as you watched the agent
+/// finish.
+const SKEW: Held = Held::from_secs(3);
+
+/// How far the session list's titles may lag behind the title a pane gives
+/// itself: zellij writes them out every second, and they show a shell back
+/// at its prompt some four seconds after its command ended.
+const LAG: Held = Held::from_secs(10);
 
 /// What a shell ran last, as its title said.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,36 +107,91 @@ impl Record for Run {
     }
 }
 
-/// When you were last in a pane.
-impl Record for Moment {
+/// When you were last in a pane, and what its shell was doing then, as the
+/// title the pane gave itself said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Visit {
+    at: Moment,
+    doing: Doing,
+}
+
+impl Visit {
+    /// Whether you saw an agent finish, as `came` dates it: by the time you
+    /// were there, as late as another sidebar may date what this one did.
+    fn saw_finish(&self, came: Moment) -> bool {
+        came.since(self.at) <= SKEW
+    }
+
+    /// Whether you saw `command` end, as its record dates it `at`: by the
+    /// time you were there, or, if the pane's own title had ended it by
+    /// then, as late as the session list may have taken to say so.
+    fn saw_end(&self, command: &str, at: Moment) -> bool {
+        at <= self.at || (at.since(self.at) <= LAG && ends(&self.doing, command))
+    }
+}
+
+/// Whether a shell `doing` this is done with `command`: back at its prompt,
+/// or on to another.
+fn ends(doing: &Doing, command: &str) -> bool {
+    match doing {
+        Doing::Prompt => true,
+        Doing::Running(running) => running != command,
+        Doing::Unknown => false,
+    }
+}
+
+const PROMPT: &str = "prompt";
+
+const RUNNING: &str = "running";
+
+impl Record for Visit {
     fn read(text: &str) -> Option<Self> {
-        text.trim().parse().ok().map(Moment::from_millis)
+        let text = text.trim_end_matches('\n');
+        let (millis, doing) = match text.split_once(' ') {
+            None => (text, Doing::Unknown),
+            Some((millis, PROMPT)) => (millis, Doing::Prompt),
+            Some((millis, said)) => {
+                let command = said.strip_prefix(RUNNING)?.strip_prefix(' ')?;
+                (millis, Doing::Running(command.to_owned()))
+            },
+        };
+        Some(Visit { at: Moment::from_millis(millis.parse().ok()?), doing })
     }
 
     fn write(&self) -> String {
-        format!("{}\n", self.millis())
+        let millis = self.at.millis();
+        match &self.doing {
+            Doing::Prompt => format!("{millis} {PROMPT}\n"),
+            Doing::Running(command) => format!("{millis} {RUNNING} {command}\n"),
+            Doing::Unknown => format!("{millis}\n"),
+        }
     }
 }
 
 #[derive(Default)]
 pub struct News {
-    visits: Ledger<Moment>,
+    visits: Ledger<Visit>,
     runs: Ledger<Run>,
     /// The pane you were in as the last `watch` saw, and since when.
     dwelling: Option<Dwelling>,
     /// How many `prune`s in a row have found each session missing.
     missing: BTreeMap<String, u32>,
+    /// How many `watch`es in a row have found each pane with a record
+    /// missing from its session, which was listed.
+    closed: BTreeMap<(String, u32), u32>,
     /// When each session the last `watch` saw was made, to know one renamed.
     made: BTreeMap<String, Moment>,
     /// When the last `watch` was, or before the first, when the news was read.
     now: Moment,
 }
 
-#[derive(Clone)]
 struct Dwelling {
     session: String,
     pane: u32,
     since: Moment,
+    /// The command the pane's own title last said its shell ran while you
+    /// were there, until a visit saw it end.
+    ran: Option<String>,
 }
 
 impl News {
@@ -138,8 +212,10 @@ impl News {
     }
 
     /// Takes up what every shell's title in `branches` says it is doing at
-    /// `now`, and that you are in `here`: a pane you stayed in has been
-    /// visited, once there is something new in it. So has the one you were
+    /// `now`, and that you are in `here`, the panes of whose session give
+    /// themselves the titles `own` says. A pane you stayed in has been
+    /// visited, once there is something new in it, or its own title has
+    /// ended a command the session list has yet to. So has the one you were
     /// in as the last `watch` saw, if you stayed there, which you have left
     /// since: what it finished as you left it, you saw.
     pub fn watch(
@@ -147,6 +223,7 @@ impl News {
         branches: &[Branch],
         agents: &AgentSet,
         here: Option<(&str, u32)>,
+        own: impl Fn(u32) -> Option<String>,
         now: Moment,
     ) {
         self.now = now;
@@ -172,40 +249,101 @@ impl News {
             }
         }
         self.made = made;
+        self.sweep(branches);
 
-        let before = self.dwelling.take();
-        self.dwelling = here.map(|(session, pane)| match &before {
-            Some(dwelling) if dwelling.session == session && dwelling.pane == pane => {
-                dwelling.clone()
+        // What the shell in a pane you were in is doing, by its own title.
+        let doing_of = |dwelt: &Dwelling| {
+            let Some(title) = own(dwelt.pane) else {
+                return Doing::Unknown;
+            };
+            let leaf = branches
+                .iter()
+                .filter(|branch| branch.name == dwelt.session)
+                .flat_map(|branch| &branch.panes)
+                .find(|leaf| leaf.id == dwelt.pane);
+            tree::doing(&title, leaf.and_then(|leaf| leaf.cwd.as_deref()))
+        };
+        let (left, mut dwelling) = match (self.dwelling.take(), here) {
+            (Some(before), Some((session, pane)))
+                if before.session == session && before.pane == pane =>
+            {
+                (None, Some(before))
             },
-            _ => Dwelling { session: session.to_owned(), pane, since: now },
-        });
-        for dwelt in before.iter().chain(&self.dwelling) {
-            if now.since(dwelt.since) < DWELL {
-                continue;
-            }
-            let (session, pane) = (dwelt.session.as_str(), dwelt.pane);
-            let agent = seated.get(&(session, pane)).copied();
-            let visited = self.visits.get(session, pane).copied();
-            if self.latest(session, pane, agent) > visited {
-                self.visits.set(session, pane, Some(now));
+            (before, here) => {
+                let dwelling = here.map(|(session, pane)| Dwelling {
+                    session: session.to_owned(),
+                    pane,
+                    since: now,
+                    ran: None,
+                });
+                (before, dwelling)
+            },
+        };
+        if let Some(left) = &left {
+            let agent = seated.get(&(left.session.as_str(), left.pane)).copied();
+            self.visit(left, &doing_of(left), agent, now);
+        }
+        if let Some(dwelling) = &mut dwelling {
+            let agent = seated.get(&(dwelling.session.as_str(), dwelling.pane)).copied();
+            let doing = doing_of(dwelling);
+            let visited = self.visit(dwelling, &doing, agent, now);
+            match doing {
+                Doing::Running(command) => dwelling.ran = Some(command),
+                Doing::Prompt | Doing::Unknown if visited => dwelling.ran = None,
+                Doing::Prompt | Doing::Unknown => {},
             }
         }
+        self.dwelling = dwelling;
+    }
+
+    /// Writes that you were in the pane you are or were in as `dwelt`, its
+    /// shell `doing` this by its own title, once you stayed a while and there
+    /// is something new in it to have seen: what finished, as its records
+    /// say, a command its record has going that its own title has ended, or
+    /// one its own title said it ran while you were there, and has ended.
+    /// Says whether it wrote.
+    fn visit(
+        &mut self,
+        dwelt: &Dwelling,
+        doing: &Doing,
+        agent: Option<&AgentRow>,
+        now: Moment,
+    ) -> bool {
+        if now.since(dwelt.since) < DWELL {
+            return false;
+        }
+        let (session, pane) = (dwelt.session.as_str(), dwelt.pane);
+        let visit = self.visits.get(session, pane);
+        let finished = self.latest(session, pane, agent) > visit.map(|visit| visit.at);
+        let ending = match self.runs.get(session, pane) {
+            // Unless a visit since it went saw its title end it already.
+            Some(Run::Going { command, since }) => {
+                ends(doing, command)
+                    && visit.is_none_or(|visit| visit.at < *since || !ends(&visit.doing, command))
+            },
+            Some(Run::Ended { .. }) | None => false,
+        };
+        let ran = dwelt.ran.as_deref().is_some_and(|command| ends(doing, command));
+        if !(finished || ending || ran) {
+            return false;
+        }
+        self.visits.set(session, pane, Some(Visit { at: now, doing: doing.clone() }));
+        true
     }
 
     /// Whether `agent`, in `pane` of `session`, finished since you were last
     /// there.
     pub fn finished(&self, session: &str, pane: u32, agent: &AgentRow) -> bool {
-        let visited = self.visits.get(session, pane).copied();
-        agent.status == Status::Idle && Some(agent.came) > visited
+        let visit = self.visits.get(session, pane);
+        agent.status == Status::Idle && visit.is_none_or(|visit| !visit.saw_finish(agent.came))
     }
 
     /// The command the shell in `pane` of `session` finished since you were
     /// last there, and how long ago.
     pub fn ran(&self, session: &str, pane: u32) -> Option<(&str, Held)> {
-        let visited = self.visits.get(session, pane).copied();
+        let visit = self.visits.get(session, pane);
         match self.runs.get(session, pane)? {
-            Run::Ended { command, at } if Some(*at) > visited => {
+            Run::Ended { command, at } if visit.is_none_or(|visit| !visit.saw_end(command, *at)) => {
                 Some((command.as_str(), self.now.since(*at)))
             },
             Run::Ended { .. } | Run::Going { .. } => None,
@@ -240,6 +378,33 @@ impl News {
             self.runs.forget(&session);
         }
         self.missing = missing;
+    }
+
+    /// Forgets the records of each pane that its session, as `branches`
+    /// lists it, has left out of as many lists in a row as `GONE` says: it
+    /// closed, and its records would only pile up.
+    fn sweep(&mut self, branches: &[Branch]) {
+        let mut closed = BTreeMap::new();
+        for branch in branches {
+            let open: BTreeSet<u32> = branch.panes.iter().map(|leaf| leaf.id).collect();
+            let kept: BTreeSet<u32> = self
+                .visits
+                .panes(&branch.name)
+                .chain(self.runs.panes(&branch.name))
+                .filter(|pane| !open.contains(pane))
+                .collect();
+            for pane in kept {
+                let key = (branch.name.clone(), pane);
+                let lists = self.closed.get(&key).map_or(1, |lists| lists + 1);
+                if lists < GONE {
+                    closed.insert(key, lists);
+                    continue;
+                }
+                self.visits.set(&branch.name, pane, None);
+                self.runs.set(&branch.name, pane, None);
+            }
+        }
+        self.closed = closed;
     }
 
     /// Hands what was kept of each session that has left the list since the
@@ -298,8 +463,13 @@ mod tests {
         Moment::from_millis(secs * 1000)
     }
 
+    /// No pane's own title known, as for a session of another sidebar.
+    fn untitled(_: u32) -> Option<String> {
+        None
+    }
+
     #[test]
-    fn a_run_reads_as_it_is_written() {
+    fn a_record_reads_as_it_is_written() {
         for run in [
             Run::Going { command: "cargo build --relea".to_owned(), since: at(5) },
             Run::Ended { command: "make".to_owned(), at: at(9) },
@@ -308,7 +478,11 @@ mod tests {
         }
         assert_eq!(Run::read("going 12"), None);
         assert_eq!(Run::read("gone 12 make"), None);
-        assert_eq!(Moment::read(&at(7).write()), Some(at(7)));
+        for doing in [Doing::Prompt, Doing::Running("git commit -m 'fix".to_owned()), Doing::Unknown] {
+            let visit = Visit { at: at(7), doing };
+            assert_eq!(Visit::read(&visit.write()), Some(visit.clone()), "{visit:?}");
+        }
+        assert_eq!(Visit::read("7000 ran make"), None);
     }
 
     /// A command runs, then ends: the prompt after it says it ended, and when.
@@ -385,27 +559,27 @@ mod tests {
     fn what_finished_is_new_until_you_stay_in_its_pane() {
         let mut news = News::default();
         let (busy, agents) = session("cargo test ~/w/s", "busy", 0, at(98));
-        news.watch(&busy, &agents, None, at(98));
+        news.watch(&busy, &agents, None, untitled, at(98));
         let (idle, agents) = session("~/w/s", "idle", 3, at(103));
-        news.watch(&idle, &agents, None, at(103));
+        news.watch(&idle, &agents, None, untitled, at(103));
         assert_eq!(news_of(&news, &agents), (Some(ran("cargo test", 0)), true));
 
         // Passing through pane 2, and staying in pane 1 for a second.
-        news.watch(&idle, &agents, Some(("s", 2)), at(104));
-        news.watch(&idle, &agents, Some(("s", 1)), at(104));
-        news.watch(&idle, &agents, Some(("s", 1)), at(105));
+        news.watch(&idle, &agents, Some(("s", 2)), untitled, at(104));
+        news.watch(&idle, &agents, Some(("s", 1)), untitled, at(104));
+        news.watch(&idle, &agents, Some(("s", 1)), untitled, at(105));
         assert_eq!(news_of(&news, &agents), (None, true));
         // Staying in pane 2, then on to pane 1 before another `watch`.
-        news.watch(&idle, &agents, Some(("s", 2)), at(106));
-        news.watch(&idle, &agents, Some(("s", 2)), at(107));
-        news.watch(&idle, &agents, Some(("s", 1)), at(108));
+        news.watch(&idle, &agents, Some(("s", 2)), untitled, at(106));
+        news.watch(&idle, &agents, Some(("s", 2)), untitled, at(107));
+        news.watch(&idle, &agents, Some(("s", 1)), untitled, at(108));
         assert_eq!(news_of(&news, &agents), (None, false));
 
         let (busy, agents) = session("cargo test ~/w/s", "busy", 0, at(110));
-        news.watch(&busy, &agents, None, at(110));
+        news.watch(&busy, &agents, None, untitled, at(110));
         let (idle, agents) = session("~/w/s", "idle", 1, at(113));
-        news.watch(&idle, &agents, None, at(113));
-        news.watch(&idle, &agents, None, at(120));
+        news.watch(&idle, &agents, None, untitled, at(113));
+        news.watch(&idle, &agents, None, untitled, at(120));
         assert_eq!(news_of(&news, &agents), (Some(ran("cargo test", 7)), true));
     }
 
@@ -416,12 +590,118 @@ mod tests {
         let mut news = News::default();
         let (running, agents) = session("make ~/w/s", "busy", 0, at(100));
         for now in 100..110 {
-            news.watch(&running, &agents, Some(("s", 1)), at(now));
+            news.watch(&running, &agents, Some(("s", 1)), untitled, at(now));
         }
-        news.watch(&running, &agents, Some(("s", 2)), at(110));
+        news.watch(&running, &agents, Some(("s", 2)), untitled, at(110));
         let (prompt, agents) = session("~/w/s", "busy", 0, at(111));
-        news.watch(&prompt, &agents, Some(("s", 2)), at(111));
+        news.watch(&prompt, &agents, Some(("s", 2)), untitled, at(111));
         assert_eq!(news_of(&news, &agents), (Some(ran("make", 0)), false));
+    }
+
+    /// Each session's sidebar dates an agent's finish from its own answer of
+    /// claude-ps, in whole seconds from a whole second. You watch the agent
+    /// in pane 2 finish at 100.1s: this sidebar hears at 100.35s, and writes
+    /// your visit at 100.5s; another hears at 401s, and dates it at 102s.
+    /// Both have seen it. One that finishes once you have gone is new.
+    #[test]
+    fn an_agent_you_saw_finish_is_seen_however_a_sidebar_dates_it() {
+        let ms = Moment::from_millis;
+        let mut news = News::default();
+        let (busy, agents) = session("~/w/s", "busy", 30, ms(98_000));
+        news.watch(&busy, &agents, Some(("s", 2)), untitled, ms(98_000));
+        news.watch(&busy, &agents, Some(("s", 2)), untitled, ms(99_000));
+        let (idle, here) = session("~/w/s", "idle", 0, ms(100_350));
+        news.watch(&idle, &here, Some(("s", 2)), untitled, ms(100_500));
+        let (_, there) = session("~/w/s", "idle", 299, ms(401_000));
+        assert!(!news_of(&news, &here).1 && !news_of(&news, &there).1);
+
+        let (_, later) = session("~/w/s", "idle", 0, ms(104_000));
+        assert!(news_of(&news, &later).1);
+    }
+
+    /// Watches session `s` at `now`, the shell in pane 1 titled `listed` in
+    /// the session list and `own` by itself, and you in pane `here`.
+    fn shell(news: &mut News, listed: &str, own: &str, here: Option<u32>, now: u64) {
+        let (branches, agents) = session(listed, "busy", 0, at(now));
+        let own = |pane| (pane == 1).then(|| own.to_owned());
+        news.watch(&branches, &agents, here.map(|pane| ("s", pane)), own, at(now));
+    }
+
+    /// The session list shows a shell back at its prompt seconds after the
+    /// title the pane gives itself does. What you saw end in pane 1 is seen
+    /// once the list says it ended: whether you stayed, left the pane or the
+    /// session before another `watch`, or saw it run and end before the list
+    /// showed it at all. What ends once you have left is new.
+    #[test]
+    fn a_command_you_saw_end_is_seen_once_the_session_list_says_so() {
+        let (going, back) = ("make ~/w/s", "~/w/s");
+        // `make` ends at 100 by its own title, and at 104 by the list's. You
+        // stay to 101, or leave as it ends, for pane 2 or another session.
+        for (then, left) in [(Some(2), 102), (Some(2), 100), (None, 100)] {
+            let mut news = News::default();
+            for now in 90..100 {
+                shell(&mut news, going, going, Some(1), now);
+            }
+            for now in 100..left {
+                shell(&mut news, going, back, Some(1), now);
+            }
+            for now in left..104 {
+                shell(&mut news, going, back, then, now);
+            }
+            shell(&mut news, back, back, then, 104);
+            assert_eq!(news.ran("s", 1), None, "{then:?} at {left}");
+        }
+
+        // `make` runs from 90 to 91 by its own title, and you leave at 92.
+        // The list shows it from 94 to 96.
+        let mut news = News::default();
+        shell(&mut news, back, back, Some(1), 89);
+        shell(&mut news, back, going, Some(1), 90);
+        shell(&mut news, back, back, Some(1), 91);
+        for now in 92..94 {
+            shell(&mut news, back, back, Some(2), now);
+        }
+        shell(&mut news, going, back, Some(2), 94);
+        shell(&mut news, back, back, Some(2), 96);
+        assert_eq!(news.ran("s", 1), None);
+
+        // You leave at 100 while `make` runs, and it ends at 102.
+        let mut news = News::default();
+        for now in 90..100 {
+            shell(&mut news, going, going, Some(1), now);
+        }
+        shell(&mut news, going, going, Some(2), 100);
+        for now in 102..106 {
+            shell(&mut news, going, back, Some(2), now);
+        }
+        shell(&mut news, back, back, Some(2), 106);
+        assert_eq!(news.ran("s", 1).map(|(command, _)| command), Some("make"));
+    }
+
+    /// A pane its session leaves out of `GONE` lists in a row has closed,
+    /// and what was kept of it goes. One left out of fewer keeps it.
+    #[test]
+    fn a_closed_pane_s_records_go_once_it_stays_out_of_the_list() {
+        let mut news = News::default();
+        let (running, agents) = session("make ~/w/s", "idle", 1, at(100));
+        news.watch(&running, &agents, Some(("s", 2)), untitled, at(100));
+        let (prompt, agents) = session("~/w/s", "idle", 2, at(101));
+        news.watch(&prompt, &agents, Some(("s", 2)), untitled, at(101));
+        let kept = |news: &News| (news.runs.get("s", 1).is_some(), news.visits.get("s", 2).is_some());
+        assert_eq!(kept(&news), (true, true));
+
+        let (mut closed, _) = session("~/w/s", "idle", 2, at(101));
+        closed[0].panes.clear();
+        for now in 102..101 + u64::from(GONE) {
+            news.watch(&closed, &agents, None, untitled, at(now));
+        }
+        news.watch(&prompt, &agents, None, untitled, at(110));
+        for now in 111..110 + u64::from(GONE) {
+            news.watch(&closed, &agents, None, untitled, at(now));
+        }
+        assert_eq!(kept(&news), (true, true));
+        news.watch(&closed, &agents, None, untitled, at(120));
+        assert_eq!(kept(&news), (false, false));
     }
 
     /// A session made again by the name of one gone, before any sidebar saw
@@ -431,14 +711,14 @@ mod tests {
     fn a_session_made_again_by_its_name_has_none_of_what_the_last_one_ran() {
         let mut news = News::default();
         let (running, agents) = session("make ~/w/s", "busy", 0, at(100));
-        news.watch(&running, &agents, None, at(100));
+        news.watch(&running, &agents, None, untitled, at(100));
         let (prompt, agents) = session("~/w/s", "busy", 0, at(101));
-        news.watch(&prompt, &agents, None, at(101));
+        news.watch(&prompt, &agents, None, untitled, at(101));
         assert_eq!(news_of(&news, &agents).0, Some(ran("make", 0)));
 
         let (mut again, agents) = session("~/w/s", "busy", 0, at(500));
         again[0].age = Age::from_secs(10);
-        news.watch(&again, &agents, None, at(500));
+        news.watch(&again, &agents, None, untitled, at(500));
         assert_eq!(news_of(&news, &agents).0, None);
         assert_eq!(news.runs.get("s", 1), None);
     }
@@ -452,7 +732,7 @@ mod tests {
         fn watch(news: &mut News, name: &str, title: &str, here: Option<u32>, now: u64) {
             let (mut branches, agents) = session(title, "busy", 0, at(now));
             branches[0].name = name.to_owned();
-            news.watch(&branches, &agents, here.map(|pane| (name, pane)), at(now));
+            news.watch(&branches, &agents, here.map(|pane| (name, pane)), untitled, at(now));
         }
         let mut news = News::default();
         watch(&mut news, "s", "make ~/w/s", None, 100);
@@ -476,8 +756,8 @@ mod tests {
     fn a_session_s_records_go_once_it_stays_gone() {
         let mut news = News::default();
         let (idle, agents) = session("~/w/s", "idle", 1, at(10));
-        news.watch(&idle, &agents, Some(("s", 2)), at(10));
-        news.watch(&idle, &agents, Some(("s", 2)), at(11));
+        news.watch(&idle, &agents, Some(("s", 2)), untitled, at(10));
+        news.watch(&idle, &agents, Some(("s", 2)), untitled, at(11));
         assert!(!news_of(&news, &agents).1);
 
         let live = ["s".to_owned()];

@@ -1464,11 +1464,11 @@ mod tests {
             ]
         };
         let mut tree = Tree::default();
-        tree.news.watch(&titled("make ~/w/a"), &set, None, at(10));
+        tree.news.watch(&titled("make ~/w/a"), &set, None, |_| None, at(10));
         let branches = titled("~/w/a");
         // You stay in `b`'s pane 4, then go to `c`'s pane 5.
         for (here, now) in [(("b", 4), 20), (("b", 4), 21), (("c", 5), 22)] {
-            tree.news.watch(&branches, &set, Some(here), at(now));
+            tree.news.watch(&branches, &set, Some(here), |_| None, at(now));
         }
         tree.rebuild(&branches, Some("c"), &set, Some(5), true);
         assert_eq!(
