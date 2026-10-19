@@ -2293,7 +2293,7 @@ mod tests {
         state.places = Places::of(&[("b", &[(4, "/w/b"), (5, "/w/b")])]);
         let seated = |pane: u32, id: &str| {
             format!(
-                r#"{{"status":"idle","status_age":4,"cwd":"/w/b","session_id":"{id}",
+                r#"{{"status":"idle","status_age":4,"pid":{pane},"cwd":"/w/b","session_id":"{id}",
                    "zellij":{{"session":"b","pane":"{pane}"}}}}"#
             )
         };

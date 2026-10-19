@@ -77,7 +77,10 @@ pane that tells it apart as well, or by its session's name.
 
 A pane holds one agent, as it does in the sidebar. A `claude -p` an agent runs
 has its pane's ids, and claude-ps puts it in that pane too: the list shows the
-agent that started first, and says below it how many it left out.
+agent you started at a prompt, or with an older claude-ps that does not say how
+an agent started, the one that started first, and says below it how many it
+left out. An agent only guessed into a pane gives way to the one whose session
+names that pane, and counts among those luneta cannot find.
 
 `Del` closes the pane the highlighted agent is in, and its tab with it when
 nothing else holds the tab open: neither the sidebar's column nor a floating

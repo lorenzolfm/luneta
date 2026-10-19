@@ -114,9 +114,10 @@ fn claude_ps(n: usize) -> Vec<u8> {
     let rows: Vec<String> = (0..n)
         .map(|i| {
             format!(
-                r#"{{"status":"{}","status_age":{},"cwd":"/home/you/Projects/group-{}/repo-{:04}-name","name":"agent-{:03}","name_source":"user","zellij":{{"session":"session-{:03}-work","pane":"{}"}}}}"#,
+                r#"{{"status":"{}","status_age":{},"pid":{},"cwd":"/home/you/Projects/group-{}/repo-{:04}-name","name":"agent-{:03}","name_source":"user","zellij":{{"session":"session-{:03}-work","pane":"{}"}}}}"#,
                 ["waiting", "idle", "busy", "shell"][i % 4],
                 i * 13,
+                1000 + i,
                 i % 12,
                 i,
                 i,

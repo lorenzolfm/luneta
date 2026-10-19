@@ -864,9 +864,10 @@ mod tests {
     fn agents(seated: &[(&str, u32, &str)]) -> AgentSet {
         let json: Vec<String> = seated
             .iter()
-            .map(|(session, pane, status)| {
+            .enumerate()
+            .map(|(pid, (session, pane, status))| {
                 format!(
-                    r#"{{"status":"{status}","status_age":4,"cwd":"/w/{session}",
+                    r#"{{"status":"{status}","status_age":4,"pid":{pid},"cwd":"/w/{session}",
                        "zellij":{{"session":"{session}","pane":"{pane}"}}}}"#
                 )
             })
@@ -952,7 +953,7 @@ mod tests {
 
     #[test]
     fn a_name_someone_chose_beats_the_title_of_the_pane() {
-        let json = r#"[{"status":"busy","status_age":4,"cwd":"/w/s","name":"orca-copy",
+        let json = r#"[{"status":"busy","status_age":4,"pid":101,"cwd":"/w/s","name":"orca-copy",
             "name_source":"user","zellij":{"session":"s","pane":"0"}}]"#;
         let mut set = AgentSet::default();
         set.ingest(Some(0), json.as_bytes(), b"");
@@ -968,9 +969,9 @@ mod tests {
     #[test]
     fn agents_with_no_topic_and_no_tab_name_go_by_where_they_work() {
         let json = r#"[
-            {"status":"busy","status_age":4,"name":"main-60","name_source":"derived",
+            {"status":"busy","status_age":4,"pid":102,"name":"main-60","name_source":"derived",
              "cwd":"/w/luneta/main","zellij":{"session":"luneta","pane":"1"}},
-            {"status":"idle","status_age":4,"name":"agents-tab-9a","name_source":"derived",
+            {"status":"idle","status_age":4,"pid":103,"name":"agents-tab-9a","name_source":"derived",
              "cwd":"/w/luneta/agents-tab","zellij":{"session":"luneta","pane":"4"}}]"#;
         let mut set = AgentSet::default();
         set.ingest(Some(0), json.as_bytes(), b"");

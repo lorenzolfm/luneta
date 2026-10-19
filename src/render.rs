@@ -892,8 +892,8 @@ fn unplaced_text(unplaced: usize) -> String {
 
 fn doubled_text(doubled: usize) -> String {
     match doubled {
-        1 => "1 agent sits in a pane an earlier one holds".to_owned(),
-        n => format!("{n} agents sit in panes earlier ones hold"),
+        1 => "1 agent sits in a pane another one holds".to_owned(),
+        n => format!("{n} agents sit in panes other ones hold"),
     }
 }
 
@@ -2296,9 +2296,9 @@ mod tests {
 
     #[test]
     fn an_agent_luneta_cannot_place_is_left_out_and_counted() {
-        let json = r#"[{"status":"waiting","status_age":60,"cwd":"/home/lorenzo/Projects/misc",
+        let json = r#"[{"status":"waiting","status_age":60,"pid":100,"cwd":"/home/lorenzo/Projects/misc",
             "zellij":{"session":"bipa.git","pane":"4"}},
-            {"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
+            {"status":"idle","status_age":60,"pid":101,"cwd":"/home/lorenzo/Projects/misc/luneta",
              "zellij":{"session":"luneta","pane":"0"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
@@ -2316,9 +2316,9 @@ mod tests {
 
     #[test]
     fn the_agent_you_are_in_is_pinned_above_the_list() {
-        let json = r#"[{"status":"idle","status_age":60,"cwd":"/w/notes",
+        let json = r#"[{"status":"idle","status_age":60,"pid":102,"cwd":"/w/notes",
             "name":"handoff","name_source":"user","zellij":{"session":"notes","pane":"1"}},
-            {"status":"busy","status_age":60,"cwd":"/w/luneta",
+            {"status":"busy","status_age":60,"pid":103,"cwd":"/w/luneta",
              "zellij":{"session":"luneta","pane":"4"}}]"#;
         let places = Places::of(&[("notes", &[(1, "/w/notes")]), ("luneta", &[(4, "/w/luneta")])]);
         let rect = Rect { x: 0, y: 0, width: 42, height: 5 };
@@ -2342,7 +2342,7 @@ mod tests {
 
     #[test]
     fn the_agent_you_are_in_alone_is_no_other_agent() {
-        let json = r#"[{"status":"idle","status_age":60,"cwd":"/w/notes",
+        let json = r#"[{"status":"idle","status_age":60,"pid":104,"cwd":"/w/notes",
             "zellij":{"session":"notes","pane":"1"}}]"#;
         let places = Places::of(&[("notes", &[(1, "/w/notes")])]);
         let mut agents = AgentSet::default();
@@ -2449,13 +2449,13 @@ mod tests {
     }
 
     const AGENTS: &str = r#"[
-        {"status": "waiting", "status_age": 1080, "cwd": "/home/lorenzo/Projects/misc/luneta",
+        {"status": "waiting", "status_age": 1080, "pid": 105, "cwd": "/home/lorenzo/Projects/misc/luneta",
          "name": "luneta", "name_source": "user", "zellij": {"session": "misc", "pane": "12"}},
-        {"status": "busy", "status_age": 1860, "cwd": "/home/lorenzo/Projects/Work/bipa",
+        {"status": "busy", "status_age": 1860, "pid": 106, "cwd": "/home/lorenzo/Projects/Work/bipa",
          "zellij": {"session": "bipa", "pane": "3"}},
-        {"status": "idle", "status_age": 300, "cwd": "/home/lorenzo/Documents",
+        {"status": "idle", "status_age": 300, "pid": 107, "cwd": "/home/lorenzo/Documents",
          "zellij": {"session": "notes", "pane": "7"}},
-        {"status": "idle", "status_age": 60, "cwd": "/home/lorenzo"}
+        {"status": "idle", "status_age": 60, "pid": 108, "cwd": "/home/lorenzo"}
     ]"#;
 
     fn snapshot() -> Sessions {
