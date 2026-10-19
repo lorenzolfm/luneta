@@ -1456,7 +1456,7 @@ impl State {
             return false;
         };
         let entries = self.menu_entries.as_deref();
-        let menu = SidebarMenu::help(entries, row, Some(group), &mut self.menus);
+        let menu = SidebarMenu::help(entries, row, group, &mut self.menus);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };

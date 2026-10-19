@@ -360,7 +360,7 @@ impl Keys {
     /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
     /// kills its session. A key of yours can take neither group's.
     pub fn new(configured: Option<&str>, row: Scope) -> Result<Self, String> {
-        let mut root = match configured {
+        let root = match configured {
             Some(text) => {
                 let document: KdlDocument =
                     text.parse().map_err(|error| format!("menu: {error}"))?;
@@ -375,6 +375,12 @@ impl Keys {
                 ));
             }
         }
+        Ok(Keys::of(root, row))
+    }
+
+    /// The keys of `root`, which has neither key of luneta's groups, and
+    /// luneta's New and Delete groups after them.
+    fn of(mut root: Vec<Entry>, row: Scope) -> Self {
         root.push(Entry::Group {
             key: NEW,
             name: NEW_NAME.to_owned(),
@@ -388,7 +394,7 @@ impl Keys {
                 Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
             ],
         });
-        Ok(Keys { root, open: Vec::new() })
+        Keys { root, open: Vec::new() }
     }
 
     /// Help: the sidebar's commands their own key runs, as `/` searches, then
@@ -1199,34 +1205,18 @@ impl SidebarMenu {
 
     /// Help, numbered next among `numbers`: the keys at the top of the menu
     /// for `row`, as `m` opens it, and the sidebar's commands, on the group of
-    /// commands `group` opens, or on the first. A group of commands has none
-    /// of the menu's keys, and opens with yours gone wrong too, over luneta's
-    /// keys alone: the legend and `m` still say what is wrong with yours.
-    pub fn help(
-        entries: Option<&str>,
-        row: Row,
-        group: Option<char>,
-        numbers: &mut Numbers,
-    ) -> Self {
+    /// commands `group` opens, which `Backspace` goes back from to the top. A
+    /// group of commands has none of the menu's keys, and opens with yours
+    /// gone wrong too, over luneta's keys alone: the legend and `m` say what
+    /// is wrong with yours.
+    pub fn help(entries: Option<&str>, row: Row, group: char, numbers: &mut Numbers) -> Self {
         let number = numbers.next();
         let back = row.back;
-        let group = group.filter(|group| Command::opens(*group));
         let deletes = row.deletes();
-        let keys = Keys::new(entries, deletes).or_else(|reason| match group {
-            Some(_) => Keys::new(None, deletes),
-            None => Err(reason),
-        });
-        let stage = match keys {
-            Ok(keys) => {
-                let mut keys = Keys::help(keys);
-                if let Some(group) = group {
-                    keys.press(group);
-                }
-                Stage::Choosing(keys, row.target())
-            },
-            Err(reason) => wrong(reason),
-        };
-        SidebarMenu { number, back, stage }
+        let menu = Keys::new(entries, deletes).unwrap_or_else(|_| Keys::of(Vec::new(), deletes));
+        let mut keys = Keys::help(menu);
+        keys.press(group);
+        SidebarMenu { number, back, stage: Stage::Choosing(keys, row.target()) }
     }
 
     /// The menu numbered next among `numbers`, saying what is wrong, until
@@ -2322,8 +2312,14 @@ mod tests {
     }
 
     /// Help numbered 1 for `row`, on the group of commands `group` opens.
-    fn help(entries: Option<&str>, row: Row, group: Option<char>) -> SidebarMenu {
+    fn help(entries: Option<&str>, row: Row, group: char) -> SidebarMenu {
         SidebarMenu::help(entries, row, group, &mut Numbers::default())
+    }
+
+    /// The top of help numbered 1 for `row`, which `Backspace` comes back to
+    /// from the brief's keys.
+    fn help_top(entries: Option<&str>, row: Row) -> SidebarMenu {
+        press(Some(help(entries, row, 'b')), &bare(BareKey::Backspace)).expect("help")
     }
 
     /// `key` pressed in the sidebar's menu at frame 0, its pane with no agent.
@@ -2398,9 +2394,9 @@ mod tests {
     /// does, luneta's Delete group among them, then the groups of the
     /// sidebar's commands, which keep their keys from the menu's. So it does
     /// on a session's row, and with no menu of yours, and so does the legend.
-    /// A menu that cannot be read says what is wrong with it, but not over the
-    /// brief's keys, which are none of its own: they open with luneta's keys
-    /// alone at the top.
+    /// Of a menu that cannot be read, the legend says what is wrong, and help
+    /// opens on the brief's keys, which are none of its own, with luneta's
+    /// keys alone at the top.
     #[test]
     fn help_shows_search_then_the_top_of_the_menu_then_the_groups_of_commands() {
         let legend = |entries: Option<&str>| match Legend::new(entries).shown() {
@@ -2415,19 +2411,17 @@ mod tests {
             (None, row(None), vec!['/', 'n', 'd', 'b']),
         ] {
             assert_eq!(legend(entries), Ok(on.clone()), "{entries:?}");
-            let menu = help(entries, on_row, None);
+            let menu = help_top(entries, on_row);
             assert_eq!(on_show(Some(&menu)), Some(Ok(on)), "{entries:?}");
         }
         for (entries, said) in [
             ("t", "menu: \"t\" takes one string"),
             (r#"d "notes""#, "menu: \"d\" is luneta's"),
         ] {
-            let menu = help(Some(entries), row(None), None);
-            let wrong = wrong(Some(&menu)).expect("what is wrong");
+            let wrong = legend(Some(entries)).expect_err("what is wrong");
             assert!(wrong.starts_with(said), "{wrong}");
-            assert_eq!(legend(Some(entries)), Err(wrong.to_owned()), "{entries}");
 
-            let brief = help(Some(entries), row(None), Some('b'));
+            let brief = help(Some(entries), row(None), 'b');
             assert_eq!(on_show(Some(&brief)), Some(Ok(vec!['z', 's', 'h'])), "{entries}");
             let top = press(Some(brief), &bare(BareKey::Backspace));
             assert_eq!(on_show(top.as_ref()), Some(Ok(vec!['/', 'n', 'd', 'b'])), "{entries}");
@@ -2443,7 +2437,7 @@ mod tests {
         let legend = Legend::new(entries);
         let Shown::Keys(keys) = legend.shown() else { panic!("no keys") };
         assert_eq!(shown(keys), ['/', 'c', 'n', 'd', 'b']);
-        let menu = help(entries, row(None), None);
+        let menu = help_top(entries, row(None));
         assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['/', 'c', 'k', 'm', 'n', 'd', 'b'])));
     }
 
@@ -2454,7 +2448,7 @@ mod tests {
     /// does at the top of the sidebar.
     #[test]
     fn a_key_of_help_opens_its_group_or_hands_the_sidebar_its_command() {
-        let top = || Some(help(Some(MENU), row(None), None));
+        let top = || Some(help_top(Some(MENU), row(None)));
         let menu = press(top(), &char('c'));
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['t', 'm', 's'])));
         let menu = press(menu, &bare(BareKey::Backspace));
@@ -2470,7 +2464,7 @@ mod tests {
 
         for on_session in [false, true] {
             let on_row = || if on_session { session_row(None) } else { row(None) };
-            let brief = || help(Some(MENU), on_row(), Some('b'));
+            let brief = || help(Some(MENU), on_row(), 'b');
             assert_eq!(on_show(Some(&brief())), Some(Ok(vec!['z', 's', 'h'])), "{on_session}");
             let (menu, did) = brief().key(&char('s'), None, 0);
             assert!(menu.is_none(), "{on_session}");
@@ -2484,7 +2478,7 @@ mod tests {
             (MENU, row(None), '/', Command::Search),
             (MENU, session_row(None), '/', Command::Search),
         ] {
-            let menu = help(Some(entries), on_row, None);
+            let menu = help_top(Some(entries), on_row);
             let (menu, did) = menu.key(&char(key), None, 0);
             assert!(menu.is_none(), "{key}");
             assert_eq!(did, Some(Did::Command(command)), "{key}");
@@ -2503,8 +2497,9 @@ mod tests {
                 (MENU_KEY.to_owned(), menu.to_string()),
             ])
         };
-        let help = SidebarMenu::help(Some(MENU), row(Some(there)), None, &mut Numbers(1));
-        let menu = press(Some(help), &char('r')).expect("a menu");
+        let help = SidebarMenu::help(Some(MENU), row(Some(there)), 'b', &mut Numbers(1));
+        let top = press(Some(help), &bare(BareKey::Backspace));
+        let menu = press(top, &char('r')).expect("a menu");
         let menu = told(menu, None, b"", b"", &answer(1)).expect("a menu");
         assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['/', 'c', 'r', 'n', 'd', 'b'])));
         let menu = told(menu, None, b"", b"", &answer(2));

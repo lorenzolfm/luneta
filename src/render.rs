@@ -3089,7 +3089,11 @@ mod tests {
         let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
         let row = crate::menu::Row { pane, there: None, back: None };
         let numbers = &mut crate::menu::Numbers::default();
-        let help = SidebarMenu::help(Some(MENU_KDL), row, None, numbers);
+        let brief = SidebarMenu::help(Some(MENU_KDL), row, 'b', numbers);
+        let back = zellij_tile::prelude::KeyWithModifier::new(
+            zellij_tile::prelude::BareKey::Backspace,
+        );
+        let help = brief.key(&back, None, 0).0.expect("the top of help");
         assert_eq!(
             sidebar_menu_picture(&help, 7, 30),
             [
