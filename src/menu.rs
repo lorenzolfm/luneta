@@ -342,7 +342,8 @@ pub enum Pressed {
     /// Opened a group, or went back to the one before, or typed in the search
     /// box, moved its cursor or closed it.
     Moved,
-    /// Opened the search box, for the menu to ask the finder for the skills.
+    /// Asks for the search box, for the menu to open it over the skills of
+    /// the directory it starts an agent in, if it knows one.
     Search,
     /// Starts an agent on the prompt.
     Start(String),
@@ -477,6 +478,11 @@ impl Keys {
         self.search.as_deref()
     }
 
+    /// Opens `search`, which asked the finder for its skills as it was made.
+    fn open_search(&mut self, search: Search) {
+        self.search = Some(Box::new(search));
+    }
+
     /// Fills the search box with what the finder said, while it is open and
     /// waits for it, and says whether it did.
     fn found(&mut self, skills: Fetch<Vec<skills::Skill>>) -> bool {
@@ -485,8 +491,8 @@ impl Keys {
 
     /// What `key` does: a key the group open shows opens its group, starts
     /// its agent, opens or closes what it opens or closes, runs its command,
-    /// or opens the search box, `Backspace` goes back a group, and out of the
-    /// menu from the first, and `Esc` closes it. While the search box is
+    /// or asks for the search box, `Backspace` goes back a group, and out of
+    /// the menu from the first, and `Esc` closes it. While the search box is
     /// open, it takes the keys instead.
     pub fn key(&mut self, key: &KeyWithModifier) -> Pressed {
         if let Some(search) = &mut self.search {
@@ -519,10 +525,7 @@ impl Keys {
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
             Entry::Command(command) => return Pressed::Command(*command),
-            Entry::Search => {
-                self.search = Some(Box::default());
-                return Pressed::Search;
-            },
+            Entry::Search => return Pressed::Search,
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -1103,14 +1106,14 @@ impl Target {
         }
     }
 
-    /// Asks the finder for the skills the directory the pane works in can
-    /// run, for the search box `keys` has open, for the menu numbered `menu`.
-    /// A row with no pane, or one the sidebar does not know the directory of
-    /// yet, says why, as a key that starts an agent there does.
-    fn find(self, keys: Keys, menu: u64) -> Stage {
+    /// Opens the search box of `keys` over the skills the directory the pane
+    /// works in can run, for the menu numbered `menu`. A row with no pane, or
+    /// one the sidebar does not know the directory of yet, says why, as a key
+    /// that starts an agent there does.
+    fn find(self, mut keys: Keys, menu: u64) -> Stage {
         match self.beside() {
             Ok(beside) => {
-                skills::ask(&beside.cwd, numbered(skills::CONTEXT_VALUE, menu));
+                keys.open_search(Search::ask(&beside.cwd, numbered(skills::CONTEXT_VALUE, menu)));
                 Stage::Choosing(keys, self)
             },
             Err(reason) => wrong(reason),
@@ -1852,27 +1855,21 @@ impl Menu {
         *branch = (exit_code == Some(0) && !said.is_empty()).then_some(said);
     }
 
-    /// Asks the finder for the skills the directory of the pane you came from
-    /// can run, for the search box the keys have open. One opened before
-    /// zellij says which pane you came from closes again: there is no
-    /// directory yet to look in. Says whether to draw.
+    /// Opens the search box over the skills the directory of the pane you came
+    /// from can run. Before zellij says which pane that is, there is no
+    /// directory to look in, and no box opens. Says whether to draw.
     fn find(&mut self) -> bool {
-        let Phase::Choosing(keys, origin) = &mut self.phase else {
+        let Phase::Choosing(keys, Fetch::Ready(origin)) = &mut self.phase else {
             return false;
         };
-        let Fetch::Ready(origin) = origin else {
-            keys.search = None;
-            return false;
-        };
-        skills::ask(&origin.beside().cwd, BTreeMap::new());
+        keys.open_search(Search::ask(&origin.beside().cwd, BTreeMap::new()));
         self.place();
         true
     }
 
-    /// What the finder said of the skills the directory of the pane you came
-    /// from can run, for the search box, while it is open and waits for it.
-    /// An answer for another directory is for a pane you came from before.
-    /// Says whether to draw.
+    /// What the finder said of the skills of the directory the search box
+    /// looks in, while it is open and waits for it. An answer for another
+    /// directory is for a box closed before it came. Says whether to draw.
     fn found(
         &mut self,
         exit_code: Option<i32>,
@@ -1880,10 +1877,10 @@ impl Menu {
         stderr: &[u8],
         context: &BTreeMap<String, String>,
     ) -> bool {
-        let Phase::Choosing(keys, Fetch::Ready(origin)) = &mut self.phase else {
+        let Phase::Choosing(keys, _) = &mut self.phase else {
             return false;
         };
-        if context.get(DIR_KEY) != Some(&origin.beside().cwd) {
+        if context.get(DIR_KEY).map(String::as_str) != keys.search().map(Search::cwd) {
             return false;
         }
         if !keys.found(skills::answer(exit_code, stdout, stderr)) {
@@ -2163,7 +2160,9 @@ impl Menu {
 
     /// Keeps the terminal you came from as zellij says, and whether that is a
     /// guess. A pane that was a guess stays one: once a floating terminal you
-    /// may have come from closes, the pane under it is no surer.
+    /// may have come from closes, the pane under it is no surer. A search box
+    /// over the skills of a directory that is no longer where an agent starts
+    /// closes, back to the keys: it would start one where it may not run.
     fn follow_origin(&mut self) -> bool {
         let pane = match self.origin_pane() {
             Fetch::Waiting => return false,
@@ -2171,7 +2170,7 @@ impl Menu {
             Fetch::Failed(_) => None,
         };
         let floats = self.floats_a_terminal();
-        let Phase::Choosing(_, origin) = &mut self.phase else {
+        let Phase::Choosing(keys, origin) = &mut self.phase else {
             return false;
         };
         let was = match &*origin {
@@ -2192,6 +2191,13 @@ impl Menu {
                 )),
             },
         };
+        let cwd = match &now {
+            Fetch::Ready(now) => Some(now.beside().cwd.as_str()),
+            Fetch::Waiting | Fetch::Failed(_) => None,
+        };
+        if keys.search().is_some_and(|search| Some(search.cwd()) != cwd) {
+            keys.search = None;
+        }
         let followed = *origin != now;
         *origin = now;
         followed
@@ -2340,8 +2346,10 @@ mod tests {
 
     /// The skills a test's finder finds, with nothing said of what they do.
     fn found_skills(names: &[&str]) -> Fetch<Vec<skills::Skill>> {
-        let skill =
-            |name: &&str| skills::Skill { name: (*name).to_owned(), description: String::new() };
+        let skill = |name: &&str| skills::Skill {
+            name: skills::Name::new((*name).to_owned()).expect("a name"),
+            description: String::new(),
+        };
         Fetch::Ready(names.iter().map(skill).collect())
     }
 
@@ -2352,16 +2360,23 @@ mod tests {
         Some((search.term(), search.chosen().map(|skill| skill.name.as_str())))
     }
 
-    /// `/` at the top of the menu opens the search box, for the menu to ask
-    /// the finder for the skills. The box takes every key, as the sidebar's
-    /// does: a key of the menu's types, `Down` and `Up` move the cursor, and
-    /// `Enter` starts an agent on the skill it is on, as a slash command. `Esc`
-    /// goes back to the keys, and so does `Backspace` with nothing typed;
-    /// `Ctrl c` closes the menu.
+    /// `/` pressed at the top of `keys`, and the search box the menu opens
+    /// for it.
+    fn slash(keys: &mut Keys) {
+        assert_eq!(keys.key(&char('/')), Pressed::Search);
+        keys.open_search(Search::ask("/w/elo", BTreeMap::new()));
+    }
+
+    /// `/` at the top of the menu asks for the search box, which the menu
+    /// opens over the skills of a directory. The box takes every key, as the
+    /// sidebar's does: a key of the menu's types, `Down` and `Up` move the
+    /// cursor, and `Enter` starts an agent on the skill it is on, as a slash
+    /// command. `Esc` goes back to the keys, and so does `Backspace` with
+    /// nothing typed; `Ctrl c` closes the menu.
     #[test]
     fn slash_searches_the_skills_and_enter_starts_the_one_picked() {
         let mut keys = keys(MENU);
-        assert_eq!(keys.key(&char('/')), Pressed::Search);
+        slash(&mut keys);
         assert_eq!(searched(&keys), Some(("", None)));
         assert_eq!(keys.key(&char('c')), Pressed::Moved);
         assert_eq!(keys.key(&bare(BareKey::Enter)), Pressed::Nothing);
@@ -2381,10 +2396,10 @@ mod tests {
         assert_eq!(keys.key(&bare(BareKey::Esc)), Pressed::Moved);
         assert_eq!(searched(&keys), None);
         assert_eq!(shown(&keys), ['/', 'c', 'r', 'n', 'd']);
-        keys.key(&char('/'));
+        slash(&mut keys);
         assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Moved);
         assert_eq!(searched(&keys), None);
-        keys.key(&char('/'));
+        slash(&mut keys);
         assert_eq!(keys.key(&char('c').with_ctrl_modifier()), Pressed::Close);
     }
 
@@ -3165,7 +3180,9 @@ mod tests {
 
     /// The key binding's `/` asks the finder for the skills where the pane
     /// you came from works, and takes the answer for that directory alone.
-    /// Pressed before zellij says which pane that is, it opens no box.
+    /// Pressed before zellij says which pane that is, it opens no box. Once
+    /// zellij says you came from a pane in another directory, the box closes,
+    /// and the answer for the directory it looked in comes to nothing.
     #[test]
     fn the_key_binding_s_search_takes_the_skills_of_the_pane_you_came_from() {
         let search_open = |menu: &Menu| match menu.shown() {
@@ -3197,6 +3214,26 @@ mod tests {
         assert!(menu.key(&bare(BareKey::Esc)));
         assert_eq!(search_open(&menu), None);
         assert!(menu.shown().is_some());
+
+        // Pane 2 exits while the box looks in `/w/elo`, and zellij says the
+        // focus is on pane 3, in `/w/old`: set here as zellij would say it,
+        // since asking where a pane works reads stdin in a test.
+        assert!(menu.key(&char('/')));
+        assert_eq!(search_open(&menu), Some(0));
+        let old = Beside { pane: 3, cwd: "/w/old".to_owned() };
+        if let Phase::Choosing(_, origin) = &mut menu.phase {
+            *origin = Fetch::Ready(Origin::Sure(old));
+        }
+        let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
+        let itself = PaneInfo { is_plugin: true, is_floating: true, ..shell(0) };
+        let tab = vec![PaneInfo { is_focused: true, ..shell(3) }, itself];
+        menu.panes(PaneManifest { panes: HashMap::from([(0, tab)]) });
+        assert_eq!(search_open(&menu), None);
+        assert!(!menu.ran(Some(0), FOUND, b"", &skills_in("/w/elo")));
+        assert!(menu.key(&char('/')));
+        assert!(!menu.ran(Some(0), FOUND, b"", &skills_in("/w/elo")));
+        assert!(menu.ran(Some(0), FOUND, b"", &skills_in("/w/old")));
+        assert_eq!(search_open(&menu), Some(1));
     }
 
     /// The key binding's menu, floating over pane 2 of session `luneta`,

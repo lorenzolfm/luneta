@@ -33,11 +33,13 @@ pub const CONTEXT_VALUE: &str = "skills";
 /// above it up to its repository's top, or up to `/` outside of one, then in
 /// yours, where they were found being none, then in each plugin installed,
 /// where they were found being its install path. A plugin keeps its skills
-/// where its manifest says, which comes before them, whole: every `SKILL.md`
-/// in it is printed, but in a `node_modules` or a `.git`. Of a `.md`, what it
+/// where its manifest says, which is printed whole: every `SKILL.md` in it is
+/// printed, but in a `node_modules` or a `.git`. Of a `.md`, what it
 /// says of itself is its frontmatter, and of a workflow the `meta` it begins
-/// with, each its first 64 lines. All of it is cut at 256 KiB: zellij hands it
-/// to the plugin as a JSON array of numbers, some four bytes to a byte.
+/// with, each its first 64 lines, with any NUL in it left out: it would end
+/// the field early, and every field after it would be read as the one before.
+/// All of it is cut at 256 KiB: zellij hands it to the plugin as a JSON array
+/// of numbers, some four bytes to a byte.
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 found() {
@@ -47,7 +49,7 @@ found() {
     *) awk 'NR == 1 { if ($0 !~ /^---[[:space:]]*$/) exit; next }
         /^---[[:space:]]*$/ || NR > 65 { exit }
         { print }' "$3" 2>/dev/null ;;
-    esac
+    esac | tr -d '\000'
     printf '\0'
 }
 under() {
@@ -72,7 +74,7 @@ under() {
         while IFS= read -r path; do
             if [ -f "$path/.claude-plugin/plugin.json" ]; then
                 printf '%s\0%s\0' "$path" .claude-plugin/plugin.json
-                head -c 65536 "$path/.claude-plugin/plugin.json"
+                head -c 65536 "$path/.claude-plugin/plugin.json" | tr -d '\000'
                 printf '\0'
             fi
             find -L "$path" -maxdepth 6 \( -name node_modules -o -name .git \) -prune \
@@ -95,13 +97,38 @@ const DESCRIPTION_CHARS: usize = 500;
 /// `/`, and what its frontmatter says it does, on one line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
-    pub name: String,
+    pub name: Name,
     pub description: String,
+}
+
+/// The name a skill runs by, after its `/`: one word, as the first word of a
+/// prompt is the skill it runs. Claude Code would read a name with a space in
+/// it as another skill, and the rest as what that one is asked.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Name(String);
+
+impl Name {
+    /// `name`, if a prompt can run it: a word, with no space or control
+    /// character in it. Else `name` back, to say which.
+    pub fn new(name: String) -> Result<Self, String> {
+        let spaced = |c: char| c.is_whitespace() || c.is_control();
+        if name.is_empty() || name.contains(spaced) { Err(name) } else { Ok(Name(name)) }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Asks the finder for the skills `cwd` can run, with `context`, which the
 /// answer carries back with the directory it is for.
-pub fn ask(cwd: &str, mut context: BTreeMap<String, String>) {
+fn ask(cwd: &str, mut context: BTreeMap<String, String>) {
     context.insert(CONTEXT_KEY.to_owned(), CONTEXT_VALUE.to_owned());
     context.insert(DIR_KEY.to_owned(), cwd.to_owned());
     run_command(&["sh", "-c", FIND, "sh", cwd], context);
@@ -123,28 +150,45 @@ pub fn answer(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Fetch<Vec
 /// runs as `plugin:skill`, and only while `claude plugin list` says the
 /// plugin is on. A skill found twice is the first found: the one nearest the
 /// directory. One whose frontmatter says it is not for you to run is left
-/// out. Output cut short ends with the last skill printed whole.
+/// out, and so is one named what no slash command runs, which the log says.
+/// A plugin's skills are named once all of its manifest is read, wherever it
+/// was printed. Output cut short ends with the last skill printed whole.
 fn found(stdout: &[u8]) -> Vec<Skill> {
     let printed = String::from_utf8_lossy(stdout);
     let whole = printed.rfind('\0').map_or("", |end| &printed[..=end]);
     let mut fields = whole.split_terminator('\0');
     let mut plugins = plugins_on(fields.next().unwrap_or(""));
+    let mut files = Vec::new();
+    while let (Some(at), Some(path), Some(text)) = (fields.next(), fields.next(), fields.next()) {
+        files.push((at, path, text));
+    }
+    for (at, path, text) in &files {
+        if let (Some(plugin), MANIFEST) = (plugins.get_mut(*at), *path) {
+            plugin.keeps(text);
+        }
+    }
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
-    while let (Some(at), Some(path), Some(text)) = (fields.next(), fields.next(), fields.next()) {
-        let found = match (at, plugins.get_mut(at)) {
+    for (at, path, text) in files {
+        let found = match (at, plugins.get(at)) {
             ("", _) => own(path, text),
-            (_, Some(plugin)) if path == MANIFEST => {
-                plugin.keeps(text);
-                None
-            },
             (_, Some(plugin)) => plugin.name(path).map(|name| (name, Front::read(text))),
             (_, None) => None,
         };
         let Some((name, front)) = found else {
             continue;
         };
-        if front.invocable && seen.insert(name.clone()) {
+        if !front.invocable {
+            continue;
+        }
+        let name = match Name::new(name) {
+            Ok(name) => name,
+            Err(name) => {
+                eprintln!("luneta skills: no slash command runs {path} by its name, {name:?}");
+                continue;
+            },
+        };
+        if seen.insert(name.clone()) {
             // A tab, say, has no width to draw, and would throw the line off.
             let shown = |c: char| if c.is_control() { ' ' } else { c };
             let description = front.description.chars().map(shown).take(DESCRIPTION_CHARS);
@@ -184,14 +228,13 @@ fn one_name(name: &str) -> bool {
 }
 
 /// A plugin as `claude plugin list --json` lists it, once for each place it
-/// is installed in.
+/// is installed in. A list with no `enabled` or `installPath` is one luneta
+/// cannot read, and no plugin of it is on: rather than every plugin off.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Installed {
     id: String,
-    #[serde(default)]
     enabled: bool,
-    #[serde(default)]
     install_path: String,
 }
 
@@ -204,9 +247,20 @@ struct Plugin {
     keeps: Vec<String>,
 }
 
-/// Each plugin that is on, by its install path.
+/// Each plugin that is on, by its install path. `claude` missing lists none,
+/// and so does a list luneta cannot read, which the log says: Claude Code
+/// changed how it lists them, and the finder must follow.
 fn plugins_on(listed: &str) -> HashMap<String, Plugin> {
-    let installed: Vec<Installed> = serde_json::from_str(listed).unwrap_or_default();
+    if listed.trim().is_empty() {
+        return HashMap::new();
+    }
+    let installed: Vec<Installed> = match serde_json::from_str(listed) {
+        Ok(installed) => installed,
+        Err(error) => {
+            eprintln!("luneta skills: claude plugin list said what luneta cannot read: {error}");
+            return HashMap::new();
+        },
+    };
     installed
         .into_iter()
         .filter(|plugin| plugin.enabled && !plugin.install_path.is_empty())
@@ -356,18 +410,35 @@ pub struct Found {
 
 impl Stops for Found {}
 
-/// The search box over the skills, while it is open: what is typed, the
-/// skills, once the finder has said, and those that match what is typed,
-/// best first, the cursor on one. With nothing typed, every skill matches,
-/// by name.
-#[derive(Default)]
+/// The search box over the skills of a directory, while it is open: the
+/// directory, what is typed, the skills, once the finder has said, and those
+/// that match what is typed, best first, the cursor on one. With nothing
+/// typed, every skill matches, by name.
 pub struct Search {
+    cwd: String,
     term: String,
     skills: Fetch<Vec<Skill>>,
     found: Cursor<Found>,
 }
 
 impl Search {
+    /// A box over the skills `cwd` can run, once it has asked the finder for
+    /// them with `context`: no box waits on an answer nothing asked for.
+    pub fn ask(cwd: &str, context: BTreeMap<String, String>) -> Self {
+        ask(cwd, context);
+        Search {
+            cwd: cwd.to_owned(),
+            term: String::new(),
+            skills: Fetch::Waiting,
+            found: Cursor::default(),
+        }
+    }
+
+    /// The directory whose skills the box lists.
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
     pub fn term(&self) -> &str {
         &self.term
     }
@@ -450,8 +521,9 @@ impl Search {
                 if term.is_empty() {
                     return Some(((false, false, 0), Found { at, hits: Vec::new() }));
                 }
-                if let Some((score, hits)) = matcher.fuzzy_indices(&skill.name, term) {
-                    return Some(((skill.name == term, true, score), Found { at, hits }));
+                let name = skill.name.as_str();
+                if let Some((score, hits)) = matcher.fuzzy_indices(name, term) {
+                    return Some(((name == term, true, score), Found { at, hits }));
                 }
                 let score = matcher.fuzzy_match(&skill.description, term)?;
                 Some(((false, false, score), Found { at, hits: Vec::new() }))
@@ -467,7 +539,8 @@ mod tests {
     use super::*;
 
     fn skill(name: &str, description: &str) -> Skill {
-        Skill { name: name.to_owned(), description: description.to_owned() }
+        let name = Name::new(name.to_owned()).expect("a name");
+        Skill { name, description: description.to_owned() }
     }
 
     /// What `FIND` prints: the plugins, then where, the path and the
@@ -526,7 +599,8 @@ mod tests {
                 skill("tigerstyle", "Apply TigerStyle."),
             ]
         );
-        // `claude` missing, or saying no JSON: no plugin is on.
+        // `claude` missing, or saying what luneta cannot read: no plugin is
+        // on, and your own skills are still found.
         let stdout = printed(
             "",
             &[(REVIEW, "skills/deep/SKILL.md", ""), ("", "skills/tdd/SKILL.md", "")],
@@ -534,9 +608,28 @@ mod tests {
         assert_eq!(found(&stdout), [skill("tdd", "")]);
     }
 
+    /// A skill named what no slash command runs is left out, rather than
+    /// named some other way: the first word of a prompt is the skill it runs,
+    /// so a name with a space in it would run another, and no name runs none.
+    #[test]
+    fn a_skill_no_slash_command_runs_is_left_out() {
+        let stdout = printed(
+            "[]",
+            &[
+                ("", "workflows/empty.js", "export const meta = {\n  name: '',\n}"),
+                ("", "workflows/spaced.js", "export const meta = {\n  name: 'review pr',\n}"),
+                ("", "workflows/tabbed.js", "export const meta = {\n  name: 'a\tb',\n}"),
+                ("", "skills/two words/SKILL.md", ""),
+                ("", "commands/one-word.md", ""),
+            ],
+        );
+        assert_eq!(found(&stdout), [skill("one-word", "")]);
+    }
+
     /// A plugin keeps its skills in `skills`, and where its manifest says
-    /// besides: a skill's own directory, or one that holds skills. A
-    /// `SKILL.md` anywhere else in it is no skill of the plugin's.
+    /// besides: a skill's own directory, or one that holds skills, whether
+    /// the manifest comes before them or after. A `SKILL.md` anywhere else in
+    /// it is no skill of the plugin's.
     #[test]
     fn a_plugin_s_skills_are_where_its_manifest_says() {
         let stdout = printed(
@@ -551,12 +644,13 @@ mod tests {
                 (REVIEW, "SKILL.md", ""),
             ],
         );
-        let names: Vec<String> = found(&stdout).into_iter().map(|skill| skill.name).collect();
+        let names: Vec<String> =
+            found(&stdout).iter().map(|skill| skill.name.to_string()).collect();
         assert_eq!(names, ["review:deep", "review:one", "review:own"]);
 
         let stdout = printed(
             PLUGINS,
-            &[(REVIEW, MANIFEST, r#"{"skills": "extra"}"#), (REVIEW, "extra/own/SKILL.md", "")],
+            &[(REVIEW, "extra/own/SKILL.md", ""), (REVIEW, MANIFEST, r#"{"skills": "extra"}"#)],
         );
         assert_eq!(found(&stdout), [skill("review:own", "")]);
     }
@@ -638,6 +732,75 @@ mod tests {
         );
     }
 
+    /// What the finder finds in `LUNETA_SKILLS_DIR`, or in this directory,
+    /// against the slash commands Claude Code says it has there, in the
+    /// `init` that `claude -p` prints first. Each skill the finder names is
+    /// one of them, and each of them is one the finder found, but for those
+    /// Claude Code brings itself, which the menu leaves out: what it has with
+    /// none of your settings, skills or plugins, in a directory of none, and
+    /// the skills it brings from claude.ai, in the namespaces it keeps for
+    /// them. The finder looks where Claude Code looks, as far as luneta knows,
+    /// and only this says when a Claude Code looks elsewhere.
+    #[test]
+    #[ignore = "starts `claude`: run it with `dev skills [dir]`"]
+    fn the_finder_finds_what_claude_code_runs() {
+        use std::collections::BTreeSet;
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        /// The slash commands of the `init` of `claude -p` in `dir`, with
+        /// `args`, on a model that is none, so that nothing reaches one. Out
+        /// of the panes claude-ps places agents in, and of a Claude Code
+        /// session this may run in, but for where yours keeps its config.
+        fn commands(dir: &Path, args: &[&str]) -> BTreeSet<String> {
+            let mut claude = Command::new("claude");
+            for (key, _) in std::env::vars() {
+                let session = key.starts_with("CLAUDE") && key != "CLAUDE_CONFIG_DIR";
+                if session || key.starts_with("ZELLIJ") {
+                    claude.env_remove(key);
+                }
+            }
+            let said = claude
+                .current_dir(dir)
+                .args(["-p", "x", "--output-format", "stream-json", "--verbose"])
+                .args(["--model", "luneta-no-such-model"])
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .expect("claude");
+            let init = String::from_utf8_lossy(&said.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|event| event["subtype"] == "init")
+                .expect("claude -p said its init");
+            let names = init["slash_commands"].as_array().into_iter().flatten();
+            names.filter_map(serde_json::Value::as_str).map(str::to_owned).collect()
+        }
+
+        let dir = std::env::var("LUNETA_SKILLS_DIR").unwrap_or_else(|_| ".".to_owned());
+        let finder = Command::new("sh").args(["-c", FIND, "sh", &dir]).output().expect("sh");
+        let luneta: BTreeSet<String> =
+            found(&finder.stdout).iter().map(|skill| skill.name.to_string()).collect();
+
+        let none = std::env::temp_dir().join(format!("luneta-skills-{}", std::process::id()));
+        std::fs::create_dir_all(&none).expect("a directory");
+        let own = commands(&none, &["--setting-sources", "local"]);
+        std::fs::remove_dir_all(&none).expect("the directory goes");
+
+        let there = commands(Path::new(&dir), &[]);
+        let synced = ["anthropic-skills:", "claude-ai:"];
+        let brought =
+            |name: &&String| own.contains(*name) || synced.iter().any(|at| name.starts_with(at));
+        let finder_alone: Vec<&String> = luneta.difference(&there).collect();
+        let claude_alone: Vec<&String> =
+            there.difference(&luneta).filter(|name| !brought(name)).collect();
+        assert!(
+            finder_alone.is_empty() && claude_alone.is_empty(),
+            "in {dir}, the finder alone finds {finder_alone:?}, and Claude Code alone runs \
+             {claude_alone:?}"
+        );
+    }
+
     #[test]
     fn a_finder_that_failed_says_why() {
         assert_eq!(answer(Some(0), b"[]\0", b""), Fetch::Ready(Vec::new()));
@@ -656,7 +819,7 @@ mod tests {
     /// skills it finds are narrowed by what was typed by then.
     #[test]
     fn a_search_narrows_the_skills_to_the_best_match_first() {
-        let mut search = Search::default();
+        let mut search = Search::ask("/w", BTreeMap::new());
         search.push('r');
         search.push('e');
         assert_eq!(search.count(), 0);

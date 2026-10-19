@@ -130,6 +130,7 @@
             dev install                build, then install to ~/.local/share/zellij/plugins
             dev reload [session]       install, then put the new bytes in the running picker
             dev clean                  cargo clean
+            dev skills [dir]           check the menu's skill finder against what claude runs in dir
           HELP
           }
 
@@ -141,7 +142,7 @@
               usage
               exit 0
               ;;
-            build | clippy | install | reload | clean) ;;
+            build | clippy | install | reload | clean | skills) ;;
             *)
               # Explicit failure, not a silent fall-through to help: `dev buidl` in a script
               # or a CI step must not exit 0.
@@ -155,6 +156,8 @@
             echo "dev: run this inside the luneta checkout (no git worktree here)" >&2
             exit 2
           fi
+          # Where `dev skills` looks when it is given no directory: where you ran it.
+          here="$PWD"
           cd "$root"
 
           wasm="target/wasm32-wasip1/release/luneta.wasm"
@@ -244,6 +247,17 @@
 
             clean)
               cargo clean
+              ;;
+
+            # The menu's search finds skills where Claude Code looks for them, which
+            # Claude Code can change in any release. This asks Claude Code itself, by the
+            # `init` a headless start prints on a model that is none, and fails with the
+            # names only one side has. Like zellij for `reload`, claude comes from the
+            # ambient PATH: the check is against the claude you run.
+            skills)
+              dir="$(cd "''${1:-$here}" && pwd -P)"
+              LUNETA_SKILLS_DIR="$dir" cargo test --locked \
+                skills::tests::the_finder_finds_what_claude_code_runs -- --ignored --exact
               ;;
           esac
         '';
