@@ -1154,42 +1154,60 @@ fn menu_help(width: usize, opened: bool) -> Painted {
     }
 }
 
-/// What takes the bottom of the sidebar: the menu while it is open, and the
-/// legend while the sidebar has the focus and no search box is open.
+/// What takes the bottom of the sidebar: the menu while it shows something,
+/// or else the search box while it is open, with a line of its keys under it
+/// while the sidebar has the focus, or else the legend while the sidebar has
+/// the focus. A menu that shows nothing gives way to the search box, and not
+/// to the legend: the keys are still the menu's.
 enum Bottom<'a> {
     Menu(&'a SidebarMenu),
+    Search { term: &'a str, keys: bool },
     Legend(&'a Legend),
 }
 
 impl<'a> Bottom<'a> {
     fn of(tree: &'a Tree, focused: bool) -> Option<Self> {
-        match (&tree.menu, &tree.legend) {
-            (Some(menu), _) => Some(Bottom::Menu(menu)),
-            (None, Some(legend)) if focused && tree.search().is_none() => {
+        if let Some(menu) = tree.menu.as_ref().filter(|menu| menu.shown().is_some()) {
+            return Some(Bottom::Menu(menu));
+        }
+        match (tree.search(), &tree.legend) {
+            (Some(term), _) => Some(Bottom::Search { term, keys: focused }),
+            (None, Some(legend)) if focused && tree.menu.is_none() => {
                 Some(Bottom::Legend(legend))
             },
             (None, _) => None,
         }
     }
 
-    /// How many lines it wants at the bottom of a sidebar `cols` wide: the
-    /// menu's, or the legend's rule and what it shows, with no keys under
-    /// them.
-    fn height(&self, cols: usize) -> usize {
-        match self {
+    /// How many lines it takes at the bottom of a sidebar `rows` tall and
+    /// `cols` wide: as many as the menu wants, its keys under them, or the
+    /// legend's rule and what it shows, that leave the tree a row; or the
+    /// search box, and its keys while there are two more lines.
+    fn height(&self, rows: usize, cols: usize) -> usize {
+        let wants = match self {
             Bottom::Menu(menu) => sidebar_menu_height(menu, cols),
             Bottom::Legend(legend) => {
                 menu_parts(legend.shown(), cols.saturating_sub(2)).body.len() + 1
             },
-        }
+            Bottom::Search { keys, .. } => {
+                return usize::from(rows > 0) + usize::from(*keys && rows > 2);
+            },
+        };
+        wants.min(rows.saturating_sub(1))
     }
 
-    /// Its lines in `lines` lines, each as wide as the sidebar, and the
-    /// menu's keys under them, which the legend has none of.
+    /// Its lines in `lines` lines, each as wide as the sidebar, and the keys
+    /// that go under them on the last: the menu's, or the search box's while
+    /// it has a line for them. The legend has none.
     fn lines(&self, lines: usize, cols: usize) -> (Vec<Painted>, Option<Painted>) {
         match self {
             Bottom::Menu(menu) => sidebar_menu_lines(menu, lines, cols),
             Bottom::Legend(legend) => (ruled(legend.shown(), None, lines, cols).0, None),
+            Bottom::Search { term, .. } => {
+                let inner = cols.saturating_sub(2);
+                let drawn = (lines > 0).then(|| search_line(term, inner));
+                (drawn.into_iter().collect(), (lines > 1).then(|| search_help_line(inner)))
+            },
         }
     }
 }
@@ -1258,40 +1276,33 @@ fn menu_rule(title: &str, right: &str, cols: usize) -> Painted {
 }
 
 /// How a sidebar `rows` tall is cut up: the header and a blank line under it
-/// at the top, the tree under them, the notes under it, and the search box
-/// while it is open, with a line of its keys at the bottom while the sidebar
-/// has the focus. The box opens at the bottom so that no row moves. The
-/// header goes before it would leave the tree no row.
-///
-/// The menu while it is open, or else the legend, takes the place of the box
-/// and its keys, with as many of the `menu` lines it wants as leave the tree a
-/// row, and the notes leave the tree that row too: the menu is for the row the
-/// cursor is on.
+/// at the top, the tree under them, the notes under it, and what takes the
+/// bottom under them all. The search box opens at the bottom so that no row
+/// moves. The header goes before it would leave the tree no row. The menu
+/// and the legend leave the tree a row, and the notes leave it that row too:
+/// they are for the row the cursor is on.
 struct Shelf {
     header: usize,
     tree: usize,
     notes: usize,
-    search_y: Option<usize>,
-    help_y: Option<usize>,
-    menu_y: Option<usize>,
+    /// Where what takes the bottom starts, while it has a line.
+    bottom_y: Option<usize>,
 }
 
 impl Shelf {
-    fn new(rows: usize, notes: usize, focused: bool, searching: bool, menu: usize) -> Self {
-        let menu = menu.min(rows.saturating_sub(1));
-        let search = usize::from(menu == 0 && searching && rows > 0);
-        let help = usize::from(search == 1 && focused && rows > search + 1);
-        let below = menu + search + help;
+    fn new(rows: usize, notes: usize, bottom: Option<&Bottom>, cols: usize) -> Self {
+        let below = bottom.map_or(0, |bottom| bottom.height(rows, cols));
+        let kept = match bottom {
+            Some(Bottom::Menu(_) | Bottom::Legend(_)) => usize::from(below > 0),
+            Some(Bottom::Search { .. }) | None => 0,
+        };
         let header = if rows > below + notes + HEADER { HEADER } else { 0 };
-        let kept = usize::from(menu > 0);
         let notes = notes.min((rows - below - header).saturating_sub(kept));
         Shelf {
             header,
             tree: rows - below - header - notes,
             notes,
-            search_y: (search == 1).then(|| rows - help - 1),
-            help_y: (help == 1).then(|| rows - 1),
-            menu_y: (menu > 0).then(|| rows - menu),
+            bottom_y: (below > 0).then(|| rows - below),
         }
     }
 }
@@ -1309,27 +1320,20 @@ pub fn render_sidebar(
 ) {
     let inner = cols.saturating_sub(2);
     let notes = agent_note_texts(agents, inner);
-    let term = tree.search();
     let bottom = Bottom::of(tree, focused);
-    let menu = bottom.as_ref().map_or(0, |bottom| bottom.height(cols));
-    let shelf = Shelf::new(rows, notes.len(), focused, term.is_some(), menu);
+    let shelf = Shelf::new(rows, notes.len(), bottom.as_ref(), cols);
     for (y, line) in sidebar_lines(tree, &notes, &shelf, focused, cols, frame).iter().enumerate() {
         print_at(line, 0, y, cols);
     }
-    if let Some((y, term)) = shelf.search_y.zip(term) {
-        print_at(&search_line(term, inner), 0, y, cols);
+    let Some((y, bottom)) = shelf.bottom_y.zip(bottom) else {
+        return;
+    };
+    let (lines, keys) = bottom.lines(rows - y, cols);
+    for (at, line) in lines.iter().enumerate() {
+        print_at(line, 0, y + at, cols);
     }
-    if let Some(y) = shelf.help_y {
-        print_at(&search_help_line(inner), 1, y, inner);
-    }
-    if let Some((y, bottom)) = shelf.menu_y.zip(bottom) {
-        let (lines, help) = bottom.lines(rows - y, cols);
-        for (at, line) in lines.iter().enumerate() {
-            print_at(line, 0, y + at, cols);
-        }
-        if let Some(help) = help {
-            print_at(&help, 1, rows - 1, inner);
-        }
+    if let Some(keys) = keys {
+        print_at(&keys, 1, rows - 1, inner);
     }
 }
 
@@ -1418,8 +1422,7 @@ pub fn select_sidebar_row(
 /// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
 fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, cols: usize) -> Shelf {
     let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
-    let menu = Bottom::of(tree, focused).map_or(0, |bottom| bottom.height(cols));
-    Shelf::new(rows, notes, focused, tree.search().is_some(), menu)
+    Shelf::new(rows, notes, Bottom::of(tree, focused).as_ref(), cols)
 }
 
 /// Whether a click on `column` of a row folds it: a session's, on its fold.
@@ -2569,8 +2572,7 @@ mod tests {
         rows: usize,
         cols: usize,
     ) -> Vec<String> {
-        let menu = Bottom::of(tree, focused).map_or(0, |bottom| bottom.height(cols));
-        let shelf = Shelf::new(rows, notes.len(), focused, tree.search().is_some(), menu);
+        let shelf = Shelf::new(rows, notes.len(), Bottom::of(tree, focused).as_ref(), cols);
         sidebar_lines(tree, notes, &shelf, focused, cols, 0)
             .iter()
             .map(|line| line.content().to_owned())
@@ -2635,7 +2637,7 @@ mod tests {
     #[test]
     fn a_pane_s_branch_is_gray_on_the_line_under_its_label() {
         let tree = sidebar_tree(worktrees(), 0);
-        let shelf = Shelf::new(11, 0, false, false, 0);
+        let shelf = Shelf::new(11, 0, None, 30);
         let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
         let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
         assert_eq!(
@@ -2697,7 +2699,7 @@ mod tests {
     fn the_highlight_is_on_your_pane_until_the_sidebar_has_the_focus() {
         let tree = workday_tree(2);
         for (focused, row) in [(false, 6), (true, 2)] {
-            let shelf = Shelf::new(11, 0, focused, false, 0);
+            let shelf = Shelf::new(11, 0, None, 30);
             let lines = sidebar_lines(&tree, &[], &shelf, focused, 30, 0);
             let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
             assert_eq!(lit, [HEADER + row], "focused: {focused}");
@@ -2729,10 +2731,10 @@ mod tests {
         assert_eq!(unfocused.len(), 6);
         assert_eq!(unfocused[5], " claude-ps: gone                ");
         let agents = AgentSet::default();
-        assert_eq!(sidebar_shelf(&tree, &agents, false, 13, 30).menu_y, None);
+        assert_eq!(sidebar_shelf(&tree, &agents, false, 13, 30).bottom_y, None);
 
         let shelf = sidebar_shelf(&tree, &agents, true, 13, 30);
-        assert_eq!((shelf.tree, shelf.menu_y, shelf.help_y), (5, Some(7), None));
+        assert_eq!((shelf.tree, shelf.bottom_y), (5, Some(7)));
         let Some(bottom) = Bottom::of(&tree, true) else { panic!("no legend") };
         let (lines, help) = bottom.lines(13 - 7, 30);
         assert!(help.is_none());
@@ -2751,8 +2753,8 @@ mod tests {
         assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, 7), None);
 
         tree.search_for(String::new());
-        let shelf = sidebar_shelf(&tree, &agents, true, 13, 30);
-        assert_eq!((shelf.menu_y, shelf.search_y, shelf.help_y), (None, Some(11), Some(12)));
+        assert!(matches!(Bottom::of(&tree, true), Some(Bottom::Search { keys: true, .. })));
+        assert_eq!(sidebar_shelf(&tree, &agents, true, 13, 30).bottom_y, Some(11));
         assert!(search_help_line(30).content().width() <= 30);
 
         tree.menu = sidebar_menu(MENU_KDL, Some('c'));
@@ -2769,8 +2771,8 @@ mod tests {
         assert_eq!(open.len(), closed.len() - 2);
         assert_eq!(open[..], closed[..open.len()]);
 
-        let shelf = Shelf::new(9, 0, true, true, 0);
-        assert_eq!((shelf.search_y, shelf.help_y), (Some(7), Some(8)));
+        let search = Bottom::Search { term: "", keys: true };
+        assert_eq!(Shelf::new(9, 0, Some(&search), 32).bottom_y, Some(7));
         assert_eq!(search_line("pix", 30).content(), " /pix_                          ");
         assert_eq!(search_line("handoff-eng-11259", 10).content(), " /…g-11259_ ");
 
@@ -2798,7 +2800,7 @@ mod tests {
     #[test]
     fn a_short_sidebar_keeps_your_pane_in_sight_until_it_has_the_focus() {
         let tree = workday_tree(0);
-        let shelf = Shelf::new(5, 0, false, false, 0);
+        let shelf = Shelf::new(5, 0, None, 30);
         let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
         let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
         assert_eq!(lit, [HEADER + 2]);
@@ -2995,15 +2997,9 @@ mod tests {
                         let lines = sidebar_picture(&tree, &notes, focused, rows, cols);
                         let agents = AgentSet::default();
                         let shelf = sidebar_shelf(&tree, &agents, focused, rows, cols);
-                        let menu_lines = shelf.menu_y.map_or(0, |y| rows - y);
-                        let below = [shelf.search_y, shelf.help_y];
-                        assert_eq!(
-                            lines.len() + below.iter().flatten().count() + menu_lines,
-                            rows,
-                            "{cols}x{rows}"
-                        );
-                        assert!(below.iter().flatten().all(|y| *y >= lines.len()), "{rows}");
-                        assert!(shelf.menu_y.is_none_or(|y| y == lines.len()), "{rows}");
+                        let below = shelf.bottom_y.map_or(0, |y| rows - y);
+                        assert_eq!(lines.len() + below, rows, "{cols}x{rows}");
+                        assert!(shelf.bottom_y.is_none_or(|y| y == lines.len()), "{rows}");
                         assert!(shelf.header == 0 || shelf.tree > 0, "{cols}x{rows}");
                         for line in lines {
                             assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
@@ -3011,9 +3007,9 @@ mod tests {
                         let Some(bottom) = Bottom::of(&tree, focused) else {
                             continue;
                         };
-                        let (drawn, help) = bottom.lines(menu_lines, cols);
-                        let shown = drawn.len() + usize::from(help.is_some());
-                        assert_eq!(shown, menu_lines, "{cols}x{rows}");
+                        let (drawn, keys) = bottom.lines(below, cols);
+                        let shown = drawn.len() + usize::from(keys.is_some());
+                        assert_eq!(shown, below, "{cols}x{rows}");
                         for line in drawn.iter().map(Painted::content) {
                             assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
                         }
@@ -3058,8 +3054,7 @@ mod tests {
         tree.menu = sidebar_menu(MENU_KDL, Some('c'));
         let agents = AgentSet::default();
         let shelf = sidebar_shelf(&tree, &agents, true, 13, 30);
-        assert_eq!((shelf.tree, shelf.menu_y), (6, Some(8)));
-        assert_eq!((shelf.help_y, shelf.search_y), (None, None));
+        assert_eq!((shelf.tree, shelf.bottom_y), (6, Some(8)));
         let menu = tree.menu.as_ref().expect("a menu");
         let mut picture = sidebar_picture(&tree, &[], true, 13, 30);
         picture.extend(sidebar_menu_picture(menu, 13 - 8, 30));
@@ -3128,10 +3123,12 @@ mod tests {
     #[test]
     fn a_short_sidebar_cuts_the_menu_and_keeps_its_keys() {
         let menu = sidebar_menu(MENU_KDL, Some('c')).expect("a menu");
-        assert_eq!(Shelf::new(4, 0, true, false, 5).menu_y, Some(1));
+        let bottom = Bottom::Menu(&menu);
+        assert_eq!(bottom.height(99, 30), 5);
+        assert_eq!(Shelf::new(4, 0, Some(&bottom), 30).bottom_y, Some(1));
         for (rows, cut) in [(4, (1, 0, Some(1))), (7, (1, 1, Some(2)))] {
-            let shelf = Shelf::new(rows, 1, true, false, 5);
-            assert_eq!((shelf.tree, shelf.notes, shelf.menu_y), cut, "{rows}");
+            let shelf = Shelf::new(rows, 1, Some(&bottom), 30);
+            assert_eq!((shelf.tree, shelf.notes, shelf.bottom_y), cut, "{rows}");
         }
         assert_eq!(
             sidebar_menu_picture(&menu, 3, 30),
