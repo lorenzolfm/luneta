@@ -2313,28 +2313,35 @@ mod tests {
     /// `b` opens the brief's keys at the bottom of the sidebar, on any row,
     /// and a key of them briefs by the row the cursor is on: `z` every
     /// session, `s` the row's session, and `h` the agent in the row's pane,
-    /// or on a session's row, its session. A brief first reads the end of the
-    /// transcript of each agent it covers. With no agent to brief on, the
-    /// sidebar says so where the keys were.
+    /// or on the row of a folded session, which stands in for its panes, its
+    /// session. A brief first reads the end of the transcript of each agent
+    /// it covers. With no agent to brief on, the sidebar says so where the
+    /// keys were.
     #[test]
     fn the_brief_s_keys_brief_by_the_row_the_cursor_is_on() {
-        let mut state = agents_in_b();
-
         // Rows `a`, `pane 1`, `b`, `pane 4`, `pane 5`; only `b` has agents.
+        // A session's row is one the cursor stops on once it is folded, and
+        // the fold takes away none of the rows above it.
         let none_in_a = "brief: no agents in a";
-        for (at, scope, briefed) in [
-            (0, 'z', Ok(vec![FOUR, FIVE])),
-            (0, 's', Err(none_in_a)),
-            (0, 'h', Err(none_in_a)),
-            (1, 'h', Err("brief: no agent in this pane")),
-            (2, 'h', Ok(vec![FOUR, FIVE])),
-            (3, 's', Ok(vec![FOUR, FIVE])),
-            (3, 'h', Ok(vec![FOUR])),
-            (4, 'h', Ok(vec![FIVE])),
+        for (fold, at, scope, briefed) in [
+            (false, 1, 'z', Ok(vec![FOUR, FIVE])),
+            (false, 1, 's', Err(none_in_a)),
+            (false, 1, 'h', Err("brief: no agent in this pane")),
+            (false, 3, 's', Ok(vec![FOUR, FIVE])),
+            (false, 3, 'h', Ok(vec![FOUR])),
+            (false, 4, 'h', Ok(vec![FIVE])),
+            (true, 0, 'h', Err(none_in_a)),
+            (true, 2, 'h', Ok(vec![FOUR, FIVE])),
         ] {
-            state.brief = None;
+            let mut state = agents_in_b();
+            if fold {
+                if let Role::Sidebar(tree) = &mut state.role {
+                    assert!(tree.toggle_row(at), "row {at}");
+                }
+                state.rebuild_tree();
+            }
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(at);
+                assert!(tree.rows.select(at), "row {at}");
             }
             assert!(key(&mut state, BareKey::Char('b')), "row {at}");
             assert_eq!(menu_open(&state), Some(vec!["Brief"]), "row {at}");
@@ -2387,7 +2394,7 @@ mod tests {
         let mut state = focused_sidebar();
         state.here = Some(1);
         if let Role::Sidebar(tree) = &mut state.role {
-            tree.rows.select(3);
+            assert!(tree.rows.select(3));
         }
         // The focus you asked for, as `focus` brings it.
         state.pass.ask(state.frame);
