@@ -2,6 +2,7 @@ mod agents;
 mod brief;
 mod checkouts;
 mod close;
+mod context;
 mod cursor;
 mod dirs;
 mod dock;
@@ -25,9 +26,10 @@ use std::path::PathBuf;
 use agents::{AgentRow, AgentSet, Live, Seat};
 use brief::{Brief, Over, Scope};
 use checkouts::Checkouts;
+use context::CONTEXT_KEY;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
-use menu::{Command, Did, SidebarMenu, There};
+use menu::{Command, Did, RowPane, SidebarMenu, There};
 use elapsed::Age;
 use folds::Folds;
 use panes::Peeks;
@@ -316,8 +318,7 @@ impl ZellijPlugin for State {
                     Event::PaneUpdate(panes) => menu.panes(panes),
                     Event::Timer(_) => menu.tick(),
                     Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                        menu.ran(exit_code, &stdout, &stderr, &context);
-                        false
+                        menu.ran(exit_code, &stdout, &stderr, &context)
                     },
                     _ => false,
                 };
@@ -359,14 +360,14 @@ impl ZellijPlugin for State {
                 false
             },
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                match context.get(dirs::CONTEXT_KEY).map(String::as_str) {
+                match context.get(CONTEXT_KEY).map(String::as_str) {
                     Some(dirs::CONTEXT_VALUE) => {
                         self.dirs.ingest(exit_code, &stdout, &stderr);
                         if let Some(command) = self.dirs.worktrees_query() {
                             run_command(
                                 &command,
                                 BTreeMap::from([(
-                                    dirs::CONTEXT_KEY.to_owned(),
+                                    CONTEXT_KEY.to_owned(),
                                     dirs::WORKTREES_VALUE.to_owned(),
                                 )]),
                             );
@@ -445,17 +446,34 @@ impl ZellijPlugin for State {
                         tree.menu = Some(SidebarMenu::wrong(reason, &mut self.menus));
                         true
                     },
-                    Some(menu::START_VALUE | menu::CLOSING_VALUE) => {
+                    Some(
+                        menu::START_VALUE
+                        | menu::OPENING_VALUE
+                        | menu::CLOSING_VALUE
+                        | menu::NAMING_VALUE
+                        | menu::ARRIVING_VALUE,
+                    ) => {
                         let Role::Sidebar(tree) = &mut self.role else {
                             return false;
                         };
+                        let taken = self.sessions.taken(self.matches.current_session.as_deref());
                         let answered = |menu: SidebarMenu| {
-                            menu.answered(exit_code, &stdout, &stderr, &context)
+                            menu.answered(exit_code, &stdout, &stderr, &context, &taken)
                         };
                         tree.menu = tree.menu.take().and_then(answered);
                         true
                     },
-                    Some(close::CLIENTS_VALUE) => self.listed(exit_code, &stdout),
+                    Some(close::CLIENTS_VALUE) => self.listed(exit_code, &stdout, &context),
+                    // The menu that took you to the session is gone: the
+                    // sidebar you come back to says why no tab opened.
+                    Some(menu::TAB_VALUE) if exit_code != Some(0) => {
+                        let session = context.get(places::SESSION_KEY).map_or("", String::as_str);
+                        let reason = String::from_utf8_lossy(&stderr);
+                        let reason = reason.lines().next().unwrap_or("").trim();
+                        let reason = if reason.is_empty() { "zellij opened none" } else { reason };
+                        self.error = Some(format!("new tab in \"{session}\": {reason}"));
+                        true
+                    },
                     Some(agents::CLOSE_VALUE) if exit_code != Some(0) => {
                         let label = context.get(agents::LABEL_KEY).map_or("", String::as_str);
                         let reason = String::from_utf8_lossy(&stderr);
@@ -725,7 +743,7 @@ impl State {
             run_command(
                 &places::query(&session),
                 BTreeMap::from([
-                    (dirs::CONTEXT_KEY.to_owned(), places::CONTEXT_VALUE.to_owned()),
+                    (CONTEXT_KEY.to_owned(), places::CONTEXT_VALUE.to_owned()),
                     (places::SESSION_KEY.to_owned(), session.clone()),
                 ]),
             );
@@ -741,7 +759,7 @@ impl State {
             run_command(
                 &checkouts::query(&dir),
                 BTreeMap::from([
-                    (dirs::CONTEXT_KEY.to_owned(), checkouts::CONTEXT_VALUE.to_owned()),
+                    (CONTEXT_KEY.to_owned(), checkouts::CONTEXT_VALUE.to_owned()),
                     (checkouts::DIR_KEY.to_owned(), dir.clone()),
                 ]),
             );
@@ -785,7 +803,7 @@ impl State {
                 run_command(
                     &command,
                     BTreeMap::from([
-                        (dirs::CONTEXT_KEY.to_owned(), dirs::PREVIEW_VALUE.to_owned()),
+                        (CONTEXT_KEY.to_owned(), dirs::PREVIEW_VALUE.to_owned()),
                         (dirs::PATH_KEY.to_owned(), path.clone()),
                     ]),
                 );
@@ -801,7 +819,7 @@ impl State {
                 run_command(
                     &command,
                     BTreeMap::from([
-                        (dirs::CONTEXT_KEY.to_owned(), panes::CONTEXT_VALUE.to_owned()),
+                        (CONTEXT_KEY.to_owned(), panes::CONTEXT_VALUE.to_owned()),
                         (panes::PANE_KEY.to_owned(), panes::key(&session, pane)),
                     ]),
                 );
@@ -840,7 +858,7 @@ impl State {
         }
         run_command(
             &dirs::QUERY,
-            BTreeMap::from([(dirs::CONTEXT_KEY.to_owned(), dirs::CONTEXT_VALUE.to_owned())]),
+            BTreeMap::from([(CONTEXT_KEY.to_owned(), dirs::CONTEXT_VALUE.to_owned())]),
         );
     }
 
@@ -1069,7 +1087,7 @@ impl State {
         }
         let pane = close::Pane::of(row.pane, &self.leaves(row.seat.session()));
         pane.act(row.seat.clone()).run(BTreeMap::from([
-            (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
+            (CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
             (agents::LABEL_KEY.to_owned(), row.label()),
         ]));
         self.agents.forget_selected();
@@ -1385,11 +1403,6 @@ impl State {
     fn command(&mut self, command: Command) -> bool {
         match command {
             Command::Search => self.search_tree(String::new()),
-            Command::Next => {
-                // A key comes only to the sidebar with the focus.
-                self.go_to_next(true);
-                false
-            },
             Command::Brief(scope) => {
                 self.brief(scope);
                 true
@@ -1475,7 +1488,7 @@ impl State {
                 run_command(
                     &tails,
                     BTreeMap::from([
-                        (dirs::CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
+                        (CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
                         (brief::NUMBER_KEY.to_owned(), brief.number.to_string()),
                     ]),
                 );
@@ -1508,8 +1521,9 @@ impl State {
     }
 
     /// While the menu takes the client out of the session, which a key of it
-    /// killed: asks zellij whether the client is gone, for `listed` to kill
-    /// the session once it is. Says whether to draw.
+    /// killed, or to another, where a key of it opens a tab: asks zellij
+    /// whether the client is gone, or there, for `listed` to kill the session,
+    /// or open the tab, once it is. Says whether to draw.
     fn leave_session(&mut self) -> bool {
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
@@ -1521,10 +1535,16 @@ impl State {
         true
     }
 
-    /// What zellij said, as it listed the clients of the session, while the
-    /// menu takes the client out of it: the session is killed once the client
-    /// is gone. Says whether to draw.
-    fn listed(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
+    /// What zellij said, as it listed the clients of a session for the menu
+    /// `context` names, while the menu takes the client out of the session or
+    /// to another: the session is killed once the client is gone, or the tab
+    /// opens once it is there. Says whether to draw.
+    fn listed(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> bool {
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
@@ -1532,7 +1552,8 @@ impl State {
             return false;
         }
         let client = self.client_id;
-        tree.menu = tree.menu.take().and_then(|menu| menu.clients(client, exit_code, stdout));
+        let listed = |menu: SidebarMenu| menu.clients(client, exit_code, stdout, context);
+        tree.menu = tree.menu.take().and_then(listed);
         tree.menu.is_none()
     }
 
@@ -1567,21 +1588,22 @@ impl State {
 
     /// The highlighted row, for the menu: its pane, the directory it works
     /// in, as its session says or else as its agent does, the branch checked
-    /// out there, and when that is another session, its session and its tab,
-    /// and the pane you came from, for the menu to hand the focus back to
-    /// before it goes there. The row of a session that lists none of its
-    /// panes has its session alone.
+    /// out there, when that is another session, its session and its tab, and
+    /// the pane you came from, for the menu to hand the focus back to before
+    /// it takes you out of this session. The row of a session that lists none
+    /// of its panes has its session alone.
     fn menu_row(&self) -> Option<menu::Row> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
         };
         let current = self.matches.current_session.as_deref();
+        let back = self.here;
         let (session, pane) = match tree.rows.selected_row().map(Node::place)? {
             Place::Pane(session, pane) => (session, pane),
             Place::Session(session) => {
                 let here = current == Some(session.as_str());
-                let there = (!here).then_some(There { session, tab: None, back: self.here });
-                return Some(menu::Row { pane: None, cwd: None, branch: None, there });
+                let there = (!here).then_some(There { session, tab: None });
+                return Some(menu::Row { pane: None, there, back });
             },
         };
         let leaf = self
@@ -1597,8 +1619,8 @@ impl State {
         let branch = leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.clone());
         let here = current == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
-        let there = (!here).then_some(There { session, tab, back: self.here });
-        Some(menu::Row { pane: Some(pane), cwd, branch, there })
+        let there = (!here).then_some(There { session, tab });
+        Some(menu::Row { pane: Some(RowPane { id: pane, cwd, branch }), there, back })
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -2206,30 +2228,29 @@ mod tests {
         four.tab_id = Some(TabId(7));
         four.checkout = Some(Checkout { branch: "feat/menu".to_owned(), status: String::new() });
         state.rebuild_tree();
-        let there = There { session: "b".to_owned(), tab: Some(TabId(7)), back: Some(1) };
-        let row = |pane, cwd: Option<&str>, branch: Option<&str>, there| menu::Row {
-            pane,
-            cwd: cwd.map(str::to_owned),
-            branch: branch.map(str::to_owned),
-            there,
+        let there = There { session: "b".to_owned(), tab: Some(TabId(7)) };
+        let pane = |id, cwd: Option<&str>, branch: Option<&str>| {
+            let (cwd, branch) = (cwd.map(str::to_owned), branch.map(str::to_owned));
+            Some(RowPane { id, cwd, branch })
         };
-        let b = There { session: "b".to_owned(), tab: None, back: Some(1) };
+        let row = |pane, there| menu::Row { pane, there, back: Some(1) };
+        let b = There { session: "b".to_owned(), tab: None };
         let menu_row = |state: &mut State, at| {
             if let Role::Sidebar(tree) = &mut state.role {
                 assert!(tree.rows.select(at));
             }
             state.menu_row()
         };
-        assert_eq!(menu_row(&mut state, 1), Some(row(Some(1), None, None, None)));
-        let four = row(Some(4), Some("/w/b"), Some("feat/menu"), Some(there));
+        assert_eq!(menu_row(&mut state, 1), Some(row(pane(1, None, None), None)));
+        let four = row(pane(4, Some("/w/b"), Some("feat/menu")), Some(there));
         assert_eq!(menu_row(&mut state, 3), Some(four));
         if let Role::Sidebar(tree) = &mut state.role {
             tree.toggle_row(0);
             tree.toggle_row(2);
         }
         state.rebuild_tree();
-        assert_eq!(menu_row(&mut state, 0), Some(row(None, None, None, None)));
-        assert_eq!(menu_row(&mut state, 1), Some(row(None, None, None, Some(b))));
+        assert_eq!(menu_row(&mut state, 0), Some(row(None, None)));
+        assert_eq!(menu_row(&mut state, 1), Some(row(None, Some(b))));
     }
 
     /// The groups the menu at the bottom of the sidebar has open, while it
@@ -2345,7 +2366,7 @@ mod tests {
             key(&mut state, BareKey::Char('z'));
             let asked = state.brief.as_ref().map(|brief| brief.number.to_string());
             let answer = BTreeMap::from([
-                (dirs::CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
+                (CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
                 (brief::NUMBER_KEY.to_owned(), asked.expect("a brief asked")),
             ]);
             let ran = Event::RunCommandResult(exit_code, Vec::new(), stderr.into(), answer);
@@ -2483,7 +2504,7 @@ mod tests {
         assert!(key(&mut state, BareKey::Char('d')));
         assert_eq!(menu_open(&state), Some(vec!["Delete"]));
         let closed = BTreeMap::from([
-            (agents::CONTEXT_KEY.to_owned(), menu::CLOSING_VALUE.to_owned()),
+            (CONTEXT_KEY.to_owned(), menu::CLOSING_VALUE.to_owned()),
             (menu::MENU_KEY.to_owned(), "1".to_owned()),
         ]);
         state.update(Event::RunCommandResult(Some(0), Vec::new(), Vec::new(), closed));
@@ -2492,6 +2513,73 @@ mod tests {
         state.rebuild_tree();
         let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
         assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Session("b".to_owned())));
+    }
+
+    /// `n p` on a pane of another session waits for zellij to open your
+    /// shell there, `n s` for the name of the session it starts, and `n t`
+    /// for zellij to list the clients of that session, and once the focus has
+    /// gone, to list one more: the sidebar hands the menu each answer, and the
+    /// menu goes, rather than wait for good.
+    #[test]
+    fn the_new_keys_in_the_sidebar_wait_for_their_answers() {
+        let header = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n";
+        let come = format!("{header}1 terminal_2 sh");
+        for (new, value, said) in [
+            ('p', menu::OPENING_VALUE, ""),
+            ('s', menu::NAMING_VALUE, ""),
+            ('t', close::CLIENTS_VALUE, come.as_str()),
+        ] {
+            let mut state = focused_sidebar();
+            state.menu_entries = None;
+            state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+            state.rebuild_tree();
+            if let Role::Sidebar(tree) = &mut state.role {
+                assert!(tree.rows.select(3), "n {new}");
+            }
+            assert!(key(&mut state, BareKey::Char('n')), "n {new}");
+            key(&mut state, BareKey::Char(new));
+            let answer = |value: &str| {
+                BTreeMap::from([
+                    (CONTEXT_KEY.to_owned(), value.to_owned()),
+                    (menu::MENU_KEY.to_owned(), "1".to_owned()),
+                ])
+            };
+            if new == 't' {
+                // The session has no client before you go.
+                let before = header.as_bytes().to_vec();
+                let counted = answer(menu::ARRIVING_VALUE);
+                state.update(Event::RunCommandResult(Some(0), before, Vec::new(), counted));
+                focus(&mut state, false);
+                assert!(state.leave_session());
+            }
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert!(tree.menu.is_some(), "n {new}");
+            let said = said.as_bytes().to_vec();
+            state.update(Event::RunCommandResult(Some(0), said, Vec::new(), answer(value)));
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert!(tree.menu.is_none(), "n {new}");
+        }
+    }
+
+    /// The tab `n t` opens once you have come to another session answers a
+    /// sidebar whose menu is gone: when it does not open, the sidebar says
+    /// why, for when you come back, as zellij said it or else that it opened
+    /// none.
+    #[test]
+    fn a_tab_that_did_not_open_in_another_session_is_said_by_the_sidebar() {
+        let opened = |exit_code, stderr: &[u8]| {
+            let mut state = focused_sidebar();
+            let context = BTreeMap::from([
+                (CONTEXT_KEY.to_owned(), menu::TAB_VALUE.to_owned()),
+                (places::SESSION_KEY.to_owned(), "b".to_owned()),
+            ]);
+            state.update(Event::RunCommandResult(exit_code, Vec::new(), stderr.to_vec(), context));
+            state.error
+        };
+        assert_eq!(opened(Some(0), b""), None);
+        let refused = opened(Some(1), b"Session 'b' not found\n");
+        assert_eq!(refused.as_deref(), Some("new tab in \"b\": Session 'b' not found"));
+        assert_eq!(opened(None, b"").as_deref(), Some("new tab in \"b\": zellij opened none"));
     }
 
     /// `d s` on a pane of the session you are in, and `d d` on its row, once
@@ -2532,18 +2620,20 @@ mod tests {
             }
             if others {
                 // The session ends once zellij lists the sidebar's client, 1,
-                // out of it.
+                // out of it, for the menu that asked, numbered 1: what zellij
+                // says for another menu lists another session's clients.
                 state.client_id = 1;
-                let listed = |clients: &str| {
-                    let context = BTreeMap::from([(
-                        agents::CONTEXT_KEY.to_owned(),
-                        close::CLIENTS_VALUE.to_owned(),
-                    )]);
+                let listed = |number: &str, clients: &str| {
+                    let context = BTreeMap::from([
+                        (CONTEXT_KEY.to_owned(), close::CLIENTS_VALUE.to_owned()),
+                        (menu::MENU_KEY.to_owned(), number.to_owned()),
+                    ]);
                     let stdout = format!("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n{clients}");
                     Event::RunCommandResult(Some(0), stdout.into_bytes(), Vec::new(), context)
                 };
-                assert!(!state.update(listed("1         plugin_3       N/A\n")), "{case}");
-                assert!(state.update(listed("")), "{case}");
+                assert!(!state.update(listed("2", "")), "{case}");
+                assert!(!state.update(listed("1", "1         plugin_3       N/A\n")), "{case}");
+                assert!(state.update(listed("1", "")), "{case}");
                 let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
                 assert!(tree.menu.is_none(), "{case}");
             }
@@ -2628,7 +2718,7 @@ mod tests {
             }
             if through_help {
                 assert!(key(&mut state, BareKey::Char('?')), "row {at}");
-                assert_eq!(shown(&state), ['c', 'd', '/', 'n', 'b'], "row {at}");
+                assert_eq!(shown(&state), ['c', 'n', 'd', '/', 'b'], "row {at}");
             }
             assert!(key(&mut state, BareKey::Char('/')), "row {at}, through help: {through_help}");
             assert_eq!(menu_open(&state), None, "row {at}, through help: {through_help}");

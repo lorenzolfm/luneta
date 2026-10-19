@@ -33,7 +33,7 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Create a session in a directory you work in
 * Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
 * Start an agent on a skill with a few keys, from a [menu](#menu) of your own, and
-  close a pane or kill a session with two
+  open a pane, a tab or a session, or close a pane or kill a session, with two
 * Come back from a break to a [brief](#brief) of what your agents are doing
 
 | `Tab` | list | `Enter` |
@@ -212,8 +212,9 @@ folds.
 ### Menu
 
 Keys, pressed one after another, that start an agent on a skill, beside the
-agent whose work it is for, or delete what you are done with. The menu shows the
-keys of the group you are in and what each does, as which-key does in neovim.
+agent whose work it is for, open a pane, a tab or a session where it works, or
+delete what you are done with. The menu shows the keys of the group you are in
+and what each does, as which-key does in neovim.
 
 ```text
 ─ 2 sessions ──────────── ⠋1 ─
@@ -239,21 +240,21 @@ rule over the keys names. For `/thermo-nuclear-review` that is the point: it
 reviews the branch checked out there. A row of another tab takes you to that
 tab, and a row of another session starts the agent in that session and takes
 you there, handing the session you leave the pane you came from. A key the
-sidebar has a use of its own for, as `j`, `n` or `b`, stays the sidebar's: `m`
+sidebar has a use of its own for, as `j`, `/` or `b`, stays the sidebar's: `m`
 opens the menu on its first group, where every key is the menu's. The menu
 closes when the sidebar loses the focus, and with a click.
 
 `?` opens it on its first group too, and under its keys, the sidebar's own
-commands: `/` to search, `n` to go to the next agent that wants you, and the
-[brief](#brief)'s keys, in a group `b` opens. A key of the menu that a command
-has stays the command's, as it does in the sidebar.
+commands: `/` to search, and the [brief](#brief)'s keys, in a group `b` opens.
+A key of the menu that a command has stays the command's, as it does in the
+sidebar.
 
 ```text
 ─ luneta ──── luneta/sidebar ─
  c  Claude ▸
+ n  New ▸
  d  Delete ▸
  /  Search
- n  Next agent
  b  Brief ▸
  <ESC> - Close
 ```
@@ -272,6 +273,26 @@ What a key starts on is the first message of the session, as
 `claude "/tigerstyle"` would take it: a skill, a skill and its arguments, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
+
+Every menu has luneta's own New group too, under `n`, with nothing to
+configure, which opens where the highlighted pane works: `n p` your shell in a
+pane of its own beside that pane, `n t` a tab of its session, and `n s` a
+session, which you go to. The session is named as the picker's directories
+name that directory, `luneta-main` for a worktree of `luneta`, with a `-2`
+when a session has that name. The floating menu does the same for the pane you
+are in. A pane of another session opens there, and you go to it, and so does a
+tab of a session with a client. A tab of a session with none, as most are,
+opens once you are there: zellij makes a tab as big as a client of its
+session, and one with none would have no room for its panes. A session's row
+has no pane, nor a directory to open in, and its `n` keys say so.
+
+```text
+─ New ─────────── luneta/main ─
+ p  new pane
+ t  new tab
+ s  new session
+ <BS> - Back, <ESC> - Close
+```
 
 Every menu has luneta's own Delete group too, under `d`, with nothing to
 configure: `d d` deletes the highlighted row, and `d s` kills its session. On a
@@ -741,7 +762,6 @@ In the sidebar, once it has the focus:
 | `Enter` | go to the highlighted pane, or switch to the highlighted folded session |
 | `←` `→` / `h` `l` | fold / unfold the session |
 | `Space` | fold or unfold |
-| `n` | go to the next agent that wants you |
 | *a key of the [menu](#menu)* | open its group, or start its agent, for the highlighted pane |
 | `m` | open the menu on its first group, for the highlighted pane |
 | `?` | open the menu on its first group, with the sidebar's commands under its keys |
@@ -771,6 +791,9 @@ In the menu:
 | key | does |
 |---|---|
 | *a key it shows* | open its group, start its agent, or run the sidebar's command |
+| `n p` | open your shell in a pane beside the highlighted pane |
+| `n t` | open a tab of the highlighted pane's session |
+| `n s` | start a session where the highlighted pane works, and go there |
 | `d d` | close the highlighted pane, or kill the highlighted session |
 | `d s` | kill the highlighted row's session |
 | `y`, or the key again | go ahead with a delete that asked first |

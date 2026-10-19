@@ -1097,6 +1097,7 @@ fn menu_entry_width(entry: &Entry) -> usize {
     let does = match entry {
         Entry::Group { name, .. } => name.width() + 1 + GROUP.width(),
         Entry::Start { prompt, .. } => prompt.width(),
+        Entry::New(new) => new.does().width(),
         Entry::Close { scope, .. } => scope.does().width(),
         Entry::Command(command) => command.does().width(),
     };
@@ -1115,6 +1116,7 @@ fn menu_line(entry: &Entry, inner: usize) -> Painted {
             line.push(GROUP, TAG);
         },
         Entry::Start { prompt, .. } => line.push(&truncate(prompt, room), NAME),
+        Entry::New(new) => line.push(&truncate(new.does(), room), NAME),
         Entry::Close { scope, .. } => line.push(&truncate(scope.does(), room), NAME),
         Entry::Command(command) => line.push(&truncate(command.does(), room), NAME),
     }
@@ -2967,7 +2969,8 @@ mod tests {
     /// `/w/misc/unnamed`.
     fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
         let cwd = Some("/w/misc/unnamed".to_owned());
-        let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
+        let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
+        let row = crate::menu::Row { pane, there: None, back: None };
         SidebarMenu::open(Some(entries), row, key, &mut crate::menu::Numbers::default(), 0)
     }
 
@@ -3022,7 +3025,8 @@ mod tests {
         );
 
         let cwd = Some("/w/misc/unnamed".to_owned());
-        let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
+        let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
+        let row = crate::menu::Row { pane, there: None, back: None };
         let numbers = &mut crate::menu::Numbers::default();
         let help = SidebarMenu::help(Some(MENU_KDL), row, None, numbers);
         assert_eq!(
@@ -3030,11 +3034,23 @@ mod tests {
             [
                 "─ luneta ────── misc/unnamed ─",
                 " c  Claude ▸                  ",
+                " n  New ▸                     ",
                 " d  Delete ▸                  ",
                 " /  Search                    ",
-                " n  Next agent                ",
                 " b  Brief ▸                   ",
                 " <ESC> - Close",
+            ]
+        );
+
+        let new = sidebar_menu(MENU_KDL, Some('n')).expect("a menu");
+        assert_eq!(
+            sidebar_menu_picture(&new, 5, 30),
+            [
+                "─ New ───────── misc/unnamed ─",
+                " p  new pane                  ",
+                " t  new tab                   ",
+                " s  new session               ",
+                " <BS> - Back, <ESC> - Close",
             ]
         );
     }

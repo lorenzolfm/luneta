@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use zellij_tile::prelude::*;
 
-use crate::agents::{AgentSet, Seat, Status, CONTEXT_KEY};
+use crate::agents::{AgentSet, Seat, Status};
 use crate::dock::{TabId, SIDEBAR_TITLE};
 use crate::elapsed::Age;
 use crate::fetch::Fetch;
@@ -372,11 +372,13 @@ fn kill_session(session: &str) -> [&str; 3] {
 }
 
 /// How many ticks the client may take to leave before the session it is in
-/// stays after all.
-const PATIENCE: u32 = 50;
+/// stays after all, or to come to another session before the menu gives up
+/// what it would open there.
+pub const PATIENCE: u32 = 50;
 
 /// What the command that lists a session's clients is run with, as its
-/// context, for its answer to come back to the menu that leaves.
+/// context, for its answer to come back to the menu that leaves, or that
+/// comes to another session.
 pub const CLIENTS_VALUE: &str = "clients";
 
 /// What `zellij action list-clients` heads its list with.
@@ -385,12 +387,12 @@ const CLIENTS_HEADER: &str = "CLIENT_ID";
 /// Lists the clients of `session`, a client to a line under a header, its id
 /// first. zellij's own answer to a plugin leaves out a client whose focus is
 /// on that plugin, as the focus of the client leaving is on the menu.
-fn clients_of(session: &str) -> [&str; 5] {
+pub fn clients_of(session: &str) -> [&str; 5] {
     ["zellij", "--session", session, "action", "list-clients"]
 }
 
 /// The clients a list of them names, by id, or none for what is no such list.
-fn clients_listed(stdout: &[u8]) -> Option<Vec<ClientId>> {
+pub fn clients_listed(stdout: &[u8]) -> Option<Vec<ClientId>> {
     let listed = String::from_utf8_lossy(stdout);
     let mut lines = listed.lines().filter(|line| !line.trim().is_empty());
     let header = lines.next()?.split_whitespace().next()?;
@@ -421,11 +423,11 @@ impl Leaving {
         &self.to
     }
 
-    /// Asks zellij which clients the session has, once it has answered the
-    /// last ask, for `listed` to kill the session once the plugin's client is
-    /// not among them. Says why the session stays once the client has taken
-    /// too long to leave.
-    pub fn tick(&mut self) -> Result<(), String> {
+    /// Asks zellij which clients the session has, with `context`, once it
+    /// has answered the last ask, for `listed` to kill the session once the
+    /// plugin's client is not among them. Says why the session stays once the
+    /// client has taken too long to leave.
+    pub fn tick(&mut self, context: BTreeMap<String, String>) -> Result<(), String> {
         self.ticks += 1;
         if self.ticks >= PATIENCE {
             return Err(format!(
@@ -434,7 +436,6 @@ impl Leaving {
             ));
         }
         if !self.asking {
-            let context = BTreeMap::from([(CONTEXT_KEY.to_owned(), CLIENTS_VALUE.to_owned())]);
             run_command(&clients_of(&self.session), context);
             self.asking = true;
         }
@@ -630,14 +631,14 @@ mod tests {
             let said = leaving.listed(1, exit_code, stdout.as_bytes());
             assert_eq!(said, killed, "{exit_code:?}: {stdout:?}");
         }
-        assert_eq!(leaving.tick(), Ok(()));
+        assert_eq!(leaving.tick(BTreeMap::new()), Ok(()));
         assert!(leaving.asking);
         leaving.listed(1, Some(0), format!("{header}{yours}").as_bytes());
         assert!(!leaving.asking);
         for _ in 2..PATIENCE {
-            assert_eq!(leaving.tick(), Ok(()));
+            assert_eq!(leaving.tick(BTreeMap::new()), Ok(()));
         }
-        let stayed = leaving.tick().err();
+        let stayed = leaving.tick(BTreeMap::new()).err();
         assert!(stayed.as_deref().is_some_and(|said| said.contains("stays")), "{stayed:?}");
     }
 

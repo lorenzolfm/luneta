@@ -52,7 +52,6 @@ pub const LIST: [&str; 8] = [
     "--no-quotes",
 ];
 
-pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "zoxide";
 pub const PREVIEW_VALUE: &str = "preview";
 pub const PATH_KEY: &str = "luneta_path";
@@ -154,9 +153,7 @@ impl DirSet {
         };
         if exit_code == Some(0) {
             let listed = String::from_utf8_lossy(stdout);
-            let lines: Vec<&str> = listed.lines().collect();
-            let commons: HashMap<&str, &str> =
-                lines.as_chunks::<2>().0.iter().map(|[path, common]| (*path, *common)).collect();
+            let commons = commons(&listed);
             for dir in &mut found {
                 let Some(common) = commons.get(dir.path.as_str()) else {
                     continue;
@@ -350,6 +347,22 @@ pub fn short_cwd(path: &str) -> String {
 fn derive_name(path: &str) -> Option<SessionName> {
     let base = path.split('/').rfind(|part| !part.is_empty())?;
     SessionName::parse(base).ok()
+}
+
+/// What `WORKTREES` printed, as each worktree's repository, by its path.
+fn commons(listed: &str) -> HashMap<&str, &str> {
+    let lines: Vec<&str> = listed.lines().collect();
+    lines.as_chunks::<2>().0.iter().map(|[path, common]| (*path, *common)).collect()
+}
+
+/// What a session that starts in `path` is named, as the list names that
+/// directory: for its repository too when `worktrees`, what `WORKTREES`
+/// printed for it, says it is a worktree, and with a postfix when `taken`
+/// holds the name. None for a directory no session can be named for, as `/`.
+pub fn session_name(path: &str, worktrees: Option<&str>, taken: &Taken) -> Option<SessionName> {
+    let common = worktrees.and_then(|listed| commons(listed).get(path).copied());
+    let name = common.and_then(|common| worktree_name(path, common)).or_else(|| derive_name(path))?;
+    Some(free_name(&name, taken))
 }
 
 /// A worktree is named for its repository too, `luneta-main`, where `main`
@@ -636,6 +649,31 @@ mod tests {
         assert_eq!(name.as_str(), format!("app-{fits}"));
         assert!(socket.len() + name.len() <= 107);
         assert_eq!(worktree_name(&format!("/home/you/{fits}w"), common), None);
+    }
+
+    /// A session the menu starts in a directory is named as the list names
+    /// that directory: for its repository too once `WORKTREES` says it is a
+    /// worktree, and for itself when it is none or `WORKTREES` failed, with a
+    /// postfix when a session has the name. A directory no session can be
+    /// named for gets no name.
+    #[test]
+    fn a_session_started_in_a_directory_is_named_as_the_list_names_it() {
+        let main = "/home/you/luneta/main";
+        let worktree = Some("/home/you/luneta/main\n/home/you/luneta/.bare\n");
+        let taken = Sessions { live: vec![named("luneta-main")], dead: vec![named("main")] };
+        let nobody = Sessions::default();
+        for (path, printed, sessions, name) in [
+            (main, worktree, &nobody, Some("luneta-main")),
+            (main, worktree, &taken, Some("luneta-main-2")),
+            (main, None, &nobody, Some("main")),
+            (main, None, &taken, Some("main-2")),
+            ("/home/you/luneta", Some(""), &nobody, Some("luneta")),
+            ("/home/you/luneta", worktree, &nobody, Some("luneta")),
+            ("/", Some(""), &nobody, None),
+        ] {
+            let said = session_name(path, printed, &sessions.taken(None));
+            assert_eq!(said.as_deref(), name, "{path} {printed:?}");
+        }
     }
 
     #[test]
