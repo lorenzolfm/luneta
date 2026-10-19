@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zellij_tile::prelude::*;
 
+use crate::close;
 use crate::hiding::{Hiding, Said};
 use crate::tree::{is_placeholder, PLACEHOLDER};
 
@@ -42,6 +43,14 @@ type Spot = (usize, usize, usize, usize);
 /// as the tabs before it close; the id does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TabId(pub usize);
+
+impl TabId {
+    /// The id of `tab`, and not its position, which zellij hands over beside
+    /// it as a number of the same kind.
+    pub fn of(tab: &TabInfo) -> Self {
+        TabId(tab.tab_id)
+    }
+}
 
 /// What a key binding asks through the `sidebar` pipe. Every plugin in the
 /// session hears it, and the dock and the sidebar each answer their own.
@@ -182,8 +191,7 @@ struct Scene {
     /// Tabs showing their floating panes. zellij reports the floating panes'
     /// layout for such a tab, and applies theirs when asked for one.
     floating: BTreeSet<TabId>,
-    /// Tabs with a pane besides the sidebar and the placeholders that can
-    /// take the focus.
+    /// Tabs with a pane that holds them open, as `close::holds_tab` says.
     occupied: BTreeSet<TabId>,
 }
 
@@ -228,7 +236,7 @@ impl Scene {
         plugin_id: u32,
         sidebar: Option<u32>,
     ) -> Option<Self> {
-        let id = |tab: &TabInfo| TabId(tab.tab_id);
+        let id = TabId::of;
         let active = id(tabs.iter().find(|t| t.active)?);
         let mut seats: BTreeMap<ClientId, TabId> = tabs
             .iter()
@@ -265,7 +273,7 @@ impl Scene {
                     scene.sidebars.push((tab, Seen::new(pane)));
                 } else if is_placeholder(pane) {
                     scene.placeholders.entry(tab).or_default().push(Seen::new(pane));
-                } else if pane.is_selectable && !pane.is_suppressed && !pane.is_floating {
+                } else if close::holds_tab(pane) {
                     scene.occupied.insert(tab);
                 }
             }

@@ -15,8 +15,10 @@ use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::checkouts::{Checkout, Checkouts, Said};
+use crate::close::{self, Act, Closes};
 use crate::cursor::Cursor;
 use crate::dirs::short_cwd;
+use crate::dock::TabId;
 use crate::elapsed::{Age, Held};
 use crate::folds::Folds;
 use crate::menu::SidebarMenu;
@@ -59,9 +61,12 @@ pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
-    pub tab_id: Option<usize>,
+    pub tab_id: Option<TabId>,
     pub cwd: Option<String>,
     pub checkout: Option<Checkout>,
+    /// What closing it closes with it: its tab once nothing else holds the
+    /// tab open, and its session once that is the session's only tab.
+    pub closes: Closes,
 }
 
 impl Branch {
@@ -98,7 +103,7 @@ pub fn leaves(
     let mut keyed: Vec<((usize, bool, u32), Leaf)> = Vec::new();
     for (position, panes) in &manifest.panes {
         let tab = tabs.iter().find(|tab| tab.position == *position);
-        let tab_id = tab.map(|tab| tab.tab_id);
+        let tab_id = tab.map(TabId::of);
         let tab = tab.map_or("", |tab| tab.name.as_str());
         for pane in panes {
             if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
@@ -122,6 +127,7 @@ pub fn leaves(
                     tab_id,
                     cwd: cwd.map(str::to_owned),
                     checkout,
+                    closes: close::closes(panes, pane.id, manifest.panes.len()),
                 },
             ));
         }
@@ -184,6 +190,8 @@ pub struct SessionNode {
 pub struct PaneNode {
     pub session: String,
     pub id: u32,
+    /// The id zellij keeps for its tab, once its session has said.
+    pub tab: Option<TabId>,
     pub label: String,
     pub agent: Option<Mark>,
     /// What is checked out where the pane works, for the line under its row.
@@ -271,6 +279,16 @@ pub struct Tree {
     handed: Option<Place>,
     /// Where the wheel left the view.
     scrolled: Option<Scrolled>,
+    /// The row the cursor was on when a delete key closed it, and the row to
+    /// go to once it is gone.
+    closed: Option<Closed>,
+}
+
+/// A row a delete key closed, and the first row after it that stays, or else
+/// the last before it.
+struct Closed {
+    row: Place,
+    next: Option<Place>,
 }
 
 /// The row at the top of the view the wheel moved, and the row the cursor was
@@ -315,7 +333,11 @@ impl Tree {
     ///
     /// A search lasts while the sidebar has the focus, so `follow` closes it.
     /// One left behind would keep the rows it hides out of sight. So does the
-    /// menu, which is for the row the cursor was on.
+    /// menu, which is for the row the cursor was on, but one that takes the
+    /// client out of the session: the focus leaves with the client.
+    ///
+    /// The row the cursor was on when a delete key closed it hands the cursor
+    /// to the row after it, once it is gone.
     ///
     /// The row the cursor is on when `follow` comes is kept for the picker,
     /// and a row the picker handed over holds the cursor against `follow`
@@ -337,7 +359,7 @@ impl Tree {
         self.following = follow;
         if follow {
             self.search = None;
-            self.menu = None;
+            self.menu = self.menu.take().filter(SidebarMenu::lasts);
         }
         let seated: HashMap<(&str, u32), &AgentRow> =
             agents.rows.iter().map(|row| ((row.seat.session(), row.pane), row)).collect();
@@ -392,6 +414,7 @@ impl Tree {
                 let node = PaneNode {
                     session: branch.name.clone(),
                     id: leaf.id,
+                    tab: leaf.tab_id,
                     label,
                     agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
                     checkout: leaf.checkout.clone(),
@@ -434,6 +457,18 @@ impl Tree {
         let handed = if follow { self.handed.clone() } else { self.handed.take() };
         let held = handed.or(followed).or_else(|| self.rows.selected_row().map(Node::place));
         let row_of = |place: &Place| rows.iter().position(|node| node.is(place));
+        // Forgotten once the cursor leaves the row, or the row its place.
+        let held = match self.closed.take() {
+            Some(closed) if held.as_ref() == Some(&closed.row) => {
+                if row_of(&closed.row).is_some() {
+                    self.closed = Some(closed);
+                    held
+                } else {
+                    closed.next
+                }
+            },
+            _ => held,
+        };
         let at = match best {
             Some(best) if seek => Some(best),
             _ => held
@@ -501,6 +536,28 @@ impl Tree {
     /// Puts row `top` at the top of the view, until the cursor leaves its row.
     pub fn scroll_to(&mut self, top: usize) {
         self.scrolled = Some(Scrolled { top, cursor: self.cursor() });
+    }
+
+    /// Has the cursor go past the rows `act` closes once they are gone: to the
+    /// first row after them, or else the last before them. A pane takes its
+    /// row, a tab the rows of its panes, and a session every row of it.
+    pub fn closing(&mut self, act: &Act) {
+        let gone = |node: &Node| match (act, node) {
+            (Act::Pane(seat, pane), Node::Pane(node)) => {
+                node.session == seat.session() && node.id == *pane
+            },
+            (Act::Tab(seat, tab), Node::Pane(node)) => {
+                node.session == seat.session() && node.tab == Some(*tab)
+            },
+            (Act::Kill(session) | Act::Leave { session, .. }, node) => node.session() == session,
+            (Act::Pane(..) | Act::Tab(..), Node::Session(_)) => false,
+        };
+        let Some(at) = self.rows.selected() else {
+            return;
+        };
+        let after = self.rows[at..].iter().find(|node| !gone(node));
+        let next = after.or_else(|| self.rows[..at].iter().rev().find(|node| !gone(node)));
+        self.closed = Some(Closed { row: self.rows[at].place(), next: next.map(Node::place) });
     }
 
     /// Brings the view back to the lit row, and says whether it was away.
@@ -680,7 +737,7 @@ mod tests {
     use zellij_tile::prelude::PaneInfo;
 
     use super::*;
-    use crate::agents::Live;
+    use crate::agents::{Live, Seat};
     use crate::places::Places;
     use crate::sessions::Selection;
 
@@ -709,6 +766,7 @@ mod tests {
                     tab_id: None,
                     cwd: None,
                     checkout: None,
+                    closes: Closes::Pane,
                 })
                 .collect(),
         }
@@ -857,6 +915,7 @@ mod tests {
             tab_id: None,
             cwd: None,
             checkout: None,
+            closes: Closes::Pane,
         };
         assert_eq!(label(&leaf("✳ Claude Code", "liquid dual"), None), "liquid dual");
         assert_eq!(label(&leaf("✳ Claude Code", "Tab #13"), None), "Claude Code");
@@ -878,6 +937,7 @@ mod tests {
             tab_id: None,
             cwd: cwd.map(str::to_owned),
             checkout: None,
+            closes: Closes::Pane,
         };
         let main = Some("/home/you/Projects/misc/luneta/main");
         assert_eq!(label(&leaf("~/P/m/l/main", main), None), "luneta/main");
@@ -962,6 +1022,23 @@ mod tests {
             .map(|leaf| leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str()))
             .collect();
         assert_eq!(branches, [Some("main"), None, None, None]);
+    }
+
+    /// A pane says what closing it closes: itself beside another, its tab
+    /// alone in it, and its session alone in the session's only tab.
+    #[test]
+    fn a_pane_says_what_closing_it_closes() {
+        let two = manifest(&[(0, vec![pane(2, "a"), pane(3, "b")]), (1, vec![pane(4, "c")])]);
+        let one = manifest(&[(0, vec![pane(4, "c")])]);
+        let (places, checkouts) = (Places::default(), Checkouts::default());
+        let closes = |manifest: &PaneManifest, tabs: &[TabInfo]| {
+            let leaves = leaves("s", tabs, manifest, &places, &checkouts, &[]);
+            leaves.iter().map(|leaf| (leaf.id, leaf.closes)).collect::<Vec<_>>()
+        };
+        let tabs = [tab(0, "code"), tab(1, "logs")];
+        let of_two = [(2, Closes::Pane), (3, Closes::Pane), (4, Closes::Tab)];
+        assert_eq!(closes(&two, &tabs), of_two);
+        assert_eq!(closes(&one, &tabs[..1]), [(4, Closes::Session)]);
     }
 
     /// A pane that moved keeps its branch until git answers for where it
@@ -1180,6 +1257,50 @@ mod tests {
         assert_eq!(drawn(&tree), ["▾ a", "  - x"]);
     }
 
+    /// Once what a delete key closed is gone, the cursor is on the row after
+    /// it, or else the one before, and not back at the top: a pane's row, a
+    /// tab's panes, or a whole session. Moved away first, it stays where it
+    /// was moved.
+    #[test]
+    fn the_cursor_goes_past_what_a_close_key_closed_once_it_is_gone() {
+        let set = agents(&[]);
+        let tabbed = |name: &str, age: u64, panes: &[(u32, usize)]| {
+            let mut branch =
+                branch(name, age, &panes.iter().map(|(id, _)| (*id, "x")).collect::<Vec<_>>());
+            for (leaf, (_, tab)) in branch.panes.iter_mut().zip(panes) {
+                leaf.tab_id = Some(TabId(*tab));
+            }
+            branch
+        };
+        let a = |panes: &[(u32, usize)]| tabbed("a", 9, panes);
+        let b = || tabbed("b", 1, &[(4, 20)]);
+        let here = |name: &str| Seat::Here(name.to_owned());
+        let pane = |session: &str, id| Some(Place::Pane(session.to_owned(), id));
+        for (act, left, at) in [
+            (Act::Pane(here("a"), 1), vec![a(&[(0, 10), (2, 11)]), b()], pane("a", 2)),
+            (Act::Tab(here("a"), TabId(10)), vec![a(&[(2, 11)]), b()], pane("a", 2)),
+            (Act::Kill("a".to_owned()), vec![b()], Some(Place::Session("b".to_owned()))),
+        ] {
+            let mut tree = Tree::default();
+            let all = [a(&[(0, 10), (1, 10), (2, 11)]), b()];
+            tree.rebuild(&all, None, &set, None, false);
+            tree.rows.select(2);
+            tree.closing(&act);
+            tree.rebuild(&all, None, &set, None, false);
+            assert_eq!(selected(&tree), pane("a", 1), "{act:?} before it is gone");
+            tree.rebuild(&left, None, &set, None, false);
+            assert_eq!(selected(&tree), at, "{act:?}");
+        }
+        let mut tree = Tree::default();
+        let all = [a(&[(0, 10), (1, 10)]), b()];
+        tree.rebuild(&all, None, &set, None, false);
+        tree.rows.select(2);
+        tree.closing(&Act::Pane(here("a"), 1));
+        tree.rows.select(4);
+        tree.rebuild(&[a(&[(0, 10)]), b()], None, &set, None, false);
+        assert_eq!(selected(&tree), pane("b", 4));
+    }
+
     #[test]
     fn a_search_keeps_the_rows_that_match_where_they_were() {
         let branches = [
@@ -1240,6 +1361,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             checkout: branch
                 .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
+            closes: Closes::Pane,
         };
         let branches = [Branch {
             name: "s".to_owned(),

@@ -32,7 +32,8 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Jump to the agent that is waiting for you
 * Create a session in a directory you work in
 * Keep every session and agent in sight, in a [sidebar](#sidebar) pinned to each tab
-* Start an agent on a skill with a few keys, from a [menu](#menu) of your own
+* Start an agent on a skill with a few keys, from a [menu](#menu) of your own, and
+  close a pane or kill a session with two
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -66,12 +67,12 @@ the order their panes were opened within each. Which agent wants you is the job
 of the glyph, not of the order. The agent in the pane you came from is pinned
 above the list.
 
-`Del` closes the pane the highlighted agent is in, and its tab with it when that
-was the last pane there. With the sidebar, the tab closes only in a session
-someone is attached to; in one nobody is, it stays, with nothing in it but its
-column. When the pane is a guess, `Del` leaves it alone and says so: the agent
-names a session that is still running, but its pane turned up in another,
-matched by its id and directory alone.
+`Del` closes the pane the highlighted agent is in, and its tab with it when
+nothing else holds the tab open: neither the sidebar's column nor a floating
+pane does. That goes for a session nobody is attached to as well, where no dock
+is there to close the tab. When the pane is a guess, `Del` leaves it alone and
+says so: the agent names a session that is still running, but its pane turned
+up in another, matched by its id and directory alone.
 
 Needs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) on the server's
 `PATH`. Without it, the other two lists work exactly as before.
@@ -202,8 +203,8 @@ folds.
 ### Menu
 
 Keys, pressed one after another, that start an agent on a skill, beside the
-agent whose work it is for. The menu shows the keys of the group you are in and
-what each does, as which-key does in neovim.
+agent whose work it is for, or delete what you are done with. The menu shows the
+keys of the group you are in and what each does, as which-key does in neovim.
 
 ```text
 ─ 2 sessions ──────────── ⠋1 ─
@@ -247,6 +248,40 @@ What a key starts on is the first message of the session, as
 `claude "/tigerstyle"` would take it: a skill, a skill and its arguments, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
+
+Every menu has luneta's own Delete group too, under `d`, with nothing to
+configure: `d d` deletes the highlighted row, and `d s` kills its session. On a
+pane's row, `d d` closes the pane; on a session's row, it kills the session. The
+floating menu does the same for the pane you are in, except in a tab with a
+floating pane: the menu takes the floating focus from the pane you were in as
+it opens, and zellij then says the pane under it has the focus, so luneta cannot
+tell which you came from. There `d d` closes neither and says so, and goes on
+doing so once the floating pane closes; `d s` still kills the session. A pane that is the last in
+its tab to hold it open closes the tab with it, so no tab is left with nothing
+in it but the sidebar's column; a pane another was opened in place of keeps the
+tab open, since zellij brings that pane back. A pane of another session closes
+through `zellij --session`, and the sidebar's highlight moves to the row after
+it once it is gone. The session you are in is killed once you are in another,
+the newest, which the picker lists first; with no other session to go to, the
+menu says so and kills nothing. Closing the last pane that holds a session's
+only tab open would end the session, so `d d` there deletes the session, as
+`d s` does: it asks as for the session, and the session you are in goes once
+you are in another.
+
+When what a key deletes would end an agent that is busy or waiting on you, the
+menu asks first, and says what goes:
+
+```text
+─ Delete ──────── luneta/main ─
+ Close the pane? 1 agent, 1
+ busy
+ <y> Yes <BS> Back <ESC> Close
+```
+
+`y`, or the key again, goes ahead; `n` or `Backspace` goes back to the keys. An
+idle agent or a shell goes without asking. An agent whose status luneta does
+not know, or that reports none, may be at work, and asks. Without `claude-ps`,
+luneta cannot tell, and asks every time.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 
@@ -350,8 +385,9 @@ keybinds {
 
 The menu is the plugin in `mode "menu"`. Its keys are a `menu`, a node to a
 key: a key's one string is what it starts an agent on, or, with keys inside
-it, the name of the group they make. Give them to the alias, so that the key
-that opens the menu and the sidebar show the same keys:
+it, the name of the group they make. `d` is luneta's, for its Delete group, and
+a menu that gives it a key of yours says so. Give them to the alias, so that
+the key that opens the menu and the sidebar show the same keys:
 
 ```kdl
 plugins {
@@ -618,7 +654,7 @@ Press your key, type, press `Enter`.
 | `Enter` | act on the highlighted row — the prompt says which action |
 | `Tab` / `Shift-Tab` | next / previous list, keeping the search term |
 | `Ctrl-r` | rename the session you are in |
-| `Del` | kill a live session, or delete a dead one; close an agent's pane |
+| `Del` | kill a live session, or delete a dead one; close an agent's pane, and its tab once nothing else holds it open |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
 
@@ -658,7 +694,11 @@ In the menu:
 | key | does |
 |---|---|
 | *a key it shows* | open its group, or start its agent |
-| `Backspace` | back a group, or close from the first |
+| `d d` | close the highlighted pane, or kill the highlighted session |
+| `d s` | kill the highlighted row's session |
+| `y`, or the key again | go ahead with a delete that asked first |
+| `n` | back to the keys, from a delete that asked first |
+| `Backspace` | back a group, or close from the first; back to the keys from a delete that asked |
 | `Esc` / `Ctrl-c` | close |
 
 ---

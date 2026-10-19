@@ -1,5 +1,6 @@
 mod agents;
 mod checkouts;
+mod close;
 mod cursor;
 mod dirs;
 mod dock;
@@ -30,7 +31,7 @@ use panes::Peeks;
 use pass::{At, Pass, Then};
 use places::Places;
 use sessions::{Contents, Focus, Kind, MatchSet, Selection, Session, SessionName, Sessions};
-use tree::{is_placeholder, origin, Branch, Node, Place, Tree};
+use tree::{is_placeholder, origin, Branch, Leaf, Node, Place, Tree};
 use zellij_tile::prelude::*;
 
 const SCREEN_PIPE: &str = "screen";
@@ -67,7 +68,9 @@ enum Role {
     Picker,
     Sidebar(Tree),
     Dock(dock::Dock),
-    Menu(menu::Menu),
+    /// Boxed: the menu keeps what claude-ps says, for a delete key to ask
+    /// first, and is larger than every other role.
+    Menu(Box<menu::Menu>),
     /// A `mode` luneta does not know. It says so, and does nothing else.
     Unknown(String),
 }
@@ -90,8 +93,6 @@ const PERMISSIONS: [PermissionType; 4] = [
     PermissionType::RunCommands,
     PermissionType::OpenTerminalsOrPlugins,
 ];
-
-const AGENTS_COMMAND: &str = "agents_command";
 
 const FLOATING: (&str, &str, &str, &str) = ("20%", "20%", "60%", "60%");
 
@@ -186,6 +187,9 @@ struct State {
     agents_taken_at: u64,
     role: Role,
     plugin_id: u32,
+    /// This plugin's client, which the sidebar's menu takes out of the
+    /// session before a delete key kills it.
+    client_id: ClientId,
     tabs: Vec<TabInfo>,
     branches: Vec<Branch>,
     here: Option<u32>,
@@ -218,6 +222,7 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         let ids = get_plugin_ids();
         self.plugin_id = ids.plugin_id;
+        self.client_id = ids.client_id;
         request_permission(&PERMISSIONS);
         self.role = match configuration.get(MODE).map(|value| value.trim()) {
             None => Role::Picker,
@@ -228,7 +233,9 @@ impl ZellijPlugin for State {
                 let dock = dock::Dock::new(self.plugin_id, ids.client_id, sidebar);
                 Role::Dock(dock.shared(ids.zellij_pid))
             },
-            Some(MENU) => Role::Menu(menu::Menu::new(self.plugin_id, &configuration)),
+            Some(MENU) => {
+                Role::Menu(Box::new(menu::Menu::new(self.plugin_id, ids.client_id, &configuration)))
+            },
             Some(mode) => Role::Unknown(mode.to_owned()),
         };
         match &self.role {
@@ -249,6 +256,7 @@ impl ZellijPlugin for State {
                     EventType::TabUpdate,
                     EventType::PaneUpdate,
                     EventType::RunCommandResult,
+                    EventType::Timer,
                 ]);
                 return;
             },
@@ -257,11 +265,7 @@ impl ZellijPlugin for State {
                 return;
             },
         }
-        self.agents_command = configuration
-            .get(AGENTS_COMMAND)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        self.agents_command = agents::configured(&configuration);
         self.menu_entries = configuration.get(menu::ENTRIES).cloned();
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -301,8 +305,9 @@ impl ZellijPlugin for State {
                     Event::Key(key) => menu.key(&key),
                     Event::TabUpdate(tabs) => menu.tabs(tabs),
                     Event::PaneUpdate(panes) => menu.panes(panes),
-                    Event::RunCommandResult(exit_code, stdout, _, context) => {
-                        menu.ran(exit_code, &stdout, &context);
+                    Event::Timer(_) => menu.tick(),
+                    Event::RunCommandResult(exit_code, stdout, stderr, context) => {
+                        menu.ran(exit_code, &stdout, &stderr, &context);
                         false
                     },
                     _ => false,
@@ -334,7 +339,8 @@ impl ZellijPlugin for State {
                 }
                 self.frame = self.frame.wrapping_add(1);
                 let asked = self.follow_preview();
-                polled || self.spinning() || asked
+                let left = self.leave_session();
+                polled || self.spinning() || asked || left
             },
             Event::Key(key) if self.is_sidebar() => self.handle_sidebar_key(&key),
             Event::Key(key) => self.handle_key(&key),
@@ -404,16 +410,17 @@ impl ZellijPlugin for State {
                         self.rebuild_agents(Selection::Hold);
                         true
                     },
-                    Some(menu::START_VALUE) => {
+                    Some(menu::START_VALUE | menu::CLOSING_VALUE) => {
                         let Role::Sidebar(tree) = &mut self.role else {
                             return false;
                         };
-                        let started = |menu: SidebarMenu| {
-                            menu.started(exit_code, &stdout, &stderr, &context)
+                        let answered = |menu: SidebarMenu| {
+                            menu.answered(exit_code, &stdout, &stderr, &context)
                         };
-                        tree.menu = tree.menu.take().and_then(started);
+                        tree.menu = tree.menu.take().and_then(answered);
                         true
                     },
+                    Some(close::CLIENTS_VALUE) => self.listed(exit_code, &stdout),
                     Some(agents::CLOSE_VALUE) if exit_code != Some(0) => {
                         let label = context.get(agents::LABEL_KEY).map_or("", String::as_str);
                         let reason = String::from_utf8_lossy(&stderr);
@@ -710,17 +717,7 @@ impl State {
         if !self.agents.ask() {
             return;
         }
-        let command: [&str; 1] = match self.agents_command.as_deref() {
-            Some(command) => [command],
-            None => agents::QUERY,
-        };
-        run_command(
-            &command,
-            BTreeMap::from([(
-                agents::CONTEXT_KEY.to_owned(),
-                agents::CONTEXT_VALUE.to_owned(),
-            )]),
-        );
+        agents::ask(self.agents_command.as_deref());
     }
 
     fn follow_preview(&mut self) -> bool {
@@ -1014,9 +1011,10 @@ impl State {
     }
 
     /// Closes the pane the highlighted agent sits in, and with it its tab when
-    /// that was the last pane there. The plugin closes a pane of its own
-    /// session, and `zellij` one of another, whose answer comes later. A pane
-    /// that is only a guess may hold something else, and stays.
+    /// nothing else holds the tab open, as the menu's `d d` does. The plugin
+    /// closes a pane of its own session, and `zellij` one of another, whose
+    /// answer comes later. A pane that is only a guess may hold something
+    /// else, and stays.
     fn kill_agent_pane(&mut self) {
         let Some(row) = self.agents.selected_row() else {
             return;
@@ -1026,21 +1024,27 @@ impl State {
             self.error = Some(format!("kill \"{label}\": luneta is not sure which pane it sits in"));
             return;
         }
-        match &row.seat {
-            Seat::Here(_) => close_terminal_pane(row.pane),
-            Seat::There(session) => {
-                let id = panes::pane_id(row.pane);
-                run_command(
-                    &agents::close(session, &id),
-                    BTreeMap::from([
-                        (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
-                        (agents::LABEL_KEY.to_owned(), row.label()),
-                    ]),
-                );
-            },
-        }
+        let pane = close::Pane::of(row.pane, &self.leaves(row.seat.session()));
+        pane.act(row.seat.clone()).run(BTreeMap::from([
+            (agents::CONTEXT_KEY.to_owned(), agents::CLOSE_VALUE.to_owned()),
+            (agents::LABEL_KEY.to_owned(), row.label()),
+        ]));
         self.agents.forget_selected();
         self.set_term(String::new());
+    }
+
+    /// The panes of `session` you can go to, as zellij lists them now: the
+    /// picker keeps none.
+    fn leaves(&self, session: &str) -> Vec<Leaf> {
+        let Ok(snapshot) = get_session_list() else {
+            return Vec::new();
+        };
+        let Some(listed) = snapshot.live_sessions.iter().find(|listed| listed.name == session)
+        else {
+            return Vec::new();
+        };
+        let (places, checkouts) = (&self.places, &self.checkouts);
+        tree::leaves(session, &listed.tabs, &listed.panes, places, checkouts, &[])
     }
 
     fn set_term(&mut self, term: String) {
@@ -1256,9 +1260,14 @@ impl State {
         let lapsed = |menu: &SidebarMenu| {
             menu.started_at().is_some_and(|at| frame.wrapping_sub(at) > ON_THE_WAY)
         };
+        let subject = self.menu_subject();
         if let Role::Sidebar(tree) = &mut self.role {
             if let Some(menu) = tree.menu.take().filter(|menu| !lapsed(menu)) {
-                tree.menu = menu.key(key, frame);
+                let (menu, closed) = menu.key(key, subject.as_ref(), frame);
+                tree.menu = menu;
+                if let Some(act) = closed {
+                    tree.closing(&act);
+                }
                 return true;
             }
         }
@@ -1305,9 +1314,10 @@ impl State {
         drawn || unscrolled
     }
 
-    /// Opens the menu at the bottom of the sidebar for the highlighted pane,
-    /// on the group its `key` opens, or on the first: an agent it starts opens
-    /// beside that pane, in the directory it works in. A key the menu has not
+    /// Opens the menu at the bottom of the sidebar for the highlighted row, on
+    /// the group its `key` opens, or on the first: an agent it starts opens
+    /// beside that row's pane, in the directory it works in, and its Delete
+    /// group closes the pane or kills the session. A key the menu has not
     /// does nothing. Says whether to draw.
     fn open_menu(&mut self, key: Option<char>) -> bool {
         let Some(row) = self.menu_row() else {
@@ -1323,17 +1333,81 @@ impl State {
         tree.menu.is_some()
     }
 
-    /// The highlighted pane, for the menu: the directory it works in, as its
-    /// session says or else as its agent does, the branch checked out there,
-    /// and when that is another session, its session and its tab, and the
-    /// pane you came from, for the menu to hand the focus back to before it
-    /// goes there. A session's row has no pane to open a menu for.
+    /// While the menu takes the client out of the session, which a key of it
+    /// killed: asks zellij whether the client is gone, for `listed` to kill
+    /// the session once it is. Says whether to draw.
+    fn leave_session(&mut self) -> bool {
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        if !tree.menu.as_ref().is_some_and(SidebarMenu::lasts) {
+            return false;
+        }
+        tree.menu = tree.menu.take().map(SidebarMenu::tick);
+        true
+    }
+
+    /// What zellij said, as it listed the clients of the session, while the
+    /// menu takes the client out of it: the session is killed once the client
+    /// is gone. Says whether to draw.
+    fn listed(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        if !tree.menu.as_ref().is_some_and(SidebarMenu::lasts) {
+            return false;
+        }
+        let client = self.client_id;
+        tree.menu = tree.menu.take().and_then(|menu| menu.clients(client, exit_code, stdout));
+        tree.menu.is_none()
+    }
+
+    /// What the open menu is for, as a key of it deletes the pane or the
+    /// session.
+    fn menu_subject(&self) -> Option<close::Subject> {
+        let Role::Sidebar(tree) = &self.role else {
+            return None;
+        };
+        let (pane, session) = tree.menu.as_ref()?.pane()?;
+        self.closing(pane, session)
+    }
+
+    /// `pane` of `session` or of the session you are in, or that session's
+    /// row with no `pane`, as a key of the menu deletes it: the pane's tab,
+    /// whether anything else holds the tab open, the agents of its session,
+    /// and the session to go to before the session you are in is killed.
+    fn closing(&self, pane: Option<u32>, session: Option<&str>) -> Option<close::Subject> {
+        let current = self.matches.current_session.as_deref();
+        let name = session.or(current)?;
+        let seat = if Some(name) == current {
+            Seat::Here(name.to_owned())
+        } else {
+            Seat::There(name.to_owned())
+        };
+        let branch = self.branches.iter().find(|branch| branch.name == name);
+        let leaves = branch.map_or(&[][..], |branch| branch.panes.as_slice());
+        let agents = close::agents_of(&self.agents, name, leaves);
+        let others = self.sessions.live.iter().map(|other| (other.name.as_str(), other.age));
+        Some(close::Subject::new(seat, pane, leaves, agents, close::refuge(others)))
+    }
+
+    /// The highlighted row, for the menu: its pane, the directory it works
+    /// in, as its session says or else as its agent does, the branch checked
+    /// out there, and when that is another session, its session and its tab,
+    /// and the pane you came from, for the menu to hand the focus back to
+    /// before it goes there. A session's row has its session alone.
     fn menu_row(&self) -> Option<menu::Row> {
         let Role::Sidebar(tree) = &self.role else {
             return None;
         };
-        let Some(Place::Pane(session, pane)) = tree.rows.selected_row().map(Node::place) else {
-            return None;
+        let current = self.matches.current_session.as_deref();
+        let (session, pane) = match tree.rows.selected_row().map(Node::place)? {
+            Place::Pane(session, pane) => (session, pane),
+            Place::Session(session) => {
+                let here = current == Some(session.as_str());
+                let there = (!here).then_some(There { session, tab: None, back: self.here });
+                return Some(menu::Row { pane: None, cwd: None, branch: None, there });
+            },
         };
         let leaf = self
             .branches
@@ -1346,10 +1420,10 @@ impl State {
             .and_then(|leaf| leaf.cwd.clone())
             .or_else(|| agent.and_then(|row| row.cwd.clone()));
         let branch = leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.clone());
-        let here = self.matches.current_session.as_deref() == Some(session.as_str());
+        let here = current == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
         let there = (!here).then_some(There { session, tab, back: self.here });
-        Some(menu::Row { pane, cwd, branch, there })
+        Some(menu::Row { pane: Some(pane), cwd, branch, there })
     }
 
     /// The keys `j k h l n` and `Space` type, like any other character, while
@@ -1665,7 +1739,7 @@ fn focus_at(tab: &TabInfo, panes: &[PaneInfo], plugin_id: u32) -> Option<At> {
     if tab.are_floating_panes_visible {
         return Some(At::Floating);
     }
-    let id = TabId(tab.tab_id);
+    let id = TabId::of(tab);
     let own = |pane: &PaneInfo| pane.is_plugin && pane.id == plugin_id;
     let mut focused = tiled(panes).filter(|p| p.is_focused);
     let pane = if let (Some(pane), None) = (focused.next(), focused.next()) {
@@ -1730,8 +1804,7 @@ mod tests {
 
     use super::*;
     use crate::checkouts::Checkout;
-    use crate::menu::Keys;
-    use crate::tree::Leaf;
+    use crate::menu::Shown;
 
     /// A sidebar with the focus, in the one tab of session `a` beside its
     /// pane, and session `b` with a pane of its own: rows `a`, `pane 1`, `b`,
@@ -1758,6 +1831,7 @@ mod tests {
             tab_id: None,
             cwd: None,
             checkout: None,
+            closes: close::Closes::Pane,
         };
         let mut state = State {
             role: Role::Sidebar(Tree::default()),
@@ -1879,27 +1953,29 @@ mod tests {
     /// A pane's row hands the menu its pane: one of your own session starts
     /// its agent here, one of another session there, in the pane's tab. The
     /// directory is the pane's, as its session says, and the branch the one
-    /// checked out there. A session's row has no pane.
+    /// checked out there. A session's row has its session alone, to delete.
     #[test]
     fn the_menu_a_row_opens_starts_its_agent_beside_that_pane() {
         let mut state = focused_sidebar();
         state.here = Some(1);
         let four = &mut state.branches[1].panes[0];
         four.cwd = Some("/w/b".to_owned());
-        four.tab_id = Some(7);
+        four.tab_id = Some(TabId(7));
         four.checkout = Some(Checkout { branch: "feat/menu".to_owned(), status: String::new() });
         state.rebuild_tree();
-        let there = There { session: "b".to_owned(), tab: Some(7), back: Some(1) };
+        let there = There { session: "b".to_owned(), tab: Some(TabId(7)), back: Some(1) };
         let row = |pane, cwd: Option<&str>, branch: Option<&str>, there| menu::Row {
             pane,
             cwd: cwd.map(str::to_owned),
             branch: branch.map(str::to_owned),
             there,
         };
+        let b = There { session: "b".to_owned(), tab: None, back: Some(1) };
         for (at, expected) in [
-            (0, None),
-            (1, Some(row(1, None, None, None))),
-            (3, Some(row(4, Some("/w/b"), Some("feat/menu"), Some(there)))),
+            (0, Some(row(None, None, None, None))),
+            (1, Some(row(Some(1), None, None, None))),
+            (2, Some(row(None, None, None, Some(b)))),
+            (3, Some(row(Some(4), Some("/w/b"), Some("feat/menu"), Some(there)))),
         ] {
             if let Role::Sidebar(tree) = &mut state.role {
                 tree.rows.select(at);
@@ -1912,8 +1988,10 @@ mod tests {
     /// shows.
     fn menu_open(state: &State) -> Option<Vec<&str>> {
         let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
-        let shown = tree.menu.as_ref().and_then(SidebarMenu::keys);
-        shown.map(|keys| keys.map(Keys::names).unwrap_or_default())
+        tree.menu.as_ref().and_then(SidebarMenu::shown).map(|shown| match shown {
+            Shown::Keys(keys) | Shown::Asking(keys, _) => keys.names(),
+            Shown::Leaving(_) | Shown::Wrong(_) => Vec::new(),
+        })
     }
 
     fn key(state: &mut State, key: BareKey) -> bool {
@@ -1923,8 +2001,8 @@ mod tests {
     /// A key of the menu opens it at the bottom of the sidebar for the row
     /// the cursor is on, and the menu takes every key until it closes. A key
     /// the menu has not is the sidebar's, and so is a key the sidebar has,
-    /// which `m` opens the menu for. A session's row has no pane to open it
-    /// for.
+    /// which `m` opens the menu for. A session's row opens it too, for the
+    /// session.
     #[test]
     fn a_key_of_the_menu_opens_it_in_the_sidebar_and_takes_every_key() {
         let mut state = focused_sidebar();
@@ -1935,8 +2013,9 @@ mod tests {
             let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
             tree.rows.selected()
         };
-        assert!(!key(&mut state, BareKey::Char('c')));
-        assert_eq!(menu_open(&state), None);
+        assert!(key(&mut state, BareKey::Char('c')));
+        assert_eq!(menu_open(&state), Some(vec!["Claude"]));
+        assert!(key(&mut state, BareKey::Esc));
         if let Role::Sidebar(tree) = &mut state.role {
             tree.rows.select(3);
         }
@@ -1959,6 +2038,83 @@ mod tests {
         assert!(key(&mut state, BareKey::Char('j')));
         assert!(key(&mut state, BareKey::Char('m')));
         assert_eq!(menu_open(&state), Some(vec![]));
+    }
+
+    /// `d d` closes the highlighted pane, with no menu of yours: one of
+    /// another session by a command, which the menu waits on. Once the pane
+    /// is gone, the cursor is on the row before it, and not back at the top.
+    #[test]
+    fn d_d_in_the_sidebar_closes_the_highlighted_pane() {
+        let mut state = focused_sidebar();
+        state.menu_entries = None;
+        state.agents.ingest(Some(0), b"[]", b"");
+        if let Role::Sidebar(tree) = &mut state.role {
+            tree.rows.select(3);
+        }
+        assert!(key(&mut state, BareKey::Char('d')));
+        assert!(key(&mut state, BareKey::Char('d')));
+        assert_eq!(menu_open(&state), Some(vec!["Delete"]));
+        let closed = BTreeMap::from([
+            (agents::CONTEXT_KEY.to_owned(), menu::CLOSING_VALUE.to_owned()),
+            (menu::MENU_KEY.to_owned(), state.menus.to_string()),
+        ]);
+        state.update(Event::RunCommandResult(Some(0), Vec::new(), Vec::new(), closed));
+        assert_eq!(menu_open(&state), None);
+        state.branches[1].panes.clear();
+        state.rebuild_tree();
+        let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+        assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Session("b".to_owned())));
+    }
+
+    /// `d s` on a pane of the session you are in, and `d d` on its row, go to
+    /// another session first, and the menu outlasts the focus on the way, to
+    /// kill the session once the client is gone. With no other session, it
+    /// says so.
+    #[test]
+    fn deleting_the_session_you_are_in_goes_to_another_first() {
+        for (others, row, then) in [(false, 1, 's'), (true, 1, 's'), (false, 0, 'd'), (true, 0, 'd')]
+        {
+            let mut state = focused_sidebar();
+            state.agents.ingest(Some(0), b"[]", b"");
+            if others {
+                state.sessions.live =
+                    vec![Session { name: "b".to_owned(), age: Age::from_secs(1) }];
+            }
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(row);
+            }
+            let case = format!("others: {others}, row {row}, d {then}");
+            assert!(key(&mut state, BareKey::Char('d')), "{case}");
+            assert!(key(&mut state, BareKey::Char(then)), "{case}");
+            if others {
+                focus(&mut state, false);
+            }
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            match tree.menu.as_ref().and_then(SidebarMenu::shown) {
+                Some(Shown::Leaving(to)) => assert!(others && to == "b", "{case}"),
+                Some(Shown::Wrong(said)) => {
+                    assert!(!others && said.contains("only session"), "{case}");
+                },
+                _ => panic!("{case}: neither leaving nor wrong"),
+            }
+            if others {
+                // The session ends once zellij lists the sidebar's client, 1,
+                // out of it.
+                state.client_id = 1;
+                let listed = |clients: &str| {
+                    let context = BTreeMap::from([(
+                        agents::CONTEXT_KEY.to_owned(),
+                        close::CLIENTS_VALUE.to_owned(),
+                    )]);
+                    let stdout = format!("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n{clients}");
+                    Event::RunCommandResult(Some(0), stdout.into_bytes(), Vec::new(), context)
+                };
+                assert!(!state.update(listed("1         plugin_3       N/A\n")), "{case}");
+                assert!(state.update(listed("")), "{case}");
+                let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+                assert!(tree.menu.is_none(), "{case}");
+            }
+        }
     }
 
     /// The menu is for the row the cursor was on, and lasts while the sidebar
