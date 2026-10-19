@@ -29,7 +29,7 @@ use checkouts::Checkouts;
 use context::CONTEXT_KEY;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
-use menu::{Command, Did, RowPane, SidebarMenu, There};
+use menu::{Command, Did, RowPane, SidebarMenu, There, Top};
 use elapsed::Age;
 use folds::Folds;
 use panes::Peeks;
@@ -234,7 +234,10 @@ impl ZellijPlugin for State {
         request_permission(&PERMISSIONS);
         self.role = match configuration.get(MODE).map(|value| value.trim()) {
             None => Role::Picker,
-            Some(SIDEBAR) => Role::Sidebar(Tree::shared()),
+            Some(SIDEBAR) => {
+                let entries = configuration.get(menu::ENTRIES).map(String::as_str);
+                Role::Sidebar(Tree::shared(menu::Legend::new(entries)))
+            },
             Some(DOCK) => {
                 let mut sidebar = configuration.clone();
                 sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
@@ -348,7 +351,8 @@ impl ZellijPlugin for State {
                 self.frame = self.frame.wrapping_add(1);
                 let asked = self.follow_preview();
                 let left = self.leave_session();
-                polled || self.spinning() || asked || left
+                let settled = self.settle_menu();
+                polled || self.spinning() || asked || left || settled
             },
             Event::Key(key) if self.is_sidebar() => self.handle_sidebar_key(&key),
             Event::Key(key) => self.handle_key(&key),
@@ -1362,14 +1366,12 @@ impl State {
 
     fn handle_sidebar_key(&mut self, key: &KeyWithModifier) -> bool {
         // The menu takes every key while it is open, and those on their way
-        // as an agent it started takes the focus.
+        // as an agent it started takes the focus, until `settle_menu` closes
+        // it.
         let frame = self.frame;
-        let lapsed = |menu: &SidebarMenu| {
-            menu.started_at().is_some_and(|at| frame.wrapping_sub(at) > ON_THE_WAY)
-        };
         let subject = self.menu_subject();
         if let Role::Sidebar(tree) = &mut self.role {
-            if let Some(menu) = tree.menu.take().filter(|menu| !lapsed(menu)) {
+            if let Some(menu) = tree.menu.take() {
                 let (menu, did) = menu.key(key, subject.as_ref(), frame);
                 tree.menu = menu;
                 self.follow_menu(did);
@@ -1392,17 +1394,13 @@ impl State {
         if let Some(term) = search {
             return self.handle_search_box_key(key.bare_key, term) || unscrolled;
         }
-        // A key that does more than move the cursor, fold or open the menu
-        // is a `Command`, which it comes to by `Command::of` below, for `?`
-        // to list it.
+        // A character does what `Top::of` says, which the legend goes by
+        // too, and a key it has not is the menu's.
         let drawn = match key.bare_key {
-            BareKey::Down | BareKey::Char('j') => self.move_tree(1),
-            BareKey::Up | BareKey::Char('k') => self.move_tree(-1),
-            BareKey::Left | BareKey::Char('h') => self.fold(Some(true)),
-            BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
-            BareKey::Char(' ') => self.fold(None),
-            BareKey::Char('m') => self.open_menu(None),
-            BareKey::Char('?') => self.open_help(None),
+            BareKey::Down => self.move_tree(1),
+            BareKey::Up => self.move_tree(-1),
+            BareKey::Left => self.fold(Some(true)),
+            BareKey::Right => self.fold(Some(false)),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -1411,9 +1409,12 @@ impl State {
                 self.go_back();
                 false
             },
-            BareKey::Char(c) => match Command::of(c) {
-                Some(command) => self.command(command),
-                None if Command::opens(c) => self.open_help(Some(c)),
+            BareKey::Char(c) => match Top::of(c) {
+                Some(Top::Move(rows)) => self.move_tree(rows),
+                Some(Top::Fold(folded)) => self.fold(folded),
+                Some(Top::Menu) => self.open_menu(None),
+                Some(Top::Command(command)) => self.command(command),
+                Some(Top::Group(group)) => self.open_help(group),
                 None => self.open_menu(Some(c)),
             },
             _ => false,
@@ -1422,7 +1423,7 @@ impl State {
     }
 
     /// Runs a command of the sidebar's own: a key at the top of the sidebar,
-    /// or a key of `?`. Says whether to draw.
+    /// or a key of help. Says whether to draw.
     fn command(&mut self, command: Command) -> bool {
         match command {
             Command::Search => self.search_tree(String::new()),
@@ -1448,10 +1449,9 @@ impl State {
         }
     }
 
-    /// Opens `?` at the bottom of the sidebar for the highlighted row: the
-    /// keys at the top of the menu, and the sidebar's commands, on the group
-    /// of commands `group` opens, or on the first. Says whether to draw.
-    fn open_help(&mut self, group: Option<char>) -> bool {
+    /// Opens help at the bottom of the sidebar for the highlighted row, on the
+    /// group of commands `group` opens. Says whether to draw.
+    fn open_help(&mut self, group: char) -> bool {
         let Some(row) = self.menu_row() else {
             return false;
         };
@@ -1555,6 +1555,26 @@ impl State {
             return false;
         }
         tree.menu = tree.menu.take().map(SidebarMenu::tick);
+        true
+    }
+
+    /// Closes the menu once the keys on their way to what it started in the
+    /// sidebar's own session have all come: the keys after them are the
+    /// sidebar's, and the legend is back. The frame moves only with the tick
+    /// that runs this, so no key comes to a menu that should be gone. Says
+    /// whether to draw.
+    fn settle_menu(&mut self) -> bool {
+        let frame = self.frame;
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        let lapsed = |menu: &SidebarMenu| {
+            menu.started_at().is_some_and(|at| frame.wrapping_sub(at) > ON_THE_WAY)
+        };
+        if !tree.menu.as_ref().is_some_and(lapsed) {
+            return false;
+        }
+        tree.menu = None;
         true
     }
 
@@ -2197,6 +2217,7 @@ mod tests {
     #[test]
     fn a_fold_leaves_the_view_where_the_wheel_left_it() {
         let mut state = focused_sidebar();
+        state.size = (9, 30);
         let leaf = |id: u32| Leaf {
             id,
             title: format!("pane {id}"),
@@ -2518,6 +2539,37 @@ mod tests {
         assert_eq!(menu_open(&state), Some(vec![]));
     }
 
+    /// A key that comes soon after the menu starts an agent in the sidebar's
+    /// own session was on its way already, and the menu takes it. Once those
+    /// keys have all come, the tick closes the menu, and the keys are the
+    /// sidebar's again.
+    #[test]
+    fn the_menu_closes_once_the_keys_on_their_way_have_come() {
+        let mut state = focused_sidebar();
+        // Off the ticks that ask zellij for the sessions, which a test has no
+        // answer to.
+        state.frame = 1;
+        let selected = |state: &State| {
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            (tree.rows.selected(), tree.menu.is_some())
+        };
+        if let Role::Sidebar(tree) = &mut state.role {
+            assert!(tree.rows.select(1));
+            tree.menu = Some(SidebarMenu::started(state.frame));
+        }
+        assert!(key(&mut state, BareKey::Char('j')));
+        assert_eq!(selected(&state), (Some(1), true));
+        for _ in 0..ON_THE_WAY {
+            state.update(Event::Timer(TICK));
+        }
+        assert_eq!(selected(&state), (Some(1), true));
+        assert!(state.update(Event::Timer(TICK)));
+        assert_eq!(selected(&state), (Some(1), false));
+        // Down from pane 1, over the row of `b`, to pane 4.
+        assert!(key(&mut state, BareKey::Char('j')));
+        assert_eq!(selected(&state), (Some(3), false));
+    }
+
     /// `d d` closes the highlighted pane, with no menu of yours: one of
     /// another session by a command, which the menu waits on. Once the pane
     /// is gone, the cursor is on the row before it, and not back at the top:
@@ -2721,10 +2773,10 @@ mod tests {
         }
     }
 
-    /// `?` opens the menu at the bottom of the sidebar with the sidebar's
-    /// commands under its keys, on a pane's row and on a session's. A command
-    /// in it closes it and runs as it does pressed at the top of the sidebar:
-    /// `/` opens the search.
+    /// `b` opens help at the bottom of the sidebar, and `Backspace` its top,
+    /// with `/` over the menu's keys, on a pane's row and on a session's. A
+    /// command in it closes it and runs as it does pressed at the top of the
+    /// sidebar: `/` opens the search.
     #[test]
     fn a_command_of_help_runs_as_it_does_at_the_top_of_the_sidebar() {
         let shown = |state: &State| {
@@ -2747,8 +2799,9 @@ mod tests {
                 assert!(tree.rows.select(at));
             }
             if through_help {
-                assert!(key(&mut state, BareKey::Char('?')), "row {at}");
-                assert_eq!(shown(&state), ['c', 'n', 'd', '/', 'b'], "row {at}");
+                assert!(key(&mut state, BareKey::Char('b')), "row {at}");
+                key(&mut state, BareKey::Backspace);
+                assert_eq!(shown(&state), ['/', 'c', 'n', 'd', 'b'], "row {at}");
             }
             assert!(key(&mut state, BareKey::Char('/')), "row {at}, through help: {through_help}");
             assert_eq!(menu_open(&state), None, "row {at}, through help: {through_help}");

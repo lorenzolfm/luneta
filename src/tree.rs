@@ -22,7 +22,7 @@ use crate::dirs::short_cwd;
 use crate::dock::TabId;
 use crate::elapsed::{Age, Held};
 use crate::folds::Folds;
-use crate::menu::SidebarMenu;
+use crate::menu::{Legend, SidebarMenu};
 use crate::places::Places;
 
 /// What a placeholder runs: the column each tab keeps for the sidebar, which
@@ -321,6 +321,10 @@ pub struct Tree {
     pub summary: Summary,
     /// The menu, while it is open at the bottom of the sidebar.
     pub menu: Option<SidebarMenu>,
+    /// What the bottom of the sidebar shows while it has the focus, and
+    /// neither the menu nor the search box is open. None in a test that
+    /// leaves it out.
+    pub legend: Option<Legend>,
     folded: Folds,
     search: Option<Search>,
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
@@ -368,9 +372,9 @@ enum Search {
 }
 
 impl Tree {
-    /// A tree whose folds are every session's sidebar's.
-    pub fn shared() -> Self {
-        Tree { folded: Folds::shared(), ..Tree::default() }
+    /// A tree whose folds are every session's sidebar's, over `legend`.
+    pub fn shared(legend: Legend) -> Self {
+        Tree { folded: Folds::shared(), legend: Some(legend), ..Tree::default() }
     }
 
     /// A tree of `nodes` as they stand, the cursor on row `selected` or the

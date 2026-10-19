@@ -115,7 +115,7 @@ const SYSTEM: &str = "You brief a developer who is coming back to their desk aft
     in a few words rather than guess.";
 
 /// What a key of the brief covers. Each is a `Command` of the sidebar's, in
-/// the group `b` opens, which has its key and what `?` says of it.
+/// the group `b` opens, which has its key and what help says of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// Every session, a line each.
