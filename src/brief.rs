@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 use zellij_tile::prelude::*;
 
+use crate::agents::SessionId;
+
 pub const CONTEXT_VALUE: &str = "brief";
 /// The number of the brief the ends of the transcripts are for.
 pub const NUMBER_KEY: &str = "luneta_brief";
@@ -38,21 +40,27 @@ const STEP_CHARS: usize = 300;
 /// and Linux takes no argument longer than 128 KiB.
 const NOTES_BYTES: usize = 100 * 1024;
 
+/// What the notes keep of `NOTES_BYTES` for saying which agents they leave
+/// out.
+const LEFT_OUT_BYTES: usize = 4 * 1024;
+
 /// Prints, for each transcript id after the first argument, the id and the
 /// last bytes of its transcript, as many as the first argument says, each
 /// ending in a NUL. A transcript is in a directory named for where its session
-/// started, which the id alone finds. One that is not found prints nothing
-/// for its end.
+/// started, which the id alone finds. One that is not found prints nothing,
+/// not even its id.
 const TAILS: &str = r#"bytes=$1
 shift
 projects=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
 for id do
-    printf '%s\0' "$id"
     for f in "$projects"/*/"$id".jsonl; do
-        if [ -f "$f" ]; then tail -c "$bytes" "$f"; fi
+        if [ -f "$f" ]; then
+            printf '%s\0' "$id"
+            tail -c "$bytes" "$f"
+            printf '\0'
+        fi
         break
     done
-    printf '\0'
 done"#;
 
 /// The brief's pane: what it is a brief of, `claude -p` on the notes with the
@@ -179,7 +187,7 @@ pub struct Note {
     pub branch: Option<String>,
     pub cwd: Option<String>,
     /// The id of its Claude Code session, which names its transcript.
-    pub transcript: Option<String>,
+    pub transcript: Option<SessionId>,
 }
 
 /// A brief asked for, while the sidebar reads the end of each transcript it
@@ -194,11 +202,12 @@ pub struct Brief {
 
 impl Brief {
     /// The brief numbered `number` of the agents in `notes` that `over`
-    /// covers, or what the sidebar says when there is none.
+    /// covers, or what the sidebar says when there is none. Two agents a
+    /// session names alike are told apart by their panes, as the agent list
+    /// tells them apart: `luneta/main:4`.
     pub fn new(number: u64, over: Over, notes: Vec<Note>) -> Result<Self, String> {
         let mut notes: Vec<Note> =
             notes.into_iter().filter(|note| over.covers(note)).collect();
-        notes.truncate(MAX_NOTES);
         if notes.is_empty() {
             return Err(match &over {
                 Over::Sessions(_) => "brief: no agents to brief you on".to_owned(),
@@ -206,16 +215,29 @@ impl Brief {
                 Over::Agent(..) => "brief: no agent in this pane".to_owned(),
             });
         }
+        let alike: Vec<bool> = notes
+            .iter()
+            .map(|note| {
+                let named = |other: &&Note| other.session == note.session && other.name == note.name;
+                notes.iter().filter(named).count() > 1
+            })
+            .collect();
+        for (note, alike) in notes.iter_mut().zip(alike) {
+            if alike {
+                note.name = format!("{}:{}", note.name, note.pane);
+            }
+        }
         Ok(Brief { number, over, notes })
     }
 
-    /// The command that prints the end of each transcript the brief covers.
+    /// The command that prints the end of each transcript the brief has room
+    /// for.
     pub fn tails(&self) -> Vec<String> {
         let mut command: Vec<String> =
             ["sh", "-c", TAILS, "sh"].iter().map(|arg| (*arg).to_owned()).collect();
         command.push(TAIL_BYTES.to_string());
-        let ids = self.notes.iter().filter_map(|note| note.transcript.as_deref());
-        command.extend(ids.filter(|id| is_id(id)).map(str::to_owned));
+        let ids = self.notes.iter().take(MAX_NOTES).filter_map(|note| note.transcript.as_ref());
+        command.extend(ids.map(|id| id.as_str().to_owned()));
         command
     }
 
@@ -262,7 +284,8 @@ impl Brief {
     }
 
     /// What the model is asked, with the notes on each agent and what the
-    /// end of its transcript in `ends` says of it.
+    /// end of its transcript in `ends` says of it, for as many agents as the
+    /// notes have room for, and how many they leave out.
     fn prompt(&self, ends: &HashMap<&str, String>) -> String {
         let mut prompt = self.over.ask();
         prompt.push_str("\n\nThe notes:\n");
@@ -271,19 +294,53 @@ impl Brief {
             prompt.push_str(&sessions.join(", "));
             prompt.push('\n');
         }
-        for note in &self.notes {
-            let end = note.transcript.as_deref().and_then(|id| ends.get(id));
-            let digest = end.map(|end| digest(end, self.over.steps())).unwrap_or_default();
-            prompt.push('\n');
-            prompt.push_str(&note.written(&digest));
+        let mut told = 0;
+        for note in self.notes.iter().take(MAX_NOTES) {
+            let written = format!("\n{}", note.written(&self.told(note, ends)));
+            if prompt.len() + written.len() > NOTES_BYTES - LEFT_OUT_BYTES {
+                break;
+            }
+            prompt.push_str(&written);
+            told += 1;
+        }
+        let left_out = &self.notes[told..];
+        if !left_out.is_empty() {
+            prompt.push_str(&leaves_out(left_out));
         }
         cut_bytes(prompt, NOTES_BYTES)
     }
+
+    /// What the end of `note`'s transcript, among `ends`, told of it.
+    fn told(&self, note: &Note, ends: &HashMap<&str, String>) -> Told {
+        let Some(id) = &note.transcript else {
+            return Told::NoId;
+        };
+        match ends.get(id.as_str()) {
+            Some(end) => Told::Read(digest(end, self.over.steps())),
+            None => Told::NotFound,
+        }
+    }
+}
+
+/// What the notes say of the agents in `left_out` that they have no room
+/// for, so that a session whose agents they leave out is not taken for one
+/// with none.
+fn leaves_out(left_out: &[Note]) -> String {
+    let mut sessions: Vec<&str> = left_out.iter().map(|note| note.session.as_str()).collect();
+    sessions.dedup();
+    let agents = if left_out.len() == 1 { "agent" } else { "agents" };
+    let of = if sessions.len() == 1 { "session" } else { "sessions" };
+    format!(
+        "\nThe notes leave out {} more {agents} for room, in {of} {}. Say that the brief leaves \
+         them out, and do not call their sessions empty.\n",
+        left_out.len(),
+        sessions.join(", ")
+    )
 }
 
 impl Note {
-    /// The note as the model reads it.
-    fn written(&self, digest: &Digest) -> String {
+    /// The note as the model reads it, with what its transcript `told`.
+    fn written(&self, told: &Told) -> String {
         let mut lines = vec![format!("Agent \"{}\" in session {}", self.name, self.session)];
         lines.push(format!("Status: {}, for {}", self.status, self.held));
         match (&self.branch, &self.cwd) {
@@ -292,26 +349,30 @@ impl Note {
             (None, Some(cwd)) => lines.push(format!("Works in {cwd}")),
             (None, None) => {},
         }
-        if let Some(title) = &digest.title {
-            lines.push(format!("Title: {title}"));
-        }
-        if let Some(asked) = &digest.asked {
-            // The notes name the developer as the model is told of them: a
-            // `you` here reads as the agent asking.
-            lines.push(format!("The developer last asked it: {asked}"));
-        }
-        if digest.steps.is_empty() {
-            lines.push("Its transcript says nothing more.".to_owned());
-        } else {
-            lines.push("Lately, oldest first:".to_owned());
-            lines.extend(digest.steps.iter().map(|step| format!("- {step}")));
+        match told {
+            Told::NoId => {
+                lines.push("Its transcript is unknown: claude-ps names none for it.".to_owned());
+            },
+            Told::NotFound => lines.push("Its transcript was not found.".to_owned()),
+            Told::Read(digest) => lines.extend(digest.lines()),
         }
         lines.join("\n") + "\n"
     }
 }
 
+/// What the end of an agent's transcript told of it.
+enum Told {
+    /// claude-ps gave no id for its session, or one that names no
+    /// transcript.
+    NoId,
+    /// No transcript has its id where `TAILS` looks: one written under
+    /// another `CLAUDE_CONFIG_DIR`, or one not written yet.
+    NotFound,
+    Read(Digest),
+}
+
 /// What the end of a transcript says of what its agent is doing.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct Digest {
     /// The title Claude Code gave the session.
     title: Option<String>,
@@ -321,14 +382,35 @@ struct Digest {
     steps: Vec<String>,
 }
 
+impl Digest {
+    /// What the note says of what the transcript says.
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(title) = &self.title {
+            lines.push(format!("Title: {title}"));
+        }
+        if let Some(asked) = &self.asked {
+            // The notes name the developer as the model is told of them: a
+            // `you` here reads as the agent asking.
+            lines.push(format!("The developer last asked it: {asked}"));
+        }
+        if self.steps.is_empty() {
+            lines.push("Its transcript says nothing more.".to_owned());
+        } else {
+            lines.push("Lately, oldest first:".to_owned());
+            lines.extend(self.steps.iter().map(|step| format!("- {step}")));
+        }
+        lines
+    }
+}
+
 /// What `end`, the end of a transcript, says, with as many of the last steps
 /// as `steps`. A transcript is a JSON record to a line, and its end starts
 /// partway into one, which is no record. A subagent's records, what Claude
 /// thought and what a tool answered are left out.
 fn digest(end: &str, steps: usize) -> Digest {
     let mut title = None;
-    let mut prompt = None;
-    let mut typed = None;
+    let mut asked = None;
     let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
     for line in end.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
@@ -339,11 +421,14 @@ fn digest(end: &str, steps: usize) -> Digest {
         }
         match record["type"].as_str() {
             Some("ai-title") => title = record["aiTitle"].as_str().map(str::to_owned).or(title),
+            // Claude Code records the last prompt some records after you type
+            // it, and a slash command only there: the later of the two is
+            // what you last asked.
             Some("last-prompt") => {
-                prompt = record["lastPrompt"].as_str().map(str::to_owned).or(prompt);
+                asked = record["lastPrompt"].as_str().map(str::to_owned).or(asked);
             },
             Some("user") if record["isMeta"].as_bool() != Some(true) => {
-                typed = typed_by_you(&record["message"]["content"]).or(typed);
+                asked = typed_by_you(&record["message"]["content"]).or(asked);
             },
             Some("assistant") => {
                 let blocks = record["message"]["content"].as_array().into_iter().flatten();
@@ -359,13 +444,17 @@ fn digest(end: &str, steps: usize) -> Digest {
     }
     Digest {
         title: title.map(|title| one_line(&title, TITLE_CHARS)),
-        asked: prompt.or(typed).map(|asked| one_line(&asked, ASKED_CHARS)),
+        asked: asked.map(|asked| one_line(&asked, ASKED_CHARS)),
         steps: last.into(),
     }
 }
 
-/// What you typed, in a user record: its text, and not what a tool answered
-/// or what Claude Code wrapped in tags of its own, as a command's output.
+/// How the line Claude Code writes in your place where you stopped it starts.
+const INTERRUPTED: &str = "[Request interrupted by user";
+
+/// What you typed, in a user record: its text, and not what a tool answered,
+/// what Claude Code wrapped in tags of its own, as a command's output, or the
+/// line it writes in your place where you stopped it.
 fn typed_by_you(content: &Value) -> Option<String> {
     let text = match content {
         Value::String(text) => Some(text.as_str()),
@@ -375,7 +464,8 @@ fn typed_by_you(content: &Value) -> Option<String> {
         _ => None,
     }?;
     let text = text.trim();
-    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
+    let theirs = text.starts_with('<') || text.starts_with(INTERRUPTED);
+    (!text.is_empty() && !theirs).then(|| text.to_owned())
 }
 
 /// A step of what an agent did, from a block of what it sent: what it said,
@@ -431,12 +521,6 @@ fn cut_bytes(mut text: String, bytes: usize) -> String {
     text
 }
 
-/// Whether `id` is one Claude Code names a transcript with, a UUID, and no
-/// path that `TAILS` would read some other file by.
-fn is_id(id: &str) -> bool {
-    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-}
-
 /// The end of each transcript, by its id, as `TAILS` printed them.
 fn tails(stdout: &[u8]) -> HashMap<&str, String> {
     let mut fields = stdout.split(|byte| *byte == 0);
@@ -459,25 +543,30 @@ mod tests {
 
     /// What the model reads of each agent: what the sidebar knows of it, and
     /// what the end of its transcript says, as `TAILS` reads it through the
-    /// `sh` zellij would run. The title and the prompt are the last ones, the
-    /// steps the last few, oldest first, by what a tool was for over what it
-    /// ran. The record the end starts partway into, a subagent's records,
+    /// `sh` zellij would run. The title is the last one, and what you last
+    /// asked the later of the last prompt Claude Code recorded and the last
+    /// one you typed: it records a prompt some records after you type it. The
+    /// steps are the last few, oldest first, by what a tool was for over what
+    /// it ran. The record the end starts partway into, a subagent's records,
     /// what Claude thought and what a tool answered are left out, and so is
-    /// what Claude Code typed in tags of its own. A transcript with no prompt
-    /// recorded has the last one you typed; one not found says nothing more.
+    /// what Claude Code typed in tags of its own or in your place where you
+    /// stopped it. A transcript not found says so, and so does an agent
+    /// claude-ps names none for. Two agents a session names alike are told
+    /// apart by their panes, and an agent of another session named alike is
+    /// not.
     #[test]
     fn the_notes_tell_each_agent_by_the_end_of_its_transcript() {
         use serde_json::json;
 
-        let note = |pane: u32, name: &str, transcript: &str| Note {
-            session: "b".to_owned(),
+        let note = |session: &str, pane: u32, name: &str, transcript: Option<&str>| Note {
+            session: session.to_owned(),
             pane,
             name: name.to_owned(),
             status: "idle".to_owned(),
             held: "3m".to_owned(),
             branch: (pane == 4).then(|| "feat/fold".to_owned()),
-            cwd: Some("/w/b".to_owned()),
-            transcript: Some(transcript.to_owned()),
+            cwd: Some(format!("/w/{session}")),
+            transcript: transcript.map(|id| SessionId::parse(id).expect("a UUID")),
         };
         let fold = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
         let quiet = "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a";
@@ -502,7 +591,10 @@ mod tests {
             json!({"type": "ai-title", "aiTitle": "Fold sessions in the sidebar"}),
         ];
         let quiet_end = [
-            json!({"type": "user", "message": {"content": "make it so"}}),
+            json!({"type": "last-prompt", "lastPrompt": "make it so"}),
+            json!({"type": "user", "message": {"content": "make it so, and test it"}}),
+            json!({"type": "user", "message": {"content": [
+                {"type": "text", "text": "[Request interrupted by user]"}]}}),
             json!({"type": "user", "message": {"content": "<command-name>/clear</command-name>"}}),
             json!({"type": "user", "isMeta": true, "message": {"content": "a reminder"}}),
         ];
@@ -518,7 +610,13 @@ mod tests {
         std::fs::write(project.join(format!("{quiet}.jsonl")), lines(&quiet_end)).expect("a file");
 
         let over = Over::Sessions(vec!["a".to_owned(), "b".to_owned()]);
-        let notes = vec![note(4, "fold", fold), note(5, "quiet", quiet), note(6, "gone", gone)];
+        let notes = vec![
+            note("a", 1, "fold", None),
+            note("b", 4, "fold", Some(fold)),
+            note("b", 5, "quiet", Some(quiet)),
+            note("b", 6, "spare", Some(gone)),
+            note("b", 7, "spare", None),
+        ];
         let brief = Brief::new(1, over, notes).expect("a brief");
         let tails = brief.tails();
         let output = std::process::Command::new(&tails[0])
@@ -536,6 +634,11 @@ mod tests {
             "
 Sessions, in order: a, b
 
+Agent \"fold\" in session a
+Status: idle, for 3m
+Works in /w/a
+Its transcript is unknown: claude-ps names none for it.
+
 Agent \"fold\" in session b
 Status: idle, for 3m
 Branch: feat/fold, in /w/b
@@ -550,14 +653,51 @@ Lately, oldest first:
 Agent \"quiet\" in session b
 Status: idle, for 3m
 Works in /w/b
-The developer last asked it: make it so
+The developer last asked it: make it so, and test it
 Its transcript says nothing more.
 
-Agent \"gone\" in session b
+Agent \"spare:6\" in session b
 Status: idle, for 3m
 Works in /w/b
-Its transcript says nothing more.
+Its transcript was not found.
+
+Agent \"spare:7\" in session b
+Status: idle, for 3m
+Works in /w/b
+Its transcript is unknown: claude-ps names none for it.
 "
         );
+    }
+
+    /// A brief tells of as many agents as it has room for, in the order the
+    /// sidebar gives them, and says how many it leaves out and in which
+    /// sessions, so that the model does not call a session whose agents it
+    /// left out empty: past `MAX_NOTES` agents, and past `NOTES_BYTES` of
+    /// notes, which go to `claude` as one argument.
+    #[test]
+    fn a_brief_says_how_many_agents_it_has_no_room_for() {
+        let note = |session: &str, pane: usize, name: String| Note {
+            session: session.to_owned(),
+            pane: pane as u32,
+            name,
+            status: "busy".to_owned(),
+            held: "1m".to_owned(),
+            branch: None,
+            cwd: None,
+            transcript: None,
+        };
+        let session = |pane: usize| if pane < MAX_NOTES { "a" } else { "b" };
+        let many = (0..MAX_NOTES + 2).map(|pane| note(session(pane), pane, format!("agent {pane}")));
+        let long = |session: &str, pane: usize| note(session, pane, "x".repeat(NOTES_BYTES / 2));
+        for (notes, told, said) in [
+            (many.collect(), MAX_NOTES, "The notes leave out 2 more agents for room, in session b."),
+            (vec![long("a", 0), long("b", 1)], 1, "leave out 1 more agent for room, in session b."),
+        ] {
+            let over = Over::Sessions(vec!["a".to_owned(), "b".to_owned()]);
+            let prompt = Brief::new(1, over, notes).expect("a brief").prompt(&HashMap::new());
+            assert_eq!(prompt.matches("\nAgent \"").count(), told, "{said}");
+            assert!(prompt.contains(said), "{said}");
+            assert!(prompt.len() <= NOTES_BYTES, "{said}");
+        }
     }
 }

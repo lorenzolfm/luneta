@@ -330,8 +330,8 @@ on, and `Backspace` goes back to the rest of `?`:
 
 The brief opens floating over the tab, and any key closes it. It says when it
 was made, and nothing is kept: each key asks again, so a brief costs only when
-you ask for one. With no agent to brief you on, the sidebar says so where the
-keys were.
+you ask for one. With no agent to brief you on, or transcripts that could not
+be read, the sidebar says so where the keys were.
 
 For each agent, the model is told its session, its row's name, its status and
 for how long, and its branch, as the sidebar knows them, and from the last
@@ -339,7 +339,9 @@ for how long, and its branch, as the sidebar knows them, and from the last
 of it, and its last few steps, what it said and what it ran. It is asked to
 use those alone. The transcript is the one Claude Code keeps in
 `~/.claude/projects`, or under `CLAUDE_CONFIG_DIR`, by the session id
-claude-ps gives.
+claude-ps gives; the model is told when it was not found there. Two agents a
+session names alike are told apart by their panes, as `luneta/main:4`, and a
+brief tells of 32 agents at most, and says how many it leaves out.
 
 The model is `claude -p --model haiku`, on your Claude Code login, with no
 tools, and in `--safe-mode`, so that none of your hooks, `CLAUDE.md` or MCP

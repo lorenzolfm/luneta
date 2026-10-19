@@ -421,10 +421,28 @@ impl ZellijPlugin for State {
                     Some(brief::CONTEXT_VALUE) => {
                         let number = context.get(brief::NUMBER_KEY);
                         let asked = |brief: &mut Brief| number == Some(&brief.number.to_string());
-                        if let Some(brief) = self.brief.take_if(asked) {
+                        let Some(brief) = self.brief.take_if(asked) else {
+                            return false;
+                        };
+                        if exit_code == Some(0) {
                             brief.open(&stdout);
+                            return false;
                         }
-                        false
+                        // A brief on transcripts that were never read would
+                        // tell of none: the sidebar says why where its keys
+                        // were.
+                        let Role::Sidebar(tree) = &mut self.role else {
+                            return false;
+                        };
+                        let said = String::from_utf8_lossy(&stderr);
+                        let reason = match said.lines().next().map(str::trim) {
+                            Some(said) if !said.is_empty() => {
+                                format!("brief: the transcripts could not be read: {said}")
+                            },
+                            _ => "brief: the transcripts could not be read".to_owned(),
+                        };
+                        tree.menu = Some(SidebarMenu::wrong(reason, &mut self.menus));
+                        true
                     },
                     Some(menu::START_VALUE | menu::CLOSING_VALUE) => {
                         let Role::Sidebar(tree) = &mut self.role else {
@@ -2141,16 +2159,14 @@ mod tests {
         state.update(Event::Key(KeyWithModifier::new(key)))
     }
 
-    /// `b` opens the brief's keys at the bottom of the sidebar, on any row,
-    /// and a key of them briefs by the row the cursor is on: `z` every
-    /// session, `s` the row's session, and `h` the agent in the row's pane,
-    /// or on a session's row, its session. A brief first reads the end of the
-    /// transcript of each agent it covers. With no agent to brief on, the
-    /// sidebar says so where the keys were.
-    #[test]
-    fn the_brief_s_keys_brief_by_the_row_the_cursor_is_on() {
-        const FOUR: &str = "4444aaaa-0000-4000-8000-000000000004";
-        const FIVE: &str = "5555aaaa-0000-4000-8000-000000000005";
+    /// The transcripts of the agents in `agents_in_b`.
+    const FOUR: &str = "4444aaaa-0000-4000-8000-000000000004";
+    const FIVE: &str = "5555aaaa-0000-4000-8000-000000000005";
+
+    /// A focused sidebar whose session `b` has an agent in each of its panes
+    /// 4 and 5, its transcript `FOUR` and `FIVE`: rows `a`, `pane 1`, `b`,
+    /// `pane 4`, `pane 5`.
+    fn agents_in_b() -> State {
         let mut state = focused_sidebar();
         let leaf = |id: u32| Leaf {
             id,
@@ -2172,6 +2188,29 @@ mod tests {
         let claude_ps = format!("[{},{}]", seated(4, FOUR), seated(5, FIVE));
         state.agents.ingest(Some(0), claude_ps.as_bytes(), b"");
         state.rebuild_agents(Selection::Hold);
+        state
+    }
+
+    /// What is wrong, as the menu at the bottom of the sidebar says it, which
+    /// closes.
+    fn wrong_said(state: &mut State) -> Option<String> {
+        let Role::Sidebar(tree) = &mut state.role else { panic!("not a sidebar") };
+        let menu = tree.menu.take();
+        menu.as_ref().and_then(SidebarMenu::shown).and_then(|shown| match shown {
+            Shown::Wrong(reason) => Some(reason.to_owned()),
+            Shown::Keys(_) | Shown::Asking(..) | Shown::Leaving(_) => None,
+        })
+    }
+
+    /// `b` opens the brief's keys at the bottom of the sidebar, on any row,
+    /// and a key of them briefs by the row the cursor is on: `z` every
+    /// session, `s` the row's session, and `h` the agent in the row's pane,
+    /// or on a session's row, its session. A brief first reads the end of the
+    /// transcript of each agent it covers. With no agent to brief on, the
+    /// sidebar says so where the keys were.
+    #[test]
+    fn the_brief_s_keys_brief_by_the_row_the_cursor_is_on() {
+        let mut state = agents_in_b();
 
         // Rows `a`, `pane 1`, `b`, `pane 4`, `pane 5`; only `b` has agents.
         let none_in_a = "brief: no agents in a";
@@ -2196,17 +2235,36 @@ mod tests {
             let read = state.brief.as_ref().map(Brief::tails).unwrap_or_default();
             let read: Vec<&str> =
                 read.iter().map(String::as_str).filter(|arg| [FOUR, FIVE].contains(arg)).collect();
-            let Role::Sidebar(tree) = &mut state.role else { panic!("not a sidebar") };
-            let menu = tree.menu.take();
-            let said = menu.as_ref().and_then(SidebarMenu::shown).and_then(|shown| match shown {
-                Shown::Wrong(reason) => Some(reason),
-                Shown::Keys(_) | Shown::Asking(..) | Shown::Leaving(_) => None,
-            });
+            let said = wrong_said(&mut state);
             let (briefed, reason) = match briefed {
                 Ok(briefed) => (briefed, None),
-                Err(reason) => (Vec::new(), Some(reason)),
+                Err(reason) => (Vec::new(), Some(reason.to_owned())),
             };
             assert_eq!((read, said), (briefed, reason), "row {at} {scope}");
+        }
+    }
+
+    /// A brief whose transcripts could not be read opens no pane, which
+    /// would tell of none of them: the sidebar says why where its keys were.
+    #[test]
+    fn a_brief_on_transcripts_that_could_not_be_read_says_why() {
+        let mut state = agents_in_b();
+        let not_read = "brief: the transcripts could not be read";
+        for (exit_code, stderr, said) in [
+            (Some(2), "sh: 3: tail: not found\n", format!("{not_read}: sh: 3: tail: not found")),
+            (None, "", not_read.to_owned()),
+        ] {
+            key(&mut state, BareKey::Char('b'));
+            key(&mut state, BareKey::Char('z'));
+            let asked = state.brief.as_ref().map(|brief| brief.number.to_string());
+            let answer = BTreeMap::from([
+                (dirs::CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
+                (brief::NUMBER_KEY.to_owned(), asked.expect("a brief asked")),
+            ]);
+            let ran = Event::RunCommandResult(exit_code, Vec::new(), stderr.into(), answer);
+            assert!(state.update(ran), "{said}");
+            assert!(state.brief.is_none(), "{said}");
+            assert_eq!(wrong_said(&mut state), Some(said));
         }
     }
 
