@@ -1590,7 +1590,7 @@ impl State {
         let Some(index) = tree.rows.iter().position(|node| node.place() == place) else {
             return false;
         };
-        render::select_sidebar_row(tree, &self.agents, focused, rows, cols, index);
+        let selected = render::select_sidebar_row(tree, &self.agents, focused, rows, cols, index);
         if fold && !tree.narrowed() {
             let top = tree.top();
             let changed = tree.toggle_row(index);
@@ -1602,11 +1602,10 @@ impl State {
             }
             return changed;
         }
-        if !tree.rows.stops_at(index) {
-            return false;
+        if selected {
+            self.go_to_selected();
         }
-        self.go_to_selected();
-        true
+        selected
     }
 
     fn scroll(&mut self, delta: isize) -> bool {
@@ -1913,7 +1912,7 @@ mod tests {
         for to_the_picker in [true, false] {
             let mut state = focused_sidebar();
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(3);
+                assert!(tree.rows.select(3));
             }
             state.rebuild_tree();
             let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
@@ -2045,7 +2044,7 @@ mod tests {
         // Rows `a`, 1, `b`, 4, `c`, 5, 6, `d`, 7, 8, `e`, 9 and 10, seven to a
         // view: the cursor on pane 5, and the wheel has `c` at the top.
         if let Role::Sidebar(tree) = &mut state.role {
-            tree.rows.select(5);
+            assert!(tree.rows.select(5));
         }
         state.handle_mouse(Mouse::ScrollDown(4));
         let line = line_of_c(&state).expect("the row of `c` in view");
@@ -2084,7 +2083,7 @@ mod tests {
         let b = There { session: "b".to_owned(), tab: None, back: Some(1) };
         let menu_row = |state: &mut State, at| {
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(at);
+                assert!(tree.rows.select(at));
             }
             state.menu_row()
         };
@@ -2132,7 +2131,7 @@ mod tests {
         assert_eq!(menu_open(&state), Some(vec!["Claude"]));
         assert!(key(&mut state, BareKey::Esc));
         if let Role::Sidebar(tree) = &mut state.role {
-            tree.rows.select(3);
+            assert!(tree.rows.select(3));
         }
 
         assert!(!key(&mut state, BareKey::Char('x')));
@@ -2158,14 +2157,15 @@ mod tests {
 
     /// `d d` closes the highlighted pane, with no menu of yours: one of
     /// another session by a command, which the menu waits on. Once the pane
-    /// is gone, the cursor is on the pane before it, and not back at the top.
+    /// is gone, the cursor is on the row before it, and not back at the top:
+    /// its session's, which lists none of its panes now.
     #[test]
     fn d_d_in_the_sidebar_closes_the_highlighted_pane() {
         let mut state = focused_sidebar();
         state.menu_entries = None;
         state.agents.ingest(Some(0), b"[]", b"");
         if let Role::Sidebar(tree) = &mut state.role {
-            tree.rows.select(3);
+            assert!(tree.rows.select(3));
         }
         assert!(key(&mut state, BareKey::Char('d')));
         assert!(key(&mut state, BareKey::Char('d')));
@@ -2179,7 +2179,7 @@ mod tests {
         state.branches[1].panes.clear();
         state.rebuild_tree();
         let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
-        assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Pane("a".to_owned(), 1)));
+        assert_eq!(tree.rows.selected_row().map(Node::place), Some(Place::Session("b".to_owned())));
     }
 
     /// `d s` on a pane of the session you are in, and `d d` on its row, once
@@ -2200,7 +2200,7 @@ mod tests {
                 if folded {
                     tree.toggle_row(0);
                 } else {
-                    tree.rows.select(1);
+                    assert!(tree.rows.select(1));
                 }
             }
             state.rebuild_tree();
@@ -2248,7 +2248,7 @@ mod tests {
             state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
             state.rebuild_tree();
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(3);
+                assert!(tree.rows.select(3));
             }
             assert!(key(&mut state, BareKey::Char('c')));
             assert!(menu_open(&state).is_some(), "by click: {by_click}");
@@ -2279,7 +2279,7 @@ mod tests {
         // Pane 1 is of your own session, and pane 4 of `b`.
         for (at, open) in [(1, false), (3, true)] {
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(at);
+                assert!(tree.rows.select(at));
             }
             assert!(key(&mut state, BareKey::Char('c')));
             assert!(menu_open(&state).is_some(), "row {at}");
@@ -2312,7 +2312,7 @@ mod tests {
             }
             state.rebuild_tree();
             if let Role::Sidebar(tree) = &mut state.role {
-                tree.rows.select(at);
+                assert!(tree.rows.select(at));
             }
             if through_help {
                 assert!(key(&mut state, BareKey::Char('?')), "row {at}");

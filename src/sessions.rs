@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use crate::cursor::Cursor;
+use crate::cursor::{Cursor, Stops};
 use crate::elapsed::Age;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -254,6 +254,8 @@ fn head(text: &str, bytes: usize) -> &str {
     }
     &text[..end]
 }
+
+impl Stops for Row {}
 
 impl Row {
     pub(crate) fn new(

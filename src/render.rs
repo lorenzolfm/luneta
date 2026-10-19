@@ -1338,9 +1338,9 @@ fn top_after(rows: &[Node], mut top: usize, delta: isize) -> usize {
     top
 }
 
-/// Puts the cursor on `row`, as a click does. A view the wheel moved stays
-/// where it is while the row is in it, so that the row stays under the
-/// pointer.
+/// Puts the cursor on `row`, as a click does, and says whether it can be
+/// there. A view the wheel moved stays where it is while the row is in it, so
+/// that the row stays under the pointer.
 pub fn select_sidebar_row(
     tree: &mut Tree,
     agents: &AgentSet,
@@ -1348,14 +1348,15 @@ pub fn select_sidebar_row(
     rows: usize,
     cols: usize,
     row: usize,
-) {
+) -> bool {
     let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
     let (shown, _) = on_screen(tree, focused, height);
     let wheeled = tree.top().is_some();
-    tree.rows.select(row);
+    let selected = tree.rows.select(row);
     if wheeled && shown.contains(&row) {
         tree.scroll_to(shown.start);
     }
+    selected
 }
 
 /// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
@@ -2821,7 +2822,7 @@ mod tests {
 
         assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
         assert_eq!(top(&tree, true), Some(3));
-        tree.rows.select(2);
+        assert!(tree.rows.select(2));
         assert_eq!(top(&tree, true), Some(0));
     }
 

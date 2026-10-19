@@ -16,7 +16,7 @@ use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::checkouts::{Checkout, Checkouts, Said};
 use crate::close::{self, Act, Closes};
-use crate::cursor::Cursor;
+use crate::cursor::{Cursor, Stops};
 use crate::dirs::short_cwd;
 use crate::dock::TabId;
 use crate::elapsed::{Age, Held};
@@ -232,15 +232,18 @@ impl Node {
     }
 }
 
-/// Whether the cursor stops on row `at`: a pane's, and a session's that lists
-/// none of its panes, folded or with none to list, which stands in for them.
-/// The row of a session that lists its panes is their heading, and no place
-/// to go to.
-pub fn stops(rows: &[Node], at: usize) -> bool {
-    match rows.get(at) {
-        Some(Node::Pane(_)) => true,
-        Some(Node::Session(_)) => !matches!(rows.get(at + 1), Some(Node::Pane(_))),
-        None => false,
+impl Stops for Node {
+    /// The cursor stops on a pane's row, and on a session's that lists none of
+    /// its panes, folded or with none to list, which stands in for them. The
+    /// row of a session that lists its panes is their heading, and no place to
+    /// go to. A session lists its panes in the rows right after its own, as
+    /// `Tree::rebuild`, the one maker of the rows, puts them.
+    fn stops(rows: &[Node], at: usize) -> bool {
+        match rows.get(at) {
+            Some(Node::Pane(_)) => true,
+            Some(Node::Session(_)) => !matches!(rows.get(at + 1), Some(Node::Pane(_))),
+            None => false,
+        }
     }
 }
 
@@ -270,8 +273,8 @@ impl Summary {
     }
 }
 
+#[derive(Default)]
 pub struct Tree {
-    /// The cursor stops on the rows `stops` says it can.
     pub rows: Cursor<Node>,
     /// Counts every session and agent, whatever a search hides.
     pub summary: Summary,
@@ -296,26 +299,8 @@ pub struct Tree {
     closed: Option<Closed>,
 }
 
-impl Default for Tree {
-    fn default() -> Self {
-        Tree {
-            rows: Cursor::stopping_at(stops),
-            summary: Summary::default(),
-            menu: None,
-            folded: Folds::default(),
-            search: None,
-            matcher: None,
-            following: false,
-            left: None,
-            handed: None,
-            scrolled: None,
-            closed: None,
-        }
-    }
-}
-
-/// A row a delete key closed, and the first row after it that stays and the
-/// cursor stops on, or else the last before it.
+/// A row a delete key closed, and the first row after it that stays, or else
+/// the last before it.
 struct Closed {
     row: Place,
     next: Option<Place>,
@@ -580,9 +565,9 @@ impl Tree {
     }
 
     /// Has the cursor go past the rows `act` closes once they are gone: to the
-    /// first row after them it stops on, or else the last before them. A pane
-    /// takes its row, a tab the rows of its panes, and a session every row of
-    /// it.
+    /// first row after them, or else the last before them, as the rows stand
+    /// then. A pane takes its row, a tab the rows of its panes, and a session
+    /// every row of it.
     pub fn closing(&mut self, act: &Act) {
         let gone = |node: &Node| match (act, node) {
             (Act::Pane(seat, pane), Node::Pane(node)) => {
@@ -597,10 +582,9 @@ impl Tree {
         let Some(at) = self.rows.selected() else {
             return;
         };
-        let stays = |index: &usize| !gone(&self.rows[*index]) && self.rows.stops_at(*index);
-        let next = (at..self.rows.len()).find(stays).or_else(|| (0..at).rev().find(stays));
-        let next = next.map(|index| self.rows[index].place());
-        self.closed = Some(Closed { row: self.rows[at].place(), next });
+        let after = self.rows[at..].iter().find(|node| !gone(node));
+        let next = after.or_else(|| self.rows[..at].iter().rev().find(|node| !gone(node)));
+        self.closed = Some(Closed { row: self.rows[at].place(), next: next.map(Node::place) });
     }
 
     /// Brings the view back to the lit row, and says whether it was away.
@@ -1242,7 +1226,7 @@ mod tests {
 
         let pane = |session: &str, id| Some(Place::Pane(session.to_owned(), id));
         let session = |name: &str| Some(Place::Session(name.to_owned()));
-        tree.rows.select(1);
+        assert!(tree.rows.select(1));
         let down = [pane("a", 1), pane("b", 4), session("c"), session("d"), session("d")];
         let up = [session("c"), pane("b", 4), pane("a", 1), pane("a", 0), pane("a", 0)];
         let steps = down.map(|place| (1, place)).into_iter().chain(up.map(|place| (-1, place)));
@@ -1370,7 +1354,7 @@ mod tests {
             let mut tree = Tree::default();
             let all = [a(&[(0, 10), (1, 10), (2, 11)]), b()];
             tree.rebuild(&all, None, &set, None, false);
-            tree.rows.select(2);
+            assert!(tree.rows.select(2));
             tree.closing(&act);
             tree.rebuild(&all, None, &set, None, false);
             assert_eq!(selected(&tree), pane("a", 1), "{act:?} before it is gone");
@@ -1380,9 +1364,9 @@ mod tests {
         let mut tree = Tree::default();
         let all = [a(&[(0, 10), (1, 10)]), b()];
         tree.rebuild(&all, None, &set, None, false);
-        tree.rows.select(2);
+        assert!(tree.rows.select(2));
         tree.closing(&Act::Pane(here("a"), 1));
-        tree.rows.select(4);
+        assert!(tree.rows.select(4));
         tree.rebuild(&[a(&[(0, 10)]), b()], None, &set, None, false);
         assert_eq!(selected(&tree), pane("b", 4));
     }

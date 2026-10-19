@@ -1,23 +1,25 @@
+/// Which rows of a list the cursor can be on: every row, unless the rows say
+/// otherwise. A row that heads others can be one the cursor passes over, but
+/// a list that is not empty has a row to be on, so that the cursor is absent
+/// only where there are no rows.
+pub trait Stops: Sized {
+    fn stops(_rows: &[Self], _at: usize) -> bool {
+        true
+    }
+}
+
 pub struct Cursor<T> {
     rows: Vec<T>,
     selected: Option<usize>,
-    /// Whether the cursor can be on the row at an index of the rows. A list
-    /// whose rows head others has rows the cursor passes over.
-    stops: fn(&[T], usize) -> bool,
 }
 
 impl<T> Default for Cursor<T> {
     fn default() -> Self {
-        Cursor { rows: Vec::new(), selected: None, stops: |_, _| true }
+        Cursor { rows: Vec::new(), selected: None }
     }
 }
 
-impl<T> Cursor<T> {
-    /// A cursor that is only ever on the rows `stops` says it can be on.
-    pub fn stopping_at(stops: fn(&[T], usize) -> bool) -> Self {
-        Cursor { stops, ..Cursor::default() }
-    }
-
+impl<T: Stops> Cursor<T> {
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
@@ -40,10 +42,14 @@ impl<T> Cursor<T> {
         self.selected = self.stop_from(from).or_else(|| self.stop_before(from));
     }
 
-    pub fn select(&mut self, index: usize) {
-        if self.stops_at(index) {
+    /// Puts the cursor on row `index`, and says whether it can be there. A row
+    /// it cannot be on leaves the cursor where it was.
+    pub fn select(&mut self, index: usize) -> bool {
+        let stops = self.stops_at(index);
+        if stops {
             self.selected = Some(index);
         }
+        stops
     }
 
     /// Moves the cursor `delta` rows it can be on, down or up, and no further
@@ -59,8 +65,8 @@ impl<T> Cursor<T> {
     }
 
     /// Whether the cursor can be on row `index`.
-    pub fn stops_at(&self, index: usize) -> bool {
-        index < self.rows.len() && (self.stops)(&self.rows, index)
+    fn stops_at(&self, index: usize) -> bool {
+        index < self.rows.len() && T::stops(&self.rows, index)
     }
 
     fn stop_from(&self, from: usize) -> Option<usize> {
@@ -91,6 +97,14 @@ impl<T> std::ops::Deref for Cursor<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `#` row heads the rows under it, and is passed over while it heads
+    /// any.
+    impl Stops for &str {
+        fn stops(rows: &[Self], at: usize) -> bool {
+            !rows[at].starts_with('#') || rows.get(at + 1).is_none_or(|next| next.starts_with('#'))
+        }
+    }
 
     #[test]
     fn a_cursor_is_absent_exactly_when_there_are_no_rows() {
@@ -138,12 +152,12 @@ mod tests {
     #[test]
     fn a_row_that_is_not_there_cannot_be_selected() {
         let mut cursor = Cursor::seeded(vec!["a", "b"], 0);
-        cursor.select(1);
+        assert!(cursor.select(1));
         assert_eq!(cursor.selected(), Some(1));
-        cursor.select(2);
+        assert!(!cursor.select(2));
         assert_eq!(cursor.selected(), Some(1));
         let mut empty: Cursor<&str> = Cursor::default();
-        empty.select(0);
+        assert!(!empty.select(0));
         assert_eq!(empty.selected(), None);
     }
 
@@ -151,11 +165,8 @@ mod tests {
     /// its rows are replaced, and a row that heads none is a stop.
     #[test]
     fn the_cursor_passes_over_the_rows_it_does_not_stop_on() {
-        let heads = |rows: &[&str], at: usize| {
-            !rows[at].starts_with('#') || rows.get(at + 1).is_none_or(|next| next.starts_with('#'))
-        };
         let rows = || vec!["# a", "a1", "a2", "# b", "b1", "# c"];
-        let mut cursor = Cursor::stopping_at(heads);
+        let mut cursor = Cursor::default();
         cursor.replace_at(rows(), None);
         assert_eq!(cursor.selected_row(), Some(&"a1"));
         cursor.move_selection(-1);
@@ -167,7 +178,7 @@ mod tests {
         cursor.move_selection(-2);
         assert_eq!(cursor.selected_row(), Some(&"a2"));
 
-        cursor.select(3);
+        assert!(!cursor.select(3));
         assert_eq!(cursor.selected_row(), Some(&"a2"));
         cursor.replace_at(rows(), Some(3));
         assert_eq!(cursor.selected_row(), Some(&"b1"));
