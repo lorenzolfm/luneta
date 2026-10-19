@@ -1235,6 +1235,13 @@ impl SidebarMenu {
         SidebarMenu { number: numbers.next(), back: None, stage: wrong(reason) }
     }
 
+    /// The menu once it started an agent in the sidebar's own session at
+    /// `frame`: for a test, where zellij opens no pane to start one in.
+    #[cfg(test)]
+    pub fn started(frame: u64) -> Self {
+        SidebarMenu { number: 1, back: None, stage: Stage::Started(frame) }
+    }
+
     /// What the menu shows: the keys, what a delete key asks, where you are
     /// going, or what is wrong with the keys, with the row, or with what a key
     /// asked for. Nothing once an agent started in the sidebar's own session,
