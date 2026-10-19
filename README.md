@@ -234,6 +234,19 @@ sidebar has a use of its own for, as `j` or `n`, stays the sidebar's: `m` opens
 the menu on its first group, where every key is the menu's. The menu closes
 when the sidebar loses the focus, and with a click.
 
+`?` opens it on its first group too, and under its keys, the sidebar's own
+commands: `/` to search, and `n` to go to the next agent that wants you. A key
+of the menu that a command has stays the command's, as it does in the sidebar.
+
+```text
+─ luneta ──── luneta/sidebar ─
+ c  Claude ▸
+ d  Delete ▸
+ /  Search
+ n  Next agent
+ <ESC> - Close
+```
+
 Your key opens the same menu floating at the bottom right of the tab, for the
 pane you are in. In the sidebar, or any pane that is no terminal, it has no
 pane to start an agent beside, and says so in place of its keys. So it does for
@@ -669,6 +682,7 @@ In the sidebar, once it has the focus:
 | `n` | go to the next agent that wants you |
 | *a key of the [menu](#menu)* | open its group, or start its agent, for the highlighted pane |
 | `m` | open the menu on its first group, for the highlighted pane |
+| `?` | open the menu on its first group, with the sidebar's commands under its keys |
 | `/` | search |
 | `Esc` | back to the pane you came from |
 
@@ -693,7 +707,7 @@ In the menu:
 
 | key | does |
 |---|---|
-| *a key it shows* | open its group, or start its agent |
+| *a key it shows* | open its group, start its agent, or run the sidebar's command |
 | `d d` | close the highlighted pane, or kill the highlighted session |
 | `d s` | kill the highlighted row's session |
 | `y`, or the key again | go ahead with a delete that asked first |

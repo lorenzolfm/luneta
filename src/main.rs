@@ -25,7 +25,7 @@ use agents::{AgentRow, AgentSet, Live, Seat};
 use checkouts::Checkouts;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
-use menu::{SidebarMenu, There};
+use menu::{Command, Did, SidebarMenu, There};
 use elapsed::Age;
 use panes::Peeks;
 use pass::{At, Pass, Then};
@@ -213,7 +213,7 @@ struct State {
     menu_entries: Option<String>,
     /// How many menus the sidebar has opened, which numbers each: the answer
     /// to an agent one starts in another session says which it is for.
-    menus: u64,
+    menus: menu::Numbers,
 }
 
 register_plugin!(State);
@@ -1263,11 +1263,9 @@ impl State {
         let subject = self.menu_subject();
         if let Role::Sidebar(tree) = &mut self.role {
             if let Some(menu) = tree.menu.take().filter(|menu| !lapsed(menu)) {
-                let (menu, closed) = menu.key(key, subject.as_ref(), frame);
+                let (menu, did) = menu.key(key, subject.as_ref(), frame);
                 tree.menu = menu;
-                if let Some(act) = closed {
-                    tree.closing(&act);
-                }
+                self.follow_menu(did);
                 return true;
             }
         }
@@ -1287,31 +1285,75 @@ impl State {
         if let Some(term) = search {
             return self.handle_search_box_key(key.bare_key, term) || unscrolled;
         }
+        // A key that does more than move the cursor, fold or open the menu
+        // is a `Command`, which it comes to by `Command::of` below, for `?`
+        // to list it.
         let drawn = match key.bare_key {
             BareKey::Down | BareKey::Char('j') => self.move_tree(1),
             BareKey::Up | BareKey::Char('k') => self.move_tree(-1),
             BareKey::Left | BareKey::Char('h') => self.fold(Some(true)),
             BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
             BareKey::Char(' ') => self.fold(None),
-            BareKey::Char('/') => self.search_tree(String::new()),
             BareKey::Char('m') => self.open_menu(None),
+            BareKey::Char('?') => self.open_help(),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
-            },
-            BareKey::Char('n') => {
-                // A key comes only to the sidebar with the focus.
-                self.go_to_next(true);
-                false
             },
             BareKey::Esc => {
                 self.go_back();
                 false
             },
-            BareKey::Char(c) => self.open_menu(Some(c)),
+            BareKey::Char(c) => match Command::of(c) {
+                Some(command) => self.command(command),
+                None => self.open_menu(Some(c)),
+            },
             _ => false,
         };
         drawn || unscrolled
+    }
+
+    /// Runs a command of the sidebar's own: a key at the top of the sidebar,
+    /// or a key of `?`. Says whether to draw.
+    fn command(&mut self, command: Command) -> bool {
+        match command {
+            Command::Search => self.search_tree(String::new()),
+            Command::Next => {
+                // A key comes only to the sidebar with the focus.
+                self.go_to_next(true);
+                false
+            },
+        }
+    }
+
+    /// What a key of the menu left the sidebar to do: go past what a delete
+    /// key closes, once it is gone, or run a command. Says whether to draw.
+    fn follow_menu(&mut self, did: Option<Did>) -> bool {
+        match did {
+            None => false,
+            Some(Did::Closed(act)) => {
+                if let Role::Sidebar(tree) = &mut self.role {
+                    tree.closing(&act);
+                }
+                true
+            },
+            Some(Did::Command(command)) => self.command(command),
+        }
+    }
+
+    /// Opens `?` at the bottom of the sidebar for the highlighted row: the
+    /// keys at the top of the menu, and the sidebar's commands. Says whether
+    /// to draw.
+    fn open_help(&mut self) -> bool {
+        let Some(row) = self.menu_row() else {
+            return false;
+        };
+        let menu = SidebarMenu::help(self.menu_entries.as_deref(), row, &mut self.menus);
+        let Role::Sidebar(tree) = &mut self.role else {
+            return false;
+        };
+        tree.menu = Some(menu);
+        true
     }
 
     /// Opens the menu at the bottom of the sidebar for the highlighted row, on
@@ -1323,9 +1365,8 @@ impl State {
         let Some(row) = self.menu_row() else {
             return false;
         };
-        self.menus = self.menus.wrapping_add(1);
         let entries = self.menu_entries.as_deref();
-        let menu = SidebarMenu::open(entries, row, key, self.menus, self.frame);
+        let menu = SidebarMenu::open(entries, row, key, &mut self.menus, self.frame);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
@@ -2056,7 +2097,7 @@ mod tests {
         assert_eq!(menu_open(&state), Some(vec!["Delete"]));
         let closed = BTreeMap::from([
             (agents::CONTEXT_KEY.to_owned(), menu::CLOSING_VALUE.to_owned()),
-            (menu::MENU_KEY.to_owned(), state.menus.to_string()),
+            (menu::MENU_KEY.to_owned(), "1".to_owned()),
         ]);
         state.update(Event::RunCommandResult(Some(0), Vec::new(), Vec::new(), closed));
         assert_eq!(menu_open(&state), None);
@@ -2165,6 +2206,39 @@ mod tests {
             state.update(Event::PaneUpdate(closed.clone()));
             assert_eq!(menu_open(&state).is_some(), open, "row {at}");
             state.update(Event::PaneUpdate(panes.clone()));
+        }
+    }
+
+    /// `?` opens the menu at the bottom of the sidebar with the sidebar's
+    /// commands under its keys, on a pane's row and on a session's. A command
+    /// in it closes it and runs as it does pressed at the top of the sidebar:
+    /// `/` opens the search.
+    #[test]
+    fn a_command_of_help_runs_as_it_does_at_the_top_of_the_sidebar() {
+        let shown = |state: &State| {
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            match tree.menu.as_ref().and_then(SidebarMenu::shown) {
+                Some(Shown::Keys(keys)) => keys.entries().iter().map(menu::Entry::key).collect(),
+                _ => Vec::new(),
+            }
+        };
+        // Row 0 is the session `a`, and row 3 pane 4 of `b`.
+        for (at, through_help) in [(0, false), (0, true), (3, true)] {
+            let mut state = focused_sidebar();
+            state.menu_entries = Some(r#"c "Claude" { t "/tigerstyle"; }"#.to_owned());
+            state.branches[1].panes[0].cwd = Some("/w/b".to_owned());
+            state.rebuild_tree();
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(at);
+            }
+            if through_help {
+                assert!(key(&mut state, BareKey::Char('?')), "row {at}");
+                assert_eq!(shown(&state), ['c', 'd', '/', 'n'], "row {at}");
+            }
+            assert!(key(&mut state, BareKey::Char('/')), "row {at}, through help: {through_help}");
+            assert_eq!(menu_open(&state), None, "row {at}, through help: {through_help}");
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert_eq!(tree.search(), Some(""), "row {at}, through help: {through_help}");
         }
     }
 
