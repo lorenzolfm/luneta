@@ -2510,9 +2510,7 @@ mod tests {
     }
 
     fn sidebar_tree(nodes: Vec<Node>, selected: usize) -> Tree {
-        let mut tree = Tree::default();
-        tree.rows.replace_at(nodes, Some(selected));
-        tree
+        Tree::of(nodes, selected)
     }
 
     /// `workday`, and what its header counts: the busy agent folded away in

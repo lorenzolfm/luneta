@@ -237,9 +237,34 @@ impl Stops for Node {
     /// place to go to. The cursor stops on a pane's row, and on a session's
     /// that lists none of its panes, folded or with none to list, which
     /// stands in for them. A session lists its panes in the rows right after
-    /// its own, as `Tree::rebuild`, the one maker of the rows, puts them.
+    /// its own, as `Tree::rebuild`, the one maker of the `Rows`, puts them.
     fn heads(&self, next: &Node) -> bool {
         matches!((self, next), (Node::Session(_), Node::Pane(_)))
+    }
+}
+
+/// The rows of the tree and the cursor on them: read as a `Cursor`, moved by
+/// `select` and `move_selection`, and made by `Tree::rebuild` alone.
+#[derive(Default)]
+pub struct Rows(Cursor<Node>);
+
+impl std::ops::Deref for Rows {
+    type Target = Cursor<Node>;
+
+    fn deref(&self) -> &Cursor<Node> {
+        &self.0
+    }
+}
+
+impl Rows {
+    /// `Cursor::select`.
+    pub fn select(&mut self, index: usize) -> bool {
+        self.0.select(index)
+    }
+
+    /// `Cursor::move_selection`.
+    pub fn move_selection(&mut self, delta: isize) {
+        self.0.move_selection(delta);
     }
 }
 
@@ -271,7 +296,7 @@ impl Summary {
 
 #[derive(Default)]
 pub struct Tree {
-    pub rows: Cursor<Node>,
+    pub rows: Rows,
     /// Counts every session and agent, whatever a search hides.
     pub summary: Summary,
     /// The menu, while it is open at the bottom of the sidebar.
@@ -326,6 +351,17 @@ impl Tree {
     /// A tree whose folds are every session's sidebar's.
     pub fn shared() -> Self {
         Tree { folded: Folds::shared(), ..Tree::default() }
+    }
+
+    /// A tree of `nodes` as they stand, the cursor on row `selected` or the
+    /// next it stops on: for a test that draws rows `rebuild` would need far
+    /// more to make. They take the shape `rebuild` gives them: each session's
+    /// row, and then the panes it lists.
+    #[cfg(test)]
+    pub fn of(nodes: Vec<Node>, selected: usize) -> Self {
+        let mut tree = Tree::default();
+        tree.rows.0.replace_at(nodes, Some(selected));
+        tree
     }
 
     /// Takes up what the sidebars of other sessions folded and unfolded
@@ -497,7 +533,7 @@ impl Tree {
                 .and_then(|place| row_of(&place).or_else(|| row_of(&self.shown(place))))
                 .or(best),
         };
-        self.rows.replace_at(rows, at);
+        self.rows.0.replace_at(rows, at);
         // A view the wheel left for a row the cursor has left would come back
         // with the cursor.
         if self.top().is_none() {
