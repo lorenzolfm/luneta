@@ -1,4 +1,5 @@
 mod agents;
+mod brief;
 mod checkouts;
 mod close;
 mod cursor;
@@ -22,6 +23,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use agents::{AgentRow, AgentSet, Live, Seat};
+use brief::{Brief, Over, Scope};
 use checkouts::Checkouts;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
@@ -214,6 +216,12 @@ struct State {
     /// How many menus the sidebar has opened, which numbers each: the answer
     /// to an agent one starts in another session says which it is for.
     menus: menu::Numbers,
+    /// The brief asked for last, while the sidebar reads the end of each
+    /// transcript it covers.
+    brief: Option<Brief>,
+    /// How many briefs the sidebar has asked for, which numbers each: the
+    /// ends of the transcripts say which they are for.
+    briefs: u64,
 }
 
 register_plugin!(State);
@@ -408,6 +416,32 @@ impl ZellijPlugin for State {
                         self.agents.ingest(exit_code, &stdout, &stderr);
                         self.agents_taken_at = self.frame;
                         self.rebuild_agents(Selection::Hold);
+                        true
+                    },
+                    Some(brief::CONTEXT_VALUE) => {
+                        let number = context.get(brief::NUMBER_KEY);
+                        let asked = |brief: &mut Brief| number == Some(&brief.number.to_string());
+                        let Some(brief) = self.brief.take_if(asked) else {
+                            return false;
+                        };
+                        if exit_code == Some(0) {
+                            brief.open(&stdout);
+                            return false;
+                        }
+                        // A brief on transcripts that were never read would
+                        // tell of none: the sidebar says why where its keys
+                        // were.
+                        let Role::Sidebar(tree) = &mut self.role else {
+                            return false;
+                        };
+                        let said = String::from_utf8_lossy(&stderr);
+                        let reason = match said.lines().next().map(str::trim) {
+                            Some(said) if !said.is_empty() => {
+                                format!("brief: the transcripts could not be read: {said}")
+                            },
+                            _ => "brief: the transcripts could not be read".to_owned(),
+                        };
+                        tree.menu = Some(SidebarMenu::wrong(reason, &mut self.menus));
                         true
                     },
                     Some(menu::START_VALUE | menu::CLOSING_VALUE) => {
@@ -1088,10 +1122,7 @@ impl State {
         let Some(tab) = self.own_tab().filter(|tab| Some(*tab) == self.active_tab) else {
             return false;
         };
-        let floating = self
-            .tabs
-            .iter()
-            .any(|t| t.position == tab && t.are_floating_panes_visible);
+        let floating = self.shows_floating(tab);
         let focused = self
             .panes
             .as_ref()
@@ -1101,6 +1132,30 @@ impl State {
         // The focus on its way past draws nothing, and leaves the highlight
         // with the pane you are in.
         focused && !floating && !self.pass.passing()
+    }
+
+    /// Whether a brief has the focus, floating over the sidebar it hands the
+    /// focus back to as it closes.
+    fn briefing(&self) -> bool {
+        let Some(tab) = self.own_tab().filter(|tab| Some(*tab) == self.active_tab) else {
+            return false;
+        };
+        let floating = self.shows_floating(tab);
+        let panes = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab));
+        let panes = panes.map_or(&[][..], Vec::as_slice);
+        let own = panes.iter().any(|p| p.is_focused && p.is_plugin && p.id == self.plugin_id);
+        let over = panes.iter().any(|p| p.is_focused && p.is_floating && brief::is_brief(p));
+        floating && own && over
+    }
+
+    /// Whether `tab` shows its floating panes. zellij hides them as the last
+    /// one closes, and tells of the panes before the tabs: a tab whose panes
+    /// have none floating shows none, whatever the tabs said last.
+    fn shows_floating(&self, tab: usize) -> bool {
+        let shown = self.tabs.iter().any(|t| t.position == tab && t.are_floating_panes_visible);
+        let panes = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab));
+        let floating = |p: &PaneInfo| p.is_floating && !p.is_suppressed;
+        shown && panes.is_some_and(|panes| panes.iter().any(floating))
     }
 
     /// After the panes or the tabs change. Says whether to draw.
@@ -1217,7 +1272,9 @@ impl State {
         if !self.away {
             self.ask_checkouts();
         }
-        let follow = !self.sidebar_focused();
+        // A brief leaves the cursor on the row it was asked on, for the
+        // sidebar to have it back as it closes.
+        let follow = !self.sidebar_focused() && !self.briefing();
         if let Role::Sidebar(tree) = &mut self.role {
             tree.rebuild(&self.branches, current.as_deref(), &self.agents, self.here, follow);
         }
@@ -1295,7 +1352,7 @@ impl State {
             BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
             BareKey::Char(' ') => self.fold(None),
             BareKey::Char('m') => self.open_menu(None),
-            BareKey::Char('?') => self.open_help(),
+            BareKey::Char('?') => self.open_help(None),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -1306,6 +1363,7 @@ impl State {
             },
             BareKey::Char(c) => match Command::of(c) {
                 Some(command) => self.command(command),
+                None if Command::opens(c) => self.open_help(Some(c)),
                 None => self.open_menu(Some(c)),
             },
             _ => false,
@@ -1322,6 +1380,10 @@ impl State {
                 // A key comes only to the sidebar with the focus.
                 self.go_to_next(true);
                 false
+            },
+            Command::Brief(scope) => {
+                self.brief(scope);
+                true
             },
         }
     }
@@ -1342,18 +1404,80 @@ impl State {
     }
 
     /// Opens `?` at the bottom of the sidebar for the highlighted row: the
-    /// keys at the top of the menu, and the sidebar's commands. Says whether
-    /// to draw.
-    fn open_help(&mut self) -> bool {
+    /// keys at the top of the menu, and the sidebar's commands, on the group
+    /// of commands `group` opens, or on the first. Says whether to draw.
+    fn open_help(&mut self, group: Option<char>) -> bool {
         let Some(row) = self.menu_row() else {
             return false;
         };
-        let menu = SidebarMenu::help(self.menu_entries.as_deref(), row, &mut self.menus);
+        let entries = self.menu_entries.as_deref();
+        let menu = SidebarMenu::help(entries, row, group, &mut self.menus);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
         tree.menu = Some(menu);
         true
+    }
+
+    /// Asks for a brief of what `scope` covers, by the row the cursor is on:
+    /// the end of each transcript it covers first, and the brief's pane once
+    /// the sidebar has read them. With no agent there, the sidebar says so
+    /// where the brief's keys were.
+    fn brief(&mut self, scope: Scope) {
+        let Role::Sidebar(tree) = &self.role else {
+            return;
+        };
+        let order = tree::in_order(&self.branches);
+        let over = match (scope, tree.rows.selected_row()) {
+            (Scope::Every, _) => Over::Sessions(order.iter().map(|b| b.name.clone()).collect()),
+            (Scope::Highlighted, Some(Node::Pane(pane))) => {
+                Over::Agent(pane.session.clone(), pane.id)
+            },
+            (Scope::Session | Scope::Highlighted, Some(row)) => {
+                Over::Session(row.session().to_owned())
+            },
+            (Scope::Session | Scope::Highlighted, None) => return,
+        };
+        let mut notes = Vec::new();
+        for branch in order {
+            for leaf in &branch.panes {
+                let seated =
+                    |row: &&AgentRow| row.seat.session() == branch.name && row.pane == leaf.id;
+                let Some(agent) = self.agents.rows.iter().find(seated) else {
+                    continue;
+                };
+                notes.push(brief::Note {
+                    session: branch.name.clone(),
+                    pane: leaf.id,
+                    name: tree::label(leaf, Some(agent)),
+                    status: agent.status.word().to_owned(),
+                    held: agent.age.label(),
+                    branch: leaf.checkout.as_ref().map(|checkout| checkout.branch.clone()),
+                    cwd: leaf.cwd.clone().or_else(|| agent.cwd.clone()),
+                    transcript: agent.transcript.clone(),
+                });
+            }
+        }
+        self.briefs = self.briefs.wrapping_add(1);
+        match Brief::new(self.briefs, over, notes) {
+            Ok(brief) => {
+                let tails = brief.tails();
+                let tails: Vec<&str> = tails.iter().map(String::as_str).collect();
+                run_command(
+                    &tails,
+                    BTreeMap::from([
+                        (dirs::CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
+                        (brief::NUMBER_KEY.to_owned(), brief.number.to_string()),
+                    ]),
+                );
+                self.brief = Some(brief);
+            },
+            Err(reason) => {
+                if let Role::Sidebar(tree) = &mut self.role {
+                    tree.menu = Some(SidebarMenu::wrong(reason, &mut self.menus));
+                }
+            },
+        }
     }
 
     /// Opens the menu at the bottom of the sidebar for the highlighted row, on
@@ -2039,6 +2163,185 @@ mod tests {
         state.update(Event::Key(KeyWithModifier::new(key)))
     }
 
+    /// The transcripts of the agents in `agents_in_b`.
+    const FOUR: &str = "4444aaaa-0000-4000-8000-000000000004";
+    const FIVE: &str = "5555aaaa-0000-4000-8000-000000000005";
+
+    /// A focused sidebar whose session `b` has an agent in each of its panes
+    /// 4 and 5, its transcript `FOUR` and `FIVE`: rows `a`, `pane 1`, `b`,
+    /// `pane 4`, `pane 5`.
+    fn agents_in_b() -> State {
+        let mut state = focused_sidebar();
+        let leaf = |id: u32| Leaf {
+            id,
+            title: format!("pane {id}"),
+            tab: String::new(),
+            tab_id: None,
+            cwd: Some("/w/b".to_owned()),
+            checkout: None,
+            closes: close::Closes::Pane,
+        };
+        state.branches[1].panes = vec![leaf(4), leaf(5)];
+        state.places = Places::of(&[("b", &[(4, "/w/b"), (5, "/w/b")])]);
+        let seated = |pane: u32, id: &str| {
+            format!(
+                r#"{{"status":"idle","status_age":4,"cwd":"/w/b","session_id":"{id}",
+                   "zellij":{{"session":"b","pane":"{pane}"}}}}"#
+            )
+        };
+        let claude_ps = format!("[{},{}]", seated(4, FOUR), seated(5, FIVE));
+        state.agents.ingest(Some(0), claude_ps.as_bytes(), b"");
+        state.rebuild_agents(Selection::Hold);
+        state
+    }
+
+    /// What is wrong, as the menu at the bottom of the sidebar says it, which
+    /// closes.
+    fn wrong_said(state: &mut State) -> Option<String> {
+        let Role::Sidebar(tree) = &mut state.role else { panic!("not a sidebar") };
+        let menu = tree.menu.take();
+        menu.as_ref().and_then(SidebarMenu::shown).and_then(|shown| match shown {
+            Shown::Wrong(reason) => Some(reason.to_owned()),
+            Shown::Keys(_) | Shown::Asking(..) | Shown::Leaving(_) => None,
+        })
+    }
+
+    /// `b` opens the brief's keys at the bottom of the sidebar, on any row,
+    /// and a key of them briefs by the row the cursor is on: `z` every
+    /// session, `s` the row's session, and `h` the agent in the row's pane,
+    /// or on a session's row, its session. A brief first reads the end of the
+    /// transcript of each agent it covers. With no agent to brief on, the
+    /// sidebar says so where the keys were.
+    #[test]
+    fn the_brief_s_keys_brief_by_the_row_the_cursor_is_on() {
+        let mut state = agents_in_b();
+
+        // Rows `a`, `pane 1`, `b`, `pane 4`, `pane 5`; only `b` has agents.
+        let none_in_a = "brief: no agents in a";
+        for (at, scope, briefed) in [
+            (0, 'z', Ok(vec![FOUR, FIVE])),
+            (0, 's', Err(none_in_a)),
+            (0, 'h', Err(none_in_a)),
+            (1, 'h', Err("brief: no agent in this pane")),
+            (2, 'h', Ok(vec![FOUR, FIVE])),
+            (3, 's', Ok(vec![FOUR, FIVE])),
+            (3, 'h', Ok(vec![FOUR])),
+            (4, 'h', Ok(vec![FIVE])),
+        ] {
+            state.brief = None;
+            if let Role::Sidebar(tree) = &mut state.role {
+                tree.rows.select(at);
+            }
+            assert!(key(&mut state, BareKey::Char('b')), "row {at}");
+            assert_eq!(menu_open(&state), Some(vec!["Brief"]), "row {at}");
+            key(&mut state, BareKey::Char(scope));
+
+            let read = state.brief.as_ref().map(Brief::tails).unwrap_or_default();
+            let read: Vec<&str> =
+                read.iter().map(String::as_str).filter(|arg| [FOUR, FIVE].contains(arg)).collect();
+            let said = wrong_said(&mut state);
+            let (briefed, reason) = match briefed {
+                Ok(briefed) => (briefed, None),
+                Err(reason) => (Vec::new(), Some(reason.to_owned())),
+            };
+            assert_eq!((read, said), (briefed, reason), "row {at} {scope}");
+        }
+    }
+
+    /// A brief whose transcripts could not be read opens no pane, which
+    /// would tell of none of them: the sidebar says why where its keys were.
+    #[test]
+    fn a_brief_on_transcripts_that_could_not_be_read_says_why() {
+        let mut state = agents_in_b();
+        let not_read = "brief: the transcripts could not be read";
+        for (exit_code, stderr, said) in [
+            (Some(2), "sh: 3: tail: not found\n", format!("{not_read}: sh: 3: tail: not found")),
+            (None, "", not_read.to_owned()),
+        ] {
+            key(&mut state, BareKey::Char('b'));
+            key(&mut state, BareKey::Char('z'));
+            let asked = state.brief.as_ref().map(|brief| brief.number.to_string());
+            let answer = BTreeMap::from([
+                (dirs::CONTEXT_KEY.to_owned(), brief::CONTEXT_VALUE.to_owned()),
+                (brief::NUMBER_KEY.to_owned(), asked.expect("a brief asked")),
+            ]);
+            let ran = Event::RunCommandResult(exit_code, Vec::new(), stderr.into(), answer);
+            assert!(state.update(ran), "{said}");
+            assert!(state.brief.is_none(), "{said}");
+            assert_eq!(wrong_said(&mut state), Some(said));
+        }
+    }
+
+    /// A brief floats over the tab with the focus, and hands it back to the
+    /// sidebar as it closes. It is no row of the sidebar's, nor the pane you
+    /// are in: the cursor stays on the row it was asked on, and `Esc` goes
+    /// back to the pane you came from, as it did before the brief. zellij
+    /// tells of the panes before the tabs, so the sidebar hears the brief is
+    /// gone while the tabs still show the floating panes it hid with it.
+    #[test]
+    fn a_brief_leaves_the_sidebar_as_it_found_it() {
+        let mut state = focused_sidebar();
+        state.here = Some(1);
+        if let Role::Sidebar(tree) = &mut state.role {
+            tree.rows.select(3);
+        }
+        // The focus you asked for, as `focus` brings it.
+        state.pass.ask(state.frame);
+        state.update(Event::TabUpdate(state.tabs.clone()));
+        let note = brief::Note {
+            session: "b".to_owned(),
+            pane: 4,
+            name: "pane 4".to_owned(),
+            status: "idle".to_owned(),
+            held: "4s".to_owned(),
+            branch: None,
+            cwd: None,
+            transcript: None,
+        };
+        let asked = Brief::new(1, Over::Session("b".to_owned()), vec![note]).expect("a brief");
+        let command = asked.pane("Brief of b", b"");
+        // As zellij spells a command: its path, then each argument after a
+        // space.
+        let path = command.path.to_string_lossy().into_owned();
+        let spelled = std::iter::once(path).chain(command.args).collect::<Vec<_>>().join(" ");
+        let pane = PaneInfo {
+            id: 2,
+            is_floating: true,
+            is_focused: true,
+            is_selectable: true,
+            title: "luneta: brief of b".to_owned(),
+            terminal_command: Some(spelled),
+            ..PaneInfo::default()
+        };
+        let closed = state.panes.clone().expect("the panes");
+        let mut open = closed.clone();
+        open.panes.get_mut(&0).expect("tab 0").push(pane);
+
+        // Rows `a`, `pane 1`, `b`, `pane 4`, and the cursor on `pane 4`.
+        let rows = [
+            Place::Session("a".to_owned()),
+            Place::Pane("a".to_owned(), 1),
+            Place::Session("b".to_owned()),
+            Place::Pane("b".to_owned(), 4),
+        ];
+        let as_found = |state: &State, told: &str| {
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            let shown: Vec<Place> = tree.rows.iter().map(Node::place).collect();
+            assert_eq!(shown, rows, "{told}");
+            let at = tree.rows.selected_row().map(Node::place);
+            assert_eq!(at.as_ref(), rows.get(3), "{told}");
+            assert_eq!(state.here, Some(1), "{told}");
+        };
+        for (brief_open, manifest) in [(true, open), (false, closed)] {
+            state.update(Event::PaneUpdate(manifest));
+            as_found(&state, &format!("brief open: {brief_open}, as the panes come"));
+            let mut tabs = state.tabs.clone();
+            tabs[0].are_floating_panes_visible = brief_open;
+            state.update(Event::TabUpdate(tabs));
+            as_found(&state, &format!("brief open: {brief_open}, as the tabs come"));
+        }
+    }
+
     /// A key of the menu opens it at the bottom of the sidebar for the row
     /// the cursor is on, and the menu takes every key until it closes. A key
     /// the menu has not is the sidebar's, and so is a key the sidebar has,
@@ -2233,7 +2536,7 @@ mod tests {
             }
             if through_help {
                 assert!(key(&mut state, BareKey::Char('?')), "row {at}");
-                assert_eq!(shown(&state), ['c', 'd', '/', 'n'], "row {at}");
+                assert_eq!(shown(&state), ['c', 'd', '/', 'n', 'b'], "row {at}");
             }
             assert!(key(&mut state, BareKey::Char('/')), "row {at}, through help: {through_help}");
             assert_eq!(menu_open(&state), None, "row {at}, through help: {through_help}");

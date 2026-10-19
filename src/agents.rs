@@ -55,12 +55,30 @@ struct Wire {
     name: Option<String>,
     #[serde(default)]
     name_source: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct WireZellij {
     session: String,
     pane: String,
+}
+
+/// The id of an agent's Claude Code session, which names its transcript: a
+/// UUID's characters, and so never a path that would name some other file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn parse(id: &str) -> Option<Self> {
+        let uuid = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
+        uuid.then(|| SessionId(id.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -128,6 +146,8 @@ pub struct Agent {
     age: Held,
     /// Where the agent works, when claude-ps says.
     cwd: Option<String>,
+    /// The id of its Claude Code session, which names its transcript.
+    transcript: Option<SessionId>,
 }
 
 #[expect(
@@ -144,6 +164,9 @@ pub struct AgentRow {
     pub status: Status,
     pub age: Held,
     pub cwd: Option<String>,
+    /// The id of its Claude Code session, which names its transcript, when
+    /// claude-ps says.
+    pub transcript: Option<SessionId>,
     pub shared: bool,
     /// The agent names a session that is still running, but its pane turned
     /// up in another, matched by its id and directory alone: where it sits is
@@ -323,6 +346,7 @@ impl AgentSet {
                     status: agent.status.clone(),
                     age: agent.age.grown_by(since),
                     cwd: agent.cwd.clone(),
+                    transcript: agent.transcript.clone(),
                     shared: false,
                     indices: Vec::new(),
                     score: 0,
@@ -501,6 +525,7 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
             status: Status::parse(row.status.as_deref()),
             age: Held::from_secs(row.status_age),
             cwd: row.cwd.filter(|cwd| !cwd.is_empty()),
+            transcript: row.session_id.as_deref().and_then(SessionId::parse),
         });
     }
     Ok(agents)
@@ -699,6 +724,23 @@ mod tests {
         .expect("the document should parse");
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].reported, "s");
+    }
+
+    /// The session id claude-ps gives names the agent's transcript, which the
+    /// brief reads by it from a shell: one that is not a UUID's characters
+    /// could name some other file, and names none.
+    #[test]
+    fn a_session_id_names_a_transcript_only_as_a_uuid() {
+        const UUID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
+        for (id, transcript) in [(UUID, Some(UUID)), ("../../.ssh/id_ed25519", None), ("", None)] {
+            let json = format!(
+                r#"[{{"status":"idle","status_age":4,"session_id":"{id}",
+                     "zellij":{{"session":"s","pane":"0"}}}}]"#
+            );
+            let agents = parse(&json).expect("the document should parse");
+            let read = agents.first().and_then(|agent| agent.transcript.as_ref());
+            assert_eq!(read.map(SessionId::as_str), transcript, "{id}");
+        }
     }
 
     #[test]

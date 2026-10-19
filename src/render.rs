@@ -3025,15 +3025,17 @@ mod tests {
 
         let cwd = Some("/w/misc/unnamed".to_owned());
         let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
-        let help = SidebarMenu::help(Some(MENU_KDL), row, &mut crate::menu::Numbers::default());
+        let numbers = &mut crate::menu::Numbers::default();
+        let help = SidebarMenu::help(Some(MENU_KDL), row, None, numbers);
         assert_eq!(
-            sidebar_menu_picture(&help, 6, 30),
+            sidebar_menu_picture(&help, 7, 30),
             [
                 "─ luneta ────── misc/unnamed ─",
                 " c  Claude ▸                  ",
                 " d  Delete ▸                  ",
                 " /  Search                    ",
                 " n  Next agent                ",
+                " b  Brief ▸                   ",
                 " <ESC> - Close",
             ]
         );
