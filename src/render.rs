@@ -2969,7 +2969,8 @@ mod tests {
     /// `/w/misc/unnamed`.
     fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
         let cwd = Some("/w/misc/unnamed".to_owned());
-        let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None, back: None };
+        let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
+        let row = crate::menu::Row { pane, there: None, back: None };
         SidebarMenu::open(Some(entries), row, key, &mut crate::menu::Numbers::default(), 0)
     }
 
@@ -3024,7 +3025,8 @@ mod tests {
         );
 
         let cwd = Some("/w/misc/unnamed".to_owned());
-        let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None, back: None };
+        let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
+        let row = crate::menu::Row { pane, there: None, back: None };
         let numbers = &mut crate::menu::Numbers::default();
         let help = SidebarMenu::help(Some(MENU_KDL), row, None, numbers);
         assert_eq!(

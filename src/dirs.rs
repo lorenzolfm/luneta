@@ -52,7 +52,6 @@ pub const LIST: [&str; 8] = [
     "--no-quotes",
 ];
 
-pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "zoxide";
 pub const PREVIEW_VALUE: &str = "preview";
 pub const PATH_KEY: &str = "luneta_path";

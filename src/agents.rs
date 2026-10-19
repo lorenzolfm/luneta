@@ -10,13 +10,13 @@ use crate::elapsed::{Age, Held};
 use crate::fetch::Fetch;
 use crate::places::Places;
 use crate::sessions::{Selection, Session};
+use crate::context::CONTEXT_KEY;
 
 pub const QUERY: [&str; 1] = ["claude-ps"];
 
 /// What a configuration names claude-ps by, in place of `QUERY`.
 pub const COMMAND_KEY: &str = "agents_command";
 
-pub const CONTEXT_KEY: &str = "luneta";
 pub const CONTEXT_VALUE: &str = "agents";
 
 pub const CLOSE_VALUE: &str = "close";
