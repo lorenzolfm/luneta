@@ -1576,6 +1576,11 @@ impl State {
     /// The row of a session that lists its panes heads them, and a click on
     /// its name does nothing. A term unfolds what it finds, so a fold would
     /// show nothing, and a click on it is a click on its row.
+    ///
+    /// A fold has the cursor go from the session's row to its first pane, or
+    /// from a pane of it to its row, which would end the view the wheel left:
+    /// the view stays, as it does for a click on any other row. The rows
+    /// above the one clicked stay as they were.
     fn press(&mut self, (place, fold): (Place, bool)) -> bool {
         let (rows, cols) = self.size;
         let focused = self.sidebar_focused();
@@ -1587,9 +1592,13 @@ impl State {
         };
         render::select_sidebar_row(tree, &self.agents, focused, rows, cols, index);
         if fold && !tree.narrowed() {
+            let top = tree.top();
             let changed = tree.toggle_row(index);
             if changed {
                 self.rebuild_tree();
+                if let (Some(top), Role::Sidebar(tree)) = (top, &mut self.role) {
+                    tree.scroll_to(top);
+                }
             }
             return changed;
         }
@@ -2001,6 +2010,53 @@ mod tests {
             assert_eq!(folded(&state), after, "{case}");
             let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
             assert_eq!(tree.search().is_none(), went, "{case}");
+        }
+    }
+
+    /// A click on a session's fold leaves the view where the wheel left it, as
+    /// a click on any other row does, though the cursor goes from a pane of
+    /// the session to its row as it folds, and on to its first pane as it
+    /// unfolds.
+    #[test]
+    fn a_fold_leaves_the_view_where_the_wheel_left_it() {
+        let mut state = focused_sidebar();
+        let leaf = |id: u32| Leaf {
+            id,
+            title: format!("pane {id}"),
+            tab: String::new(),
+            tab_id: None,
+            cwd: None,
+            checkout: None,
+            closes: close::Closes::Pane,
+        };
+        for (name, id) in [("c", 5), ("d", 7), ("e", 9)] {
+            let panes = vec![leaf(id), leaf(id + 1)];
+            state.branches.push(Branch { name: name.to_owned(), age: Age::from_secs(0), panes });
+        }
+        state.rebuild_tree();
+        let line_of_c = |state: &State| {
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            let (rows, cols) = state.size;
+            let is_c = |at: usize| matches!(&tree.rows[at], Node::Session(node) if node.name == "c");
+            (0..rows).find(|line| {
+                render::sidebar_row_at(tree, &state.agents, true, rows, cols, *line).is_some_and(is_c)
+            })
+        };
+        // Rows `a`, 1, `b`, 4, `c`, 5, 6, `d`, 7, 8, `e`, 9 and 10, seven to a
+        // view: the cursor on pane 5, and the wheel has `c` at the top.
+        if let Role::Sidebar(tree) = &mut state.role {
+            tree.rows.select(5);
+        }
+        state.handle_mouse(Mouse::ScrollDown(4));
+        let line = line_of_c(&state).expect("the row of `c` in view");
+        assert_eq!(line, render::HEADER);
+        for (shut, at) in [(&["c"][..], Place::Session("c".to_owned())), (&[], Place::Pane("c".to_owned(), 5))]
+        {
+            state.handle_mouse(Mouse::LeftClick(line as isize, 1));
+            assert_eq!(folded(&state), shut);
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert_eq!(tree.rows.selected_row().map(Node::place), Some(at.clone()), "{at:?}");
+            assert_eq!(line_of_c(&state), Some(line), "{at:?}");
         }
     }
 

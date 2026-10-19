@@ -361,7 +361,9 @@ impl Tree {
     /// While the search box holds a term, only the rows that match it are
     /// kept, with the session of each pane that does, unfolded. A session
     /// found by its name keeps all its panes. The cursor goes to the best
-    /// match when the term changes, and stays on its row otherwise.
+    /// match when the term changes, and stays on its row otherwise. A session
+    /// that matches best by its name has it on the pane of it that matches
+    /// best, or else on its first.
     ///
     /// A search lasts while the sidebar has the focus, so `follow` closes it.
     /// One left behind would keep the rows it hides out of sight. So does the
@@ -458,11 +460,7 @@ impl Tree {
             if finder.is_some() && fit.is_none() && shown.is_empty() {
                 continue;
             }
-            // Found best by its name, the session hands the cursor on to its
-            // first pane.
-            if let Some(fit) = fit {
-                weigh(rows.len(), fit);
-            }
+            let head = rows.len();
             rows.push(Node::Session(SessionNode {
                 name: branch.name.clone(),
                 current: is_current,
@@ -471,11 +469,21 @@ impl Tree {
                 loudest: statuses().min_by_key(|status| agents::status_rank(status)).cloned(),
                 hits: hits.unwrap_or_default(),
             }));
-            for (node, fit) in shown {
-                if let Some(fit) = fit {
-                    weigh(rows.len(), fit);
+            // The pane of the session that matches best, which a session
+            // found by its name hands the cursor on to. With none, its row
+            // hands it on to its first pane.
+            let mut lead: Option<(usize, Fit)> = None;
+            for (node, matched) in shown {
+                if let Some(matched) = matched {
+                    weigh(rows.len(), matched);
+                    if lead.is_none_or(|(_, top)| matched > top) {
+                        lead = Some((rows.len(), matched));
+                    }
                 }
                 rows.push(Node::Pane(node));
+            }
+            if let Some(fit) = fit {
+                weigh(lead.map_or(head, |(at, _)| at), fit);
             }
         }
         let best = best.map(|(at, _)| at);
@@ -1379,14 +1387,18 @@ mod tests {
         assert_eq!(selected(&tree), pane("b", 4));
     }
 
-    /// A session found by its name keeps all its panes, the cursor on the
-    /// first.
+    /// A session found by its name keeps all its panes, the cursor on the one
+    /// of them that matches best, or else on the first, though the name
+    /// matches better. A pane that matches as well as its session's name is
+    /// the best match.
     #[test]
     fn a_search_keeps_the_rows_that_match_where_they_were() {
         let branches = [
             branch("bipa", 300, &[(31, "✳ a-p-i-x"), (39, "✳ dda-bank-slip"), (47, "✳ pix outflow")]),
             branch("notes", 200, &[(0, "~/Documents")]),
             branch("misc", 100, &[(3, "✳ luneta")]),
+            branch("zed", 50, &[(5, "fish"), (6, "z-e-d"), (7, "logs")]),
+            branch("yak", 40, &[(8, "fish"), (9, "yak")]),
         ];
         let set = agents(&[]);
         for (term, rows, best) in [
@@ -1396,6 +1408,12 @@ mod tests {
                 Place::Pane("bipa".to_owned(), 47),
             ),
             ("note", &["▾ notes", "  - ~/Documents"][..], Place::Pane("notes".to_owned(), 0)),
+            (
+                "zed",
+                &["▾ zed", "  - fish", "  - z-e-d", "  - logs"][..],
+                Place::Pane("zed".to_owned(), 6),
+            ),
+            ("yak", &["▾ yak", "  - fish", "  - yak"][..], Place::Pane("yak".to_owned(), 9)),
         ] {
             let mut tree = Tree::default();
             tree.rebuild(&branches, None, &set, None, false);

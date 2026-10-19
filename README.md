@@ -166,7 +166,8 @@ Click a pane's row, or focus the sidebar and press `Enter`, to go there — acro
 tabs and sessions alike. One click does it, whether the sidebar has the focus or
 not. A session's row heads its panes, and is no place to go: the highlight
 passes over it, from the last pane of one session to the first of the next, and
-a click on its name does nothing. On a session's row, the `▾` or `▸` folds or
+a click on its name does nothing, but bring the focus into the sidebar, as a
+click anywhere on it does. On a session's row, the `▾` or `▸` folds or
 unfolds the session. A folded session stands in for its panes: the highlight
 stops on its row, and it switches to the session, on the pane it last had the
 focus on; the session you are in takes you back to your pane. It keeps its
@@ -186,7 +187,8 @@ match what you type, fuzzily, as the picker does: a session by its name, a pane
 by its row, its branch, its tab or its directory. The rows left keep their order, and the
 highlight lands on the best match, so `Ctrl b` `/` *a few characters* `Enter`
 takes you anywhere. A folded session opens to show the panes found in it, and
-a session found by its name shows all of its panes.
+a session found by its name shows all of its panes, the highlight on the one
+that matches best, or else on the first.
 
 One key goes to the next pane listed, and from the last back to the first, so
 pressing it again and again takes you down the sidebar, across sessions. A
