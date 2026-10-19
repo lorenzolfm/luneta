@@ -606,11 +606,18 @@ impl Row {
     /// The keys of the menu for the row, from the `entries` of the sidebar's
     /// configuration and luneta's Delete group, and what the menu is for.
     fn menu(self, entries: Option<&str>) -> Result<(Keys, Target), String> {
-        let deletes = if self.pane.is_some() { Scope::Pane } else { Scope::Session };
-        let keys = Keys::new(entries, deletes)?;
-        let target =
-            Target { pane: self.pane, cwd: self.cwd, branch: self.branch, there: self.there };
-        Ok((keys, target))
+        let keys = Keys::new(entries, self.deletes())?;
+        Ok((keys, self.target()))
+    }
+
+    /// What luneta's Delete group deletes on the row: its pane, or on a
+    /// session's row, its session.
+    fn deletes(&self) -> Scope {
+        if self.pane.is_some() { Scope::Pane } else { Scope::Session }
+    }
+
+    fn target(self) -> Target {
+        Target { pane: self.pane, cwd: self.cwd, branch: self.branch, there: self.there }
     }
 }
 
@@ -784,7 +791,10 @@ impl SidebarMenu {
 
     /// What `?` opens, numbered next among `numbers`: the keys at the top of
     /// the menu for `row`, as `m` opens it, and then the sidebar's commands,
-    /// on the group of commands `group` opens, or on the first.
+    /// on the group of commands `group` opens, or on the first. A group of
+    /// commands has none of the menu's keys, and opens with yours gone wrong
+    /// too, over luneta's keys alone: `?` and `m` still say what is wrong
+    /// with yours.
     pub fn help(
         entries: Option<&str>,
         row: Row,
@@ -792,13 +802,19 @@ impl SidebarMenu {
         numbers: &mut Numbers,
     ) -> Self {
         let number = numbers.next();
-        let stage = match row.menu(entries) {
-            Ok((keys, target)) => {
+        let group = group.filter(|group| Command::opens(*group));
+        let deletes = row.deletes();
+        let keys = Keys::new(entries, deletes).or_else(|reason| match group {
+            Some(_) => Keys::new(None, deletes),
+            None => Err(reason),
+        });
+        let stage = match keys {
+            Ok(keys) => {
                 let mut keys = Keys::help(keys);
-                if let Some(group) = group.filter(|group| Command::opens(*group)) {
+                if let Some(group) = group {
                     keys.press(group);
                 }
-                Stage::Choosing(keys, target)
+                Stage::Choosing(keys, row.target())
             },
             Err(reason) => wrong(reason),
         };
@@ -1771,7 +1787,9 @@ mod tests {
     /// `?` shows the keys at the top of the menu, as `m` does, luneta's Delete
     /// group among them, and then the sidebar's commands, which keep their
     /// keys from the menu's. So it does on a session's row, and with no menu
-    /// of yours. A menu that cannot be read says what is wrong with it.
+    /// of yours. A menu that cannot be read says what is wrong with it, but
+    /// not over the brief's keys, which are none of its own: they open with
+    /// luneta's keys alone at the top.
     #[test]
     fn help_shows_the_top_of_the_menu_and_then_the_sidebar_s_commands() {
         for (entries, on_row, on) in [
@@ -1790,6 +1808,11 @@ mod tests {
             let menu = help(Some(entries), row(None), None);
             let wrong = wrong(Some(&menu)).expect("what is wrong");
             assert!(wrong.starts_with(said), "{wrong}");
+
+            let brief = help(Some(entries), row(None), Some('b'));
+            assert_eq!(on_show(Some(&brief)), Some(Ok(vec!['z', 's', 'h'])), "{entries}");
+            let top = press(Some(brief), &bare(BareKey::Backspace));
+            assert_eq!(on_show(top.as_ref()), Some(Ok(vec!['d', '/', 'n', 'b'])), "{entries}");
         }
     }
 
