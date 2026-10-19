@@ -325,7 +325,9 @@ impl ZellijPlugin for State {
         match event {
             Event::PermissionRequestResult(status) => {
                 if matches!(status, PermissionStatus::Granted) {
-                    rename_plugin_pane(self.plugin_id, dock::TITLE);
+                    if let Some(pane) = get_pane_info(PaneId::Plugin(self.plugin_id)) {
+                        self.retitle(&pane);
+                    }
                     if !self.is_sidebar() {
                         resize_self(self.plugin_id);
                         self.ask_zoxide();
@@ -489,6 +491,9 @@ impl ZellijPlugin for State {
                     tree.menu = tree.menu.take().and_then(|menu| menu.panes(&manifest));
                 }
                 self.panes = Some(manifest);
+                if let Some(pane) = self.own_pane() {
+                    self.retitle(pane);
+                }
                 self.settle()
             },
             Event::TabUpdate(tabs) => {
@@ -1130,6 +1135,24 @@ impl State {
         self.panes = Some(current.panes.clone());
         self.tabs.clone_from(&current.tabs);
         self.active_tab = current.tabs.iter().find(|t| t.active).map(|t| t.position);
+    }
+
+    fn own_pane(&self) -> Option<&PaneInfo> {
+        let manifest = self.panes.as_ref()?;
+        manifest.panes.values().flatten().find(|p| p.is_plugin && p.id == self.plugin_id)
+    }
+
+    /// Gives the pane the title the picker's or the sidebar's is to have where
+    /// it stands, as it floats or stands in a column.
+    fn retitle(&self, pane: &PaneInfo) {
+        let title = match self.role {
+            Role::Picker => dock::picker_title(pane),
+            Role::Sidebar(_) => dock::sidebar_title(pane),
+            Role::Dock(_) | Role::Menu(_) | Role::Unknown(_) => None,
+        };
+        if let Some(title) = title {
+            rename_plugin_pane(self.plugin_id, title);
+        }
     }
 
     fn own_tab(&self) -> Option<usize> {
