@@ -10,6 +10,7 @@ mod elapsed;
 mod fetch;
 mod folds;
 mod hiding;
+mod icons;
 mod layout;
 mod menu;
 mod paint;
@@ -236,7 +237,9 @@ impl ZellijPlugin for State {
             None => Role::Picker,
             Some(SIDEBAR) => {
                 let entries = configuration.get(menu::ENTRIES).map(String::as_str);
-                Role::Sidebar(Tree::shared(menu::Legend::new(entries)))
+                let (icons, wrong) =
+                    icons::configured(configuration.get(icons::KEY).map(String::as_str));
+                Role::Sidebar(Tree::shared(menu::Legend::new(entries), icons, wrong))
             },
             Some(DOCK) => {
                 let mut sidebar = configuration.clone();
@@ -2074,6 +2077,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: None,
+            command: None,
             checkout: None,
             closes: close::Closes::Pane,
         };
@@ -2224,6 +2228,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: None,
+            command: None,
             checkout: None,
             closes: close::Closes::Pane,
         };
@@ -2326,6 +2331,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: Some("/w/b".to_owned()),
+            command: None,
             checkout: None,
             closes: close::Closes::Pane,
         };

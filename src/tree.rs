@@ -22,6 +22,7 @@ use crate::dirs::short_cwd;
 use crate::dock::TabId;
 use crate::elapsed::{Age, Held};
 use crate::folds::Folds;
+use crate::icons::{self, Icons};
 use crate::menu::{Legend, SidebarMenu};
 use crate::places::Places;
 
@@ -59,16 +60,19 @@ pub struct Branch {
 }
 
 /// A terminal pane, the name of the tab that holds it and the id zellij keeps
-/// for that tab, the directory it works in, as its session last said, and
-/// what is checked out there, as git last said. For the few seconds after a
-/// `cd` that git has yet to answer for the new directory, it is what was
-/// checked out in the old one.
+/// for that tab, the directory it works in and what it runs in the
+/// foreground, as its session last said, and what is checked out there, as
+/// git last said. For the few seconds after a `cd` that git has yet to answer
+/// for the new directory, it is what was checked out in the old one.
 pub struct Leaf {
     pub id: u32,
     pub title: String,
     pub tab: String,
     pub tab_id: Option<TabId>,
     pub cwd: Option<String>,
+    /// The command line of the process group in front, or of the shell
+    /// itself at its prompt.
+    pub command: Option<String>,
     pub checkout: Option<Checkout>,
     /// What closing it closes with it: its tab once nothing else holds the
     /// tab open, and its session once that is the session's only tab.
@@ -106,7 +110,8 @@ pub fn in_order(branches: &[Branch]) -> Vec<&Branch> {
 /// is checked out where it works now, so that a `cd` does not take its
 /// branch's line away and back. A session that leaves a pane out of one
 /// answer has not said it moved, and the pane keeps its directory too, for
-/// git to be asked about.
+/// git to be asked about, and what it runs, unless it said what runs there
+/// now: zellij leaves that out of an answer it could not get in time.
 pub fn leaves(
     session: &str,
     tabs: &[TabInfo],
@@ -133,6 +138,9 @@ pub fn leaves(
             let cwd = places
                 .cwd(session, pane.id)
                 .or_else(|| held.and_then(|leaf| leaf.cwd.as_deref()));
+            let command = places
+                .command(session, pane.id)
+                .or_else(|| held.and_then(|leaf| leaf.command.as_deref()));
             let checkout = match cwd.map_or(Said::Nothing, |cwd| checkouts.said(cwd)) {
                 Said::Branch(checkout) => Some(checkout.clone()),
                 Said::NoBranch => None,
@@ -146,6 +154,7 @@ pub fn leaves(
                     tab: tab.to_owned(),
                     tab_id,
                     cwd: cwd.map(str::to_owned),
+                    command: command.map(str::to_owned),
                     checkout,
                     closes: close::closes(panes, pane.id, manifest.panes.len()),
                 },
@@ -214,6 +223,8 @@ pub struct PaneNode {
     pub tab: Option<TabId>,
     pub label: String,
     pub agent: Option<Mark>,
+    /// The program that runs in the pane, by its binary's name, for its icon.
+    pub program: Option<String>,
     /// What is checked out where the pane works, for the line under its row.
     pub checkout: Option<Checkout>,
     pub here: bool,
@@ -325,6 +336,12 @@ pub struct Tree {
     /// neither the menu nor the search box is open. None in a test that
     /// leaves it out.
     pub legend: Option<Legend>,
+    /// The icons on the panes' rows, none once the configuration turns them
+    /// off.
+    pub icons: Option<Icons>,
+    /// What is wrong with the icons the configuration gives, for a note under
+    /// the tree.
+    pub icons_wrong: Option<String>,
     folded: Folds,
     search: Option<Search>,
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
@@ -372,9 +389,12 @@ enum Search {
 }
 
 impl Tree {
-    /// A tree whose folds are every session's sidebar's, over `legend`.
-    pub fn shared(legend: Legend) -> Self {
-        Tree { folded: Folds::shared(), legend: Some(legend), ..Tree::default() }
+    /// A tree whose folds are every session's sidebar's, over `legend`, and
+    /// that draws `icons`, and says what is wrong with the ones the
+    /// configuration gives.
+    pub fn shared(legend: Legend, icons: Option<Icons>, icons_wrong: Option<String>) -> Self {
+        let folded = Folds::shared();
+        Tree { folded, legend: Some(legend), icons, icons_wrong, ..Tree::default() }
     }
 
     /// A tree of `nodes` as they stand, the cursor on row `selected` or the
@@ -491,6 +511,7 @@ impl Tree {
                     tab: leaf.tab_id,
                     label,
                     agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
+                    program: program(leaf, *agent).map(str::to_owned),
                     checkout: leaf.checkout.clone(),
                     here: is_current && here == Some(leaf.id),
                     hits: hits.unwrap_or_default(),
@@ -773,6 +794,16 @@ pub fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     title.to_owned()
 }
 
+/// The program that runs in a pane, by its binary's name: Claude Code for an
+/// agent claude-ps finds there, or else what the pane's terminal runs in the
+/// foreground, as its session last said.
+fn program<'a>(leaf: &'a Leaf, agent: Option<&AgentRow>) -> Option<&'a str> {
+    if agent.is_some() {
+        return Some(icons::AGENT);
+    }
+    leaf.command.as_deref().and_then(icons::program)
+}
+
 const GENERIC_TITLE: &str = "Claude Code";
 
 /// Whether a title is the cwd, as a shell writes it: whole, or with `~` for
@@ -856,6 +887,7 @@ mod tests {
                     tab: String::new(),
                     tab_id: None,
                     cwd: None,
+                    command: None,
                     checkout: None,
                     closes: Closes::Pane,
                 })
@@ -1007,6 +1039,7 @@ mod tests {
             tab: tab.to_owned(),
             tab_id: None,
             cwd: None,
+            command: None,
             checkout: None,
             closes: Closes::Pane,
         };
@@ -1029,6 +1062,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: cwd.map(str::to_owned),
+            command: None,
             checkout: None,
             closes: Closes::Pane,
         };
@@ -1163,6 +1197,70 @@ mod tests {
         let again = leaves("s", &tabs, &manifest, &places, &checkouts, &after);
         assert_eq!(again[2].cwd.as_deref(), Some("/w/repo"));
         assert_eq!(again[2].checkout.as_ref().map(|c| c.branch.as_str()), Some("fold"));
+    }
+
+    /// The panes of session `s` as `zellij action list-panes` lists them, each
+    /// in `/w/s`, by its id and what its terminal runs in the foreground.
+    fn listed(panes: &[(u32, Option<&str>)]) -> Places {
+        let json: Vec<String> = panes
+            .iter()
+            .map(|(id, command)| {
+                let command = command.map_or("null".to_owned(), |command| format!("{command:?}"));
+                let pane = format!(r#""id":{id},"is_plugin":false,"pane_cwd":"/w/s""#);
+                format!(r#"{{{pane},"pane_command":{command}}}"#)
+            })
+            .collect();
+        let mut places = Places::default();
+        places.ingest("s".to_owned(), Some(0), format!("[{}]", json.join(",")).as_bytes());
+        places
+    }
+
+    /// A pane runs Claude Code while claude-ps finds an agent in it, whatever
+    /// its terminal has in front, and else the binary its terminal has in
+    /// front, as its session says. A pane its session says nothing of runs
+    /// nothing luneta knows.
+    #[test]
+    fn a_pane_runs_its_agent_or_else_what_its_terminal_has_in_front() {
+        let manifest = manifest(&[(0, (1..=4).map(|id| pane(id, "fish")).collect())]);
+        let places = listed(&[
+            (1, Some("node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")),
+            (2, Some("/run/current-system/sw/bin/nvim src/tree.rs")),
+            (3, Some("fish")),
+            (4, None),
+        ]);
+        let leaves = leaves("s", &[tab(0, "code")], &manifest, &places, &Checkouts::default(), &[]);
+        let branches = [Branch { name: "s".to_owned(), age: Age::from_secs(1), panes: leaves }];
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, None, &agents(&[("s", 1, "busy")]), None, true);
+        let programs: Vec<(u32, Option<&str>)> = tree
+            .rows
+            .iter()
+            .filter_map(|node| match node {
+                Node::Pane(node) => Some((node.id, node.program.as_deref())),
+                Node::Session(_) => None,
+            })
+            .collect();
+        let ran = [(1, Some("claude")), (2, Some("nvim")), (3, Some("fish")), (4, None)];
+        assert_eq!(programs, ran);
+    }
+
+    /// A pane keeps what it runs while its session leaves it out of an
+    /// answer, or answers with nothing for it, as zellij does for a terminal
+    /// that does not say in time, and takes what its session says runs there
+    /// now.
+    #[test]
+    fn a_pane_keeps_what_it_runs_until_its_session_says_what_runs_there_now() {
+        let manifest = manifest(&[(0, (1..=3).map(|id| pane(id, "fish")).collect())]);
+        let tabs = [tab(0, "code")];
+        let checkouts = Checkouts::default();
+        let places = listed(&[(1, Some("nvim")), (2, Some("htop")), (3, Some("cargo build"))]);
+        let before = leaves("s", &tabs, &manifest, &places, &checkouts, &[]);
+
+        let places = listed(&[(1, Some("fish")), (2, None)]);
+        let after = leaves("s", &tabs, &manifest, &places, &checkouts, &before);
+        let commands: Vec<Option<&str>> =
+            after.iter().map(|leaf| leaf.command.as_deref()).collect();
+        assert_eq!(commands, [Some("fish"), Some("htop"), Some("cargo build")]);
     }
 
     #[test]
@@ -1530,6 +1628,7 @@ mod tests {
             tab: tab.to_owned(),
             tab_id: None,
             cwd: cwd.map(str::to_owned),
+            command: None,
             checkout: branch
                 .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
             closes: Closes::Pane,

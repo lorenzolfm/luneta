@@ -28,6 +28,10 @@ struct Pane {
     id: u32,
     cwd: String,
     claude: bool,
+    /// What its terminal runs in the foreground, when zellij could say: the
+    /// command line of the process group in front, or of the shell itself at
+    /// its prompt.
+    command: Option<String>,
 }
 
 const MARK: char = '✳';
@@ -99,6 +103,14 @@ impl Places {
         panes.iter().find(|held| held.id == pane).map(|held| held.cwd.as_str())
     }
 
+    /// What a pane's terminal runs in the foreground, as its session last
+    /// said, as zellij spells a command: its path, then each argument after a
+    /// space.
+    pub fn command(&self, session: &str, pane: u32) -> Option<&str> {
+        let panes = self.sessions.get(session)?;
+        panes.iter().find(|held| held.id == pane)?.command.as_deref()
+    }
+
     pub fn find(&self, pane: u32, cwd: &str, reported: &str) -> Option<&str> {
         let holders = self.holders.get(&pane)?;
         let held = || holders.iter().filter(|held| held.cwd == cwd);
@@ -128,6 +140,7 @@ fn parse(stdout: &str) -> Vec<Pane> {
                 id: pane.id,
                 cwd: pane.pane_cwd.filter(|cwd| !cwd.is_empty())?,
                 claude: is_claude(pane.pane_command.as_deref(), pane.title.as_deref()),
+                command: pane.pane_command.filter(|command| !command.trim().is_empty()),
             })
         })
         .collect()
@@ -147,7 +160,12 @@ impl Places {
                 .map(|(name, panes)| {
                     let panes = panes
                         .iter()
-                        .map(|(id, cwd)| Pane { id: *id, cwd: cwd.to_string(), claude: true })
+                        .map(|(id, cwd)| Pane {
+                            id: *id,
+                            cwd: cwd.to_string(),
+                            claude: true,
+                            command: None,
+                        })
                         .collect();
                     (name.to_string(), panes)
                 })
