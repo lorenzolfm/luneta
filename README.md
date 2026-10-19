@@ -171,7 +171,8 @@ a program shows its icon a few seconds after it starts.
 
 The icons are a [Nerd Font](https://www.nerdfonts.com)'s, as the directory
 preview's are. Claude's came with Nerd Fonts 3.5.0, and ssh's with 3.3.0: an
-older font draws nothing in their place. In a font whose name ends in "Mono",
+older font has neither, and the terminal draws a box or nothing for them, on
+every agent's row for Claude's. In a font whose name ends in "Mono",
 an icon takes one column; in the others it can spill into the space after
 it. The sidebars drawn on this page leave the icons out.
 
@@ -460,6 +461,8 @@ Needs `claude` and `claude-ps` on the server's `PATH`.
 The session list needs nothing but zellij. The optional tools are looked up by
 name on the `PATH` of the zellij **server**, which is inherited from whatever
 started it — on a long-lived session that can be older than your shell profile.
+The font is not looked up: it is the terminal's you attach from, which over SSH
+is the one on your own machine, not the server.
 
 ### Install
 

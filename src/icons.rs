@@ -8,6 +8,8 @@
 //! program an icon of its own.
 
 use std::collections::BTreeMap;
+use std::iter::Peekable;
+use std::str::SplitWhitespace;
 
 use kdl::{KdlDocument, KdlNode};
 use unicode_width::UnicodeWidthStr;
@@ -33,7 +35,7 @@ const GIT: &str = "\u{e702}";
 
 /// luneta's icons, by the name of the binary each is for, as Nerd Fonts 3.5
 /// numbers them. Claude's came with Nerd Fonts 3.5.0, and ssh's with 3.3.0: an
-/// older font draws nothing in their place.
+/// older font has neither, and the terminal draws a box or nothing for them.
 const DEFAULTS: [(&str, &str); 16] = [
     (AGENT, "\u{ec82}"), // `cod-claude`
     ("bash", TERMINAL),
@@ -156,21 +158,20 @@ fn icon(node: &KdlNode) -> Result<(&str, Option<&str>), String> {
 /// its path, then each argument after a space. A login shell's leading `-`
 /// goes, and `sudo`, `env` and `nix run` give way to what they run: `nix
 /// run`'s is the last part of the attribute it is given, as `htop` of
-/// `nixpkgs#htop`, and nothing a binary goes by for a flake's default.
+/// `nixpkgs#htop`, and nothing a binary goes by for a flake's default. It
+/// reads no further than the binary, however many arguments follow it.
 pub fn program(command: &str) -> Option<&str> {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let mut at = 0;
+    let mut words = command.split_whitespace().peekable();
     loop {
-        let word = *words.get(at)?;
-        at += 1;
+        let word = words.next()?;
         if is_assignment(word) {
             continue;
         }
         match binary(word) {
-            "sudo" => at = past_options(&words, at, &SUDO_TAKES),
-            "env" => at = past_options(&words, at, &ENV_TAKES),
-            "nix" if words.get(at) == Some(&"run") => {
-                let installable = words[at + 1..].iter().find(|word| !word.starts_with('-'))?;
+            "sudo" => past_options(&mut words, &SUDO_TAKES),
+            "env" => past_options(&mut words, &ENV_TAKES),
+            "nix" if words.next_if_eq(&"run").is_some() => {
+                let installable = words.find(|word| !word.starts_with('-'))?;
                 let (_, attribute) = installable.split_once('#')?;
                 return attribute.rsplit('.').next().filter(|name| !name.is_empty());
             },
@@ -180,48 +181,61 @@ pub fn program(command: &str) -> Option<&str> {
     }
 }
 
-/// The options of `sudo` that take the word after them as their value.
-const SUDO_TAKES: [&str; 22] = [
-    "-C",
-    "-D",
-    "-R",
-    "-T",
-    "-U",
-    "-g",
-    "-h",
-    "-p",
-    "-r",
-    "-t",
-    "-u",
-    "--chdir",
-    "--chroot",
-    "--close-from",
-    "--command-timeout",
-    "--group",
-    "--host",
-    "--other-user",
-    "--prompt",
-    "--role",
-    "--type",
-    "--user",
-];
+/// The options of a command that take a value, by their letters after a `-`
+/// and their names after `--`.
+struct Takes {
+    letters: &'static str,
+    names: &'static [&'static str],
+}
 
-/// The options of `env` that take the word after them as their value.
-const ENV_TAKES: [&str; 4] = ["-C", "-u", "--chdir", "--unset"];
+/// The options of `sudo` that take a value.
+const SUDO_TAKES: Takes = Takes {
+    letters: "CDRTUghprtu",
+    names: &[
+        "chdir",
+        "chroot",
+        "close-from",
+        "command-timeout",
+        "group",
+        "host",
+        "other-user",
+        "prompt",
+        "role",
+        "type",
+        "user",
+    ],
+};
 
-/// Where the words after `at` that are options end: past `--`, and past the
-/// value of an option in `takes`.
-fn past_options(words: &[&str], mut at: usize, takes: &[&str]) -> usize {
-    while let Some(word) = words.get(at) {
-        if *word == "--" {
-            return at + 1;
+/// The options of `env` that take a value.
+const ENV_TAKES: Takes = Takes { letters: "Cu", names: &["chdir", "unset"] };
+
+impl Takes {
+    /// Whether `option` takes the word after it as its value: a name that
+    /// takes one, with none after an `=`, or a run of letters whose first
+    /// that takes one is its last, as the `u` of `-Hu root`. One before the
+    /// last takes the rest of the run, as the `u` of `-uroot`.
+    fn next_word(&self, option: &str) -> bool {
+        if let Some(name) = option.strip_prefix("--") {
+            return self.names.contains(&name);
         }
-        if !word.starts_with('-') {
-            break;
-        }
-        at += if takes.contains(word) { 2 } else { 1 };
+        let letters = option.strip_prefix('-').unwrap_or(option);
+        letters
+            .find(|letter: char| self.letters.contains(letter))
+            .is_some_and(|at| at + 1 == letters.len())
     }
-    at
+}
+
+/// Takes the options at the front of `words` off it, the value of each that
+/// takes the word after it, and a `--` that ends them.
+fn past_options(words: &mut Peekable<SplitWhitespace>, takes: &Takes) {
+    while let Some(option) = words.next_if(|word| word.starts_with('-')) {
+        if option == "--" {
+            return;
+        }
+        if takes.next_word(option) {
+            words.next();
+        }
+    }
 }
 
 /// Whether `word` sets a variable for the command after it, as `FOO=1`.
@@ -258,7 +272,10 @@ mod tests {
             ("ssh -o ConnectTimeout=60 10.255.255.1", Some("ssh")),
             (sudo, Some("nvim")),
             ("sudo -u postgres psql", Some("psql")),
+            ("sudo -Hu postgres psql", Some("psql")),
+            ("sudo -upostgres -E psql", Some("psql")),
             ("sudo --user postgres -- psql", Some("psql")),
+            ("sudo --user=postgres psql", Some("psql")),
             ("sudo FOO=1 env -i -C /w PATH=/bin htop", Some("htop")),
             ("nix run nixpkgs#htop", Some("htop")),
             ("nix run --impure nixpkgs#python3Packages.ipython -- -i", Some("ipython")),
@@ -266,6 +283,7 @@ mod tests {
             // A flake's default, a shell `sudo` starts, and nothing at all.
             ("nix run .", None),
             ("sudo -i", None),
+            ("sudo -iu postgres", None),
             ("-", None),
             ("", None),
         ] {

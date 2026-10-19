@@ -70,9 +70,9 @@ pub struct Leaf {
     pub tab: String,
     pub tab_id: Option<TabId>,
     pub cwd: Option<String>,
-    /// The command line of the process group in front, or of the shell
-    /// itself at its prompt.
-    pub command: Option<String>,
+    /// The binary its terminal runs in the foreground, by its name: the
+    /// process group's in front, or the shell's itself at its prompt.
+    pub runs: Option<String>,
     pub checkout: Option<Checkout>,
     /// What closing it closes with it: its tab once nothing else holds the
     /// tab open, and its session once that is the session's only tab.
@@ -138,9 +138,10 @@ pub fn leaves(
             let cwd = places
                 .cwd(session, pane.id)
                 .or_else(|| held.and_then(|leaf| leaf.cwd.as_deref()));
-            let command = places
-                .command(session, pane.id)
-                .or_else(|| held.and_then(|leaf| leaf.command.as_deref()));
+            let runs = match places.command(session, pane.id) {
+                Some(command) => icons::program(command),
+                None => held.and_then(|leaf| leaf.runs.as_deref()),
+            };
             let checkout = match cwd.map_or(Said::Nothing, |cwd| checkouts.said(cwd)) {
                 Said::Branch(checkout) => Some(checkout.clone()),
                 Said::NoBranch => None,
@@ -154,7 +155,7 @@ pub fn leaves(
                     tab: tab.to_owned(),
                     tab_id,
                     cwd: cwd.map(str::to_owned),
-                    command: command.map(str::to_owned),
+                    runs: runs.map(str::to_owned),
                     checkout,
                     closes: close::closes(panes, pane.id, manifest.panes.len()),
                 },
@@ -523,7 +524,7 @@ impl Tree {
                     tab: leaf.tab_id,
                     label,
                     agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
-                    runs: leaf.command.as_deref().and_then(icons::program).map(str::to_owned),
+                    runs: leaf.runs.clone(),
                     checkout: leaf.checkout.clone(),
                     here: is_current && here == Some(leaf.id),
                     hits: hits.unwrap_or_default(),
@@ -889,7 +890,7 @@ mod tests {
                     tab: String::new(),
                     tab_id: None,
                     cwd: None,
-                    command: None,
+                    runs: None,
                     checkout: None,
                     closes: Closes::Pane,
                 })
@@ -1041,7 +1042,7 @@ mod tests {
             tab: tab.to_owned(),
             tab_id: None,
             cwd: None,
-            command: None,
+            runs: None,
             checkout: None,
             closes: Closes::Pane,
         };
@@ -1064,7 +1065,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: cwd.map(str::to_owned),
-            command: None,
+            runs: None,
             checkout: None,
             closes: Closes::Pane,
         };
@@ -1249,20 +1250,24 @@ mod tests {
     /// A pane keeps what it runs while its session leaves it out of an
     /// answer, or answers with nothing for it, as zellij does for a terminal
     /// that does not say in time, and takes what its session says runs there
-    /// now.
+    /// now, even a command with no binary to go by, as a shell `sudo` starts.
     #[test]
     fn a_pane_keeps_what_it_runs_until_its_session_says_what_runs_there_now() {
-        let manifest = manifest(&[(0, (1..=3).map(|id| pane(id, "fish")).collect())]);
+        let manifest = manifest(&[(0, (1..=4).map(|id| pane(id, "fish")).collect())]);
         let tabs = [tab(0, "code")];
         let checkouts = Checkouts::default();
-        let places = listed(&[(1, Some("nvim")), (2, Some("htop")), (3, Some("cargo build"))]);
+        let places = listed(&[
+            (1, Some("nvim")),
+            (2, Some("htop")),
+            (3, Some("cargo build")),
+            (4, Some("nvim")),
+        ]);
         let before = leaves("s", &tabs, &manifest, &places, &checkouts, &[]);
 
-        let places = listed(&[(1, Some("fish")), (2, None)]);
+        let places = listed(&[(1, Some("fish")), (2, None), (4, Some("sudo -i"))]);
         let after = leaves("s", &tabs, &manifest, &places, &checkouts, &before);
-        let commands: Vec<Option<&str>> =
-            after.iter().map(|leaf| leaf.command.as_deref()).collect();
-        assert_eq!(commands, [Some("fish"), Some("htop"), Some("cargo build")]);
+        let runs: Vec<Option<&str>> = after.iter().map(|leaf| leaf.runs.as_deref()).collect();
+        assert_eq!(runs, [Some("fish"), Some("htop"), Some("cargo"), None]);
     }
 
     #[test]
@@ -1630,7 +1635,7 @@ mod tests {
             tab: tab.to_owned(),
             tab_id: None,
             cwd: cwd.map(str::to_owned),
-            command: None,
+            runs: None,
             checkout: branch
                 .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
             closes: Closes::Pane,

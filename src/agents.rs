@@ -787,7 +787,7 @@ mod tests {
             tab: tab.to_owned(),
             tab_id: None,
             cwd: Some("/w/luneta".to_owned()),
-            command: None,
+            runs: None,
             checkout: None,
             closes: Closes::Pane,
         }

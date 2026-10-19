@@ -2080,7 +2080,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: None,
-            command: None,
+            runs: None,
             checkout: None,
             closes: close::Closes::Pane,
         };
@@ -2231,7 +2231,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: None,
-            command: None,
+            runs: None,
             checkout: None,
             closes: close::Closes::Pane,
         };
@@ -2334,7 +2334,7 @@ mod tests {
             tab: String::new(),
             tab_id: None,
             cwd: Some("/w/b".to_owned()),
-            command: None,
+            runs: None,
             checkout: None,
             closes: close::Closes::Pane,
         };
