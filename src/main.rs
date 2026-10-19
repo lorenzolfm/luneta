@@ -234,7 +234,10 @@ impl ZellijPlugin for State {
         request_permission(&PERMISSIONS);
         self.role = match configuration.get(MODE).map(|value| value.trim()) {
             None => Role::Picker,
-            Some(SIDEBAR) => Role::Sidebar(Tree::shared()),
+            Some(SIDEBAR) => {
+                let entries = configuration.get(menu::ENTRIES).map(String::as_str);
+                Role::Sidebar(Tree::shared(menu::Legend::new(entries)))
+            },
             Some(DOCK) => {
                 let mut sidebar = configuration.clone();
                 sidebar.insert(MODE.to_owned(), SIDEBAR.to_owned());
@@ -1393,7 +1396,7 @@ impl State {
             return self.handle_search_box_key(key.bare_key, term) || unscrolled;
         }
         // A key that does more than move the cursor, fold or open the menu
-        // is a `Command`, which it comes to by `Command::of` below, for `?`
+        // is a `Command`, which it comes to by `Command::of` below, for help
         // to list it.
         let drawn = match key.bare_key {
             BareKey::Down | BareKey::Char('j') => self.move_tree(1),
@@ -1402,7 +1405,6 @@ impl State {
             BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
             BareKey::Char(' ') => self.fold(None),
             BareKey::Char('m') => self.open_menu(None),
-            BareKey::Char('?') => self.open_help(None),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -1413,7 +1415,7 @@ impl State {
             },
             BareKey::Char(c) => match Command::of(c) {
                 Some(command) => self.command(command),
-                None if Command::opens(c) => self.open_help(Some(c)),
+                None if Command::opens(c) => self.open_help(c),
                 None => self.open_menu(Some(c)),
             },
             _ => false,
@@ -1422,7 +1424,7 @@ impl State {
     }
 
     /// Runs a command of the sidebar's own: a key at the top of the sidebar,
-    /// or a key of `?`. Says whether to draw.
+    /// or a key of help. Says whether to draw.
     fn command(&mut self, command: Command) -> bool {
         match command {
             Command::Search => self.search_tree(String::new()),
@@ -1448,15 +1450,14 @@ impl State {
         }
     }
 
-    /// Opens `?` at the bottom of the sidebar for the highlighted row: the
-    /// keys at the top of the menu, and the sidebar's commands, on the group
-    /// of commands `group` opens, or on the first. Says whether to draw.
-    fn open_help(&mut self, group: Option<char>) -> bool {
+    /// Opens help at the bottom of the sidebar for the highlighted row, on the
+    /// group of commands `group` opens. Says whether to draw.
+    fn open_help(&mut self, group: char) -> bool {
         let Some(row) = self.menu_row() else {
             return false;
         };
         let entries = self.menu_entries.as_deref();
-        let menu = SidebarMenu::help(entries, row, group, &mut self.menus);
+        let menu = SidebarMenu::help(entries, row, Some(group), &mut self.menus);
         let Role::Sidebar(tree) = &mut self.role else {
             return false;
         };
@@ -2197,6 +2198,7 @@ mod tests {
     #[test]
     fn a_fold_leaves_the_view_where_the_wheel_left_it() {
         let mut state = focused_sidebar();
+        state.size = (9, 30);
         let leaf = |id: u32| Leaf {
             id,
             title: format!("pane {id}"),
@@ -2721,10 +2723,10 @@ mod tests {
         }
     }
 
-    /// `?` opens the menu at the bottom of the sidebar with the sidebar's
-    /// commands under its keys, on a pane's row and on a session's. A command
-    /// in it closes it and runs as it does pressed at the top of the sidebar:
-    /// `/` opens the search.
+    /// `b` opens help at the bottom of the sidebar, and `Backspace` its top,
+    /// with `/` over the menu's keys, on a pane's row and on a session's. A
+    /// command in it closes it and runs as it does pressed at the top of the
+    /// sidebar: `/` opens the search.
     #[test]
     fn a_command_of_help_runs_as_it_does_at_the_top_of_the_sidebar() {
         let shown = |state: &State| {
@@ -2747,8 +2749,9 @@ mod tests {
                 assert!(tree.rows.select(at));
             }
             if through_help {
-                assert!(key(&mut state, BareKey::Char('?')), "row {at}");
-                assert_eq!(shown(&state), ['c', 'n', 'd', '/', 'b'], "row {at}");
+                assert!(key(&mut state, BareKey::Char('b')), "row {at}");
+                key(&mut state, BareKey::Backspace);
+                assert_eq!(shown(&state), ['/', 'c', 'n', 'd', 'b'], "row {at}");
             }
             assert!(key(&mut state, BareKey::Char('/')), "row {at}, through help: {through_help}");
             assert_eq!(menu_open(&state), None, "row {at}, through help: {through_help}");

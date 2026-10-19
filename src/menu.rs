@@ -107,18 +107,18 @@ const LEAVING_TICK: f64 = 0.1;
 type Spot = (usize, usize, usize, usize);
 
 /// A key of the sidebar's own that does more than move the cursor or fold a
-/// session. `?` lists each one beside the menu's keys. A command in a group
+/// session. Help lists each one beside the menu's keys. A command in a group
 /// is a key of that group, which a key of the sidebar's opens, as `b` then
 /// `s` briefs you on a session.
 ///
-/// The sidebar finds the command a key runs in `ALL`, by `of`, and `?` lists
-/// `ALL`, so no key runs a command that `?` leaves out. `key` and `does` match
-/// every command, so a command does not compile until it says what `?` shows
-/// for it, and the sidebar's `command` matches every command too. A command
-/// left out of `ALL` is dead code, which does not compile either, unless a
-/// key of the sidebar's names it: that compiles, and `?` leaves it out. Only
-/// `dev clippy` stops it, by way of `examples/profile.rs`, which compiles this
-/// module without the sidebar's keys.
+/// The sidebar finds the command a key runs in `ALL`, by `of`, and help lists
+/// `ALL`, so no key runs a command that help leaves out. `key` and `does`
+/// match every command, so a command does not compile until it says what help
+/// shows for it, and the sidebar's `command` matches every command too. A
+/// command left out of `ALL` is dead code, which does not compile either,
+/// unless a key of the sidebar's names it: that compiles, and help leaves it
+/// out. Only `dev clippy` stops it, by way of `examples/profile.rs`, which
+/// compiles this module without the sidebar's keys.
 #[deny(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -129,7 +129,8 @@ pub enum Command {
 }
 
 impl Command {
-    /// Every command, in the order `?` lists them.
+    /// Every command, in the order help lists them: the ones their own key
+    /// runs at the top, and the groups of the rest at the bottom.
     pub const ALL: &[Command] = &[
         Command::Search,
         Command::Brief(brief::Scope::Every),
@@ -164,7 +165,7 @@ impl Command {
         }
     }
 
-    /// What `?` says the command does.
+    /// What help says the command does.
     pub fn does(self) -> &'static str {
         match self {
             Command::Search => "Search",
@@ -175,7 +176,7 @@ impl Command {
     }
 
     /// The group the command is in, by the key that opens it and the name
-    /// `?` shows for it. None for a command its own key runs.
+    /// help shows for it. None for a command its own key runs.
     const fn group(self) -> Option<(char, &'static str)> {
         match self {
             Command::Search => None,
@@ -186,10 +187,10 @@ impl Command {
 
 /// No two commands share a key where they are, at the top of the sidebar or
 /// in one group, and no group opens on the key of a command at the top: `of`
-/// would find the first, and `?` would show both. Nor does a command at the
+/// would find the first, and help would show both. Nor does a command at the
 /// top, or a group of them, take the key of luneta's New or Delete group:
 /// the sidebar keeps a key for its command, and the group would be out of
-/// reach there, and gone from `?`.
+/// reach there, and gone from help.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
@@ -262,7 +263,7 @@ pub enum Entry {
     /// A key of the Delete group: closes the pane the menu is for, or kills
     /// its session.
     Close { key: char, scope: Scope },
-    /// A command of the sidebar's own, which `?` lists beside the menu's
+    /// A command of the sidebar's own, which help lists beside the menu's
     /// keys.
     Command(Command),
 }
@@ -342,15 +343,17 @@ impl Keys {
         Ok(Keys { root, open: Vec::new() })
     }
 
-    /// What `?` shows: the keys at the top of `menu`, and then the sidebar's
-    /// commands. A key of the menu's that a command has stays the command's,
-    /// as it does at the top of the sidebar.
+    /// Help: the sidebar's commands their own key runs, as `/` searches, then
+    /// the keys at the top of `menu`, then the groups of the other commands.
+    /// A key of the menu's that a command has stays the command's, as it does
+    /// at the top of the sidebar.
     pub fn help(menu: Keys) -> Self {
-        let mut root = menu.root;
-        root.retain(|entry| !Command::takes(entry.key()));
+        let own = |command: &Command| command.group().is_none();
+        let mut root: Vec<Entry> =
+            Command::ALL.iter().copied().filter(own).map(Entry::Command).collect();
+        root.extend(menu.root.into_iter().filter(|entry| !Command::takes(entry.key())));
         for command in Command::ALL.iter().copied() {
             let Some((key, name)) = command.group() else {
-                root.push(Entry::Command(command));
                 continue;
             };
             let group = root.iter_mut().find_map(|entry| match entry {
@@ -424,6 +427,27 @@ impl Keys {
         }
         self.open.push(at);
         Pressed::Moved
+    }
+}
+
+/// The top of help, which the sidebar shows at its bottom while it has the
+/// focus and no menu or search box is open. Each of its keys does at the top
+/// of the sidebar what it does in help. Or what is wrong with the menu, which
+/// shows nothing then.
+pub struct Legend(Result<Keys, String>);
+
+impl Legend {
+    /// The legend of a menu of `entries`. It shows the Delete group's key and
+    /// not what it deletes, which is the row's, so any row's scope will do.
+    pub fn new(entries: Option<&str>) -> Self {
+        Legend(Keys::new(entries, Scope::Pane).map(Keys::help))
+    }
+
+    pub fn shown(&self) -> Shown<'_> {
+        match &self.0 {
+            Ok(keys) => Shown::Keys(keys),
+            Err(reason) => Shown::Wrong(reason),
+        }
     }
 }
 
@@ -982,8 +1006,8 @@ impl Numbers {
 }
 
 /// The menu at the bottom of the sidebar, for the row highlighted when a key
-/// of the menu, or `?`, opened it: a pane, or a session. The sidebar keeps it
-/// while it has the focus, and while that pane is open.
+/// of the menu, or of help, opened it: a pane, or a session. The sidebar keeps
+/// it while it has the focus, and while that pane is open.
 pub struct SidebarMenu {
     /// Its number among the menus the sidebar has opened, which the answer to
     /// an agent it starts in another session carries.
@@ -1121,12 +1145,11 @@ impl SidebarMenu {
         }
     }
 
-    /// What `?` opens, numbered next among `numbers`: the keys at the top of
-    /// the menu for `row`, as `m` opens it, and then the sidebar's commands,
-    /// on the group of commands `group` opens, or on the first. A group of
-    /// commands has none of the menu's keys, and opens with yours gone wrong
-    /// too, over luneta's keys alone: `?` and `m` still say what is wrong
-    /// with yours.
+    /// Help, numbered next among `numbers`: the keys at the top of the menu
+    /// for `row`, as `m` opens it, and the sidebar's commands, on the group of
+    /// commands `group` opens, or on the first. A group of commands has none
+    /// of the menu's keys, and opens with yours gone wrong too, over luneta's
+    /// keys alone: the legend and `m` still say what is wrong with yours.
     pub fn help(
         entries: Option<&str>,
         row: Row,
@@ -2239,7 +2262,7 @@ mod tests {
         SidebarMenu::open(entries, row, key, &mut Numbers::default(), 0)
     }
 
-    /// `?` numbered 1 for `row`, on the group of commands `group` opens.
+    /// Help numbered 1 for `row`, on the group of commands `group` opens.
     fn help(entries: Option<&str>, row: Row, group: Option<char>) -> SidebarMenu {
         SidebarMenu::help(entries, row, group, &mut Numbers::default())
     }
@@ -2312,20 +2335,27 @@ mod tests {
     /// the menu keeps it.
     const SHADOWED: &str = r#"b "build"; s "status"; c "Claude" { t "/tigerstyle"; }"#;
 
-    /// `?` shows the keys at the top of the menu, as `m` does, luneta's Delete
-    /// group among them, and then the sidebar's commands, which keep their
-    /// keys from the menu's. So it does on a session's row, and with no menu
-    /// of yours. A menu that cannot be read says what is wrong with it, but
-    /// not over the brief's keys, which are none of its own: they open with
-    /// luneta's keys alone at the top.
+    /// Help shows `/` at the top, then the keys at the top of the menu, as `m`
+    /// does, luneta's Delete group among them, then the groups of the
+    /// sidebar's commands, which keep their keys from the menu's. So it does
+    /// on a session's row, and with no menu of yours, and so does the legend.
+    /// A menu that cannot be read says what is wrong with it, but not over the
+    /// brief's keys, which are none of its own: they open with luneta's keys
+    /// alone at the top.
     #[test]
-    fn help_shows_the_top_of_the_menu_and_then_the_sidebar_s_commands() {
+    fn help_shows_search_then_the_top_of_the_menu_then_the_groups_of_commands() {
+        let legend = |entries: Option<&str>| match Legend::new(entries).shown() {
+            Shown::Keys(keys) => Ok(shown(keys)),
+            Shown::Asking(..) | Shown::Leaving(_) => Err(String::new()),
+            Shown::Wrong(reason) => Err(reason.to_owned()),
+        };
         for (entries, on_row, on) in [
-            (Some(MENU), row(None), vec!['c', 'r', 'n', 'd', '/', 'b']),
-            (Some(SHADOWED), row(None), vec!['s', 'c', 'n', 'd', '/', 'b']),
-            (Some(MENU), session_row(None), vec!['c', 'r', 'n', 'd', '/', 'b']),
-            (None, row(None), vec!['n', 'd', '/', 'b']),
+            (Some(MENU), row(None), vec!['/', 'c', 'r', 'n', 'd', 'b']),
+            (Some(SHADOWED), row(None), vec!['/', 's', 'c', 'n', 'd', 'b']),
+            (Some(MENU), session_row(None), vec!['/', 'c', 'r', 'n', 'd', 'b']),
+            (None, row(None), vec!['/', 'n', 'd', 'b']),
         ] {
+            assert_eq!(legend(entries), Ok(on.clone()), "{entries:?}");
             let menu = help(entries, on_row, None);
             assert_eq!(on_show(Some(&menu)), Some(Ok(on)), "{entries:?}");
         }
@@ -2336,18 +2366,19 @@ mod tests {
             let menu = help(Some(entries), row(None), None);
             let wrong = wrong(Some(&menu)).expect("what is wrong");
             assert!(wrong.starts_with(said), "{wrong}");
+            assert_eq!(legend(Some(entries)), Err(wrong.to_owned()), "{entries}");
 
             let brief = help(Some(entries), row(None), Some('b'));
             assert_eq!(on_show(Some(&brief)), Some(Ok(vec!['z', 's', 'h'])), "{entries}");
             let top = press(Some(brief), &bare(BareKey::Backspace));
-            assert_eq!(on_show(top.as_ref()), Some(Ok(vec!['n', 'd', '/', 'b'])), "{entries}");
+            assert_eq!(on_show(top.as_ref()), Some(Ok(vec!['/', 'n', 'd', 'b'])), "{entries}");
         }
     }
 
-    /// A group of the menu opens from `?`, and `Backspace` comes back to it.
+    /// A group of the menu opens from help, and `Backspace` comes back to it.
     /// A delete key deletes as it does from `m`. A command closes the menu,
     /// for the sidebar to run it, on a session's row too, and so does a
-    /// command in a group of commands, which `?` opens on as the group's key
+    /// command in a group of commands, which help opens on as the group's key
     /// does at the top of the sidebar.
     #[test]
     fn a_key_of_help_opens_its_group_or_hands_the_sidebar_its_command() {
@@ -2355,7 +2386,7 @@ mod tests {
         let menu = press(top(), &char('c'));
         assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['t', 'm', 's'])));
         let menu = press(menu, &bare(BareKey::Backspace));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'n', 'd', '/', 'b'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['/', 'c', 'r', 'n', 'd', 'b'])));
         assert!(press(menu, &bare(BareKey::Esc)).is_none());
 
         let menu = press(top(), &char('d'));
@@ -2373,7 +2404,7 @@ mod tests {
             assert!(menu.is_none(), "{on_session}");
             assert_eq!(did, Some(Did::Command(Command::Brief(brief::Scope::Session))));
             let back = press(Some(brief()), &bare(BareKey::Backspace));
-            let top = vec!['c', 'r', 'n', 'd', '/', 'b'];
+            let top = vec!['/', 'c', 'r', 'n', 'd', 'b'];
             assert_eq!(on_show(back.as_ref()), Some(Ok(top)), "{on_session}");
         }
 
@@ -2388,9 +2419,9 @@ mod tests {
         }
     }
 
-    /// An agent `?` starts in another session waits for the answer to its own
-    /// menu, as one `m` starts does: an answer for another menu is from one
-    /// closed before it came.
+    /// An agent help starts in another session waits for the answer to its
+    /// own menu, as one `m` starts does: an answer for another menu is from
+    /// one closed before it came.
     #[test]
     fn an_agent_started_from_help_waits_for_its_own_answer() {
         let there = There { session: "elo".to_owned(), tab: Some(TabId(3)), };
@@ -2403,7 +2434,7 @@ mod tests {
         let help = SidebarMenu::help(Some(MENU), row(Some(there)), None, &mut Numbers(1));
         let menu = press(Some(help), &char('r')).expect("a menu");
         let menu = told(menu, None, b"", b"", &answer(1)).expect("a menu");
-        assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['c', 'r', 'n', 'd', '/', 'b'])));
+        assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['/', 'c', 'r', 'n', 'd', 'b'])));
         let menu = told(menu, None, b"", b"", &answer(2));
         let said = wrong(menu.as_ref());
         assert_eq!(said, Some("menu: the agent did not start: zellij opened no pane"));

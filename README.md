@@ -258,19 +258,18 @@ sidebar has a use of its own for, as `j`, `/` or `b`, stays the sidebar's: `m`
 opens the menu on its first group, where every key is the menu's. The menu
 closes when the sidebar loses the focus, and with a click.
 
-`?` opens it on its first group too, and under its keys, the sidebar's own
-commands: `/` to search, and the [brief](#brief)'s keys, in a group `b` opens.
-A key of the menu that a command has stays the command's, as it does in the
-sidebar.
+While the sidebar has the focus and no menu is open, its bottom shows the keys
+you can press there: `/` to search at the top, then the menu's first group,
+then the [brief](#brief)'s keys, in a group `b` opens. A key of the menu that a
+command has stays the command's.
 
 ```text
-─ luneta ──── luneta/sidebar ─
+─ luneta ─────────────────────
+ /  Search
  c  Claude ▸
  n  New ▸
  d  Delete ▸
- /  Search
  b  Brief ▸
- <ESC> - Close
 ```
 
 Your key opens the same menu floating at the bottom right of the tab, for the
@@ -363,8 +362,8 @@ break, written by a fast model from what each one's transcript says last.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-In the sidebar, `b` opens `?` on the brief's keys, for the row the cursor is
-on, and `Backspace` goes back to the rest of `?`:
+In the sidebar, `b` opens the brief's keys, for the row the cursor is on, and
+`Backspace` goes back to the rest of the sidebar's keys:
 
 | keys | brief |
 |---|---|
@@ -780,8 +779,7 @@ In the sidebar, once it has the focus:
 | `Space` | fold or unfold |
 | *a key of the [menu](#menu)* | open its group, or start its agent, for the highlighted pane |
 | `m` | open the menu on its first group, for the highlighted pane |
-| `?` | open the menu on its first group, with the sidebar's commands under its keys |
-| `b` | open `?` on the [brief](#brief)'s keys, for the highlighted row |
+| `b` | open the [brief](#brief)'s keys, for the highlighted row |
 | `/` | search |
 | `Esc` | back to the pane you came from |
 
