@@ -270,8 +270,9 @@ the menu from the first; `Esc` closes it.
 
 Every menu has luneta's own Delete group too, under `d`, with nothing to
 configure: `d d` deletes the highlighted row, and `d s` kills its session. On a
-pane's row, `d d` closes the pane; on a folded session's row, it kills the
-session. The floating menu does the same for the pane you are in, except in a tab with a
+pane's row, `d d` closes the pane; on the row of a session that lists none of
+its panes, folded or with none to list, it kills the session. The
+floating menu does the same for the pane you are in, except in a tab with a
 floating pane: the menu takes the floating focus from the pane you were in as
 it opens, and zellij then says the pane under it has the focus, so luneta cannot
 tell which you came from. There `d d` closes neither and says so, and goes on

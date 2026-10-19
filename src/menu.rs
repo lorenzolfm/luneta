@@ -46,9 +46,9 @@ const NO_PANE: &str = "menu: the pane you are in is no terminal, to start an age
 
 /// What the sidebar's menu says of a key that starts an agent, on a session's
 /// row, which the cursor is only on while it lists none of the session's
-/// panes.
-const NO_ROW_PANE: &str = "menu: a session's row has no pane to start an agent beside; unfold it, \
-                           and highlight one of its panes";
+/// panes: folded, or with none to list.
+const NO_ROW_PANE: &str = "menu: a session's row has no pane to start an agent beside; highlight a \
+                           pane, unfolding its session first if it is folded";
 
 /// What the floating menu says of a delete key when zellij has not said which
 /// session it is in.
