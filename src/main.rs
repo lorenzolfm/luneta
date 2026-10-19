@@ -27,6 +27,7 @@ use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
 use menu::{Command, Did, SidebarMenu, There};
 use elapsed::Age;
+use folds::Folds;
 use panes::Peeks;
 use pass::{At, Pass, Then};
 use places::Places;
@@ -1003,7 +1004,15 @@ impl State {
         let name = row.name.clone();
         let (verb, result) = match row.kind {
             Kind::Live => ("kill", kill_sessions(&[name.as_str()])),
-            Kind::Resurrectable => ("delete", delete_dead_session(&name)),
+            Kind::Resurrectable => {
+                let deleted = delete_dead_session(&name);
+                if deleted.is_ok() {
+                    // Gone for good: a session made later by its name is
+                    // another, and starts unfolded in every sidebar.
+                    Folds::shared().set(&name, false);
+                }
+                ("delete", deleted)
+            },
         };
         self.set_term(String::new());
         self.error = result.err().map(|e| format!("{verb} \"{name}\": {e}"));

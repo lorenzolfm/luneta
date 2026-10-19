@@ -174,7 +174,9 @@ focus on; the session you are in takes you back to your pane. It keeps its
 count and shows the dot of the agent that wants you most. A fold holds in the
 sidebar of every session, and after zellij restarts: the sidebars keep their
 folds in the cache zellij gives the plugin, one for each location it loads
-from, so every session's `load_plugins` names the same one.
+from, so every session's `load_plugins` names the same one. A session the
+picker deletes takes its fold with it: one made later by the same name starts
+unfolded.
 
 The wheel scrolls the list and leaves the highlight where it is, until you go
 somewhere else or press a key. A click on a row it scrolled to lights the row
