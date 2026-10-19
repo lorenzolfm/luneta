@@ -1541,7 +1541,11 @@ mod tests {
                     },
                 ),
             ],
-            vec![(&tty(2), Front::Asking), (&tty(3), Front::Interactive)],
+            vec![
+                (&tty(1), Front::Working),
+                (&tty(2), Front::Asking),
+                (&tty(3), Front::Interactive),
+            ],
         );
         let set = agents(&[]);
         tree.news.watch(&branches, &set, None, |_| None, at(20));

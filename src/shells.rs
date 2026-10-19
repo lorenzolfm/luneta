@@ -28,10 +28,10 @@ use crate::elapsed::{Held, Moment};
 
 pub const CONTEXT_VALUE: &str = "shells";
 
-/// Reads the record of each pane of the sessions it is handed, and for each
+/// Reads the record of each shell of the sessions it is handed, and for each
 /// command still going, how its terminal takes keys and where the processes
-/// in front of it sleep. A terminal that is gone would fail `ps` for all of
-/// them, so only the ones there are asked about.
+/// in front of it sleep. A command going on a terminal that is gone is no
+/// pane's, and would fail `ps` for all of them, so it is left out.
 const SCRIPT: &str = r#"
 cd "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/luneta/commands" 2>/dev/null || exit 0
 ttys=
@@ -39,7 +39,6 @@ for session in "$@"; do
   for file in "$session"/*; do
     [ -f "$file" ] || continue
     IFS= read -r said < "$file" || continue
-    printf 'said\t%s\t%s\t%s\n' "$session" "${file##*/}" "$said"
     case $said in
     'going '*)
       tty=${said#going * }
@@ -51,6 +50,7 @@ for session in "$@"; do
       esac
       ;;
     esac
+    printf 'said\t%s\t%s\t%s\n' "$session" "${file##*/}" "$said"
   done
 done
 [ -n "$ttys" ] || exit 0
@@ -87,21 +87,22 @@ impl Said {
         let (word, rest) = line.split_once(' ')?;
         let (secs, rest) = rest.split_once(' ')?;
         let secs: u64 = secs.parse().ok()?;
+        // The hook dates it to the second it started or ended in: the last
+        // moment of it, so that a command never ran longer than it did, nor
+        // ended before you left.
+        let moment = Moment::from_millis(secs.saturating_mul(1000).saturating_add(999));
         match word {
             "going" => {
                 let (tty, command) = rest.split_once(' ')?;
-                let since = Moment::from_millis(secs.saturating_mul(1000));
-                Some(Said::Going { command: command.to_owned(), since, tty: tty.to_owned() })
+                let (command, tty) = (command.to_owned(), tty.to_owned());
+                Some(Said::Going { command, since: moment, tty })
             },
             "ended" => {
                 let (status, rest) = rest.split_once(' ')?;
                 let (took, command) = rest.split_once(' ')?;
-                // The hook dates it to the second it ended in: the last
-                // moment of it, so that it never ended before you left.
-                let at = Moment::from_millis(secs.saturating_mul(1000).saturating_add(999));
                 let took = Held::from_millis(took.parse().ok()?);
                 let (status, command) = (status.parse().ok()?, command.to_owned());
-                Some(Said::Ended { command, at, status, took })
+                Some(Said::Ended { command, at: moment, status, took })
             },
             "stopped" => Some(Said::Stopped),
             _ => None,
@@ -110,10 +111,9 @@ impl Said {
 }
 
 /// What the command in front of a terminal does.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Front {
     /// It works, and reads nothing from the terminal.
-    #[default]
     Working,
     /// It waits for you to type: it reads the terminal a line at a time, or
     /// with the echo off, as a password prompt does.
@@ -142,8 +142,8 @@ impl Front {
     /// `stty -a` writes them, and the processes in front of it. The shell
     /// itself in front, its terminal a key at a time, is its own `read`
     /// asking you something, as fish's line editor takes the keys.
-    fn of(modes: Option<&str>, front: &[Process]) -> Self {
-        let has = |mode: &str| modes.is_some_and(|modes| modes.split_whitespace().any(|m| m == mode));
+    fn of(modes: &str, front: &[Process]) -> Self {
+        let has = |mode: &str| modes.split_whitespace().any(|m| m == mode);
         let shell = front.iter().any(|process| process.stat.contains('s'));
         let reading = front.iter().any(|process| READING.contains(&process.wchan));
         if has("-icanon") {
@@ -235,7 +235,7 @@ impl Shells {
         }
         for (tty, modes) in modes {
             let front = fronts.get(terminal(tty)).map_or(&[][..], Vec::as_slice);
-            self.fronts.insert(tty.to_owned(), Front::of(Some(modes), front));
+            self.fronts.insert(tty.to_owned(), Front::of(modes, front));
         }
     }
 
@@ -244,10 +244,10 @@ impl Shells {
         self.said.get(session)?.get(&pane).map(|(started, said)| (*started, said))
     }
 
-    /// What the command in front of `tty` does: at work, unless its terminal
-    /// says otherwise.
-    pub fn front(&self, tty: &str) -> Front {
-        self.fronts.get(tty).copied().unwrap_or_default()
+    /// What the command in front of `tty` does, or nothing where the script
+    /// found no terminal to ask.
+    pub fn front(&self, tty: &str) -> Option<Front> {
+        self.fronts.get(tty).copied()
     }
 
     /// The shells that said `said`, each in its session and pane, started at
@@ -278,7 +278,7 @@ mod tests {
             Said::read("going 1760900000 /dev/pts/3 cargo build --release"),
             Some(Said::Going {
                 command: "cargo build --release".to_owned(),
-                since: Moment::from_millis(1_760_900_000_000),
+                since: Moment::from_millis(1_760_900_000_999),
                 tty: "/dev/pts/3".to_owned(),
             })
         );
@@ -315,14 +315,13 @@ mod tests {
         let password = "speed 38400 baud; line = 0; isig icanon iexten -echo echoe";
         let ps = |stat, wchan| Process { stat, wchan };
         for (modes, front, said) in [
-            (Some(cooked), vec![ps("S+", "hrtimer_nanosleep")], Front::Working),
-            (Some(cooked), vec![ps("S+", "do_wait"), ps("S+", "wait_woken")], Front::Asking),
-            (Some(cooked), vec![ps("S+", "ttyin")], Front::Asking),
-            (Some(password), vec![ps("Ss+", "0")], Front::Asking),
-            (Some(raw), vec![ps("S+", "wait_woken")], Front::Interactive),
-            (Some(raw), vec![ps("Sl+", "do_epoll_wait")], Front::Interactive),
-            (Some(raw), vec![ps("Ss+", "poll_schedule_timeout.constprop.0")], Front::Asking),
-            (None, vec![], Front::Working),
+            (cooked, vec![ps("S+", "hrtimer_nanosleep")], Front::Working),
+            (cooked, vec![ps("S+", "do_wait"), ps("S+", "wait_woken")], Front::Asking),
+            (cooked, vec![ps("S+", "ttyin")], Front::Asking),
+            (password, vec![ps("Ss+", "0")], Front::Asking),
+            (raw, vec![ps("S+", "wait_woken")], Front::Interactive),
+            (raw, vec![ps("Sl+", "do_epoll_wait")], Front::Interactive),
+            (raw, vec![ps("Ss+", "poll_schedule_timeout.constprop.0")], Front::Asking),
         ] {
             assert_eq!(Front::of(modes, &front), said, "{modes:?} {front:?}");
         }
@@ -365,16 +364,17 @@ mod tests {
         assert_eq!(shells.said("luneta", 6), None);
         assert!(matches!(shells.said("bipa", 3), Some((_, Said::Going { .. }))));
         assert_eq!(shells.said("bipa", 4), None);
-        assert_eq!(shells.front("/dev/pts/3"), Front::Working);
-        assert_eq!(shells.front("/dev/pts/4"), Front::Asking);
-        assert_eq!(shells.front("/dev/pts/9"), Front::Interactive);
+        assert_eq!(shells.front("/dev/pts/3"), Some(Front::Working));
+        assert_eq!(shells.front("/dev/pts/4"), Some(Front::Asking));
+        assert_eq!(shells.front("/dev/pts/9"), Some(Front::Interactive));
 
         shells.ingest(Some(1), answer.as_bytes());
         assert_eq!(shells.said("luneta", 3), None);
     }
 
     /// The script reads the records of the sessions it is handed, and no
-    /// others, and asks about the terminal of a command going.
+    /// others, and asks about the terminal of a command going. One going on
+    /// a terminal that is gone is no pane's.
     #[test]
     fn the_script_reads_the_records_of_the_sessions_it_is_handed() {
         let runtime = std::env::temp_dir().join(format!("luneta-shells-{}", std::process::id()));
@@ -382,6 +382,7 @@ mod tests {
         for (session, pane, said) in [
             ("s", "1.90", "going 100 /dev/null sleep 30\n"),
             ("s", "2.90", "ended 100 1 2500 false\n"),
+            ("s", "3.90", "going 100 /dev/luneta-gone sleep 30\n"),
             ("gone", "1.90", "ended 100 0 2500 true\n"),
         ] {
             std::fs::create_dir_all(commands.join(session)).unwrap();
@@ -401,6 +402,7 @@ mod tests {
         let one = shells.said("s", 1);
         assert!(matches!(one, Some((_, Said::Going { tty, .. })) if tty == "/dev/null"), "{one:?}");
         assert!(matches!(shells.said("s", 2), Some((_, Said::Ended { status: 1, .. }))));
+        assert_eq!(shells.said("s", 3), None);
         assert_eq!(shells.said("gone", 1), None);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.lines().any(|line| line.starts_with("stty\t/dev/null\t")), "{stdout}");

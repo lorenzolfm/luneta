@@ -372,11 +372,12 @@ impl News {
         match said {
             Said::Going { command, since, tty } => {
                 let age = self.now.since(*since);
+                // A terminal that said nothing says neither.
                 let mark = match self.shells.front(tty) {
                     _ if age < LONG => return None,
-                    Front::Working => Mark::Running { age },
-                    Front::Asking => Mark::Asking { age },
-                    Front::Interactive => return None,
+                    Some(Front::Working) => Mark::Running { age },
+                    Some(Front::Asking) => Mark::Asking { age },
+                    Some(Front::Interactive) | None => return None,
                 };
                 Some((mark, command))
             },
@@ -652,19 +653,21 @@ mod tests {
 
     /// A command the hook says is going has no mark for its first second. It
     /// is at work after that, or waits for you to type, as its terminal says,
-    /// and takes the terminal over as an editor does, and then has none. Its
-    /// row goes by the whole command, which the title cuts.
+    /// and takes the terminal over as an editor does, and then has none, as
+    /// on a terminal that said nothing. Its row goes by the whole command,
+    /// which the title cuts.
     #[test]
     fn a_command_its_hook_says_runs_a_while_is_at_work_or_waits_for_you() {
         let (branches, agents) = session("cargo build --relea ~/w/s", "busy", 0, at(100));
         let build = "cargo build --release";
         for (front, mark) in [
-            (Front::Working, Some(Mark::Running { age: Held::from_secs(2) })),
-            (Front::Asking, Some(Mark::Asking { age: Held::from_secs(2) })),
-            (Front::Interactive, None),
+            (Some(Front::Working), Some(Mark::Running { age: Held::from_secs(2) })),
+            (Some(Front::Asking), Some(Mark::Asking { age: Held::from_secs(2) })),
+            (Some(Front::Interactive), None),
+            (None, None),
         ] {
-            let said = vec![("s", 1, at(0), going(build, at(100)))];
-            let shells = Shells::of(said, vec![("/dev/pts/3", front)]);
+            let fronts = front.map(|front| ("/dev/pts/3", front)).into_iter().collect();
+            let shells = Shells::of(vec![("s", 1, at(0), going(build, at(100)))], fronts);
             let mut news = News { shells, ..News::default() };
             news.watch(&branches, &agents, None, untitled, Moment::from_millis(100_500));
             assert_eq!(command_of(&news, false), None, "{front:?}");
