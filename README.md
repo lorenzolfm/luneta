@@ -280,11 +280,11 @@ pane of its own beside that pane, `n t` a tab of its session, and `n s` a
 session, which you go to. The session is named as the picker's directories
 name that directory, `luneta-main` for a worktree of `luneta`, with a `-2`
 when a session has that name. The floating menu does the same for the pane you
-are in. A pane of another session opens there, and you go to it; a tab of
-another session opens once you are there, as zellij makes a tab as big as a
-client of its session, and one with none would have no room for its panes.
-A session's row has no pane, nor a directory to open in, and its `n` keys say
-so.
+are in. A pane of another session opens there, and you go to it, and so does a
+tab of a session with a client. A tab of a session with none, as most are,
+opens once you are there: zellij makes a tab as big as a client of its
+session, and one with none would have no room for its panes. A session's row
+has no pane, nor a directory to open in, and its `n` keys say so.
 
 ```text
 ─ New ─────────── luneta/main ─

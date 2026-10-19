@@ -92,8 +92,8 @@ pub const MENU_KEY: &str = "luneta_menu";
 /// name the session for it.
 pub const NAMING_VALUE: &str = "naming";
 /// The sidebar's menu asking which clients the session a tab opens in has,
-/// before it takes you there: yours is the one that is not among them once
-/// you have come.
+/// before it takes you there: the tab opens before you go to a session with
+/// one, and once you have come to one with none.
 pub const ARRIVING_VALUE: &str = "arriving";
 /// The tab that opens in another session once you are there, and the
 /// session, for the sidebar to say why when it does not open.
@@ -702,21 +702,45 @@ fn opened(stdout: &[u8]) -> Option<u32> {
     String::from_utf8_lossy(stdout).trim().strip_prefix("terminal_")?.parse().ok()
 }
 
-/// The client on its way to another session, to open a tab there in `cwd`
-/// once you have come. zellij makes a tab as big as a client of its session:
-/// one it opens in a session with none has no room for its panes, and a
-/// client that comes to it finds no tab. Opened once you are there, it is as
-/// big as your terminal, and you are in it.
-///
-/// You are there once zellij lists a client of the session that it did not
-/// list before you went: a client that was there already would open the tab
-/// before you come. zellij gives a client the lowest id free, so one of
-/// those that leaves as you come hands you its id, and no tab opens.
+/// Opens a tab in the session `$1`, in the directory `$2`, and then lists the
+/// session's tabs: zellij prints the new tab's id, and the list says where
+/// that tab stands. The tab moves no client to it: zellij would move the
+/// client that last typed in the session, or else its first, and leave you
+/// where you come. Fails only when no tab opened.
+const OPEN_TAB: &str = r#"zellij --session "$1" action new-tab --no-focus --cwd "$2" || exit
+zellij --session "$1" action list-tabs
+exit 0"#;
+
+/// Opens a tab of `session`, which has a client to make it as big as its
+/// terminal, in `cwd`, as `OPEN_TAB` does. A client that leaves between the
+/// ask and the tab leaves it no room, as a session with none would.
+fn open_tab<'a>(session: &'a str, cwd: &'a str) -> [&'a str; 6] {
+    ["sh", "-c", OPEN_TAB, "sh", session, cwd]
+}
+
+/// Where the tab `OPEN_TAB` opened stands among the tabs of its session, by
+/// the id zellij printed for it and the list after it, or none when the list
+/// does not have it.
+fn tab_position(stdout: &[u8]) -> Option<usize> {
+    let printed = String::from_utf8_lossy(stdout);
+    let mut lines = printed.lines();
+    let id = lines.next()?.trim();
+    lines.find_map(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+        [tab, position, ..] if tab == id => position.parse().ok(),
+        _ => None,
+    })
+}
+
+/// The client on its way to another session, one with no client, to open a
+/// tab there in `cwd` once you have come. zellij makes a tab as big as a
+/// client of its session: one it opens in a session with none has no room
+/// for its panes, and a client that comes to it finds no tab. Opened once you
+/// are there, it is as big as your terminal, and you are in it:
+/// `zellij action new-tab` opens the tab for the client that last typed in
+/// the session, or else for its first, and you are its one client.
 struct Arriving {
     session: String,
     cwd: String,
-    /// The clients the session had before you went.
-    before: Vec<ClientId>,
     ticks: u32,
     /// Whether zellij has yet to answer the last ask for the clients.
     asking: bool,
@@ -725,11 +749,11 @@ struct Arriving {
 impl Arriving {
     /// Goes to the pane `beside` of the session `there` names, handing the
     /// focus back to `back` first, for a tab to open there in the directory
-    /// that pane works in once a client not `before` has come.
-    fn go(there: There, beside: Beside, before: Vec<ClientId>, back: Option<u32>) -> Self {
+    /// that pane works in once you have come.
+    fn go(there: There, beside: Beside, back: Option<u32>) -> Self {
         hand_back(back);
         switch_session_with_focus(&there.session, None, Some((beside.pane, false)));
-        Arriving { session: there.session, cwd: beside.cwd, before, ticks: 0, asking: false }
+        Arriving { session: there.session, cwd: beside.cwd, ticks: 0, asking: false }
     }
 
     /// Asks zellij which clients the session has, with `context`, once it has
@@ -747,15 +771,14 @@ impl Arriving {
         Ok(())
     }
 
-    /// Opens the tab once zellij lists a client of the session that it did
-    /// not list before you went, and says whether it did. An answer that is
-    /// no list of the clients opens nothing. The tab says why when it does
-    /// not open, by `TAB_VALUE`: the menu is gone by then.
+    /// Opens the tab once zellij lists a client of the session, which had
+    /// none, and says whether it did. An answer that is no list of the
+    /// clients opens nothing. The tab says why when it does not open, by
+    /// `TAB_VALUE`: the menu is gone by then.
     fn listed(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
         self.asking = false;
         let come = exit_code == Some(0)
-            && close::clients_listed(stdout)
-                .is_some_and(|now| now.iter().any(|client| !self.before.contains(client)));
+            && close::clients_listed(stdout).is_some_and(|clients| !clients.is_empty());
         if come {
             let session = self.session.as_str();
             let cwd = self.cwd.as_str();
@@ -883,8 +906,9 @@ impl Target {
     /// opens at once. Another session opens your shell itself, and a session
     /// is named once `WORKTREES` says whether the directory is a worktree: the
     /// menu, with `keys` on show, waits for the answer. A tab of another
-    /// session opens once you are there, and the menu asks which clients it
-    /// has before it takes you there.
+    /// session opens before you go there when the session has a client, and
+    /// once you are there when it has none: the menu asks which clients it
+    /// has first.
     fn open(self, keys: Keys, new: New, menu: u64, frame: u64) -> Stage {
         let beside = match self.beside() {
             Ok(beside) => beside,
@@ -911,7 +935,7 @@ impl Target {
             },
             (New::Tab, Some(there)) => {
                 run_command(&close::clients_of(&there.session), numbered(ARRIVING_VALUE, menu));
-                Stage::Waiting(keys, Wait::Tab(beside, there))
+                Stage::Waiting(keys, Wait::Clients(beside, there))
             },
         }
     }
@@ -988,8 +1012,8 @@ enum Stage {
     /// The client is on its way to another session, and the session it
     /// leaves ends once it is gone. Keys do nothing.
     Leaving(Leaving),
-    /// The client is on its way to another session, to open a tab there once
-    /// it has come. Nothing shows, and keys do nothing.
+    /// The client is on its way to another session, one with no client, to
+    /// open a tab there once it has come. Nothing shows, and keys do nothing.
     Arriving(Arriving),
     /// What is wrong with the keys, with the row, or with what a key asked
     /// for. Any key closes the menu.
@@ -1010,8 +1034,12 @@ enum Wait {
     /// Another session opens your shell beside a pane of it, for the menu to
     /// go there.
     Shell(Beside, There),
-    /// Another session says which clients it has, for the menu to take you
-    /// to a pane of it, and open a tab there once you are the one more.
+    /// Another session says which clients it has: with one, for the menu to
+    /// open a tab of it, and with none, to take you to a pane of it and open
+    /// the tab there once you have come.
+    Clients(Beside, There),
+    /// Another session, which has a client, opens a tab, for the menu to take
+    /// you to it.
     Tab(Beside, There),
     /// Another session closes a pane or a tab of it, for a pane that works in
     /// `cwd`.
@@ -1026,8 +1054,8 @@ impl Wait {
     fn value(&self) -> &str {
         match self {
             Wait::Start(..) => START_VALUE,
-            Wait::Shell(..) => OPENING_VALUE,
-            Wait::Tab(..) => ARRIVING_VALUE,
+            Wait::Shell(..) | Wait::Tab(..) => OPENING_VALUE,
+            Wait::Clients(..) => ARRIVING_VALUE,
             Wait::Close { .. } => CLOSING_VALUE,
             Wait::Name(_) => NAMING_VALUE,
         }
@@ -1041,7 +1069,8 @@ impl Wait {
         match self {
             Wait::Start(..) => Some(("the agent did not start", "zellij opened no pane")),
             Wait::Shell(..) => Some(("the pane did not open", "zellij opened none")),
-            Wait::Tab(..) => Some((NO_TAB, NO_CLIENTS)),
+            Wait::Clients(..) => Some((NO_TAB, NO_CLIENTS)),
+            Wait::Tab(..) => Some((NO_TAB, "zellij opened none")),
             Wait::Close { .. } => Some(("nothing closed", "zellij said nothing")),
             Wait::Name(_) => None,
         }
@@ -1050,9 +1079,10 @@ impl Wait {
     /// The directory what the menu waits on is in.
     fn cwd(&self) -> Option<&str> {
         match self {
-            Wait::Start(beside, _) | Wait::Shell(beside, _) | Wait::Tab(beside, _) => {
-                Some(&beside.cwd)
-            },
+            Wait::Start(beside, _)
+            | Wait::Shell(beside, _)
+            | Wait::Clients(beside, _)
+            | Wait::Tab(beside, _) => Some(&beside.cwd),
             Wait::Name(cwd) => Some(cwd),
             Wait::Close { cwd } => cwd.as_deref(),
         }
@@ -1264,14 +1294,16 @@ impl SidebarMenu {
 
     /// What a command the menu waits on said: the agent's pane or your
     /// shell's open in another session, which clients a session a tab opens
-    /// in has, what a delete key closes closed, or whether the directory a
-    /// session starts in is a worktree. The menu goes to that pane, and to the
-    /// session when zellij says not which it is, or takes you to the row's
-    /// pane, for the tab to open once you have come, starts the session,
-    /// named as the picker names a directory with a postfix when `taken`
-    /// holds the name, or closes, or says what zellij said went wrong. None
-    /// once it went or closed. An answer for anything the menu does not wait
-    /// for, or for another menu, is from one closed before it came.
+    /// in has, the tab open, what a delete key closes closed, or whether the
+    /// directory a session starts in is a worktree. The menu goes to that pane,
+    /// and to the session when zellij says not which it is, or opens the tab
+    /// of a session with a client and goes to it, and to the row's pane when
+    /// zellij says not where it is, or takes you to the row's pane of a
+    /// session with none, for the tab to open once you have come, starts the
+    /// session, named as the picker names a directory with a postfix when
+    /// `taken` holds the name, or closes, or says what zellij said went wrong.
+    /// None once it went or closed. An answer for anything the menu does not
+    /// wait for, or for another menu, is from one closed before it came.
     pub fn answered(
         self,
         exit_code: Option<i32>,
@@ -1291,12 +1323,35 @@ impl SidebarMenu {
             return Some(self.failed(stderr, what, nothing));
         }
         match wait {
-            Wait::Tab(beside, there) => {
-                let Some(before) = close::clients_listed(stdout) else {
+            Wait::Clients(beside, there) => {
+                let Some(clients) = close::clients_listed(stdout) else {
                     return Some(self.failed(stderr, NO_TAB, NO_CLIENTS));
                 };
-                let arriving = Arriving::go(there.clone(), beside.clone(), before, self.back);
-                return Some(SidebarMenu { stage: Stage::Arriving(arriving), ..self });
+                let (beside, there) = (beside.clone(), there.clone());
+                if clients.is_empty() {
+                    let arriving = Arriving::go(there, beside, self.back);
+                    return Some(SidebarMenu { stage: Stage::Arriving(arriving), ..self });
+                }
+                let opening = numbered(OPENING_VALUE, self.number);
+                run_command(&open_tab(&there.session, &beside.cwd), opening);
+                let mut menu = self;
+                if let Stage::Waiting(_, wait) = &mut menu.stage {
+                    *wait = Wait::Tab(beside, there);
+                }
+                return Some(menu);
+            },
+            Wait::Tab(beside, there) => {
+                hand_back(self.back);
+                match tab_position(stdout) {
+                    Some(position) => {
+                        switch_session_with_focus(&there.session, Some(position), None);
+                    },
+                    // The tab is open, and zellij did not say where it
+                    // stands: the row's pane.
+                    None => {
+                        switch_session_with_focus(&there.session, None, Some((beside.pane, false)));
+                    },
+                }
             },
             Wait::Name(cwd) => {
                 hand_back(self.back);
@@ -2433,21 +2488,22 @@ mod tests {
     }
 
     /// zellij makes a tab of a session with no client with no room for its
-    /// panes, so a tab of another session opens once you are there: the menu
-    /// asks which clients the session has, takes you to the row's pane,
+    /// panes, and a tab `zellij action` opens in a session with one is for
+    /// that client, not for you. The menu asks which clients the session has.
+    /// With one, it opens a tab that moves no client, waits for zellij to say
+    /// it has, and goes there. With none, it takes you to the row's pane,
     /// outlasts the focus on the way, and asks zellij for the session's
-    /// clients until it lists one it did not list before you went. A client
-    /// that was there already is not you, nor is one an answer for another
-    /// menu lists, and a key does nothing meanwhile, nor an answer that is no
-    /// list. When zellij cannot list the clients before you go, or you take
-    /// too long to come, the menu says no tab opened.
+    /// clients until it lists one, which is you. An answer for another menu
+    /// does nothing, nor does a key meanwhile, nor an answer that is no list.
+    /// When zellij cannot list the clients before you go, opens no tab, or
+    /// you take too long to come, the menu says no tab opened.
     #[test]
-    fn a_tab_of_another_session_opens_once_you_are_there() {
+    fn a_tab_of_another_session_opens_for_you() {
         let there = There { session: "elo".to_owned(), tab: Some(TabId(3)) };
         let header = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n";
-        let before = format!("{header}1 terminal_7 sh\n");
-        let come = format!("{before}2 terminal_2 sh\n");
+        let one = format!("{header}1 terminal_7 sh\n");
         let none: &[u8] = b"";
+        let refused = b"There is no active session!\n";
         let counting = || {
             let menu = press(open(None, row(Some(there.clone())), Some('n')), &char('t'));
             let menu = menu.expect("a menu");
@@ -2456,11 +2512,34 @@ mod tests {
             assert_eq!(menu.cwd(), Some("/w/elo"));
             menu
         };
-        // The session has a client of its own before you go.
-        let arriving = || {
+        let counted = |clients: &str| {
             let counted = numbered(ARRIVING_VALUE, 1);
-            let menu = told(counting(), Some(0), before.as_bytes(), none, &counted);
-            let menu = menu.expect("a menu");
+            told(counting(), Some(0), clients.as_bytes(), none, &counted).expect("a menu")
+        };
+
+        // The session has a client of its own: the tab opens before you go.
+        let opening = || {
+            let menu = counted(&one);
+            assert!(matches!(menu.stage, Stage::Waiting(_, Wait::Tab(..))));
+            assert!(!menu.lasts());
+            assert_eq!(menu.cwd(), Some("/w/elo"));
+            menu
+        };
+        let opened = &b"4\nTAB_ID  POSITION  NAME\n0  0  Tab #1\n4  1  Tab #2\n"[..];
+        let menu = told(opening(), Some(0), opened, none, &numbered(OPENING_VALUE, 2));
+        assert!(matches!(menu.expect("a menu").stage, Stage::Waiting(_, Wait::Tab(..))));
+        for printed in [opened, b"4\n"] {
+            let gone = told(opening(), Some(0), printed, none, &numbered(OPENING_VALUE, 1));
+            assert!(gone.is_none(), "{printed:?}");
+        }
+        let menu = told(opening(), Some(1), none, refused, &numbered(OPENING_VALUE, 1));
+        let said = format!("menu: {NO_TAB}: There is no active session!");
+        assert_eq!(wrong(menu.as_ref()), Some(said.as_str()));
+        assert!(press(Some(opening()), &bare(BareKey::Esc)).is_none());
+
+        // The session has none: the tab opens once you have come.
+        let arriving = || {
+            let menu = counted(header);
             assert!(menu.lasts());
             assert!(menu.shown().is_none());
             assert_eq!(menu.cwd(), Some("/w/elo"));
@@ -2468,13 +2547,12 @@ mod tests {
         };
         let clients = numbered(close::CLIENTS_VALUE, 1);
         let menu = press(Some(arriving()), &bare(BareKey::Esc)).expect("a menu").tick();
-        let menu = menu.clients(1, Some(0), before.as_bytes(), &clients).expect("a menu");
-        let refused = b"There is no active session!\n";
+        let menu = menu.clients(1, Some(0), header.as_bytes(), &clients).expect("a menu");
         let menu = menu.clients(1, Some(1), refused, &clients).expect("a menu");
         let elsewhere = numbered(close::CLIENTS_VALUE, 2);
-        let menu = menu.clients(1, Some(0), come.as_bytes(), &elsewhere).expect("a menu");
+        let menu = menu.clients(1, Some(0), one.as_bytes(), &elsewhere).expect("a menu");
         assert!(menu.lasts());
-        assert!(menu.clients(1, Some(0), come.as_bytes(), &clients).is_none());
+        assert!(menu.clients(1, Some(0), one.as_bytes(), &clients).is_none());
 
         assert!(press(Some(counting()), &bare(BareKey::Esc)).is_none());
         for (exit_code, stdout, stderr, said) in [
@@ -2943,6 +3021,24 @@ mod tests {
         assert_eq!(opened(b"terminal_12\n"), Some(12));
         assert_eq!(opened(b"plugin_3\n"), None);
         assert_eq!(opened(b""), None);
+    }
+
+    /// The tab `OPEN_TAB` opened stands where the list after its id puts it,
+    /// which is not its id once a tab before it has closed. A tab the list
+    /// does not have stands nowhere the menu knows.
+    #[test]
+    fn a_tab_opened_in_another_session_stands_where_its_list_says() {
+        let list = "TAB_ID  POSITION  NAME\n0  0  Tab #1\n2  1  Tab #3\n3  2  my tab\n";
+        for (printed, position) in [
+            (format!("3\n{list}"), Some(2)),
+            (format!("2\n{list}"), Some(1)),
+            (format!("5\n{list}"), None),
+            ("3\n".to_owned(), None),
+            (list.to_owned(), None),
+            (String::new(), None),
+        ] {
+            assert_eq!(tab_position(printed.as_bytes()), position, "{printed:?}");
+        }
     }
 
     /// zellij takes a directory a plugin names under `/tmp`, `/data`,
