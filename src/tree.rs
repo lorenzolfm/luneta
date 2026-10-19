@@ -13,7 +13,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
-use crate::agents::{self, AgentRow, AgentSet, Status};
+use crate::agents::{AgentRow, AgentSet, Status};
 use crate::brief;
 use crate::checkouts::{Checkout, Checkouts, Said};
 use crate::close::{self, Act, Closes};
@@ -24,6 +24,7 @@ use crate::elapsed::{Age, Held};
 use crate::folds::Folds;
 use crate::icons::{self, Icons};
 use crate::menu::{Legend, SidebarMenu};
+use crate::news::News;
 use crate::places::Places;
 
 /// What a placeholder runs: the column each tab keeps for the sidebar, which
@@ -210,9 +211,9 @@ pub struct SessionNode {
     pub current: bool,
     pub folded: bool,
     pub waiting: usize,
-    /// The status of the agent that wants you most, for a folded session to
+    /// The mark of the pane that wants you most, for a folded session to
     /// show in place of the rows it hides.
-    pub loudest: Option<Status>,
+    pub loudest: Option<Mark>,
     /// The characters of the name a search lands on.
     pub hits: Vec<usize>,
 }
@@ -223,7 +224,7 @@ pub struct PaneNode {
     /// The id zellij keeps for its tab, once its session has said.
     pub tab: Option<TabId>,
     pub label: String,
-    pub agent: Option<Mark>,
+    pub mark: Option<Mark>,
     /// What the pane's terminal runs in the foreground, by its binary's name.
     pub runs: Option<String>,
     /// What is checked out where the pane works, for the line under its row.
@@ -236,18 +237,83 @@ pub struct PaneNode {
 impl PaneNode {
     /// The program that runs in the pane, by its binary's name, for its icon:
     /// Claude Code for an agent claude-ps finds there, whatever its terminal
-    /// has in front.
+    /// has in front. A shell that finished a command is back at its prompt.
     pub fn program(&self) -> Option<&str> {
-        match self.agent {
-            Some(_) => Some(icons::AGENT),
-            None => self.runs.as_deref(),
+        match self.mark {
+            Some(Mark::Agent { .. } | Mark::Finished { .. }) => Some(icons::AGENT),
+            Some(Mark::Ran { .. }) | None => self.runs.as_deref(),
         }
     }
 }
 
-pub struct Mark {
-    pub status: Status,
-    pub age: Held,
+/// What a pane's row shows of what goes on in it, beside its label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// An agent in its status, and how long it has held it. An idle one has
+    /// been seen since it finished.
+    Agent { status: Status, age: Held },
+    /// An agent that finished since you were last in its pane, and how long
+    /// it has been idle.
+    Finished { age: Held },
+    /// A command its shell finished since you were last in its pane, and how
+    /// long ago.
+    Ran { age: Held },
+}
+
+impl Mark {
+    /// The mark of `leaf`, with `agent` in it, as `news` has it, and its
+    /// label: a command its shell finished goes by the command. The pane you
+    /// are in, as `here` says, has nothing new: you see it.
+    fn of(
+        news: &News,
+        session: &str,
+        leaf: &Leaf,
+        agent: Option<&AgentRow>,
+        here: bool,
+    ) -> (Option<Mark>, String) {
+        let Some(agent) = agent else {
+            return match news.ran(session, leaf.id).filter(|_| !here) {
+                Some((command, age)) => (Some(Mark::Ran { age }), command.to_owned()),
+                None => (None, label(leaf, None)),
+            };
+        };
+        let mark = if !here && news.finished(session, leaf.id, agent) {
+            Mark::Finished { age: agent.age }
+        } else {
+            Mark::Agent { status: agent.status.clone(), age: agent.age }
+        };
+        (Some(mark), label(leaf, Some(agent)))
+    }
+
+    pub fn age(&self) -> Held {
+        match self {
+            Mark::Agent { age, .. } | Mark::Finished { age } | Mark::Ran { age } => *age,
+        }
+    }
+
+    /// Whether what it shows is new since you were last in its pane.
+    pub fn is_new(&self) -> bool {
+        matches!(self, Mark::Finished { .. } | Mark::Ran { .. })
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        matches!(self, Mark::Agent { status: Status::Waiting, .. })
+    }
+
+    /// How much its pane wants you, the most first: an agent that asked you
+    /// something, then what is new, then an agent at work, and then one you
+    /// have seen finish.
+    fn rank(&self) -> u8 {
+        match self {
+            Mark::Agent { status: Status::Waiting, .. } => 0,
+            Mark::Finished { .. } | Mark::Ran { .. } => 1,
+            Mark::Agent { status: Status::Busy, .. } => 2,
+            Mark::Agent { status: Status::Idle, .. } => 3,
+            Mark::Agent { status: Status::Shell, .. } => 4,
+            Mark::Agent { status: Status::Unknown(_), .. } => 5,
+            Mark::Agent { status: Status::Unreported, .. } => 6,
+        }
+    }
 }
 
 impl Node {
@@ -312,29 +378,27 @@ impl Rows {
     }
 }
 
-/// The live sessions, and how many of the agents in them are in each state
-/// worth counting, folded or not: what the sidebar's header says.
+/// The live sessions, and how many of the panes in them show a mark worth
+/// counting, folded or not: what the sidebar's header says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     pub sessions: usize,
+    /// Agents that wait for you.
     pub waiting: usize,
-    pub idle: usize,
+    /// Agents and commands that finished since you were last in their panes.
+    pub unseen: usize,
+    /// Agents at work.
     pub busy: usize,
 }
 
 impl Summary {
-    fn count(&mut self, status: &Status) {
-        match status {
-            Status::Waiting => self.waiting += 1,
-            Status::Idle => self.idle += 1,
-            Status::Busy => self.busy += 1,
-            Status::Shell | Status::Unknown(_) | Status::Unreported => {},
+    fn count(&mut self, mark: &Mark) {
+        match mark {
+            Mark::Agent { status: Status::Waiting, .. } => self.waiting += 1,
+            Mark::Finished { .. } | Mark::Ran { .. } => self.unseen += 1,
+            Mark::Agent { status: Status::Busy, .. } => self.busy += 1,
+            Mark::Agent { .. } => {},
         }
-    }
-
-    /// The counts the header shows, each with the status it counts.
-    pub fn counts(&self) -> [(Status, usize); 3] {
-        [(Status::Waiting, self.waiting), (Status::Idle, self.idle), (Status::Busy, self.busy)]
     }
 }
 
@@ -355,6 +419,9 @@ pub struct Tree {
     /// What is wrong with the icons the configuration gives, for a note under
     /// the tree.
     pub icons_wrong: Option<String>,
+    /// What is new in each pane since you were last in it. Boxed: it would
+    /// make the sidebar twice the size of every other role.
+    pub news: Box<News>,
     folded: Folds,
     search: Option<Search>,
     /// Boxed: a matcher is larger than the rest of the tree, and a sidebar
@@ -402,12 +469,12 @@ enum Search {
 }
 
 impl Tree {
-    /// A tree whose folds are every session's sidebar's, over `legend`, and
-    /// that draws `icons`, and says what is wrong with the ones the
-    /// configuration gives.
+    /// A tree whose folds and news are every session's sidebar's, over
+    /// `legend`, and that draws `icons`, and says what is wrong with the ones
+    /// the configuration gives.
     pub fn shared(legend: Legend, icons: Icons, icons_wrong: Option<String>) -> Self {
-        let folded = Folds::shared();
-        Tree { folded, legend: Some(legend), icons, icons_wrong, ..Tree::default() }
+        let (folded, news) = (Folds::shared(), Box::new(News::shared()));
+        Tree { folded, news, legend: Some(legend), icons, icons_wrong, ..Tree::default() }
     }
 
     /// A tree of `nodes` as they stand, the cursor on row `selected` or the
@@ -497,23 +564,26 @@ impl Tree {
         for branch in order {
             let is_current = current == Some(branch.name.as_str());
             let folded = self.folded.contains(&branch.name);
-            let panes: Vec<(&Leaf, Option<&AgentRow>)> = branch
+            let panes: Vec<(&Leaf, bool, Option<Mark>, String)> = branch
                 .panes
                 .iter()
-                .map(|leaf| (leaf, seated.get(&(branch.name.as_str(), leaf.id)).copied()))
+                .map(|leaf| {
+                    let agent = seated.get(&(branch.name.as_str(), leaf.id)).copied();
+                    let is_here = is_current && here == Some(leaf.id);
+                    let (mark, label) = Mark::of(&self.news, &branch.name, leaf, agent, is_here);
+                    (leaf, is_here, mark, label)
+                })
                 .collect();
-            let statuses =
-                || panes.iter().filter_map(|(_, agent)| agent.map(|agent| &agent.status));
-            for status in statuses() {
-                summary.count(status);
+            let marks = || panes.iter().filter_map(|(_, _, mark, _)| mark.as_ref());
+            for mark in marks() {
+                summary.count(mark);
             }
             // A search looks inside a folded session too.
             let open = if finder.is_some() || !folded { panes.as_slice() } else { &[] };
             let named = finder.as_ref().and_then(|finder| finder.session(&branch.name));
             let mut shown = Vec::new();
-            for (leaf, agent) in open {
-                let label = label(leaf, *agent);
-                let found = finder.as_ref().and_then(|finder| finder.pane(&label, leaf));
+            for (leaf, here, mark, label) in open {
+                let found = finder.as_ref().and_then(|finder| finder.pane(label, leaf));
                 if finder.is_some() && found.is_none() && named.is_none() {
                     continue;
                 }
@@ -522,11 +592,11 @@ impl Tree {
                     session: branch.name.clone(),
                     id: leaf.id,
                     tab: leaf.tab_id,
-                    label,
-                    agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
+                    label: label.clone(),
+                    mark: mark.clone(),
                     runs: leaf.runs.clone(),
                     checkout: leaf.checkout.clone(),
-                    here: is_current && here == Some(leaf.id),
+                    here: *here,
                     hits: hits.unwrap_or_default(),
                 };
                 shown.push((node, fit));
@@ -540,8 +610,8 @@ impl Tree {
                 name: branch.name.clone(),
                 current: is_current,
                 folded: if finder.is_some() { shown.is_empty() } else { folded },
-                waiting: statuses().filter(|status| status.is_waiting()).count(),
-                loudest: statuses().min_by_key(|status| agents::status_rank(status)).cloned(),
+                waiting: marks().filter(|mark| mark.is_waiting()).count(),
+                loudest: marks().min_by_key(|mark| mark.rank()).cloned(),
                 hits: hits.unwrap_or_default(),
             }));
             // The pane of the session that matches best, which a session
@@ -789,7 +859,7 @@ pub fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
         return name.to_owned();
     }
     let title = bare_title(&leaf.title);
-    if let Some(cwd) = leaf.cwd.as_deref().filter(|cwd| abbreviates(title, cwd)) {
+    if let Some(cwd) = leaf.cwd.as_deref().filter(|cwd| abbreviates(shell_title(title), cwd)) {
         return short_cwd(cwd);
     }
     if !title.is_empty() && title != GENERIC_TITLE {
@@ -834,6 +904,57 @@ fn abbreviates(title: &str, cwd: &str) -> bool {
         && written.iter().rev().zip(parts.iter().rev()).all(begins)
 }
 
+/// What a shell is doing, as its title says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Doing {
+    /// It is back at its prompt.
+    Prompt,
+    /// It runs a command, as fish cut it.
+    Running(String),
+    /// A title fish did not write: an agent's, say, or a program's that
+    /// titles the pane itself.
+    Unknown,
+}
+
+/// What a shell is doing, as fish titles its pane: with its cwd at its
+/// prompt, `~/P/m/l/main`, and while it runs a command, with the command cut
+/// to twenty characters before the cwd, `cargo build --relea ~/P/m/l/main`.
+/// The sidebar may not have caught up with a `cd` yet, so a title that is a
+/// directory alone is the prompt, whichever it is.
+pub fn doing(title: &str, cwd: Option<&str>) -> Doing {
+    let title = title.trim();
+    if title.chars().next().is_some_and(is_agent_glyph) {
+        return Doing::Unknown;
+    }
+    let title = shell_title(title);
+    if is_directory(title) || cwd.is_some_and(|cwd| abbreviates(title, cwd)) {
+        return Doing::Prompt;
+    }
+    match title.rsplit_once(' ') {
+        Some((command, cwd)) if is_directory(cwd) && !command.trim().is_empty() => {
+            Doing::Running(command.trim().to_owned())
+        },
+        _ => Doing::Unknown,
+    }
+}
+
+/// A shell's title without the host fish puts before it over SSH, as in
+/// `[nixos] ~/P/m/l/main`: ten characters of its name at most, in brackets.
+fn shell_title(title: &str) -> &str {
+    let host = title.strip_prefix('[').and_then(|rest| rest.split_once("] "));
+    let host = host.filter(|(host, _)| {
+        !host.is_empty() && host.chars().count() <= 10 && !host.contains(char::is_whitespace)
+    });
+    host.map_or(title, |(_, rest)| rest)
+}
+
+/// Whether `text` is a directory as fish writes one in a title: from the
+/// root or from `~`, and with no space in it.
+fn is_directory(text: &str) -> bool {
+    let rooted = text.starts_with('/') || text == "~" || text.starts_with("~/");
+    rooted && !text.contains(char::is_whitespace)
+}
+
 /// The title without the glyph an agent leads it with: Claude Code's `✳` at
 /// rest, and a turning frame while it works.
 fn bare_title(title: &str) -> &str {
@@ -863,6 +984,7 @@ mod tests {
 
     use super::*;
     use crate::agents::{Live, Seat};
+    use crate::elapsed::Moment;
     use crate::places::Places;
     use crate::sessions::Selection;
 
@@ -930,7 +1052,7 @@ mod tests {
         let places = Places::of(&shaped);
 
         let mut set = AgentSet::default();
-        set.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"");
+        set.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"", Moment::default());
         let live = Live::new(None, &[], &places, &[]);
         set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
         set
@@ -950,7 +1072,11 @@ mod tests {
                 Node::Pane(node) => format!(
                     "  {}{} {}",
                     if node.here { "›" } else { "" },
-                    node.agent.as_ref().map_or("-", |mark| mark.status.word()),
+                    node.mark.as_ref().map_or("-", |mark| match mark {
+                        Mark::Agent { status, .. } => status.word(),
+                        Mark::Finished { .. } => "finished",
+                        Mark::Ran { .. } => "ran",
+                    }),
                     node.label
                 ),
             })
@@ -995,7 +1121,7 @@ mod tests {
         let json = r#"[{"status":"busy","status_age":4,"pid":101,"cwd":"/w/s","name":"orca-copy",
             "name_source":"user","zellij":{"session":"s","pane":"0"}}]"#;
         let mut set = AgentSet::default();
-        set.ingest(Some(0), json.as_bytes(), b"");
+        set.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
         let live = Live::new(None, &[], &places, &[]);
         set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
@@ -1013,7 +1139,7 @@ mod tests {
             {"status":"idle","status_age":4,"pid":103,"name":"agents-tab-9a","name_source":"derived",
              "cwd":"/w/luneta/agents-tab","zellij":{"session":"luneta","pane":"4"}}]"#;
         let mut set = AgentSet::default();
-        set.ingest(Some(0), json.as_bytes(), b"");
+        set.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let places = Places::of(&[("luneta", &[(1, "/w/luneta/main"), (4, "/w/luneta/agents-tab")])]);
         let live = Live::new(None, &[], &places, &[]);
         set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
@@ -1021,7 +1147,7 @@ mod tests {
         let branches = [branch("luneta", 1, &[(1, "✳ Claude Code"), (4, "✳ Claude Code")])];
         let mut tree = Tree::default();
         tree.rebuild(&branches, None, &set, None, true);
-        assert_eq!(drawn(&tree), ["▾ luneta", "  busy luneta/main", "  idle luneta/agents-tab"]);
+        assert_eq!(drawn(&tree), ["▾ luneta", "  busy luneta/main", "  finished luneta/agents-tab"]);
     }
 
     #[test]
@@ -1071,6 +1197,7 @@ mod tests {
         };
         let main = Some("/home/you/Projects/misc/luneta/main");
         assert_eq!(label(&leaf("~/P/m/l/main", main), None), "luneta/main");
+        assert_eq!(label(&leaf("[nixos] ~/P/m/l/main", main), None), "luneta/main");
         assert_eq!(label(&leaf("~/Projects/misc/luneta/main", main), None), "luneta/main");
         assert_eq!(label(&leaf("/home/you/Projects/misc/luneta/main", main), None), "luneta/main");
         // Before the sidebar is told the cwd, and after a `cd` it has not yet
@@ -1102,6 +1229,35 @@ mod tests {
         assert!(!abbreviates("~", "/home/you"));
         assert!(!abbreviates("/", "/"));
         assert!(!abbreviates("main", main));
+    }
+
+    #[test]
+    fn a_shell_s_title_says_whether_it_runs_a_command() {
+        let main = Some("/home/you/Projects/misc/luneta/main");
+        let running = |command: &str| Doing::Running(command.to_owned());
+        for (title, cwd, said) in [
+            ("~/P/m/l/main", main, Doing::Prompt),
+            ("~", Some("/home/you"), Doing::Prompt),
+            ("/etc/nixos", None, Doing::Prompt),
+            // A `cd` the sidebar has not caught up with.
+            ("~/P/m/l/main/src", main, Doing::Prompt),
+            ("cargo build --relea ~/P/m/l/main", main, running("cargo build --relea")),
+            ("nvim ~/notes.md ~/P/m/l/main", main, running("nvim ~/notes.md")),
+            ("/usr/bin/make ~/P/m/l/main", None, running("/usr/bin/make")),
+            ("git commit -m 'fix  ~/P/m/l/main", main, running("git commit -m 'fix")),
+            // Over SSH, fish puts the host first.
+            ("[nixos] ~/P/m/l/main", main, Doing::Prompt),
+            ("[nixos] cargo test ~/P/m/l/main", main, running("cargo test")),
+            // An agent, one that names a directory too, and what fish did
+            // not write.
+            ("✳ Claude Code", main, Doing::Unknown),
+            ("⠐ Look at ~/P/m/l/main", main, Doing::Unknown),
+            ("Pane #3", None, Doing::Unknown),
+            ("fish", main, Doing::Unknown),
+            ("", main, Doing::Unknown),
+        ] {
+            assert_eq!(doing(title, cwd), said, "{title:?}");
+        }
     }
 
     #[test]
@@ -1282,13 +1438,58 @@ mod tests {
         assert!(tree.fold(true));
         assert!(!tree.fold(true));
         tree.rebuild(&branches, None, &set, None, false);
-        assert_eq!(drawn(&tree), ["▸ a waiting:1", "▾ b", "  idle three"]);
+        assert_eq!(drawn(&tree), ["▸ a waiting:1", "▾ b", "  finished three"]);
         let Node::Session(a) = &tree.rows[0] else { panic!("a session comes first") };
-        assert_eq!(a.loudest, Some(Status::Waiting));
+        assert!(a.loudest.as_ref().is_some_and(Mark::is_waiting));
 
         assert!(tree.toggle());
         tree.rebuild(&branches, None, &set, None, false);
         assert_eq!(tree.rows.len(), 5);
+    }
+
+    /// A pane shows what finished in it since you were last there: an agent,
+    /// and a command its shell ran, which names its row until you go there.
+    /// The pane you are in shows none of it, as you see it. Folded, a session
+    /// shows what is new in it over an agent at work, and the header counts
+    /// what is new in every session.
+    #[test]
+    fn a_pane_shows_what_finished_in_it_since_you_were_last_there() {
+        let at = |secs: u64| Moment::from_millis(secs * 1000);
+        let set = agents(&[("a", 0, "idle"), ("a", 2, "busy"), ("b", 4, "idle"), ("c", 5, "idle")]);
+        let titled = |shell: &str| {
+            [
+                branch("a", 9, &[(0, "✳ one"), (1, shell), (2, "✳ two")]),
+                branch("b", 5, &[(4, "✳ three")]),
+                branch("c", 1, &[(5, "✳ four")]),
+            ]
+        };
+        let mut tree = Tree::default();
+        tree.news.watch(&titled("make ~/w/a"), &set, None, at(10));
+        let branches = titled("~/w/a");
+        // You stay in `b`'s pane 4, then go to `c`'s pane 5.
+        for (here, now) in [(("b", 4), 20), (("b", 4), 21), (("c", 5), 22)] {
+            tree.news.watch(&branches, &set, Some(here), at(now));
+        }
+        tree.rebuild(&branches, Some("c"), &set, Some(5), true);
+        assert_eq!(
+            drawn(&tree),
+            [
+                "▾ a",
+                "  finished one",
+                "  ran make",
+                "  busy two",
+                "▾ b",
+                "  idle three",
+                "▾ c",
+                "  ›idle four",
+            ]
+        );
+        assert_eq!(tree.summary, Summary { sessions: 3, waiting: 0, unseen: 2, busy: 1 });
+
+        assert!(tree.toggle_row(0));
+        tree.rebuild(&branches, Some("c"), &set, Some(5), true);
+        let Node::Session(a) = &tree.rows[0] else { panic!("a session comes first") };
+        assert!(a.folded && a.loudest.as_ref().is_some_and(Mark::is_new));
     }
 
     /// The header sums up every agent, so neither a fold nor a search takes
@@ -1300,7 +1501,7 @@ mod tests {
             branch("b", 1, &[(0, "✳ three")]),
         ];
         let set = agents(&[("a", 0, "waiting"), ("a", 1, "busy"), ("b", 0, "idle")]);
-        let all = Summary { sessions: 2, waiting: 1, idle: 1, busy: 1 };
+        let all = Summary { sessions: 2, waiting: 1, unseen: 1, busy: 1 };
         let mut tree = Tree::default();
         tree.rebuild(&branches, None, &set, None, false);
         assert_eq!(tree.summary, all);
@@ -1309,7 +1510,7 @@ mod tests {
         assert_eq!(tree.summary, all);
         tree.search_for("three".to_owned());
         tree.rebuild(&branches, None, &set, None, false);
-        assert_eq!(drawn(&tree), ["▾ b", "  idle three"]);
+        assert_eq!(drawn(&tree), ["▾ b", "  finished three"]);
         assert_eq!(tree.summary, all);
     }
 
@@ -1701,7 +1902,7 @@ mod tests {
         let mut tree = Tree::default();
         let set = agents(&[("a", 0, "idle"), ("b", 0, "busy")]);
         tree.rebuild(&branches, Some("b"), &set, Some(0), true);
-        assert_eq!(drawn(&tree), ["▾ a", "  idle one", "▾ b", "  ›busy two"]);
+        assert_eq!(drawn(&tree), ["▾ a", "  finished one", "▾ b", "  ›busy two"]);
         assert_eq!(selected(&tree), Some(Place::Pane("b".to_owned(), 0)));
     }
 }

@@ -120,33 +120,55 @@ over it: every live session, the panes in it, and what the agent in each pane
 is doing. One sidebar for the whole session, which follows you from tab to tab.
 
 ```text
-─ 3 sessions ────── ●1 ✓1 ⠋3 ─
+─ 3 sessions ────── ●1 •2 ⠋2 ─
 
  ▾ bipa ────────────────── ●1
-   ✓ handoff-eng-11259-p… 13h
+  •✓ handoff-eng-11259-p… 13h
      eng-11259-pr4b         ⇡
    ● dda-bank-slip-paid-…  3m
      dda-bank-slip-paid    !?
-   ⠋ Handoff pix outflow… 12s
+   ✓ Handoff pix outflow…  2h
      pix-outflow-readback !+?
  ▸ floresta ─────────────── ⠋
  ▾ unnamed ──────────────────
 ▌  ⠋ orca-copy            12s
 ▌    main
-     misc/unnamed
+  •$ cargo build --relea   8s
+     main
 ```
 
 Sessions keep their place, oldest first, so a row never moves under your eye
-or your mouse. Which agent wants you is the job of the dot, the count on its
-session's row, and the `next` key — not of the order.
+or your mouse. Which pane wants you is the job of its marks and the count on
+its session's row — not of the order.
 
 The sidebar marks a status with a dot one column wide where the picker has an
 emoji, so that every label starts at the same column and the dot can take a
 colour: `●` in the accent for `waiting`, `✓` in green for `idle`, the spinner
 for `busy`, and `$`, dimmed, for `shell`. Any other status shows its initial.
-The rule along the top counts the live sessions, and the agents across all of
-them in each of the first three, a folded session's too. A count of none is
-left out.
+The rule along the top counts the live sessions, the agents that wait for you,
+what is new, and the agents at work, across all of them, a folded session's
+too. A count of none is left out.
+
+A `•` before a pane's mark says that something finished there since you were
+last in it: an agent, its `✓` in green, or a command in a shell, its `$` and
+how long ago it ended, with the row named for the command. Once you go there,
+the `•` goes: the agent keeps its `✓`, dimmed, and the shell is the plain row
+it was. You were in a pane once you stayed there a second, so one you only
+pass through keeps its `•`; the pane you are in has none, as you see it. A
+folded session shows the `•` when any of its panes has one, over an agent at
+work.
+
+A shell says what it is doing in its title, as fish titles its pane: the
+command it runs, cut to twenty characters, before its directory, and the
+directory alone at the prompt. A command finished when the one gives way to
+the other. One that ends within a second is never seen running, and gets no
+`•`; nor does a command in a shell whose title says neither, as bash's and
+zsh's do not, or one in a program that titles the pane itself.
+
+What you have seen, and what each shell ran, is the same in the sidebar of
+every session, and outlasts zellij: the sidebars keep it in the plugin's cache,
+beside the folds. A session the picker renames takes it along, and a session
+gone for good takes it with it.
 
 After the dot, an icon says what runs in the pane: Claude's for an agent, a
 terminal for a shell, neovim's for nvim. It has a column of its own, so every
@@ -202,7 +224,8 @@ A pane with no agent in it is dimmed. `▌` marks the pane you are in, and the
 highlight stays on it while the sidebar does not have the focus; once it has,
 the highlight goes with the cursor. The session you are in has its rule in the
 accent. A shell at its prompt is named for its directory's last two parts, as
-`luneta/main`, where fish would title it `~/P/m/l/main`.
+`luneta/main`, where fish would title it `~/P/m/l/main`, or over SSH
+`[host] ~/P/m/l/main`.
 
 Under a pane's row, dimmed, is the branch checked out in the directory the pane
 works in, and under the age, how its work tree stands, in the glyphs
@@ -736,8 +759,8 @@ of more than one terminal.
 
 Key bindings drive it without moving your hands to it. A `MessagePlugin` with
 no location goes to every plugin in the session: the dock answers `toggle`, the
-sidebar `focus`, `cycle` and `next`, and the picker `focus` too, handing the
-sidebar its row. Bind the ones you want:
+sidebar `focus` and `cycle`, and the picker `focus` too, handing the sidebar
+its row. Bind the ones you want:
 
 ```kdl
 keybinds {
@@ -755,14 +778,6 @@ keybinds {
             MessagePlugin {
                 name "sidebar"
                 payload "cycle"
-            }
-        }
-        // The next agent that wants you: the waiting first, then the idle,
-        // the most recent first.
-        bind "Alt a" {
-            MessagePlugin {
-                name "sidebar"
-                payload "next"
             }
         }
         // Hide the sidebar, or bring it back.
@@ -799,8 +814,8 @@ plugin no right click, and no drag.
 Two clients on one session — a terminal and `zellij web`, say — share the one
 sidebar. It goes with whoever switched tabs last, and comes back from hidden to
 the tab of the client that attached first. A key reaches the plugins of every
-client, and zellij does not say whose it was, so `Ctrl b`, `Ctrl f` and
-`Alt a` act for both.
+client, and zellij does not say whose it was, so `Ctrl b` and `Ctrl f` act
+for both.
 
 ---
 

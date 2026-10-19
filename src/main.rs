@@ -12,7 +12,9 @@ mod folds;
 mod hiding;
 mod icons;
 mod layout;
+mod ledger;
 mod menu;
+mod news;
 mod paint;
 mod panes;
 mod pass;
@@ -31,8 +33,9 @@ use context::CONTEXT_KEY;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
 use menu::{Command, Did, RowPane, SidebarMenu, There, Top};
-use elapsed::Age;
+use elapsed::{Age, Moment};
 use folds::Folds;
+use news::News;
 use panes::Peeks;
 use pass::{At, Pass, Then};
 use places::Places;
@@ -423,7 +426,7 @@ impl ZellijPlugin for State {
                         }
                     },
                     Some(agents::CONTEXT_VALUE) => {
-                        self.agents.ingest(exit_code, &stdout, &stderr);
+                        self.agents.ingest(exit_code, &stdout, &stderr, Moment::now());
                         self.agents_taken_at = self.frame;
                         self.rebuild_agents(Selection::Hold);
                         true
@@ -695,6 +698,7 @@ impl State {
             live.push(Session { name, age });
         }
         self.live_names = live_names;
+        self.watch_news(current.as_deref());
         self.sessions = Sessions {
             live,
             dead: snapshot
@@ -708,6 +712,22 @@ impl State {
         self.ask_places();
         self.rebuild_dirs(Selection::Hold);
         self.rebuild_agents(Selection::Hold);
+    }
+
+    /// Takes up what the sidebars of other sessions saw since, what each
+    /// shell's title says it is doing, and the pane you are in, in `current`,
+    /// for the dot of what is new in each pane.
+    fn watch_news(&mut self, current: Option<&str>) {
+        if !self.is_sidebar() {
+            return;
+        }
+        let here = current.zip(self.pane_now());
+        let Role::Sidebar(tree) = &mut self.role else {
+            return;
+        };
+        tree.news.reload();
+        tree.news.watch(&self.branches, &self.agents, here, Moment::now());
+        tree.news.prune(&self.live_names);
     }
 
     fn spinning(&self) -> bool {
@@ -1061,6 +1081,8 @@ impl State {
             return;
         };
         rename_session(&name);
+        // The sidebars find what is new in its panes under the new name.
+        News::shared().rename(current, &name);
         self.mode = Mode::Search;
     }
 
@@ -1888,13 +1910,6 @@ impl State {
         }
     }
 
-    fn go_to_next(&self, focused: bool) {
-        let here = self.matches.current_session.as_deref().zip(self.pane_now());
-        if let Some(row) = self.agents.next_wanted(here) {
-            self.go_to(row.seat.session(), row.pane, focused);
-        }
-    }
-
     fn go_to_after(&self, focused: bool) {
         let Role::Sidebar(tree) = &self.role else {
             return;
@@ -1936,7 +1951,6 @@ impl State {
                 self.pass.ask(self.frame);
                 focus_plugin_pane(self.plugin_id, false, false);
             },
-            Ask::Next => self.go_to_next(self.has_focus()),
             Ask::Cycle => self.go_to_after(self.has_focus()),
             Ask::Toggle => {},
         }
@@ -2347,7 +2361,7 @@ mod tests {
             )
         };
         let claude_ps = format!("[{},{}]", seated(4, FOUR), seated(5, FIVE));
-        state.agents.ingest(Some(0), claude_ps.as_bytes(), b"");
+        state.agents.ingest(Some(0), claude_ps.as_bytes(), b"", Moment::default());
         state.rebuild_agents(Selection::Hold);
         state
     }
@@ -2587,7 +2601,7 @@ mod tests {
     fn d_d_in_the_sidebar_closes_the_highlighted_pane() {
         let mut state = focused_sidebar();
         state.menu_entries = None;
-        state.agents.ingest(Some(0), b"[]", b"");
+        state.agents.ingest(Some(0), b"[]", b"", Moment::default());
         if let Role::Sidebar(tree) = &mut state.role {
             assert!(tree.rows.select(3));
         }
@@ -2682,7 +2696,7 @@ mod tests {
         let cases = [(false, false, 's'), (true, false, 's'), (false, true, 'd'), (true, true, 'd')];
         for (others, folded, then) in cases {
             let mut state = focused_sidebar();
-            state.agents.ingest(Some(0), b"[]", b"");
+            state.agents.ingest(Some(0), b"[]", b"", Moment::default());
             if others {
                 state.sessions.live =
                     vec![Session { name: "b".to_owned(), age: Age::from_secs(1) }];
