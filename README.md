@@ -148,6 +148,52 @@ The rule along the top counts the live sessions, and the agents across all of
 them in each of the first three, a folded session's too. A count of none is
 left out.
 
+After the dot, an icon says what runs in the pane: Claude's for an agent, a
+terminal for a shell, neovim's for nvim. It has a column of its own, so every
+label still starts at the same column, and a program with no icon leaves the
+column blank. What runs is the agent claude-ps finds in the pane, or else
+what zellij says the pane's terminal has in front, by its binary's name: the
+program you started, or the shell itself at its prompt. `sudo`, `env` and
+`nix run` give way to what they run. zellij is asked every five seconds, so
+a program shows its icon a few seconds after it starts.
+
+| icon | Nerd Fonts name | for |
+|---|---|---|
+| Claude | `cod-claude` | an agent, and `claude` |
+| a terminal | `dev-terminal` | `bash`, `fish`, `nu`, `sh`, `zsh` |
+| neovim | `custom-neovim` | `nvim`, `vim` |
+| rust | `dev-rust` | `cargo` |
+| python | `dev-python` | `python`, `python3` |
+| docker | `dev-docker` | `docker` |
+| ssh | `dev-ssh` | `ssh` |
+| git | `dev-git` | `git`, `lazygit` |
+| a pulse | `cod-pulse` | `htop` |
+
+The icons are a [Nerd Font](https://www.nerdfonts.com)'s, as the directory
+preview's are. Claude's came with Nerd Fonts 3.5.0, and ssh's with 3.3.0: an
+older font has neither, and the terminal draws a box or nothing for them, on
+every agent's row for Claude's. In a font whose name ends in "Mono",
+an icon takes one column; in the others it can spill into the space after
+it. The sidebars drawn on this page leave the icons out.
+
+Give a program an icon of your own, or take one away, by its binary's name,
+in the alias's `icons`; `icons false` turns them off:
+
+```kdl
+plugins {
+    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
+        icons {
+            lazydocker "\u{e7b0}"   // docker's
+            htop ""                 // none
+        }
+    }
+}
+```
+
+An icon takes one column or two. An `icons` luneta cannot read, or an icon of
+another width, says what is wrong with it under the sidebar's tree, and
+leaves luneta's in its place.
+
 An agent's row is named for what it is doing: the name you gave it with
 `/rename`, or else the title Claude Code gives its pane. That title is a bare
 `Claude Code` until the agent has a topic, and some never get one; such a row
@@ -410,10 +456,13 @@ Needs `claude` and `claude-ps` on the server's `PATH`.
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
+| a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
 
 The session list needs nothing but zellij. The optional tools are looked up by
 name on the `PATH` of the zellij **server**, which is inherited from whatever
 started it — on a long-lived session that can be older than your shell profile.
+The font is not looked up: it is the terminal's you attach from, which over SSH
+is the one on your own machine, not the server.
 
 ### Install
 

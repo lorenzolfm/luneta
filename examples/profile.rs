@@ -18,6 +18,7 @@
 #[path = "../src/fetch.rs"] mod fetch;
 #[path = "../src/folds.rs"] mod folds;
 #[path = "../src/hiding.rs"] mod hiding;
+#[path = "../src/icons.rs"] mod icons;
 #[path = "../src/layout.rs"] mod layout;
 #[path = "../src/menu.rs"] mod menu;
 #[path = "../src/paint.rs"] mod paint;

@@ -6,6 +6,7 @@ use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::checkouts::Checkout;
 use crate::dirs::{short_cwd, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
+use crate::icons::Icons;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
@@ -1319,7 +1320,7 @@ pub fn render_sidebar(
     frame: u64,
 ) {
     let inner = cols.saturating_sub(2);
-    let notes = agent_note_texts(agents, inner);
+    let notes = sidebar_notes(tree, agents, inner);
     let bottom = Bottom::of(tree, focused);
     let shelf = Shelf::new(rows, notes.len(), bottom.as_ref(), cols);
     for (y, line) in sidebar_lines(tree, &notes, &shelf, focused, cols, frame).iter().enumerate() {
@@ -1421,8 +1422,15 @@ pub fn select_sidebar_row(
 
 /// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
 fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, cols: usize) -> Shelf {
-    let notes = agent_note_texts(agents, cols.saturating_sub(2)).len();
+    let notes = sidebar_notes(tree, agents, cols.saturating_sub(2)).len();
     Shelf::new(rows, notes, Bottom::of(tree, focused).as_ref(), cols)
+}
+
+/// The notes under the sidebar's tree: what is wrong with the icons the
+/// configuration gives, and then what the agent list says.
+fn sidebar_notes(tree: &Tree, agents: &AgentSet, width: usize) -> Vec<Note> {
+    let wrong = tree.icons_wrong.as_deref().map(|wrong| Note::error(truncate(wrong, width)));
+    wrong.into_iter().chain(agent_note_texts(agents, width)).collect()
 }
 
 /// Whether a click on `column` of a row folds it: a session's, on its fold.
@@ -1497,11 +1505,25 @@ const MARGIN: usize = 1;
 
 const GLYPH: usize = 1;
 
-/// How wide the dots and the ages are across the rows on screen, so that
-/// every label is cut at the same column.
-struct Columns {
+/// How wide the dots and the ages are across the rows on screen, and the
+/// icons the rows draw, wherever they are, so that every label starts at the
+/// same column and is cut at the same column. No icons take no column.
+struct Columns<'a> {
     glyph: usize,
+    icons: &'a Icons,
     age: usize,
+}
+
+impl Columns<'_> {
+    /// How far a label starts from where the dot does: past the dot, and the
+    /// icon, and a space after each.
+    fn label(&self) -> usize {
+        let icon = match self.icons.width() {
+            0 => 0,
+            width => width + 1,
+        };
+        self.glyph + 1 + icon
+    }
 }
 
 fn sidebar_lines(
@@ -1537,6 +1559,7 @@ fn sidebar_lines(
                 .max()
                 .unwrap_or(0)
                 .max(GLYPH),
+            icons: &tree.icons,
             age: marks().map(|mark| mark.age.label().width()).max().unwrap_or(0),
         };
         for (offset, node) in window.iter().enumerate() {
@@ -1661,17 +1684,16 @@ fn dot_ink(status: &Status) -> Ink {
     }
 }
 
-/// A pane's row: its dot, its label, and how long its agent has been in its
-/// state. The label is plain, in the accent while its agent waits for you,
-/// and dimmed with no agent. The pane you are in has the mark and a bold one.
+/// A pane's row: its dot, the icon of its program, its label, and how long
+/// its agent has been in its state. The label is plain, in the accent while
+/// its agent waits for you, and dimmed with no agent, and the icon is drawn
+/// as the label is. The pane you are in has the mark and a bold one.
 fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Painted {
     let mut line = pane_margin(node);
     let start = line.columns();
     if let Some(mark) = &node.agent {
         line.push(&agents::dot(&mark.status, frame), dot_ink(&mark.status));
     }
-    line.pad_to(start + columns.glyph);
-    line.gap(1);
     // A label in the accent shows the letters a search lands on in a colour.
     let (label, hit) = match &node.agent {
         _ if node.here => (Ink::Strong, Ink::Bold(ACCENT)),
@@ -1679,6 +1701,11 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
         Some(_) => (Ink::Plain, Ink::Bold(ACCENT)),
         None => (Ink::Dim, Ink::Bold(ACCENT)),
     };
+    if let Some(icon) = node.program().and_then(|program| columns.icons.of(program)) {
+        line.pad_to(start + columns.glyph + 1);
+        line.push(icon, label);
+    }
+    line.pad_to(start + columns.label());
     let reserve = if columns.age > 0 { columns.age + 1 } else { 0 };
     let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
     let (text, hits) = lit(&node.label, room, &node.hits);
@@ -1697,7 +1724,7 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
 /// runs down this line too.
 fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: usize) -> Painted {
     let mut line = pane_margin(node);
-    line.gap(columns.glyph + 1);
+    line.gap(columns.label());
     let status = checkout.status.as_str();
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
@@ -1752,6 +1779,7 @@ fn search_help_line(width: usize) -> Painted {
 mod tests {
     use super::*;
     use crate::cursor::Cursor;
+    use crate::icons;
     use crate::places::Places;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Session, Sessions};
@@ -2531,6 +2559,7 @@ mod tests {
                 status: Status::parse(Some(word)),
                 age: Held::from_secs(age),
             }),
+            runs: None,
             checkout: None,
             here: false,
             hits: Vec::new(),
@@ -2549,6 +2578,14 @@ mod tests {
         let checkout = Checkout { branch: branch.to_owned(), status: status.to_owned() };
         match node {
             Node::Pane(pane) => Node::Pane(PaneNode { checkout: Some(checkout), ..pane }),
+            session @ Node::Session(_) => session,
+        }
+    }
+
+    /// `node`, its terminal running `program`.
+    fn running(program: &str, node: Node) -> Node {
+        match node {
+            Node::Pane(pane) => Node::Pane(PaneNode { runs: Some(program.to_owned()), ..pane }),
             session @ Node::Session(_) => session,
         }
     }
@@ -2615,7 +2652,7 @@ mod tests {
     }
 
     /// Agents in worktrees, a shell in no repository, and a branch too long
-    /// for the pane beside its work tree's status.
+    /// for the pane beside its work tree's status, in nvim.
     fn worktrees() -> Vec<Node> {
         vec![
             session_node("luneta", false, 0, None),
@@ -2625,9 +2662,12 @@ mod tests {
                 "!?⇡",
                 pane_node("luneta", 2, "branch-name", Some(("idle", 60))),
             )),
-            pane_node("luneta", 3, "~/notes", None),
+            running("fish", pane_node("luneta", 3, "~/notes", None)),
             session_node("elo", false, 0, None),
-            on("feature/very-long-branch-name", "+", pane_node("elo", 4, "elo/main", None)),
+            running(
+                "nvim",
+                on("feature/very-long-branch-name", "+", pane_node("elo", 4, "elo/main", None)),
+            ),
         ]
     }
 
@@ -2661,6 +2701,56 @@ mod tests {
         assert!((5..16).all(|at| lines[HEADER + 4].is_gray_at(at)));
         assert!(!(26..29).any(|at| lines[HEADER + 4].is_gray_at(at)));
         assert!(!lines[HEADER + 3].is_gray_at(5));
+    }
+
+    /// The icon of a pane's program goes in a column of its own after the
+    /// dot, so that a label starts at one column with an icon or without, and
+    /// the branch under it. A program with no icon leaves the column blank.
+    #[test]
+    fn a_pane_s_icon_has_a_column_of_its_own_after_the_dot() {
+        let mut tree = sidebar_tree(worktrees(), 0);
+        let (icons, wrong) = icons::configured(Some(r#"claude "C"; fish "F"; nvim """#));
+        assert_eq!(wrong, None);
+        tree.icons = icons;
+        assert_eq!(
+            sidebar_picture(&tree, &[], false, 11, 30),
+            [
+                "──────────────────────────────",
+                "                              ",
+                " ▾ luneta ─────────────────── ",
+                "   ⠋ C fold               12s ",
+                "       main                   ",
+                "▌  ✓ C branch-name         1m ",
+                "▌      branch-name        !?⇡ ",
+                "     F ~/notes                ",
+                " ▾ elo ────────────────────── ",
+                "       elo/main               ",
+                "       feature/very-long-b… + ",
+            ]
+        );
+    }
+
+    /// Icons the configuration gives that luneta cannot read say so under the
+    /// tree, before what the agent list says.
+    #[test]
+    fn icons_luneta_cannot_read_say_so_under_the_tree() {
+        let mut tree = sidebar_tree(worktrees(), 0);
+        (tree.icons, tree.icons_wrong) = icons::configured(Some("nvim"));
+        let mut agents = AgentSet::default();
+        agents.fail("claude-ps: gone");
+        let notes: Vec<(String, bool)> = sidebar_notes(&tree, &agents, 30)
+            .into_iter()
+            .map(|note| (note.text, note.error))
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                (r#"icons: "nvim" takes one strin…"#.to_owned(), true),
+                ("claude-ps: gone".to_owned(), true),
+            ]
+        );
+        let shelf = sidebar_shelf(&tree, &agents, false, 11, 32);
+        assert_eq!(shelf.notes, 2);
     }
 
     /// A row of two lines is one row: a click on either line lands on it, the
@@ -2833,7 +2923,7 @@ mod tests {
     /// colour of their own.
     #[test]
     fn the_letters_a_search_lands_on_stand_out_on_every_pane_row() {
-        let columns = Columns { glyph: GLYPH, age: 2 };
+        let columns = Columns { glyph: GLYPH, icons: &Icons::default(), age: 2 };
         for (here, agent) in [
             (false, Some("waiting")),
             (false, Some("idle")),
@@ -2849,6 +2939,7 @@ mod tests {
                     status: Status::parse(Some(word)),
                     age: Held::from_secs(4),
                 }),
+                runs: None,
                 checkout: None,
                 here,
                 hits: vec![0, 2],
@@ -2986,7 +3077,9 @@ mod tests {
                     (true, false, Some('c')),
                 ] {
                     let trees = [0, 3, 7].into_iter().flat_map(|selected| {
-                        [workday_tree(selected), sidebar_tree(worktrees(), selected)]
+                        let mut iconed = sidebar_tree(worktrees(), selected);
+                        iconed.icons = Icons::luneta();
+                        [workday_tree(selected), sidebar_tree(worktrees(), selected), iconed]
                     });
                     for mut tree in trees {
                         if searching {
