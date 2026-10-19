@@ -747,8 +747,8 @@ impl Finder<'_> {
 /// its cwd's last two parts instead, as the agent list shows a cwd:
 /// `luneta/main`, where `~/P/m/l/main` hides the repository behind an `l`.
 pub fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
-    if let Some(agent) = agent.filter(|agent| agent.chosen) {
-        return agent.display.clone();
+    if let Some(name) = agent.and_then(AgentRow::chosen) {
+        return name.to_owned();
     }
     let title = bare_title(&leaf.title);
     if let Some(cwd) = leaf.cwd.as_deref().filter(|cwd| abbreviates(title, cwd)) {

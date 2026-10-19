@@ -821,7 +821,7 @@ fn agent_line(
 ) -> Painted {
     let label = truncate(&row.label(), name_column);
     let visible = label.chars().count();
-    let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
+    let hits: Vec<usize> = row.hits().iter().copied().filter(|i| *i < visible).collect();
 
     let mut line = Line::new();
     gutter(&mut line, selected);
@@ -877,6 +877,9 @@ fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
     if agents.unplaced > 0 {
         notes.push(Note::dim(truncate(&unplaced_text(agents.unplaced), width)));
     }
+    if agents.doubled > 0 {
+        notes.push(Note::dim(truncate(&doubled_text(agents.doubled), width)));
+    }
     notes
 }
 
@@ -884,6 +887,13 @@ fn unplaced_text(unplaced: usize) -> String {
     match unplaced {
         1 => "1 agent sits in a pane luneta cannot find".to_owned(),
         n => format!("{n} agents sit in panes luneta cannot find"),
+    }
+}
+
+fn doubled_text(doubled: usize) -> String {
+    match doubled {
+        1 => "1 agent sits in a pane an earlier one holds".to_owned(),
+        n => format!("{n} agents sit in panes earlier ones hold"),
     }
 }
 
@@ -2297,7 +2307,7 @@ mod tests {
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
         assert_eq!(agents.rows.len(), 1);
-        assert_eq!(agents.rows[0].display, "luneta");
+        assert_eq!(agents.rows[0].name(), "luneta");
         let notes = agent_note_texts(&agents, 80);
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].text, "1 agent sits in a pane luneta cannot find");
