@@ -9,7 +9,7 @@ use serde::Deserialize;
 use zellij_tile::prelude::run_command;
 
 use crate::cursor::{Cursor, Stops};
-use crate::elapsed::{Age, Held};
+use crate::elapsed::{Age, Held, Moment};
 use crate::fetch::Fetch;
 use crate::places::Places;
 use crate::sessions::{Selection, Session};
@@ -185,6 +185,8 @@ pub struct Agent {
     pane: u32,
     status: Status,
     age: Held,
+    /// When it came to its status.
+    came: Moment,
     /// Where the agent works, when claude-ps says.
     cwd: Option<String>,
     /// The id of its Claude Code session, which names its transcript.
@@ -205,6 +207,8 @@ pub struct AgentRow {
     pub pane: u32,
     pub status: Status,
     pub age: Held,
+    /// When it came to its status.
+    pub came: Moment,
     pub cwd: Option<String>,
     /// The id of its Claude Code session, which names its transcript, when
     /// claude-ps says.
@@ -233,6 +237,7 @@ impl AgentRow {
             pane: agent.pane,
             status: agent.status.clone(),
             age: agent.age.grown_by(since),
+            came: agent.came,
             cwd: agent.cwd.clone(),
             transcript: agent.transcript.clone(),
             shared: Shared::Not,
@@ -416,7 +421,8 @@ impl AgentSet {
         true
     }
 
-    pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+    /// What claude-ps answered, as of `now`.
+    pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8], now: Moment) {
         if exit_code != Some(0) {
             let reason = String::from_utf8_lossy(stderr);
             let reason = reason.lines().next().unwrap_or("").trim();
@@ -427,8 +433,13 @@ impl AgentSet {
             });
             return;
         }
-        match parse(&String::from_utf8_lossy(stdout)) {
-            Ok(agents) => {
+        match parse(&String::from_utf8_lossy(stdout), now) {
+            Ok(mut agents) => {
+                if let Fetch::Ready(before) = &self.status {
+                    for agent in &mut agents {
+                        settle(agent, before);
+                    }
+                }
                 self.asking = false;
                 self.status = Fetch::Ready(agents);
                 self.closing.clear();
@@ -550,28 +561,6 @@ impl AgentSet {
         self.rows.iter().any(|row| row.status.is_busy())
     }
 
-    /// The agent after the one you are in, among those that want you: the
-    /// waiting first, then the idle, the most recent first. Wraps around, and
-    /// passes over the pane you are in when it is the only one.
-    pub fn next_wanted(&self, here: Option<(&str, u32)>) -> Option<&AgentRow> {
-        let mut wanted: Vec<&AgentRow> = self
-            .rows
-            .iter()
-            .filter(|row| matches!(row.status, Status::Waiting | Status::Idle))
-            .collect();
-        wanted.sort_by(|a, b| {
-            status_rank(&a.status).cmp(&status_rank(&b.status)).then_with(|| a.age.cmp(&b.age))
-        });
-        let at = here.and_then(|(session, pane)| {
-            wanted.iter().position(|row| row.seat.session() == session && row.pane == pane)
-        });
-        match at {
-            Some(_) if wanted.len() == 1 => None,
-            Some(at) => wanted.get((at + 1) % wanted.len()).copied(),
-            None => wanted.first().copied(),
-        }
-    }
-
     /// Highlights the agent in `pane` of `session`, or else the first in
     /// `session`: the nearest the list has to a row of the sidebar.
     pub fn select_seated(&mut self, session: &str, pane: Option<u32>) {
@@ -633,14 +622,23 @@ fn started_first(agent: &Agent, held: &Agent) -> bool {
     }
 }
 
-pub fn status_rank(status: &Status) -> u8 {
-    match status {
-        Status::Waiting => 0,
-        Status::Idle => 1,
-        Status::Busy => 2,
-        Status::Shell => 3,
-        Status::Unknown(_) => 4,
-        Status::Unreported => 5,
+/// How far apart two answers may put the moment an agent came to its status
+/// and still date the same spell of it: claude-ps dates a status in whole
+/// seconds, so each answer puts it up to a second later than the last.
+const SETTLE: Held = Held::from_secs(2);
+
+/// Keeps the moment the answer `before` said `agent` came to its status,
+/// while the status holds and the two are no further apart than the seconds
+/// they round to. A status claude-ps cannot date, it says has been held for
+/// no time at all, in every answer.
+fn settle(agent: &mut Agent, before: &[Agent]) {
+    let Some(was) = before.iter().find(|was| was.pid == agent.pid && was.status == agent.status)
+    else {
+        return;
+    };
+    let apart = agent.came.since(was.came).max(was.came.since(agent.came));
+    if agent.age == Held::from_secs(0) || apart < SETTLE {
+        agent.came = was.came;
     }
 }
 
@@ -682,7 +680,8 @@ pub fn abbr_tag(status: &Status, frame: u64) -> String {
     }
 }
 
-fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
+/// claude-ps's answer, as of `now`.
+fn parse(stdout: &str, now: Moment) -> Result<Vec<Agent>, String> {
     let wire: Vec<Wire> =
         serde_json::from_str(stdout).map_err(|error| format!("claude-ps: {error}"))?;
 
@@ -693,13 +692,15 @@ fn parse(stdout: &str) -> Result<Vec<Agent>, String> {
         if zellij.session.is_empty() {
             continue;
         }
+        let age = Held::from_secs(row.status_age);
         agents.push(Agent {
             reported: zellij.session,
             pid: row.pid,
             name: chosen_name(row.name.as_deref(), row.name_source.as_deref()),
             pane,
             status: Status::parse(row.status.as_deref()),
-            age: Held::from_secs(row.status_age),
+            age,
+            came: now.back(age),
             cwd: row.cwd.filter(|cwd| !cwd.is_empty()),
             transcript: row.session_id.as_deref().and_then(SessionId::parse),
             // claude-ps spells a start it does not know `0`.
@@ -728,14 +729,14 @@ mod tests {
 
     fn rows(json: &str, current: Option<&str>, places: &Places) -> AgentSet {
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(current, &[], places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         agents
     }
 
     fn status(json: &str) -> Status {
-        let agents = parse(json).expect("the document should parse");
+        let agents = parse(json, Moment::default()).expect("the document should parse");
         agents.into_iter().next().expect("one agent").status
     }
 
@@ -810,7 +811,7 @@ mod tests {
             ],
         }];
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let named = |agents: &AgentSet| -> Vec<String> {
             agents.rows.iter().map(AgentRow::label).collect()
         };
@@ -849,7 +850,7 @@ mod tests {
         let branches = [branch("a"), branch("b")];
         let sessions = [Session { name: "b".to_owned(), age: Age::from_secs(5) }];
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(Some("a"), &sessions, &places, &branches);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
@@ -871,7 +872,7 @@ mod tests {
             panes: vec![leaf(4, "✳ Claude Code", "Tab #1"), leaf(6, "✳ Claude Code", "Tab #1")],
         }];
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(Some("luneta"), &[], &places, &branches);
         agents.rebuild("luneta:6", &live, None, Age::ZERO, Selection::SnapToTop);
 
@@ -891,7 +892,7 @@ mod tests {
              "zellij":{"session":"luneta","pane":"29"}}]"#;
         let places = Places::of(&[("luneta", &[(29, "/w/luneta")])]);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(Some("luneta"), &[], &places, &[]);
 
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
@@ -911,7 +912,7 @@ mod tests {
     fn held_in_29(json: &str) -> Vec<Status> {
         let places = Places::of(&[("luneta", &[(29, "/w/luneta")])]);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(Some("luneta"), &[], &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         assert_eq!(agents.doubled, 1);
@@ -955,7 +956,7 @@ mod tests {
         let places = Places::of(&[("a", &[(0, "/w/luneta")])]);
         let sessions = [Session { name: "b".to_owned(), age: Age::ZERO }];
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(Some("a"), &sessions, &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
@@ -986,7 +987,7 @@ mod tests {
     #[test]
     fn the_cursor_holds_to_its_agent_while_another_names_the_same_pane() {
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), ONCE_GONE.as_bytes(), b"");
+        agents.ingest(Some(0), ONCE_GONE.as_bytes(), b"", Moment::default());
         once_gone(&mut agents);
         assert_eq!(seats(&agents), [("x", 2), ("y", 2)]);
 
@@ -998,14 +999,14 @@ mod tests {
     #[test]
     fn a_closing_pane_takes_its_own_agents_and_no_others_until_claude_ps_answers() {
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), ONCE_GONE.as_bytes(), b"");
+        agents.ingest(Some(0), ONCE_GONE.as_bytes(), b"", Moment::default());
         once_gone(&mut agents);
         agents.rows.select(1);
         agents.forget_selected();
         once_gone(&mut agents);
         assert_eq!(seats(&agents), [("x", 2)]);
 
-        agents.ingest(Some(0), ONCE_GONE.as_bytes(), b"");
+        agents.ingest(Some(0), ONCE_GONE.as_bytes(), b"", Moment::default());
         once_gone(&mut agents);
         assert_eq!(seats(&agents), [("x", 2), ("y", 2)]);
     }
@@ -1014,7 +1015,7 @@ mod tests {
     fn the_pane_you_are_in_is_pinned_by_its_pane_and_not_its_name() {
         let places = luneta_holds_both();
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
+        agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"", Moment::default());
         agents.rebuild(
             "misc",
             &Live::new(Some("luneta"), &[], &places, &[]),
@@ -1106,7 +1107,7 @@ mod tests {
     fn the_search_asks_the_name_the_session_goes_by_now() {
         let places = luneta_holds_both();
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"");
+        agents.ingest(Some(0), TWO_IN_ONE_SESSION.as_bytes(), b"", Moment::default());
         agents.rebuild(
             "luneta",
             &Live::new(Some("luneta"), &[], &places, &[]),
@@ -1132,6 +1133,7 @@ mod tests {
                 {"status":"idle","status_age":4,"pid":118,"zellij":{"session":"s","pane":"nope"}},
                 {"status":"idle","status_age":4,"pid":119,"zellij":{"session":"","pane":"0"}},
                 {"status":"idle","status_age":4,"pid":120,"zellij":{"session":"s","pane":"0"}}]"#,
+            Moment::default(),
         )
         .expect("the document should parse");
         assert_eq!(agents.len(), 1);
@@ -1149,7 +1151,7 @@ mod tests {
                 r#"[{{"status":"idle","status_age":4,"pid":121,"session_id":"{id}",
                      "zellij":{{"session":"s","pane":"0"}}}}]"#
             );
-            let agents = parse(&json).expect("the document should parse");
+            let agents = parse(&json, Moment::default()).expect("the document should parse");
             let read = agents.first().and_then(|agent| agent.transcript.as_ref());
             assert_eq!(read.map(SessionId::as_str), transcript, "{id}");
         }
@@ -1186,14 +1188,31 @@ mod tests {
         assert_eq!(abbr_tag(&status, 0), "[C]");
     }
 
+    /// claude-ps dates a status in whole seconds, so each answer puts the
+    /// moment an agent came to it up to a second later than the last did:
+    /// the moment holds while the status does, until an answer puts it
+    /// further off, as a new spell of the same status does. A status it
+    /// cannot date, it says was held for no time at all, every time.
     #[test]
-    fn a_status_sorts_by_how_much_it_wants_you() {
-        let ranks: Vec<u8> = ["waiting", "idle", "busy", "shell", "compacting"]
-            .iter()
-            .map(|word| status_rank(&Status::parse(Some(word))))
-            .collect();
-        assert_eq!(ranks, [0, 1, 2, 3, 4]);
-        assert!(status_rank(&Status::Unreported) > 4);
+    fn an_agent_came_to_its_status_when_the_answers_first_said() {
+        let places = Places::of(&[("s", &[(0, "/w/s")])]);
+        let mut agents = AgentSet::default();
+        let mut came = |status: &str, age: u64, now: u64| {
+            let json = format!(
+                r#"[{{"status":"{status}","status_age":{age},"pid":100,"cwd":"/w/s",
+                     "zellij":{{"session":"s","pane":"0"}}}}]"#
+            );
+            agents.ingest(Some(0), json.as_bytes(), b"", Moment::from_millis(now));
+            let live = Live::new(None, &[], &places, &[]);
+            agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
+            agents.rows[0].came.millis()
+        };
+        assert_eq!(came("idle", 0, 10_400), 10_400);
+        assert_eq!(came("idle", 1, 11_600), 10_400);
+        assert_eq!(came("idle", 0, 20_000), 10_400);
+        assert_eq!(came("busy", 1, 21_000), 20_000);
+        assert_eq!(came("idle", 1, 30_000), 29_000);
+        assert_eq!(came("idle", 1, 40_000), 39_000);
     }
 
     #[test]
@@ -1207,30 +1226,6 @@ mod tests {
         );
         assert!(!Status::Unreported.is_waiting());
         assert!(!Status::Unreported.is_busy());
-    }
-
-    #[test]
-    fn the_next_agent_that_wants_you_comes_round_in_order() {
-        let json = r#"[
-            {"status":"idle","status_age":90,"pid":123,"cwd":"/w/a","zellij":{"session":"a","pane":"0"}},
-            {"status":"busy","status_age":5,"pid":124,"cwd":"/w/b","zellij":{"session":"b","pane":"0"}},
-            {"status":"waiting","status_age":30,"pid":125,"cwd":"/w/c","zellij":{"session":"c","pane":"0"}},
-            {"status":"idle","status_age":10,"pid":126,"cwd":"/w/d","zellij":{"session":"d","pane":"0"}}]"#;
-        let places = Places::of(&[
-            ("a", &[(0, "/w/a")]),
-            ("b", &[(0, "/w/b")]),
-            ("c", &[(0, "/w/c")]),
-            ("d", &[(0, "/w/d")]),
-        ]);
-        let agents = rows(json, None, &places);
-        let next = |here: Option<(&str, u32)>| {
-            agents.next_wanted(here).map(|row| row.seat.session().to_owned())
-        };
-        assert_eq!(next(None).as_deref(), Some("c"));
-        assert_eq!(next(Some(("c", 0))).as_deref(), Some("d"));
-        assert_eq!(next(Some(("d", 0))).as_deref(), Some("a"));
-        assert_eq!(next(Some(("a", 0))).as_deref(), Some("c"));
-        assert_eq!(next(Some(("b", 0))).as_deref(), Some("c"));
     }
 
     /// Sessions `old` and `new` besides `here`, the one you are in, each with
@@ -1248,7 +1243,7 @@ mod tests {
             }
         }
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"");
+        agents.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"", Moment::default());
         rebuild_three(&mut agents);
         agents
     }
@@ -1307,22 +1302,12 @@ mod tests {
         let named = |name: &str| Session { name: name.to_owned(), age: Age::ZERO };
         let sessions = [named("foo"), named("notes")];
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = Live::new(None, &sessions, &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
         let guessed: Vec<(&str, u32, bool)> =
             agents.rows.iter().map(|row| (row.seat.session(), row.pane, row.guessed)).collect();
         assert_eq!(guessed, [("notes", 2, true), ("notes", 5, false), ("notes", 7, false)]);
-    }
-
-    #[test]
-    fn the_only_agent_that_wants_you_is_not_next_when_you_are_in_it() {
-        let places = Places::of(&[("s", &[(0, "/w/s")])]);
-        let agents = rows(&one(r#""waiting""#), None, &places);
-        assert!(agents.next_wanted(Some(("s", 0))).is_none());
-        assert_eq!(agents.next_wanted(Some(("s", 1))).map(|row| row.pane), Some(0));
-        let busy = rows(&one(r#""busy""#), None, &places);
-        assert!(busy.next_wanted(None).is_none());
     }
 
     #[test]

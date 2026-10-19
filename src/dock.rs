@@ -94,8 +94,6 @@ impl TabId {
 pub enum Ask {
     /// Into the sidebar, or back out of it. A hidden one comes back first.
     Focus,
-    /// To the next agent that wants you.
-    Next,
     /// To the pane the sidebar lists after the one you are in, and from the
     /// last back to the first.
     Cycle,
@@ -107,7 +105,6 @@ impl Ask {
     pub fn parse(payload: &str) -> Option<Self> {
         match payload.trim() {
             "focus" => Some(Ask::Focus),
-            "next" => Some(Ask::Next),
             "cycle" => Some(Ask::Cycle),
             "toggle" => Some(Ask::Toggle),
             _ => None,
@@ -435,7 +432,7 @@ impl Dock {
             (Ask::Toggle, Want::Hidden) => Want::Back { focus: false },
             (Ask::Toggle, _) => Want::Hidden,
             (Ask::Focus, Want::Hidden) => Want::Back { focus: true },
-            (Ask::Focus | Ask::Next | Ask::Cycle, _) => return,
+            (Ask::Focus | Ask::Cycle, _) => return,
         };
         if self.take(want) {
             self.say(want == Want::Hidden);

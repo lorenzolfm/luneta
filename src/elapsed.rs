@@ -1,10 +1,48 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Age(Duration);
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Held(Duration);
+
+/// A moment, as the host's clock tells it: how long after the epoch. Every
+/// session's sidebar reads the same clock, so a moment one of them keeps
+/// means the same to the others.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct Moment(Duration);
+
+impl Moment {
+    /// A clock that cannot be read puts every moment at the epoch, where
+    /// nothing comes after anything.
+    pub fn now() -> Self {
+        Moment(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
+    }
+
+    pub fn from_millis(millis: u64) -> Self {
+        Moment(Duration::from_millis(millis))
+    }
+
+    pub fn millis(self) -> u64 {
+        u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The moment `held` before this one.
+    pub fn back(self, held: Held) -> Moment {
+        Moment(self.0.saturating_sub(held.0))
+    }
+
+    /// The moment `age` before this one: when what is that old now was made.
+    pub fn before(self, age: Age) -> Moment {
+        Moment(self.0.saturating_sub(age.0))
+    }
+
+    /// How long after `earlier` this moment is: no time at all when it is
+    /// not after it.
+    pub fn since(self, earlier: Moment) -> Held {
+        Held(self.0.saturating_sub(earlier.0))
+    }
+}
 
 impl Age {
     #[cfg(test)]
@@ -31,7 +69,7 @@ impl Age {
 }
 
 impl Held {
-    pub fn from_secs(secs: u64) -> Self {
+    pub const fn from_secs(secs: u64) -> Self {
         Held(Duration::from_secs(secs))
     }
 

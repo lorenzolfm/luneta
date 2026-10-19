@@ -25,7 +25,7 @@ use crate::checkouts::{Checkouts, DIR_KEY};
 use crate::close::{self, Act, Leaving, Plan, Ran, Scope};
 use crate::dirs::{self, WORKTREES};
 use crate::dock::TabId;
-use crate::elapsed::Age;
+use crate::elapsed::{Age, Moment};
 use crate::fetch::Fetch;
 use crate::places::{self, Places, SESSION_KEY};
 use crate::render;
@@ -1701,7 +1701,7 @@ impl Menu {
         match context.get(CONTEXT_KEY).map(String::as_str) {
             Some(BRANCH_VALUE) => self.branched(exit_code, stdout, context),
             Some(agents::CONTEXT_VALUE) => {
-                self.agents.ingest(exit_code, stdout, stderr);
+                self.agents.ingest(exit_code, stdout, stderr, Moment::now());
                 self.seat_agents();
             },
             Some(places::CONTEXT_VALUE) => {

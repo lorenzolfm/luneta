@@ -20,7 +20,9 @@
 #[path = "../src/hiding.rs"] mod hiding;
 #[path = "../src/icons.rs"] mod icons;
 #[path = "../src/layout.rs"] mod layout;
+#[path = "../src/ledger.rs"] mod ledger;
 #[path = "../src/menu.rs"] mod menu;
+#[path = "../src/news.rs"] mod news;
 #[path = "../src/paint.rs"] mod paint;
 #[path = "../src/panes.rs"] mod panes;
 #[path = "../src/places.rs"] mod places;
@@ -35,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use agents::{AgentSet, Live};
 use dirs::DirSet;
-use elapsed::Age;
+use elapsed::{Age, Moment};
 use paint::Colour;
 use panes::Peeks;
 use places::Places;
@@ -298,10 +300,10 @@ fn main() {
     let mut agents = AgentSet::default();
     stats.push(bench("AgentSet::ingest (claude-ps json)", 2000, || {
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), &ps, b"");
+        agents.ingest(Some(0), &ps, b"", Moment::default());
         std::hint::black_box(&agents);
     }));
-    agents.ingest(Some(0), &ps, b"");
+    agents.ingest(Some(0), &ps, b"", Moment::default());
 
     stats.push(bench("AgentSet::rebuild (empty term)", 2000, || {
         let live = Live::new(Some("session-000-work"), &sess.live, &places, &[]);
@@ -345,7 +347,7 @@ fn main() {
 
     // --- render (stdout should be redirected) ---
     let mut ag = AgentSet::default();
-    ag.ingest(Some(0), &ps, b"");
+    ag.ingest(Some(0), &ps, b"", Moment::default());
     ag.rebuild(
         "",
         &Live::new(Some("session-000-work"), &sess.live, &places, &[]),

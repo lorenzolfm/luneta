@@ -14,7 +14,7 @@ use crate::menu::{Entry, Keys, Legend, Menu, Shown, SidebarMenu};
 use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
-use crate::tree::{Node, PaneNode, SessionNode, Summary, Tree};
+use crate::tree::{Mark, Node, PaneNode, SessionNode, Summary, Tree};
 
 const TAG: Colour = Colour::Level0;
 const NAME: Colour = Colour::Level1;
@@ -1505,6 +1505,10 @@ const MARGIN: usize = 1;
 
 const GLYPH: usize = 1;
 
+/// The dot before a pane's mark for what is new in it since you were last
+/// there, and on a folded session's row for what is new in one of its panes.
+const NEW: &str = "•";
+
 /// How wide the dots and the ages are across the rows on screen, and the
 /// icons the rows draw, wherever they are, so that every label starts at the
 /// same column and is cut at the same column. No icons take no column.
@@ -1549,18 +1553,18 @@ fn sidebar_lines(
         let window = &tree.rows[start..end];
         let marks = || {
             window.iter().filter_map(|node| match node {
-                Node::Pane(PaneNode { agent: Some(mark), .. }) => Some(mark),
+                Node::Pane(PaneNode { mark: Some(mark), .. }) => Some(mark),
                 _ => None,
             })
         };
         let columns = Columns {
             glyph: marks()
-                .map(|mark| agents::dot(&mark.status, frame).width())
+                .map(|mark| glyph(mark, frame).0.width())
                 .max()
                 .unwrap_or(0)
                 .max(GLYPH),
             icons: &tree.icons,
-            age: marks().map(|mark| mark.age.label().width()).max().unwrap_or(0),
+            age: marks().map(|mark| mark.age().label().width()).max().unwrap_or(0),
         };
         for (offset, node) in window.iter().enumerate() {
             let lit = lit == Some(start + offset);
@@ -1588,16 +1592,24 @@ fn header_lines(summary: &Summary, cols: usize, frame: u64) -> [Painted; HEADER]
     [header_line(summary, cols, frame), Painted::new(" ".repeat(cols))]
 }
 
-/// The rule along the top of the sidebar: how many sessions are live, and how
-/// many agents across them wait for you, are done, and are at work. A count
-/// of none is left out, and so is the word for the sessions where the counts
-/// need its room.
+/// The rule along the top of the sidebar: how many sessions are live, how
+/// many agents across them wait for you, how many agents and commands
+/// finished since you were last in their panes, and how many agents are at
+/// work. A count of none is left out, and so is the word for the sessions
+/// where the counts need its room.
 fn header_line(summary: &Summary, cols: usize, frame: u64) -> Painted {
-    let counts: Vec<(Status, usize)> =
-        summary.counts().into_iter().filter(|(_, n)| *n > 0).collect();
+    let (waiting, busy) = (Status::Waiting, Status::Busy);
+    let counts: Vec<(String, Ink, usize, Ink)> = [
+        (agents::dot(&waiting, frame), dot_ink(&waiting), summary.waiting, Ink::Bold(ACCENT)),
+        (NEW.to_owned(), Ink::Bold(ACCENT), summary.unseen, Ink::Plain),
+        (agents::dot(&busy, frame), dot_ink(&busy), summary.busy, Ink::Plain),
+    ]
+    .into_iter()
+    .filter(|(_, _, n, _)| *n > 0)
+    .collect();
     let counted: usize = counts
         .iter()
-        .map(|(status, n)| agents::dot(status, frame).width() + n.to_string().len())
+        .map(|(glyph, _, n, _)| glyph.width() + n.to_string().len())
         .sum::<usize>()
         + counts.len().saturating_sub(1);
     // A space, the counts, a space and a last stretch of the rule.
@@ -1616,13 +1628,12 @@ fn header_line(summary: &Summary, cols: usize, frame: u64) -> Painted {
     if counted > 0 && line.columns() + RULE.width() + tail <= cols {
         line.push(&RULE.repeat(cols - line.columns() - tail), Ink::Dim);
         line.gap(1);
-        for (nth, (status, n)) in counts.iter().enumerate() {
+        for (nth, (glyph, ink, n, counted)) in counts.iter().enumerate() {
             if nth > 0 {
                 line.gap(1);
             }
-            line.push(&agents::dot(status, frame), dot_ink(status));
-            let ink = if status.is_waiting() { Ink::Bold(ACCENT) } else { Ink::Plain };
-            line.push(&n.to_string(), ink);
+            line.push(glyph, *ink);
+            line.push(&n.to_string(), *counted);
         }
         line.gap(1);
         line.push(RULE, Ink::Dim);
@@ -1660,15 +1671,28 @@ fn branch_line(node: &SessionNode, cols: usize, frame: u64) -> Painted {
 }
 
 /// What a session says on its own row: how many of its agents wait for you,
-/// and once it is folded, the dot of the one that wants you most.
+/// and once it is folded, the mark of the pane that wants you most, or the
+/// dot of what is new in one.
 fn branch_badge(node: &SessionNode, frame: u64) -> Option<(String, Ink)> {
     if node.waiting > 0 {
         let dot = agents::dot(&Status::Waiting, frame);
         return Some((format!("{dot}{}", node.waiting), Ink::Bold(ACCENT)));
     }
     match &node.loudest {
-        Some(status) if node.folded => Some((agents::dot(status, frame), dot_ink(status))),
+        Some(mark) if node.folded && mark.is_new() => Some((NEW.to_owned(), Ink::Bold(ACCENT))),
+        Some(mark) if node.folded => Some(glyph(mark, frame)),
         _ => None,
+    }
+}
+
+/// A mark's glyph and its colour: its status's dot, dimmed for an agent you
+/// have seen finish, and `$` for a shell that finished a command.
+fn glyph(mark: &Mark, frame: u64) -> (String, Ink) {
+    match mark {
+        Mark::Agent { status: Status::Idle, .. } => (agents::dot(&Status::Idle, frame), Ink::Dim),
+        Mark::Agent { status, .. } => (agents::dot(status, frame), dot_ink(status)),
+        Mark::Finished { .. } => (agents::dot(&Status::Idle, frame), dot_ink(&Status::Idle)),
+        Mark::Ran { .. } => (agents::dot(&Status::Shell, frame), Ink::Plain),
     }
 }
 
@@ -1684,20 +1708,23 @@ fn dot_ink(status: &Status) -> Ink {
     }
 }
 
-/// A pane's row: its dot, the icon of its program, its label, and how long
-/// its agent has been in its state. The label is plain, in the accent while
-/// its agent waits for you, and dimmed with no agent, and the icon is drawn
-/// as the label is. The pane you are in has the mark and a bold one.
+/// A pane's row: the dot of what is new in it, its mark, the icon of its
+/// program, its label, and how long its agent has been in its state, or since
+/// its shell finished a command. The label is plain, in the accent while its
+/// agent waits for you, and dimmed with no mark, and the icon is drawn as the
+/// label is. The pane you are in has the mark of the pane you are in, and a
+/// bold one.
 fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Painted {
-    let mut line = pane_margin(node);
+    let mut line = pane_margin(node, node.mark.as_ref().is_some_and(Mark::is_new));
     let start = line.columns();
-    if let Some(mark) = &node.agent {
-        line.push(&agents::dot(&mark.status, frame), dot_ink(&mark.status));
+    if let Some(mark) = &node.mark {
+        let (glyph, ink) = glyph(mark, frame);
+        line.push(&glyph, ink);
     }
     // A label in the accent shows the letters a search lands on in a colour.
-    let (label, hit) = match &node.agent {
+    let (label, hit) = match &node.mark {
         _ if node.here => (Ink::Strong, Ink::Bold(ACCENT)),
-        Some(mark) if mark.status.is_waiting() => (Ink::Bold(ACCENT), Ink::Bold(NAME)),
+        Some(mark) if mark.is_waiting() => (Ink::Bold(ACCENT), Ink::Bold(NAME)),
         Some(_) => (Ink::Plain, Ink::Bold(ACCENT)),
         None => (Ink::Dim, Ink::Bold(ACCENT)),
     };
@@ -1710,8 +1737,8 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
     let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
     let (text, hits) = lit(&node.label, room, &node.hits);
     line.push_hits(&text, label, hit, &hits);
-    if let Some(mark) = &node.agent {
-        let age = mark.age.label();
+    if let Some(mark) = &node.mark {
+        let age = mark.age().label();
         line.pad_to(cols.saturating_sub(age.width() + MARGIN));
         line.push(&age, Ink::Dim);
     }
@@ -1723,7 +1750,7 @@ fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Pai
 /// branch is cut to leave the status room. The mark of the pane you are in
 /// runs down this line too.
 fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: usize) -> Painted {
-    let mut line = pane_margin(node);
+    let mut line = pane_margin(node, false);
     line.gap(columns.label());
     let status = checkout.status.as_str();
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
@@ -1736,16 +1763,22 @@ fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: 
     line.fill(cols)
 }
 
-/// The columns of a pane's lines before its dot: the mark of the pane you are
-/// in, or a blank where it goes, and the indent under its session.
-fn pane_margin(node: &PaneNode) -> Line {
+/// The columns of a pane's lines before its mark: the mark of the pane you
+/// are in, or a blank where it goes, and the indent under its session, whose
+/// last column has the dot of what is `new` in the pane.
+fn pane_margin(node: &PaneNode, new: bool) -> Line {
     let mut line = Line::new();
     if node.here {
         line.push(HERE_MARK, Ink::Bold(ACCENT));
     } else {
         line.gap(1);
     }
-    line.gap(2);
+    line.gap(1);
+    if new {
+        line.push(NEW, Ink::Bold(ACCENT));
+    } else {
+        line.gap(1);
+    }
     line
 }
 
@@ -1783,8 +1816,7 @@ mod tests {
     use crate::places::Places;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Session, Sessions};
-    use crate::elapsed::Held;
-    use crate::tree::Mark;
+    use crate::elapsed::{Held, Moment};
 
     fn picture<R: Into<PreviewRow>>(
         rect: &Rect,
@@ -2362,7 +2394,7 @@ mod tests {
              "zellij":{"session":"luneta","pane":"0"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = agents::Live::new(Some("luneta"), &[], &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
@@ -2384,7 +2416,7 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 42, height: 5 };
         let body = |origin: Option<u32>, term: &str| -> Vec<String> {
             let mut agents = AgentSet::default();
-            agents.ingest(Some(0), json.as_bytes(), b"");
+            agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
             let live = agents::Live::new(Some("notes"), &[], &places, &[]);
             agents.rebuild(term, &live, origin, Age::ZERO, Selection::SnapToTop);
             agent_body(&agents, term, &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect()
@@ -2406,7 +2438,7 @@ mod tests {
             "zellij":{"session":"notes","pane":"1"}}]"#;
         let places = Places::of(&[("notes", &[(1, "/w/notes")])]);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"");
+        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
         let live = agents::Live::new(Some("notes"), &[], &places, &[]);
         agents.rebuild("", &live, Some(1), Age::ZERO, Selection::SnapToTop);
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
@@ -2447,7 +2479,7 @@ mod tests {
         );
 
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), AGENTS.as_bytes(), b"");
+        agents.ingest(Some(0), AGENTS.as_bytes(), b"", Moment::default());
         let places = Places::of(&[
             ("misc", &[(12, "/home/lorenzo/Projects/misc/luneta")]),
             ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
@@ -2538,27 +2570,36 @@ mod tests {
         \x1b[33m\u{e673} \x1b[1;4mMakefile\x1b[0m\n\
         \x1b[33m\u{f00ba} \x1b[1;4mREADME.md\x1b[0m\n";
 
+    /// The mark `word` names, held for `age` seconds: `finished` for an
+    /// agent that finished since you were last in its pane, `ran` for a
+    /// command its shell finished, and else an agent's status.
+    fn mark(word: &str, age: u64) -> Mark {
+        let age = Held::from_secs(age);
+        match word {
+            "finished" => Mark::Finished { age },
+            "ran" => Mark::Ran { age },
+            _ => Mark::Agent { status: Status::parse(Some(word)), age },
+        }
+    }
+
     fn session_node(name: &str, folded: bool, waiting: usize, loudest: Option<&str>) -> Node {
         Node::Session(SessionNode {
             name: name.to_owned(),
             current: false,
             folded,
             waiting,
-            loudest: loudest.map(|word| Status::parse(Some(word))),
+            loudest: loudest.map(|word| mark(word, 0)),
             hits: Vec::new(),
         })
     }
 
-    fn pane_node(session: &str, id: u32, label: &str, agent: Option<(&str, u64)>) -> Node {
+    fn pane_node(session: &str, id: u32, label: &str, marked: Option<(&str, u64)>) -> Node {
         Node::Pane(PaneNode {
             session: session.to_owned(),
             id,
             tab: None,
             label: label.to_owned(),
-            agent: agent.map(|(word, age)| Mark {
-                status: Status::parse(Some(word)),
-                age: Held::from_secs(age),
-            }),
+            mark: marked.map(|(word, age)| mark(word, age)),
             runs: None,
             checkout: None,
             here: false,
@@ -2598,7 +2639,7 @@ mod tests {
     /// floresta as well as the ones on show.
     fn workday_tree(selected: usize) -> Tree {
         let mut tree = sidebar_tree(workday(), selected);
-        tree.summary = Summary { sessions: 3, waiting: 1, idle: 1, busy: 3 };
+        tree.summary = Summary { sessions: 3, waiting: 1, unseen: 1, busy: 3 };
         tree
     }
 
@@ -2619,7 +2660,7 @@ mod tests {
     fn workday() -> Vec<Node> {
         vec![
             session_node("bipa", false, 1, Some("waiting")),
-            pane_node("bipa", 31, "handoff-eng-11259-pr4b", Some(("idle", 13 * HOUR))),
+            pane_node("bipa", 31, "handoff-eng-11259-pr4b", Some(("finished", 13 * HOUR))),
             pane_node("bipa", 39, "dda-bank-slip-paid-feature", Some(("waiting", 180))),
             pane_node("bipa", 47, "Handoff pix outflow request readback", Some(("busy", 12))),
             session_node("floresta", true, 0, Some("busy")),
@@ -2636,10 +2677,10 @@ mod tests {
         assert_eq!(
             sidebar_picture(&tree, &[], false, 11, 30),
             vec![
-                "─ 3 sessions ────── ●1 ✓1 ⠋3 ─",
+                "─ 3 sessions ────── ●1 •1 ⠋3 ─",
                 "                              ",
                 " ▾ bipa ────────────────── ●1 ",
-                "   ✓ handoff-eng-11259-p… 13h ",
+                "  •✓ handoff-eng-11259-p… 13h ",
                 "   ● dda-bank-slip-paid-…  3m ",
                 "   ⠋ Handoff pix outflow… 12s ",
                 " ▸ floresta ─────────────── ⠋ ",
@@ -2797,13 +2838,56 @@ mod tests {
         }
     }
 
+    /// What finished since you were last in its pane has a dot before its
+    /// mark, in the accent: an agent's `✓` in green, and a shell's `$`, its
+    /// row named for the command it ran. An agent you have seen finish keeps
+    /// its `✓`, dimmed, and has no dot. A folded session shows the dot for
+    /// what is new in it.
+    #[test]
+    fn what_is_new_has_a_dot_before_its_mark() {
+        let nodes = vec![
+            session_node("a", false, 0, Some("finished")),
+            pane_node("a", 1, "seen", Some(("idle", 60))),
+            pane_node("a", 2, "unseen", Some(("finished", 60))),
+            pane_node("a", 3, "cargo build --relea", Some(("ran", 8))),
+            pane_node("a", 4, "~/P/m/a", None),
+            session_node("b", true, 0, Some("ran")),
+        ];
+        let tree = sidebar_tree(nodes, 1);
+        let shelf = Shelf::new(8, 0, None, 30);
+        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
+        let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
+        assert_eq!(
+            drawn[HEADER..],
+            [
+                " ▾ a ──────────────────────── ",
+                "   ✓ seen                  1m ",
+                "  •✓ unseen                1m ",
+                "  •$ cargo build --relea   8s ",
+                "     ~/P/m/a                  ",
+                " ▸ b ────────────────────── • ",
+            ]
+        );
+        let [seen, unseen, ran, plain] = [1, 2, 3, 4].map(|row| &lines[HEADER + row]);
+        assert!(seen.is_dim_at(3));
+        for new in [unseen, ran] {
+            assert_eq!(new.colour_at(2), Some(ACCENT));
+            assert!(new.is_bold_at(2) && !new.is_dim_at(3) && !new.is_dim_at(5));
+        }
+        assert_eq!(unseen.colour_at(3), Some(Colour::Success));
+        assert!(plain.is_dim_at(5));
+        assert_eq!(lines[HEADER + 5].colour_at(28), Some(ACCENT));
+    }
+
     #[test]
     fn the_header_leaves_out_what_there_is_none_of() {
         let header =
             |summary: Summary, cols: usize| header_line(&summary, cols, 0).content().to_owned();
-        let summary = Summary { sessions: 4, waiting: 2, idle: 0, busy: 1 };
+        let summary = Summary { sessions: 4, waiting: 2, unseen: 0, busy: 1 };
         assert_eq!(header(summary, 30), "─ 4 sessions ───────── ●2 ⠋1 ─");
         assert_eq!(header(summary, 16), "──────── ●2 ⠋1 ─");
+        let unseen = Summary { sessions: 4, unseen: 3, ..Summary::default() };
+        assert_eq!(header(unseen, 30), "─ 4 sessions ──────────── •3 ─");
         assert_eq!(header(Summary { sessions: 1, ..Summary::default() }, 16), "─ 1 session ────");
         assert_eq!(header(Summary::default(), 6), "──────");
     }
@@ -2935,7 +3019,7 @@ mod tests {
                 id: 0,
                 tab: None,
                 label: "misc".to_owned(),
-                agent: agent.map(|word| Mark {
+                mark: agent.map(|word| Mark::Agent {
                     status: Status::parse(Some(word)),
                     age: Held::from_secs(4),
                 }),
@@ -3154,9 +3238,9 @@ mod tests {
         assert_eq!(
             picture,
             [
-                "─ 3 sessions ────── ●1 ✓1 ⠋3 ─",
+                "─ 3 sessions ────── ●1 •1 ⠋3 ─",
                 "                              ",
-                "   ✓ handoff-eng-11259-p… 13h ",
+                "  •✓ handoff-eng-11259-p… 13h ",
                 "   ● dda-bank-slip-paid-…  3m ",
                 "   ⠋ Handoff pix outflow… 12s ",
                 " ▸ floresta ─────────────── ⠋ ",
