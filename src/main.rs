@@ -29,7 +29,7 @@ use checkouts::Checkouts;
 use context::CONTEXT_KEY;
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
-use menu::{Command, Did, RowPane, SidebarMenu, There};
+use menu::{Command, Did, RowPane, SidebarMenu, There, Top};
 use elapsed::Age;
 use folds::Folds;
 use panes::Peeks;
@@ -1395,16 +1395,13 @@ impl State {
         if let Some(term) = search {
             return self.handle_search_box_key(key.bare_key, term) || unscrolled;
         }
-        // A key that does more than move the cursor, fold or open the menu
-        // is a `Command`, which it comes to by `Command::of` below, for help
-        // to list it.
+        // A character does what `Top::of` says, which the legend goes by
+        // too, and a key it has not is the menu's.
         let drawn = match key.bare_key {
-            BareKey::Down | BareKey::Char('j') => self.move_tree(1),
-            BareKey::Up | BareKey::Char('k') => self.move_tree(-1),
-            BareKey::Left | BareKey::Char('h') => self.fold(Some(true)),
-            BareKey::Right | BareKey::Char('l') => self.fold(Some(false)),
-            BareKey::Char(' ') => self.fold(None),
-            BareKey::Char('m') => self.open_menu(None),
+            BareKey::Down => self.move_tree(1),
+            BareKey::Up => self.move_tree(-1),
+            BareKey::Left => self.fold(Some(true)),
+            BareKey::Right => self.fold(Some(false)),
             BareKey::Enter => {
                 self.go_to_selected();
                 true
@@ -1413,9 +1410,12 @@ impl State {
                 self.go_back();
                 false
             },
-            BareKey::Char(c) => match Command::of(c) {
-                Some(command) => self.command(command),
-                None if Command::opens(c) => self.open_help(c),
+            BareKey::Char(c) => match Top::of(c) {
+                Some(Top::Move(rows)) => self.move_tree(rows),
+                Some(Top::Fold(folded)) => self.fold(folded),
+                Some(Top::Menu) => self.open_menu(None),
+                Some(Top::Command(command)) => self.command(command),
+                Some(Top::Group(group)) => self.open_help(group),
                 None => self.open_menu(Some(c)),
             },
             _ => false,

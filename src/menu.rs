@@ -140,13 +140,13 @@ impl Command {
 
     /// The command `key` runs at the top of the sidebar, if any: a command in
     /// a group is the group's key.
-    pub fn of(key: char) -> Option<Command> {
+    fn of(key: char) -> Option<Command> {
         let at_the_top = |command: &Command| command.group().is_none() && command.key() == key;
         Command::ALL.iter().copied().find(at_the_top)
     }
 
     /// Whether `key` opens a group of commands at the top of the sidebar.
-    pub fn opens(key: char) -> bool {
+    fn opens(key: char) -> bool {
         Command::ALL.iter().any(|command| command.group().is_some_and(|(at, _)| at == key))
     }
 
@@ -185,12 +185,59 @@ impl Command {
     }
 }
 
+/// What a key does at the top of the sidebar, ahead of the menu's keys. The
+/// sidebar does what `of` says, and the legend leaves out a key of yours that
+/// `moves` takes, so the legend shows no key that does something else there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Top {
+    /// Moves the cursor so many rows down, or up.
+    Move(isize),
+    /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
+    Fold(Option<bool>),
+    /// Opens the menu on its first group, where every key is the menu's.
+    Menu,
+    /// Runs a command of the sidebar's own.
+    Command(Command),
+    /// Opens help on the group of commands the key opens.
+    Group(char),
+}
+
+impl Top {
+    /// What `key` does at the top of the sidebar besides a command: moves the
+    /// cursor, folds, or opens the menu. A key of yours among these is the
+    /// menu's through `m`.
+    pub const fn moves(key: char) -> Option<Top> {
+        match key {
+            'j' => Some(Top::Move(1)),
+            'k' => Some(Top::Move(-1)),
+            'h' => Some(Top::Fold(Some(true))),
+            'l' => Some(Top::Fold(Some(false))),
+            ' ' => Some(Top::Fold(None)),
+            'm' => Some(Top::Menu),
+            _ => None,
+        }
+    }
+
+    /// What `key` does at the top of the sidebar. None for a key the menu has
+    /// the say on.
+    pub fn of(key: char) -> Option<Top> {
+        if let Some(top) = Top::moves(key) {
+            return Some(top);
+        }
+        if Command::opens(key) {
+            return Some(Top::Group(key));
+        }
+        Command::of(key).map(Top::Command)
+    }
+}
+
 /// No two commands share a key where they are, at the top of the sidebar or
 /// in one group, and no group opens on the key of a command at the top: `of`
 /// would find the first, and help would show both. Nor does a command at the
 /// top, or a group of them, take the key of luneta's New or Delete group:
 /// the sidebar keeps a key for its command, and the group would be out of
-/// reach there, and gone from help.
+/// reach there, and gone from help. Nor a key the top of the sidebar moves,
+/// folds or opens the menu with: `Top::of` finds that first.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
@@ -200,6 +247,7 @@ const _: () = {
             None => one.key(),
         };
         assert!(top != NEW && top != DELETE, "a command on a key of luneta's groups");
+        assert!(Top::moves(top).is_none(), "a command on a key the sidebar moves with");
         let mut other = 0;
         while other < Command::ALL.len() {
             let two = Command::ALL[other];
@@ -432,15 +480,19 @@ impl Keys {
 
 /// The top of help, which the sidebar shows at its bottom while it has the
 /// focus and no menu or search box is open. Each of its keys does at the top
-/// of the sidebar what it does in help. Or what is wrong with the menu, which
-/// shows nothing then.
+/// of the sidebar what it does in help, so it leaves out a key of yours that
+/// the top of the sidebar keeps, which `m` reaches. Or what is wrong with the
+/// menu, which shows nothing then.
 pub struct Legend(Result<Keys, String>);
 
 impl Legend {
     /// The legend of a menu of `entries`. It shows the Delete group's key and
     /// not what it deletes, which is the row's, so any row's scope will do.
     pub fn new(entries: Option<&str>) -> Self {
-        Legend(Keys::new(entries, Scope::Pane).map(Keys::help))
+        Legend(Keys::new(entries, Scope::Pane).map(|mut menu| {
+            menu.root.retain(|entry| Top::moves(entry.key()).is_none());
+            Keys::help(menu)
+        }))
     }
 
     pub fn shown(&self) -> Shown<'_> {
@@ -2373,6 +2425,19 @@ mod tests {
             let top = press(Some(brief), &bare(BareKey::Backspace));
             assert_eq!(on_show(top.as_ref()), Some(Ok(vec!['/', 'n', 'd', 'b'])), "{entries}");
         }
+    }
+
+    /// A key of yours that the top of the sidebar moves, folds or opens the
+    /// menu with is the menu's through `m`: the legend leaves it out, and
+    /// help, which is a menu, keeps it.
+    #[test]
+    fn the_legend_leaves_out_the_keys_the_sidebar_keeps() {
+        let entries = Some(r#"c "Claude" { t "/tigerstyle"; }; k "review"; m "migrate""#);
+        let legend = Legend::new(entries);
+        let Shown::Keys(keys) = legend.shown() else { panic!("no keys") };
+        assert_eq!(shown(keys), ['/', 'c', 'n', 'd', 'b']);
+        let menu = help(entries, row(None), None);
+        assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['/', 'c', 'k', 'm', 'n', 'd', 'b'])));
     }
 
     /// A group of the menu opens from help, and `Backspace` comes back to it.

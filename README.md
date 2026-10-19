@@ -261,7 +261,8 @@ closes when the sidebar loses the focus, and with a click.
 While the sidebar has the focus and no menu is open, its bottom shows the keys
 you can press there: `/` to search at the top, then the menu's first group,
 then the [brief](#brief)'s keys, in a group `b` opens. A key of the menu that a
-command has stays the command's.
+command has stays the command's, and one the sidebar moves, folds or opens the
+menu with, as `j` or `m`, is left out: `m` reaches it.
 
 ```text
 ─ luneta ─────────────────────
