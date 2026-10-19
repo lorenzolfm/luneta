@@ -388,15 +388,19 @@ impl News {
                 let ok = Some(*status == 0);
                 Some((Mark::Ran { age: self.now.since(*at), ok }, command))
             },
+            // A job stopped with `Ctrl z` neither runs nor ended.
+            Said::Stopped => None,
         }
     }
 
-    /// What the hook in `pane` of `session` said last, since its session was
-    /// made: a session made earlier by the same name ran it, in a pane of its
-    /// own.
+    /// What the hook in `pane` of `session` said last, if its shell started
+    /// in that session: one that started before the session was made is a
+    /// shell of another session by that name, gone or renamed since, which
+    /// goes on writing under the name it had.
     fn said(&self, session: &str, pane: u32) -> Option<&Said> {
         let born = self.made.get(session).map(|made| made.back(MADE));
-        self.shells.said(session, pane).filter(|said| born.is_none_or(|born| said.moment() >= born))
+        let (started, said) = self.shells.said(session, pane)?;
+        born.is_none_or(|born| started >= born).then_some(said)
     }
 
     /// When the last thing finished in a pane, whether its agent or its
@@ -405,7 +409,8 @@ impl News {
         let finished = agent.filter(|agent| agent.status == Status::Idle).map(|agent| agent.came);
         let ran = match (self.said(session, pane), self.runs.get(session, pane)) {
             (Some(Said::Ended { at, .. }), _) | (None, Some(Run::Ended { at, .. })) => Some(*at),
-            (Some(Said::Going { .. }), _) | (None, Some(Run::Going { .. }) | None) => None,
+            (Some(Said::Going { .. } | Said::Stopped), _)
+            | (None, Some(Run::Going { .. }) | None) => None,
         };
         finished.max(ran)
     }
@@ -658,8 +663,8 @@ mod tests {
             (Front::Asking, Some(Mark::Asking { age: Held::from_secs(2) })),
             (Front::Interactive, None),
         ] {
-            let shells =
-                Shells::of(vec![("s", 1, going(build, at(100)))], vec![("/dev/pts/3", front)]);
+            let said = vec![("s", 1, at(0), going(build, at(100)))];
+            let shells = Shells::of(said, vec![("/dev/pts/3", front)]);
             let mut news = News { shells, ..News::default() };
             news.watch(&branches, &agents, None, untitled, Moment::from_millis(100_500));
             assert_eq!(command_of(&news, false), None, "{front:?}");
@@ -671,7 +676,9 @@ mod tests {
 
     /// A command that ran for a second or more has `✓` once it ends with 0,
     /// and `✗` with anything else, until you stay in its pane. One that took
-    /// less has none, and nor does one its session was not made by then.
+    /// less has none, nor does a job stopped with `Ctrl z`, nor what a shell
+    /// says that started before its session was made, however new: it is a
+    /// shell of a session renamed since, which had the name.
     #[test]
     fn a_command_that_ran_a_while_says_how_it_ended_until_you_stay_in_its_pane() {
         let (branches, agents) = session("~/w/s", "busy", 0, at(110));
@@ -680,8 +687,9 @@ mod tests {
             (ended("make", at(103), 0, 3_000), Some(Mark::Ran { age, ok: Some(true) })),
             (ended("make", at(103), 2, 3_000), Some(Mark::Ran { age, ok: Some(false) })),
             (ended("make", at(103), 0, 999), None),
+            (Said::Stopped, None),
         ] {
-            let shells = Shells::of(vec![("s", 1, said.clone())], vec![]);
+            let shells = Shells::of(vec![("s", 1, at(0), said.clone())], vec![]);
             let mut news = News { shells, ..News::default() };
             news.watch(&branches, &agents, Some(("s", 2)), untitled, at(110));
             let ran = mark.clone().map(|mark| (mark, "make".to_owned()));
@@ -692,12 +700,17 @@ mod tests {
             assert_eq!(command_of(&news, false), None, "{said:?}");
         }
 
-        let shells = Shells::of(vec![("s", 1, ended("make", at(50), 0, 3_000))], vec![]);
-        let mut news = News { shells, ..News::default() };
         let mut later = branches;
         later[0].age = Age::from_secs(10);
-        news.watch(&later, &agents, None, untitled, at(110));
-        assert_eq!(command_of(&news, false), None);
+        let passed = Some(Mark::Ran { age, ok: Some(true) });
+        for (started, mark) in [(at(50), None), (at(100), passed)] {
+            let said = ended("make", at(103), 0, 3_000);
+            let shells = Shells::of(vec![("s", 1, started, said)], vec![]);
+            let mut news = News { shells, ..News::default() };
+            news.watch(&later, &agents, None, untitled, at(110));
+            let ran = mark.map(|mark| (mark, "make".to_owned()));
+            assert_eq!(command_of(&news, false), ran, "{started:?}");
+        }
     }
 
     /// A shell with no hook says by its title that a command ended, and not

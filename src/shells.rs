@@ -2,18 +2,20 @@
 //!
 //! A title says only that a command runs, cut to twenty characters, and not
 //! how it ended. A hook in the shell says it all: fish's `fish_preexec` and
-//! `fish_postexec` write a file for each pane, in a folder for its session
-//! under the host's runtime folder, as the README shows. Its one line is one
-//! of
+//! `fish_postexec` write a file for each shell, `<pane>.<started>`, in a
+//! folder for its session under the host's runtime folder, as the README
+//! shows. Its one line is one of
 //!
 //! ```text
 //! going <since> <tty> <command>
 //! ended <at> <status> <took> <command>
+//! stopped <at> <command>
 //! ```
 //!
-//! with `<since>` and `<at>` in seconds since the epoch, and `<took>` in
-//! milliseconds. A shell without the hook writes none, and its title says
-//! what it can.
+//! with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>`
+//! in milliseconds, and `stopped` for a job stopped with `Ctrl z`. A pane's
+//! shell is the one that started last. A shell without the hook writes none,
+//! and its title says what it can.
 //!
 //! What runs is at work, or waits for you to type, or has the terminal to
 //! itself, as an editor does: what the terminal says of the command in front
@@ -76,17 +78,11 @@ pub enum Said {
     /// It ran `command`, for as long as `took`, and it ended at `at` with
     /// `status`.
     Ended { command: String, at: Moment, status: i32, took: Held },
+    /// It stopped the job it ran, which waits to be brought back.
+    Stopped,
 }
 
 impl Said {
-    /// When it started, or ended.
-    pub fn moment(&self) -> Moment {
-        match self {
-            Said::Going { since, .. } => *since,
-            Said::Ended { at, .. } => *at,
-        }
-    }
-
     fn read(line: &str) -> Option<Self> {
         let (word, rest) = line.split_once(' ')?;
         let (secs, rest) = rest.split_once(' ')?;
@@ -107,6 +103,7 @@ impl Said {
                 let (status, command) = (status.parse().ok()?, command.to_owned());
                 Some(Said::Ended { command, at, status, took })
             },
+            "stopped" => Some(Said::Stopped),
             _ => None,
         }
     }
@@ -161,7 +158,8 @@ impl Front {
 
 #[derive(Default)]
 pub struct Shells {
-    said: BTreeMap<String, BTreeMap<u32, Said>>,
+    /// What the shell in each pane of each session said, and when it started.
+    said: BTreeMap<String, BTreeMap<u32, (Moment, Said)>>,
     /// What the command in front of each terminal a command is going on does.
     fronts: HashMap<String, Front>,
     asking: bool,
@@ -196,15 +194,26 @@ impl Shells {
             match kind {
                 "said" => {
                     let mut parts = rest.splitn(3, '\t');
-                    let (Some(session), Some(pane), Some(said)) =
+                    let (Some(session), Some(file), Some(said)) =
                         (parts.next(), parts.next(), parts.next())
                     else {
                         continue;
                     };
-                    let (Ok(pane), Some(said)) = (pane.parse(), Said::read(said)) else {
+                    let Some((pane, started)) = file.split_once('.') else {
                         continue;
                     };
-                    self.said.entry(session.to_owned()).or_default().insert(pane, said);
+                    let (Ok(pane), Ok(started), Some(said)) =
+                        (pane.parse(), started.parse::<u64>(), Said::read(said))
+                    else {
+                        continue;
+                    };
+                    let started = Moment::from_millis(started.saturating_mul(1000));
+                    // A pane's shell is the one that started last: the others
+                    // were a session's that had its name.
+                    let panes = self.said.entry(session.to_owned()).or_default();
+                    if panes.get(&pane).is_none_or(|(was, _)| *was < started) {
+                        panes.insert(pane, (started, said));
+                    }
                 },
                 "stty" => {
                     if let Some((tty, said)) = rest.split_once('\t') {
@@ -230,8 +239,9 @@ impl Shells {
         }
     }
 
-    pub fn said(&self, session: &str, pane: u32) -> Option<&Said> {
-        self.said.get(session)?.get(&pane)
+    /// What the shell in `pane` of `session` said last, and when it started.
+    pub fn said(&self, session: &str, pane: u32) -> Option<(Moment, &Said)> {
+        self.said.get(session)?.get(&pane).map(|(started, said)| (*started, said))
     }
 
     /// What the command in front of `tty` does: at work, unless its terminal
@@ -240,11 +250,13 @@ impl Shells {
         self.fronts.get(tty).copied().unwrap_or_default()
     }
 
+    /// The shells that said `said`, each in its session and pane, started at
+    /// its moment, and the terminals that do as `fronts` say.
     #[cfg(test)]
-    pub fn of(said: Vec<(&str, u32, Said)>, fronts: Vec<(&str, Front)>) -> Self {
+    pub fn of(said: Vec<(&str, u32, Moment, Said)>, fronts: Vec<(&str, Front)>) -> Self {
         let mut shells = Shells::default();
-        for (session, pane, said) in said {
-            shells.said.entry(session.to_owned()).or_default().insert(pane, said);
+        for (session, pane, started, said) in said {
+            shells.said.entry(session.to_owned()).or_default().insert(pane, (started, said));
         }
         shells.fronts = fronts.into_iter().map(|(tty, front)| (tty.to_owned(), front)).collect();
         shells
@@ -279,8 +291,15 @@ mod tests {
                 took: Held::from_millis(41_873),
             })
         );
-        for wrong in ["", "going", "going 12 /dev/pts/3", "went 12 /dev/pts/3 make", "ended 12 x 5 make"]
-        {
+        assert_eq!(Said::read("stopped 1760900045 cargo test"), Some(Said::Stopped));
+        for wrong in [
+            "",
+            "going",
+            "going 12 /dev/pts/3",
+            "went 12 /dev/pts/3 make",
+            "ended 12 x 5 make",
+            "stopped 12",
+        ] {
             assert_eq!(Said::read(wrong), None, "{wrong:?}");
         }
     }
@@ -309,17 +328,22 @@ mod tests {
         }
     }
 
-    /// What the script writes: each pane's record, and for the terminals of
+    /// What the script writes: each shell's record, and for the terminals of
     /// the commands going, their modes and the processes on them. Only the
-    /// ones in front count.
+    /// ones in front count. A pane's shell is the one that started last, and
+    /// a file that does not say when its shell started, or is still being
+    /// written, is none.
     #[test]
     fn an_answer_says_what_each_pane_ran_and_what_its_terminal_does() {
         let answer = [
-            "said\tluneta\t3\tgoing 100 /dev/pts/3 cargo build",
-            "said\tluneta\t4\tgoing 100 /dev/pts/4 rm -i notes",
-            "said\tluneta\t5\tended 100 0 1500 make",
-            "said\tluneta\tx.new\tended 100 0 1500 make",
-            "said\tbipa\t3\tgoing 100 /dev/pts/9 nvim",
+            "said\tluneta\t3.90\tgoing 100 /dev/pts/3 cargo build",
+            "said\tluneta\t4.90\tgoing 100 /dev/pts/4 rm -i notes",
+            "said\tluneta\t5.95\tended 100 0 1500 make",
+            "said\tluneta\t5.80\tended 100 1 1500 make",
+            "said\tluneta\t6\tended 100 0 1500 make",
+            "said\tluneta\t6.90.new\tended 100 0 1500 make",
+            "said\tluneta\tx.90\tended 100 0 1500 make",
+            "said\tbipa\t3.90\tgoing 100 /dev/pts/9 nvim",
             "stty\t/dev/pts/3\tspeed 38400 baud; icanon echo ",
             "stty\t/dev/pts/4\tspeed 38400 baud; icanon echo ",
             "stty\t/dev/pts/9\tspeed 38400 baud; -icanon -echo ",
@@ -334,9 +358,12 @@ mod tests {
         assert!(!shells.ask());
         shells.ingest(Some(0), answer.as_bytes());
         assert!(shells.ask());
-        assert!(matches!(shells.said("luneta", 3), Some(Said::Going { .. })));
-        assert!(matches!(shells.said("luneta", 5), Some(Said::Ended { status: 0, .. })));
-        assert!(matches!(shells.said("bipa", 3), Some(Said::Going { .. })));
+        assert!(matches!(shells.said("luneta", 3), Some((_, Said::Going { .. }))));
+        let (five, newest) = (shells.said("luneta", 5), Moment::from_millis(95_000));
+        let from_newest = matches!(five, Some((at, Said::Ended { status: 0, .. })) if at == newest);
+        assert!(from_newest, "{five:?}");
+        assert_eq!(shells.said("luneta", 6), None);
+        assert!(matches!(shells.said("bipa", 3), Some((_, Said::Going { .. }))));
         assert_eq!(shells.said("bipa", 4), None);
         assert_eq!(shells.front("/dev/pts/3"), Front::Working);
         assert_eq!(shells.front("/dev/pts/4"), Front::Asking);
@@ -353,9 +380,9 @@ mod tests {
         let runtime = std::env::temp_dir().join(format!("luneta-shells-{}", std::process::id()));
         let commands = runtime.join("luneta/commands");
         for (session, pane, said) in [
-            ("s", "1", "going 100 /dev/null sleep 30\n"),
-            ("s", "2", "ended 100 1 2500 false\n"),
-            ("gone", "1", "ended 100 0 2500 true\n"),
+            ("s", "1.90", "going 100 /dev/null sleep 30\n"),
+            ("s", "2.90", "ended 100 1 2500 false\n"),
+            ("gone", "1.90", "ended 100 0 2500 true\n"),
         ] {
             std::fs::create_dir_all(commands.join(session)).unwrap();
             std::fs::write(commands.join(session).join(pane), said).unwrap();
@@ -371,8 +398,9 @@ mod tests {
         assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
         let mut shells = Shells::default();
         shells.ingest(output.status.code(), &output.stdout);
-        assert!(matches!(shells.said("s", 1), Some(Said::Going { tty, .. }) if tty == "/dev/null"));
-        assert!(matches!(shells.said("s", 2), Some(Said::Ended { status: 1, .. })));
+        let one = shells.said("s", 1);
+        assert!(matches!(one, Some((_, Said::Going { tty, .. })) if tty == "/dev/null"), "{one:?}");
+        assert!(matches!(shells.said("s", 2), Some((_, Said::Ended { status: 1, .. }))));
         assert_eq!(shells.said("gone", 1), None);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.lines().any(|line| line.starts_with("stty\t/dev/null\t")), "{stdout}");

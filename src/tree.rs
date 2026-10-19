@@ -1526,12 +1526,13 @@ mod tests {
         let mut tree = Tree::default();
         tree.news.shells = Shells::of(
             vec![
-                ("a", 1, going("cargo build", 1)),
-                ("a", 2, going("sudo true", 2)),
-                ("a", 3, going("nvim", 3)),
+                ("a", 1, at(0), going("cargo build", 1)),
+                ("a", 2, at(0), going("sudo true", 2)),
+                ("a", 3, at(0), going("nvim", 3)),
                 (
                     "a",
                     4,
+                    at(0),
                     Said::Ended {
                         command: "make".to_owned(),
                         at: at(15),

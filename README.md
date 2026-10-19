@@ -167,9 +167,11 @@ the whole command and its age counting up. Once it ends, it has `✓` in green
 for an exit status of 0, or `✗` in red for any other, after the `•`. A command
 that ends within a second gets none of it: an `ls` is no news. A program that
 takes the terminal over a key at a time, as an editor, a pager or `ssh` does,
-runs for as long as you use it, and has no mark while it does. The rule along
-the top counts a command that waits for you with the agents that wait for you,
-and one at work with the agents at work.
+runs for as long as you use it, and has no mark while it does. Nor does a job
+you stop with `Ctrl z`, until `fg` brings it back under its own name; and a
+command that runs `exec` gives the pane to another program, and the shell says
+no more of it. The rule along the top counts a command that waits for you with
+the agents that wait for you, and one at work with the agents at work.
 
 That takes the [hook](#hook-the-shell) in your shell, which says what it runs
 and how it ended. The terminal says whether the command works or waits for
@@ -901,24 +903,50 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     set -q TMPDIR[1]; and set root $TMPDIR
     set -q XDG_RUNTIME_DIR[1]; and set root $XDG_RUNTIME_DIR
     set -g __luneta_dir $root/luneta/commands/$ZELLIJ_SESSION_NAME
+    # The shell's own file, for its pane and when it started.
+    set -q __luneta_file; or set -g __luneta_file $__luneta_dir/$ZELLIJ_PANE_ID.(date +%s)
     set -g __luneta_tty (tty)
 
     function __luneta_say
         test -d $__luneta_dir; or mkdir -p $__luneta_dir; or return
-        printf '%s\n' "$argv" >$__luneta_dir/$ZELLIJ_PANE_ID
+        # Moved into place whole, as the sidebar reads it.
+        printf '%s\n' "$argv" >$__luneta_file.new; and mv -f $__luneta_file.new $__luneta_file
     end
 
     function __luneta_going --on-event fish_preexec
-        __luneta_say going (date +%s) $__luneta_tty (string replace -a \n ' ' -- $argv[1])
+        set -g __luneta_jobs (jobs --group)
+        set -g __luneta_command (string replace -a \n ' ' -- $argv[1])
+        # `exec` gives the pane to another program, and nothing would say how
+        # this ended.
+        if string match -qr '(^|[;&|]|\b(and|or|not))\s*exec(\s|$)' -- $argv[1]
+            rm -f $__luneta_file
+            return
+        end
+        # `fg` brings back the last job, which is what runs.
+        if string match -qr '^\s*fg\s*$' -- $argv[1]
+            set -l job (jobs --last | string split \t)
+            if set -q job[1]
+                set __luneta_command $job[-1]
+                set __luneta_jobs (string match -v -- $job[2] $__luneta_jobs)
+            end
+        end
+        __luneta_say going (date +%s) $__luneta_tty $__luneta_command
     end
 
     function __luneta_ended --on-event fish_postexec
         set -l s $status
-        __luneta_say ended (date +%s) $s $CMD_DURATION (string replace -a \n ' ' -- $argv[1])
+        # `Ctrl z` stops the job, and gives the prompt back with a status of 0.
+        set -l job (jobs --last --group)
+        if set -q job[1]; and not contains -- $job $__luneta_jobs
+            and ps -o stat= -p $job | string match -q 'T*'
+            __luneta_say stopped (date +%s) $__luneta_command
+        else
+            __luneta_say ended (date +%s) $s $CMD_DURATION $__luneta_command
+        end
     end
 
     function __luneta_gone --on-event fish_exit
-        rm -f $__luneta_dir/$ZELLIJ_PANE_ID
+        rm -f $__luneta_file
     end
 end
 ```
@@ -926,24 +954,30 @@ end
 A shell started before the hook was there has none: start it again, or
 `source` the file in it.
 
-The hook keeps a file for each pane, of one line, at
-`$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>`, or under `$TMPDIR` or
-`/tmp` where that is not set, and takes it away as the shell exits. Another
-shell can be hooked to write the same line, which is one of
+The hook keeps a file for each shell, of one line, at
+`$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>.<started>`, or under
+`$TMPDIR` or `/tmp` where that is not set, and takes it away as the shell
+exits. It writes the line beside it first and moves it into place, so that the
+sidebar never reads half of one. Another shell can be hooked to write the same
+line, which is one of
 
 ```text
 going <since> <tty> <command>
 ended <at> <status> <took> <command>
+stopped <at> <command>
 ```
 
-with `<since>` and `<at>` in seconds since the epoch, `<took>` in
-milliseconds, `<tty>` the path `tty` prints, and the command on one line. The
-sidebar reads the files every second, through `sh`, `stty` and `ps` on the
-zellij server's `PATH`, and the server must see the same `XDG_RUNTIME_DIR` as
-the shells in its panes.
+with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
+milliseconds, `<tty>` the path `tty` prints, the command on one line, and
+`stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
+second, through `sh`, `stty` and `ps` on the zellij server's `PATH`, and the
+server must see the same `XDG_RUNTIME_DIR` as the shells in its panes. A
+pane's shell is the one that started last, and one that started before its
+session was made is another session's.
 
 A shell started before its session was renamed goes on writing under the old
-name, and its commands have no marks until it starts again.
+name, and its commands have no marks until it starts again; nor does a session
+made later by that name take them for its own.
 
 ---
 
