@@ -17,7 +17,7 @@ use crate::agents::{self, AgentRow, AgentSet, Status};
 use crate::brief;
 use crate::checkouts::{Checkout, Checkouts, Said};
 use crate::close::{self, Act, Closes};
-use crate::cursor::Cursor;
+use crate::cursor::{Cursor, Stops};
 use crate::dirs::short_cwd;
 use crate::dock::TabId;
 use crate::elapsed::{Age, Held};
@@ -252,6 +252,42 @@ impl Node {
     }
 }
 
+impl Stops for Node {
+    /// The row of a session that lists its panes is their heading, and no
+    /// place to go to. The cursor stops on a pane's row, and on a session's
+    /// that lists none of its panes, folded or with none to list, which
+    /// stands in for them. A session lists its panes in the rows right after
+    /// its own, as `Tree::rebuild`, the one maker of the `Rows`, puts them.
+    fn heads(&self, next: &Node) -> bool {
+        matches!((self, next), (Node::Session(_), Node::Pane(_)))
+    }
+}
+
+/// The rows of the tree and the cursor on them: read as a `Cursor`, moved by
+/// `select` and `move_selection`, and made by `Tree::rebuild` alone.
+#[derive(Default)]
+pub struct Rows(Cursor<Node>);
+
+impl std::ops::Deref for Rows {
+    type Target = Cursor<Node>;
+
+    fn deref(&self) -> &Cursor<Node> {
+        &self.0
+    }
+}
+
+impl Rows {
+    /// `Cursor::select`.
+    pub fn select(&mut self, index: usize) -> bool {
+        self.0.select(index)
+    }
+
+    /// `Cursor::move_selection`.
+    pub fn move_selection(&mut self, delta: isize) {
+        self.0.move_selection(delta);
+    }
+}
+
 /// The live sessions, and how many of the agents in them are in each state
 /// worth counting, folded or not: what the sidebar's header says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -280,7 +316,7 @@ impl Summary {
 
 #[derive(Default)]
 pub struct Tree {
-    pub rows: Cursor<Node>,
+    pub rows: Rows,
     /// Counts every session and agent, whatever a search hides.
     pub summary: Summary,
     /// The menu, while it is open at the bottom of the sidebar.
@@ -314,10 +350,11 @@ struct Closed {
 /// The row at the top of the view the wheel moved, and the row the cursor was
 /// on as it did, or since by a click. The view stays there while the cursor
 /// stays on that row, with the focus or without: without, the cursor is on the
-/// pane you are in, or on its session's row. The cursor on another row, or a
-/// key, ends it, and the view shows the lit row again.
+/// pane you are in, or on its session's row. Rows that come and go above it
+/// leave it on its row. The cursor on another row, the row at the top gone,
+/// or a key, ends it, and the view shows the lit row again.
 struct Scrolled {
-    top: usize,
+    top: Place,
     cursor: Option<Place>,
 }
 
@@ -336,6 +373,17 @@ impl Tree {
         Tree { folded: Folds::shared(), ..Tree::default() }
     }
 
+    /// A tree of `nodes` as they stand, the cursor on row `selected` or the
+    /// next it stops on: for a test that draws rows `rebuild` would need far
+    /// more to make. They take the shape `rebuild` gives them: each session's
+    /// row, and then the panes it lists.
+    #[cfg(test)]
+    pub fn of(nodes: Vec<Node>, selected: usize) -> Self {
+        let mut tree = Tree::default();
+        tree.rows.0.replace_at(nodes, Some(selected));
+        tree
+    }
+
     /// Takes up what the sidebars of other sessions folded and unfolded
     /// since. The rows are only redrawn by the next `rebuild`.
     pub fn refold(&mut self) {
@@ -344,12 +392,16 @@ impl Tree {
 
     /// `follow` puts the cursor on the pane you are in, which is where it
     /// belongs while the sidebar does not have the focus. Otherwise the cursor
-    /// stays on the row it was on, or on its session once that is folded.
+    /// stays on the row it was on, or on its session once that is folded. A
+    /// session's row that is no stop, as a session the picker handed over or
+    /// one unfolded under the cursor, has the cursor on its first pane.
     ///
     /// While the search box holds a term, only the rows that match it are
     /// kept, with the session of each pane that does, unfolded. A session
-    /// found by its name alone shows as folded. The cursor goes to the best
-    /// match when the term changes, and stays on its row otherwise.
+    /// found by its name keeps all its panes. The cursor goes to the best
+    /// match when the term changes, and stays on its row otherwise. A session
+    /// that matches best by its name has it on the pane of it that matches
+    /// best, or else on its first.
     ///
     /// A search lasts while the sidebar has the focus, so `follow` closes it.
     /// One left behind would keep the rows it hides out of sight. So does the
@@ -420,16 +472,15 @@ impl Tree {
             }
             // A search looks inside a folded session too.
             let open = if finder.is_some() || !folded { panes.as_slice() } else { &[] };
+            let named = finder.as_ref().and_then(|finder| finder.session(&branch.name));
             let mut shown = Vec::new();
             for (leaf, agent) in open {
                 let label = label(leaf, *agent);
-                let (fit, hits) = match &finder {
-                    Some(finder) => match finder.pane(&label, leaf) {
-                        Some((fit, hits)) => (Some(fit), hits),
-                        None => continue,
-                    },
-                    None => (None, Vec::new()),
-                };
+                let found = finder.as_ref().and_then(|finder| finder.pane(&label, leaf));
+                if finder.is_some() && found.is_none() && named.is_none() {
+                    continue;
+                }
+                let (fit, hits) = found.unzip();
                 let node = PaneNode {
                     session: branch.name.clone(),
                     id: leaf.id,
@@ -438,18 +489,15 @@ impl Tree {
                     agent: agent.map(|agent| Mark { status: agent.status.clone(), age: agent.age }),
                     checkout: leaf.checkout.clone(),
                     here: is_current && here == Some(leaf.id),
-                    hits,
+                    hits: hits.unwrap_or_default(),
                 };
                 shown.push((node, fit));
             }
-            let named = finder.as_ref().and_then(|finder| finder.session(&branch.name));
             let (fit, hits) = named.unzip();
             if finder.is_some() && fit.is_none() && shown.is_empty() {
                 continue;
             }
-            if let Some(fit) = fit {
-                weigh(rows.len(), fit);
-            }
+            let head = rows.len();
             rows.push(Node::Session(SessionNode {
                 name: branch.name.clone(),
                 current: is_current,
@@ -458,11 +506,21 @@ impl Tree {
                 loudest: statuses().min_by_key(|status| agents::status_rank(status)).cloned(),
                 hits: hits.unwrap_or_default(),
             }));
-            for (node, fit) in shown {
-                if let Some(fit) = fit {
-                    weigh(rows.len(), fit);
+            // The pane of the session that matches best, which a session
+            // found by its name hands the cursor on to. With none, its row
+            // hands it on to its first pane.
+            let mut lead: Option<(usize, Fit)> = None;
+            for (node, matched) in shown {
+                if let Some(matched) = matched {
+                    weigh(rows.len(), matched);
+                    if lead.is_none_or(|(_, top)| matched > top) {
+                        lead = Some((rows.len(), matched));
+                    }
                 }
                 rows.push(Node::Pane(node));
+            }
+            if let Some(fit) = fit {
+                weigh(lead.map_or(head, |(at, _)| at), fit);
             }
         }
         let best = best.map(|(at, _)| at);
@@ -494,7 +552,7 @@ impl Tree {
                 .and_then(|place| row_of(&place).or_else(|| row_of(&self.shown(place))))
                 .or(best),
         };
-        self.rows.replace_at(rows, at);
+        self.rows.0.replace_at(rows, at);
         // A view the wheel left for a row the cursor has left would come back
         // with the cursor.
         if self.top().is_none() {
@@ -532,7 +590,8 @@ impl Tree {
 
     /// Puts the cursor on `place`, the row the picker had highlighted when it
     /// handed over the focus, from the next `rebuild` until the sidebar has
-    /// the focus. A pane in a folded session unfolds it, to show the row.
+    /// the focus. A pane in a folded session unfolds it, to show the row, and
+    /// a session that lists its panes has the cursor on the first.
     pub fn hand(&mut self, place: Place) {
         if let Place::Pane(session, _) = &place {
             self.folded.set(session, false);
@@ -546,20 +605,23 @@ impl Tree {
     }
 
     /// The row at the top of the view the wheel left, while the cursor is on
-    /// the row it was on then.
+    /// the row it was on then, and that row is still listed.
     pub fn top(&self) -> Option<usize> {
-        let scrolled = self.scrolled.as_ref()?;
-        (self.cursor() == scrolled.cursor).then_some(scrolled.top)
+        let scrolled = self.scrolled.as_ref().filter(|scrolled| self.cursor() == scrolled.cursor)?;
+        self.rows.iter().position(|node| node.is(&scrolled.top))
     }
 
-    /// Puts row `top` at the top of the view, until the cursor leaves its row.
+    /// Puts row `top` at the top of the view, until the cursor leaves its row
+    /// or the row is gone.
     pub fn scroll_to(&mut self, top: usize) {
-        self.scrolled = Some(Scrolled { top, cursor: self.cursor() });
+        let cursor = self.cursor();
+        self.scrolled = self.rows.get(top).map(|node| Scrolled { top: node.place(), cursor });
     }
 
     /// Has the cursor go past the rows `act` closes once they are gone: to the
-    /// first row after them, or else the last before them. A pane takes its
-    /// row, a tab the rows of its panes, and a session every row of it.
+    /// first row after them, or else the last before them, as the rows stand
+    /// then. A pane takes its row, a tab the rows of its panes, and a session
+    /// every row of it.
     pub fn closing(&mut self, act: &Act) {
         let gone = |node: &Node| match (act, node) {
             (Act::Pane(seat, pane), Node::Pane(node)) => {
@@ -620,11 +682,17 @@ impl Tree {
     }
 
     pub fn toggle(&mut self) -> bool {
-        let Some(name) = self.rows.selected_row().map(Node::session) else {
+        self.rows.selected().is_some_and(|at| self.toggle_row(at))
+    }
+
+    /// Folds or unfolds the session of row `at`, whichever it is not, as a
+    /// click on its fold does, wherever the cursor is.
+    pub fn toggle_row(&mut self, at: usize) -> bool {
+        let Some(name) = self.rows.get(at).map(|node| node.session().to_owned()) else {
             return false;
         };
-        let folded = self.folded.contains(name);
-        self.fold(!folded)
+        let folded = self.folded.contains(&name);
+        self.folded.set(&name, !folded)
     }
 }
 
@@ -1172,6 +1240,35 @@ mod tests {
         assert_eq!(tree.top(), None);
     }
 
+    /// Panes that open and close above the view the wheel left keep the row
+    /// at its top there, and a view whose top row goes ends, as though the
+    /// cursor had gone.
+    #[test]
+    fn the_view_the_wheel_left_holds_its_top_row_as_rows_come_and_go_above_it() {
+        let branches = |a: &[(u32, &str)], b: &[(u32, &str)]| {
+            [branch("a", 9, a), branch("b", 5, b), branch("c", 1, &[(4, "z")])]
+        };
+        let set = agents(&[]);
+        let top = |tree: &Tree| tree.top().map(|at| tree.rows[at].place());
+        let mut tree = Tree::default();
+        tree.rebuild(&branches(&[(0, "x"), (1, "y")], &[(2, "w")]), Some("c"), &set, Some(4), true);
+        tree.scroll_to(3);
+        let b = Some(Place::Session("b".to_owned()));
+        assert_eq!(top(&tree), b);
+
+        for a in [&[(0, "x"), (1, "y"), (6, "v")][..], &[(0, "x")]] {
+            tree.rebuild(&branches(a, &[(2, "w")]), Some("c"), &set, Some(4), true);
+            assert_eq!(top(&tree), b, "{a:?}");
+        }
+
+        tree.scroll_to(3);
+        assert_eq!(top(&tree), Some(Place::Pane("b".to_owned(), 2)));
+        tree.rebuild(&branches(&[(0, "x")], &[]), Some("c"), &set, Some(4), true);
+        assert_eq!(tree.top(), None);
+        tree.rebuild(&branches(&[(0, "x")], &[(2, "w")]), Some("c"), &set, Some(4), true);
+        assert_eq!(tree.top(), None);
+    }
+
     #[test]
     fn the_row_the_cursor_was_on_as_the_focus_left_is_kept_once() {
         let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")]), branch("b", 1, &[(4, "x")])];
@@ -1191,24 +1288,61 @@ mod tests {
         assert_eq!(tree.take_left(), None);
     }
 
+    /// `j` and `k` go from pane to pane, over the row of the session that
+    /// heads them, and stop on a session's row only where it lists none of
+    /// its panes: folded, or with none.
+    #[test]
+    fn the_cursor_steps_from_pane_to_pane_and_onto_a_session_that_shows_none() {
+        let branches = [
+            branch("a", 9, &[(0, "x"), (1, "y")]),
+            branch("b", 5, &[(4, "z")]),
+            branch("c", 3, &[(7, "w")]),
+            branch("d", 1, &[]),
+        ];
+        let set = agents(&[]);
+        let mut tree = Tree::default();
+        tree.rebuild(&branches, None, &set, None, false);
+        tree.rows.move_selection(3);
+        assert!(tree.fold(true));
+        tree.rebuild(&branches, None, &set, None, false);
+        assert_eq!(drawn(&tree), ["▾ a", "  - x", "  - y", "▾ b", "  - z", "▸ c", "▾ d"]);
+
+        let pane = |session: &str, id| Some(Place::Pane(session.to_owned(), id));
+        let session = |name: &str| Some(Place::Session(name.to_owned()));
+        assert!(tree.rows.select(1));
+        let down = [pane("a", 1), pane("b", 4), session("c"), session("d"), session("d")];
+        let up = [session("c"), pane("b", 4), pane("a", 1), pane("a", 0), pane("a", 0)];
+        let steps = down.map(|place| (1, place)).into_iter().chain(up.map(|place| (-1, place)));
+        for (delta, place) in steps {
+            tree.rows.move_selection(delta);
+            assert_eq!(selected(&tree), place, "{delta}");
+        }
+    }
+
+    /// A pane in a folded session unfolds it, and a session that lists its
+    /// panes is lit on the first.
     #[test]
     fn a_row_the_picker_hands_over_holds_the_cursor_until_the_sidebar_has_the_focus() {
         let branches = [branch("a", 9, &[(0, "✳ one"), (1, "✳ two")]), branch("b", 1, &[(4, "x")])];
         let set = agents(&[]);
-        let mut tree = Tree::default();
-        tree.rebuild(&branches, Some("a"), &set, Some(0), false);
-        tree.rows.move_selection(3);
-        assert!(tree.fold(true));
-        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+        let four = Place::Pane("b".to_owned(), 4);
+        for (handed, folded) in [(four.clone(), true), (Place::Session("b".to_owned()), false)] {
+            let mut tree = Tree::default();
+            tree.rebuild(&branches, Some("a"), &set, Some(0), false);
+            if folded {
+                tree.rows.move_selection(2);
+                assert!(tree.fold(true));
+            }
+            tree.rebuild(&branches, Some("a"), &set, Some(0), true);
 
-        let handed = Place::Pane("b".to_owned(), 4);
-        tree.hand(handed.clone());
-        for focused in [false, false, true] {
-            tree.rebuild(&branches, Some("a"), &set, Some(0), !focused);
-            assert_eq!(selected(&tree), Some(handed.clone()), "focused: {focused}");
+            tree.hand(handed.clone());
+            for focused in [false, false, true] {
+                tree.rebuild(&branches, Some("a"), &set, Some(0), !focused);
+                assert_eq!(selected(&tree), Some(four.clone()), "{handed:?}, focused: {focused}");
+            }
+            tree.rebuild(&branches, Some("a"), &set, Some(0), true);
+            assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)), "{handed:?}");
         }
-        tree.rebuild(&branches, Some("a"), &set, Some(0), true);
-        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
     }
 
     #[test]
@@ -1257,11 +1391,11 @@ mod tests {
         let mut tree = Tree::default();
         let both = [branch("a", 9, &[(0, "x")]), branch("b", 1, &[(0, "y")])];
         tree.rebuild(&both, None, &set, None, false);
-        tree.rows.move_selection(3);
+        tree.rows.move_selection(1);
         assert_eq!(selected(&tree), Some(Place::Pane("b".to_owned(), 0)));
 
         tree.rebuild(&[branch("a", 9, &[(0, "x")])], None, &set, None, false);
-        assert_eq!(selected(&tree), Some(Place::Session("a".to_owned())));
+        assert_eq!(selected(&tree), Some(Place::Pane("a".to_owned(), 0)));
 
         tree.rebuild(&[], None, &set, None, false);
         assert!(tree.rows.is_empty());
@@ -1276,7 +1410,7 @@ mod tests {
         assert_eq!(drawn(&tree), ["▾ a", "  - x"]);
     }
 
-    /// Once what a delete key closed is gone, the cursor is on the row after
+    /// Once what a delete key closed is gone, the cursor is on the pane after
     /// it, or else the one before, and not back at the top: a pane's row, a
     /// tab's panes, or a whole session. Moved away first, it stays where it
     /// was moved.
@@ -1298,12 +1432,12 @@ mod tests {
         for (act, left, at) in [
             (Act::Pane(here("a"), 1), vec![a(&[(0, 10), (2, 11)]), b()], pane("a", 2)),
             (Act::Tab(here("a"), TabId(10)), vec![a(&[(2, 11)]), b()], pane("a", 2)),
-            (Act::Kill("a".to_owned()), vec![b()], Some(Place::Session("b".to_owned()))),
+            (Act::Kill("a".to_owned()), vec![b()], pane("b", 4)),
         ] {
             let mut tree = Tree::default();
             let all = [a(&[(0, 10), (1, 10), (2, 11)]), b()];
             tree.rebuild(&all, None, &set, None, false);
-            tree.rows.select(2);
+            assert!(tree.rows.select(2));
             tree.closing(&act);
             tree.rebuild(&all, None, &set, None, false);
             assert_eq!(selected(&tree), pane("a", 1), "{act:?} before it is gone");
@@ -1313,19 +1447,25 @@ mod tests {
         let mut tree = Tree::default();
         let all = [a(&[(0, 10), (1, 10)]), b()];
         tree.rebuild(&all, None, &set, None, false);
-        tree.rows.select(2);
+        assert!(tree.rows.select(2));
         tree.closing(&Act::Pane(here("a"), 1));
-        tree.rows.select(4);
+        assert!(tree.rows.select(4));
         tree.rebuild(&[a(&[(0, 10)]), b()], None, &set, None, false);
         assert_eq!(selected(&tree), pane("b", 4));
     }
 
+    /// A session found by its name keeps all its panes, the cursor on the one
+    /// of them that matches best, or else on the first, though the name
+    /// matches better. A pane that matches as well as its session's name is
+    /// the best match.
     #[test]
     fn a_search_keeps_the_rows_that_match_where_they_were() {
         let branches = [
             branch("bipa", 300, &[(31, "✳ a-p-i-x"), (39, "✳ dda-bank-slip"), (47, "✳ pix outflow")]),
             branch("notes", 200, &[(0, "~/Documents")]),
             branch("misc", 100, &[(3, "✳ luneta")]),
+            branch("zed", 50, &[(5, "fish"), (6, "z-e-d"), (7, "logs")]),
+            branch("yak", 40, &[(8, "fish"), (9, "yak")]),
         ];
         let set = agents(&[]);
         for (term, rows, best) in [
@@ -1334,7 +1474,13 @@ mod tests {
                 &["▾ bipa", "  - a-p-i-x", "  - pix outflow"][..],
                 Place::Pane("bipa".to_owned(), 47),
             ),
-            ("note", &["▸ notes"][..], Place::Session("notes".to_owned())),
+            ("note", &["▾ notes", "  - ~/Documents"][..], Place::Pane("notes".to_owned(), 0)),
+            (
+                "zed",
+                &["▾ zed", "  - fish", "  - z-e-d", "  - logs"][..],
+                Place::Pane("zed".to_owned(), 6),
+            ),
+            ("yak", &["▾ yak", "  - fish", "  - yak"][..], Place::Pane("yak".to_owned(), 9)),
         ] {
             let mut tree = Tree::default();
             tree.rebuild(&branches, None, &set, None, false);
@@ -1417,7 +1563,7 @@ mod tests {
         let set = agents(&[]);
         let mut tree = Tree::default();
         tree.rebuild(&all, None, &set, None, false);
-        tree.rows.move_selection(2);
+        tree.rows.move_selection(1);
 
         tree.search_for(String::new());
         tree.rebuild(&all, None, &set, None, false);

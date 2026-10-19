@@ -6,6 +6,10 @@
 //! is a file there named for it, so that a fold is a file to make or take
 //! away, and two sidebars never write over each other. A session's name holds
 //! no `/`, and is neither `.` nor `..`, so it names a file.
+//!
+//! A fold lasts as long as its session, dead and resurrected or not, and goes
+//! when the picker deletes the session: one made later by the same name is
+//! another, and starts unfolded.
 
 use std::collections::BTreeSet;
 use std::fs;

@@ -5,7 +5,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
 use zellij_tile::prelude::run_command;
 
-use crate::cursor::Cursor;
+use crate::cursor::{Cursor, Stops};
 use crate::elapsed::{Age, Held};
 use crate::fetch::Fetch;
 use crate::places::Places;
@@ -177,6 +177,8 @@ pub struct AgentRow {
     score: i64,
     is_exact: bool,
 }
+
+impl Stops for AgentRow {}
 
 impl AgentRow {
     pub fn label(&self) -> String {
