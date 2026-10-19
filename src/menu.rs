@@ -1667,7 +1667,7 @@ impl Menu {
 
     /// Puts each agent in the pane of the session it sits in.
     fn seat_agents(&mut self) {
-        let live = Live::new(self.session.as_deref(), &[], &self.places);
+        let live = Live::new(self.session.as_deref(), &[], &self.places, &[]);
         self.agents.rebuild("", &live, None, Age::from_secs(0), Selection::Hold);
     }
 
@@ -2845,7 +2845,7 @@ mod tests {
                     (SESSION_KEY.to_owned(), "luneta".to_owned()),
                 ])
             };
-            let agents = br#"[{"status":"busy","status_age":4,"cwd":"/w/elo",
+            let agents = br#"[{"status":"busy","status_age":4,"pid":100,"cwd":"/w/elo",
                 "zellij":{"session":"luneta","pane":"3"}}]"#;
             menu.ran(Some(0), agents, b"", &context(agents::CONTEXT_VALUE));
             let panes = br#"[{"id":2,"pane_cwd":"/w/elo"},{"id":3,"pane_cwd":"/w/elo"}]"#;

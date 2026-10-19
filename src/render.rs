@@ -821,7 +821,7 @@ fn agent_line(
 ) -> Painted {
     let label = truncate(&row.label(), name_column);
     let visible = label.chars().count();
-    let hits: Vec<usize> = row.indices.iter().copied().filter(|i| *i < visible).collect();
+    let hits: Vec<usize> = row.hits().iter().copied().filter(|i| *i < visible).collect();
 
     let mut line = Line::new();
     gutter(&mut line, selected);
@@ -877,6 +877,9 @@ fn agent_note_texts(agents: &AgentSet, width: usize) -> Vec<Note> {
     if agents.unplaced > 0 {
         notes.push(Note::dim(truncate(&unplaced_text(agents.unplaced), width)));
     }
+    if agents.doubled > 0 {
+        notes.push(Note::dim(truncate(&doubled_text(agents.doubled), width)));
+    }
     notes
 }
 
@@ -884,6 +887,13 @@ fn unplaced_text(unplaced: usize) -> String {
     match unplaced {
         1 => "1 agent sits in a pane luneta cannot find".to_owned(),
         n => format!("{n} agents sit in panes luneta cannot find"),
+    }
+}
+
+fn doubled_text(doubled: usize) -> String {
+    match doubled {
+        1 => "1 agent sits in a pane another one holds".to_owned(),
+        n => format!("{n} agents sit in panes other ones hold"),
     }
 }
 
@@ -2286,18 +2296,18 @@ mod tests {
 
     #[test]
     fn an_agent_luneta_cannot_place_is_left_out_and_counted() {
-        let json = r#"[{"status":"waiting","status_age":60,"cwd":"/home/lorenzo/Projects/misc",
+        let json = r#"[{"status":"waiting","status_age":60,"pid":100,"cwd":"/home/lorenzo/Projects/misc",
             "zellij":{"session":"bipa.git","pane":"4"}},
-            {"status":"idle","status_age":60,"cwd":"/home/lorenzo/Projects/misc/luneta",
+            {"status":"idle","status_age":60,"pid":101,"cwd":"/home/lorenzo/Projects/misc/luneta",
              "zellij":{"session":"luneta","pane":"0"}}]"#;
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = agents::Live::new(Some("luneta"), &[], &places);
+        let live = agents::Live::new(Some("luneta"), &[], &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
         assert_eq!(agents.rows.len(), 1);
-        assert_eq!(agents.rows[0].display, "luneta");
+        assert_eq!(agents.rows[0].name(), "luneta");
         let notes = agent_note_texts(&agents, 80);
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].text, "1 agent sits in a pane luneta cannot find");
@@ -2306,16 +2316,16 @@ mod tests {
 
     #[test]
     fn the_agent_you_are_in_is_pinned_above_the_list() {
-        let json = r#"[{"status":"idle","status_age":60,"cwd":"/w/notes",
+        let json = r#"[{"status":"idle","status_age":60,"pid":102,"cwd":"/w/notes",
             "name":"handoff","name_source":"user","zellij":{"session":"notes","pane":"1"}},
-            {"status":"busy","status_age":60,"cwd":"/w/luneta",
+            {"status":"busy","status_age":60,"pid":103,"cwd":"/w/luneta",
              "zellij":{"session":"luneta","pane":"4"}}]"#;
         let places = Places::of(&[("notes", &[(1, "/w/notes")]), ("luneta", &[(4, "/w/luneta")])]);
         let rect = Rect { x: 0, y: 0, width: 42, height: 5 };
         let body = |origin: Option<u32>, term: &str| -> Vec<String> {
             let mut agents = AgentSet::default();
             agents.ingest(Some(0), json.as_bytes(), b"");
-            let live = agents::Live::new(Some("notes"), &[], &places);
+            let live = agents::Live::new(Some("notes"), &[], &places, &[]);
             agents.rebuild(term, &live, origin, Age::ZERO, Selection::SnapToTop);
             agent_body(&agents, term, &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect()
         };
@@ -2332,12 +2342,12 @@ mod tests {
 
     #[test]
     fn the_agent_you_are_in_alone_is_no_other_agent() {
-        let json = r#"[{"status":"idle","status_age":60,"cwd":"/w/notes",
+        let json = r#"[{"status":"idle","status_age":60,"pid":104,"cwd":"/w/notes",
             "zellij":{"session":"notes","pane":"1"}}]"#;
         let places = Places::of(&[("notes", &[(1, "/w/notes")])]);
         let mut agents = AgentSet::default();
         agents.ingest(Some(0), json.as_bytes(), b"");
-        let live = agents::Live::new(Some("notes"), &[], &places);
+        let live = agents::Live::new(Some("notes"), &[], &places, &[]);
         agents.rebuild("", &live, Some(1), Age::ZERO, Selection::SnapToTop);
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
         let body: Vec<String> =
@@ -2383,7 +2393,7 @@ mod tests {
             ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
             ("notes", &[(7, "/home/lorenzo/Documents")]),
         ]);
-        let live = agents::Live::new(Some("notes"), &sessions.live, &places);
+        let live = agents::Live::new(Some("notes"), &sessions.live, &places, &[]);
         agents.rebuild("", &live, Some(7), Age::ZERO, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
@@ -2439,13 +2449,13 @@ mod tests {
     }
 
     const AGENTS: &str = r#"[
-        {"status": "waiting", "status_age": 1080, "cwd": "/home/lorenzo/Projects/misc/luneta",
+        {"status": "waiting", "status_age": 1080, "pid": 105, "cwd": "/home/lorenzo/Projects/misc/luneta",
          "name": "luneta", "name_source": "user", "zellij": {"session": "misc", "pane": "12"}},
-        {"status": "busy", "status_age": 1860, "cwd": "/home/lorenzo/Projects/Work/bipa",
+        {"status": "busy", "status_age": 1860, "pid": 106, "cwd": "/home/lorenzo/Projects/Work/bipa",
          "zellij": {"session": "bipa", "pane": "3"}},
-        {"status": "idle", "status_age": 300, "cwd": "/home/lorenzo/Documents",
+        {"status": "idle", "status_age": 300, "pid": 107, "cwd": "/home/lorenzo/Documents",
          "zellij": {"session": "notes", "pane": "7"}},
-        {"status": "idle", "status_age": 60, "cwd": "/home/lorenzo"}
+        {"status": "idle", "status_age": 60, "pid": 108, "cwd": "/home/lorenzo"}
     ]"#;
 
     fn snapshot() -> Sessions {

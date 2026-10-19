@@ -643,18 +643,22 @@ impl State {
                 return;
             }
             self.seat_from(&snapshot);
-            let before = std::mem::take(&mut self.branches);
-            self.branches = snapshot
-                .live_sessions
-                .iter()
-                .map(|s| {
-                    let age = Age::new(s.creation_time);
-                    let before = before.iter().find(|branch| branch.name == s.name);
-                    let before = before.map_or(&[][..], |branch| branch.panes.as_slice());
-                    let (places, checkouts) = (&self.places, &self.checkouts);
-                    Branch::new(s.name.clone(), age, &s.tabs, &s.panes, places, checkouts, before)
-                })
-                .collect();
+        }
+        // The picker too, for each agent to go by the name the sidebar gives
+        // its pane.
+        let before = std::mem::take(&mut self.branches);
+        self.branches = snapshot
+            .live_sessions
+            .iter()
+            .map(|s| {
+                let age = Age::new(s.creation_time);
+                let before = before.iter().find(|branch| branch.name == s.name);
+                let before = before.map_or(&[][..], |branch| branch.panes.as_slice());
+                let (places, checkouts) = (&self.places, &self.checkouts);
+                Branch::new(s.name.clone(), age, &s.tabs, &s.panes, places, checkouts, before)
+            })
+            .collect();
+        if self.is_sidebar() {
             if self.frame.wrapping_sub(self.places_at) >= TICKS_PER_PLACES {
                 self.places_at = self.frame;
                 self.places.forget();
@@ -711,7 +715,7 @@ impl State {
         let origin = if self.is_sidebar() { None } else { self.origin_pane() };
         let since = self.agents_since();
         let current = self.matches.current_session.as_deref();
-        let live = Live::new(current, &self.sessions.live, &self.places);
+        let live = Live::new(current, &self.sessions.live, &self.places, &self.branches);
         self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
         self.land();
         self.rebuild_tree();
@@ -1095,8 +1099,8 @@ impl State {
         self.set_term(String::new());
     }
 
-    /// The panes of `session` you can go to, as zellij lists them now: the
-    /// picker keeps none.
+    /// The panes of `session` you can go to, as zellij lists them now, and
+    /// not as it did at the picker's last poll.
     fn leaves(&self, session: &str) -> Vec<Leaf> {
         let Ok(snapshot) = get_session_list() else {
             return Vec::new();
@@ -2308,7 +2312,7 @@ mod tests {
         state.places = Places::of(&[("b", &[(4, "/w/b"), (5, "/w/b")])]);
         let seated = |pane: u32, id: &str| {
             format!(
-                r#"{{"status":"idle","status_age":4,"cwd":"/w/b","session_id":"{id}",
+                r#"{{"status":"idle","status_age":4,"pid":{pane},"cwd":"/w/b","session_id":"{id}",
                    "zellij":{{"session":"b","pane":"{pane}"}}}}"#
             )
         };

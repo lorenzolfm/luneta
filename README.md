@@ -68,6 +68,20 @@ the order their panes were opened within each. Which agent wants you is the job
 of the glyph, not of the order. The agent in the pane you came from is pinned
 above the list.
 
+An agent goes by the name its row has in the [sidebar](#sidebar): the name you
+gave it with `/rename`, or else the title Claude Code gives its pane, its tab or
+its directory. Two agents named alike are told apart by their panes, as
+`luneta/main:4`, and by their sessions too when they sit in two, as
+`luneta/main (review:4)`. A search finds an agent by what its row shows, the
+pane that tells it apart as well, or by its session's name.
+
+A pane holds one agent, as it does in the sidebar. A `claude -p` an agent runs
+has its pane's ids, and claude-ps puts it in that pane too: the list shows the
+agent you started at a prompt, or with an older claude-ps that does not say how
+an agent started, the one that started first, and says below it how many it
+left out. An agent only guessed into a pane gives way to the one whose session
+names that pane, and counts among those luneta cannot find.
+
 `Del` closes the pane the highlighted agent is in, and its tab with it when
 nothing else holds the tab open: neither the sidebar's column nor a floating
 pane does. That goes for a session nobody is attached to as well, where no dock
