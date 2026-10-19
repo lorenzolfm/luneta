@@ -83,6 +83,49 @@ const LEAVING_TICK: f64 = 0.1;
 /// Where a floating pane stands: x, y, columns, rows.
 type Spot = (usize, usize, usize, usize);
 
+/// A key of the sidebar's own that does more than move the cursor or fold a
+/// session. `?` lists each one beside the menu's keys.
+///
+/// The sidebar finds the command a key runs in `ALL`, and `?` lists `ALL`, so
+/// no key runs a command that `?` leaves out. `key` and `does` match every
+/// command, so a command does not compile until it says what `?` shows for
+/// it, and the sidebar's `command` matches every command too. A command left
+/// out of `ALL` is one no key runs, and it is dead code, which does not
+/// compile either.
+#[deny(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// Narrows the tree to the rows that match what you type.
+    Search,
+    /// Goes to the next agent that wants you.
+    Next,
+}
+
+impl Command {
+    /// Every command, in the order `?` lists them.
+    pub const ALL: &[Command] = &[Command::Search, Command::Next];
+
+    /// The command `key` runs, if any.
+    pub fn of(key: char) -> Option<Command> {
+        Command::ALL.iter().copied().find(|command| command.key() == key)
+    }
+
+    pub fn key(self) -> char {
+        match self {
+            Command::Search => '/',
+            Command::Next => 'n',
+        }
+    }
+
+    /// What `?` says the command does.
+    pub fn does(self) -> &'static str {
+        match self {
+            Command::Search => "Search",
+            Command::Next => "Next agent",
+        }
+    }
+}
+
 pub enum Entry {
     /// A key that opens a group, the name the menu shows for it, and the keys
     /// in it.
@@ -92,12 +135,16 @@ pub enum Entry {
     /// A key of the Delete group: closes the pane the menu is for, or kills
     /// its session.
     Close { key: char, scope: Scope },
+    /// A command of the sidebar's own, which `?` lists beside the menu's
+    /// keys.
+    Command(Command),
 }
 
 impl Entry {
     pub fn key(&self) -> char {
         match self {
             Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
+            Entry::Command(command) => command.key(),
         }
     }
 }
@@ -111,6 +158,8 @@ pub enum Pressed {
     Start(String),
     /// Closes the pane the menu is for, or kills its session, by `key`.
     Delete { key: char, scope: Scope },
+    /// Runs a command of the sidebar's own.
+    Command(Command),
     /// Closes the menu.
     Close,
     /// Nothing: the group open has no such key.
@@ -155,6 +204,16 @@ impl Keys {
         Ok(Keys { root, open: Vec::new() })
     }
 
+    /// What `?` shows: the keys at the top of `menu`, and then the sidebar's
+    /// commands. A key of the menu's that a command has stays the command's,
+    /// as it does at the top of the sidebar.
+    pub fn help(menu: Keys) -> Self {
+        let mut root = menu.root;
+        root.retain(|entry| Command::of(entry.key()).is_none());
+        root.extend(Command::ALL.iter().copied().map(Entry::Command));
+        Keys { root, open: Vec::new() }
+    }
+
     /// The groups opened, each its name and its entries.
     fn trail(&self) -> Vec<(&str, &[Entry])> {
         let mut trail = Vec::with_capacity(self.open.len());
@@ -179,8 +238,8 @@ impl Keys {
     }
 
     /// What `key` does: a key the group open shows opens its group, starts
-    /// its agent or closes what it closes, `Backspace` goes back a group, and
-    /// out of the menu from the first, and `Esc` closes it.
+    /// its agent, closes what it closes or runs its command, `Backspace` goes
+    /// back a group, and out of the menu from the first, and `Esc` closes it.
     pub fn key(&mut self, key: &KeyWithModifier) -> Pressed {
         if closes(key) {
             return Pressed::Close;
@@ -203,6 +262,7 @@ impl Keys {
         match &entries[at] {
             Entry::Start { prompt, .. } => return Pressed::Start(prompt.clone()),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
+            Entry::Command(command) => return Pressed::Command(*command),
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -459,6 +519,18 @@ pub struct Row {
     pub there: Option<There>,
 }
 
+impl Row {
+    /// The keys of the menu for the row, from the `entries` of the sidebar's
+    /// configuration and luneta's Delete group, and what the menu is for.
+    fn menu(self, entries: Option<&str>) -> Result<(Keys, Target), String> {
+        let deletes = if self.pane.is_some() { Scope::Pane } else { Scope::Session };
+        let keys = Keys::new(entries, deletes)?;
+        let target =
+            Target { pane: self.pane, cwd: self.cwd, branch: self.branch, there: self.there };
+        Ok((keys, target))
+    }
+}
+
 /// What the sidebar's menu is for: a row's pane, or none on a session's row,
 /// in the sidebar's own session or `there`, where an agent starts beside it,
 /// and what the Delete group deletes.
@@ -523,9 +595,19 @@ impl Target {
     }
 }
 
+/// What a key of the sidebar's menu leaves the sidebar to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Did {
+    /// A delete key asked zellij for this, and the sidebar's cursor goes past
+    /// what it closes once it is gone.
+    Closed(Act),
+    /// The menu closed, for the sidebar to run a command of its own.
+    Command(Command),
+}
+
 /// The menu at the bottom of the sidebar, for the row highlighted when a key
-/// of the menu opened it: a pane, or a session. The sidebar keeps it while it
-/// has the focus, and while that pane is open.
+/// of the menu, or `?`, opened it: a pane, or a session. The sidebar keeps it
+/// while it has the focus, and while that pane is open.
 pub struct SidebarMenu {
     /// Its number among the menus the sidebar has opened, which the answer to
     /// an agent it starts in another session carries.
@@ -588,21 +670,29 @@ impl SidebarMenu {
         number: u64,
         frame: u64,
     ) -> Option<Self> {
-        let deletes = if row.pane.is_some() { Scope::Pane } else { Scope::Session };
-        let keys = match Keys::new(entries, deletes) {
-            Ok(keys) => keys,
+        let (keys, target) = match row.menu(entries) {
+            Ok(menu) => menu,
             Err(reason) => return Some(SidebarMenu { number, stage: wrong(reason) }),
         };
         let has = |key: char| keys.entries().iter().any(|entry| entry.key() == key);
         if key.is_some_and(|key| !has(key)) {
             return None;
         }
-        let target = Target { pane: row.pane, cwd: row.cwd, branch: row.branch, there: row.there };
         let choosing = SidebarMenu { number, stage: Stage::Choosing(keys, target) };
         match key {
             Some(key) => choosing.key(&KeyWithModifier::new(BareKey::Char(key)), None, frame).0,
             None => Some(choosing),
         }
+    }
+
+    /// What `?` opens, numbered `number`: the keys at the top of the menu for
+    /// `row`, as `m` opens it, and then the sidebar's commands.
+    pub fn help(entries: Option<&str>, row: Row, number: u64) -> Self {
+        let stage = match row.menu(entries) {
+            Ok((keys, target)) => Stage::Choosing(Keys::help(keys), target),
+            Err(reason) => wrong(reason),
+        };
+        SidebarMenu { number, stage }
     }
 
     /// What the menu shows: the keys, what a delete key asks, where you are
@@ -660,7 +750,8 @@ impl SidebarMenu {
 
     /// What `key` does to the menu at `frame`: the menu left, none once it
     /// closed or deleted what a key asked in the sidebar's own session, and
-    /// what a delete key asked zellij for. `subject` is what the menu is for,
+    /// what that leaves the sidebar to do: go past what a delete key asked
+    /// zellij to close, or run a command. `subject` is what the menu is for,
     /// as a delete key deletes it, as zellij says it stands now: going ahead
     /// after a delete key asked plans it again.
     pub fn key(
@@ -668,7 +759,7 @@ impl SidebarMenu {
         key: &KeyWithModifier,
         subject: Option<&close::Subject>,
         frame: u64,
-    ) -> (Option<Self>, Option<Act>) {
+    ) -> (Option<Self>, Option<Did>) {
         let number = self.number;
         let (stage, act) = match self.stage {
             Stage::Wrong(_) => return (None, None),
@@ -678,6 +769,7 @@ impl SidebarMenu {
             },
             Stage::Choosing(mut keys, target) => match keys.key(key) {
                 Pressed::Close => return (None, None),
+                Pressed::Command(command) => return (None, Some(Did::Command(command))),
                 Pressed::Start(prompt) => (Some(target.start(keys, &prompt, number, frame)), None),
                 Pressed::Delete { key, scope } => match subject.map(|it| it.plan(scope)) {
                     None => (Some(Stage::Choosing(keys, target)), None),
@@ -703,7 +795,7 @@ impl SidebarMenu {
                 Answer::Nothing => (Some(Stage::Asking(keys, target, asked)), None),
             },
         };
-        (stage.map(|stage| SidebarMenu { number, stage }), act)
+        (stage.map(|stage| SidebarMenu { number, stage }), act.map(Did::Closed))
     }
 
     /// Closes the menu once the pane an agent would start beside, in the
@@ -942,7 +1034,9 @@ impl Menu {
                 Pressed::Start(prompt) => self.start(&prompt),
                 Pressed::Delete { key, scope } => self.delete(key, scope),
                 Pressed::Close => self.close(),
-                Pressed::Nothing => false,
+                // The sidebar's commands are the sidebar's: this menu's keys
+                // are the configuration's alone.
+                Pressed::Command(_) | Pressed::Nothing => false,
             },
             Phase::Asking(_, _, asked) => match answer(key, asked.key) {
                 Answer::Yes => self.go_ahead(),
@@ -1548,6 +1642,87 @@ mod tests {
         assert!(press(menu, &bare(BareKey::Esc)).is_none());
     }
 
+    /// A menu whose `n` the sidebar's `Next` has, as it has at the top of the
+    /// sidebar.
+    const SHADOWED: &str = r#"n "notes"; c "Claude" { t "/tigerstyle"; }"#;
+
+    /// `?` shows the keys at the top of the menu, as `m` does, luneta's Delete
+    /// group among them, and then the sidebar's commands, which keep their
+    /// keys from the menu's. So it does on a session's row, and with no menu
+    /// of yours. A menu that cannot be read says what is wrong with it.
+    #[test]
+    fn help_shows_the_top_of_the_menu_and_then_the_sidebar_s_commands() {
+        for (entries, on_row, on) in [
+            (Some(MENU), row(None), vec!['c', 'r', 'd', '/', 'n']),
+            (Some(SHADOWED), row(None), vec!['c', 'd', '/', 'n']),
+            (Some(MENU), session_row(None), vec!['c', 'r', 'd', '/', 'n']),
+            (None, row(None), vec!['d', '/', 'n']),
+        ] {
+            let menu = SidebarMenu::help(entries, on_row, 1);
+            assert_eq!(on_show(Some(&menu)), Some(Ok(on)), "{entries:?}");
+        }
+        for (entries, said) in [
+            ("t", "menu: \"t\" takes one string"),
+            (r#"d "notes""#, "menu: \"d\" is luneta's"),
+        ] {
+            let menu = SidebarMenu::help(Some(entries), row(None), 1);
+            let wrong = wrong(Some(&menu)).expect("what is wrong");
+            assert!(wrong.starts_with(said), "{wrong}");
+        }
+    }
+
+    /// A group of the menu opens from `?`, and `Backspace` comes back to it.
+    /// A delete key deletes as it does from `m`. A command closes the menu,
+    /// for the sidebar to run it, on a session's row too.
+    #[test]
+    fn a_key_of_help_opens_its_group_or_hands_the_sidebar_its_command() {
+        let help = || Some(SidebarMenu::help(Some(MENU), row(None), 1));
+        let menu = press(help(), &char('c'));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['t', 'm', 's'])));
+        let menu = press(menu, &bare(BareKey::Backspace));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'd', '/', 'n'])));
+        assert!(press(menu, &bare(BareKey::Esc)).is_none());
+
+        let menu = press(help(), &char('d'));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['d', 's'])));
+        let idle = closing(luneta(), &[]);
+        let (menu, did) = menu.expect("a menu").key(&char('d'), Some(&idle), 0);
+        assert!(menu.is_none());
+        assert_eq!(did, Some(Did::Closed(Act::Pane(luneta(), 2))));
+
+        for (entries, on_row, key, command) in [
+            (MENU, row(None), '/', Command::Search),
+            (SHADOWED, row(None), 'n', Command::Next),
+            (MENU, session_row(None), '/', Command::Search),
+        ] {
+            let menu = SidebarMenu::help(Some(entries), on_row, 1);
+            let (menu, did) = menu.key(&char(key), None, 0);
+            assert!(menu.is_none(), "{key}");
+            assert_eq!(did, Some(Did::Command(command)), "{key}");
+        }
+    }
+
+    /// An agent `?` starts in another session waits for the answer to its own
+    /// menu, as one `m` starts does: an answer for another menu is from one
+    /// closed before it came.
+    #[test]
+    fn an_agent_started_from_help_waits_for_its_own_answer() {
+        let there = There { session: "elo".to_owned(), tab: Some(TabId(3)), back: Some(1) };
+        let answer = |menu: u64| {
+            BTreeMap::from([
+                (CONTEXT_KEY.to_owned(), START_VALUE.to_owned()),
+                (MENU_KEY.to_owned(), menu.to_string()),
+            ])
+        };
+        let help = SidebarMenu::help(Some(MENU), row(Some(there)), 2);
+        let menu = press(Some(help), &char('r')).expect("a menu");
+        let menu = menu.answered(None, b"", b"", &answer(1)).expect("a menu");
+        assert_eq!(on_show(Some(&menu)), Some(Ok(vec!['c', 'r', 'd', '/', 'n'])));
+        let menu = menu.answered(None, b"", b"", &answer(2));
+        let said = wrong(menu.as_ref());
+        assert_eq!(said, Some("menu: the agent did not start: zellij opened no pane"));
+    }
+
     /// A row the sidebar does not know the directory of yet has no agent to
     /// start, and the menu says so rather than start one wherever zellij
     /// runs. Nor has a session's row, which has no pane. A menu that cannot
@@ -1655,7 +1830,7 @@ mod tests {
             let menu = open(Some(MENU), row, Some('d')).expect("a menu");
             let (menu, closed) = menu.key(&char(key), Some(subject), 0);
             let leaves = matches!(act, Act::Leave { .. });
-            assert_eq!(closed, Some(act), "{key}");
+            assert_eq!(closed, Some(Did::Closed(act)), "{key}");
             assert_eq!(menu.as_ref().is_some_and(SidebarMenu::lasts), leaves, "{key}");
         }
     }
@@ -1676,7 +1851,7 @@ mod tests {
         for key in [char('y'), char('d')] {
             let (menu, closed) = asked().key(&key, Some(&busy), 0);
             assert!(menu.is_none(), "{key:?}");
-            assert_eq!(closed, Some(Act::Pane(luneta(), 2)), "{key:?}");
+            assert_eq!(closed, Some(Did::Closed(Act::Pane(luneta(), 2))), "{key:?}");
         }
         let (menu, closed) = asked().key(&char('x'), Some(&busy), 0);
         assert!(asking(menu.as_ref()).is_some());
@@ -1708,13 +1883,13 @@ mod tests {
         };
         let (menu, closed) = asked().key(&char('y'), Some(&alone), 0);
         assert!(menu.is_none());
-        assert_eq!(closed, Some(Act::Tab(luneta(), TabId(7))));
+        assert_eq!(closed, Some(Did::Closed(Act::Tab(luneta(), TabId(7)))));
         let (menu, closed) = asked().key(&char('y'), Some(&joined), 0);
         assert_eq!(closed, None);
         assert_eq!(asking(menu.as_ref()), Some("Close the pane? 1 agent, 1 busy"));
         let (menu, closed) = menu.expect("a menu").key(&char('y'), Some(&joined), 0);
         assert!(menu.is_none());
-        assert_eq!(closed, Some(Act::Pane(luneta(), 2)));
+        assert_eq!(closed, Some(Did::Closed(Act::Pane(luneta(), 2))));
     }
 
     /// A pane of another session closes by a command, and the menu waits for
@@ -1743,7 +1918,7 @@ mod tests {
             let menu = open(Some(MENU), row(Some(there.clone())), Some('d'));
             let pane = closing(elo.clone(), &[]);
             let (menu, closed) = menu.expect("a menu").key(&char('d'), Some(&pane), 0);
-            assert_eq!(closed, Some(Act::Pane(elo.clone(), 2)));
+            assert_eq!(closed, Some(Did::Closed(Act::Pane(elo.clone(), 2))));
             let menu = menu.expect("a menu waiting");
             let menu = menu.answered(Some(0), none, none, &answer(START_VALUE, 1));
             let menu = menu.expect("a menu waiting");

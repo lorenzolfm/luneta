@@ -1098,6 +1098,7 @@ fn menu_entry_width(entry: &Entry) -> usize {
         Entry::Group { name, .. } => name.width() + 1 + GROUP.width(),
         Entry::Start { prompt, .. } => prompt.width(),
         Entry::Close { scope, .. } => scope.does().width(),
+        Entry::Command(command) => command.does().width(),
     };
     entry.key().to_string().width() + GAP + does
 }
@@ -1115,6 +1116,7 @@ fn menu_line(entry: &Entry, inner: usize) -> Painted {
         },
         Entry::Start { prompt, .. } => line.push(&truncate(prompt, room), NAME),
         Entry::Close { scope, .. } => line.push(&truncate(scope.does(), room), NAME),
+        Entry::Command(command) => line.push(&truncate(command.does(), room), NAME),
     }
     line.finish(inner)
 }
@@ -1680,6 +1682,8 @@ fn search_line(term: &str, inner: usize) -> Painted {
     line.finish(inner)
 }
 
+/// The keys that move, and `?` for the rest: the sidebar's commands and the
+/// menu's keys.
 fn sidebar_help(width: usize) -> Painted {
     keys_text(
         width,
@@ -1687,10 +1691,8 @@ fn sidebar_help(width: usize) -> Painted {
             ("<↓↑>", "Move", "Move"),
             ("<ENTER>", "Go", "Go"),
             ("<←→>", "Fold", "Fold"),
-            ("<n>", "Next", "Next"),
-            ("<m>", "Menu", "Menu"),
             ("<ESC>", "Back", "Back"),
-            ("</>", "Search", "Search"),
+            ("<?>", "Help", "Help"),
         ],
     )
 }
@@ -2688,7 +2690,8 @@ mod tests {
         assert_eq!(focused.len(), 5);
         assert_eq!(focused[4], " claude-ps: gone                ");
         assert_eq!(Shelf::new(6, 1, true, false, 0).help_y, Some(5));
-        assert!(sidebar_help(30).content().width() <= 30);
+        // `?` is in sight at the width of the README's layout, for the rest.
+        assert_eq!(sidebar_help(30).content(), "<↓↑>/<ENTER>/<←→>/<ESC>/<?>");
         assert!(search_help_line(30).content().width() <= 30);
     }
 
@@ -3018,6 +3021,21 @@ mod tests {
         assert_eq!(
             sidebar_menu_picture(&root, 3, 30),
             ["─ luneta ────── misc/unnamed ─", " c  Claude ▸                  ", " <ESC> - Close"]
+        );
+
+        let cwd = Some("/w/misc/unnamed".to_owned());
+        let row = crate::menu::Row { pane: Some(0), cwd, branch: None, there: None };
+        let help = SidebarMenu::help(Some(MENU_KDL), row, 1);
+        assert_eq!(
+            sidebar_menu_picture(&help, 6, 30),
+            [
+                "─ luneta ────── misc/unnamed ─",
+                " c  Claude ▸                  ",
+                " d  Delete ▸                  ",
+                " /  Search                    ",
+                " n  Next agent                ",
+                " <ESC> - Close",
+            ]
         );
     }
 
