@@ -309,10 +309,11 @@ struct Closed {
 /// The row at the top of the view the wheel moved, and the row the cursor was
 /// on as it did, or since by a click. The view stays there while the cursor
 /// stays on that row, with the focus or without: without, the cursor is on the
-/// pane you are in, or on its session's row. The cursor on another row, or a
-/// key, ends it, and the view shows the lit row again.
+/// pane you are in, or on its session's row. Rows that come and go above it
+/// leave it on its row. The cursor on another row, the row at the top gone,
+/// or a key, ends it, and the view shows the lit row again.
 struct Scrolled {
-    top: usize,
+    top: Place,
     cursor: Option<Place>,
 }
 
@@ -553,15 +554,17 @@ impl Tree {
     }
 
     /// The row at the top of the view the wheel left, while the cursor is on
-    /// the row it was on then.
+    /// the row it was on then, and that row is still listed.
     pub fn top(&self) -> Option<usize> {
-        let scrolled = self.scrolled.as_ref()?;
-        (self.cursor() == scrolled.cursor).then_some(scrolled.top)
+        let scrolled = self.scrolled.as_ref().filter(|scrolled| self.cursor() == scrolled.cursor)?;
+        self.rows.iter().position(|node| node.is(&scrolled.top))
     }
 
-    /// Puts row `top` at the top of the view, until the cursor leaves its row.
+    /// Puts row `top` at the top of the view, until the cursor leaves its row
+    /// or the row is gone.
     pub fn scroll_to(&mut self, top: usize) {
-        self.scrolled = Some(Scrolled { top, cursor: self.cursor() });
+        let cursor = self.cursor();
+        self.scrolled = self.rows.get(top).map(|node| Scrolled { top: node.place(), cursor });
     }
 
     /// Has the cursor go past the rows `act` closes once they are gone: to the
@@ -1183,6 +1186,35 @@ mod tests {
         tree.rebuild(&branches, Some("a"), &set, Some(0), true);
         assert_eq!(tree.top(), None);
         tree.rebuild(&branches, Some("a"), &set, Some(1), true);
+        assert_eq!(tree.top(), None);
+    }
+
+    /// Panes that open and close above the view the wheel left keep the row
+    /// at its top there, and a view whose top row goes ends, as though the
+    /// cursor had gone.
+    #[test]
+    fn the_view_the_wheel_left_holds_its_top_row_as_rows_come_and_go_above_it() {
+        let branches = |a: &[(u32, &str)], b: &[(u32, &str)]| {
+            [branch("a", 9, a), branch("b", 5, b), branch("c", 1, &[(4, "z")])]
+        };
+        let set = agents(&[]);
+        let top = |tree: &Tree| tree.top().map(|at| tree.rows[at].place());
+        let mut tree = Tree::default();
+        tree.rebuild(&branches(&[(0, "x"), (1, "y")], &[(2, "w")]), Some("c"), &set, Some(4), true);
+        tree.scroll_to(3);
+        let b = Some(Place::Session("b".to_owned()));
+        assert_eq!(top(&tree), b);
+
+        for a in [&[(0, "x"), (1, "y"), (6, "v")][..], &[(0, "x")]] {
+            tree.rebuild(&branches(a, &[(2, "w")]), Some("c"), &set, Some(4), true);
+            assert_eq!(top(&tree), b, "{a:?}");
+        }
+
+        tree.scroll_to(3);
+        assert_eq!(top(&tree), Some(Place::Pane("b".to_owned(), 2)));
+        tree.rebuild(&branches(&[(0, "x")], &[]), Some("c"), &set, Some(4), true);
+        assert_eq!(tree.top(), None);
+        tree.rebuild(&branches(&[(0, "x")], &[(2, "w")]), Some("c"), &set, Some(4), true);
         assert_eq!(tree.top(), None);
     }
 
