@@ -32,6 +32,11 @@ impl Moment {
         Moment(self.0.saturating_sub(held.0))
     }
 
+    /// The moment `age` before this one: when what is that old now was made.
+    pub fn before(self, age: Age) -> Moment {
+        Moment(self.0.saturating_sub(age.0))
+    }
+
     /// How long after `earlier` this moment is: no time at all when it is
     /// not after it.
     pub fn since(self, earlier: Moment) -> Held {

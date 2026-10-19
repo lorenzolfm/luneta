@@ -167,8 +167,9 @@ zsh's do not, or one in a program that titles the pane itself.
 
 What you have seen, and what each shell ran, is the same in the sidebar of
 every session, and outlasts zellij: the sidebars keep it in the plugin's cache,
-beside the folds. A session the picker renames takes it along, and a session
-gone for good takes it with it.
+beside the folds. A session renamed takes it along, whether the picker or
+zellij renamed it, and a session gone for good takes it with it: one made
+later by the same name starts with none of it.
 
 After the dot, an icon says what runs in the pane: Claude's for an agent, a
 terminal for a shell, neovim's for nvim. It has a column of its own, so every

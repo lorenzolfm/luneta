@@ -35,7 +35,6 @@ use dock::{Ask, TabId};
 use menu::{Command, Did, RowPane, SidebarMenu, There, Top};
 use elapsed::{Age, Moment};
 use folds::Folds;
-use news::News;
 use panes::Peeks;
 use pass::{At, Pass, Then};
 use places::Places;
@@ -1080,9 +1079,9 @@ impl State {
         let Ok(name) = self.rename_to(current, input) else {
             return;
         };
+        // The sidebars find what is new in its panes under the new name, as
+        // they do whoever renames it.
         rename_session(&name);
-        // The sidebars find what is new in its panes under the new name.
-        News::shared().rename(current, &name);
         self.mode = Mode::Search;
     }
 

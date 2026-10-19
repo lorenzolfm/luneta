@@ -12,6 +12,12 @@
 //! it is doing in its title, as fish titles its pane: the command it runs,
 //! and the cwd once it is back at its prompt. A command finished once a title
 //! that named it gives way to the prompt.
+//!
+//! The ledgers keep a session's records by its name, and a session is its
+//! name and when it was made: what a pane ran before its session was made, a
+//! session made earlier by the same name ran, in a pane of its own. And a
+//! session that turns up by a new name, made when one that leaves was, is
+//! that one renamed, whoever renamed it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -32,6 +38,11 @@ const DWELL: Held = Held::from_secs(1);
 /// go: a session can drop out of one list as zellij writes it again.
 const GONE: u32 = 5;
 
+/// How far apart two readings of when a session was made may be and still
+/// be the same moment: zellij counts a session's age in whole seconds, from
+/// a list it read a moment before.
+const MADE: Held = Held::from_secs(3);
+
 /// What a shell ran last, as its title said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Run {
@@ -39,6 +50,16 @@ pub enum Run {
     Going { command: String, since: Moment },
     /// The command it ran, and when a sidebar saw it back at its prompt.
     Ended { command: String, at: Moment },
+}
+
+impl Run {
+    /// When a sidebar saw it start, or end.
+    fn moment(&self) -> Moment {
+        match self {
+            Run::Going { since, .. } => *since,
+            Run::Ended { at, .. } => *at,
+        }
+    }
 }
 
 const GOING: &str = "going";
@@ -86,7 +107,9 @@ pub struct News {
     dwelling: Option<Dwelling>,
     /// How many `prune`s in a row have found each session missing.
     missing: BTreeMap<String, u32>,
-    /// When the last `watch` was.
+    /// When each session the last `watch` saw was made, to know one renamed.
+    made: BTreeMap<String, Moment>,
+    /// When the last `watch` was, or before the first, when the news was read.
     now: Moment,
 }
 
@@ -103,6 +126,7 @@ impl News {
         News {
             visits: Ledger::within(PathBuf::from(VISITED)),
             runs: Ledger::within(PathBuf::from(RAN)),
+            now: Moment::now(),
             ..News::default()
         }
     }
@@ -126,20 +150,28 @@ impl News {
         now: Moment,
     ) {
         self.now = now;
+        let made: BTreeMap<String, Moment> =
+            branches.iter().map(|branch| (branch.name.clone(), now.before(branch.age))).collect();
+        self.follow(&made);
         let seated: HashMap<(&str, u32), &AgentRow> =
             agents.rows.iter().map(|row| ((row.seat.session(), row.pane), row)).collect();
         for branch in branches {
+            let born = now.before(branch.age).back(MADE);
             for leaf in &branch.panes {
                 if seated.contains_key(&(branch.name.as_str(), leaf.id)) {
                     continue;
                 }
-                let run = self.runs.get(&branch.name, leaf.id);
+                let kept = self.runs.get(&branch.name, leaf.id);
+                // One from before its session was made, another session made
+                // by the same name ran, in a pane of its own.
+                let run = kept.filter(|run| run.moment() >= born);
                 let next = step(run, &tree::doing(&leaf.title, leaf.cwd.as_deref()), now);
-                if next.as_ref() != run {
+                if next.as_ref() != kept {
                     self.runs.set(&branch.name, leaf.id, next);
                 }
             }
         }
+        self.made = made;
 
         let before = self.dwelling.take();
         self.dwelling = here.map(|(session, pane)| match &before {
@@ -192,9 +224,8 @@ impl News {
     }
 
     /// Forgets the records of each session that `live` has left out of as
-    /// many lists in a row as `GONE` says. A session made later by its name
-    /// numbers its panes from the start again, and its pane 3 is not the
-    /// pane 3 of the session before it.
+    /// many lists in a row as `GONE` says: it is gone, and a session made
+    /// later by its name numbers its panes from the start again.
     pub fn prune(&mut self, live: &[String]) {
         let kept: BTreeSet<String> =
             self.visits.sessions().chain(self.runs.sessions()).map(str::to_owned).collect();
@@ -211,11 +242,28 @@ impl News {
         self.missing = missing;
     }
 
-    /// Hands what was kept of session `from` to `to`, as the session is
-    /// renamed.
-    pub fn rename(&mut self, from: &str, to: &str) {
-        self.visits.rename(from, to);
-        self.runs.rename(from, to);
+    /// Hands what was kept of each session that has left the list since the
+    /// last `watch` to the one that has joined it, made at the same moment
+    /// as `made` says, and no other: zellij renamed it, whoever asked it to.
+    fn follow(&mut self, made: &BTreeMap<String, Moment>) {
+        let at_once = |a: Moment, b: Moment| a.since(b).max(b.since(a)) < MADE;
+        let mut renamed = Vec::new();
+        for (from, was) in &self.made {
+            if made.contains_key(from) {
+                continue;
+            }
+            let mut joined = made
+                .iter()
+                .filter(|(to, is)| !self.made.contains_key(*to) && at_once(**is, *was))
+                .map(|(to, _)| to);
+            if let (Some(to), None) = (joined.next(), joined.next()) {
+                renamed.push((from.clone(), to.clone()));
+            }
+        }
+        for (from, to) in renamed {
+            self.visits.rename(&from, &to);
+            self.runs.rename(&from, &to);
+        }
     }
 }
 
@@ -288,8 +336,8 @@ mod tests {
         }
     }
 
-    /// Session `s` with a shell in pane 1, as titled, and an agent in pane
-    /// 2 whose status came `age` seconds before `now`.
+    /// Session `s`, made at 0, with a shell in pane 1, as titled, and an
+    /// agent in pane 2 whose status came `age` seconds before `now`.
     fn session(title: &str, agent: &str, age: u64, now: Moment) -> (Vec<Branch>, AgentSet) {
         let leaf = |id: u32, title: &str| Leaf {
             id,
@@ -303,7 +351,7 @@ mod tests {
         };
         let branches = vec![Branch {
             name: "s".to_owned(),
-            age: Age::ZERO,
+            age: Age::from_secs(now.millis() / 1000),
             panes: vec![leaf(1, title), leaf(2, "✳ Claude Code")],
         }];
         let json = format!(
@@ -374,6 +422,52 @@ mod tests {
         let (prompt, agents) = session("~/w/s", "busy", 0, at(111));
         news.watch(&prompt, &agents, Some(("s", 2)), at(111));
         assert_eq!(news_of(&news, &agents), (Some(ran("make", 0)), false));
+    }
+
+    /// A session made again by the name of one gone, before any sidebar saw
+    /// the one go, has none of what that one's shells ran: its pane 1 is
+    /// another pane.
+    #[test]
+    fn a_session_made_again_by_its_name_has_none_of_what_the_last_one_ran() {
+        let mut news = News::default();
+        let (running, agents) = session("make ~/w/s", "busy", 0, at(100));
+        news.watch(&running, &agents, None, at(100));
+        let (prompt, agents) = session("~/w/s", "busy", 0, at(101));
+        news.watch(&prompt, &agents, None, at(101));
+        assert_eq!(news_of(&news, &agents).0, Some(ran("make", 0)));
+
+        let (mut again, agents) = session("~/w/s", "busy", 0, at(500));
+        again[0].age = Age::from_secs(10);
+        news.watch(&again, &agents, None, at(500));
+        assert_eq!(news_of(&news, &agents).0, None);
+        assert_eq!(news.runs.get("s", 1), None);
+    }
+
+    /// A session renamed, by the picker or by zellij itself, keeps under its
+    /// new name what its shells ran and what you saw in it: zellij says it
+    /// was made when it was.
+    #[test]
+    fn a_session_renamed_keeps_what_finished_in_it_and_what_you_saw() {
+        /// Session `s` by `name`, with its shell titled, at `now`.
+        fn watch(news: &mut News, name: &str, title: &str, here: Option<u32>, now: u64) {
+            let (mut branches, agents) = session(title, "busy", 0, at(now));
+            branches[0].name = name.to_owned();
+            news.watch(&branches, &agents, here.map(|pane| (name, pane)), at(now));
+        }
+        let mut news = News::default();
+        watch(&mut news, "s", "make ~/w/s", None, 100);
+        watch(&mut news, "s", "~/w/s", None, 101);
+        watch(&mut news, "t", "~/w/s", None, 102);
+        assert_eq!(news.ran("t", 1).map(|(command, _)| command), Some("make"));
+        assert_eq!(news.ran("s", 1), None);
+
+        // You stay in it under its new name, and it is renamed back.
+        watch(&mut news, "t", "~/w/s", Some(1), 103);
+        watch(&mut news, "t", "~/w/s", Some(1), 104);
+        watch(&mut news, "s", "~/w/s", None, 105);
+        assert!(news.runs.get("s", 1).is_some());
+        assert_eq!(news.ran("s", 1), None);
+        assert_eq!(news.runs.get("t", 1), None);
     }
 
     /// A session missing from the session list loses its records only once

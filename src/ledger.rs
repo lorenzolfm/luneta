@@ -5,15 +5,18 @@
 //! goes on: you, in a pane of its own session, and nothing at all while its
 //! session has no client. What one sees, the others read from the cache
 //! zellij gives the plugin, where the folds are kept too: a folder for each
-//! session, and a file in it for each pane, named for its id. Two sidebars
-//! never write over each other's panes, and a file is written whole before it
-//! takes its pane's name, so that no sidebar reads one halfway written.
+//! session, and a file in it for each pane, named for its id. A file is
+//! written whole, under a name of its writer's own, before it takes its
+//! pane's name, so that no sidebar reads one halfway written, and two that
+//! write one pane at once each write a file of their own: the last to take
+//! the pane's name holds it.
 //!
 //! A session's name holds no `/`, and is neither `.` nor `..`, so it names a
 //! folder.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
@@ -23,7 +26,8 @@ pub trait Record: Sized {
     fn write(&self) -> String;
 }
 
-/// The name a file takes while it is written, before it takes its pane's.
+/// How the name a file takes while it is written ends, before it takes its
+/// pane's.
 const UNFINISHED: &str = "new";
 
 pub struct Ledger<T> {
@@ -31,12 +35,22 @@ pub struct Ledger<T> {
     /// The folder they are shared through. Without one, the records are this
     /// sidebar's alone: a test's, or one whose folder failed it.
     dir: Option<PathBuf>,
+    /// What this sidebar's files are called after their pane's id while it
+    /// writes them, and no other sidebar's are.
+    unfinished: String,
 }
 
 impl<T> Default for Ledger<T> {
     fn default() -> Self {
-        Ledger { records: BTreeMap::new(), dir: None }
+        Ledger { records: BTreeMap::new(), dir: None, unfinished: unfinished() }
     }
+}
+
+/// A name no other ledger's files take while they are written: each
+/// `RandomState` is seeded from the system's randomness. A pane's id does
+/// not read from it, so no sidebar takes it for a record.
+fn unfinished() -> String {
+    format!("{:016x}.{UNFINISHED}", RandomState::new().hash_one(()))
 }
 
 impl<T: Record> Ledger<T> {
@@ -49,7 +63,7 @@ impl<T: Record> Ledger<T> {
                 None
             },
         };
-        let mut ledger = Ledger { records: BTreeMap::new(), dir };
+        let mut ledger = Ledger { records: BTreeMap::new(), dir, unfinished: unfinished() };
         ledger.reload();
         ledger
     }
@@ -68,20 +82,23 @@ impl<T: Record> Ledger<T> {
             let file = folder.join(pane.to_string());
             let kept = match &record {
                 Some(record) => {
-                    let unfinished = folder.join(format!("{pane}.{UNFINISHED}"));
+                    let unfinished = folder.join(format!("{pane}.{}", self.unfinished));
                     fs::create_dir_all(&folder)
                         .and_then(|()| fs::write(&unfinished, record.write()))
                         .and_then(|()| fs::rename(&unfinished, &file))
                 },
-                // Another sidebar may have taken it away first.
-                None => fs::remove_file(&file).or_else(|error| match error.kind() {
-                    ErrorKind::NotFound => Ok(()),
-                    _ => Err(error),
-                }),
+                None => fs::remove_file(&file),
             };
-            if let Err(error) = kept {
-                eprintln!("luneta: {} stays in this session: {error}", dir.display());
-                self.dir = None;
+            match kept {
+                Ok(()) => {},
+                // Another sidebar took the record away first, or its
+                // session's folder, as it forgot or renamed the session.
+                // What still holds, the next `watch` writes again.
+                Err(error) if error.kind() == ErrorKind::NotFound => {},
+                Err(error) => {
+                    eprintln!("luneta: {} stays in this session: {error}", dir.display());
+                    self.dir = None;
+                },
             }
         }
         match record {
@@ -143,12 +160,15 @@ impl<T: Record> Ledger<T> {
     }
 
     /// Hands the records of `from` to `to`, for a session renamed: its panes
-    /// keep their ids. Whatever `to` had before is another session's.
+    /// keep their ids. Whatever `to` had before is another session's. A
+    /// `from` with no records hands nothing, and leaves `to` as it is: another
+    /// sidebar handed them over first.
     pub fn rename(&mut self, from: &str, to: &str) {
+        let Some(panes) = self.records.remove(from) else {
+            return;
+        };
         self.forget(to);
-        if let Some(panes) = self.records.remove(from) {
-            self.records.insert(to.to_owned(), panes);
-        }
+        self.records.insert(to.to_owned(), panes);
         let Some(dir) = &self.dir else {
             return;
         };
@@ -225,6 +245,37 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Two sidebars that write one pane's record at the same moment, as two
+    /// do that see its shell end in the same poll, both go on sharing it.
+    #[test]
+    fn two_sidebars_writing_one_pane_at_once_both_go_on_sharing() {
+        let dir = scratch("together");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writers: Vec<_> = ["here", "there"]
+            .into_iter()
+            .map(|name| {
+                let (dir, start) = (dir.clone(), start.clone());
+                std::thread::spawn(move || {
+                    let mut ledger: Ledger<String> = Ledger::within(dir);
+                    start.wait();
+                    for nth in 0..5000 {
+                        ledger.set("work", 3, Some(format!("{name} {nth}")));
+                    }
+                    ledger
+                })
+            })
+            .collect();
+        for writer in writers {
+            let mut ledger = writer.join().unwrap();
+            ledger.set("work", 4, Some("last".to_owned()));
+            let mut other: Ledger<String> = Ledger::within(dir.clone());
+            other.reload();
+            assert_eq!(get(&other, "work", 4).as_deref(), Some("last"));
+        }
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A session forgotten takes its records with it, for every sidebar, and
     /// one renamed takes them to its new name, over whatever was there.
     #[test]
@@ -237,6 +288,8 @@ mod tests {
 
         here.rename("old", "new");
         here.forget("gone");
+        // Another sidebar sees the same session renamed, once it has.
+        Ledger::<String>::within(dir.clone()).rename("old", "new");
         for ledger in [&here, &Ledger::within(dir.clone())] {
             assert_eq!(ledger.sessions().collect::<Vec<_>>(), ["new"]);
             assert_eq!(get(ledger, "new", 1).as_deref(), Some("seen"));
