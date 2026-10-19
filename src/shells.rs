@@ -1,0 +1,380 @@
+//! What the shell in each pane says it runs, and how what it ran ended.
+//!
+//! A title says only that a command runs, cut to twenty characters, and not
+//! how it ended. A hook in the shell says it all: fish's `fish_preexec` and
+//! `fish_postexec` write a file for each pane, in a folder for its session
+//! under the host's runtime folder, as the README shows. Its one line is one
+//! of
+//!
+//! ```text
+//! going <since> <tty> <command>
+//! ended <at> <status> <took> <command>
+//! ```
+//!
+//! with `<since>` and `<at>` in seconds since the epoch, and `<took>` in
+//! milliseconds. A shell without the hook writes none, and its title says
+//! what it can.
+//!
+//! What runs is at work, or waits for you to type, or has the terminal to
+//! itself, as an editor does: what the terminal says of the command in front
+//! tells which. `ps` marks the processes in front with a `+` and says where
+//! each sleeps in the kernel, and `stty` reads how the terminal takes keys.
+
+use std::collections::{BTreeMap, HashMap};
+
+use crate::elapsed::{Held, Moment};
+
+pub const CONTEXT_VALUE: &str = "shells";
+
+/// Reads the record of each pane of the sessions it is handed, and for each
+/// command still going, how its terminal takes keys and where the processes
+/// in front of it sleep. A terminal that is gone would fail `ps` for all of
+/// them, so only the ones there are asked about.
+const SCRIPT: &str = r#"
+cd "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/luneta/commands" 2>/dev/null || exit 0
+ttys=
+for session in "$@"; do
+  for file in "$session"/*; do
+    [ -f "$file" ] || continue
+    IFS= read -r said < "$file" || continue
+    printf 'said\t%s\t%s\t%s\n' "$session" "${file##*/}" "$said"
+    case $said in
+    'going '*)
+      tty=${said#going * }
+      tty=${tty%% *}
+      [ -c "$tty" ] || continue
+      case " $ttys " in
+      *" $tty "*) ;;
+      *) ttys="$ttys $tty" ;;
+      esac
+      ;;
+    esac
+  done
+done
+[ -n "$ttys" ] || exit 0
+for tty in $ttys; do
+  printf 'stty\t%s\t' "$tty"
+  stty -a < "$tty" 2>/dev/null | tr '\n' ' '
+  echo
+done
+ps -o tty= -o stat= -o wchan= -t "$(echo $ttys | tr ' ' ',')" 2>/dev/null |
+  while IFS= read -r line; do printf 'ps\t%s\n' "$line"; done
+"#;
+
+/// The command that reads what the shells of `sessions` say.
+pub fn query(sessions: &[String]) -> Vec<&str> {
+    let mut command = vec!["sh", "-c", SCRIPT, "sh"];
+    command.extend(sessions.iter().map(String::as_str));
+    command
+}
+
+/// What a shell's hook said last.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Said {
+    /// It runs `command`, on the terminal `tty`, since `since`.
+    Going { command: String, since: Moment, tty: String },
+    /// It ran `command`, for as long as `took`, and it ended at `at` with
+    /// `status`.
+    Ended { command: String, at: Moment, status: i32, took: Held },
+}
+
+impl Said {
+    /// When it started, or ended.
+    pub fn moment(&self) -> Moment {
+        match self {
+            Said::Going { since, .. } => *since,
+            Said::Ended { at, .. } => *at,
+        }
+    }
+
+    fn read(line: &str) -> Option<Self> {
+        let (word, rest) = line.split_once(' ')?;
+        let (secs, rest) = rest.split_once(' ')?;
+        let secs: u64 = secs.parse().ok()?;
+        match word {
+            "going" => {
+                let (tty, command) = rest.split_once(' ')?;
+                let since = Moment::from_millis(secs.saturating_mul(1000));
+                Some(Said::Going { command: command.to_owned(), since, tty: tty.to_owned() })
+            },
+            "ended" => {
+                let (status, rest) = rest.split_once(' ')?;
+                let (took, command) = rest.split_once(' ')?;
+                // The hook dates it to the second it ended in: the last
+                // moment of it, so that it never ended before you left.
+                let at = Moment::from_millis(secs.saturating_mul(1000).saturating_add(999));
+                let took = Held::from_millis(took.parse().ok()?);
+                let (status, command) = (status.parse().ok()?, command.to_owned());
+                Some(Said::Ended { command, at, status, took })
+            },
+            _ => None,
+        }
+    }
+}
+
+/// What the command in front of a terminal does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Front {
+    /// It works, and reads nothing from the terminal.
+    #[default]
+    Working,
+    /// It waits for you to type: it reads the terminal a line at a time, or
+    /// with the echo off, as a password prompt does.
+    Asking,
+    /// It takes the terminal over a key at a time, as an editor, a pager or
+    /// `ssh` does, for as long as you use it.
+    Interactive,
+}
+
+/// Where a process that reads its terminal sleeps in the kernel, as `ps`
+/// names it: Linux's, and the BSDs'. A blocking read of a socket sleeps in
+/// Linux's too, and reads as a prompt.
+const READING: [&str; 3] = ["wait_woken", "n_tty_read", "ttyin"];
+
+/// A process in front of its terminal, as `ps` says: its state, with `s` for
+/// the leader of its session, the shell the terminal was opened for, and
+/// where it sleeps in the kernel.
+#[derive(Clone, Copy, Debug)]
+struct Process<'a> {
+    stat: &'a str,
+    wchan: &'a str,
+}
+
+impl Front {
+    /// What the command in front does, as the terminal's `modes` say, as
+    /// `stty -a` writes them, and the processes in front of it. The shell
+    /// itself in front, its terminal a key at a time, is its own `read`
+    /// asking you something, as fish's line editor takes the keys.
+    fn of(modes: Option<&str>, front: &[Process]) -> Self {
+        let has = |mode: &str| modes.is_some_and(|modes| modes.split_whitespace().any(|m| m == mode));
+        let shell = front.iter().any(|process| process.stat.contains('s'));
+        let reading = front.iter().any(|process| READING.contains(&process.wchan));
+        if has("-icanon") {
+            if shell { Front::Asking } else { Front::Interactive }
+        } else if has("-echo") || reading {
+            Front::Asking
+        } else {
+            Front::Working
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Shells {
+    said: BTreeMap<String, BTreeMap<u32, Said>>,
+    /// What the command in front of each terminal a command is going on does.
+    fronts: HashMap<String, Front>,
+    asking: bool,
+}
+
+impl Shells {
+    /// Whether to ask again: not while an answer is on its way.
+    pub fn ask(&mut self) -> bool {
+        if self.asking {
+            return false;
+        }
+        self.asking = true;
+        true
+    }
+
+    /// What the shells said, in place of what they said before. A script that
+    /// failed says nothing.
+    pub fn ingest(&mut self, exit_code: Option<i32>, stdout: &[u8]) {
+        self.asking = false;
+        self.said.clear();
+        self.fronts.clear();
+        if exit_code != Some(0) {
+            return;
+        }
+        let stdout = String::from_utf8_lossy(stdout);
+        let mut modes: HashMap<&str, &str> = HashMap::new();
+        let mut fronts: HashMap<String, Vec<Process>> = HashMap::new();
+        for line in stdout.lines() {
+            let Some((kind, rest)) = line.split_once('\t') else {
+                continue;
+            };
+            match kind {
+                "said" => {
+                    let mut parts = rest.splitn(3, '\t');
+                    let (Some(session), Some(pane), Some(said)) =
+                        (parts.next(), parts.next(), parts.next())
+                    else {
+                        continue;
+                    };
+                    let (Ok(pane), Some(said)) = (pane.parse(), Said::read(said)) else {
+                        continue;
+                    };
+                    self.said.entry(session.to_owned()).or_default().insert(pane, said);
+                },
+                "stty" => {
+                    if let Some((tty, said)) = rest.split_once('\t') {
+                        modes.insert(tty, said);
+                    }
+                },
+                "ps" => {
+                    let mut fields = rest.split_whitespace();
+                    let (Some(tty), Some(stat)) = (fields.next(), fields.next()) else {
+                        continue;
+                    };
+                    if stat.contains('+') {
+                        let process = Process { stat, wchan: fields.next().unwrap_or("") };
+                        fronts.entry(terminal(tty).to_owned()).or_default().push(process);
+                    }
+                },
+                _ => {},
+            }
+        }
+        for (tty, modes) in modes {
+            let front = fronts.get(terminal(tty)).map_or(&[][..], Vec::as_slice);
+            self.fronts.insert(tty.to_owned(), Front::of(Some(modes), front));
+        }
+    }
+
+    pub fn said(&self, session: &str, pane: u32) -> Option<&Said> {
+        self.said.get(session)?.get(&pane)
+    }
+
+    /// What the command in front of `tty` does: at work, unless its terminal
+    /// says otherwise.
+    pub fn front(&self, tty: &str) -> Front {
+        self.fronts.get(tty).copied().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn of(said: Vec<(&str, u32, Said)>, fronts: Vec<(&str, Front)>) -> Self {
+        let mut shells = Shells::default();
+        for (session, pane, said) in said {
+            shells.said.entry(session.to_owned()).or_default().insert(pane, said);
+        }
+        shells.fronts = fronts.into_iter().map(|(tty, front)| (tty.to_owned(), front)).collect();
+        shells
+    }
+}
+
+/// A terminal as `ps` names it: `pts/3` for `/dev/pts/3`.
+fn terminal(tty: &str) -> &str {
+    tty.strip_prefix("/dev/").unwrap_or(tty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_reads_as_the_hook_writes_it() {
+        assert_eq!(
+            Said::read("going 1760900000 /dev/pts/3 cargo build --release"),
+            Some(Said::Going {
+                command: "cargo build --release".to_owned(),
+                since: Moment::from_millis(1_760_900_000_000),
+                tty: "/dev/pts/3".to_owned(),
+            })
+        );
+        assert_eq!(
+            Said::read("ended 1760900042 101 41873 cargo test"),
+            Some(Said::Ended {
+                command: "cargo test".to_owned(),
+                at: Moment::from_millis(1_760_900_042_999),
+                status: 101,
+                took: Held::from_millis(41_873),
+            })
+        );
+        for wrong in ["", "going", "going 12 /dev/pts/3", "went 12 /dev/pts/3 make", "ended 12 x 5 make"]
+        {
+            assert_eq!(Said::read(wrong), None, "{wrong:?}");
+        }
+    }
+
+    /// A terminal that takes keys one at a time is a program's own, or the
+    /// shell's, which reads one line in its own editor. One with its echo off,
+    /// or a process in front that reads it, waits for you to type. Else the
+    /// command is at work.
+    #[test]
+    fn a_terminal_says_whether_its_command_works_asks_or_is_interactive() {
+        let cooked = "speed 38400 baud; line = 0; isig icanon iexten echo echoe";
+        let raw = "speed 38400 baud; line = 0; isig -icanon iexten -echo echoe";
+        let password = "speed 38400 baud; line = 0; isig icanon iexten -echo echoe";
+        let ps = |stat, wchan| Process { stat, wchan };
+        for (modes, front, said) in [
+            (Some(cooked), vec![ps("S+", "hrtimer_nanosleep")], Front::Working),
+            (Some(cooked), vec![ps("S+", "do_wait"), ps("S+", "wait_woken")], Front::Asking),
+            (Some(cooked), vec![ps("S+", "ttyin")], Front::Asking),
+            (Some(password), vec![ps("Ss+", "0")], Front::Asking),
+            (Some(raw), vec![ps("S+", "wait_woken")], Front::Interactive),
+            (Some(raw), vec![ps("Sl+", "do_epoll_wait")], Front::Interactive),
+            (Some(raw), vec![ps("Ss+", "poll_schedule_timeout.constprop.0")], Front::Asking),
+            (None, vec![], Front::Working),
+        ] {
+            assert_eq!(Front::of(modes, &front), said, "{modes:?} {front:?}");
+        }
+    }
+
+    /// What the script writes: each pane's record, and for the terminals of
+    /// the commands going, their modes and the processes on them. Only the
+    /// ones in front count.
+    #[test]
+    fn an_answer_says_what_each_pane_ran_and_what_its_terminal_does() {
+        let answer = [
+            "said\tluneta\t3\tgoing 100 /dev/pts/3 cargo build",
+            "said\tluneta\t4\tgoing 100 /dev/pts/4 rm -i notes",
+            "said\tluneta\t5\tended 100 0 1500 make",
+            "said\tluneta\tx.new\tended 100 0 1500 make",
+            "said\tbipa\t3\tgoing 100 /dev/pts/9 nvim",
+            "stty\t/dev/pts/3\tspeed 38400 baud; icanon echo ",
+            "stty\t/dev/pts/4\tspeed 38400 baud; icanon echo ",
+            "stty\t/dev/pts/9\tspeed 38400 baud; -icanon -echo ",
+            "ps\tpts/3    Ss   do_wait",
+            "ps\tpts/3    Sl+  futex_do_wait",
+            "ps\tpts/4    Ss   wait_woken",
+            "ps\tpts/4    S+   wait_woken",
+        ]
+        .join("\n");
+        let mut shells = Shells::default();
+        assert!(shells.ask());
+        assert!(!shells.ask());
+        shells.ingest(Some(0), answer.as_bytes());
+        assert!(shells.ask());
+        assert!(matches!(shells.said("luneta", 3), Some(Said::Going { .. })));
+        assert!(matches!(shells.said("luneta", 5), Some(Said::Ended { status: 0, .. })));
+        assert!(matches!(shells.said("bipa", 3), Some(Said::Going { .. })));
+        assert_eq!(shells.said("bipa", 4), None);
+        assert_eq!(shells.front("/dev/pts/3"), Front::Working);
+        assert_eq!(shells.front("/dev/pts/4"), Front::Asking);
+        assert_eq!(shells.front("/dev/pts/9"), Front::Interactive);
+
+        shells.ingest(Some(1), answer.as_bytes());
+        assert_eq!(shells.said("luneta", 3), None);
+    }
+
+    /// The script reads the records of the sessions it is handed, and no
+    /// others, and asks about the terminal of a command going.
+    #[test]
+    fn the_script_reads_the_records_of_the_sessions_it_is_handed() {
+        let runtime = std::env::temp_dir().join(format!("luneta-shells-{}", std::process::id()));
+        let commands = runtime.join("luneta/commands");
+        for (session, pane, said) in [
+            ("s", "1", "going 100 /dev/null sleep 30\n"),
+            ("s", "2", "ended 100 1 2500 false\n"),
+            ("gone", "1", "ended 100 0 2500 true\n"),
+        ] {
+            std::fs::create_dir_all(commands.join(session)).unwrap();
+            std::fs::write(commands.join(session).join(pane), said).unwrap();
+        }
+        let sessions = ["s".to_owned(), "never".to_owned()];
+        let command = query(&sessions);
+        let output = std::process::Command::new(command[0])
+            .args(&command[1..])
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&runtime).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+        let mut shells = Shells::default();
+        shells.ingest(output.status.code(), &output.stdout);
+        assert!(matches!(shells.said("s", 1), Some(Said::Going { tty, .. }) if tty == "/dev/null"));
+        assert!(matches!(shells.said("s", 2), Some(Said::Ended { status: 1, .. })));
+        assert_eq!(shells.said("gone", 1), None);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.lines().any(|line| line.starts_with("stty\t/dev/null\t")), "{stdout}");
+    }
+}

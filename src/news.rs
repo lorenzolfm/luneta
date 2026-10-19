@@ -8,10 +8,12 @@
 //! session's sidebar, each of which sees you only in its own session's panes,
 //! and the shells only while its session has a client.
 //!
-//! An agent finished when claude-ps says it came to `idle`. A shell says what
-//! it is doing in its title, as fish titles its pane: the command it runs,
-//! and the cwd once it is back at its prompt. A command finished once a title
-//! that named it gives way to the prompt.
+//! An agent finished when claude-ps says it came to `idle`. A shell with
+//! luneta's hook says what it runs, and how it ended, in `Shells`, and only a
+//! command that ran a while, `LONG`, counts: an `ls` is no news. A shell
+//! without it says what it is doing in its title, as fish titles its pane:
+//! the command it runs, and the cwd once it is back at its prompt. A command
+//! finished once a title that named it gives way to the prompt.
 //!
 //! Every sidebar reads what the shells ran from the session list, whose
 //! titles are the same for all of them, and seconds late. A visit reads the
@@ -31,7 +33,8 @@ use std::path::PathBuf;
 use crate::agents::{AgentRow, AgentSet, Status};
 use crate::elapsed::{Held, Moment};
 use crate::ledger::{Ledger, Record};
-use crate::tree::{self, Branch, Doing};
+use crate::shells::{Front, Said, Shells};
+use crate::tree::{self, Branch, Doing, Mark};
 
 const VISITED: &str = "/cache/visited";
 
@@ -39,6 +42,10 @@ const RAN: &str = "/cache/ran";
 
 /// How long you stay in a pane before it counts as a visit.
 const DWELL: Held = Held::from_secs(1);
+
+/// How long a command runs before its row says it runs, and says how it
+/// ended once it does.
+const LONG: Held = Held::from_secs(1);
 
 /// How many lists in a row a session, or a pane of one, is missing from
 /// before its records go: one can drop out of a list as zellij writes it
@@ -172,6 +179,8 @@ impl Record for Visit {
 pub struct News {
     visits: Ledger<Visit>,
     runs: Ledger<Run>,
+    /// What the shells with luneta's hook say, as the host keeps it.
+    pub shells: Shells,
     /// The pane you were in as the last `watch` saw, and since when.
     dwelling: Option<Dwelling>,
     /// How many `prune`s in a row have found each session missing.
@@ -350,13 +359,53 @@ impl News {
         }
     }
 
+    /// The mark of the command the shell in `pane` of `session` runs, or
+    /// finished since you were last there, and the command. A shell with the
+    /// hook says how one ended, and the title of one without, only that it
+    /// did. A command that runs as an editor does, as long as you use it, has
+    /// none. You see what ended in the pane you are in, `here`.
+    pub fn command(&self, session: &str, pane: u32, here: bool) -> Option<(Mark, &str)> {
+        let Some(said) = self.said(session, pane) else {
+            let (command, age) = self.ran(session, pane).filter(|_| !here)?;
+            return Some((Mark::Ran { age, ok: None }, command));
+        };
+        match said {
+            Said::Going { command, since, tty } => {
+                let age = self.now.since(*since);
+                let mark = match self.shells.front(tty) {
+                    _ if age < LONG => return None,
+                    Front::Working => Mark::Running { age },
+                    Front::Asking => Mark::Asking { age },
+                    Front::Interactive => return None,
+                };
+                Some((mark, command))
+            },
+            Said::Ended { command, at, status, took } => {
+                let visit = self.visits.get(session, pane);
+                if here || *took < LONG || visit.is_some_and(|visit| *at <= visit.at) {
+                    return None;
+                }
+                let ok = Some(*status == 0);
+                Some((Mark::Ran { age: self.now.since(*at), ok }, command))
+            },
+        }
+    }
+
+    /// What the hook in `pane` of `session` said last, since its session was
+    /// made: a session made earlier by the same name ran it, in a pane of its
+    /// own.
+    fn said(&self, session: &str, pane: u32) -> Option<&Said> {
+        let born = self.made.get(session).map(|made| made.back(MADE));
+        self.shells.said(session, pane).filter(|said| born.is_none_or(|born| said.moment() >= born))
+    }
+
     /// When the last thing finished in a pane, whether its agent or its
     /// shell: a visit after that has seen it all.
     fn latest(&self, session: &str, pane: u32, agent: Option<&AgentRow>) -> Option<Moment> {
         let finished = agent.filter(|agent| agent.status == Status::Idle).map(|agent| agent.came);
-        let ran = match self.runs.get(session, pane) {
-            Some(Run::Ended { at, .. }) => Some(*at),
-            Some(Run::Going { .. }) | None => None,
+        let ran = match (self.said(session, pane), self.runs.get(session, pane)) {
+            (Some(Said::Ended { at, .. }), _) | (None, Some(Run::Ended { at, .. })) => Some(*at),
+            (Some(Said::Going { .. }), _) | (None, Some(Run::Going { .. }) | None) => None,
         };
         finished.max(ran)
     }
@@ -581,6 +630,88 @@ mod tests {
         news.watch(&idle, &agents, None, untitled, at(113));
         news.watch(&idle, &agents, None, untitled, at(120));
         assert_eq!(news_of(&news, &agents), (Some(ran("cargo test", 7)), true));
+    }
+
+    fn going(command: &str, since: Moment) -> Said {
+        Said::Going { command: command.to_owned(), since, tty: "/dev/pts/3".to_owned() }
+    }
+
+    fn ended(command: &str, at: Moment, status: i32, took: u64) -> Said {
+        Said::Ended { command: command.to_owned(), at, status, took: Held::from_millis(took) }
+    }
+
+    /// The mark of what the shell in pane 1 runs, or ran, and its command.
+    fn command_of(news: &News, here: bool) -> Option<(Mark, String)> {
+        news.command("s", 1, here).map(|(mark, command)| (mark, command.to_owned()))
+    }
+
+    /// A command the hook says is going has no mark for its first second. It
+    /// is at work after that, or waits for you to type, as its terminal says,
+    /// and takes the terminal over as an editor does, and then has none. Its
+    /// row goes by the whole command, which the title cuts.
+    #[test]
+    fn a_command_its_hook_says_runs_a_while_is_at_work_or_waits_for_you() {
+        let (branches, agents) = session("cargo build --relea ~/w/s", "busy", 0, at(100));
+        let build = "cargo build --release";
+        for (front, mark) in [
+            (Front::Working, Some(Mark::Running { age: Held::from_secs(2) })),
+            (Front::Asking, Some(Mark::Asking { age: Held::from_secs(2) })),
+            (Front::Interactive, None),
+        ] {
+            let shells =
+                Shells::of(vec![("s", 1, going(build, at(100)))], vec![("/dev/pts/3", front)]);
+            let mut news = News { shells, ..News::default() };
+            news.watch(&branches, &agents, None, untitled, Moment::from_millis(100_500));
+            assert_eq!(command_of(&news, false), None, "{front:?}");
+            news.watch(&branches, &agents, Some(("s", 1)), untitled, at(102));
+            let ran = command_of(&news, true);
+            assert_eq!(ran, mark.map(|mark| (mark, build.to_owned())), "{front:?}");
+        }
+    }
+
+    /// A command that ran for a second or more has `✓` once it ends with 0,
+    /// and `✗` with anything else, until you stay in its pane. One that took
+    /// less has none, and nor does one its session was not made by then.
+    #[test]
+    fn a_command_that_ran_a_while_says_how_it_ended_until_you_stay_in_its_pane() {
+        let (branches, agents) = session("~/w/s", "busy", 0, at(110));
+        let age = Held::from_secs(7);
+        for (said, mark) in [
+            (ended("make", at(103), 0, 3_000), Some(Mark::Ran { age, ok: Some(true) })),
+            (ended("make", at(103), 2, 3_000), Some(Mark::Ran { age, ok: Some(false) })),
+            (ended("make", at(103), 0, 999), None),
+        ] {
+            let shells = Shells::of(vec![("s", 1, said.clone())], vec![]);
+            let mut news = News { shells, ..News::default() };
+            news.watch(&branches, &agents, Some(("s", 2)), untitled, at(110));
+            let ran = mark.clone().map(|mark| (mark, "make".to_owned()));
+            assert_eq!(command_of(&news, false), ran, "{said:?}");
+            assert_eq!(command_of(&news, true), None, "{said:?}");
+            news.watch(&branches, &agents, Some(("s", 1)), untitled, at(111));
+            news.watch(&branches, &agents, Some(("s", 1)), untitled, at(112));
+            assert_eq!(command_of(&news, false), None, "{said:?}");
+        }
+
+        let shells = Shells::of(vec![("s", 1, ended("make", at(50), 0, 3_000))], vec![]);
+        let mut news = News { shells, ..News::default() };
+        let mut later = branches;
+        later[0].age = Age::from_secs(10);
+        news.watch(&later, &agents, None, untitled, at(110));
+        assert_eq!(command_of(&news, false), None);
+    }
+
+    /// A shell with no hook says by its title that a command ended, and not
+    /// how.
+    #[test]
+    fn a_shell_without_the_hook_says_a_command_ended_but_not_how() {
+        let mut news = News::default();
+        let (running, agents) = session("make ~/w/s", "busy", 0, at(100));
+        news.watch(&running, &agents, None, untitled, at(100));
+        let (prompt, agents) = session("~/w/s", "busy", 0, at(104));
+        news.watch(&prompt, &agents, None, untitled, at(104));
+        news.watch(&prompt, &agents, None, untitled, at(106));
+        let age = Held::from_secs(2);
+        assert_eq!(command_of(&news, false), Some((Mark::Ran { age, ok: None }, "make".to_owned())));
     }
 
     /// The pane you stay in takes no visit while nothing in it is new, so

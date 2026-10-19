@@ -1686,9 +1686,8 @@ fn header_lines(summary: &Summary, cols: usize, frame: u64) -> [Painted; HEADER]
 }
 
 /// The rule along the top of the sidebar: how many sessions are live, how
-/// many agents across them wait for you, how many agents and commands
-/// finished since you were last in their panes, and how many agents are at
-/// work. A count of none is left out, and so is the word for the sessions
+/// many agents and commands across them wait for you, how many finished since
+/// you were last in their panes, and how many are at work. A count of none is left out, and so is the word for the sessions
 /// where the counts need its room.
 fn header_line(summary: &Summary, cols: usize, frame: u64) -> Painted {
     let (waiting, busy) = (Status::Waiting, Status::Busy);
@@ -1779,15 +1778,25 @@ fn branch_badge(node: &SessionNode, frame: u64) -> Option<(String, Ink)> {
 }
 
 /// A mark's glyph and its colour: its status's dot, dimmed for an agent you
-/// have seen finish, and `$` for a shell that finished a command.
+/// have seen finish. A command at work has the spinner of an agent at work,
+/// and one that waits for you to type the dot of an agent that waits for you.
+/// One that ended has `✓` in green, or `✗` in red, or `$` where its shell
+/// did not say how it ended.
 fn glyph(mark: &Mark, frame: u64) -> (String, Ink) {
+    let dot = |status: &Status| (agents::dot(status, frame), dot_ink(status));
     match mark {
         Mark::Agent { status: Status::Idle, .. } => (agents::dot(&Status::Idle, frame), Ink::Dim),
-        Mark::Agent { status, .. } => (agents::dot(status, frame), dot_ink(status)),
-        Mark::Finished { .. } => (agents::dot(&Status::Idle, frame), dot_ink(&Status::Idle)),
-        Mark::Ran { .. } => (agents::dot(&Status::Shell, frame), Ink::Plain),
+        Mark::Agent { status, .. } => dot(status),
+        Mark::Finished { .. } | Mark::Ran { ok: Some(true), .. } => dot(&Status::Idle),
+        Mark::Ran { ok: Some(false), .. } => (FAILED.to_owned(), Ink::Error),
+        Mark::Ran { ok: None, .. } => (agents::dot(&Status::Shell, frame), Ink::Plain),
+        Mark::Running { .. } => dot(&Status::Busy),
+        Mark::Asking { .. } => dot(&Status::Waiting),
     }
 }
+
+/// The glyph of a command that ended with a status other than 0.
+const FAILED: &str = "✗";
 
 /// The colour of a status: the accent for an agent that waits for you, the
 /// success colour for one that is done, the tag for one at work. A shell and
@@ -2665,12 +2674,18 @@ mod tests {
 
     /// The mark `word` names, held for `age` seconds: `finished` for an
     /// agent that finished since you were last in its pane, `ran` for a
-    /// command its shell finished, and else an agent's status.
+    /// command its shell finished, `passed` and `failed` for one its shell's
+    /// hook said how it ended, `running` and `asking` for one it runs, and
+    /// else an agent's status.
     fn mark(word: &str, age: u64) -> Mark {
         let age = Held::from_secs(age);
         match word {
             "finished" => Mark::Finished { age },
-            "ran" => Mark::Ran { age },
+            "ran" => Mark::Ran { age, ok: None },
+            "passed" => Mark::Ran { age, ok: Some(true) },
+            "failed" => Mark::Ran { age, ok: Some(false) },
+            "running" => Mark::Running { age },
+            "asking" => Mark::Asking { age },
             _ => Mark::Agent { status: Status::parse(Some(word)), age },
         }
     }
@@ -2929,6 +2944,46 @@ mod tests {
             assert_eq!(lit, [HEADER + row], "focused: {focused}");
             assert!(lines[HEADER + 6].content().starts_with(HERE_MARK), "focused: {focused}");
         }
+    }
+
+    /// A command at work turns the spinner an agent at work does, and one that
+    /// waits for you to type has the dot of an agent that waits for you, its
+    /// label in the accent. One that ended has the dot of what is new before
+    /// `✓` in green, or before `✗` in red. The header counts each with the
+    /// agents like it.
+    #[test]
+    fn a_command_shows_what_an_agent_would_and_how_it_ended() {
+        let nodes = vec![
+            session_node("a", false, 1, None),
+            pane_node("a", 1, "cargo build --release", Some(("running", 42))),
+            pane_node("a", 2, "sudo nixos-rebuild switch", Some(("asking", 8))),
+            pane_node("a", 3, "cargo test", Some(("passed", 60))),
+            pane_node("a", 4, "cargo test", Some(("failed", 5))),
+        ];
+        let mut tree = sidebar_tree(nodes, 1);
+        tree.summary = Summary { sessions: 1, waiting: 1, unseen: 2, busy: 1 };
+        let shelf = Shelf::new(7, 0, None, 30);
+        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
+        let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
+        assert_eq!(
+            drawn,
+            [
+                "─ 1 session ─────── ●1 •2 ⠋1 ─",
+                "                              ",
+                " ▾ a ───────────────────── ●1 ",
+                "   ⠋ cargo build --relea… 42s ",
+                "   ● sudo nixos-rebuild…   8s ",
+                "  •✓ cargo test            1m ",
+                "  •✗ cargo test            5s ",
+            ]
+        );
+        let [running, asking, passed, failed] = [3, 4, 5, 6].map(|row| &lines[row]);
+        assert_eq!(running.colour_at(3), Some(TAG));
+        assert_eq!(asking.colour_at(3), Some(ACCENT));
+        assert_eq!(asking.colour_at(5), Some(ACCENT));
+        assert_eq!(passed.colour_at(3), Some(Colour::Success));
+        assert!(failed.is_error_at(3) && failed.is_bold_at(3));
+        assert_eq!(failed.colour_at(2), Some(ACCENT));
     }
 
     /// What finished since you were last in its pane has a dot before its

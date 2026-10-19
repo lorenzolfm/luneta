@@ -84,6 +84,11 @@ impl Painted {
     }
 
     #[cfg(test)]
+    pub fn is_error_at(&self, index: usize) -> bool {
+        self.indices.get(ERROR).is_some_and(|at| at.contains(&index))
+    }
+
+    #[cfg(test)]
     pub fn is_dim_at(&self, index: usize) -> bool {
         self.indices.get(DIM).is_some_and(|at| at.contains(&index))
     }
@@ -146,6 +151,10 @@ impl Painted {
 
     pub fn error_color_range<R: RangeBounds<usize>>(self, range: R) -> Self {
         self.slot_range(ERROR, range)
+    }
+
+    pub fn error_color_indices(self, indices: Vec<usize>) -> Self {
+        self.slot_indices(ERROR, indices)
     }
 
     pub fn gray_indices(mut self, indices: Vec<usize>) -> Self {

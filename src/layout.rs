@@ -134,6 +134,8 @@ pub enum Ink {
     Dim,
     /// The terminal's gray, not bold.
     Gray,
+    /// The theme's error colour, bold.
+    Error,
 }
 
 impl From<Colour> for Ink {
@@ -146,7 +148,7 @@ impl Ink {
     fn colour(self) -> Option<Colour> {
         match self {
             Ink::Level(colour) | Ink::Bold(colour) => Some(colour),
-            Ink::Plain | Ink::Strong | Ink::Dim | Ink::Gray => None,
+            Ink::Plain | Ink::Strong | Ink::Dim | Ink::Gray | Ink::Error => None,
         }
     }
 }
@@ -262,7 +264,7 @@ impl Line {
                 Style::Run(ink, _) | Style::Indices(ink, _) => match ink {
                     Ink::Level(_) | Ink::Plain => &mut unbold,
                     Ink::Dim => &mut dim,
-                    Ink::Bold(_) | Ink::Strong | Ink::Gray => continue,
+                    Ink::Bold(_) | Ink::Strong | Ink::Gray | Ink::Error => continue,
                 },
                 Style::Error(_) => &mut unbold,
             };
@@ -291,6 +293,13 @@ impl Line {
                 Style::Indices(Ink::Gray, indices) => text.gray_indices(
                     indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
                 ),
+                Style::Run(Ink::Error, range) | Style::Error(range) => match clamp(range) {
+                    Some(range) => text.error_color_range(range),
+                    None => text,
+                },
+                Style::Indices(Ink::Error, indices) => text.error_color_indices(
+                    indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
+                ),
                 Style::Run(ink, range) => match (ink.colour(), clamp(range)) {
                     (Some(colour), Some(range)) => text.color_range(colour, range),
                     _ => text,
@@ -300,10 +309,6 @@ impl Line {
                         colour,
                         indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
                     ),
-                    None => text,
-                },
-                Style::Error(range) => match clamp(range) {
-                    Some(range) => text.error_color_range(range),
                     None => text,
                 },
             };
