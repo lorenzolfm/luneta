@@ -1119,6 +1119,23 @@ impl State {
         focused && !floating && !self.pass.passing()
     }
 
+    /// Whether a brief has the focus, floating over the sidebar it hands the
+    /// focus back to as it closes.
+    fn briefing(&self) -> bool {
+        let Some(tab) = self.own_tab().filter(|tab| Some(*tab) == self.active_tab) else {
+            return false;
+        };
+        let floating = self
+            .tabs
+            .iter()
+            .any(|t| t.position == tab && t.are_floating_panes_visible);
+        let panes = self.panes.as_ref().and_then(|manifest| manifest.panes.get(&tab));
+        let panes = panes.map_or(&[][..], Vec::as_slice);
+        let own = panes.iter().any(|p| p.is_focused && p.is_plugin && p.id == self.plugin_id);
+        let over = panes.iter().any(|p| p.is_focused && p.is_floating && brief::is_brief(p));
+        floating && own && over
+    }
+
     /// After the panes or the tabs change. Says whether to draw.
     fn settle(&mut self) -> bool {
         if self.leaving && !self.on_screen() {
@@ -1233,7 +1250,9 @@ impl State {
         if !self.away {
             self.ask_checkouts();
         }
-        let follow = !self.sidebar_focused();
+        // A brief leaves the cursor on the row it was asked on, for the
+        // sidebar to have it back as it closes.
+        let follow = !self.sidebar_focused() && !self.briefing();
         if let Role::Sidebar(tree) = &mut self.role {
             tree.rebuild(&self.branches, current.as_deref(), &self.agents, self.here, follow);
         }
@@ -2188,6 +2207,66 @@ mod tests {
                 Err(reason) => (Vec::new(), Some(reason)),
             };
             assert_eq!((read, said), (briefed, reason), "row {at} {scope}");
+        }
+    }
+
+    /// A brief floats over the tab with the focus, and hands it back to the
+    /// sidebar as it closes. It is no row of the sidebar's, nor the pane you
+    /// are in: the cursor stays on the row it was asked on, and `Esc` goes
+    /// back to the pane you came from, as it did before the brief.
+    #[test]
+    fn a_brief_leaves_the_sidebar_as_it_found_it() {
+        let mut state = focused_sidebar();
+        state.here = Some(1);
+        if let Role::Sidebar(tree) = &mut state.role {
+            tree.rows.select(3);
+        }
+        state.rebuild_tree();
+        let note = brief::Note {
+            session: "b".to_owned(),
+            pane: 4,
+            name: "pane 4".to_owned(),
+            status: "idle".to_owned(),
+            held: "4s".to_owned(),
+            branch: None,
+            cwd: None,
+            transcript: None,
+        };
+        let asked = Brief::new(1, Over::Session("b".to_owned()), vec![note]).expect("a brief");
+        let command = asked.pane("Brief of b", b"");
+        // As zellij spells a command: its path, then each argument after a
+        // space.
+        let path = command.path.to_string_lossy().into_owned();
+        let spelled = std::iter::once(path).chain(command.args).collect::<Vec<_>>().join(" ");
+        let pane = PaneInfo {
+            id: 2,
+            is_floating: true,
+            is_focused: true,
+            is_selectable: true,
+            title: "luneta: brief of b".to_owned(),
+            terminal_command: Some(spelled),
+            ..PaneInfo::default()
+        };
+        let closed = state.panes.clone().expect("the panes");
+        let mut open = closed.clone();
+        open.panes.get_mut(&0).expect("tab 0").push(pane);
+
+        // Rows `a`, `pane 1`, `b`, `pane 4`, and the cursor on `pane 4`.
+        let rows = [
+            Place::Session("a".to_owned()),
+            Place::Pane("a".to_owned(), 1),
+            Place::Session("b".to_owned()),
+            Place::Pane("b".to_owned(), 4),
+        ];
+        for (brief_open, manifest) in [(true, open), (false, closed)] {
+            state.tabs[0].are_floating_panes_visible = brief_open;
+            state.update(Event::PaneUpdate(manifest));
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            let shown: Vec<Place> = tree.rows.iter().map(Node::place).collect();
+            assert_eq!(shown, rows, "brief open: {brief_open}");
+            let at = tree.rows.selected_row().map(Node::place);
+            assert_eq!(at.as_ref(), rows.get(3), "brief open: {brief_open}");
+            assert_eq!(state.here, Some(1), "brief open: {brief_open}");
         }
     }
 

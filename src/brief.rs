@@ -72,6 +72,15 @@ dd bs=1 count=1 >/dev/null 2>&1
 stty sane 2>/dev/null
 zellij action close-pane --pane-id "terminal_$ZELLIJ_PANE_ID""#;
 
+/// Whether `pane` is a brief's, by the command `Brief::pane` runs in it, as
+/// zellij spells a command: its path, then each argument after a space. It
+/// is gone once a key closes it, and the focus with it, back to the sidebar:
+/// no pane anyone goes to, or comes from.
+pub fn is_brief(pane: &PaneInfo) -> bool {
+    let command = pane.terminal_command.as_deref().and_then(|c| c.strip_prefix("sh -c "));
+    !pane.is_plugin && command.is_some_and(|script| script.starts_with(PANE))
+}
+
 /// What the model is told, whatever the brief covers.
 const SYSTEM: &str = "You brief a developer who is coming back to their desk after a break. They \
     left Claude Code agents at work in zellij sessions, and want to know at a glance how each \
@@ -214,16 +223,7 @@ impl Brief {
     /// zellij answers which pane it opened on stdin, which no test has.
     pub fn open(&self, stdout: &[u8]) {
         let title = self.title();
-        let args = [
-            "-c".to_owned(),
-            PANE.to_owned(),
-            "luneta".to_owned(),
-            title.clone(),
-            MODEL.to_owned(),
-            SYSTEM.to_owned(),
-            self.prompt(&tails(stdout)),
-        ];
-        let command = CommandToRun { path: PathBuf::from("sh"), args: args.to_vec(), cwd: None };
+        let command = self.pane(&title, stdout);
         // A few lines, wide ones: room for a dozen agents, and lines that do
         // not wrap.
         let [x, y, width, height] = ["15%", "25%", "70%", "50%"].map(|at| Some(at.to_owned()));
@@ -233,6 +233,20 @@ impl Brief {
         {
             rename_terminal_pane(pane, format!("luneta: {}", title.to_lowercase()));
         }
+    }
+
+    /// What the brief's pane runs, titled `title`, on what `tails` printed.
+    pub fn pane(&self, title: &str, stdout: &[u8]) -> CommandToRun {
+        let args = [
+            "-c".to_owned(),
+            PANE.to_owned(),
+            "luneta".to_owned(),
+            title.to_owned(),
+            MODEL.to_owned(),
+            SYSTEM.to_owned(),
+            self.prompt(&tails(stdout)),
+        ];
+        CommandToRun { path: PathBuf::from("sh"), args: args.to_vec(), cwd: None }
     }
 
     /// What the pane says the brief is of.

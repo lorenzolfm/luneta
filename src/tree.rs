@@ -14,6 +14,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{self, AgentRow, AgentSet, Status};
+use crate::brief;
 use crate::checkouts::{Checkout, Checkouts, Said};
 use crate::close::{self, Act, Closes};
 use crate::cursor::Cursor;
@@ -35,11 +36,16 @@ pub fn is_placeholder(pane: &PaneInfo) -> bool {
 
 /// The terminal you are in, of a tab's panes: the focused tiled one, or else
 /// the focused floating one. The picker and the menu float over the tab with
-/// the focus, and are no terminal.
+/// the focus, and are no terminal. A brief is one, but you are not in it: it
+/// hands the focus back to the sidebar as it closes.
 pub fn origin(panes: &[PaneInfo]) -> Option<u32> {
     let focused = |floating: bool| {
         panes.iter().find(move |p| {
-            p.is_focused && !p.is_plugin && !p.is_suppressed && p.is_floating == floating
+            p.is_focused
+                && !p.is_plugin
+                && !p.is_suppressed
+                && p.is_floating == floating
+                && !brief::is_brief(p)
         })
     };
     focused(false).or_else(|| focused(true)).map(|p| p.id)
@@ -95,11 +101,12 @@ pub fn in_order(branches: &[Branch]) -> Vec<&Branch> {
 
 /// The panes a person can go to, in tab order, the tiled ones of a tab before
 /// its floating ones, and in the order they were opened within each. The
-/// sidebar's placeholders are not among them. A pane keeps what was checked
-/// out where it worked, as it stood `before`, until git says what is checked
-/// out where it works now, so that a `cd` does not take its branch's line away
-/// and back. A session that leaves a pane out of one answer has not said it
-/// moved, and the pane keeps its directory too, for git to be asked about.
+/// sidebar's placeholders are not among them, nor a brief. A pane keeps what
+/// was checked out where it worked, as it stood `before`, until git says what
+/// is checked out where it works now, so that a `cd` does not take its
+/// branch's line away and back. A session that leaves a pane out of one
+/// answer has not said it moved, and the pane keeps its directory too, for
+/// git to be asked about.
 pub fn leaves(
     session: &str,
     tabs: &[TabInfo],
@@ -114,7 +121,12 @@ pub fn leaves(
         let tab_id = tab.map(TabId::of);
         let tab = tab.map_or("", |tab| tab.name.as_str());
         for pane in panes {
-            if pane.is_plugin || !pane.is_selectable || pane.is_suppressed || is_placeholder(pane) {
+            if pane.is_plugin
+                || !pane.is_selectable
+                || pane.is_suppressed
+                || is_placeholder(pane)
+                || brief::is_brief(pane)
+            {
                 continue;
             }
             let held = before.iter().find(|leaf| leaf.id == pane.id);
