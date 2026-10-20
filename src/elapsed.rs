@@ -73,6 +73,10 @@ impl Held {
         Held(Duration::from_secs(secs))
     }
 
+    pub const fn from_millis(millis: u64) -> Self {
+        Held(Duration::from_millis(millis))
+    }
+
     pub fn grown_by(self, age: Age) -> Held {
         Held(self.0 + age.0)
     }

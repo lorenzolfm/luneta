@@ -21,6 +21,7 @@ mod pass;
 mod places;
 mod render;
 mod sessions;
+mod shells;
 mod skills;
 mod tree;
 
@@ -425,6 +426,14 @@ impl ZellijPlugin for State {
                             None => false,
                         }
                     },
+                    Some(shells::CONTEXT_VALUE) => {
+                        let Role::Sidebar(tree) = &mut self.role else {
+                            return false;
+                        };
+                        tree.news.shells.ingest(exit_code, &stdout);
+                        self.rebuild_tree();
+                        true
+                    },
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr, Moment::now());
                         self.agents_taken_at = self.frame;
@@ -714,6 +723,7 @@ impl State {
         }
         self.live_names = live_names;
         self.watch_news(current.as_deref());
+        self.ask_shells();
         self.sessions = Sessions {
             live,
             dead: snapshot
@@ -747,10 +757,26 @@ impl State {
         tree.news.prune(&self.live_names);
     }
 
+    /// Asks what the shells with luneta's hook in every live session say.
+    fn ask_shells(&mut self) {
+        let Role::Sidebar(tree) = &mut self.role else {
+            return;
+        };
+        if !tree.news.shells.ask() {
+            return;
+        }
+        run_command(
+            &shells::query(&self.live_names),
+            BTreeMap::from([(CONTEXT_KEY.to_owned(), shells::CONTEXT_VALUE.to_owned())]),
+        );
+    }
+
     fn spinning(&self) -> bool {
         let shown = (self.is_sidebar() && !self.away)
             || (matches!(self.mode, Mode::Search) && self.screen == Screen::Agents);
-        shown && self.agents.any_busy()
+        // A command at work turns the spinner an agent at work does.
+        let running = matches!(&self.role, Role::Sidebar(tree) if tree.summary.busy > 0);
+        shown && (self.agents.any_busy() || running)
     }
 
     fn origin_pane(&self) -> Option<u32> {

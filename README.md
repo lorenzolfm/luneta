@@ -120,7 +120,7 @@ over it: every live session, the panes in it, and what the agent in each pane
 is doing. One sidebar for the whole session, which follows you from tab to tab.
 
 ```text
-─ 3 sessions ────── ●1 •2 ⠋2 ─
+─ 3 sessions ────── ●1 •2 ⠋3 ─
 
  ▾ bipa ────────────────── ●1
   •✓ handoff-eng-11259-p… 13h
@@ -133,7 +133,9 @@ is doing. One sidebar for the whole session, which follows you from tab to tab.
  ▾ unnamed ──────────────────
 ▌  ⠋ orca-copy            12s
 ▌    main
-  •$ cargo build --relea   8s
+   ⠋ cargo build --relea… 42s
+     main
+  •✗ cargo test            8s
      main
 ```
 
@@ -150,23 +152,48 @@ what is new, and the agents at work, across all of them, a folded session's
 too. A count of none is left out.
 
 A `•` before a pane's mark says that something finished there since you were
-last in it: an agent, its `✓` in green, or a command in a shell, its `$` and
-how long ago it ended, with the row named for the command. Once you go there,
-the `•` goes: the agent keeps its `✓`, dimmed, and the shell is the plain row
+last in it: an agent, its `✓` in green, or a command in a shell, with the row
+named for the command and its age counting from when it ended. Once you go
+there, the `•` goes: the agent keeps its `✓`, dimmed, and the shell is the plain row
 it was. You were in a pane once you stayed there a second, so one you only
 pass through keeps its `•`; the pane you are in has none, as you see it. A
 folded session shows the `•` when any of its panes has one, over an agent at
 work.
 
-A shell says what it is doing in its title, as fish titles its pane: the
-command it runs, cut to twenty characters, before its directory, and the
-directory alone at the prompt. A command finished when the one gives way to
-the other. One that ends within a second is never seen running, and gets no
-`•`; nor does a command in a shell whose title says neither, as bash's and
-zsh's do not, or one in a program that titles the pane itself. zellij lists
-every session's titles some seconds late, so a command you watch end, and
-leave the pane or the session right after, is seen by the title its pane gives
-itself at once.
+A command in a shell has the marks an agent has, once it has run for a
+second: the spinner while it works, and `●` in the accent while it waits for
+you to type, as a password prompt or a `[y/N]` does, with its row named for
+the whole command and its age counting up. Once it ends, it has `✓` in green
+for an exit status of 0, or `✗` in red for any other, after the `•`. A command
+that ends within a second gets none of it: an `ls` is no news. A program that
+takes the terminal over a key at a time, as an editor, a pager or `ssh` does,
+runs for as long as you use it, and has no mark while it does. Nor does a job
+you stop with `Ctrl z`, until `fg` brings it back under its own name, and
+it ends with `$`, as fish does not say how; and a command that runs `exec`
+gives the pane to another program, and the shell says no more of it. The rule along the top counts a command that waits for you with
+the agents that wait for you, and one at work with the agents at work.
+
+That takes the [hook](#hook-the-shell) in your shell, which says what it runs
+and how it ended. The terminal says whether the command works or waits for
+you: how it takes keys, and whether a process in front of it reads it. A
+command that waits on the network with a blocking read looks, to Linux, like
+one that reads the terminal, and has the `●` too. `sudo` and `script` run the
+command on a terminal of their own, and keep yours a key at a time to pass
+the keys on: the command goes by theirs. sudo's is root's, which says neither
+how it takes keys nor where its processes sleep, so there a shell, an editor,
+a pager or `ssh` in front has no mark, and anything else has the spinner, even
+as it asks you something.
+
+Without the hook, a shell says what it is doing in its title, as fish titles
+its pane: the command it runs, cut to twenty characters, before its
+directory, and the directory alone at the prompt. A command finished when the
+one gives way to the other, and has `$` where the hook would say `✓` or `✗`;
+while it runs it has no mark. One that ends within a second is never seen
+running, and gets no `•`; nor does a command in a shell whose title says
+neither, as bash's and zsh's do not, or one in a program that titles the pane
+itself. zellij lists every session's titles some seconds late, so a command
+you watch end, and leave the pane or the session right after, is seen by the
+title its pane gives itself at once.
 
 What you have seen, and what each shell ran, is the same in the sidebar of
 every session, and outlasts zellij: the sidebars keep it in the plugin's cache,
@@ -529,6 +556,7 @@ Needs `claude` and `claude-ps` on the server's `PATH`.
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
+| the [hook](#hook-the-shell) in fish | optional | a command's spinner in the sidebar, and how it ended |
 
 The session list needs nothing but zellij. The optional tools are looked up by
 name on the `PATH` of the zellij **server**, which is inherited from whatever
@@ -866,6 +894,113 @@ sidebar. It goes with whoever switched tabs last, and comes back from hidden to
 the tab of the client that attached first. A key reaches the plugins of every
 client, and zellij does not say whose it was, so `Ctrl b` and `Ctrl f` act
 for both.
+
+### Hook the shell
+
+A command in a shell has its [marks in the sidebar](#sidebar) once the shell
+says what it runs and how it ended. luneta cannot hook your shell for you: put
+this in `~/.config/fish/conf.d/luneta.fish`.
+
+```fish
+# luneta: say what runs in each zellij pane, and how it ended.
+if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
+    and test -n "$XDG_RUNTIME_DIR$TMPDIR"
+    # A window opened from a pane has the pane's variables, and a terminal of
+    # its own: a shell there is not the pane's.
+    and not begin
+        test "$__luneta_pane" = "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
+        and test "$__luneta_pane_tty" != (tty)
+    end
+    set -gx __luneta_pane "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
+    set -gx __luneta_pane_tty (tty)
+    set -l root $XDG_RUNTIME_DIR
+    test -n "$root"; or set root $TMPDIR
+    set -g __luneta_root $root/luneta
+    set -g __luneta_dir $__luneta_root/commands/$ZELLIJ_SESSION_NAME
+    # The shell's own file, for its pane and when it started.
+    set -q __luneta_file; or set -g __luneta_file $__luneta_dir/$ZELLIJ_PANE_ID.(date +%s)
+
+    function __luneta_say
+        # Yours alone, and no link to another: what runs says what you type.
+        test -d $__luneta_root; or mkdir -m 700 $__luneta_root
+        test -O $__luneta_root; and not test -L $__luneta_root; or return
+        test -d $__luneta_dir; or mkdir -p $__luneta_dir; or return
+        # Moved into place whole, as the sidebar reads it.
+        printf '%s\n' "$argv" >$__luneta_file.new; and mv -f $__luneta_file.new $__luneta_file
+    end
+
+    function __luneta_going --on-event fish_preexec
+        set -g __luneta_jobs (jobs --group)
+        set -g __luneta_command (string replace -a \n ' ' -- $argv[1])
+        # `exec` gives the pane to another program, and nothing would say how
+        # this ended.
+        if string match -qr '(^|[;&|]|\b(and|or|not))\s*exec(\s|$)' -- $argv[1]
+            rm -f $__luneta_file
+            return
+        end
+        # `fg` brings back the last job, which is what runs.
+        if string match -qr '^\s*fg\s*$' -- $argv[1]
+            set -l job (jobs --last | string split \t)
+            if set -q job[1]
+                set __luneta_command $job[-1]
+                set __luneta_jobs (string match -v -- $job[2] $__luneta_jobs)
+            end
+        end
+        __luneta_say going (date +%s) $__luneta_pane_tty $__luneta_command
+    end
+
+    function __luneta_ended --on-event fish_postexec
+        set -l s $status
+        # `fg` says 0 however the job it brought back ended.
+        string match -qr '^\s*fg(\s|$)' -- $argv[1]; and set s -
+        # `Ctrl z` stops the job, and gives the prompt back with a status of 0.
+        set -l job (jobs --last --group)
+        if set -q job[1]; and not contains -- $job $__luneta_jobs
+            and ps -o stat= -p $job | string match -q 'T*'
+            __luneta_say stopped (date +%s) $__luneta_command
+        else
+            __luneta_say ended (date +%s) $s $CMD_DURATION $__luneta_command
+        end
+    end
+
+    function __luneta_gone --on-event fish_exit
+        rm -f $__luneta_file
+    end
+end
+```
+
+A shell started before the hook was there has none: start it again, or
+`source` the file in it.
+
+The hook keeps a file for each shell, of one line, at
+`$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>.<started>`, or under
+`$TMPDIR` where that is not set, and takes it away as the shell exits. With
+neither, it keeps none. The folder `luneta` is yours alone: the hook makes it
+so, and neither it nor the sidebar uses one that another user made, or a link,
+as anyone could make in a `TMPDIR` of `/tmp`. It writes the line beside it first and moves it into place, so that the
+sidebar never reads half of one. Another shell can be hooked to write the same
+line, which is one of
+
+```text
+going <since> <tty> <command>
+ended <at> <status> <took> <command>
+stopped <at> <command>
+```
+
+with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
+milliseconds, `<status>` the exit status, or `-` where the shell cannot say it,
+as fish cannot after `fg`, `<tty>` the path `tty` prints, the command on one
+line, and `stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
+second, through `sh`, `stty`, `ps` and `awk` on the zellij server's `PATH`,
+and the server must see the same `XDG_RUNTIME_DIR` as the shells in its panes.
+A pane's shell is the one that started last on its terminal, and one that
+started before its session was made is another session's. A shell in a window
+opened from the pane has the pane's variables, which the hook passes on, and a
+terminal of its own: it says nothing.
+
+A shell started before its session was renamed goes on writing under the old
+name, and its commands have no marks until it starts again; nor does a session
+made later by that name take them for its own.
 
 ---
 

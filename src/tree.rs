@@ -241,7 +241,9 @@ impl PaneNode {
     pub fn program(&self) -> Option<&str> {
         match self.mark {
             Some(Mark::Agent { .. } | Mark::Finished { .. }) => Some(icons::AGENT),
-            Some(Mark::Ran { .. }) | None => self.runs.as_deref(),
+            Some(Mark::Ran { .. } | Mark::Running { .. } | Mark::Asking { .. }) | None => {
+                self.runs.as_deref()
+            },
         }
     }
 }
@@ -255,15 +257,30 @@ pub enum Mark {
     /// An agent that finished since you were last in its pane, and how long
     /// it has been idle.
     Finished { age: Held },
-    /// A command its shell finished since you were last in its pane, and how
-    /// long ago.
-    Ran { age: Held },
+    /// A command its shell finished since you were last in its pane, how
+    /// long ago, and how it ended.
+    Ran { age: Held, outcome: Outcome },
+    /// A command its shell has run for a while, and for how long.
+    Running { age: Held },
+    /// A command that waits for you to type, and how long it has run.
+    Asking { age: Held },
+}
+
+/// How a command ended, as far as its shell says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// With an exit status of 0, as its shell's hook says.
+    Passed,
+    /// With any other.
+    Failed,
+    /// Its shell has no hook, and its title says only that it ended.
+    Untold,
 }
 
 impl Mark {
     /// The mark of `leaf`, with `agent` in it, as `news` has it, and its
-    /// label: a command its shell finished goes by the command. The pane you
-    /// are in, as `here` says, has nothing new: you see it.
+    /// label: a command its shell runs, or finished, goes by the command. The
+    /// pane you are in, as `here` says, has nothing new: you see it.
     fn of(
         news: &News,
         session: &str,
@@ -272,8 +289,8 @@ impl Mark {
         here: bool,
     ) -> (Option<Mark>, String) {
         let Some(agent) = agent else {
-            return match news.ran(session, leaf.id).filter(|_| !here) {
-                Some((command, age)) => (Some(Mark::Ran { age }), command.to_owned()),
+            return match news.command(session, leaf.id, here) {
+                Some((mark, command)) => (Some(mark), command.to_owned()),
                 None => (None, label(leaf, None)),
             };
         };
@@ -287,7 +304,11 @@ impl Mark {
 
     pub fn age(&self) -> Held {
         match self {
-            Mark::Agent { age, .. } | Mark::Finished { age } | Mark::Ran { age } => *age,
+            Mark::Agent { age, .. }
+            | Mark::Finished { age }
+            | Mark::Ran { age, .. }
+            | Mark::Running { age }
+            | Mark::Asking { age } => *age,
         }
     }
 
@@ -296,18 +317,20 @@ impl Mark {
         matches!(self, Mark::Finished { .. } | Mark::Ran { .. })
     }
 
+    /// Whether it waits for you: an agent that asked you something, or a
+    /// command that waits for you to type.
     pub fn is_waiting(&self) -> bool {
-        matches!(self, Mark::Agent { status: Status::Waiting, .. })
+        matches!(self, Mark::Agent { status: Status::Waiting, .. } | Mark::Asking { .. })
     }
 
-    /// How much its pane wants you, the most first: an agent that asked you
-    /// something, then what is new, then an agent at work, and then one you
-    /// have seen finish.
+    /// How much its pane wants you, the most first: what waits for you, then
+    /// what is new, then what is at work, and then an agent you have seen
+    /// finish.
     fn rank(&self) -> u8 {
         match self {
-            Mark::Agent { status: Status::Waiting, .. } => 0,
+            Mark::Agent { status: Status::Waiting, .. } | Mark::Asking { .. } => 0,
             Mark::Finished { .. } | Mark::Ran { .. } => 1,
-            Mark::Agent { status: Status::Busy, .. } => 2,
+            Mark::Agent { status: Status::Busy, .. } | Mark::Running { .. } => 2,
             Mark::Agent { status: Status::Idle, .. } => 3,
             Mark::Agent { status: Status::Shell, .. } => 4,
             Mark::Agent { status: Status::Unknown(_), .. } => 5,
@@ -383,20 +406,20 @@ impl Rows {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     pub sessions: usize,
-    /// Agents that wait for you.
+    /// Agents and commands that wait for you.
     pub waiting: usize,
     /// Agents and commands that finished since you were last in their panes.
     pub unseen: usize,
-    /// Agents at work.
+    /// Agents and commands at work.
     pub busy: usize,
 }
 
 impl Summary {
     fn count(&mut self, mark: &Mark) {
         match mark {
-            Mark::Agent { status: Status::Waiting, .. } => self.waiting += 1,
+            Mark::Agent { status: Status::Waiting, .. } | Mark::Asking { .. } => self.waiting += 1,
             Mark::Finished { .. } | Mark::Ran { .. } => self.unseen += 1,
-            Mark::Agent { status: Status::Busy, .. } => self.busy += 1,
+            Mark::Agent { status: Status::Busy, .. } | Mark::Running { .. } => self.busy += 1,
             Mark::Agent { .. } => {},
         }
     }
@@ -985,6 +1008,7 @@ mod tests {
     use super::*;
     use crate::agents::{Live, Seat};
     use crate::elapsed::Moment;
+    use crate::shells::{Front, Said, Shells};
     use crate::places::Places;
     use crate::sessions::Selection;
 
@@ -1075,7 +1099,11 @@ mod tests {
                     node.mark.as_ref().map_or("-", |mark| match mark {
                         Mark::Agent { status, .. } => status.word(),
                         Mark::Finished { .. } => "finished",
-                        Mark::Ran { .. } => "ran",
+                        Mark::Ran { outcome: Outcome::Untold, .. } => "ran",
+                        Mark::Ran { outcome: Outcome::Passed, .. } => "passed",
+                        Mark::Ran { outcome: Outcome::Failed, .. } => "failed",
+                        Mark::Running { .. } => "running",
+                        Mark::Asking { .. } => "asking",
                     }),
                     node.label
                 ),
@@ -1490,6 +1518,59 @@ mod tests {
         tree.rebuild(&branches, Some("c"), &set, Some(5), true);
         let Node::Session(a) = &tree.rows[0] else { panic!("a session comes first") };
         assert!(a.folded && a.loudest.as_ref().is_some_and(Mark::is_new));
+    }
+
+    /// The commands the shells' hook says run, or ended, name their rows. One
+    /// that waits for you to type counts with the agents that wait for you,
+    /// on its session's row too, and one at work with the agents at work.
+    /// Folded, its session shows the one that waits for you over the rest.
+    #[test]
+    fn a_command_counts_with_the_agents_it_looks_like() {
+        let at = |secs: u64| Moment::from_millis(secs * 1000);
+        let branches = [branch("a", 100, &[(1, "~/w/a"), (2, "~/w/a"), (3, "~/w/a"), (4, "~/w/a")])];
+        let tty = |n: u32| format!("/dev/pts/{n}");
+        let going = |command: &str, n: u32| Said::Going {
+            command: command.to_owned(),
+            since: at(10),
+            tty: tty(n),
+        };
+        let mut tree = Tree::default();
+        tree.news.shells = Shells::of(
+            vec![
+                ("a", 1, at(0), going("cargo build", 1)),
+                ("a", 2, at(0), going("sudo true", 2)),
+                ("a", 3, at(0), going("nvim", 3)),
+                (
+                    "a",
+                    4,
+                    at(0),
+                    Said::Ended {
+                        command: "make".to_owned(),
+                        at: at(15),
+                        status: Some(0),
+                        took: Held::from_secs(5),
+                    },
+                ),
+            ],
+            vec![
+                (&tty(1), Front::Working),
+                (&tty(2), Front::Asking),
+                (&tty(3), Front::Interactive),
+            ],
+        );
+        let set = agents(&[]);
+        tree.news.watch(&branches, &set, None, |_| None, at(20));
+        tree.rebuild(&branches, None, &set, None, false);
+        assert_eq!(
+            drawn(&tree),
+            ["▾ a waiting:1", "  running cargo build", "  asking sudo true", "  - ~/w/a", "  passed make"]
+        );
+        assert_eq!(tree.summary, Summary { sessions: 1, waiting: 1, unseen: 1, busy: 1 });
+
+        assert!(tree.toggle_row(0));
+        tree.rebuild(&branches, None, &set, None, false);
+        let Node::Session(a) = &tree.rows[0] else { panic!("a session comes first") };
+        assert!(a.loudest.as_ref().is_some_and(Mark::is_waiting));
     }
 
     /// The header sums up every agent, so neither a fold nor a search takes
