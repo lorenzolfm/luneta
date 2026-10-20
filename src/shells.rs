@@ -223,6 +223,11 @@ impl Front {
     }
 }
 
+/// How many times in a row not to ask once an answer found no shell's
+/// record: a host without the hook runs the script every few seconds, not
+/// every one.
+const QUIET: u32 = 4;
+
 #[derive(Default)]
 pub struct Shells {
     /// What the shell in each pane of each session said, and when it started.
@@ -230,12 +235,19 @@ pub struct Shells {
     /// What the command in front of each terminal a command is going on does.
     fronts: HashMap<String, Front>,
     asking: bool,
+    /// How many more times not to ask.
+    holding: u32,
 }
 
 impl Shells {
-    /// Whether to ask again: not while an answer is on its way.
+    /// Whether to ask again: not while an answer is on its way, nor for a
+    /// while after one that found no shell's record.
     pub fn ask(&mut self) -> bool {
         if self.asking {
+            return false;
+        }
+        if self.holding > 0 {
+            self.holding -= 1;
             return false;
         }
         self.asking = true;
@@ -248,6 +260,7 @@ impl Shells {
         self.asking = false;
         self.said.clear();
         self.fronts.clear();
+        self.holding = QUIET;
         if exit_code != Some(0) {
             return;
         }
@@ -326,6 +339,9 @@ impl Shells {
                 (front, _) => front,
             };
             self.fronts.insert((*tty).to_owned(), front);
+        }
+        if !self.said.is_empty() {
+            self.holding = 0;
         }
     }
 
@@ -496,6 +512,11 @@ mod tests {
 
         shells.ingest(Some(1), answer.as_bytes());
         assert_eq!(shells.said("luneta", 3), None);
+        // With no shell's record, it asks again only after a while.
+        for _ in 0..QUIET {
+            assert!(!shells.ask());
+        }
+        assert!(shells.ask());
     }
 
     /// The script reads the records of the sessions it is handed, and no
