@@ -177,7 +177,12 @@ That takes the [hook](#hook-the-shell) in your shell, which says what it runs
 and how it ended. The terminal says whether the command works or waits for
 you: how it takes keys, and whether a process in front of it reads it. A
 command that waits on the network with a blocking read looks, to Linux, like
-one that reads the terminal, and has the `●` too.
+one that reads the terminal, and has the `●` too. `sudo` and `script` run the
+command on a terminal of their own, and keep yours a key at a time to pass
+the keys on: the command goes by theirs. sudo's is root's, which says neither
+how it takes keys nor where its processes sleep, so there a shell, an editor,
+a pager or `ssh` in front has no mark, and anything else has the spinner, even
+as it asks you something.
 
 Without the hook, a shell says what it is doing in its title, as fish titles
 its pane: the command it runs, cut to twenty characters, before its
@@ -979,9 +984,9 @@ with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
 milliseconds, `<status>` the exit status, or `-` where the shell cannot say it,
 as fish cannot after `fg`, `<tty>` the path `tty` prints, the command on one
 line, and `stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
-second, through `sh`, `stty` and `ps` on the zellij server's `PATH`, and the
-server must see the same `XDG_RUNTIME_DIR` as the shells in its panes. A
-pane's shell is the one that started last, and one that started before its
+second, through `sh`, `stty`, `ps` and `awk` on the zellij server's `PATH`,
+and the server must see the same `XDG_RUNTIME_DIR` as the shells in its panes.
+A pane's shell is the one that started last, and one that started before its
 session was made is another session's.
 
 A shell started before its session was renamed goes on writing under the old

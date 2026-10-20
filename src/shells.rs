@@ -22,10 +22,13 @@
 //! itself, as an editor does: what the terminal says of the command in front
 //! tells which. `ps` marks the processes in front with a `+` and says where
 //! each sleeps in the kernel, and `stty` reads how the terminal takes keys.
+//! `sudo` and `script` run the command on a terminal of their own, and keep
+//! yours a key at a time to pass the keys on: what runs is what that one says.
 
 use std::collections::{BTreeMap, HashMap};
 
 use crate::elapsed::{Held, Moment};
+use crate::icons;
 
 pub const CONTEXT_VALUE: &str = "shells";
 
@@ -34,7 +37,9 @@ pub const CONTEXT_VALUE: &str = "shells";
 /// in front of it sleep. A command going on a terminal that is gone is no
 /// pane's, and would fail `ps` for all of them, so it is left out. It reads
 /// the records only in a folder of the user's own: what is in one that others
-/// share, as `/tmp` is, anyone could have written.
+/// share, as `/tmp` is, anyone could have written. Behind `sudo` or `script`
+/// in front, it asks the same of the terminal they run the command on, the
+/// one their child has, and says which that is.
 const SCRIPT: &str = r#"
 root=${XDG_RUNTIME_DIR:-$TMPDIR}
 [ -n "$root" ] && [ -O "$root/luneta" ] && [ ! -L "$root/luneta" ] || exit 0
@@ -62,11 +67,30 @@ done
 set -f
 for tty in $ttys; do
   printf 'stty\t%s\t' "$tty"
-  stty -a < "$tty" 2>/dev/null | tr '\n' ' '
+  { stty -a < "$tty"; } 2>/dev/null | tr '\n' ' '
   echo
 done
-ps -o tty= -o stat= -o wchan= -t "$(echo $ttys | tr ' ' ',')" 2>/dev/null |
-  while IFS= read -r line; do printf 'ps\t%s\n' "$line"; done
+front() {
+  ps -o tty= -o stat= -o pid= -o comm= -o wchan= -t "$(echo $1 | tr ' ' ',')" 2>/dev/null
+}
+fronts=$(front "$ttys")
+printf '%s\n' "$fronts" |
+  while IFS= read -r line; do [ -z "$line" ] || printf 'ps\t%s\n' "$line"; done
+relays=$(printf '%s\n' "$fronts" | awk '{ name = $4; sub(/.*\//, "", name) }
+  $2 ~ /\+/ && (name == "sudo" || name == "script") { printf " %s", $3 }')
+[ -n "$relays" ] || exit 0
+relayed=$(ps -A -o ppid= -o tty= 2>/dev/null |
+  awk -v relays="$relays " 'index(relays, " " $1 " ") && $2 !~ /^\?/ { print $1 "\t" $2 }' |
+  sort -u)
+[ -n "$relayed" ] || exit 0
+printf '%s\n' "$relayed" | while IFS= read -r line; do printf 'relay\t%s\n' "$line"; done
+inner=$(printf '%s\n' "$relayed" | cut -f2 | sort -u)
+for tty in $inner; do
+  printf 'stty\t/dev/%s\t' "$tty"
+  { stty -a < "/dev/$tty"; } 2>/dev/null | tr '\n' ' '
+  echo
+done
+front "$inner" | while IFS= read -r line; do printf 'ps\t%s\n' "$line"; done
 "#;
 
 /// The command that reads what the shells of `sessions` say.
@@ -137,13 +161,22 @@ pub enum Front {
 /// Linux's too, and reads as a prompt.
 const READING: [&str; 3] = ["wait_woken", "n_tty_read", "ttyin"];
 
+/// The programs that take a terminal over for as long as you use them, by
+/// their binaries' names: shells, editors, pagers, monitors, and `ssh`.
+const TAKING_OVER: [&str; 22] = [
+    "sh", "bash", "dash", "zsh", "fish", "nu", "ksh", "tcsh", "vi", "vim", "nvim", "nano", "emacs",
+    "hx", "less", "more", "man", "top", "htop", "btop", "ssh", "mosh",
+];
+
 /// A process in front of its terminal, as `ps` says: its state, with `s` for
-/// the leader of its session, the shell the terminal was opened for, and
-/// where it sleeps in the kernel.
+/// the leader of its session, the shell the terminal was opened for, where it
+/// sleeps in the kernel, its id, and its binary's name.
 #[derive(Clone, Copy, Debug)]
 struct Process<'a> {
     stat: &'a str,
     wchan: &'a str,
+    pid: &'a str,
+    name: &'a str,
 }
 
 impl Front {
@@ -152,13 +185,38 @@ impl Front {
     /// itself in front, its terminal a key at a time, is its own `read`
     /// asking you something, as fish's line editor takes the keys.
     fn of(modes: &str, front: &[Process]) -> Self {
-        let has = |mode: &str| modes.split_whitespace().any(|m| m == mode);
         let shell = front.iter().any(|process| process.stat.contains('s'));
+        match Front::by_modes(modes, front) {
+            Front::Interactive if shell => Front::Asking,
+            front => front,
+        }
+    }
+
+    /// What the command in front does, as the terminal's `modes` say, and
+    /// whether a process in `front` reads it.
+    fn by_modes(modes: &str, front: &[Process]) -> Self {
+        let has = |mode: &str| modes.split_whitespace().any(|m| m == mode);
         let reading = front.iter().any(|process| READING.contains(&process.wchan));
         if has("-icanon") {
-            if shell { Front::Asking } else { Front::Interactive }
+            Front::Interactive
         } else if has("-echo") || reading {
             Front::Asking
+        } else {
+            Front::Working
+        }
+    }
+
+    /// What the command `sudo` or `script` runs on a terminal of its own
+    /// does, as that terminal's `modes` and `front` say. A terminal of
+    /// another user's, as sudo's is root's, says neither its modes nor where
+    /// its processes sleep: there, a program in front that takes a terminal
+    /// over has it, and anything else is at work, even as it asks.
+    fn behind(modes: &str, front: &[Process]) -> Self {
+        if !modes.trim().is_empty() {
+            return Front::by_modes(modes, front);
+        }
+        if front.iter().any(|process| TAKING_OVER.contains(&process.name)) {
+            Front::Interactive
         } else {
             Front::Working
         }
@@ -196,6 +254,9 @@ impl Shells {
         let stdout = String::from_utf8_lossy(stdout);
         let mut modes: HashMap<&str, &str> = HashMap::new();
         let mut fronts: HashMap<String, Vec<Process>> = HashMap::new();
+        // The terminals of the children of each `sudo` or `script` in front,
+        // by its id: one is the terminal it runs the command on.
+        let mut relays: HashMap<&str, Vec<&str>> = HashMap::new();
         for line in stdout.lines() {
             let Some((kind, rest)) = line.split_once('\t') else {
                 continue;
@@ -230,21 +291,41 @@ impl Shells {
                     }
                 },
                 "ps" => {
-                    let mut fields = rest.split_whitespace();
-                    let (Some(tty), Some(stat)) = (fields.next(), fields.next()) else {
+                    // Where it sleeps comes last, where `ps` writes it whole.
+                    let fields: Vec<&str> = rest.split_whitespace().collect();
+                    let [tty, stat, pid, ref comm @ .., wchan] = fields[..] else {
                         continue;
                     };
                     if stat.contains('+') {
-                        let process = Process { stat, wchan: fields.next().unwrap_or("") };
+                        let name = comm.first().and_then(|comm| icons::program(comm));
+                        let process = Process { stat, wchan, pid, name: name.unwrap_or("") };
                         fronts.entry(terminal(tty).to_owned()).or_default().push(process);
+                    }
+                },
+                "relay" => {
+                    if let Some((pid, tty)) = rest.split_once('\t') {
+                        relays.entry(pid).or_default().push(tty);
                     }
                 },
                 _ => {},
             }
         }
-        for (tty, modes) in modes {
-            let front = fronts.get(terminal(tty)).map_or(&[][..], Vec::as_slice);
-            self.fronts.insert(tty.to_owned(), Front::of(modes, front));
+        let front_of = |tty: &str| fronts.get(terminal(tty)).map_or(&[][..], Vec::as_slice);
+        for (tty, said) in &modes {
+            let front = front_of(tty);
+            let relayed = front
+                .iter()
+                .filter_map(|process| relays.get(process.pid))
+                .flatten()
+                .find(|inner| **inner != terminal(tty));
+            let front = match (Front::of(said, front), relayed) {
+                (Front::Interactive, Some(&inner)) => {
+                    let inner_modes = modes.get(format!("/dev/{inner}").as_str()).copied();
+                    Front::behind(inner_modes.unwrap_or(""), front_of(inner))
+                },
+                (front, _) => front,
+            };
+            self.fronts.insert((*tty).to_owned(), front);
         }
     }
 
@@ -324,7 +405,7 @@ mod tests {
         let cooked = "speed 38400 baud; line = 0; isig icanon iexten echo echoe";
         let raw = "speed 38400 baud; line = 0; isig -icanon iexten -echo echoe";
         let password = "speed 38400 baud; line = 0; isig icanon iexten -echo echoe";
-        let ps = |stat, wchan| Process { stat, wchan };
+        let ps = |stat, wchan| Process { stat, wchan, pid: "", name: "" };
         for (modes, front, said) in [
             (cooked, vec![ps("S+", "hrtimer_nanosleep")], Front::Working),
             (cooked, vec![ps("S+", "do_wait"), ps("S+", "wait_woken")], Front::Asking),
@@ -335,6 +416,40 @@ mod tests {
             (raw, vec![ps("Ss+", "poll_schedule_timeout.constprop.0")], Front::Asking),
         ] {
             assert_eq!(Front::of(modes, &front), said, "{modes:?} {front:?}");
+        }
+    }
+
+    /// Behind `sudo` or `script`, which keep your terminal a key at a time to
+    /// pass the keys on, what runs is what the terminal they run it on says:
+    /// by its modes and its processes where it is yours, as `script`'s is,
+    /// with no shell's `read` in it, and where it is root's, as sudo's is, by
+    /// the name of the program in front of it.
+    #[test]
+    fn behind_sudo_or_script_what_runs_is_what_their_terminal_says() {
+        let (raw, cooked) = ("speed 38400 baud; -icanon -echo", "speed 38400 baud; icanon echo");
+        for (relay, modes, front, said) in [
+            ("sudo", "", "S+ 700 nixos-rebuild -", Front::Working),
+            ("sudo", "", "S+ 700 bash -", Front::Interactive),
+            ("sudo", "", "S+ 700 nvim -", Front::Interactive),
+            ("script", cooked, "S+ 700 sleep hrtimer_nanosleep", Front::Working),
+            ("script", cooked, "S+ 700 cat wait_woken", Front::Asking),
+            ("script", raw, "Ss+ 700 bash do_select", Front::Interactive),
+        ] {
+            // In the order `sort` gives: its child on its own terminal, as
+            // well, is no terminal of its own.
+            let answer = [
+                format!("stty\t/dev/pts/3\t{raw}"),
+                format!("stty\t/dev/pts/10\t{modes}"),
+                "ps\tpts/3 Ss 100 fish do_wait".to_owned(),
+                format!("ps\tpts/3 S+ 200 {relay} poll_schedule_timeout.constprop.0"),
+                "relay\t200\tpts/10".to_owned(),
+                "relay\t200\tpts/3".to_owned(),
+                format!("ps\tpts/10 {front}"),
+            ]
+            .join("\n");
+            let mut shells = Shells::default();
+            shells.ingest(Some(0), answer.as_bytes());
+            assert_eq!(shells.front("/dev/pts/3"), Some(said), "{relay} {front:?}");
         }
     }
 
@@ -357,10 +472,10 @@ mod tests {
             "stty\t/dev/pts/3\tspeed 38400 baud; icanon echo ",
             "stty\t/dev/pts/4\tspeed 38400 baud; icanon echo ",
             "stty\t/dev/pts/9\tspeed 38400 baud; -icanon -echo ",
-            "ps\tpts/3    Ss   do_wait",
-            "ps\tpts/3    Sl+  futex_do_wait",
-            "ps\tpts/4    Ss   wait_woken",
-            "ps\tpts/4    S+   wait_woken",
+            "ps\tpts/3    Ss      30 fish            do_wait",
+            "ps\tpts/3    Sl+     31 cargo           futex_do_wait",
+            "ps\tpts/4    Ss      40 fish            wait_woken",
+            "ps\tpts/4    S+      41 rm              wait_woken",
         ]
         .join("\n");
         let mut shells = Shells::default();
