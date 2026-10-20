@@ -905,13 +905,20 @@ this in `~/.config/fish/conf.d/luneta.fish`.
 # luneta: say what runs in each zellij pane, and how it ended.
 if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     and test -n "$XDG_RUNTIME_DIR$TMPDIR"
+    # A window opened from a pane has the pane's variables, and a terminal of
+    # its own: a shell there is not the pane's.
+    and not begin
+        test "$__luneta_pane" = "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
+        and test "$__luneta_pane_tty" != (tty)
+    end
+    set -gx __luneta_pane "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
+    set -gx __luneta_pane_tty (tty)
     set -l root $XDG_RUNTIME_DIR
     test -n "$root"; or set root $TMPDIR
     set -g __luneta_root $root/luneta
     set -g __luneta_dir $__luneta_root/commands/$ZELLIJ_SESSION_NAME
     # The shell's own file, for its pane and when it started.
     set -q __luneta_file; or set -g __luneta_file $__luneta_dir/$ZELLIJ_PANE_ID.(date +%s)
-    set -g __luneta_tty (tty)
 
     function __luneta_say
         # Yours alone, and no link to another: what runs says what you type.
@@ -939,7 +946,7 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
                 set __luneta_jobs (string match -v -- $job[2] $__luneta_jobs)
             end
         end
-        __luneta_say going (date +%s) $__luneta_tty $__luneta_command
+        __luneta_say going (date +%s) $__luneta_pane_tty $__luneta_command
     end
 
     function __luneta_ended --on-event fish_postexec
@@ -986,8 +993,10 @@ as fish cannot after `fg`, `<tty>` the path `tty` prints, the command on one
 line, and `stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
 second, through `sh`, `stty`, `ps` and `awk` on the zellij server's `PATH`,
 and the server must see the same `XDG_RUNTIME_DIR` as the shells in its panes.
-A pane's shell is the one that started last, and one that started before its
-session was made is another session's.
+A pane's shell is the one that started last on its terminal, and one that
+started before its session was made is another session's. A shell in a window
+opened from the pane has the pane's variables, which the hook passes on, and a
+terminal of its own: it says nothing.
 
 A shell started before its session was renamed goes on writing under the old
 name, and its commands have no marks until it starts again; nor does a session
