@@ -13,7 +13,8 @@
 //! ```
 //!
 //! with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>`
-//! in milliseconds, and `stopped` for a job stopped with `Ctrl z`. A pane's
+//! in milliseconds, `<status>` `-` where the shell cannot say it, as fish
+//! cannot after `fg`, and `stopped` for a job stopped with `Ctrl z`. A pane's
 //! shell is the one that started last. A shell without the hook writes none,
 //! and its title says what it can.
 //!
@@ -76,8 +77,8 @@ pub enum Said {
     /// It runs `command`, on the terminal `tty`, since `since`.
     Going { command: String, since: Moment, tty: String },
     /// It ran `command`, for as long as `took`, and it ended at `at` with
-    /// `status`.
-    Ended { command: String, at: Moment, status: i32, took: Held },
+    /// `status`, if the shell could say it.
+    Ended { command: String, at: Moment, status: Option<i32>, took: Held },
     /// It stopped the job it ran, which waits to be brought back.
     Stopped,
 }
@@ -101,8 +102,11 @@ impl Said {
                 let (status, rest) = rest.split_once(' ')?;
                 let (took, command) = rest.split_once(' ')?;
                 let took = Held::from_millis(took.parse().ok()?);
-                let (status, command) = (status.parse().ok()?, command.to_owned());
-                Some(Said::Ended { command, at: moment, status, took })
+                let status = match status {
+                    "-" => None,
+                    status => Some(status.parse().ok()?),
+                };
+                Some(Said::Ended { command: command.to_owned(), at: moment, status, took })
             },
             "stopped" => Some(Said::Stopped),
             _ => None,
@@ -287,10 +291,12 @@ mod tests {
             Some(Said::Ended {
                 command: "cargo test".to_owned(),
                 at: Moment::from_millis(1_760_900_042_999),
-                status: 101,
+                status: Some(101),
                 took: Held::from_millis(41_873),
             })
         );
+        let fg = Said::read("ended 1760900050 - 7120 cargo test");
+        assert!(matches!(fg, Some(Said::Ended { status: None, .. })), "{fg:?}");
         assert_eq!(Said::read("stopped 1760900045 cargo test"), Some(Said::Stopped));
         for wrong in [
             "",
@@ -359,7 +365,7 @@ mod tests {
         assert!(shells.ask());
         assert!(matches!(shells.said("luneta", 3), Some((_, Said::Going { .. }))));
         let (five, newest) = (shells.said("luneta", 5), Moment::from_millis(95_000));
-        let from_newest = matches!(five, Some((at, Said::Ended { status: 0, .. })) if at == newest);
+        let from_newest = matches!(five, Some((at, Said::Ended { status: Some(0), .. })) if at == newest);
         assert!(from_newest, "{five:?}");
         assert_eq!(shells.said("luneta", 6), None);
         assert!(matches!(shells.said("bipa", 3), Some((_, Said::Going { .. }))));
@@ -401,7 +407,7 @@ mod tests {
         shells.ingest(output.status.code(), &output.stdout);
         let one = shells.said("s", 1);
         assert!(matches!(one, Some((_, Said::Going { tty, .. })) if tty == "/dev/null"), "{one:?}");
-        assert!(matches!(shells.said("s", 2), Some((_, Said::Ended { status: 1, .. }))));
+        assert!(matches!(shells.said("s", 2), Some((_, Said::Ended { status: Some(1), .. }))));
         assert_eq!(shells.said("s", 3), None);
         assert_eq!(shells.said("gone", 1), None);
         let stdout = String::from_utf8_lossy(&output.stdout);

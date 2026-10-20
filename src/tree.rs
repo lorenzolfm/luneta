@@ -1547,7 +1547,7 @@ mod tests {
                     Said::Ended {
                         command: "make".to_owned(),
                         at: at(15),
-                        status: 0,
+                        status: Some(0),
                         took: Held::from_secs(5),
                     },
                 ),

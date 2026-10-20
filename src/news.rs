@@ -386,7 +386,11 @@ impl News {
                 if here || *took < LONG || visit.is_some_and(|visit| *at <= visit.at) {
                     return None;
                 }
-                let outcome = if *status == 0 { Outcome::Passed } else { Outcome::Failed };
+                let outcome = match status {
+                    Some(0) => Outcome::Passed,
+                    Some(_) => Outcome::Failed,
+                    None => Outcome::Untold,
+                };
                 Some((Mark::Ran { age: self.now.since(*at), outcome }, command))
             },
             // A job stopped with `Ctrl z` neither runs nor ended.
@@ -642,7 +646,7 @@ mod tests {
         Said::Going { command: command.to_owned(), since, tty: "/dev/pts/3".to_owned() }
     }
 
-    fn ended(command: &str, at: Moment, status: i32, took: u64) -> Said {
+    fn ended(command: &str, at: Moment, status: Option<i32>, took: u64) -> Said {
         Said::Ended { command: command.to_owned(), at, status, took: Held::from_millis(took) }
     }
 
@@ -678,18 +682,20 @@ mod tests {
     }
 
     /// A command that ran for a second or more has `✓` once it ends with 0,
-    /// and `✗` with anything else, until you stay in its pane. One that took
-    /// less has none, nor does a job stopped with `Ctrl z`, nor what a shell
+    /// and `✗` with anything else, or `$` where its shell could not say, until
+    /// you stay in its pane. One that took less has none, nor does a job stopped with `Ctrl z`, nor what a shell
     /// says that started before its session was made, however new: it is a
     /// shell of a session renamed since, which had the name.
     #[test]
     fn a_command_that_ran_a_while_says_how_it_ended_until_you_stay_in_its_pane() {
         let (branches, agents) = session("~/w/s", "busy", 0, at(110));
         let age = Held::from_secs(7);
+        let ran_as = |outcome| Some(Mark::Ran { age, outcome });
         for (said, mark) in [
-            (ended("make", at(103), 0, 3_000), Some(Mark::Ran { age, outcome: Outcome::Passed })),
-            (ended("make", at(103), 2, 3_000), Some(Mark::Ran { age, outcome: Outcome::Failed })),
-            (ended("make", at(103), 0, 999), None),
+            (ended("make", at(103), Some(0), 3_000), ran_as(Outcome::Passed)),
+            (ended("make", at(103), Some(2), 3_000), ran_as(Outcome::Failed)),
+            (ended("make", at(103), None, 3_000), ran_as(Outcome::Untold)),
+            (ended("make", at(103), Some(0), 999), None),
             (Said::Stopped, None),
         ] {
             let shells = Shells::of(vec![("s", 1, at(0), said.clone())], vec![]);
@@ -707,7 +713,7 @@ mod tests {
         later[0].age = Age::from_secs(10);
         let passed = Some(Mark::Ran { age, outcome: Outcome::Passed });
         for (started, mark) in [(at(50), None), (at(100), passed)] {
-            let said = ended("make", at(103), 0, 3_000);
+            let said = ended("make", at(103), Some(0), 3_000);
             let shells = Shells::of(vec![("s", 1, started, said)], vec![]);
             let mut news = News { shells, ..News::default() };
             news.watch(&later, &agents, None, untitled, at(110));

@@ -168,9 +168,9 @@ for an exit status of 0, or `✗` in red for any other, after the `•`. A comma
 that ends within a second gets none of it: an `ls` is no news. A program that
 takes the terminal over a key at a time, as an editor, a pager or `ssh` does,
 runs for as long as you use it, and has no mark while it does. Nor does a job
-you stop with `Ctrl z`, until `fg` brings it back under its own name; and a
-command that runs `exec` gives the pane to another program, and the shell says
-no more of it. The rule along the top counts a command that waits for you with
+you stop with `Ctrl z`, until `fg` brings it back under its own name, and
+it ends with `$`, as fish does not say how; and a command that runs `exec`
+gives the pane to another program, and the shell says no more of it. The rule along the top counts a command that waits for you with
 the agents that wait for you, and one at work with the agents at work.
 
 That takes the [hook](#hook-the-shell) in your shell, which says what it runs
@@ -935,6 +935,8 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
 
     function __luneta_ended --on-event fish_postexec
         set -l s $status
+        # `fg` says 0 however the job it brought back ended.
+        string match -qr '^\s*fg(\s|$)' -- $argv[1]; and set s -
         # `Ctrl z` stops the job, and gives the prompt back with a status of 0.
         set -l job (jobs --last --group)
         if set -q job[1]; and not contains -- $job $__luneta_jobs
@@ -968,8 +970,9 @@ stopped <at> <command>
 ```
 
 with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
-milliseconds, `<tty>` the path `tty` prints, the command on one line, and
-`stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
+milliseconds, `<status>` the exit status, or `-` where the shell cannot say it,
+as fish cannot after `fg`, `<tty>` the path `tty` prints, the command on one
+line, and `stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
 second, through `sh`, `stty` and `ps` on the zellij server's `PATH`, and the
 server must see the same `XDG_RUNTIME_DIR` as the shells in its panes. A
 pane's shell is the one that started last, and one that started before its
