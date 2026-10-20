@@ -1,7 +1,7 @@
 //! The context luneta runs each command with, which the command answers
 //! with: the kind of the command, by which its answer finds its way back.
 
-use crate::{agents, brief, checkouts, close, dirs, menu, panes, places};
+use crate::{agents, brief, checkouts, close, dirs, menu, panes, places, skills};
 
 /// What names the kind of a command luneta runs, in the context the command
 /// answers with: its value says where the answer goes.
@@ -9,7 +9,7 @@ pub const CONTEXT_KEY: &str = "luneta";
 
 /// Each kind of command luneta runs, by the value its context names it with.
 /// A kind that is not here may share its value with one that is.
-const CONTEXT_VALUES: [&str; 17] = [
+const CONTEXT_VALUES: [&str; 18] = [
     agents::CONTEXT_VALUE,
     agents::CLOSE_VALUE,
     brief::CONTEXT_VALUE,
@@ -27,6 +27,7 @@ const CONTEXT_VALUES: [&str; 17] = [
     menu::TAB_VALUE,
     panes::CONTEXT_VALUE,
     places::CONTEXT_VALUE,
+    skills::CONTEXT_VALUE,
 ];
 
 /// No two kinds of command share a value: the answer to one would go where

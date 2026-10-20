@@ -7,8 +7,9 @@
 //! prompt, in a pane of its own beside a pane, in the directory that pane
 //! works in. Every menu has luneta's own New and Delete groups besides: under
 //! `n`, a shell beside that pane, a tab or a session, in the directory it
-//! works in; under `d`, closing that pane or killing its session. In the
-//! sidebar, a key of the
+//! works in; under `d`, closing that pane or killing its session. Its `/`
+//! opens a search over every skill that directory can run, for an agent to
+//! start on the one you pick. In the sidebar, a key of the
 //! menu opens it at the bottom of the sidebar, for the row highlighted.
 //! `mode "menu"` makes the plugin the menu for the pane you came from,
 //! floating at the bottom right of the tab you are in.
@@ -30,12 +31,18 @@ use crate::fetch::Fetch;
 use crate::places::{self, Places, SESSION_KEY};
 use crate::render;
 use crate::sessions::{Selection, Session, Sessions, Taken};
+use crate::skills::{self, Search};
 use crate::tree::{self, origin};
 use crate::context::CONTEXT_KEY;
 
 /// What holds the entries in the menu's configuration: a node with children,
 /// which zellij hands over as their KDL.
 pub const ENTRIES: &str = "menu";
+
+/// The key that opens the search over the skills, at the top of the menu, and
+/// what the menu says it does.
+const SEARCH: char = '/';
+pub const SEARCH_DOES: &str = "Search skills";
 
 /// The key of luneta's own New group, and its name. Its keys are `New`'s.
 const NEW: char = 'n';
@@ -314,6 +321,8 @@ pub enum Entry {
     /// A command of the sidebar's own, which help lists beside the menu's
     /// keys.
     Command(Command),
+    /// The key that opens the search over the skills.
+    Search,
 }
 
 impl Entry {
@@ -322,6 +331,7 @@ impl Entry {
             Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
             Entry::New(new) => new.key(),
             Entry::Command(command) => command.key(),
+            Entry::Search => SEARCH,
         }
     }
 }
@@ -329,8 +339,12 @@ impl Entry {
 /// What a key did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Pressed {
-    /// Opened a group, or went back to the one before.
+    /// Opened a group, or went back to the one before, or typed in the search
+    /// box, moved its cursor or closed it.
     Moved,
+    /// Asks for the search box, for the menu to open it over the skills of
+    /// the directory it starts an agent in, if it knows one.
+    Search,
     /// Starts an agent on the prompt.
     Start(String),
     /// Opens a pane, a tab or a session.
@@ -345,20 +359,26 @@ pub enum Pressed {
     Nothing,
 }
 
-/// The menu's entries, and the groups opened so far.
+/// The menu's entries, the groups opened so far, and the search box over the
+/// skills while it is open.
 pub struct Keys {
     root: Vec<Entry>,
     /// Each group opened, by where it stands in the one before.
     open: Vec<usize>,
+    /// Boxed: the box is larger than the rest of the keys, and a menu that is
+    /// never searched needs none.
+    search: Option<Box<Search>>,
 }
 
 impl Keys {
     /// The entries, from the KDL zellij hands over if it hands any: a node
     /// for each key, its one string the prompt the key starts an agent on, or
-    /// the name of the group its children are. luneta's New and Delete groups
-    /// come after them: `n p`, `n t` and `n s` open a pane, a tab and a
+    /// the name of the group its children are. luneta's `/` comes before
+    /// them, which opens the search over the skills, and its New and Delete
+    /// groups after them: `n p`, `n t` and `n s` open a pane, a tab and a
     /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
-    /// kills its session. A key of yours can take neither group's.
+    /// kills its session. A key of yours at the top can take none of the
+    /// three.
     pub fn new(configured: Option<&str>, row: Scope) -> Result<Self, String> {
         let root = match configured {
             Some(text) => {
@@ -368,19 +388,22 @@ impl Keys {
             },
             None => Vec::new(),
         };
-        for (key, name) in [(NEW, NEW_NAME), (DELETE, DELETE_NAME)] {
+        let luneta_s =
+            [(SEARCH, "its search"), (NEW, "its New group"), (DELETE, "its Delete group")];
+        for (key, what) in luneta_s {
             if root.iter().any(|entry| entry.key() == key) {
                 return Err(format!(
-                    "menu: \"{key}\" is luneta's, for its {name} group; give your key another"
+                    "menu: \"{key}\" is luneta's, for {what}; give your key another"
                 ));
             }
         }
         Ok(Keys::of(root, row))
     }
 
-    /// The keys of `root`, which has neither key of luneta's groups, and
-    /// luneta's New and Delete groups after them.
+    /// The keys of `root`, which has none of luneta's, luneta's `/` before
+    /// them, and its New and Delete groups after them.
     fn of(mut root: Vec<Entry>, row: Scope) -> Self {
+        root.insert(0, Entry::Search);
         root.push(Entry::Group {
             key: NEW,
             name: NEW_NAME.to_owned(),
@@ -394,13 +417,14 @@ impl Keys {
                 Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
             ],
         });
-        Keys { root, open: Vec::new() }
+        Keys { root, open: Vec::new(), search: None }
     }
 
     /// Help: the sidebar's commands their own key runs, as `/` searches, then
     /// the keys at the top of `menu`, then the groups of the other commands.
     /// A key of the menu's that a command has stays the command's, as it does
-    /// at the top of the sidebar.
+    /// at the top of the sidebar: `/` searches the sidebar, and not the
+    /// skills.
     pub fn help(menu: Keys) -> Self {
         let own = |command: &Command| command.group().is_none();
         let mut root: Vec<Entry> =
@@ -423,7 +447,7 @@ impl Keys {
                 }),
             }
         }
-        Keys { root, open: Vec::new() }
+        Keys { root, open: Vec::new(), search: None }
     }
 
     /// The groups opened, each its name and its entries.
@@ -449,11 +473,35 @@ impl Keys {
         self.trail().into_iter().map(|(name, _)| name).collect()
     }
 
+    /// The search box over the skills, while it is open.
+    pub fn search(&self) -> Option<&Search> {
+        self.search.as_deref()
+    }
+
+    /// Opens `search`, which asked the finder for its skills as it was made.
+    fn open_search(&mut self, search: Search) {
+        self.search = Some(Box::new(search));
+    }
+
+    /// Fills the search box with what the finder said, while it is open and
+    /// waits for it, and says whether it did.
+    fn found(&mut self, skills: Fetch<Vec<skills::Skill>>) -> bool {
+        self.search.as_mut().is_some_and(|search| search.fill(skills))
+    }
+
     /// What `key` does: a key the group open shows opens its group, starts
-    /// its agent, opens or closes what it opens or closes, or runs its
-    /// command, `Backspace` goes
-    /// back a group, and out of the menu from the first, and `Esc` closes it.
+    /// its agent, opens or closes what it opens or closes, runs its command,
+    /// or asks for the search box, `Backspace` goes back a group, and out of
+    /// the menu from the first, and `Esc` closes it. While the search box is
+    /// open, it takes the keys instead.
     pub fn key(&mut self, key: &KeyWithModifier) -> Pressed {
+        if let Some(search) = &mut self.search {
+            let (pressed, open) = searched(search, key);
+            if !open {
+                self.search = None;
+            }
+            return pressed;
+        }
         if closes(key) {
             return Pressed::Close;
         }
@@ -477,10 +525,46 @@ impl Keys {
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
             Entry::Command(command) => return Pressed::Command(*command),
+            Entry::Search => return Pressed::Search,
             Entry::Group { .. } => {},
         }
         self.open.push(at);
         Pressed::Moved
+    }
+}
+
+/// What `key` does in the search box, as in the sidebar's: a character types,
+/// `Backspace` takes one back, `Down` and `Up` move the cursor, and `Enter`
+/// starts an agent on the skill it is on. `Esc` closes the box, back to the
+/// keys, and so does `Backspace` once there is nothing to take back; `Ctrl c`
+/// closes the menu. Says too whether the box stays open.
+fn searched(search: &mut Search, key: &KeyWithModifier) -> (Pressed, bool) {
+    if key.bare_key == BareKey::Char('c') && key.has_modifiers(&[KeyModifier::Ctrl]) {
+        return (Pressed::Close, true);
+    }
+    if !key.has_no_modifiers() {
+        return (Pressed::Nothing, true);
+    }
+    match key.bare_key {
+        BareKey::Esc => (Pressed::Moved, false),
+        BareKey::Backspace => (Pressed::Moved, search.pop()),
+        BareKey::Down => {
+            search.move_by(1);
+            (Pressed::Moved, true)
+        },
+        BareKey::Up => {
+            search.move_by(-1);
+            (Pressed::Moved, true)
+        },
+        BareKey::Enter => match search.chosen() {
+            Some(skill) => (Pressed::Start(format!("/{}", skill.name)), true),
+            None => (Pressed::Nothing, true),
+        },
+        BareKey::Char(c) => {
+            search.push(c);
+            (Pressed::Moved, true)
+        },
+        _ => (Pressed::Nothing, true),
     }
 }
 
@@ -1022,6 +1106,20 @@ impl Target {
         }
     }
 
+    /// Opens the search box of `keys` over the skills the directory the pane
+    /// works in can run, for the menu numbered `menu`. A row with no pane, or
+    /// one the sidebar does not know the directory of yet, says why, as a key
+    /// that starts an agent there does.
+    fn find(self, mut keys: Keys, menu: u64) -> Stage {
+        match self.beside() {
+            Ok(beside) => {
+                keys.open_search(Search::ask(&beside.cwd, numbered(skills::CONTEXT_VALUE, menu)));
+                Stage::Choosing(keys, self)
+            },
+            Err(reason) => wrong(reason),
+        }
+    }
+
     /// Asks zellij for what a delete key deletes, for the menu numbered
     /// `menu`, with what that is. A pane or a tab of another session leaves
     /// the menu waiting for its answer, and the session you are in leaves it
@@ -1316,6 +1414,7 @@ impl SidebarMenu {
                 Pressed::Command(command) => return (None, Some(Did::Command(command))),
                 Pressed::Start(prompt) => (Some(target.start(keys, &prompt, number, frame)), None),
                 Pressed::New(new) => (Some(target.open(keys, new, number, frame)), None),
+                Pressed::Search => (Some(target.find(keys, number)), None),
                 Pressed::Delete { key, scope } => match subject.map(|it| it.plan(scope)) {
                     None => (Some(Stage::Choosing(keys, target)), None),
                     Some(Err(reason)) => (Some(wrong(reason)), None),
@@ -1443,6 +1542,23 @@ impl SidebarMenu {
             Wait::Close { .. } => {},
         }
         None
+    }
+
+    /// What the finder said of the skills, for the search box of the menu
+    /// `context` names, while it is open and waits for it. An answer for
+    /// another menu is from one closed before it came.
+    pub fn found(
+        mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> Self {
+        let asked = self.asked(context, skills::CONTEXT_VALUE);
+        if let (true, Stage::Choosing(keys, _)) = (asked, &mut self.stage) {
+            keys.found(skills::answer(exit_code, stdout, stderr));
+        }
+        self
     }
 
     /// The menu saying `what` went wrong, as the first line zellij said, or
@@ -1663,6 +1779,7 @@ impl Menu {
                 },
                 Pressed::Start(prompt) => self.start(&prompt),
                 Pressed::New(new) => self.open(new),
+                Pressed::Search => self.find(),
                 Pressed::Delete { key, scope } => self.delete(key, scope),
                 Pressed::Close => self.close(),
                 // The sidebar's commands are the sidebar's: this menu's keys
@@ -1687,10 +1804,10 @@ impl Menu {
     }
 
     /// What came of a command the menu ran: the branch checked out where an
-    /// agent starts, what the agents are doing, where the panes of the
-    /// session work, the clients of the session while you leave it, and
-    /// whether the directory a session starts in is a worktree. Says whether
-    /// to draw.
+    /// agent starts, the skills the directory there can run, what the agents
+    /// are doing, where the panes of the session work, the clients of the
+    /// session while you leave it, and whether the directory a session starts
+    /// in is a worktree. Says whether to draw.
     pub fn ran(
         &mut self,
         exit_code: Option<i32>,
@@ -1700,6 +1817,7 @@ impl Menu {
     ) -> bool {
         match context.get(CONTEXT_KEY).map(String::as_str) {
             Some(BRANCH_VALUE) => self.branched(exit_code, stdout, context),
+            Some(skills::CONTEXT_VALUE) => return self.found(exit_code, stdout, stderr, context),
             Some(agents::CONTEXT_VALUE) => {
                 self.agents.ingest(exit_code, stdout, stderr, Moment::now());
                 self.seat_agents();
@@ -1735,6 +1853,41 @@ impl Menu {
         }
         let said = String::from_utf8_lossy(stdout).trim().to_owned();
         *branch = (exit_code == Some(0) && !said.is_empty()).then_some(said);
+    }
+
+    /// Opens the search box over the skills the directory of the pane you came
+    /// from can run. Before zellij says which pane that is, there is no
+    /// directory to look in, and no box opens. Says whether to draw.
+    fn find(&mut self) -> bool {
+        let Phase::Choosing(keys, Fetch::Ready(origin)) = &mut self.phase else {
+            return false;
+        };
+        keys.open_search(Search::ask(&origin.beside().cwd, BTreeMap::new()));
+        self.place();
+        true
+    }
+
+    /// What the finder said of the skills of the directory the search box
+    /// looks in, while it is open and waits for it. An answer for another
+    /// directory is for a box closed before it came. Says whether to draw.
+    fn found(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> bool {
+        let Phase::Choosing(keys, _) = &mut self.phase else {
+            return false;
+        };
+        if context.get(DIR_KEY).map(String::as_str) != keys.search().map(Search::cwd) {
+            return false;
+        }
+        if !keys.found(skills::answer(exit_code, stdout, stderr)) {
+            return false;
+        }
+        self.place();
+        true
     }
 
     /// Puts each agent in the pane of the session it sits in.
@@ -2007,7 +2160,9 @@ impl Menu {
 
     /// Keeps the terminal you came from as zellij says, and whether that is a
     /// guess. A pane that was a guess stays one: once a floating terminal you
-    /// may have come from closes, the pane under it is no surer.
+    /// may have come from closes, the pane under it is no surer. A search box
+    /// over the skills of a directory that is no longer where an agent starts
+    /// closes, back to the keys: it would start one where it may not run.
     fn follow_origin(&mut self) -> bool {
         let pane = match self.origin_pane() {
             Fetch::Waiting => return false,
@@ -2015,7 +2170,7 @@ impl Menu {
             Fetch::Failed(_) => None,
         };
         let floats = self.floats_a_terminal();
-        let Phase::Choosing(_, origin) = &mut self.phase else {
+        let Phase::Choosing(keys, origin) = &mut self.phase else {
             return false;
         };
         let was = match &*origin {
@@ -2036,6 +2191,13 @@ impl Menu {
                 )),
             },
         };
+        let cwd = match &now {
+            Fetch::Ready(now) => Some(now.beside().cwd.as_str()),
+            Fetch::Waiting | Fetch::Failed(_) => None,
+        };
+        if keys.search().is_some_and(|search| Some(search.cwd()) != cwd) {
+            keys.search = None;
+        }
         let followed = *origin != now;
         *origin = now;
         followed
@@ -2158,7 +2320,7 @@ mod tests {
     #[test]
     fn a_key_opens_its_group_and_a_key_in_it_starts_its_prompt() {
         let mut keys = keys(MENU);
-        assert_eq!(shown(&keys), ['c', 'r', 'n', 'd']);
+        assert_eq!(shown(&keys), ['/', 'c', 'r', 'n', 'd']);
         assert!(keys.names().is_empty());
 
         assert_eq!(keys.key(&char('x')), Pressed::Nothing);
@@ -2170,7 +2332,7 @@ mod tests {
         assert_eq!(keys.key(&char('s')), Pressed::Start("/tigerstyle".to_owned()));
 
         assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Moved);
-        assert_eq!(shown(&keys), ['c', 'r', 'n', 'd']);
+        assert_eq!(shown(&keys), ['/', 'c', 'r', 'n', 'd']);
         assert_eq!(keys.key(&char('r')), Pressed::Start("review the diff against main".to_owned()));
         assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Close);
         keys.key(&char('c'));
@@ -2178,17 +2340,80 @@ mod tests {
         assert_eq!(keys.key(&char('c').with_ctrl_modifier()), Pressed::Close);
     }
 
-    /// Every menu has luneta's New and Delete groups after your keys, and
-    /// one with none of yours too: `n p`, `n t` and `n s` open a pane, a tab
-    /// and a session, `d d` deletes what the menu is for, a pane or a
-    /// session's row, and `d s` its session.
+    /// What the finder of a test prints: no plugin, and a skill of yours,
+    /// `tigerstyle`.
+    const FOUND: &[u8] = b"[]\0\0skills/tigerstyle/SKILL.md\0description: Apply TigerStyle.\0";
+
+    /// The skills a test's finder finds, with nothing said of what they do.
+    fn found_skills(names: &[&str]) -> Fetch<Vec<skills::Skill>> {
+        let skill = |name: &&str| skills::Skill {
+            name: skills::Name::new((*name).to_owned()).expect("a name"),
+            description: String::new(),
+        };
+        Fetch::Ready(names.iter().map(skill).collect())
+    }
+
+    /// What the search box holds: what is typed, and the skill the cursor is
+    /// on. None while it is closed.
+    fn searched(keys: &Keys) -> Option<(&str, Option<&str>)> {
+        let search = keys.search()?;
+        Some((search.term(), search.chosen().map(|skill| skill.name.as_str())))
+    }
+
+    /// `/` pressed at the top of `keys`, and the search box the menu opens
+    /// for it.
+    fn slash(keys: &mut Keys) {
+        assert_eq!(keys.key(&char('/')), Pressed::Search);
+        keys.open_search(Search::ask("/w/elo", BTreeMap::new()));
+    }
+
+    /// `/` at the top of the menu asks for the search box, which the menu
+    /// opens over the skills of a directory. The box takes every key, as the
+    /// sidebar's does: a key of the menu's types, `Down` and `Up` move the
+    /// cursor, and `Enter` starts an agent on the skill it is on, as a slash
+    /// command. `Esc` goes back to the keys, and so does `Backspace` with
+    /// nothing typed; `Ctrl c` closes the menu.
+    #[test]
+    fn slash_searches_the_skills_and_enter_starts_the_one_picked() {
+        let mut keys = keys(MENU);
+        slash(&mut keys);
+        assert_eq!(searched(&keys), Some(("", None)));
+        assert_eq!(keys.key(&char('c')), Pressed::Moved);
+        assert_eq!(keys.key(&bare(BareKey::Enter)), Pressed::Nothing);
+        assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Moved);
+        assert!(keys.found(found_skills(&["code-review", "review:deep", "tigerstyle"])));
+        assert_eq!(searched(&keys), Some(("", Some("code-review"))));
+        assert_eq!(keys.key(&bare(BareKey::Down)), Pressed::Moved);
+        assert_eq!(keys.key(&bare(BareKey::Down)), Pressed::Moved);
+        assert_eq!(keys.key(&bare(BareKey::Up)), Pressed::Moved);
+        assert_eq!(keys.key(&bare(BareKey::Enter)), Pressed::Start("/review:deep".to_owned()));
+        for c in "tig".chars() {
+            keys.key(&char(c));
+        }
+        assert_eq!(searched(&keys), Some(("tig", Some("tigerstyle"))));
+        assert_eq!(keys.key(&char('t').with_alt_modifier()), Pressed::Nothing);
+
+        assert_eq!(keys.key(&bare(BareKey::Esc)), Pressed::Moved);
+        assert_eq!(searched(&keys), None);
+        assert_eq!(shown(&keys), ['/', 'c', 'r', 'n', 'd']);
+        slash(&mut keys);
+        assert_eq!(keys.key(&bare(BareKey::Backspace)), Pressed::Moved);
+        assert_eq!(searched(&keys), None);
+        slash(&mut keys);
+        assert_eq!(keys.key(&char('c').with_ctrl_modifier()), Pressed::Close);
+    }
+
+    /// Every menu has luneta's `/` before your keys and its New and Delete
+    /// groups after them, and one with none of yours too: `n p`, `n t` and
+    /// `n s` open a pane, a tab and a session, `d d` deletes what the menu is
+    /// for, a pane or a session's row, and `d s` its session.
     #[test]
     fn every_menu_has_luneta_s_new_and_delete_keys() {
         for (configured, root) in [
-            (Some(MENU), &['c', 'r', 'n', 'd'][..]),
-            (None, &['n', 'd']),
-            (Some(""), &['n', 'd']),
-            (Some("// nothing but a comment"), &['n', 'd']),
+            (Some(MENU), &['/', 'c', 'r', 'n', 'd'][..]),
+            (None, &['/', 'n', 'd']),
+            (Some(""), &['/', 'n', 'd']),
+            (Some("// nothing but a comment"), &['/', 'n', 'd']),
         ] {
             let mut keys = Keys::new(configured, Scope::Pane).expect("a menu");
             assert_eq!(shown(&keys), root, "{configured:?}");
@@ -2222,6 +2447,7 @@ mod tests {
             (r#"t prompt="/tigerstyle""#, one_string),
             (r#"d "/tigerstyle""#, "menu: \"d\" is luneta's"),
             (r#"n "notes""#, "menu: \"n\" is luneta's, for its New group"),
+            (r#""/" "/tigerstyle""#, "menu: \"/\" is luneta's, for its search"),
         ] {
             let parsed = Keys::new(Some(text), Scope::Pane);
             let error = parsed.err().unwrap_or_else(|| panic!("{text:?} parsed"));
@@ -2368,7 +2594,7 @@ mod tests {
     fn a_key_of_the_menu_opens_it_on_its_group() {
         for (key, on) in [
             (Some('c'), Some(vec!['t', 'm', 's'])),
-            (None, Some(vec!['c', 'r', 'n', 'd'])),
+            (None, Some(vec!['/', 'c', 'r', 'n', 'd'])),
             (Some('n'), Some(vec!['p', 't', 's'])),
             (Some('d'), Some(vec!['d', 's'])),
             (Some('x'), None),
@@ -2379,9 +2605,9 @@ mod tests {
         let menu = open(Some(MENU), row(None), Some('c'));
         assert_eq!(menu.as_ref().and_then(SidebarMenu::cwd), Some("/w/elo"));
         let menu = press(menu, &bare(BareKey::Backspace));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'n', 'd'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['/', 'c', 'r', 'n', 'd'])));
         let menu = press(menu, &char('x'));
-        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['c', 'r', 'n', 'd'])));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['/', 'c', 'r', 'n', 'd'])));
         assert!(press(menu, &bare(BareKey::Esc)).is_none());
     }
 
@@ -2919,6 +3145,95 @@ mod tests {
         assert_eq!(menu.branch("/w/elo"), None);
         menu.ran(Some(0), b"feat/menu\n", b"", &branch("/w/elo"));
         assert_eq!(menu.branch("/w/elo"), Some("feat/menu"));
+    }
+
+    /// The sidebar's `/` asks the finder for the skills where the row's pane
+    /// works, and fills the box with its own answer alone: one for another
+    /// menu is from one closed before it came. `Enter` starts the agent, as a
+    /// key of the menu does. A session's row has no directory to look in, and
+    /// says so.
+    #[test]
+    fn the_sidebar_s_search_takes_its_own_menu_s_skills() {
+        let skills_for = |menu: u64| numbered(skills::CONTEXT_VALUE, menu);
+        let there = There { session: "elo".to_owned(), tab: None };
+        let menu = press(open(Some(MENU), row(Some(there)), None), &char('/')).expect("a menu");
+        let menu = menu.found(Some(0), FOUND, b"", &skills_for(2));
+        let keys = |menu: &SidebarMenu| match menu.shown() {
+            Some(Shown::Keys(keys)) => {
+                searched(keys).map(|(term, on)| (term.to_owned(), on.map(str::to_owned)))
+            },
+            _ => None,
+        };
+        assert_eq!(keys(&menu), Some((String::new(), None)));
+        let menu = menu.found(Some(0), FOUND, b"", &skills_for(1));
+        assert_eq!(keys(&menu), Some((String::new(), Some("tigerstyle".to_owned()))));
+        let menu = press(Some(menu), &bare(BareKey::Enter)).expect("a menu");
+        assert!(matches!(menu.stage, Stage::Waiting(_, Wait::Start(..))));
+
+        let menu = press(open(Some(MENU), row(None), None), &char('/'));
+        let menu = press(menu, &bare(BareKey::Esc));
+        assert_eq!(on_show(menu.as_ref()), Some(Ok(vec!['/', 'c', 'r', 'n', 'd'])));
+
+        let menu = press(open(Some(MENU), session_row(None), None), &char('/'));
+        assert_eq!(wrong(menu.as_ref()), Some(NO_ROW_PANE));
+    }
+
+    /// The key binding's `/` asks the finder for the skills where the pane
+    /// you came from works, and takes the answer for that directory alone.
+    /// Pressed before zellij says which pane that is, it opens no box. Once
+    /// zellij says you came from a pane in another directory, the box closes,
+    /// and the answer for the directory it looked in comes to nothing.
+    #[test]
+    fn the_key_binding_s_search_takes_the_skills_of_the_pane_you_came_from() {
+        let search_open = |menu: &Menu| match menu.shown() {
+            Some(Shown::Keys(keys)) => keys.search().map(Search::count),
+            _ => None,
+        };
+        let mut menu = bound();
+        assert!(!menu.key(&char('/')));
+        assert_eq!(search_open(&menu), None);
+
+        let skills_in = |dir: &str| {
+            BTreeMap::from([
+                (CONTEXT_KEY.to_owned(), skills::CONTEXT_VALUE.to_owned()),
+                (DIR_KEY.to_owned(), dir.to_owned()),
+            ])
+        };
+        let mut menu = bound_for_two(true);
+        assert!(menu.key(&char('/')));
+        assert_eq!(search_open(&menu), Some(0));
+        assert!(!menu.ran(Some(0), FOUND, b"", &skills_in("/w/old")));
+        assert_eq!(search_open(&menu), Some(0));
+        assert!(menu.ran(Some(0), FOUND, b"", &skills_in("/w/elo")));
+        assert_eq!(search_open(&menu), Some(1));
+        // It keeps its size as you type, however many skills match.
+        let size = render::menu_size(&menu);
+        assert!(menu.key(&char('z')));
+        assert_eq!(search_open(&menu), Some(0));
+        assert_eq!(render::menu_size(&menu), size);
+        assert!(menu.key(&bare(BareKey::Esc)));
+        assert_eq!(search_open(&menu), None);
+        assert!(menu.shown().is_some());
+
+        // Pane 2 exits while the box looks in `/w/elo`, and zellij says the
+        // focus is on pane 3, in `/w/old`: set here as zellij would say it,
+        // since asking where a pane works reads stdin in a test.
+        assert!(menu.key(&char('/')));
+        assert_eq!(search_open(&menu), Some(0));
+        let old = Beside { pane: 3, cwd: "/w/old".to_owned() };
+        if let Phase::Choosing(_, origin) = &mut menu.phase {
+            *origin = Fetch::Ready(Origin::Sure(old));
+        }
+        let shell = |id| PaneInfo { id, is_selectable: true, ..PaneInfo::default() };
+        let itself = PaneInfo { is_plugin: true, is_floating: true, ..shell(0) };
+        let tab = vec![PaneInfo { is_focused: true, ..shell(3) }, itself];
+        menu.panes(PaneManifest { panes: HashMap::from([(0, tab)]) });
+        assert_eq!(search_open(&menu), None);
+        assert!(!menu.ran(Some(0), FOUND, b"", &skills_in("/w/elo")));
+        assert!(menu.key(&char('/')));
+        assert!(!menu.ran(Some(0), FOUND, b"", &skills_in("/w/elo")));
+        assert!(menu.ran(Some(0), FOUND, b"", &skills_in("/w/old")));
+        assert_eq!(search_open(&menu), Some(1));
     }
 
     /// The key binding's menu, floating over pane 2 of session `luneta`,

@@ -21,6 +21,7 @@ mod pass;
 mod places;
 mod render;
 mod sessions;
+mod skills;
 mod tree;
 
 use std::collections::BTreeMap;
@@ -471,6 +472,15 @@ impl ZellijPlugin for State {
                             menu.answered(exit_code, &stdout, &stderr, &context, &taken)
                         };
                         tree.menu = tree.menu.take().and_then(answered);
+                        true
+                    },
+                    Some(skills::CONTEXT_VALUE) => {
+                        let Role::Sidebar(tree) = &mut self.role else {
+                            return false;
+                        };
+                        let found =
+                            |menu: SidebarMenu| menu.found(exit_code, &stdout, &stderr, &context);
+                        tree.menu = tree.menu.take().map(found);
                         true
                     },
                     Some(close::CLIENTS_VALUE) => self.listed(exit_code, &stdout, &context),
