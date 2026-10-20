@@ -69,6 +69,12 @@ const SKEW: Held = Held::from_secs(3);
 /// at its prompt some four seconds after its command ended.
 const LAG: Held = Held::from_secs(10);
 
+/// How much later than its end the hook may date a command's end: it counts
+/// whole seconds, and the sidebar takes the last moment of each. A command
+/// runs `LONG` at least to have its end told, so one that starts after a
+/// moment ends a second after it at the soonest.
+const ROUNDED: Held = Held::from_secs(1);
+
 /// What a shell ran last, as its title said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Run {
@@ -134,6 +140,13 @@ impl Visit {
     /// then, as late as the session list may have taken to say so.
     fn saw_end(&self, command: &str, at: Moment) -> bool {
         at <= self.at || (at.since(self.at) <= LAG && ends(&self.doing, command))
+    }
+
+    /// Whether you saw a command end that its shell's hook dates `at`: by
+    /// the time you were there, or, if the pane's own title was back at the
+    /// prompt by then, within the second the hook rounds an end up by.
+    fn saw_told_end(&self, at: Moment) -> bool {
+        at <= self.at || (at.since(self.at) < ROUNDED && self.doing == Doing::Prompt)
     }
 }
 
@@ -383,7 +396,7 @@ impl News {
             },
             Said::Ended { command, at, status, took } => {
                 let visit = self.visits.get(session, pane);
-                if here || *took < LONG || visit.is_some_and(|visit| *at <= visit.at) {
+                if here || *took < LONG || visit.is_some_and(|visit| visit.saw_told_end(*at)) {
                     return None;
                 }
                 let outcome = match status {
@@ -830,6 +843,40 @@ mod tests {
         }
         shell(&mut news, back, back, Some(2), 106);
         assert_eq!(news.ran("s", 1).map(|(command, _)| command), Some("make"));
+    }
+
+    /// The hook dates a command's end to the last moment of its second, and
+    /// the sidebar reads it a moment after: one you saw end in pane 1 by the
+    /// title it gives itself, and left at once, is seen. One you start there
+    /// and leave runs a second at least, and ends once you have gone: new.
+    #[test]
+    fn a_command_its_hook_says_ended_is_seen_by_the_title_you_saw_it_end_by() {
+        let (making, back) = ("make ~/w/s", "~/w/s");
+        let ms = Moment::from_millis;
+        let mut news = News::default();
+        let told = |said| Shells::of(vec![("s", 1, at(0), said)], vec![]);
+        news.shells = told(going("make", ms(95_999)));
+        for now in 95..100 {
+            shell(&mut news, making, making, Some(1), now);
+        }
+        shell(&mut news, making, back, Some(1), 100);
+        shell(&mut news, making, back, Some(2), 101);
+        news.shells = told(ended("make", ms(100_999), Some(0), 5_000));
+        shell(&mut news, back, back, Some(2), 102);
+        assert_eq!(command_of(&news, false), None);
+
+        // Back at 103, you start `cargo test` at 104 and leave. It ends at
+        // 105.5.
+        for now in 103..105 {
+            shell(&mut news, back, back, Some(1), now);
+        }
+        let test = "cargo test ~/w/s";
+        news.shells = told(going("cargo test", ms(104_999)));
+        shell(&mut news, back, test, Some(2), 105);
+        news.shells = told(ended("cargo test", ms(105_999), Some(0), 1_500));
+        shell(&mut news, back, back, Some(2), 106);
+        let ran = command_of(&news, false).map(|(_, command)| command);
+        assert_eq!(ran.as_deref(), Some("cargo test"));
     }
 
     /// A pane its session leaves out of `GONE` lists in a row has closed,
