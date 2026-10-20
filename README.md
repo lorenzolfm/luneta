@@ -899,15 +899,19 @@ this in `~/.config/fish/conf.d/luneta.fish`.
 ```fish
 # luneta: say what runs in each zellij pane, and how it ended.
 if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
-    set -l root /tmp
-    set -q TMPDIR[1]; and set root $TMPDIR
-    set -q XDG_RUNTIME_DIR[1]; and set root $XDG_RUNTIME_DIR
-    set -g __luneta_dir $root/luneta/commands/$ZELLIJ_SESSION_NAME
+    and test -n "$XDG_RUNTIME_DIR$TMPDIR"
+    set -l root $XDG_RUNTIME_DIR
+    test -n "$root"; or set root $TMPDIR
+    set -g __luneta_root $root/luneta
+    set -g __luneta_dir $__luneta_root/commands/$ZELLIJ_SESSION_NAME
     # The shell's own file, for its pane and when it started.
     set -q __luneta_file; or set -g __luneta_file $__luneta_dir/$ZELLIJ_PANE_ID.(date +%s)
     set -g __luneta_tty (tty)
 
     function __luneta_say
+        # Yours alone, and no link to another: what runs says what you type.
+        test -d $__luneta_root; or mkdir -m 700 $__luneta_root
+        test -O $__luneta_root; and not test -L $__luneta_root; or return
         test -d $__luneta_dir; or mkdir -p $__luneta_dir; or return
         # Moved into place whole, as the sidebar reads it.
         printf '%s\n' "$argv" >$__luneta_file.new; and mv -f $__luneta_file.new $__luneta_file
@@ -958,8 +962,10 @@ A shell started before the hook was there has none: start it again, or
 
 The hook keeps a file for each shell, of one line, at
 `$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>.<started>`, or under
-`$TMPDIR` or `/tmp` where that is not set, and takes it away as the shell
-exits. It writes the line beside it first and moves it into place, so that the
+`$TMPDIR` where that is not set, and takes it away as the shell exits. With
+neither, it keeps none. The folder `luneta` is yours alone: the hook makes it
+so, and neither it nor the sidebar uses one that another user made, or a link,
+as anyone could make in a `TMPDIR` of `/tmp`. It writes the line beside it first and moves it into place, so that the
 sidebar never reads half of one. Another shell can be hooked to write the same
 line, which is one of
 

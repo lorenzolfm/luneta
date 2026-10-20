@@ -32,9 +32,13 @@ pub const CONTEXT_VALUE: &str = "shells";
 /// Reads the record of each shell of the sessions it is handed, and for each
 /// command still going, how its terminal takes keys and where the processes
 /// in front of it sleep. A command going on a terminal that is gone is no
-/// pane's, and would fail `ps` for all of them, so it is left out.
+/// pane's, and would fail `ps` for all of them, so it is left out. It reads
+/// the records only in a folder of the user's own: what is in one that others
+/// share, as `/tmp` is, anyone could have written.
 const SCRIPT: &str = r#"
-cd "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/luneta/commands" 2>/dev/null || exit 0
+root=${XDG_RUNTIME_DIR:-$TMPDIR}
+[ -n "$root" ] && [ -O "$root/luneta" ] && [ ! -L "$root/luneta" ] || exit 0
+cd "$root/luneta/commands" 2>/dev/null || exit 0
 ttys=
 for session in "$@"; do
   for file in "$session"/*; do
@@ -55,6 +59,7 @@ for session in "$@"; do
   done
 done
 [ -n "$ttys" ] || exit 0
+set -f
 for tty in $ttys; do
   printf 'stty\t%s\t' "$tty"
   stty -a < "$tty" 2>/dev/null | tr '\n' ' '
@@ -379,29 +384,45 @@ mod tests {
     }
 
     /// The script reads the records of the sessions it is handed, and no
-    /// others, and asks about the terminal of a command going. One going on
-    /// a terminal that is gone is no pane's.
+    /// others, and asks about the terminal of a command going, by the name
+    /// its record gives, which is no pattern of files. One going on a
+    /// terminal that is gone is no pane's. A folder that is a link to one is
+    /// none of the user's own, and says nothing.
+    #[cfg(unix)]
     #[test]
     fn the_script_reads_the_records_of_the_sessions_it_is_handed() {
         let runtime = std::env::temp_dir().join(format!("luneta-shells-{}", std::process::id()));
         let commands = runtime.join("luneta/commands");
+        let starred = runtime.join("tty*");
+        let starred_going = format!("going 100 {} sleep 30\n", starred.display());
         for (session, pane, said) in [
             ("s", "1.90", "going 100 /dev/null sleep 30\n"),
             ("s", "2.90", "ended 100 1 2500 false\n"),
             ("s", "3.90", "going 100 /dev/luneta-gone sleep 30\n"),
+            ("s", "4.90", starred_going.as_str()),
             ("gone", "1.90", "ended 100 0 2500 true\n"),
         ] {
             std::fs::create_dir_all(commands.join(session)).unwrap();
             std::fs::write(commands.join(session).join(pane), said).unwrap();
         }
+        std::os::unix::fs::symlink("/dev/null", &starred).unwrap();
+        std::fs::write(runtime.join("ttyfile"), "").unwrap();
+        let linked = runtime.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(runtime.join("luneta"), linked.join("luneta")).unwrap();
         let sessions = ["s".to_owned(), "never".to_owned()];
         let command = query(&sessions);
-        let output = std::process::Command::new(command[0])
-            .args(&command[1..])
-            .env("XDG_RUNTIME_DIR", &runtime)
-            .output()
-            .unwrap();
+        let run = |runtime: &std::path::Path| {
+            std::process::Command::new(command[0])
+                .args(&command[1..])
+                .env("XDG_RUNTIME_DIR", runtime)
+                .output()
+                .unwrap()
+        };
+        let (output, through_link) = (run(&runtime), run(&linked));
         std::fs::remove_dir_all(&runtime).unwrap();
+        assert_eq!(through_link.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&through_link.stdout), "");
         assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
         let mut shells = Shells::default();
         shells.ingest(output.status.code(), &output.stdout);
@@ -412,5 +433,6 @@ mod tests {
         assert_eq!(shells.said("gone", 1), None);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.lines().any(|line| line.starts_with("stty\t/dev/null\t")), "{stdout}");
+        assert!(!stdout.contains("ttyfile"), "{stdout}");
     }
 }
