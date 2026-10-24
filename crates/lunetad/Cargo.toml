@@ -1,0 +1,54 @@
+[package]
+name = "lunetad"
+version.workspace = true
+edition = "2024"
+description = "The luneta daemon, and the CLI that talks to it"
+
+# The daemon and its CLI are one package, as they share all there is so far:
+# the protocol, and where the daemon listens. A crate of its own for the
+# protocol waits for a second user of it, the plugin, which needs the messages
+# without the tokio stack that the transport brings.
+[[bin]]
+name = "lunetad"
+path = "src/bin/lunetad.rs"
+
+[[bin]]
+name = "luneta"
+path = "src/bin/luneta.rs"
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+# `connect` hands tonic a Unix socket of its own making, so that a path is a
+# path and never has to survive being spelled as a URI.
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+# Watches Claude Code's session files and zellij's sockets: inotify on Linux,
+# FSEvents on macOS.
+notify = "8.2.0"
+prost = "0.14.4"
+prost-types = "0.14.4"
+# For the uid the runtime folder must belong to: std has no safe getuid.
+rustix = { version = "1.1.4", features = ["process"] }
+# Claude Code's session files are JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.1", features = ["net", "rt", "sync"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+# The default features without TLS: the socket is local, and a remote client
+# will come through Tailscale, which encrypts on its own.
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+tower = { version = "0.5.3", features = ["util"] }
+
+# What a process's environment and start are, on macOS. Linux has `/proc` and
+# needs nothing.
+[target.'cfg(target_os = "macos")'.dependencies]
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

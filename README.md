@@ -1089,9 +1089,15 @@ names, built in a sandbox, no devshell and no checkout needed:
 nix build github:lorenzolfm/luneta   # -> result/luneta.wasm
 ```
 
-The flake names one system, `x86_64-linux`. On anything else that command and the
-`nix develop` above both fail to evaluate; build with cargo instead, on the
-toolchain `rust-toolchain.toml` names.
+The flake builds on `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`, and the
+`.wasm` is the same bytes from each. On any other system, build with cargo
+instead, on the toolchain `rust-toolchain.toml` names.
+
+`nix build .#lunetad` builds `lunetad`, the daemon that is to hold what luneta
+knows of a host, and `luneta`, the CLI that talks to it
+([#95](https://github.com/lorenzolfm/luneta/issues/95)). The plugin does not
+use it yet: `luneta agents` lists the agents the daemon finds, to check against
+the sidebar.
 
 Then point `config.kdl` at `file:` instead of the release URL:
 

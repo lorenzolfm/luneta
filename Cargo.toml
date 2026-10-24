@@ -1,7 +1,26 @@
+# The plugin is the root package, and the daemon a member beside it. A plain
+# `cargo build` here builds the plugin alone: the root package is the
+# workspace's default member.
+[workspace]
+members = ["crates/*"]
+
+# One version for the plugin and the daemon, which ship together and speak the
+# same protocol.
+[workspace.package]
+version = "0.2.2"
+
 [package]
 name = "luneta"
-version = "0.2.2"
+version.workspace = true
 edition = "2021"
+
+# Not `luneta`, which is the name of the CLI that `crates/lunetad` builds: the
+# two would land on the same path in a host build of the whole workspace. The
+# file installed into zellij is still `luneta.wasm`; `dev install` and the
+# release name it themselves.
+[[bin]]
+name = "luneta-plugin"
+path = "src/main.rs"
 
 [dependencies]
 zellij-tile = "=0.45.0"
@@ -29,8 +48,9 @@ strip = true
 # below survive the blanket `warn`s above.
 #
 # `dev clippy` is what runs this set; it denies warnings, so every `warn` here is
-# an error on a branch.
-[lints.clippy]
+# an error on a branch. Every package in the workspace takes it, with
+# `[lints] workspace = true`.
+[workspace.lints.clippy]
 all = { level = "warn", priority = 0 }
 pedantic = { level = "warn", priority = 1 }
 
@@ -61,5 +81,8 @@ too_many_lines = { level = "allow", priority = 3 }
 unreadable_literal = { level = "allow", priority = 3 }
 disallowed_methods = { level = "allow", priority = 3 }
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
+
+[lints]
+workspace = true
