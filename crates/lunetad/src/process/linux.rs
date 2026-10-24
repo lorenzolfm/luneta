@@ -37,11 +37,14 @@ pub struct Domain {
 }
 
 impl Domain {
+    /// The machine id is the one in `/etc/machine-id`, and in no other file:
+    /// Claude Code reads that one alone, and records none without it. A host
+    /// with only `/var/lib/dbus/machine-id`, as one without systemd may be,
+    /// would otherwise have an id of its own that no file of its agents names.
     #[must_use]
     pub fn here() -> Self {
-        let machine = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
-            .into_iter()
-            .find_map(|path| fs::read_to_string(path).ok())
+        let machine = fs::read_to_string("/etc/machine-id")
+            .ok()
             .map(|id| id.trim().to_owned())
             .filter(|id| !id.is_empty());
         let namespace = fs::read_link("/proc/self/ns/pid").ok();

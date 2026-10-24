@@ -28,9 +28,8 @@ permissions:
 
 jobs:
   build:
-    # The asset is wasm, the same bytes whichever system builds it, so one runner
-    # builds it. The daemon, which is built for each system, has a job of its own
-    # below.
+    # The asset is wasm, which runs wherever zellij does, so one runner builds it.
+    # The daemon, which is built for each system, has a job of its own below.
     runs-on: ubuntu-latest
 
     outputs:
@@ -106,8 +105,10 @@ jobs:
 
   # The daemon on each system it runs on: x86_64 and arm64 Linux, and an Apple
   # Silicon Mac. Through the flake, for the reason `build` goes through it, and
-  # the derivation runs the daemon's tests in its sandbox, so each runner tests
-  # the process backend of its own system: `/proc` on Linux, sysinfo on macOS.
+  # each runner tests the process backend of its own system: `/proc` on Linux,
+  # sysinfo on macOS. On Linux the derivation runs the tests in its sandbox. On
+  # macOS the sandbox will not run `/bin/ps`, which the tests read a process's
+  # start from as Claude Code does, so they run through the devshell instead.
   #
   # Native runners, and no cross build: nix does not build for darwin from
   # Linux, and the arm64 Linux runner is free on a public repository.
@@ -127,7 +128,13 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Build and test the daemon
+      # `--locked`, so that the tests build against what Cargo.lock names, as
+      # the derivation does.
+      - name: Test the daemon outside the sandbox
+        if: runner.os == 'macOS'
+        run: nix develop -c cargo test --locked -p lunetad
+
+      - name: Build the daemon, and on Linux test it
         run: nix build -L .#lunetad
 
   release:

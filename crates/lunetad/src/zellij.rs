@@ -55,6 +55,19 @@ pub fn folder() -> PathBuf {
     std::env::temp_dir().join(format!("zellij-{uid}"))
 }
 
+/// Whether a change at `path`, in the folder, can be a session's: one at a
+/// folder of sockets, or at a socket in one. zellij writes its log in the
+/// folder too where it is the temporary one, as on macOS, and does so all
+/// the time, to no session's account. Only the end of the path is read, as
+/// macOS can name the folder by a path of its own: `/private/var` for `/var`.
+#[must_use]
+pub fn of_sessions(path: &Path) -> bool {
+    let contract = |path: &Path| {
+        path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(CONTRACT))
+    };
+    contract(path) || path.parent().is_some_and(contract)
+}
+
 /// A session that runs, by its socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Socket {

@@ -119,7 +119,8 @@ fn follow(core: &SyncSender<Command>) -> io::Result<()> {
             let core = core.clone();
             let read = move || files.scan();
             let tell = move |found| core.send(Command::Agents(found)).is_ok();
-            watch::watch("claude", dir, RecursiveMode::NonRecursive, SWEEP, read, tell)?;
+            let any = |_: &Path| true;
+            watch::watch("claude", dir, RecursiveMode::NonRecursive, any, SWEEP, read, tell)?;
         },
         None => eprintln!("lunetad: neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
@@ -131,7 +132,8 @@ fn follow(core: &SyncSender<Command>) -> io::Result<()> {
         move || zellij::scan(&folder, &mut troubles)
     };
     let tell = move |sockets| core.send(Command::Sockets(sockets)).is_ok();
-    watch::watch("zellij", folder, RecursiveMode::Recursive, SWEEP, read, tell)
+    let wanted = zellij::of_sessions;
+    watch::watch("zellij", folder, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
 }
 
 /// What the daemon answers from.

@@ -23,10 +23,10 @@ const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 
 /// Reads with `read`, and hands what it read to `tell`: once before this
 /// returns, so that what the daemon knows is whole before it answers anyone,
-/// and then from a thread of its own whenever something in `dir` changes, and
-/// at least every `sweep` besides, for what changes without a word to the
-/// folder, as a process that dies. The thread ends once `tell` says that no
-/// one listens.
+/// and then from a thread of its own whenever something in `dir` changes at
+/// a path that `wanted` takes, and at least every `sweep` besides, for what
+/// changes without a word to the folder, as a process that dies. The thread
+/// ends once `tell` says that no one listens.
 ///
 /// A folder that is not there yet is read on the sweep alone, and watched once
 /// it turns up.
@@ -34,6 +34,7 @@ pub fn watch<T: 'static>(
     name: &str,
     dir: PathBuf,
     mode: RecursiveMode,
+    wanted: fn(&Path) -> bool,
     sweep: Duration,
     mut read: impl FnMut() -> T + Send + 'static,
     tell: impl Fn(T) -> bool + Send + 'static,
@@ -49,7 +50,7 @@ pub fn watch<T: 'static>(
         let mut troubles = Troubles::default();
         loop {
             if watcher.is_none() {
-                watcher = watching(&dir, mode, &changed, &mut troubles);
+                watcher = watching(&dir, mode, wanted, &changed, &mut troubles);
                 troubles.done();
             }
             match heard.recv_timeout(sweep) {
@@ -69,10 +70,11 @@ pub fn watch<T: 'static>(
 fn watching(
     dir: &Path,
     mode: RecursiveMode,
+    wanted: fn(&Path) -> bool,
     changed: &SyncSender<()>,
     troubles: &mut Troubles,
 ) -> Option<RecommendedWatcher> {
-    match watcher(dir, mode, changed.clone()) {
+    match watcher(dir, mode, wanted, changed.clone()) {
         Ok(watcher) => Some(watcher),
         Err(error) if missing(&error) => None,
         Err(error) => {
@@ -82,17 +84,17 @@ fn watching(
     }
 }
 
-/// A watcher that says so on `changed` when anything in `dir` does, but for a
-/// read: the reads that follow a change would make changes of their own. A
-/// watcher that goes wrong is a change too, as a read is how the daemon finds
-/// out what it missed.
+/// A watcher that says so on `changed` when anything in `dir` changes that a
+/// read could find. A watcher that goes wrong is a change too, as a read is
+/// how the daemon finds out what it missed.
 fn watcher(
     dir: &Path,
     mode: RecursiveMode,
+    wanted: fn(&Path) -> bool,
     changed: SyncSender<()>,
 ) -> notify::Result<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        if event.is_ok_and(|event| event.kind.is_access()) {
+        if event.is_ok_and(|event| !worth_a_read(&event, wanted)) {
             return;
         }
         match changed.try_send(()) {
@@ -103,6 +105,17 @@ fn watcher(
     })?;
     watcher.watch(dir, mode)?;
     Ok(watcher)
+}
+
+/// Whether `event` can change what a read finds. A read's own access to the
+/// folder cannot, or the reads that follow a change would make changes of
+/// their own; nor can a change at paths that `wanted` does not take. One that
+/// names no path could be of anything.
+fn worth_a_read(event: &Event, wanted: fn(&Path) -> bool) -> bool {
+    if event.kind.is_access() {
+        return false;
+    }
+    event.paths.is_empty() || event.paths.iter().any(|path| wanted(path))
 }
 
 /// Whether `error` is the folder's not being there yet.

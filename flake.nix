@@ -11,8 +11,10 @@
     { nixpkgs, rust-overlay, ... }:
     let
       # Where luneta runs: a Linux desktop, an arm64 Linux server and an Apple
-      # Silicon Mac, each with a daemon of its own. The plugin is wasm, the same
-      # bytes on each; each system builds it too, so that each has a devshell.
+      # Silicon Mac, each with a daemon of its own. The plugin is wasm, and runs
+      # on each; each system builds it too, so that each has a devshell. A
+      # release is the x86_64-linux build: another system's works the same but
+      # is not the same bytes, as the paths it is built in are written into it.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -112,9 +114,15 @@
           #
           # buildRustPackage suits this one, for the reason it does not suit the plugin:
           # its hooks build, test and install for the host triple, which is the target
-          # here. It builds on the toolchain the plugin builds on, and the tests run in
-          # the sandbox as part of the build, so a system whose daemon builds is one
-          # whose daemon passes them.
+          # here. It builds on the toolchain the plugin builds on, and on Linux the tests
+          # run in the sandbox as part of the build, so a Linux whose daemon builds is
+          # one whose daemon passes them.
+          #
+          # Not on macOS. The tests run `/bin/ps` for when a process started, as Claude
+          # Code does, and its build sandbox will not let them: a build there with the
+          # tests on fails wherever the sandbox is on, as it is in CI. CI runs them on a
+          # Mac outside the sandbox instead, through the devshell, where they see the
+          # system as the daemon does when you run it.
           lunetad =
             (pkgs.makeRustPlatform {
               cargo = toolchain;
@@ -136,6 +144,8 @@
 
                 # The build script writes the protocol out as Rust, through protoc.
                 nativeBuildInputs = [ pkgs.protobuf ];
+
+                doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
 
                 meta = {
                   description = "The luneta daemon, and the CLI that talks to it";
