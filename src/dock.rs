@@ -49,6 +49,13 @@ pub fn is_sidebar(pane: &PaneInfo) -> bool {
     pane.is_plugin && (title == TITLE && !pane.is_floating || title == FLOATING_SIDEBAR_TITLE)
 }
 
+/// The sidebar among a session's panes, while it stands in its column: of
+/// two, the one with the lower id, which the dock keeps.
+pub fn standing(manifest: &PaneManifest) -> Option<u32> {
+    let panes = manifest.panes.values().flatten();
+    panes.filter(|p| is_sidebar(p) && !p.is_suppressed && !p.is_floating).map(|p| p.id).min()
+}
+
 /// The title the sidebar's `pane` is to have where it stands, when not the
 /// one it has. A sidebar the dock is still docking floats before it has a
 /// title, and takes one once it stands in its column.
@@ -87,6 +94,14 @@ impl TabId {
         TabId(tab.tab_id)
     }
 }
+
+/// The key the dock opens the sidebar with, in its configuration, when the
+/// sidebar is to take the focus, its value the dock's client. It would send
+/// on a focus no key asked for, and the dock cannot tell it otherwise:
+/// messaging another plugin takes a permission luneta does not ask for.
+/// zellij runs the sidebar once for each client, every one of them with this
+/// configuration, and the focus the dock hands it is its own client's.
+pub const TAKES_FOCUS: &str = "takes_focus";
 
 /// What a key binding asks through the `sidebar` pipe. Every plugin in the
 /// session hears it, and the dock and the sidebar each answer their own.
@@ -136,6 +151,10 @@ pub struct Dock {
     sidebar: Option<u32>,
     /// The tab the sidebar was last seen in.
     stood: Option<TabId>,
+    /// Whether the sidebar had the focus when last seen, with no floating
+    /// pane over it: one gone with its tab takes the focus where it opens
+    /// again.
+    focused: bool,
     /// The tab each client was on at the last update.
     seats: BTreeMap<ClientId, TabId>,
     /// The client the sidebar follows: the last to come to a tab, or to
@@ -176,8 +195,9 @@ enum Want {
     #[default]
     Shown,
     Hidden,
-    /// Coming back from hidden, and taking the focus if `focus`. The dock that
-    /// leads brings it back; the others wait to see it.
+    /// Coming back from hidden, or opening again after its tab closed, and
+    /// taking the focus if `focus`. The dock that leads brings it back; the
+    /// others wait to see it.
     Back { focus: bool },
 }
 
@@ -233,6 +253,7 @@ struct Seen {
     id: u32,
     hidden: bool,
     floating: bool,
+    focused: bool,
     spot: Spot,
 }
 
@@ -249,6 +270,7 @@ impl Seen {
             id: pane.id,
             hidden: pane.is_suppressed,
             floating: pane.is_floating,
+            focused: pane.is_focused,
             spot: spot(pane),
         }
     }
@@ -537,17 +559,25 @@ impl Dock {
         self.homes.clear();
         self.unsettled.clear();
         self.stood = None;
+        self.focused = false;
     }
 
     /// Keeps track of the placeholders and of the sidebar: the one the dock
-    /// opened, until zellij shows it, and one gone from a tab that is still
-    /// there, closed by hand, which hides the rest. Every dock sees it go,
-    /// whichever tab its client is on.
+    /// opened, until zellij shows it, one gone from a tab that is still there,
+    /// closed by hand, which hides the rest, and one gone with its tab, which
+    /// opens again with the focus it had. Every dock sees it go, whichever tab
+    /// its client is on.
     fn observe(&mut self, scene: &Scene) {
         self.track(scene);
         if let Some((tab, sidebar)) = scene.sidebar() {
             self.sidebar = Some(sidebar.id);
             self.stood = Some(tab);
+            // The last pane of a tab hands the sidebar its focus as it closes,
+            // and leaves the tab to close with nothing but the column: you
+            // were not in the sidebar, and what it had before stands.
+            if scene.occupied.contains(&tab) {
+                self.focused = sidebar.focused && !scene.floating.contains(&tab);
+            }
             if let (Want::Back { focus }, Some(_)) = (self.want, scene.home()) {
                 if !(focus && self.leads(scene)) {
                     self.want = Want::Shown;
@@ -558,14 +588,20 @@ impl Dock {
         if self.docking() {
             return;
         }
+        let focused = std::mem::take(&mut self.focused);
         let (Some(_), Some(stood)) = (self.sidebar.take(), self.stood.take()) else {
             return;
         };
         if self.want == Want::Hidden {
             return;
         }
-        // Gone with its tab, it opens again.
+        // Gone with its tab, it opens again, and takes the focus once it had
+        // it: you were in it as the tab closed, as a key of its menu closes
+        // the tab of the last pane that holds it open.
         if !scene.tabs.contains(&stood) {
+            if focused {
+                self.want = Want::Back { focus: true };
+            }
             return;
         }
         self.want = Want::Hidden;
@@ -774,11 +810,19 @@ impl Dock {
                 let Some(url) = scene.url.as_deref().filter(|_| showing(into)) else {
                     return false;
                 };
-                let configuration = self.sidebar_configuration.clone();
+                let mut configuration = self.sidebar_configuration.clone();
+                let focus = self.want == (Want::Back { focus: true });
+                if focus {
+                    configuration.insert(TAKES_FOCUS.to_owned(), self.client.to_string());
+                }
                 let opened = open_plugin_pane_floating(url, configuration, None, BTreeMap::new());
                 if let Some(PaneId::Plugin(sidebar)) = opened {
                     self.sidebar = Some(sidebar);
                     self.settle(sidebar, into, tab, scene);
+                    // `plan` hands it the focus once it stands in its column.
+                    if !focus {
+                        self.want = Want::Shown;
+                    }
                 }
             },
             Act::Move { sidebar, from, into, tab } => {
@@ -799,6 +843,10 @@ impl Dock {
                     _ => {},
                 }
                 self.settle(sidebar, into, tab, scene);
+                if self.want == (Want::Back { focus: true }) {
+                    focus_plugin_pane(sidebar, false, false);
+                }
+                self.want = Want::Shown;
             },
             Act::Restore { pane, tab } => {
                 self.unsettled.remove(&tab);
@@ -833,10 +881,6 @@ impl Dock {
                 next_swap_layout();
             }
         }
-        if self.want == (Want::Back { focus: true }) {
-            focus_plugin_pane(sidebar, false, false);
-        }
-        self.want = Want::Shown;
     }
 }
 
@@ -1342,23 +1386,97 @@ mod tests {
         assert_eq!(second.want, Want::Hidden);
     }
 
+    /// A sidebar lost with its tab opens again, and takes the focus once it
+    /// shows if it had it, with no floating pane over it: you were in it as
+    /// the tab closed.
     #[test]
     fn a_sidebar_lost_with_its_tab_opens_again() {
+        for (focused, floating, takes) in
+            [(false, false, false), (true, false, true), (true, true, false)]
+        {
+            let case = format!("focused: {focused}, floating: {floating}");
+            let mut dock = going(1);
+            let mut in_tab = vec![
+                PaneInfo { is_focused: focused, ..sidebar(5, false) },
+                placeholder(3, true),
+                terminal(4),
+            ];
+            if floating {
+                in_tab.push(PaneInfo { is_floating: true, is_focused: true, ..terminal(9) });
+            }
+            report(
+                &mut dock,
+                &[
+                    tab(0, false),
+                    TabInfo { are_floating_panes_visible: floating, ..tab(1, true) },
+                    tab(2, false),
+                ],
+                vec![
+                    (0, vec![placeholder(1, false), terminal(2)]),
+                    (1, in_tab),
+                    (2, vec![placeholder(7, false), terminal(8)]),
+                ],
+            );
+            // Tab 1 closes, and with it the sidebar. Its hidden placeholder
+            // goes to the first tab, and tab 2 takes its place.
+            let tabs = [tab(0, false), TabInfo { tab_id: 12, ..tab(1, true) }];
+            let left = report(
+                &mut dock,
+                &tabs,
+                vec![
+                    (0, vec![placeholder(1, false), terminal(2), placeholder(3, true)]),
+                    (1, vec![placeholder(7, false), terminal(8)]),
+                ],
+            );
+            assert_eq!(
+                left,
+                vec![
+                    Act::Close { pane: PaneId::Terminal(3) },
+                    Act::Open { into: 7, tab: TabId(12) },
+                ],
+                "{case}",
+            );
+            let opened = report(
+                &mut dock,
+                &tabs,
+                vec![
+                    (0, vec![placeholder(1, false), terminal(2)]),
+                    (1, vec![sidebar(6, false), placeholder(7, true), terminal(8)]),
+                ],
+            );
+            let focus = if takes { vec![Act::Focus { sidebar: 6 }] } else { Vec::new() };
+            assert_eq!(opened, focus, "{case}");
+        }
+    }
+
+    /// The last pane you were in closes, and zellij hands its focus to the
+    /// sidebar, the one pane left that takes it. The dock closes the tab, and
+    /// the sidebar opens again without the focus: you were not in it.
+    #[test]
+    fn a_sidebar_handed_the_focus_of_the_last_pane_opens_again_without_it() {
         let mut dock = going(1);
-        report(
-            &mut dock,
-            &[tab(0, false), tab(1, true), tab(2, false)],
+        let tabs = [tab(0, false), tab(1, true), tab(2, false)];
+        let in_tab = |sidebar_focused, shell: bool| {
+            let mut panes = vec![
+                PaneInfo { is_focused: sidebar_focused, ..sidebar(5, false) },
+                placeholder(3, true),
+            ];
+            if shell {
+                panes.push(PaneInfo { is_focused: true, ..terminal(4) });
+            }
             vec![
                 (0, vec![placeholder(1, false), terminal(2)]),
-                (1, vec![sidebar(5, false), placeholder(3, true), terminal(4)]),
+                (1, panes),
                 (2, vec![placeholder(7, false), terminal(8)]),
-            ],
-        );
-        // Tab 1 closes, and with it the sidebar. Its hidden placeholder goes
-        // to the first tab, and tab 2 takes its place.
+            ]
+        };
+        report(&mut dock, &tabs, in_tab(false, true));
+        let emptied = report(&mut dock, &tabs, in_tab(true, false));
+        assert_eq!(emptied, vec![Act::CloseTab { tab: TabId(11) }]);
+        let tabs = [tab(0, false), TabInfo { tab_id: 12, ..tab(1, true) }];
         let left = report(
             &mut dock,
-            &[tab(0, false), TabInfo { tab_id: 12, ..tab(1, true) }],
+            &tabs,
             vec![
                 (0, vec![placeholder(1, false), terminal(2), placeholder(3, true)]),
                 (1, vec![placeholder(7, false), terminal(8)]),
@@ -1369,6 +1487,15 @@ mod tests {
             vec![Act::Close { pane: PaneId::Terminal(3) }, Act::Open { into: 7, tab: TabId(12) }],
         );
         assert_eq!(dock.want, Want::Shown);
+        let opened = report(
+            &mut dock,
+            &tabs,
+            vec![
+                (0, vec![placeholder(1, false), terminal(2)]),
+                (1, vec![sidebar(6, false), placeholder(7, true), terminal(8)]),
+            ],
+        );
+        assert_eq!(opened, Vec::new());
     }
 
     #[test]
@@ -1641,6 +1768,27 @@ mod tests {
             None,
         );
         assert_eq!(dock().plan(&scene), Vec::new());
+    }
+
+    /// The focus lands only in a sidebar that stands in its column: zellij
+    /// floats a hidden pane it is asked to focus. Of two, the dock keeps the
+    /// one with the lower id.
+    #[test]
+    fn only_a_sidebar_in_its_column_stands() {
+        let floating = PaneInfo {
+            is_floating: true,
+            title: FLOATING_SIDEBAR_TITLE.to_owned(),
+            ..sidebar(4, false)
+        };
+        for (panes, standing_one) in [
+            (vec![sidebar(5, false), placeholder(1, true), terminal(2)], Some(5)),
+            (vec![sidebar(5, true), placeholder(1, false), terminal(2)], None),
+            (vec![floating, placeholder(1, false), terminal(2)], None),
+            (vec![sidebar(7, false), sidebar(5, false), terminal(2)], Some(5)),
+        ] {
+            let manifest = PaneManifest { panes: HashMap::from([(0, panes.clone())]) };
+            assert_eq!(standing(&manifest), standing_one, "{panes:?}");
+        }
     }
 
     /// A sidebar floated out of its column by hand is still the sidebar to a

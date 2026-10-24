@@ -471,7 +471,10 @@ the newest, which the picker lists first; with no other session to go to, the
 menu says so and kills nothing. Closing the last pane that holds a session's
 only tab open would end the session, so `d d` there deletes the session, as
 `d s` does: it asks as for the session, and the session you are in goes once
-you are in another.
+you are in another. A delete from the sidebar leaves you in the sidebar, to go
+on along its rows: when the tab it closes is the sidebar's own, the sidebar
+opens again in the tab you land in, with the focus, and the session you go to
+before the one you are in is killed has you in its sidebar.
 
 When what a key deletes would end an agent that is busy or waiting on you, the
 menu asks first, and says what goes:
@@ -737,9 +740,9 @@ tab bar, and draws no line between it and the panes beside it.
 When another tab comes on screen, the sidebar hands its tab back the placeholder
 and takes the new tab's, in its place, so the panes beside it never change size.
 The dock opens the sidebar when the session starts, and again if the tab that
-held it closes. Closing the sidebar hides it, in every session. A tab closes
-with the last pane beside its column, as it would without one, and the session
-ends with its last tab.
+held it closes, with the focus if you were in it. Closing the sidebar hides it,
+in every session. A tab closes with the last pane beside its column, as it would
+without one, and the session ends with its last tab.
 
 zellij opens every new tab of a session from the layout the session was made
 with, so `default_layout "sidebar"` in `config.kdl` gives every tab of every new

@@ -10,6 +10,7 @@
 #[path = "../src/brief.rs"] mod brief;
 #[path = "../src/checkouts.rs"] mod checkouts;
 #[path = "../src/close.rs"] mod close;
+#[path = "../src/coming.rs"] mod coming;
 #[path = "../src/context.rs"] mod context;
 #[path = "../src/cursor.rs"] mod cursor;
 #[path = "../src/dirs.rs"] mod dirs;

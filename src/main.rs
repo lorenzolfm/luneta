@@ -2,6 +2,7 @@ mod agents;
 mod brief;
 mod checkouts;
 mod close;
+mod coming;
 mod context;
 mod cursor;
 mod dirs;
@@ -199,6 +200,10 @@ struct State {
     client_id: ClientId,
     tabs: Vec<TabInfo>,
     branches: Vec<Branch>,
+    /// The sidebar of each other session, by its name, while it stands in its
+    /// column: where the focus lands as the sidebar's menu takes you there
+    /// and kills the session you are in.
+    sidebars: BTreeMap<String, u32>,
     here: Option<u32>,
     away: bool,
     places_at: u64,
@@ -245,6 +250,13 @@ impl ZellijPlugin for State {
                     icons::configured(configuration.get(icons::KEY).map(String::as_str));
                 if let Some(wrong) = &wrong {
                     eprintln!("luneta {wrong}");
+                }
+                // The dock opened it for the focus of its client that comes
+                // next, which it would send on otherwise: no key asked it of
+                // this sidebar, which was not there to hear one.
+                let client = ids.client_id.to_string();
+                if configuration.get(dock::TAKES_FOCUS).is_some_and(|dock| dock.trim() == client) {
+                    self.pass.ask(self.frame);
                 }
                 Role::Sidebar(Tree::shared(menu::Legend::new(entries), icons, wrong))
             },
@@ -711,6 +723,7 @@ impl State {
         let mut contents = BTreeMap::new();
         let mut live_names = Vec::new();
         let mut live = Vec::new();
+        let mut sidebars = BTreeMap::new();
         for session in snapshot.live_sessions {
             live_names.push(session.name.clone());
             if session.is_current_session {
@@ -718,10 +731,14 @@ impl State {
             }
             let name = session.name.clone();
             let age = Age::new(session.creation_time);
+            if let Some(sidebar) = dock::standing(&session.panes) {
+                sidebars.insert(name.clone(), sidebar);
+            }
             contents.insert(name.clone(), contents_of(session));
             live.push(Session { name, age });
         }
         self.live_names = live_names;
+        self.sidebars = sidebars;
         self.watch_news(current.as_deref());
         self.ask_shells();
         self.sessions = Sessions {
@@ -1359,6 +1376,11 @@ impl State {
         let stands = |pane| tiled(panes).any(|p| pane_id(p) == pane);
         let pressed = self.pressed.take();
         match self.pass.see(at, self.tabs.len(), self.frame, stands) {
+            // The menu of another session's sidebar took you here, into this
+            // sidebar, where no key of this session asked the focus.
+            Then::Back | Then::Beside if matches!(at, At::Sidebar { .. }) && self.welcomed() => {
+                self.pass.ask(self.frame);
+            },
             Then::Back => move_focus_or_tab(Direction::Left),
             Then::Beside => move_focus(Direction::Right),
             // The click that focused the sidebar does what any other does.
@@ -1370,6 +1392,30 @@ impl State {
             },
             Then::Stay => {},
         }
+    }
+
+    /// Whether the menu of another session's sidebar left word that it took
+    /// you into this sidebar. The word holds once.
+    fn welcomed(&self) -> bool {
+        let coming = coming::Coming::shared();
+        let Some(session) = coming.heard(self.plugin_id, Moment::now()) else {
+            return false;
+        };
+        if self.session_name().as_deref() != Some(session.as_str()) {
+            return false;
+        }
+        coming.forget();
+        true
+    }
+
+    /// The session this plugin runs in. A sidebar zellij started for a client
+    /// that just came may not have read the sessions yet.
+    fn session_name(&self) -> Option<String> {
+        if let Some(current) = &self.matches.current_session {
+            return Some(current.clone());
+        }
+        let snapshot = get_session_list().ok()?;
+        snapshot.live_sessions.into_iter().find(|s| s.is_current_session).map(|s| s.name)
     }
 
     fn wake(&mut self) {
@@ -1684,7 +1730,8 @@ impl State {
     /// `pane` of `session` or of the session you are in, or that session's
     /// row with no `pane`, as a key of the menu deletes it: the pane's tab,
     /// whether anything else holds the tab open, the agents of its session,
-    /// and the session to go to before the session you are in is killed.
+    /// and the session to go to before the session you are in is killed, into
+    /// its sidebar, as you leave from this one.
     fn closing(&self, pane: Option<u32>, session: Option<&str>) -> Option<close::Subject> {
         let current = self.matches.current_session.as_deref();
         let name = session.or(current)?;
@@ -1697,7 +1744,11 @@ impl State {
         let leaves = branch.map_or(&[][..], |branch| branch.panes.as_slice());
         let agents = close::agents_of(&self.agents, name, leaves);
         let others = self.sessions.live.iter().map(|other| (other.name.as_str(), other.age));
-        Some(close::Subject::new(seat, pane, leaves, agents, close::refuge(others)))
+        let refuge = close::refuge(others).map(|session| close::Refuge {
+            sidebar: self.sidebars.get(&session).copied(),
+            session,
+        });
+        Some(close::Subject::new(seat, pane, leaves, agents, refuge))
     }
 
     /// The highlighted row, for the menu: its pane, the directory it works
@@ -2750,6 +2801,11 @@ mod tests {
             if others {
                 state.sessions.live =
                     vec![Session { name: "b".to_owned(), age: Age::from_secs(1) }];
+                state.sidebars.insert("b".to_owned(), 7);
+                // You land in its sidebar, as you leave from this one.
+                let refuge = state.closing(None, None).and_then(|subject| subject.refuge);
+                let into = close::Refuge { session: "b".to_owned(), sidebar: Some(7) };
+                assert_eq!(refuge, Some(into));
             }
             if let Role::Sidebar(tree) = &mut state.role {
                 if folded {
