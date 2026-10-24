@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
+use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, InfoRequest, ListAgentsRequest, Status};
 use lunetad::folder::{self, SOCKET};
 
@@ -31,6 +32,12 @@ fn main() -> ExitCode {
         eprintln!("luneta: neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in");
         return ExitCode::FAILURE;
     };
+    // The daemon refuses a folder that is not yours alone, and whoever has it
+    // could be listening in it in its place.
+    if let Err(refusal) = folder::check(&folder) {
+        eprintln!("luneta: {refusal}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -64,32 +71,45 @@ async fn info(socket: &Path) -> Result<(), Box<dyn Error>> {
 /// One line to an agent, by its session and pane: the pane, its status, its pid,
 /// and its name or else where it works. An agent outside zellij has `-` for a
 /// pane. One whose session was renamed says what it was named, and one whose
-/// session the daemon cannot find has `?` for one.
+/// session the daemon cannot tell has `?` for one. A status the CLI does not
+/// know is the word Claude Code wrote, and none at all is `?`.
 async fn agents(socket: &Path) -> Result<(), Box<dyn Error>> {
     let mut daemon = lunetad::connect(socket).await?;
-    let agents = daemon.list_agents(ListAgentsRequest {}).await?.into_inner().agents;
+    let listed = daemon.list_agents(ListAgentsRequest {}).await?.into_inner();
     let pane = |agent: &Agent| match &agent.zellij {
         None => "-".to_owned(),
-        Some(zellij) if zellij.session.is_empty() => {
-            format!("?:{} ({} is gone)", zellij.pane, zellij.named)
+        Some(zellij) => match zellij.session.as_deref() {
+            None => format!("?:{} (named {})", zellij.pane, zellij.named),
+            Some(now) if now != zellij.named => {
+                format!("{now}:{} (named {})", zellij.pane, zellij.named)
+            },
+            Some(now) => format!("{now}:{}", zellij.pane),
         },
-        Some(zellij) if zellij.session != zellij.named => {
-            format!("{}:{} (named {})", zellij.session, zellij.pane, zellij.named)
-        },
-        Some(zellij) => format!("{}:{}", zellij.session, zellij.pane),
     };
-    let mut rows: Vec<(String, &Agent)> = agents.iter().map(|agent| (pane(agent), agent)).collect();
+    let mut rows: Vec<(String, &Agent)> = listed.agents.iter().map(|agent| (pane(agent), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(pane, _)| pane.len()).max().unwrap_or(0);
     for (pane, agent) in rows {
-        let status = match agent.status() {
-            Status::Busy => "busy",
-            Status::Idle => "idle",
-            Status::Waiting => "waiting",
-            Status::Unspecified => "?",
+        let status = match &agent.status {
+            Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
+                Ok(Status::Busy) => "busy",
+                Ok(Status::Idle) => "idle",
+                Ok(Status::Waiting) => "waiting",
+                Ok(Status::Shell) => "shell",
+                // A daemon newer than this CLI's.
+                Ok(Status::Unspecified) | Err(_) => "?",
+            },
+            Some(Reported::OtherStatus(word)) => word.as_str(),
+            None => "?",
         };
         let label = agent.name.as_ref().map_or(agent.cwd.as_str(), |name| name.text.as_str());
         println!("{pane:<width$}  {status:<7}  {:>7}  {label}", agent.pid);
+    }
+    if listed.unread > 0 {
+        eprintln!(
+            "luneta: lunetad cannot read {} of Claude Code's session files, and its log says which",
+            listed.unread
+        );
     }
     Ok(())
 }

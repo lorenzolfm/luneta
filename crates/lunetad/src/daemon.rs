@@ -7,10 +7,9 @@
 //! however it ends, so that a daemon that crashed never keeps the next one
 //! from starting.
 
-use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
@@ -25,7 +24,7 @@ use tonic::{Request, Response, Status};
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::{InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse};
 use crate::core::{self, Command};
-use crate::folder::{LOCK, SOCKET};
+use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::{claude, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -39,36 +38,6 @@ pub struct Claim {
     /// Held for as long as the process runs.
     _lock: File,
 }
-
-/// Why a daemon does not run in a folder.
-#[derive(Debug)]
-pub enum Refusal {
-    /// It is a link, or not a folder, or another user's. In a `TMPDIR` of
-    /// `/tmp`, anyone can make one before you do.
-    NotYours(PathBuf),
-    /// Other users may reach into it, and so reach the socket.
-    Open(PathBuf),
-    /// Another daemon holds it.
-    Running(PathBuf),
-    Io(PathBuf, io::Error),
-}
-
-impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Refusal::NotYours(folder) => {
-                write!(f, "{} is not a folder of yours alone", folder.display())
-            },
-            Refusal::Open(folder) => write!(f, "{} is open to other users", folder.display()),
-            Refusal::Running(folder) => {
-                write!(f, "another lunetad already runs in {}", folder.display())
-            },
-            Refusal::Io(path, error) => write!(f, "{}: {error}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for Refusal {}
 
 impl Claim {
     /// Takes `folder` for this process's daemon, and makes it if it is not
@@ -107,18 +76,10 @@ impl Claim {
 /// as the shell hook does before it writes in it.
 fn own(folder: &Path) -> Result<(), Refusal> {
     match DirBuilder::new().mode(0o700).create(folder) {
-        Ok(()) => return Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
-        Err(error) => return Err(Refusal::Io(folder.to_owned(), error)),
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => folder::check(folder),
+        Err(error) => Err(Refusal::Io(folder.to_owned(), error)),
     }
-    let found = fs::symlink_metadata(folder).map_err(|error| Refusal::Io(folder.to_owned(), error))?;
-    if !found.is_dir() || found.uid() != rustix::process::getuid().as_raw() {
-        return Err(Refusal::NotYours(folder.to_owned()));
-    }
-    if found.mode() & 0o077 != 0 {
-        return Err(Refusal::Open(folder.to_owned()));
-    }
-    Ok(())
 }
 
 /// Listens on the claim's socket and answers there for as long as the
@@ -147,7 +108,7 @@ fn follow(core: &Sender<Command>) -> io::Result<()> {
             let dir = sessions.dir().to_owned();
             let core = core.clone();
             let read = move || sessions.scan();
-            let tell = move |agents| core.send(Command::Agents(agents)).is_ok();
+            let tell = move |found| core.send(Command::Agents(found)).is_ok();
             watch::watch("claude", dir, RecursiveMode::NonRecursive, SWEEP, read, tell)?;
         },
         None => eprintln!("lunetad: neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
@@ -185,7 +146,6 @@ impl Daemon for Host {
         let (answer, answered) = oneshot::channel();
         let stopped = || Status::unavailable("the daemon's core has stopped");
         self.core.send(Command::List(answer)).map_err(|_| stopped())?;
-        let agents = answered.await.map_err(|_| stopped())?;
-        Ok(Response::new(ListAgentsResponse { agents }))
+        Ok(Response::new(answered.await.map_err(|_| stopped())?))
     }
 }

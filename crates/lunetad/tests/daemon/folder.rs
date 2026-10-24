@@ -4,7 +4,7 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
-use crate::host::{info, start, Vars, SOCKET};
+use crate::host::{info, start, Vars, LUNETA, SOCKET};
 
 /// A case of where the socket goes: given two roots, the variables to start a
 /// daemon with, and the root that should then hold the socket.
@@ -73,4 +73,20 @@ fn the_daemon_refuses_a_folder_that_is_not_yours_alone() {
     }
     assert!(!elsewhere.path().join("lunetad.sock").exists());
     assert!(!open.path().join(SOCKET).exists());
+}
+
+/// The CLI holds the folder to what the daemon does: a socket in a folder that
+/// other users may reach into could be anyone's, and what answers on it need
+/// not be your daemon.
+#[test]
+fn the_cli_refuses_a_folder_that_is_not_yours_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let vars = Vars::runtime(root.path());
+    let _daemon = start(vars).unwrap();
+    fs::set_permissions(root.path().join("luneta"), Permissions::from_mode(0o755)).unwrap();
+
+    let output = vars.command(LUNETA).arg("info").output().unwrap();
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("is open to other users"), "{said}");
 }

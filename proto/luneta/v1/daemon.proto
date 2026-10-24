@@ -35,6 +35,10 @@ message ListAgentsRequest {}
 message ListAgentsResponse {
   // In no order a client can count on.
   repeated Agent agents = 1;
+  // Claude Code's session files that the daemon cannot read, and so lists no
+  // agent for: cut short for good, or in a shape of a newer Claude Code's. The
+  // daemon's log says which.
+  uint32 unread = 2;
 }
 
 // A Claude Code agent: the one process of it that runs, and its session.
@@ -44,7 +48,13 @@ message Agent {
   string session_id = 2;
   // Where it works.
   string cwd = 3;
-  Status status = 4;
+  // What it is doing, as Claude Code says. Neither when it says nothing.
+  oneof status {
+    // A status the daemon knows.
+    Status known_status = 4;
+    // A word it does not, as Claude Code wrote it: a newer Claude Code's.
+    string other_status = 10;
+  }
   // When it came to its status, as Claude Code dates it.
   google.protobuf.Timestamp status_since = 5;
   // When its session started.
@@ -52,15 +62,17 @@ message Agent {
   // The name Claude Code gives the session, if any.
   Name name = 7;
   // How Claude Code says it was started, verbatim: `cli` for the agent a person
-  // talks to at a prompt, `sdk-cli` for a `claude -p`. Empty when it does not
+  // talks to at a prompt, `sdk-cli` for a `claude -p`, and a word of its own
+  // for each of the many other ways, which it adds to. Absent when it does not
   // say.
-  string entrypoint = 8;
+  optional string entrypoint = 8;
   // Where it runs in zellij, absent when it runs outside zellij.
   Zellij zellij = 9;
 }
 
 enum Status {
-  // Claude Code reports none, or a word this daemon does not know.
+  // Never sent. A client that finds it, or a number it does not know, has the
+  // status of a newer daemon's.
   STATUS_UNSPECIFIED = 0;
   // At work: the one status that ends on its own.
   STATUS_BUSY = 1;
@@ -68,13 +80,32 @@ enum Status {
   STATUS_IDLE = 2;
   // It asked something, and waits for the answer.
   STATUS_WAITING = 3;
+  // It is a shell.
+  STATUS_SHELL = 4;
 }
 
 message Name {
   string text = 1;
-  // Who chose it, verbatim: `user` and `peer` are a name someone gave, and
-  // `derived` is Claude Code's own, from the directory. Empty when unknown.
-  string source = 2;
+  // Who chose it. Absent when Claude Code does not say, as one from before it
+  // said did not.
+  optional NameSource source = 2;
+}
+
+// Who chose a name, as Claude Code spells it: `user`, `peer`, `derived`,
+// `collision`, `auto` or `hook`, the words it reads back itself.
+enum NameSource {
+  // Never sent.
+  NAME_SOURCE_UNSPECIFIED = 0;
+  // `user` and `peer` are a name someone gave.
+  NAME_SOURCE_USER = 1;
+  NAME_SOURCE_PEER = 2;
+  // `derived` is Claude Code's own, from the directory.
+  NAME_SOURCE_DERIVED = 3;
+  NAME_SOURCE_COLLISION = 4;
+  NAME_SOURCE_AUTO = 5;
+  NAME_SOURCE_HOOK = 6;
+  // A word the daemon does not know: a newer Claude Code's.
+  NAME_SOURCE_OTHER = 7;
 }
 
 // The pane an agent runs in.
@@ -82,10 +113,11 @@ message Zellij {
   // The session its environment names: what the session was called when the
   // pane opened. A rename leaves it behind.
   string named = 1;
-  // The session it runs in now, under the name it has now. Empty when the
-  // daemon cannot tell: the session it names is gone, and no rename the daemon
-  // saw leads on from it.
-  string session = 2;
+  // The session it runs in now, under the name it has now. Absent when the
+  // daemon cannot tell: the session it names is gone, or was renamed before
+  // the daemon started, or more than one session that could be it has held
+  // the name.
+  optional string session = 2;
   // The pane's id, which is unique within its session and not across them.
   uint32 pane = 3;
 }

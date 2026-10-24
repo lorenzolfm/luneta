@@ -10,18 +10,27 @@
 //! process with its pid runs and started when the file says it did. The file
 //! does not say what zellij pane the agent is in. The process's environment
 //! does: zellij gives every pane its session's name and the pane's id.
+//!
+//! The pid is the one the file is named for, as Claude Code reads it back. A
+//! folder holds one file of a name, and so one agent to a pid, whatever else
+//! is in it.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use crate::agent::{Agent, Name, Named, Status};
+use crate::agent::{Agent, Name, Named, Source, Status};
 use crate::process;
+
+/// How long a file that does not parse still says what it said before. Claude
+/// Code writes a file in place, and in a moment: one that does not parse for
+/// longer is cut short for good, or in a shape of a newer Claude Code's.
+const TORN: Duration = Duration::from_secs(1);
 
 /// Claude Code's folder: `$CLAUDE_CONFIG_DIR`, or `~/.claude`, as the plugin
 /// takes it.
@@ -34,16 +43,13 @@ pub fn folder() -> Option<PathBuf> {
 }
 
 /// A session file, as much of it as the adapter reads. A file without the
-/// first four names no agent.
+/// first three does not read as one.
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct File {
-    pid: u32,
     session_id: String,
     cwd: PathBuf,
-    /// When the process started, in the words of the system it ran on: a
-    /// number on Linux, a date on macOS.
-    proc_start: serde_json::Value,
+    proc_start: Start,
     /// The system and pid namespace the pid is from, as Claude Code spells
     /// them. A file from a container that shares the folder names another.
     pid_domain: Option<String>,
@@ -56,16 +62,41 @@ struct File {
     entrypoint: Option<String>,
 }
 
-impl File {
-    /// The process start the file records, spelled as the system spells its
-    /// own.
-    fn proc_start(&self) -> Option<String> {
-        match &self.proc_start {
-            serde_json::Value::String(start) => Some(start.clone()),
-            serde_json::Value::Number(start) => Some(start.to_string()),
-            _ => None,
+/// When the process started, in the words of the system it ran on: a number
+/// on Linux, a date on macOS. A string, or the number bare.
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum Start {
+    Spelled(String),
+    Counted(u64),
+}
+
+impl Start {
+    /// As the system spells its own.
+    fn spelled(&self) -> String {
+        match self {
+            Start::Spelled(start) => start.clone(),
+            Start::Counted(start) => start.to_string(),
         }
     }
+}
+
+/// A session file, as it last read. Claude Code writes a file in place, and a
+/// read in the middle of the write finds half of it.
+enum Read {
+    Whole(File),
+    /// It does not parse, and has not since `since`: halfway written, and what
+    /// it said `before`, if it said anything, stands.
+    Torn { since: Instant, before: Option<File> },
+    /// It has not parsed for longer than a write takes.
+    Unread,
+}
+
+/// What a scan of the folder finds.
+pub struct Scan {
+    pub agents: Vec<Agent>,
+    /// The files it cannot read.
+    pub unread: usize,
 }
 
 /// The agents of a Claude Code folder, read again on every scan.
@@ -73,9 +104,8 @@ pub struct Sessions {
     dir: PathBuf,
     /// The pids of this system, to tell a file from another's by.
     domain: process::Domain,
-    /// What each file said when it last read whole. Claude Code writes a file
-    /// in place, and a read in the middle of the write finds half of it.
-    read: HashMap<PathBuf, File>,
+    /// Each file, by the pid it is named for, as it last read.
+    read: HashMap<u32, Read>,
     /// The pane each process's environment names. The environment a process
     /// shows is the one it started with, so it is read once.
     panes: HashMap<(u32, String), Option<Named>>,
@@ -98,44 +128,52 @@ impl Sessions {
     }
 
     /// The agents that run, by the files as they are now.
-    pub fn scan(&mut self) -> Vec<Agent> {
+    pub fn scan(&mut self) -> Scan {
         let mut read = HashMap::new();
         let entries = fs::read_dir(&self.dir).into_iter().flatten().flatten();
         for path in entries.map(|entry| entry.path()) {
-            if path.extension().is_none_or(|extension| extension != "json") {
+            let Some(pid) = named(&path) else {
                 continue;
-            }
-            // A file gone since the folder was listed is gone, and one that
-            // does not parse is halfway written, or else says what it said.
+            };
+            // A file gone since the folder was listed is gone.
             let Ok(text) = fs::read(&path) else {
                 continue;
             };
-            let parsed = serde_json::from_slice::<File>(&text).ok();
-            if let Some(file) = parsed.or_else(|| self.read.remove(&path)) {
-                read.insert(path, file);
-            }
+            let was = self.read.remove(&pid);
+            let now = match serde_json::from_slice::<File>(&text) {
+                Ok(file) => Read::Whole(file),
+                Err(error) => torn(was, &path, &error),
+            };
+            read.insert(pid, now);
         }
         self.read = read;
 
         let mut panes = HashMap::with_capacity(self.read.len());
         let mut agents = Vec::with_capacity(self.read.len());
-        for file in self.read.values() {
-            let Some(start) = file.proc_start() else {
-                continue;
+        let mut unread = 0;
+        for (&pid, found) in &self.read {
+            let file = match found {
+                Read::Whole(file) | Read::Torn { before: Some(file), .. } => file,
+                Read::Torn { before: None, .. } => continue,
+                Read::Unread => {
+                    unread += 1;
+                    continue;
+                },
             };
-            if !self.local(file) || process::start(file.pid).as_ref() != Some(&start) {
+            let start = file.proc_start.spelled();
+            if !self.local(file) || process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            let key = (file.pid, start);
+            let key = (pid, start);
             let pane = match self.panes.remove(&key) {
                 Some(pane) => pane,
-                None => pane_of(file.pid),
+                None => pane_of(pid),
             };
-            agents.push(agent(file, pane.clone()));
+            agents.push(agent(pid, file, pane.clone()));
             panes.insert(key, pane);
         }
         self.panes = panes;
-        agents
+        Scan { agents, unread }
     }
 
     /// Whether the file's pid is one of this system's. A file that does not
@@ -145,21 +183,50 @@ impl Sessions {
     }
 }
 
-fn agent(file: &File, pane: Option<Named>) -> Agent {
+/// The pid a session file is named for: `<pid>.json`, spelled as Claude Code
+/// spells a pid, which is how it reads one back. Any other file in the folder,
+/// a copy of one too, names no agent.
+fn named(path: &Path) -> Option<u32> {
+    if path.extension()? != "json" {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let pid = stem.parse::<u32>().ok()?;
+    (pid.to_string() == stem).then_some(pid)
+}
+
+/// What a file that does not parse is now, by what it `was`. One may be
+/// halfway written for a while, and says what it said before. One that does
+/// not parse for longer is unread, which the daemon says once.
+fn torn(was: Option<Read>, path: &Path, error: &serde_json::Error) -> Read {
+    match was {
+        Some(Read::Whole(file)) => Read::Torn { since: Instant::now(), before: Some(file) },
+        None => Read::Torn { since: Instant::now(), before: None },
+        Some(Read::Torn { since, before }) if since.elapsed() < TORN => Read::Torn { since, before },
+        Some(Read::Torn { .. }) => {
+            eprintln!("lunetad: {} does not read as a session file: {error}", path.display());
+            Read::Unread
+        },
+        Some(Read::Unread) => Read::Unread,
+    }
+}
+
+fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
     let since = file.status_updated_at.or(file.updated_at).or(file.started_at);
     let word = |text: &Option<String>| {
         let word = text.as_deref().map(str::trim)?;
         (!word.is_empty()).then(|| word.to_owned())
     };
     let name = file.name.clone().filter(|text| !text.is_empty());
+    let source = word(&file.name_source).map(|word| Source::of(&word));
     Agent {
-        pid: file.pid,
+        pid,
         session_id: file.session_id.clone(),
         cwd: file.cwd.clone(),
         status: Status::of(file.status.as_deref()),
         status_since: since.map(moment),
         started_at: file.started_at.map(moment),
-        name: name.map(|text| Name { text, source: word(&file.name_source) }),
+        name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),
         pane,
     }

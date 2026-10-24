@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::api;
+use crate::api::agent::Status as Reported;
 use crate::zellij::Sessions;
 
 /// An agent that runs on the host.
@@ -25,24 +26,31 @@ pub struct Agent {
     pub pane: Option<Named>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Busy,
     Idle,
     Waiting,
-    /// One the agent does not report, or reports in a word not known here.
-    Unknown,
+    Shell,
+    /// A word not known here, as the agent wrote it: a newer agent's.
+    Other(String),
+    /// The agent says none.
+    Unreported,
 }
 
 impl Status {
-    /// Claude Code's word for it.
+    /// Claude Code's word for it, in any case, as the plugin reads it.
     #[must_use]
     pub fn of(word: Option<&str>) -> Self {
-        match word.map(str::trim) {
-            Some("busy") => Status::Busy,
-            Some("idle") => Status::Idle,
-            Some("waiting") => Status::Waiting,
-            _ => Status::Unknown,
+        let Some(word) = word.map(str::trim).filter(|word| !word.is_empty()) else {
+            return Status::Unreported;
+        };
+        match word.to_ascii_lowercase().as_str() {
+            "busy" => Status::Busy,
+            "idle" => Status::Idle,
+            "waiting" => Status::Waiting,
+            "shell" => Status::Shell,
+            _ => Status::Other(word.to_owned()),
         }
     }
 }
@@ -50,8 +58,40 @@ impl Status {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name {
     pub text: String,
-    /// Who chose it, in the agent's own word.
-    pub source: Option<String>,
+    /// Who chose it, when the agent says.
+    pub source: Option<Source>,
+}
+
+/// Who chose a name, in the words Claude Code reads back itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Someone gave it.
+    User,
+    /// Someone gave it.
+    Peer,
+    /// Claude Code's own, from the directory.
+    Derived,
+    Collision,
+    Auto,
+    Hook,
+    /// A word not known here: a newer Claude Code's.
+    Other,
+}
+
+impl Source {
+    /// Claude Code's word for it, in any case.
+    #[must_use]
+    pub fn of(word: &str) -> Self {
+        match word.to_ascii_lowercase().as_str() {
+            "user" => Source::User,
+            "peer" => Source::Peer,
+            "derived" => Source::Derived,
+            "collision" => Source::Collision,
+            "auto" => Source::Auto,
+            "hook" => Source::Hook,
+            _ => Source::Other,
+        }
+    }
 }
 
 /// A pane as an agent's environment names it: by the name its session had when
@@ -67,27 +107,41 @@ impl Agent {
     /// is in now.
     #[must_use]
     pub fn to_api(&self, sessions: &Sessions) -> api::Agent {
-        let status = match self.status {
-            Status::Busy => api::Status::Busy,
-            Status::Idle => api::Status::Idle,
-            Status::Waiting => api::Status::Waiting,
-            Status::Unknown => api::Status::Unspecified,
+        let known = |status: api::Status| Some(Reported::KnownStatus(status.into()));
+        let status = match &self.status {
+            Status::Busy => known(api::Status::Busy),
+            Status::Idle => known(api::Status::Idle),
+            Status::Waiting => known(api::Status::Waiting),
+            Status::Shell => known(api::Status::Shell),
+            Status::Other(word) => Some(Reported::OtherStatus(word.clone())),
+            Status::Unreported => None,
+        };
+        let source = |source| -> api::NameSource {
+            match source {
+                Source::User => api::NameSource::User,
+                Source::Peer => api::NameSource::Peer,
+                Source::Derived => api::NameSource::Derived,
+                Source::Collision => api::NameSource::Collision,
+                Source::Auto => api::NameSource::Auto,
+                Source::Hook => api::NameSource::Hook,
+                Source::Other => api::NameSource::Other,
+            }
         };
         api::Agent {
             pid: self.pid,
             session_id: self.session_id.clone(),
             cwd: self.cwd.to_string_lossy().into_owned(),
-            status: status.into(),
+            status,
             status_since: self.status_since.map(Into::into),
             started_at: self.started_at.map(Into::into),
             name: self.name.as_ref().map(|name| api::Name {
                 text: name.text.clone(),
-                source: name.source.clone().unwrap_or_default(),
+                source: name.source.map(|chose| source(chose).into()),
             }),
-            entrypoint: self.entrypoint.clone().unwrap_or_default(),
+            entrypoint: self.entrypoint.clone(),
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
-                session: sessions.lead(&named.session).unwrap_or_default().to_owned(),
+                session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
         }

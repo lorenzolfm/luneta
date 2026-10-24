@@ -8,13 +8,21 @@
 //!
 //! A pane's environment holds the name its session had when the pane opened,
 //! which a rename leaves behind. The daemon sees each rename that happens while
-//! it runs, and so leads such a name on to the one the session has now. A rename
-//! from before the daemon started, it never saw, and the name leads nowhere.
+//! it runs, and so leads such a name on to the one the session has now.
+//!
+//! A name is not a session, though: once a session lets it go, another can
+//! take it. So a name leads only to a session that held it and was made before
+//! the agent started, as the pane it runs in opened in its session before then,
+//! and only when one session alone could be it. A rename from before the daemon
+//! started, it never saw: the name leads nowhere, or to the one session made
+//! under it since, if that one is older than the agent. Only an agent started
+//! after that, in a pane older than the rename, it puts in the wrong session.
 
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// The socket in the folder that is zellij's web server's, and no session's.
 const WEB_SERVER: &str = "web_server_bus";
@@ -56,7 +64,7 @@ pub struct Socket {
 struct Id {
     dev: u64,
     ino: u64,
-    made: (i64, i64),
+    made: SystemTime,
 }
 
 /// The sessions whose sockets are in `folder` now.
@@ -73,7 +81,7 @@ pub fn scan(folder: &Path) -> Vec<Socket> {
             if name == WEB_SERVER || !found.file_type().is_socket() {
                 return None;
             }
-            let made = (found.mtime(), found.mtime_nsec());
+            let made = found.modified().ok()?;
             Some(Socket { name, id: Id { dev: found.dev(), ino: found.ino(), made } })
         })
         .collect()
@@ -84,9 +92,9 @@ pub fn scan(folder: &Path) -> Vec<Socket> {
 pub struct Sessions {
     /// The name each session that runs has now.
     names: HashMap<Id, String>,
-    /// The session behind each name seen, the ones it had before a rename too.
-    /// A name that another session takes later is that one's.
-    seen: HashMap<String, Id>,
+    /// Each name seen, and every session that runs and has held it: the one
+    /// it was renamed from, and one that took it later, side by side.
+    held: HashMap<String, Vec<Id>>,
 }
 
 impl Sessions {
@@ -95,16 +103,28 @@ impl Sessions {
     pub fn saw(&mut self, sockets: Vec<Socket>) {
         self.names = sockets.iter().map(|socket| (socket.id, socket.name.clone())).collect();
         for socket in sockets {
-            self.seen.insert(socket.name, socket.id);
+            let held = self.held.entry(socket.name).or_default();
+            if !held.contains(&socket.id) {
+                held.push(socket.id);
+            }
         }
         let names = &self.names;
-        self.seen.retain(|_, id| names.contains_key(id));
+        self.held.retain(|_, held| {
+            held.retain(|id| names.contains_key(id));
+            !held.is_empty()
+        });
     }
 
-    /// The name that the session once called `named` has now.
+    /// The name that the session once called `named` has now, for an agent
+    /// that started at `started`: a session made after it is not the one its
+    /// pane opened in. None when no session could be it, or more than one.
     #[must_use]
-    pub fn lead(&self, named: &str) -> Option<&str> {
-        let id = self.seen.get(named)?;
+    pub fn lead(&self, named: &str, started: Option<SystemTime>) -> Option<&str> {
+        let held = self.held.get(named)?;
+        let mut could = held.iter().filter(|id| started.is_none_or(|started| id.made <= started));
+        let (Some(id), None) = (could.next(), could.next()) else {
+            return None;
+        };
         self.names.get(id).map(String::as_str)
     }
 }
