@@ -1,0 +1,130 @@
+//! A host of a test's own: the variables a daemon finds everything by, folders
+//! for them to name, and the daemon itself.
+
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub const LUNETAD: &str = env!("CARGO_BIN_EXE_lunetad");
+
+pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
+
+/// Where the socket is, under the root a variable names. The shell hook keeps
+/// its commands beside it, in the same `luneta`.
+pub const SOCKET: &str = "luneta/lunetad.sock";
+
+/// The variables that the daemon and the CLI find their folders by: their
+/// own, Claude Code's and zellij's. `None` leaves one unset, so that nothing a
+/// test runs ever reads the folders of whoever runs the tests.
+#[derive(Clone, Copy, Default)]
+pub struct Vars<'a> {
+    pub runtime: Option<&'a Path>,
+    pub temp: Option<&'a Path>,
+    pub home: Option<&'a Path>,
+    pub zellij: Option<&'a Path>,
+}
+
+impl<'a> Vars<'a> {
+    pub fn runtime(root: &'a Path) -> Self {
+        Vars { runtime: Some(root), ..Vars::default() }
+    }
+
+    pub fn command(self, program: &str) -> Command {
+        let mut command = Command::new(program);
+        for name in ["XDG_RUNTIME_DIR", "TMPDIR", "HOME", "CLAUDE_CONFIG_DIR", "ZELLIJ_SOCKET_DIR"] {
+            command.env_remove(name);
+        }
+        let set = [
+            ("XDG_RUNTIME_DIR", self.runtime),
+            ("TMPDIR", self.temp),
+            ("HOME", self.home),
+            ("ZELLIJ_SOCKET_DIR", self.zellij),
+        ];
+        for (name, value) in set {
+            if let Some(value) = value {
+                command.env(name, value);
+            }
+        }
+        command
+    }
+}
+
+/// A process of a test's, killed as it goes out of scope, as a crash would end
+/// it: with no chance to clear up after itself.
+pub struct Running {
+    child: Child,
+}
+
+impl Running {
+    pub fn spawn(command: &mut Command) -> Self {
+        Running { child: command.spawn().unwrap() }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A daemon that said it listens.
+pub struct Daemon {
+    process: Running,
+    /// What the daemon says, kept open so that what it says next has somewhere
+    /// to go.
+    stderr: BufReader<ChildStderr>,
+}
+
+impl Daemon {
+    pub fn pid(&self) -> u32 {
+        self.process.pid()
+    }
+}
+
+/// Starts a daemon, and waits for it to say that it listens. One that ends
+/// first has refused to run, and gives how it ended and all it said.
+pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
+    let mut process = Running::spawn(vars.command(LUNETAD).stderr(Stdio::piped()));
+    let stderr = BufReader::new(process.child.stderr.take().unwrap());
+    let mut daemon = Daemon { process, stderr };
+    let mut said = String::new();
+    loop {
+        let mut line = String::new();
+        if daemon.stderr.read_line(&mut line).unwrap() == 0 {
+            return Err((daemon.process.child.wait().unwrap(), said));
+        }
+        if line.starts_with("lunetad: listening on ") {
+            return Ok(daemon);
+        }
+        said.push_str(&line);
+    }
+}
+
+/// What `luneta info` says, run with `vars`.
+pub fn info(vars: Vars) -> String {
+    let output = vars.command(LUNETA).arg("info").output().unwrap();
+    let said = String::from_utf8(output.stdout).unwrap();
+    let why = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "luneta info failed: {why}");
+    said
+}
+
+/// What `check` finds, once it finds it: the daemon reads what changes in a
+/// thread of its own, and a test sees the change some moments after making it.
+pub fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(found) = check() {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "never came to be: {what}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}

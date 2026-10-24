@@ -28,8 +28,9 @@ permissions:
 
 jobs:
   build:
-    # The flake sets `system = "x86_64-linux"`, so the runner must be one. An arm64
-    # or macos runner fails in the flake, not in the build.
+    # The asset is wasm, the same bytes whichever system builds it, so one runner
+    # builds it. The daemon, which is built for each system, has a job of its own
+    # below.
     runs-on: ubuntu-latest
 
     outputs:
@@ -102,6 +103,32 @@ jobs:
           name: luneta-wasm
           path: luneta.wasm
           if-no-files-found: error
+
+  # The daemon on each system it runs on: x86_64 and arm64 Linux, and an Apple
+  # Silicon Mac. Through the flake, for the reason `build` goes through it, and
+  # the derivation runs the daemon's tests in its sandbox, so each runner tests
+  # the process backend of its own system: `/proc` on Linux, sysinfo on macOS.
+  #
+  # Native runners, and no cross build: nix does not build for darwin from
+  # Linux, and the arm64 Linux runner is free on a public repository.
+  daemon:
+    strategy:
+      # A failure on one system says nothing of the others; let each finish.
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build and test the daemon
+        run: nix build -L .#lunetad
 
   release:
     needs: build
