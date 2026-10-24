@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
+use std::time::SystemTime;
 
 use tokio::sync::oneshot;
 
@@ -203,9 +204,12 @@ impl Known {
     /// order of its own, so that a host that has not changed is built the
     /// same.
     fn built(&self) -> api::Host {
-        let mut sessions: Vec<api::Session> = self
-            .sessions
-            .running()
+        // By name, and those that share one, as sessions of zellij versions
+        // with contracts of their own can, by when each started.
+        let mut running: Vec<(&str, SystemTime)> = self.sessions.running().collect();
+        running.sort_unstable();
+        let sessions = running
+            .into_iter()
             .map(|(name, started)| api::Session {
                 name: name.to_owned(),
                 started_at: Some(started.into()),
@@ -214,7 +218,6 @@ impl Known {
                 }),
             })
             .collect();
-        sessions.sort_by(|a, b| a.name.cmp(&b.name));
         let mut agents = self.agents();
         agents.sort_by_key(|agent| agent.pid);
         api::Host {

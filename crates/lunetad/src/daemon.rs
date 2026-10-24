@@ -34,8 +34,9 @@ use crate::{claude, client, git, panes, watch, zellij};
 /// session's panes as often, as it says nothing as they change either.
 const SWEEP: Duration = Duration::from_secs(2);
 
-/// How often git is asked again about each work tree. `git status` reads the
-/// whole tree, which takes a large one a while.
+/// How long git rests from a work tree, at the least, before it is asked
+/// about it again. `git status` reads the whole tree, which takes a large one
+/// a while, and git rests from one for as long as it took over it.
 const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 
 /// How long `Watch` waits for the host to change before it answers with the

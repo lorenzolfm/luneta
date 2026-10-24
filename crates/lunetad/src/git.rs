@@ -2,8 +2,9 @@
 //! says it.
 //!
 //! git tells no one as a work tree changes, so each directory is asked about
-//! again once a sweep has passed since it last was, one directory at a time,
-//! and one that git has said nothing of yet first.
+//! again once git has rested from it for a sweep, or for as long as it took
+//! over it if that is longer, one directory at a time, and one that git has
+//! said nothing of yet first.
 
 use std::collections::HashMap;
 use std::io;
@@ -18,8 +19,9 @@ use crate::program::{self, Ran};
 use crate::watch::Troubles;
 
 /// How long git has to say how a work tree stands. A large one takes it a
-/// while; one that takes longer than this is stuck.
-const LIMIT: Duration = Duration::from_secs(10);
+/// while, and one across the network longer; one that takes more than a
+/// minute is stuck.
+const LIMIT: Duration = Duration::from_mins(1);
 
 const DETACHED: &str = "(detached)";
 
@@ -135,9 +137,9 @@ impl Changes {
 }
 
 /// What git says of the work tree in `dir`: how it stands, or none at all, as
-/// in a directory in no repository, where git fails. Why git said nothing it
-/// can be asked again for, `Err` says.
-fn status(dir: &str) -> Result<WorkTree, String> {
+/// in a directory in no repository, where git fails. `None` when git did not
+/// answer in time.
+fn status(dir: &str) -> io::Result<Option<WorkTree>> {
     // `--no-optional-locks` keeps git from taking the index lock to refresh
     // the index, which a `git` of your own would trip over. `core.fsmonitor`
     // off keeps a repository's own config from naming a command for every
@@ -152,31 +154,43 @@ fn status(dir: &str) -> Result<WorkTree, String> {
     for repository in REPOSITORY_VARS {
         git.env_remove(repository);
     }
-    match program::run(&mut git, LIMIT) {
-        Ok(Ran::Ended { status, stdout, .. }) if status.success() => {
-            Ok(WorkTree::parse(&String::from_utf8_lossy(&stdout)))
+    match program::run(&mut git, LIMIT)? {
+        Ran::Ended { status, stdout, .. } if status.success() => {
+            Ok(Some(WorkTree::parse(&String::from_utf8_lossy(&stdout))))
         },
         // git ran there and failed: the directory is in no repository, or in
         // one git cannot read.
-        Ok(Ran::Ended { .. }) => Ok(WorkTree::default()),
-        Ok(Ran::Stuck) => Err(format!("git status in {dir} did not answer in time")),
-        Err(error) => Err(format!("git could not be started: {error}")),
+        Ran::Ended { .. } => Ok(Some(WorkTree::default())),
+        Ran::Stuck => Ok(None),
     }
 }
 
+/// What is said of a work tree that git did not answer for in time.
+fn stuck(dir: &str) -> String {
+    format!("git status in {dir} did not answer in time")
+}
+
+/// Where git stands with a directory it has been asked about.
+struct Asked {
+    /// When it is to be asked about again.
+    next: Instant,
+    /// Whether git did not answer for it in time the last time.
+    stuck: bool,
+}
+
 /// Asks git how the work tree stands in each directory a pane works in, in a
-/// thread of its own, and tells the core: about each once a `sweep` has
-/// passed since it was last asked about, and about a directory it has said
-/// nothing of yet as soon as it is `woken`, before those left. What git said
-/// of a directory it could not answer for stands until it can. The thread
-/// ends once the core has.
+/// thread of its own, and tells the core: about each once git has rested from
+/// it for a `sweep`, or for as long as it took over it if that is longer, and
+/// about a directory it has said nothing of yet as soon as it is `woken`,
+/// before those left. What git said of a directory it could not answer for
+/// stands until it can. The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     woken: Receiver<()>,
     sweep: Duration,
 ) -> io::Result<()> {
     thread::Builder::new().name("git".to_owned()).spawn(move || {
-        let mut asked: HashMap<String, Instant> = HashMap::new();
+        let mut asked: HashMap<String, Asked> = HashMap::new();
         let mut troubles = Troubles::default();
         loop {
             let Some(dirs) = core::ask(&core, core::Command::Dirs) else {
@@ -184,17 +198,26 @@ pub fn follow(
             };
             asked.retain(|dir, _| dirs.contains(dir));
             let now = Instant::now();
-            let due = |dir: &&String| asked.get(*dir).is_none_or(|at| now - *at >= sweep);
+            let due = |dir: &&String| asked.get(*dir).is_none_or(|was| was.next <= now);
             let mut due: Vec<String> = dirs.iter().filter(due).cloned().collect();
-            // Never asked about before all others, then the longest ago.
-            due.sort_by_key(|dir| asked.get(dir).copied());
+            // Never asked about before all others, then the one due longest.
+            due.sort_by_key(|dir| asked.get(dir).map(|was| was.next));
             let mut cut_short = false;
             for dir in due {
-                asked.insert(dir.clone(), Instant::now());
-                if let Ok(tree) = status(&dir).inspect_err(|why| troubles.say(why.clone()))
-                    && core.send(core::Command::WorkTree { dir, tree }).is_err()
-                {
-                    return;
+                let started = Instant::now();
+                let said = status(&dir);
+                // So that a slow work tree takes up half of git's time at the
+                // most, and the rest goes to the others.
+                let next = Instant::now() + started.elapsed().max(sweep);
+                asked.insert(dir.clone(), Asked { next, stuck: matches!(said, Ok(None)) });
+                match said {
+                    Ok(Some(tree)) => {
+                        if core.send(core::Command::WorkTree { dir, tree }).is_err() {
+                            return;
+                        }
+                    },
+                    Ok(None) => troubles.say(stuck(&dir)),
+                    Err(error) => troubles.say(format!("git could not be started: {error}")),
                 }
                 if woken.try_recv().is_ok() {
                     cut_short = true;
@@ -204,9 +227,14 @@ pub fn follow(
             if cut_short {
                 continue;
             }
+            // One that git rests from has not gone right since it was stuck,
+            // and is not said to be stuck again.
+            for (dir, _) in asked.iter().filter(|(_, was)| was.stuck) {
+                troubles.say(stuck(dir));
+            }
             troubles.done();
             let now = Instant::now();
-            let next = asked.values().map(|at| (*at + sweep).saturating_duration_since(now));
+            let next = asked.values().map(|was| was.next.saturating_duration_since(now));
             match woken.recv_timeout(next.min().unwrap_or(sweep)) {
                 Ok(()) | Err(RecvTimeoutError::Timeout) => {},
                 Err(RecvTimeoutError::Disconnected) => return,

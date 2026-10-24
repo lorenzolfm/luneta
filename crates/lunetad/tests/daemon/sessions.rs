@@ -1,6 +1,7 @@
 //! The host as `Watch` gives it: zellij's sessions and their panes, how the
 //! work trees the panes work in stand, and when it answers.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -267,14 +268,33 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
 /// `luneta watch` writes out the host at once. With the version it last
 /// wrote, it waits: it answers as soon as the host changes, and with the
 /// host as it was once it has waited four seconds, so that a client that
-/// asks again and again asks no more often than that. The version of
-/// another daemon's, as one that ran before this one, is answered at once.
+/// asks again and again asks no more often than that. Sessions that share a
+/// name, as those of zellij versions with contracts of their own can, leave
+/// the host as it was from one look to the next. The version of another
+/// daemon's, as one that ran before this one, is answered at once.
 #[test]
 fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
+    // Each starts in a tick of its own of the clock the kernel dates files
+    // by, as sessions do: three that started as one would be the same.
+    let _work: Vec<UnixListener> = (1..=3)
+        .map(|version| {
+            thread::sleep(Duration::from_millis(20));
+            let contract = host.sockets.path().join(format!("contract_version_{version}"));
+            fs::create_dir_all(&contract).unwrap();
+            UnixListener::bind(contract.join("work")).unwrap()
+        })
+        .collect();
     let daemon = start(host.vars()).unwrap();
 
     let (first, took) = host.watch(None);
+    let started: BTreeSet<(i64, i32)> = first
+        .sessions
+        .iter()
+        .filter(|session| session.name == "work")
+        .map(|session| session.started_at.map(|at| (at.seconds, at.nanos)).unwrap())
+        .collect();
+    assert_eq!(started.len(), 3, "{started:?}");
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
     assert!(took < Duration::from_secs(2), "{took:?}");
