@@ -158,6 +158,43 @@ fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them(
     assert_eq!(panes.panes[0], pane(3, (0, "Tab #1"), Some("/home/you/work")));
 }
 
+/// What zellij lists that does not read, the daemon says it cannot, and what
+/// zellij listed before stands: a pane that leaves out whether it is a
+/// plugin's, which a default would read as a terminal, and a pane listed
+/// twice. The test waits out two sweeps.
+#[test]
+fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
+    let host = Host::new();
+    let shell = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
+    host.zellij.list("work", &json!([shell]));
+    host.zellij.list("play", &json!([shell]));
+    let (_work, _play) = (host.serve("work"), host.serve("play"));
+    let mut daemon = start(host.vars()).unwrap();
+    let before = [pane(1, (0, "Tab #1"), Some("/home/you"))];
+    for name in ["work", "play"] {
+        eventually("zellij lists the panes of both", || {
+            let panes = session(&host.host(), name)?.panes.clone()?;
+            (panes.panes == before).then_some(())
+        });
+    }
+
+    let mut sidebar = listed(2, "luneta", (0, "Tab #1"), None);
+    sidebar.as_object_mut().unwrap().remove("is_plugin");
+    host.zellij.list("work", &json!([shell, sidebar]));
+    host.zellij.list("play", &json!([shell, shell]));
+    let said = daemon.said_after(Duration::from_secs(5)).to_vec();
+    let unread = |name: &str, why: &str| {
+        let about = format!("the panes of {name}: zellij listed what does not read: {why}");
+        said.iter().any(|line| line.contains(&about))
+    };
+    assert!(unread("work", "missing field `is_plugin`"), "{said:?}");
+    assert!(unread("play", "pane 1 comes twice"), "{said:?}");
+    let now = host.host();
+    for name in ["work", "play"] {
+        assert_eq!(session(&now, name).unwrap().panes.as_ref().unwrap().panes, before, "{name}");
+    }
+}
+
 /// git as the test runs it: on the repository at `dir` and no other, as one
 /// that a git hook ran the tests from names, with no config but its own, and
 /// as no one in particular.

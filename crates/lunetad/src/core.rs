@@ -100,7 +100,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         trees: BTreeMap::new(),
         host: api::Host::default(),
         seq: 0,
-        waiting: Vec::new(),
+        waiting: Vec::with_capacity(WAITING_MAX),
     };
     known.host = known.built();
     for command in commands {
@@ -112,32 +112,16 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 known.found = now;
             },
             Command::Sockets(now) => {
-                let before: BTreeSet<String> = known.running().map(str::to_owned).collect();
-                let renamed = known.sessions.saw(now);
-                // A rename keeps the session's panes, which zellij is asked
-                // for under its new name from now on.
-                let moved: Vec<(String, Vec<Pane>)> = renamed
-                    .into_iter()
-                    .filter_map(|(was, now)| Some((now, known.panes.remove(&was)?)))
-                    .collect();
-                known.panes.extend(moved);
-                let running: BTreeSet<String> = known.running().map(str::to_owned).collect();
-                known.panes.retain(|session, _| running.contains(session));
-                if !running.is_subset(&before) {
+                if known.saw(now) {
                     wake(&wakes.panes);
                 }
             },
-            Command::Panes { session, mut panes } => {
+            Command::Panes { session, panes } => {
                 // One that went, or took another name, since zellij was asked.
                 if !known.running().any(|name| name == session) {
                     continue;
                 }
-                if let Some(listed) = known.panes.get(&session) {
-                    panes::keep(&mut panes, listed);
-                }
-                let before = known.dirs();
-                known.panes.insert(session, panes);
-                if !known.dirs().is_subset(&before) {
+                if known.listed(session, panes) {
                     wake(&wakes.git);
                 }
             },
@@ -185,6 +169,39 @@ impl Known {
         self.sessions.running().map(|(name, _)| name)
     }
 
+    /// Takes in the sessions that run now. A rename keeps the session's panes,
+    /// which zellij is asked for under its new name from now on, and a session
+    /// that ended takes its panes with it. True when a session turned up.
+    fn saw(&mut self, sockets: Vec<Socket>) -> bool {
+        let before: BTreeSet<String> = self.running().map(str::to_owned).collect();
+        let renamed = self.sessions.saw(sockets);
+        let moved: Vec<(String, Vec<Pane>)> = renamed
+            .into_iter()
+            .filter_map(|(was, now)| Some((now, self.panes.remove(&was)?)))
+            .collect();
+        self.panes.extend(moved);
+        let running: BTreeSet<String> = self.running().map(str::to_owned).collect();
+        self.panes.retain(|session, _| running.contains(session));
+        !running.is_subset(&before)
+    }
+
+    /// Takes in what zellij listed of the panes of `session`, which runs, and
+    /// keeps what it said before where it says nothing now. True when a pane
+    /// works in a directory that none did.
+    fn listed(&mut self, session: String, mut panes: Vec<Pane>) -> bool {
+        assert!(self.running().any(|name| name == session));
+        // `keep` finds the pane each was by its id: zellij gives each terminal
+        // of a session one of its own, which `panes::parse` checks.
+        let ids: HashSet<u32> = panes.iter().map(|pane| pane.id).collect();
+        assert_eq!(ids.len(), panes.len(), "a pane's id comes twice");
+        if let Some(listed) = self.panes.get(&session) {
+            panes::keep(&mut panes, listed);
+        }
+        let before = self.dirs();
+        self.panes.insert(session, panes);
+        !self.dirs().is_subset(&before)
+    }
+
     /// The directories the panes work in.
     fn dirs(&self) -> BTreeSet<String> {
         self.panes.values().flatten().filter_map(|pane| pane.cwd.clone()).collect()
@@ -204,6 +221,11 @@ impl Known {
     /// order of its own, so that a host that has not changed is built the
     /// same.
     fn built(&self) -> api::Host {
+        // The panes of a session that does not run would be left out without
+        // a word: `saw` lets them go as it ends, and `run` takes in none for it.
+        for session in self.panes.keys() {
+            assert!(self.running().any(|name| name == session));
+        }
         // By name, and those that share one, as sessions of zellij versions
         // with contracts of their own can, by when each started.
         let mut running: Vec<(&str, SystemTime)> = self.sessions.running().collect();
@@ -262,11 +284,11 @@ impl Known {
             return;
         }
         self.waiting.retain(|waiting| !waiting.is_closed());
-        if self.waiting.len() == WAITING_MAX {
-            let _ = answer.send(None);
-            return;
-        }
-        self.waiting.push(answer);
         assert!(self.waiting.len() <= WAITING_MAX);
+        if self.waiting.len() < WAITING_MAX {
+            self.waiting.push(answer);
+        } else {
+            let _ = answer.send(None);
+        }
     }
 }

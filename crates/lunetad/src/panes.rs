@@ -50,17 +50,16 @@ impl Pane {
     }
 }
 
-/// A pane as zellij 0.45 lists it, as much of it as the daemon reads.
+/// A pane as zellij 0.45 lists it, as much of it as the daemon reads. zellij
+/// leaves out where a pane works and what runs in it when it does not know,
+/// and writes the rest every time: a listing without one does not read, where
+/// a default would have a plugin's pane read as a terminal in the first tab.
 #[derive(Deserialize)]
 struct Wire {
     id: u32,
-    #[serde(default)]
     is_plugin: bool,
-    #[serde(default)]
     is_suppressed: bool,
-    #[serde(default)]
     tab_position: u32,
-    #[serde(default)]
     tab_name: String,
     #[serde(default)]
     pane_cwd: Option<String>,
@@ -68,13 +67,15 @@ struct Wire {
     pane_command: Option<String>,
 }
 
-/// The terminals in what zellij listed. A plugin's pane is no terminal, and a
-/// suppressed one is off the screen, in the place another took.
-fn parse(said: &[u8]) -> Result<Vec<Pane>, serde_json::Error> {
-    let wire: Vec<Wire> = serde_json::from_slice(said)?;
+/// The terminals in what zellij listed, or why it does not read. A plugin's
+/// pane is no terminal, and a suppressed one is off the screen, in the place
+/// another took. zellij gives each terminal of a session an id of its own.
+fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
+    let wire: Vec<Wire> = serde_json::from_slice(said).map_err(|error| error.to_string())?;
     let said = |value: Option<String>| value.filter(|value| !value.is_empty());
-    let panes = wire.into_iter().filter(|pane| !pane.is_plugin && !pane.is_suppressed);
-    Ok(panes
+    let panes: Vec<Pane> = wire
+        .into_iter()
+        .filter(|pane| !pane.is_plugin && !pane.is_suppressed)
         .map(|pane| Pane {
             id: pane.id,
             tab: pane.tab_position,
@@ -82,7 +83,12 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, serde_json::Error> {
             cwd: said(pane.pane_cwd),
             command: said(pane.pane_command),
         })
-        .collect())
+        .collect();
+    let mut ids = HashSet::new();
+    if let Some(twice) = panes.iter().find(|pane| !ids.insert(pane.id)) {
+        return Err(format!("pane {} comes twice", twice.id));
+    }
+    Ok(panes)
 }
 
 /// Keeps in `panes` where each worked and what ran in it as `listed` said,
@@ -104,9 +110,9 @@ fn list(session: &str) -> Result<Vec<Pane>, String> {
     let mut zellij = Command::new("zellij");
     zellij.args(["--session", session, "action", "list-panes", "--all", "--json"]);
     let ran = program::run(&mut zellij, LIMIT)
-        .map_err(|error| format!("zellij could not be started: {error}"))?;
+        .map_err(|error| format!("zellij could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("zellij: {why}"))?;
-    parse(&said).map_err(|error| format!("zellij listed what does not read: {error}"))
+    parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
 /// Asks zellij for the panes of each session that runs, in a thread of its
@@ -122,13 +128,12 @@ pub fn follow(
     thread::Builder::new().name("panes".to_owned()).spawn(move || {
         let mut listed: HashSet<String> = HashSet::new();
         let mut troubles = Troubles::default();
-        loop {
+        'sweep: loop {
             let Some(mut sessions) = core::ask(&core, core::Command::Sessions) else {
                 return;
             };
             listed.retain(|session| sessions.contains(session));
             sessions.sort_by_key(|session| listed.contains(session));
-            let mut cut_short = false;
             for session in sessions {
                 // What zellij listed last stands until it lists them again.
                 if let Ok(panes) = list(&session)
@@ -140,12 +145,8 @@ pub fn follow(
                     }
                 }
                 if woken.try_recv().is_ok() {
-                    cut_short = true;
-                    break;
+                    continue 'sweep;
                 }
-            }
-            if cut_short {
-                continue;
             }
             troubles.done();
             match woken.recv_timeout(sweep) {
@@ -156,4 +157,3 @@ pub fn follow(
     })?;
     Ok(())
 }
-
