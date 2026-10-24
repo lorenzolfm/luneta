@@ -11,26 +11,38 @@ use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::time::{Duration, SystemTime};
 
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 use crate::api::daemon_server::{Daemon, DaemonServer};
-use crate::api::{InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse};
-use crate::core::{self, Command};
+use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse};
+use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, watch, zellij};
+use crate::{claude, client, git, panes, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
-/// that crashed, which leaves its file as it was.
+/// that crashed, which leaves its file as it was. zellij is asked for each
+/// session's panes as often, as it says nothing as they change either.
 const SWEEP: Duration = Duration::from_secs(2);
+
+/// How often git is asked again about each work tree. `git status` reads the
+/// whole tree, which takes a large one a while.
+const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
+
+/// How long `Watch` waits for the host to change before it answers with the
+/// host as it was: within the time a client waits for an answer.
+const WATCH: Duration = Duration::from_secs(4);
+
+const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 
 /// The most questions a client has open at once on one connection, which
 /// HTTP/2 tells it: `luneta` asks one.
@@ -95,8 +107,14 @@ fn own(folder: &Path) -> Result<(), Refusal> {
 /// what runs, and answers with all of it.
 pub async fn serve(claim: Claim) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
-    let core = core::start()?;
+    // One wake-up is all a thread that asks on a sweep needs, however many
+    // changes made it.
+    let (wake_panes, panes_woken) = mpsc::sync_channel(1);
+    let (wake_git, git_woken) = mpsc::sync_channel(1);
+    let core = core::start(Wakes { panes: wake_panes, git: wake_git })?;
     follow(&core)?;
+    panes::follow(core.clone(), panes_woken, SWEEP)?;
+    git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
     let host = Host { started: SystemTime::now(), core };
     // Bounds of the daemon's own, rather than tonic's, which are none.
@@ -156,15 +174,46 @@ impl Daemon for Host {
         &self,
         _: Request<ListAgentsRequest>,
     ) -> Result<Response<ListAgentsResponse>, Status> {
+        self.ask(Command::List).await.map(Response::new)
+    }
+
+    async fn watch(
+        &self,
+        request: Request<api::WatchRequest>,
+    ) -> Result<Response<api::Host>, Status> {
+        let after = request.into_inner().after;
+        let watched = match timeout(WATCH, self.watched(after)).await {
+            Ok(watched) => watched,
+            // It waited out its time, with the host as it was.
+            Err(_) => self.watched(None).await,
+        };
+        watched.map(Response::new)
+    }
+}
+
+impl Host {
+    /// Asks the core, and waits for its answer. A core with too many
+    /// questions open has the client told that the daemon is busy, rather
+    /// than wait.
+    async fn ask<T>(
+        &self,
+        question: impl FnOnce(oneshot::Sender<T>) -> Command,
+    ) -> Result<T, Status> {
         let (answer, answered) = oneshot::channel();
         let stopped = || Status::unavailable("the daemon's core has stopped");
-        match self.core.try_send(Command::List(answer)) {
+        match self.core.try_send(question(answer)) {
             Ok(()) => {},
             Err(TrySendError::Full(_)) => {
                 return Err(Status::resource_exhausted("the daemon has too many questions open"));
             },
             Err(TrySendError::Disconnected(_)) => return Err(stopped()),
         }
-        Ok(Response::new(answered.await.map_err(|_| stopped())?))
+        answered.await.map_err(|_| stopped())
+    }
+
+    /// The host once it is no longer as `after` saw it.
+    async fn watched(&self, after: Option<api::Version>) -> Result<api::Host, Status> {
+        let host = self.ask(|answer| Command::Watch { after, answer }).await?;
+        host.ok_or_else(|| Status::resource_exhausted("too many clients wait for the host"))
     }
 }

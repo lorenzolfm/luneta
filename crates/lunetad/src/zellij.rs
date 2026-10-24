@@ -143,10 +143,20 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    /// Takes in the sessions that run now. A session that is gone takes the
-    /// names it had with it.
-    pub fn saw(&mut self, sockets: Vec<Socket>) {
-        self.names = sockets.iter().map(|socket| (socket.id, socket.name.clone())).collect();
+    /// Takes in the sessions that run now, and gives each rename since the
+    /// last: the name a session had then, and the one it has now. A session
+    /// that is gone takes the names it had with it.
+    pub fn saw(&mut self, sockets: Vec<Socket>) -> Vec<(String, String)> {
+        let names: HashMap<Id, String> =
+            sockets.iter().map(|socket| (socket.id, socket.name.clone())).collect();
+        let renamed = names
+            .iter()
+            .filter_map(|(id, now)| {
+                let was = self.names.get(id)?;
+                (was != now).then(|| (was.clone(), now.clone()))
+            })
+            .collect();
+        self.names = names;
         for socket in sockets {
             let held = self.held.entry(socket.name).or_default();
             if !held.contains(&socket.id) {
@@ -168,6 +178,13 @@ impl Sessions {
         for (id, name) in &self.names {
             assert!(self.held.get(name).is_some_and(|held| held.contains(id)));
         }
+        renamed
+    }
+
+    /// The sessions that run, by the name each has now, and when each
+    /// started: when its server made its socket.
+    pub fn running(&self) -> impl Iterator<Item = (&str, SystemTime)> {
+        self.names.iter().map(|(id, name)| (name.as_str(), id.made))
     }
 
     /// The name that the session once called `named` has now, for an agent

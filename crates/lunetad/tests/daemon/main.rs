@@ -10,3 +10,5 @@ mod agents;
 mod folder;
 #[cfg(test)]
 mod host;
+#[cfg(test)]
+mod sessions;
