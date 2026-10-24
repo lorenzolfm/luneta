@@ -182,8 +182,10 @@ struct State {
     dirs: DirSet,
     agents: AgentSet,
     agents_command: Option<String>,
-    /// The panes as zellij last reported them, with only this client's focus
-    /// marked in the tab it is on.
+    /// The panes as zellij last reported them. In the tab this client is on,
+    /// the layer that shows marks only this client's focus, which zellij says;
+    /// the other layer keeps every client's mark, and so does the tab when
+    /// zellij cannot say.
     panes: Option<PaneManifest>,
     live_names: Vec<String>,
     places: Places,
@@ -1235,6 +1237,7 @@ impl State {
         self.panes = Some(current.panes.clone());
         self.tabs.clone_from(&current.tabs);
         self.active_tab = current.tabs.iter().find(|t| t.active).map(|t| t.position);
+        self.keep_your_focus();
     }
 
     fn own_pane(&self) -> Option<&PaneInfo> {
