@@ -182,6 +182,10 @@ struct State {
     dirs: DirSet,
     agents: AgentSet,
     agents_command: Option<String>,
+    /// The panes as zellij last reported them. In the tab this client is on,
+    /// the layer that shows marks only this client's focus, which zellij says;
+    /// the other layer keeps every client's mark, and so does the tab when
+    /// zellij cannot say.
     panes: Option<PaneManifest>,
     live_names: Vec<String>,
     places: Places,
@@ -534,6 +538,7 @@ impl ZellijPlugin for State {
                     tree.menu = tree.menu.take().and_then(|menu| menu.panes(&manifest));
                 }
                 self.panes = Some(manifest);
+                self.keep_your_focus();
                 if let Some(pane) = self.own_pane() {
                     self.retitle(pane);
                 }
@@ -542,6 +547,7 @@ impl ZellijPlugin for State {
             Event::TabUpdate(tabs) => {
                 self.active_tab = tabs.iter().find(|t| t.active).map(|t| t.position);
                 self.tabs = tabs;
+                self.keep_your_focus();
                 self.pass_over();
                 self.settle()
             },
@@ -1231,6 +1237,7 @@ impl State {
         self.panes = Some(current.panes.clone());
         self.tabs.clone_from(&current.tabs);
         self.active_tab = current.tabs.iter().find(|t| t.active).map(|t| t.position);
+        self.keep_your_focus();
     }
 
     fn own_pane(&self) -> Option<&PaneInfo> {
@@ -1258,6 +1265,26 @@ impl State {
             .iter()
             .find(|(_, panes)| panes.iter().any(|p| p.is_plugin && p.id == self.plugin_id))
             .map(|(tab, _)| *tab)
+    }
+
+    /// zellij marks focused, in each tab, the pane each client was on there
+    /// last, and keeps the mark of a client that has left the session. One
+    /// that left from the sidebar has every sidebar the session gives a client
+    /// after it take itself for the one with the focus. Where the tab you are
+    /// on marks more than one, zellij says which is yours.
+    fn keep_your_focus(&mut self) {
+        let Some(tab) = self.active_tab else {
+            return;
+        };
+        let Some(panes) = self.panes.as_mut().and_then(|m| m.panes.get_mut(&tab)) else {
+            return;
+        };
+        if !shared(panes) {
+            return;
+        }
+        if let Ok((_, yours)) = get_focused_pane_info() {
+            keep_focus(panes, yours);
+        }
     }
 
     fn sidebar_focused(&self) -> bool {
@@ -2126,6 +2153,30 @@ fn focus_at(tab: &TabInfo, panes: &[PaneInfo], plugin_id: u32) -> Option<At> {
     Some(At::Pane { tab: id, beside: beside.then_some(pane_id(pane)) })
 }
 
+/// Whether a tab marks more than one of its tiled panes focused, or more than
+/// one of its floating panes: one for each client that was on it, there or
+/// still.
+fn shared(panes: &[PaneInfo]) -> bool {
+    let marked = |floating: bool| {
+        let marks = panes.iter().filter(|p| p.is_focused && !p.is_suppressed);
+        marks.filter(|p| p.is_floating == floating).count()
+    };
+    marked(false) > 1 || marked(true) > 1
+}
+
+/// Takes the focus off the panes of a tab that share a layer with `yours`, the
+/// pane zellij says this client is on, other than it: it was other clients'.
+/// A tab without it keeps every mark, and so does the other layer: zellij
+/// says only the focus of the layer that shows.
+fn keep_focus(panes: &mut [PaneInfo], yours: PaneId) {
+    let Some(floating) = panes.iter().find(|p| pane_id(p) == yours).map(|p| p.is_floating) else {
+        return;
+    };
+    for pane in panes.iter_mut().filter(|p| p.is_floating == floating && pane_id(p) != yours) {
+        pane.is_focused = false;
+    }
+}
+
 /// The panes of a tab that stand in its columns: neither floating nor hidden.
 fn tiled(panes: &[PaneInfo]) -> impl Iterator<Item = &PaneInfo> {
     panes.iter().filter(|p| !p.is_floating && !p.is_suppressed)
@@ -2253,6 +2304,34 @@ mod tests {
             let handed = to_the_picker.then(|| (20, four.clone()));
             assert_eq!(state.handing(), handed, "to the picker: {to_the_picker}");
             assert_eq!(state.handing(), None, "to the picker: {to_the_picker}");
+        }
+    }
+
+    /// zellij marks focused, in each tab, the pane each client was on there
+    /// last, a client that left too, and says which is yours. Another's mark
+    /// on the sidebar leaves it without the focus: it lights the pane you are
+    /// in, and its cursor follows you there from the row a click took you
+    /// away by. Another's mark on a terminal is not the pane you are in.
+    #[test]
+    fn a_focus_another_client_left_in_the_tab_is_not_yours() {
+        let four = Place::Pane("b".to_owned(), 4);
+        for (yours, focused, here, cursor) in [
+            (PaneId::Terminal(1), false, Some(1), Place::Pane("a".to_owned(), 1)),
+            (PaneId::Plugin(9), true, None, four.clone()),
+        ] {
+            let mut state = focused_sidebar();
+            if let Role::Sidebar(tree) = &mut state.role {
+                assert!(tree.rows.select(3));
+            }
+            let tab = state.panes.as_mut().and_then(|m| m.panes.get_mut(&0)).expect("tab 0");
+            tab[1].is_focused = true;
+            assert!(shared(tab), "{yours:?}");
+            keep_focus(tab, yours);
+            state.rebuild_tree();
+            assert_eq!(state.sidebar_focused(), focused, "{yours:?}");
+            assert_eq!(state.here, here, "{yours:?}");
+            let Role::Sidebar(tree) = &state.role else { panic!("not a sidebar") };
+            assert_eq!(tree.rows.selected_row().map(Node::place), Some(cursor), "{yours:?}");
         }
     }
 
