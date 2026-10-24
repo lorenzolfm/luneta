@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -201,9 +202,11 @@ fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
 /// share one, as those of zellij versions with contracts of their own can, it
 /// answers for one: the daemon cannot tell which, and gives neither the panes.
 /// A session renamed keeps its panes, whatever zellij says under its new
-/// name. The test waits for zellij to be asked about the session that has a
-/// name of its own twice: one not listed yet is asked about first, so by then
-/// the daemon has asked about every session it means to.
+/// name, until another comes to share it: then the panes it had would only
+/// go stale, as zellij is no longer asked. The test waits for zellij to be
+/// asked about the session that has a name of its own twice: one not listed
+/// yet is asked about first, so by then the daemon has asked about every
+/// session it means to.
 #[test]
 fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
     let host = Host::new();
@@ -228,6 +231,13 @@ fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
     fs::rename(host.contract().join("play"), host.contract().join("game")).unwrap();
     let game = eventually("play is called game", || session(&host.host(), "game")?.panes.clone());
     assert_eq!(game.panes, [pane(1, (0, "Tab #1"), Some("/home/you"))]);
+
+    let _game = UnixListener::bind(newer.join("game")).unwrap();
+    eventually("neither session called game has panes", || {
+        let now = host.host();
+        let game: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "game").collect();
+        (game.len() == 2 && game.iter().all(|session| session.panes.is_none())).then_some(())
+    });
 }
 
 /// git as the test runs it: on the repository at `dir` and no other, as one
@@ -258,11 +268,13 @@ fn commit(dir: &Path, file: &str, text: &str) {
 }
 
 /// A work tree with a path of each kind of change, a stash, and a commit its
-/// upstream does not have yet, in the middle of a merge that went wrong.
+/// upstream does not have yet, in the middle of a merge that went wrong. One
+/// more path is modified by its type: a file that is a link now.
 fn changed_every_way(dir: &Path, origin: &Path) {
     assert!(git(origin, &["init", "-q", "--bare", "-b", "main"]));
     assert!(git(dir, &["init", "-q", "-b", "main"]));
-    for file in ["stashed", "modified", "staged", "deleted", "renamed", "conflicted"] {
+    let files = ["stashed", "modified", "retyped", "staged", "deleted", "renamed", "conflicted"];
+    for file in files {
         commit(dir, file, "start\n");
     }
     assert!(git(dir, &["remote", "add", "origin", &origin.display().to_string()]));
@@ -275,6 +287,8 @@ fn changed_every_way(dir: &Path, origin: &Path) {
     commit(dir, "conflicted", "ours\n");
     assert!(!git(dir, &["merge", "-q", "other"]), "the merge should go wrong");
     fs::write(dir.join("modified"), "changed\n").unwrap();
+    fs::remove_file(dir.join("retyped")).unwrap();
+    symlink("modified", dir.join("retyped")).unwrap();
     fs::write(dir.join("staged"), "changed\n").unwrap();
     assert!(git(dir, &["add", "staged"]));
     assert!(git(dir, &["rm", "-q", "deleted"]));
@@ -314,7 +328,7 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     });
     let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
     let every =
-        Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 1, staged: 1, untracked: 1 };
+        Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
     let main = Branch { name: "main".to_owned(), upstream: Some(Upstream { ahead: 1, behind: 0 }) };
     let checkout = |head, changes, stashes| {
         Some(Stands::Checkout(Checkout { head: Some(head), changes: Some(changes), stashes }))

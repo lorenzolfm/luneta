@@ -197,8 +197,9 @@ impl Changes {
     fn add_change(&mut self, (index, tree): (char, char)) {
         self.staged += u32::from(matches!(index, 'M' | 'A' | 'T'));
         self.deleted += u32::from(index == 'D') + u32::from(tree == 'D');
-        // `A` in the work tree is a path added with `--intent-to-add`.
-        self.modified += u32::from(matches!(tree, 'M' | 'A'));
+        // `A` in the work tree is a path added with `--intent-to-add`, and `T`
+        // one whose type changed, as a file that is a link now.
+        self.modified += u32::from(matches!(tree, 'M' | 'A' | 'T'));
     }
 }
 
@@ -211,9 +212,13 @@ fn status(dir: &str) -> Result<WorkTree, String> {
     // off keeps a repository's own config from naming a command for every
     // status to run, since git is asked about any directory a pane works in,
     // trusted or not; a filter driver it names can still run on a changed
-    // file, as with any `git status` there.
+    // file, as with any `git status` there. `safe.bareRepository` explicit
+    // keeps git from taking a directory for a bare repository on its own, as
+    // one committed into a clone can be, which would have that config read
+    // where a clone hands over none. Its repository's config cannot set it.
     let mut git = Command::new("git");
-    git.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", dir])
+    git.args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
+        .args(["-c", "safe.bareRepository=explicit", "-C", dir])
         .args(["status", "--porcelain=v2", "--branch", "--show-stash"]);
     // These would have git read some other repository than the one at `dir`,
     // as a git hook that started the daemon would pass them on.

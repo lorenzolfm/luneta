@@ -126,7 +126,8 @@ message Changes {
   // In the index or in the work tree.
   uint32 deleted = 2;
   uint32 renamed = 3;
-  // In the work tree, a path added with `--intent-to-add` among them.
+  // In the work tree, a path added with `--intent-to-add` among them, and one
+  // whose type changed.
   uint32 modified = 4;
   // In the index.
   uint32 staged = 5;

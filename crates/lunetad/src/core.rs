@@ -173,15 +173,17 @@ impl Known {
     }
 
     /// Takes in the sessions that run now. A session that ended takes its
-    /// panes with it, and one renamed keeps them. True when zellij can be
+    /// panes with it, and so does one that now shares its name: zellij is not
+    /// asked about it while it does, and what it listed would only go stale.
+    /// One renamed to a name of its own keeps them. True when zellij can be
     /// asked about a session it could not be before: one that started, or
     /// took a name, or has one another session no longer shares.
     fn saw(&mut self, sockets: Vec<Socket>) -> bool {
         let before = self.addressed();
         self.sessions.saw(sockets);
-        let sessions = &self.sessions;
-        self.panes.retain(|session, _| sessions.name_of(*session).is_some());
-        !self.addressed().is_subset(&before)
+        let now = self.addressed();
+        self.panes.retain(|session, _| now.iter().any(|(id, _)| id == session));
+        !now.is_subset(&before)
     }
 
     /// Takes in what zellij listed of the panes of `session`, which runs, and
@@ -221,10 +223,13 @@ impl Known {
     /// counts. Each list is in an order of its own, so that a host that has
     /// not changed is built the same.
     fn built(&self) -> api::Host {
-        // The panes of a session that does not run would be left out without
-        // a word: `saw` lets them go as it ends, and `run` takes in none for it.
+        // The panes of a session zellij cannot be asked about would be left out,
+        // or go stale, without a word: `saw` lets them go as it ends or comes
+        // to share its name, and `run` takes in none for it.
+        let sessions = &self.sessions;
         for session in self.panes.keys() {
-            assert!(self.sessions.name_of(*session).is_some());
+            let name = sessions.name_of(*session).expect("a session with panes runs");
+            assert_eq!(sessions.addressed(name), Some(*session));
         }
         // By name, and those that share one, as sessions of zellij versions
         // with contracts of their own can, by when each started.
