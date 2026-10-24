@@ -1,0 +1,123 @@
+// What lunetad, the daemon of a host, answers. It listens on a Unix socket,
+// `lunetad.sock` in luneta's runtime folder (see `crates/lunetad/src/folder.rs`),
+// and on nothing else.
+//
+// A field is never renumbered or given another type. One that goes away leaves
+// its number `reserved`, so that a client built against an older version reads
+// a newer daemon's answer as it was meant.
+syntax = "proto3";
+
+package luneta.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service Daemon {
+  // Which daemon runs, and since when.
+  rpc Info(InfoRequest) returns (InfoResponse);
+  // The agents that run on the host, each as it stands now.
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+}
+
+message InfoRequest {}
+
+message InfoResponse {
+  // The version of luneta the daemon was built from.
+  string version = 1;
+  // Its process id, by which a client tells one daemon from the next across a
+  // restart.
+  uint32 pid = 2;
+  // When it started.
+  google.protobuf.Timestamp started_at = 3;
+}
+
+message ListAgentsRequest {}
+
+message ListAgentsResponse {
+  // In no order a client can count on.
+  repeated Agent agents = 1;
+  // Claude Code's session files that the daemon cannot read, and so lists no
+  // agent for: cut short for good, or in a shape of a newer Claude Code's. The
+  // daemon's log says which.
+  uint32 unread = 2;
+}
+
+// A Claude Code agent: the one process of it that runs, and its session.
+message Agent {
+  uint32 pid = 1;
+  // Claude Code's id for the session, which names its transcript.
+  string session_id = 2;
+  // Where it works.
+  string cwd = 3;
+  // What it is doing, as Claude Code says. Neither when it says nothing.
+  oneof status {
+    // A status the daemon knows.
+    Status known_status = 4;
+    // A word it does not, as Claude Code wrote it: a newer Claude Code's.
+    string other_status = 10;
+  }
+  // When it came to its status, as Claude Code dates it.
+  google.protobuf.Timestamp status_since = 5;
+  // When its session started.
+  google.protobuf.Timestamp started_at = 6;
+  // The name Claude Code gives the session, if any.
+  Name name = 7;
+  // How Claude Code says it was started, verbatim: `cli` for the agent a person
+  // talks to at a prompt, `sdk-cli` for a `claude -p`, and a word of its own
+  // for each of the many other ways, which it adds to. Absent when it does not
+  // say.
+  optional string entrypoint = 8;
+  // Where it runs in zellij, absent when it runs outside zellij.
+  Zellij zellij = 9;
+}
+
+enum Status {
+  // Never sent. A client that finds it, or a number it does not know, has the
+  // status of a newer daemon's.
+  STATUS_UNSPECIFIED = 0;
+  // At work: the one status that ends on its own.
+  STATUS_BUSY = 1;
+  // Done, and waiting for the next prompt.
+  STATUS_IDLE = 2;
+  // It asked something, and waits for the answer.
+  STATUS_WAITING = 3;
+  // It is a shell.
+  STATUS_SHELL = 4;
+}
+
+message Name {
+  string text = 1;
+  // Who chose it. Absent when Claude Code does not say, as one from before it
+  // said did not.
+  optional NameSource source = 2;
+}
+
+// Who chose a name, as Claude Code spells it: `user`, `peer`, `derived`,
+// `collision`, `auto` or `hook`, the words it reads back itself.
+enum NameSource {
+  // Never sent.
+  NAME_SOURCE_UNSPECIFIED = 0;
+  // `user` and `peer` are a name someone gave.
+  NAME_SOURCE_USER = 1;
+  NAME_SOURCE_PEER = 2;
+  // `derived` is Claude Code's own, from the directory.
+  NAME_SOURCE_DERIVED = 3;
+  NAME_SOURCE_COLLISION = 4;
+  NAME_SOURCE_AUTO = 5;
+  NAME_SOURCE_HOOK = 6;
+  // A word the daemon does not know: a newer Claude Code's.
+  NAME_SOURCE_OTHER = 7;
+}
+
+// The pane an agent runs in.
+message Zellij {
+  // The session its environment names: what the session was called when the
+  // pane opened. A rename leaves it behind.
+  string named = 1;
+  // The session it runs in now, under the name it has now. Absent when the
+  // daemon cannot tell: the session it names is gone, or was renamed before
+  // the daemon started, or more than one session that could be it has held
+  // the name.
+  optional string session = 2;
+  // The pane's id, which is unique within its session and not across them.
+  uint32 pane = 3;
+}

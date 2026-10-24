@@ -1,0 +1,21 @@
+//! lunetad, the daemon that holds what luneta knows of a host, and what its
+//! CLI needs to reach it.
+//!
+//! One daemon runs for each user on a host. It listens on a Unix socket in
+//! luneta's runtime folder, where the shell hook keeps its files too, and
+//! answers in the protocol that `proto/luneta/v1` defines.
+
+mod agent;
+pub mod api;
+mod claude;
+mod client;
+mod core;
+mod daemon;
+pub mod folder;
+mod process;
+mod watch;
+mod zellij;
+
+pub use client::connect;
+pub use daemon::{serve, Claim};
+pub use folder::Refusal;

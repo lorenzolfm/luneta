@@ -1089,9 +1089,13 @@ names, built in a sandbox, no devshell and no checkout needed:
 nix build github:lorenzolfm/luneta   # -> result/luneta.wasm
 ```
 
-The flake names one system, `x86_64-linux`. On anything else that command and the
-`nix develop` above both fail to evaluate; build with cargo instead, on the
-toolchain `rust-toolchain.toml` names.
+The flake builds on `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`. A
+release is the `x86_64-linux` build; the others work the same, but are not the
+same bytes, as the paths a build runs in are written into the `.wasm`. On any
+other system, build with cargo instead, on the toolchain `rust-toolchain.toml`
+names: `cargo build --release --target wasm32-wasip1` writes
+`target/wasm32-wasip1/release/luneta-plugin.wasm`, which you install as
+`~/.local/share/zellij/plugins/luneta.wasm`.
 
 Then point `config.kdl` at `file:` instead of the release URL:
 
@@ -1100,6 +1104,12 @@ plugins {
     luneta location="file:~/.local/share/zellij/plugins/luneta.wasm"
 }
 ```
+
+`nix build .#lunetad` builds `lunetad`, the daemon that is to hold what luneta
+knows of a host, and `luneta`, the CLI that talks to it
+([#95](https://github.com/lorenzolfm/luneta/issues/95)). The plugin does not
+use it yet: `luneta agents` lists the agents the daemon finds, to check against
+the sidebar.
 
 ## License
 
