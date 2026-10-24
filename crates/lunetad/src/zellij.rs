@@ -75,13 +75,22 @@ pub struct Socket {
     id: Id,
 }
 
-/// What a session's socket keeps through a rename. The time it was made keeps
-/// a new socket that takes the inode of one gone from passing for it.
+/// Which session runs, by what its socket keeps through a rename. The time it
+/// was made keeps a new socket that takes the inode of one gone from passing
+/// for it. Only a socket the daemon found makes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Id {
+pub struct Id {
     dev: u64,
     ino: u64,
     made: SystemTime,
+}
+
+impl Id {
+    /// When the session started: when its server made its socket.
+    #[must_use]
+    pub fn started(self) -> SystemTime {
+        self.made
+    }
 }
 
 /// The sessions whose sockets are in `folder` now. What goes wrong in reading
@@ -143,20 +152,10 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    /// Takes in the sessions that run now, and gives each rename since the
-    /// last: the name a session had then, and the one it has now. A session
-    /// that is gone takes the names it had with it.
-    pub fn saw(&mut self, sockets: Vec<Socket>) -> Vec<(String, String)> {
-        let names: HashMap<Id, String> =
-            sockets.iter().map(|socket| (socket.id, socket.name.clone())).collect();
-        let renamed = names
-            .iter()
-            .filter_map(|(id, now)| {
-                let was = self.names.get(id)?;
-                (was != now).then(|| (was.clone(), now.clone()))
-            })
-            .collect();
-        self.names = names;
+    /// Takes in the sessions that run now. A session that is gone takes the
+    /// names it had with it.
+    pub fn saw(&mut self, sockets: Vec<Socket>) {
+        self.names = sockets.iter().map(|socket| (socket.id, socket.name.clone())).collect();
         for socket in sockets {
             let held = self.held.entry(socket.name).or_default();
             if !held.contains(&socket.id) {
@@ -178,13 +177,29 @@ impl Sessions {
         for (id, name) in &self.names {
             assert!(self.held.get(name).is_some_and(|held| held.contains(id)));
         }
-        renamed
     }
 
-    /// The sessions that run, by the name each has now, and when each
-    /// started: when its server made its socket.
-    pub fn running(&self) -> impl Iterator<Item = (&str, SystemTime)> {
-        self.names.iter().map(|(id, name)| (name.as_str(), id.made))
+    /// The sessions that run, and the name each has now.
+    pub fn running(&self) -> impl Iterator<Item = (Id, &str)> {
+        self.names.iter().map(|(id, name)| (*id, name.as_str()))
+    }
+
+    /// The name the session `id` has now, if it runs.
+    #[must_use]
+    pub fn name_of(&self, id: Id) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+
+    /// The session that zellij answers for by `name`: the one that runs under
+    /// it, if no other does. Of sessions that share a name, zellij answers for
+    /// the one of its own contract, and the daemon cannot tell which that is.
+    #[must_use]
+    pub fn addressed(&self, name: &str) -> Option<Id> {
+        let mut under = self.names.iter().filter(|(_, now)| *now == name);
+        let (Some((id, _)), None) = (under.next(), under.next()) else {
+            return None;
+        };
+        Some(*id)
     }
 
     /// The name that the session once called `named` has now, for an agent

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use crate::api;
 use crate::core;
 use crate::program::{self, Ran};
+use crate::said::Said;
 use crate::watch::Troubles;
 
 /// How long git has to say how a work tree stands. A large one takes it a
@@ -40,16 +41,29 @@ const REPOSITORY_VARS: [&str; 6] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ];
 
-/// How a work tree stands.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkTree {
-    /// The branch checked out, if one is.
-    pub branch: Option<String>,
-    pub changes: Changes,
-    pub stashes: u32,
-    /// How far the branch is ahead of its upstream and behind it, if it has
-    /// one.
-    pub upstream: Option<(u32, u32)>,
+/// How a work tree stands, as git says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkTree {
+    /// git failed there: the directory is in no repository, or in one git
+    /// cannot read.
+    Outside,
+    /// A repository's work tree: what is checked out there, and what changed.
+    Checkout { head: Head, changes: Changes, stashes: u32 },
+}
+
+/// What is checked out in a work tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Head {
+    Detached,
+    /// A branch, and how far it is from its upstream, if it has one.
+    Branch { name: Said, upstream: Option<Upstream> },
+}
+
+/// How far a branch is ahead of its upstream, and behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Upstream {
+    pub ahead: u32,
+    pub behind: u32,
 }
 
 /// How many paths there are of each kind of change.
@@ -66,54 +80,78 @@ pub struct Changes {
 impl WorkTree {
     #[must_use]
     pub fn to_api(&self, dir: &str) -> api::WorkTree {
-        let changes = &self.changes;
-        api::WorkTree {
-            dir: dir.to_owned(),
-            branch: self.branch.clone().inspect(|branch| {
-                assert!(!branch.is_empty());
-                assert_ne!(branch, DETACHED);
-            }),
-            changes: Some(api::Changes {
-                conflicted: changes.conflicted,
-                deleted: changes.deleted,
-                renamed: changes.renamed,
-                modified: changes.modified,
-                staged: changes.staged,
-                untracked: changes.untracked,
-            }),
-            stashes: self.stashes,
-            upstream: self.upstream.map(|(ahead, behind)| api::Upstream { ahead, behind }),
-        }
+        let stands = match self {
+            WorkTree::Outside => api::work_tree::Stands::Outside(api::work_tree::Outside {}),
+            WorkTree::Checkout { head, changes, stashes } => {
+                api::work_tree::Stands::Checkout(api::Checkout {
+                    head: Some(head.to_api()),
+                    changes: Some(changes.to_api()),
+                    stashes: *stashes,
+                })
+            },
+        };
+        api::WorkTree { dir: dir.to_owned(), stands: Some(stands) }
     }
 
     /// What `git status --porcelain=v2 --branch --show-stash` prints, or the
-    /// first line that does not read. A detached `HEAD` is no branch.
+    /// first line that does not read. git says what is checked out ahead of
+    /// the rest, and where it is from its upstream only of a branch.
     fn parse(status: &str) -> Result<Self, String> {
-        let mut tree = WorkTree::default();
+        let (mut head, mut changes, mut stashes) = (None, Changes::default(), 0);
         for line in status.lines() {
             let unread = || format!("a line that does not read: {line}");
-            if let Some(head) = line.strip_prefix("# branch.head ") {
-                let named = Some(head.trim()).filter(|head| !head.is_empty() && *head != DETACHED);
-                tree.branch = named.map(str::to_owned);
+            if let Some(named) = line.strip_prefix("# branch.head ") {
+                head = Some(Head::of(named).ok_or_else(unread)?);
             } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
-                tree.upstream = Some(ahead_behind(ab).ok_or_else(unread)?);
-            } else if let Some(stashes) = line.strip_prefix("# stash ") {
-                tree.stashes = stashes.parse().map_err(|_| unread())?;
+                let Some(Head::Branch { upstream, .. }) = &mut head else {
+                    return Err(unread());
+                };
+                *upstream = Some(Upstream::of(ab).ok_or_else(unread)?);
+            } else if let Some(count) = line.strip_prefix("# stash ") {
+                stashes = count.parse().map_err(|_| unread())?;
             } else if line.starts_with("# ") {
                 // `branch.oid` and `branch.upstream`, and any header a git to
                 // come adds, which its manual asks to pass over.
-            } else if !tree.changes.add(line) {
+            } else if !changes.add(line) {
                 return Err(unread());
             }
         }
-        Ok(tree)
+        let head = head.ok_or("no line that says what is checked out")?;
+        Ok(WorkTree::Checkout { head, changes, stashes })
     }
 }
 
-/// `+<ahead> -<behind>`.
-fn ahead_behind(ab: &str) -> Option<(u32, u32)> {
-    let (ahead, behind) = ab.split_once(' ')?;
-    Some((ahead.strip_prefix('+')?.parse().ok()?, behind.strip_prefix('-')?.parse().ok()?))
+impl Head {
+    /// What `# branch.head` names: a branch, or `(detached)`. None for no name.
+    fn of(named: &str) -> Option<Self> {
+        if named == DETACHED {
+            return Some(Head::Detached);
+        }
+        Some(Head::Branch { name: Said::new(named.to_owned())?, upstream: None })
+    }
+
+    fn to_api(&self) -> api::checkout::Head {
+        match self {
+            Head::Detached => api::checkout::Head::Detached(api::checkout::Detached {}),
+            Head::Branch { name, upstream } => api::checkout::Head::Branch(api::Branch {
+                name: name.as_str().to_owned(),
+                upstream: upstream.map(Upstream::to_api),
+            }),
+        }
+    }
+}
+
+impl Upstream {
+    /// `+<ahead> -<behind>`.
+    fn of(ab: &str) -> Option<Self> {
+        let (ahead, behind) = ab.split_once(' ')?;
+        let ahead = ahead.strip_prefix('+')?.parse().ok()?;
+        Some(Upstream { ahead, behind: behind.strip_prefix('-')?.parse().ok()? })
+    }
+
+    fn to_api(self) -> api::Upstream {
+        api::Upstream { ahead: self.ahead, behind: self.behind }
+    }
 }
 
 /// `XY`: how a path stands in the index, and in the work tree.
@@ -145,6 +183,17 @@ impl Changes {
         true
     }
 
+    fn to_api(&self) -> api::Changes {
+        api::Changes {
+            conflicted: self.conflicted,
+            deleted: self.deleted,
+            renamed: self.renamed,
+            modified: self.modified,
+            staged: self.staged,
+            untracked: self.untracked,
+        }
+    }
+
     fn add_change(&mut self, (index, tree): (char, char)) {
         self.staged += u32::from(matches!(index, 'M' | 'A' | 'T'));
         self.deleted += u32::from(index == 'D') + u32::from(tree == 'D');
@@ -153,9 +202,9 @@ impl Changes {
     }
 }
 
-/// What git says of the work tree in `dir`: how it stands, or none at all, as
-/// in a directory in no repository, where git fails. When git did not say, as
-/// it did not answer in time, what is to be said of it instead.
+/// What git says of the work tree in `dir`: how it stands, or that `dir` is
+/// outside one, where git fails. When git did not say, as it did not answer
+/// in time, what is to be said of it instead.
 fn status(dir: &str) -> Result<WorkTree, String> {
     // `--no-optional-locks` keeps git from taking the index lock to refresh
     // the index, which a `git` of your own would trip over. `core.fsmonitor`
@@ -180,7 +229,7 @@ fn status(dir: &str) -> Result<WorkTree, String> {
         },
         // git ran there and failed: the directory is in no repository, or in
         // one git cannot read.
-        Ran::Ended { .. } => Ok(WorkTree::default()),
+        Ran::Ended { .. } => Ok(WorkTree::Outside),
         Ran::Stuck => Err(format!("git status in {dir} did not answer in time")),
     }
 }
@@ -255,16 +304,18 @@ pub fn follow(
 
 #[cfg(test)]
 mod tests {
-    use super::WorkTree;
+    use super::{Head, WorkTree};
 
     /// What git says that does not read is no work tree, rather than one
     /// counted short: no git the tests can run says it, so it is tested here.
-    /// A header that git adds for an option of its own is passed over, as its
-    /// manual asks.
+    /// So is a status that says nothing of what is checked out, and one with
+    /// an upstream for no branch. A header that git adds for an option of its
+    /// own is passed over, as its manual asks.
     #[test]
     fn a_status_that_does_not_read_is_no_work_tree() {
         let head = "# branch.oid 0123abc\n# branch.head main\n";
         let unread = [
+            "# branch.head ",
             "# branch.ab +1",
             "# branch.ab 1 -2",
             "# stash many",
@@ -277,8 +328,15 @@ mod tests {
         for line in unread {
             assert!(WorkTree::parse(&format!("{head}{line}\n")).is_err(), "{line:?}");
         }
+        for status in ["? new\n", "# branch.head (detached)\n# branch.ab +1 -0\n"] {
+            assert!(WorkTree::parse(status).is_err(), "{status:?}");
+        }
         let tree = WorkTree::parse(&format!("{head}# branch.to-come 1\n? new\n")).unwrap();
-        assert_eq!(tree.branch.as_deref(), Some("main"));
-        assert_eq!(tree.changes.untracked, 1);
+        let WorkTree::Checkout { head: Head::Branch { name, upstream: None }, changes, .. } = tree
+        else {
+            panic!("main, with no upstream: {tree:?}");
+        };
+        assert_eq!(name.as_str(), "main");
+        assert_eq!(changes.untracked, 1);
     }
 }

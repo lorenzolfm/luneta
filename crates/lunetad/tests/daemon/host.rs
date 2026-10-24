@@ -69,7 +69,8 @@ impl<'a> Vars<'a> {
 /// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
 /// lists the panes of a session as a test has it: what it wrote with `list`.
 /// It knows no other command, and of a session it was given no panes for, it
-/// says there is no such session, as zellij does.
+/// says there is no such session, as zellij does. It notes each session it is
+/// asked about, for `asked`.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -84,6 +85,7 @@ if [ "$1" != --session ] || [ "$3 $4 $5 $6" != "action list-panes --all --json" 
     echo "this zellij only lists panes, and was asked: $*" >&2
     exit 2
 fi
+echo "$2" >> "{panes}/asked"
 if [ ! -f "{panes}/$2.json" ]; then
     echo "Session '$2' not found." >&2
     exit 1
@@ -105,6 +107,15 @@ exec cat "{panes}/$2.json"
 
     fn panes(&self) -> PathBuf {
         self.bin.path().join("panes")
+    }
+
+    /// The sessions zellij has been asked about, in the order it was asked.
+    pub fn asked(&self) -> Vec<String> {
+        match fs::read_to_string(self.panes().join("asked")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what zellij was asked does not read: {error}"),
+        }
     }
 
     /// Has zellij list `panes` for the session `session` from now on, as

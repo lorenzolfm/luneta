@@ -3,11 +3,10 @@
 //! wait for its answer. So nothing changes what another is reading, and the
 //! commands take effect in the order they came in.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
-use std::time::SystemTime;
 
 use tokio::sync::oneshot;
 
@@ -15,20 +14,20 @@ use crate::api;
 use crate::claude::Scan;
 use crate::git::WorkTree;
 use crate::panes::{self, Pane};
-use crate::zellij::{Sessions, Socket};
+use crate::zellij::{Id, Sessions, Socket};
 
 pub enum Command {
     /// What Claude Code's files say now.
     Agents(Scan),
     /// The zellij sessions that run now.
     Sockets(Vec<Socket>),
-    /// What zellij listed of the panes of the session called `session`.
-    Panes { session: String, panes: Vec<Pane> },
+    /// What zellij listed of the panes of `session`, asked for by `name`.
+    Panes { session: Id, name: String, panes: Vec<Pane> },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
-    /// Asks for the names of the sessions that run, for zellij to be asked
-    /// for their panes.
-    Sessions(oneshot::Sender<Vec<String>>),
+    /// Asks for the sessions zellij can be asked about, and the name to ask
+    /// by, for their panes.
+    Sessions(oneshot::Sender<Vec<(Id, String)>>),
     /// Asks for the directories the panes work in, for git to be asked about.
     Dirs(oneshot::Sender<BTreeSet<String>>),
     /// Asks for every agent, as the API gives it.
@@ -41,7 +40,8 @@ pub enum Command {
 /// Who the core wakes, as the host changes in a way that has them ask
 /// something at once rather than on their next sweep.
 pub struct Wakes {
-    /// The thread that asks zellij for panes, as a session turns up.
+    /// The thread that asks zellij for panes, as it can be asked about a
+    /// session it could not be before.
     pub panes: SyncSender<()>,
     /// The thread that asks git about work trees, as a pane works in a
     /// directory it has not asked about.
@@ -79,12 +79,11 @@ pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
 struct Known {
     found: Scan,
     sessions: Sessions,
-    /// What zellij last listed of each session's panes, by the name the
-    /// session has now.
-    panes: BTreeMap<String, Vec<Pane>>,
+    /// What zellij last listed of each session's panes.
+    panes: HashMap<Id, Vec<Pane>>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
-    /// The host as the API gives it, all but its version.
+    /// The host as the API gives it, its version with it.
     host: api::Host,
     /// How many times the host has changed.
     seq: u64,
@@ -96,13 +95,13 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     let mut known = Known {
         found: Scan { agents: Vec::new(), unread: 0 },
         sessions: Sessions::default(),
-        panes: BTreeMap::new(),
+        panes: HashMap::new(),
         trees: BTreeMap::new(),
         host: api::Host::default(),
         seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
     };
-    known.host = known.built();
+    known.host = api::Host { version: Some(known.version()), ..known.built() };
     for command in commands {
         match command {
             Command::Agents(now) => {
@@ -116,9 +115,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.panes);
                 }
             },
-            Command::Panes { session, panes } => {
-                // One that went, or took another name, since zellij was asked.
-                if !known.running().any(|name| name == session) {
+            Command::Panes { session, name, panes } => {
+                // One that went, took another name, or now shares it, since
+                // zellij was asked.
+                if known.sessions.addressed(&name) != Some(session) {
                     continue;
                 }
                 if known.listed(session, panes) {
@@ -134,7 +134,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Sessions(answer) => {
                 // One who stopped waiting has no use for the answer.
-                let _ = answer.send(known.running().map(str::to_owned).collect());
+                let _ = answer.send(known.addressed().into_iter().collect());
                 continue;
             },
             Command::Dirs(answer) => {
@@ -164,32 +164,31 @@ fn wake(thread: &SyncSender<()>) {
 }
 
 impl Known {
-    /// The names the sessions that run have now.
-    fn running(&self) -> impl Iterator<Item = &str> {
-        self.sessions.running().map(|(name, _)| name)
+    /// The sessions zellij can be asked about by name: each that runs under a
+    /// name no other runs under, and that name.
+    fn addressed(&self) -> HashSet<(Id, String)> {
+        let sessions = &self.sessions;
+        let alone = |&(id, name): &(Id, &str)| sessions.addressed(name) == Some(id);
+        sessions.running().filter(alone).map(|(id, name)| (id, name.to_owned())).collect()
     }
 
-    /// Takes in the sessions that run now. A rename keeps the session's panes,
-    /// which zellij is asked for under its new name from now on, and a session
-    /// that ended takes its panes with it. True when a session turned up.
+    /// Takes in the sessions that run now. A session that ended takes its
+    /// panes with it, and one renamed keeps them. True when zellij can be
+    /// asked about a session it could not be before: one that started, or
+    /// took a name, or has one another session no longer shares.
     fn saw(&mut self, sockets: Vec<Socket>) -> bool {
-        let before: BTreeSet<String> = self.running().map(str::to_owned).collect();
-        let renamed = self.sessions.saw(sockets);
-        let moved: Vec<(String, Vec<Pane>)> = renamed
-            .into_iter()
-            .filter_map(|(was, now)| Some((now, self.panes.remove(&was)?)))
-            .collect();
-        self.panes.extend(moved);
-        let running: BTreeSet<String> = self.running().map(str::to_owned).collect();
-        self.panes.retain(|session, _| running.contains(session));
-        !running.is_subset(&before)
+        let before = self.addressed();
+        self.sessions.saw(sockets);
+        let sessions = &self.sessions;
+        self.panes.retain(|session, _| sessions.name_of(*session).is_some());
+        !self.addressed().is_subset(&before)
     }
 
     /// Takes in what zellij listed of the panes of `session`, which runs, and
     /// keeps what it said before where it says nothing now. True when a pane
     /// works in a directory that none did.
-    fn listed(&mut self, session: String, mut panes: Vec<Pane>) -> bool {
-        assert!(self.running().any(|name| name == session));
+    fn listed(&mut self, session: Id, mut panes: Vec<Pane>) -> bool {
+        assert!(self.sessions.name_of(session).is_some());
         // `keep` finds the pane each was by its id: zellij gives each terminal
         // of a session one of its own, which `panes::parse` checks.
         let ids: HashSet<u32> = panes.iter().map(|pane| pane.id).collect();
@@ -204,7 +203,8 @@ impl Known {
 
     /// The directories the panes work in.
     fn dirs(&self) -> BTreeSet<String> {
-        self.panes.values().flatten().filter_map(|pane| pane.cwd.clone()).collect()
+        let cwds = self.panes.values().flatten().filter_map(|pane| pane.cwd.as_ref());
+        cwds.map(|cwd| cwd.as_str().to_owned()).collect()
     }
 
     /// Lets go of what git said of a directory no pane works in now.
@@ -217,25 +217,25 @@ impl Known {
         self.found.agents.iter().map(|agent| agent.to_api(&self.sessions)).collect()
     }
 
-    /// The host as the API gives it, all but its version. Each list is in an
-    /// order of its own, so that a host that has not changed is built the
-    /// same.
+    /// The host as the API gives it, all but its version, which `update`
+    /// counts. Each list is in an order of its own, so that a host that has
+    /// not changed is built the same.
     fn built(&self) -> api::Host {
         // The panes of a session that does not run would be left out without
         // a word: `saw` lets them go as it ends, and `run` takes in none for it.
         for session in self.panes.keys() {
-            assert!(self.running().any(|name| name == session));
+            assert!(self.sessions.name_of(*session).is_some());
         }
         // By name, and those that share one, as sessions of zellij versions
         // with contracts of their own can, by when each started.
-        let mut running: Vec<(&str, SystemTime)> = self.sessions.running().collect();
-        running.sort_unstable();
+        let mut running: Vec<(Id, &str)> = self.sessions.running().collect();
+        running.sort_unstable_by_key(|&(id, name)| (name, id.started()));
         let sessions = running
             .into_iter()
-            .map(|(name, started)| api::Session {
+            .map(|(id, name)| api::Session {
                 name: name.to_owned(),
-                started_at: Some(started.into()),
-                panes: self.panes.get(name).map(|panes| api::Panes {
+                started_at: Some(id.started().into()),
+                panes: self.panes.get(&id).map(|panes| api::Panes {
                     panes: panes.iter().map(Pane::to_api).collect(),
                 }),
             })
@@ -255,32 +255,29 @@ impl Known {
         api::Version { pid: std::process::id(), seq: self.seq }
     }
 
-    /// The host as the API gives it.
-    fn answer(&self) -> api::Host {
-        api::Host { version: Some(self.version()), ..self.host.clone() }
-    }
-
     /// Counts a change to the host, if there is one, and answers everyone who
     /// waits for one. What git said of a directory no pane works in now goes
     /// first.
     fn update(&mut self) {
         self.forget_dirs();
-        let host = self.built();
+        let mut host = self.built();
+        host.version = self.host.version;
         if host == self.host {
             return;
         }
-        self.host = host;
         self.seq = self.seq.checked_add(1).expect("a host changes fewer than 2^64 times");
-        let answer = self.answer();
+        host.version = Some(self.version());
+        self.host = host;
         for waiting in self.waiting.drain(..) {
             // One who stopped waiting has no use for the answer.
-            let _ = waiting.send(Some(answer.clone()));
+            let _ = waiting.send(Some(self.host.clone()));
         }
     }
 
     fn watch(&mut self, after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>>) {
+        assert_eq!(self.host.version, Some(self.version()));
         if after != Some(self.version()) {
-            let _ = answer.send(Some(self.answer()));
+            let _ = answer.send(Some(self.host.clone()));
             return;
         }
         self.waiting.retain(|waiting| !waiting.is_closed());

@@ -9,7 +9,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lunetad::api::{self, Changes, Upstream, Version, WatchRequest};
+use lunetad::api::checkout::{Detached, Head};
+use lunetad::api::work_tree::{Outside, Stands};
+use lunetad::api::{self, Branch, Changes, Checkout, Upstream, Version, WatchRequest};
 use prost::Message as _;
 use serde_json::json;
 use tempfile::TempDir;
@@ -195,6 +197,39 @@ fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
     }
 }
 
+/// zellij is asked for a session's panes by name, and of two sessions that
+/// share one, as those of zellij versions with contracts of their own can, it
+/// answers for one: the daemon cannot tell which, and gives neither the panes.
+/// A session renamed keeps its panes, whatever zellij says under its new
+/// name. The test waits for zellij to be asked about the session that has a
+/// name of its own twice: one not listed yet is asked about first, so by then
+/// the daemon has asked about every session it means to.
+#[test]
+fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
+    let host = Host::new();
+    let shell = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
+    host.zellij.list("work", &json!([shell]));
+    host.zellij.list("play", &json!([shell]));
+    let newer = host.sockets.path().join("contract_version_2");
+    fs::create_dir(&newer).unwrap();
+    let _work = (host.serve("work"), UnixListener::bind(newer.join("work")).unwrap());
+    let _play = host.serve("play");
+    let _daemon = start(host.vars()).unwrap();
+
+    eventually("zellij is asked about play twice", || {
+        let play = host.zellij.asked().into_iter().filter(|name| name == "play").count();
+        (play >= 2).then_some(())
+    });
+    let now = host.host();
+    let work: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "work").collect();
+    assert_eq!(work.len(), 2);
+    assert!(work.iter().all(|session| session.panes.is_none()), "{work:?}");
+
+    fs::rename(host.contract().join("play"), host.contract().join("game")).unwrap();
+    let game = eventually("play is called game", || session(&host.host(), "game")?.panes.clone());
+    assert_eq!(game.panes, [pane(1, (0, "Tab #1"), Some("/home/you"))]);
+}
+
 /// git as the test runs it: on the repository at `dir` and no other, as one
 /// that a git hook ran the tests from names, with no config but its own, and
 /// as no one in particular.
@@ -249,8 +284,9 @@ fn changed_every_way(dir: &Path, origin: &Path) {
 
 /// git says how the work tree stands where each pane works: the branch, how
 /// many paths changed in each way, the stashes, and where the branch is from
-/// its upstream. A directory in no repository, and a detached `HEAD`, have no
-/// branch. What git said of a directory goes once no pane works there.
+/// its upstream. A detached `HEAD` is a checkout of no branch, and a directory
+/// in no repository is outside one, not a checkout with nothing in it. What
+/// git said of a directory goes once no pane works there.
 #[test]
 fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let host = Host::new();
@@ -276,24 +312,16 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
         let trees = host.host().work_trees;
         (trees.len() == 3).then_some(trees)
     });
-    let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap();
+    let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
     let every =
         Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 1, staged: 1, untracked: 1 };
-    assert_eq!(
-        stands(&tree),
-        &api::WorkTree {
-            dir: tree.clone(),
-            branch: Some("main".to_owned()),
-            changes: Some(every),
-            stashes: 1,
-            upstream: Some(Upstream { ahead: 1, behind: 0 }),
-        }
-    );
-    for dir in [&plain, &detached] {
-        let changes = Some(Changes::default());
-        let none = api::WorkTree { dir: dir.clone(), changes, ..api::WorkTree::default() };
-        assert_eq!(stands(dir), &none, "{dir}");
-    }
+    let main = Branch { name: "main".to_owned(), upstream: Some(Upstream { ahead: 1, behind: 0 }) };
+    let checkout = |head, changes, stashes| {
+        Some(Stands::Checkout(Checkout { head: Some(head), changes: Some(changes), stashes }))
+    };
+    assert_eq!(stands(&tree), checkout(Head::Branch(main), every, 1));
+    assert_eq!(stands(&detached), checkout(Head::Detached(Detached {}), Changes::default(), 0));
+    assert_eq!(stands(&plain), Some(Stands::Outside(Outside {})));
 
     host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
     eventually("what git said of plain goes", || {

@@ -8,6 +8,8 @@ use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 use lunetad::api::agent::Status as Reported;
+use lunetad::api::checkout::Head;
+use lunetad::api::work_tree::Stands;
 use lunetad::api::{
     Agent, InfoRequest, ListAgentsRequest, Status, Version, WatchRequest, WorkTree,
 };
@@ -143,9 +145,9 @@ async fn agents(socket: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// A session to a line, with its panes under it, each by its tab and its id:
-/// where it works, then the branch checked out there and what changed on it.
-/// A pane zellij says no directory of has `-` for one, and a directory git
-/// has said nothing of yet has nothing after it.
+/// where it works, then what is checked out there and what changed on it. A
+/// pane zellij says no directory of has `-` for one, and a directory git has
+/// said nothing of yet has nothing after it.
 async fn sessions(socket: &Path) -> Result<(), Box<dyn Error>> {
     let mut daemon = lunetad::connect(socket).await?;
     let mut host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
@@ -162,22 +164,33 @@ async fn sessions(socket: &Path) -> Result<(), Box<dyn Error>> {
                 println!("  {at}  -");
                 continue;
             };
-            let tree = host.work_trees.iter().find(|tree| tree.dir == cwd);
-            match tree.map(stands) {
-                Some(stands) => println!("  {at}  {cwd}  {stands}"),
-                None => println!("  {at}  {cwd}"),
-            }
+            let Some(tree) = host.work_trees.iter().find(|tree| tree.dir == cwd) else {
+                println!("  {at}  {cwd}");
+                continue;
+            };
+            let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
+            println!("  {at}  {cwd}  {stands}");
         }
     }
     Ok(())
 }
 
-/// How a work tree stands, in words: its branch, or `no branch`, and then how
-/// many paths of each kind changed, the stashes, and where it is from its
-/// upstream.
-fn stands(tree: &WorkTree) -> String {
-    let mut said = vec![tree.branch.clone().unwrap_or_else(|| "no branch".to_owned())];
-    let changes = tree.changes.unwrap_or_default();
+/// How a work tree stands, in words: its branch, or `detached`, and then how
+/// many paths of each kind changed, the stashes, and where the branch is from
+/// its upstream. A directory in no repository says so. None for an answer
+/// that leaves out what the protocol says is always there, as a newer
+/// daemon's could.
+fn stands(tree: &WorkTree) -> Option<String> {
+    let checkout = match tree.stands.as_ref()? {
+        Stands::Outside(_) => return Some("no repository".to_owned()),
+        Stands::Checkout(checkout) => checkout,
+    };
+    let head = checkout.head.as_ref()?;
+    let changes = checkout.changes?;
+    let mut said = vec![match head {
+        Head::Detached(_) => "detached".to_owned(),
+        Head::Branch(branch) => branch.name.clone(),
+    }];
     let counts = [
         (changes.conflicted, "conflicted"),
         (changes.staged, "staged"),
@@ -185,16 +198,18 @@ fn stands(tree: &WorkTree) -> String {
         (changes.renamed, "renamed"),
         (changes.deleted, "deleted"),
         (changes.untracked, "untracked"),
-        (tree.stashes, "stashed"),
+        (checkout.stashes, "stashed"),
     ];
     let some = counts.iter().filter(|(count, _)| *count > 0);
     said.extend(some.map(|(count, kind)| format!("{count} {kind}")));
-    if let Some(upstream) = tree.upstream {
+    if let Head::Branch(branch) = head
+        && let Some(upstream) = branch.upstream
+    {
         let (ahead, behind) = (upstream.ahead, upstream.behind);
         said.extend((ahead > 0).then(|| format!("{ahead} ahead")));
         said.extend((behind > 0).then(|| format!("{behind} behind")));
     }
-    said.join(", ")
+    Some(said.join(", "))
 }
 
 /// Writes out the host once it is no longer as `after` saw it.

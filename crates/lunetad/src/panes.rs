@@ -17,7 +17,9 @@ use serde::Deserialize;
 use crate::api;
 use crate::core;
 use crate::program;
+use crate::said::Said;
 use crate::watch::Troubles;
+use crate::zellij::Id;
 
 /// How long zellij has to list a session's panes: a server that runs answers
 /// at once.
@@ -32,9 +34,9 @@ pub struct Pane {
     /// The position of its tab, from 0.
     pub tab: u32,
     pub tab_name: String,
-    pub cwd: Option<String>,
+    pub cwd: Option<Said>,
     /// What runs in front in it.
-    pub command: Option<String>,
+    pub command: Option<Said>,
 }
 
 impl Pane {
@@ -44,8 +46,8 @@ impl Pane {
             id: self.id,
             tab: self.tab,
             tab_name: self.tab_name.clone(),
-            cwd: self.cwd.clone().inspect(|cwd| assert!(!cwd.is_empty())),
-            command: self.command.clone().inspect(|command| assert!(!command.is_empty())),
+            cwd: self.cwd.clone().map(String::from),
+            command: self.command.clone().map(String::from),
         }
     }
 }
@@ -72,7 +74,6 @@ struct Wire {
 /// another took. zellij gives each terminal of a session an id of its own.
 fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
     let wire: Vec<Wire> = serde_json::from_slice(said).map_err(|error| error.to_string())?;
-    let said = |value: Option<String>| value.filter(|value| !value.is_empty());
     let panes: Vec<Pane> = wire
         .into_iter()
         .filter(|pane| !pane.is_plugin && !pane.is_suppressed)
@@ -80,8 +81,8 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
             id: pane.id,
             tab: pane.tab_position,
             tab_name: pane.tab_name,
-            cwd: said(pane.pane_cwd),
-            command: said(pane.pane_command),
+            cwd: pane.pane_cwd.and_then(Said::new),
+            command: pane.pane_command.and_then(Said::new),
         })
         .collect();
     let mut ids = HashSet::new();
@@ -115,32 +116,31 @@ fn list(session: &str) -> Result<Vec<Pane>, String> {
     parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
-/// Asks zellij for the panes of each session that runs, in a thread of its
-/// own, and tells the core what it says: every `sweep`, and at once when
-/// `woken`, as a session turns up. One zellij has not listed yet goes first,
-/// and one that turns up while the others are asked about goes before those
-/// left. The thread ends once the core has.
+/// Asks zellij for the panes of each session it can be asked about, in a
+/// thread of its own, and tells the core what it says: every `sweep`, and at
+/// once when `woken`, as a session turns up. One zellij has not listed yet
+/// goes first, and one that turns up while the others are asked about goes
+/// before those left. The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     woken: Receiver<()>,
     sweep: Duration,
 ) -> io::Result<()> {
     thread::Builder::new().name("panes".to_owned()).spawn(move || {
-        let mut listed: HashSet<String> = HashSet::new();
+        let mut listed: HashSet<Id> = HashSet::new();
         let mut troubles = Troubles::default();
         'sweep: loop {
             let Some(mut sessions) = core::ask(&core, core::Command::Sessions) else {
                 return;
             };
-            listed.retain(|session| sessions.contains(session));
-            sessions.sort_by_key(|session| listed.contains(session));
-            for session in sessions {
+            listed.retain(|session| sessions.iter().any(|(id, _)| id == session));
+            sessions.sort_by_key(|(session, _)| listed.contains(session));
+            for (session, name) in sessions {
                 // What zellij listed last stands until it lists them again.
-                if let Ok(panes) = list(&session)
-                    .inspect_err(|why| troubles.say(format!("the panes of {session}: {why}")))
-                {
-                    listed.insert(session.clone());
-                    if core.send(core::Command::Panes { session, panes }).is_err() {
+                let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
+                if let Ok(panes) = list(&name).inspect_err(said) {
+                    listed.insert(session);
+                    if core.send(core::Command::Panes { session, name, panes }).is_err() {
                         return;
                     }
                 }

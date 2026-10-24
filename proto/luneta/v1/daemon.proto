@@ -37,6 +37,7 @@ message Version {
 }
 
 message Host {
+  // Always there: a client that finds none has an answer that does not read.
   Version version = 1;
   // The sessions that run, in no order a client can count on.
   repeated Session sessions = 2;
@@ -54,7 +55,9 @@ message Session {
   string name = 1;
   // When its server started.
   google.protobuf.Timestamp started_at = 2;
-  // Its panes, as zellij last listed them. Absent until zellij has.
+  // Its panes, as zellij last listed them. Absent until zellij has, and while
+  // another session runs under its name: zellij is asked for them by name, and
+  // answers for one of the two, which the daemon cannot tell.
   Panes panes = 3;
 }
 
@@ -86,14 +89,36 @@ message Pane {
 message WorkTree {
   // The directory, as zellij spells the pane's.
   string dir = 1;
-  // The branch checked out there. Absent when none is: the directory is in no
-  // repository, its `HEAD` is detached, or git failed there.
-  optional string branch = 2;
-  // How many paths there are of each kind of change.
+  // One of these, always: a client that finds neither has a newer daemon's.
+  oneof stands {
+    // git failed there: the directory is in no repository, or in one git
+    // cannot read.
+    Outside outside = 2;
+    Checkout checkout = 3;
+  }
+
+  message Outside {}
+}
+
+// A repository's work tree: what is checked out there, and what changed.
+message Checkout {
+  // One of these, always.
+  oneof head {
+    Detached detached = 1;
+    Branch branch = 2;
+  }
+  // How many paths there are of each kind of change. Always there.
   Changes changes = 3;
   uint32 stashes = 4;
-  // How far the branch is from its upstream. Absent when it has none.
-  Upstream upstream = 5;
+
+  // `HEAD` names a commit, and no branch.
+  message Detached {}
+}
+
+message Branch {
+  string name = 1;
+  // How far it is from its upstream. Absent when it has none.
+  Upstream upstream = 2;
 }
 
 message Changes {
