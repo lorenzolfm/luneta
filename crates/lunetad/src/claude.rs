@@ -28,6 +28,7 @@ use serde::Deserialize;
 
 use crate::agent::{Agent, Name, Named, Source, Status};
 use crate::process;
+use crate::said::Said;
 use crate::watch::{self, Troubles};
 
 /// How long a file that does not read still says what it said before. Claude
@@ -257,12 +258,9 @@ fn torn(was: Option<Seen>, path: &Path, error: &impl fmt::Display) -> Seen {
 
 fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
     let since = file.status_updated_at.or(file.updated_at).or(file.started_at);
-    let word = |text: &Option<String>| {
-        let word = text.as_deref().map(str::trim)?;
-        (!word.is_empty()).then(|| word.to_owned())
-    };
-    let name = file.name.clone().filter(|text| !text.is_empty());
-    let source = word(&file.name_source).map(|word| Source::of(&word));
+    let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
+    let name = file.name.clone().and_then(Said::new);
+    let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
     Agent {
         pid,
         session_id: file.session_id.clone(),

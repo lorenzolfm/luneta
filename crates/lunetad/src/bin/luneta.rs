@@ -1,14 +1,20 @@
 //! luneta, the CLI that talks to the daemon of this host.
 
 use std::error::Error;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, InfoRequest, ListAgentsRequest, Status};
+use lunetad::api::checkout::Head;
+use lunetad::api::work_tree::Stands;
+use lunetad::api::{
+    Agent, InfoRequest, ListAgentsRequest, Status, Version, WatchRequest, WorkTree,
+};
 use lunetad::folder::{self, SOCKET};
+use prost::Message as _;
 
 /// Talk to lunetad, the luneta daemon of this host.
 #[derive(Parser)]
@@ -24,6 +30,25 @@ enum Command {
     Info,
     /// List the agents that run, and the pane each is in.
     Agents,
+    /// List the zellij sessions that run, their panes, and how the work tree
+    /// each pane works in stands.
+    Sessions,
+    /// Wait for the host to change, and write it out as the protocol encodes
+    /// it, for a program to read: luneta's zellij plugin.
+    Watch {
+        /// The host as last seen, `<pid>:<seq>` from its version, to wait for
+        /// the next. Without it, the host is written out at once.
+        #[arg(long, value_parser = version)]
+        after: Option<Version>,
+    },
+}
+
+/// A version as `--after` spells it: `<pid>:<seq>`.
+fn version(spelled: &str) -> Result<Version, String> {
+    let (pid, seq) = spelled.split_once(':').ok_or("not <pid>:<seq>")?;
+    let pid = pid.parse().map_err(|error| format!("the pid: {error}"))?;
+    let seq = seq.parse().map_err(|error| format!("the seq: {error}"))?;
+    Ok(Version { pid, seq })
 }
 
 fn main() -> ExitCode {
@@ -49,6 +74,8 @@ fn main() -> ExitCode {
     let done = match cli.command {
         Command::Info => runtime.block_on(info(&socket)),
         Command::Agents => runtime.block_on(agents(&socket)),
+        Command::Sessions => runtime.block_on(sessions(&socket)),
+        Command::Watch { after } => runtime.block_on(watch(&socket, after)),
     };
     if let Err(error) = done {
         eprintln!("luneta: {}: {}", socket.display(), causes(&*error));
@@ -114,6 +141,84 @@ async fn agents(socket: &Path) -> Result<(), Box<dyn Error>> {
             listed.unread
         );
     }
+    Ok(())
+}
+
+/// A session to a line, with its panes under it, each by its tab and its id:
+/// where it works, then what is checked out there and what changed on it. A
+/// pane zellij says no directory of has `-` for one, and a directory git has
+/// said nothing of yet has nothing after it.
+async fn sessions(socket: &Path) -> Result<(), Box<dyn Error>> {
+    let mut daemon = lunetad::connect(socket).await?;
+    let mut host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
+    host.sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    for session in &host.sessions {
+        let Some(panes) = &session.panes else {
+            println!("{}  (no panes listed yet)", session.name);
+            continue;
+        };
+        println!("{}", session.name);
+        for pane in &panes.panes {
+            let at = format!("{}:{}", pane.tab_name, pane.id);
+            let Some(cwd) = pane.cwd.as_deref() else {
+                println!("  {at}  -");
+                continue;
+            };
+            let Some(tree) = host.work_trees.iter().find(|tree| tree.dir == cwd) else {
+                println!("  {at}  {cwd}");
+                continue;
+            };
+            let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
+            println!("  {at}  {cwd}  {stands}");
+        }
+    }
+    Ok(())
+}
+
+/// How a work tree stands, in words: its branch, or `detached`, and then how
+/// many paths of each kind changed, the stashes, and where the branch is from
+/// its upstream. A directory in no repository says so. None for an answer
+/// that leaves out what the protocol says is always there, as a newer
+/// daemon's could.
+fn stands(tree: &WorkTree) -> Option<String> {
+    let checkout = match tree.stands.as_ref()? {
+        Stands::Outside(_) => return Some("no repository".to_owned()),
+        Stands::Checkout(checkout) => checkout,
+    };
+    let head = checkout.head.as_ref()?;
+    let changes = checkout.changes?;
+    let mut said = vec![match head {
+        Head::Detached(_) => "detached".to_owned(),
+        Head::Branch(branch) => branch.name.clone(),
+    }];
+    let counts = [
+        (changes.conflicted, "conflicted"),
+        (changes.staged, "staged"),
+        (changes.modified, "modified"),
+        (changes.renamed, "renamed"),
+        (changes.deleted, "deleted"),
+        (changes.untracked, "untracked"),
+        (checkout.stashes, "stashed"),
+    ];
+    let some = counts.iter().filter(|(count, _)| *count > 0);
+    said.extend(some.map(|(count, kind)| format!("{count} {kind}")));
+    if let Head::Branch(branch) = head
+        && let Some(upstream) = branch.upstream
+    {
+        let (ahead, behind) = (upstream.ahead, upstream.behind);
+        said.extend((ahead > 0).then(|| format!("{ahead} ahead")));
+        said.extend((behind > 0).then(|| format!("{behind} behind")));
+    }
+    Some(said.join(", "))
+}
+
+/// Writes out the host once it is no longer as `after` saw it.
+async fn watch(socket: &Path, after: Option<Version>) -> Result<(), Box<dyn Error>> {
+    let mut daemon = lunetad::connect(socket).await?;
+    let host = daemon.watch(WatchRequest { after }).await?.into_inner();
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&host.encode_to_vec())?;
+    stdout.flush()?;
     Ok(())
 }
 

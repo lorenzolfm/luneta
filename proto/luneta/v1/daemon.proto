@@ -16,6 +16,127 @@ service Daemon {
   rpc Info(InfoRequest) returns (InfoResponse);
   // The agents that run on the host, each as it stands now.
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  // The host as it stands: its zellij sessions and their panes, how the work
+  // trees those panes are in stand, and its agents. It answers at once when
+  // the host is no longer as the client last saw it, and otherwise as soon as
+  // the host changes, or after four seconds with the host as it was.
+  rpc Watch(WatchRequest) returns (Host);
+}
+
+message WatchRequest {
+  // The host as the client last saw it. Absent for a first look.
+  Version after = 1;
+}
+
+// A state of the host, as one daemon counts them.
+message Version {
+  // The daemon's process id. The next daemon counts from 0 again.
+  uint32 pid = 1;
+  // Goes up by one each time the host changes.
+  uint64 seq = 2;
+}
+
+message Host {
+  // Always there: a client that finds none has an answer that does not read.
+  Version version = 1;
+  // The sessions that run, in no order a client can count on.
+  repeated Session sessions = 2;
+  // How the work tree stands in each directory a pane works in, once git has
+  // said. In no order a client can count on.
+  repeated WorkTree work_trees = 3;
+  // The agents and the session files that do not read, as
+  // `ListAgentsResponse` has them.
+  repeated Agent agents = 4;
+  uint32 unread = 5;
+}
+
+// A zellij session that runs: its server listens on a socket named for it.
+message Session {
+  string name = 1;
+  // When its server started.
+  google.protobuf.Timestamp started_at = 2;
+  // Its panes, as zellij last listed them. Absent until zellij has, and while
+  // another session runs under its name: zellij is asked for them by name, and
+  // answers for one of the two, which the daemon cannot tell.
+  Panes panes = 3;
+}
+
+message Panes {
+  // Its terminals. A plugin's pane is left out, and so is a pane zellij keeps
+  // off the screen, as one that another took the place of.
+  repeated Pane panes = 1;
+}
+
+// A terminal, as `zellij action list-panes` lists it. Its title is zellij's
+// to tell: Claude Code turns a frame in it while it works, which would change
+// the host all the time.
+message Pane {
+  // Its id, which is unique within its session and not across them.
+  uint32 id = 1;
+  // The tab it is in: its position, from 0, and its name.
+  uint32 tab = 2;
+  string tab_name = 3;
+  // Where it works, absent until zellij has said. What it said last stands
+  // while it is too busy to say.
+  optional string cwd = 4;
+  // What runs in front in it: the command line of the process in the
+  // foreground, or of the shell itself at its prompt. Absent, and kept, as
+  // `cwd` is.
+  optional string command = 5;
+}
+
+// How the work tree stands where a pane works, as `git status` says it.
+message WorkTree {
+  // The directory, as zellij spells the pane's.
+  string dir = 1;
+  // One of these, always: a client that finds neither has a newer daemon's.
+  oneof stands {
+    // git failed there: the directory is in no repository, or in one git
+    // cannot read.
+    Outside outside = 2;
+    Checkout checkout = 3;
+  }
+
+  message Outside {}
+}
+
+// A repository's work tree: what is checked out there, and what changed.
+message Checkout {
+  // One of these, always.
+  oneof head {
+    Detached detached = 1;
+    Branch branch = 2;
+  }
+  // How many paths there are of each kind of change. Always there.
+  Changes changes = 3;
+  uint32 stashes = 4;
+
+  // `HEAD` names a commit, and no branch.
+  message Detached {}
+}
+
+message Branch {
+  string name = 1;
+  // How far it is from its upstream. Absent when it has none.
+  Upstream upstream = 2;
+}
+
+message Changes {
+  uint32 conflicted = 1;
+  // In the index or in the work tree.
+  uint32 deleted = 2;
+  uint32 renamed = 3;
+  // In the work tree, a path added with `--intent-to-add` among them, and one
+  // whose type changed.
+  uint32 modified = 4;
+  // In the index.
+  uint32 staged = 5;
+  uint32 untracked = 6;
+}
+
+message Upstream {
+  uint32 ahead = 1;
+  uint32 behind = 2;
 }
 
 message InfoRequest {}

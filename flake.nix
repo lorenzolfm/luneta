@@ -145,6 +145,10 @@
                 # The build script writes the protocol out as Rust, through protoc.
                 nativeBuildInputs = [ pkgs.protobuf ];
 
+                # The daemon asks git how each work tree stands, and the tests make
+                # work trees of their own for it to ask about.
+                nativeCheckInputs = [ pkgs.git ];
+
                 doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
 
                 meta = {

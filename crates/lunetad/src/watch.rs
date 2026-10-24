@@ -160,9 +160,10 @@ pub struct Troubles {
 }
 
 impl Troubles {
-    /// Says that `what` went wrong, unless it went wrong in the read before.
+    /// Says that `what` went wrong, unless it went wrong in the read before,
+    /// or has been said in this one.
     pub fn say(&mut self, what: String) {
-        if !self.said.contains(&what) {
+        if !self.said.contains(&what) && !self.now.contains(&what) {
             eprintln!("lunetad: {what}");
         }
         self.now.insert(what);

@@ -1108,8 +1108,9 @@ plugins {
 `nix build .#lunetad` builds `lunetad`, the daemon that is to hold what luneta
 knows of a host, and `luneta`, the CLI that talks to it
 ([#95](https://github.com/lorenzolfm/luneta/issues/95)). The plugin does not
-use it yet: `luneta agents` lists the agents the daemon finds, to check against
-the sidebar.
+use it yet: `luneta agents` lists the agents the daemon finds, and `luneta
+sessions` the sessions, their panes and the branch each works on, to check
+against the sidebar. The daemon asks `zellij` and `git` on its `PATH`.
 
 ## License
 

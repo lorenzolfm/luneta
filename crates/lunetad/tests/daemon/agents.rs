@@ -17,14 +17,16 @@ use lunetad::api::{Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Sta
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::host::{eventually, start, Running, Vars, LUNETA};
+use crate::host::{eventually, start, FakeZellij, Running, Vars, LUNETA};
 
 /// The folders of a host of a test's own: the daemon's, a home with Claude
-/// Code's session files in it, and zellij's sockets.
+/// Code's session files in it, and zellij's sockets, with a zellij that lists
+/// no panes.
 struct Host {
     runtime: TempDir,
     home: TempDir,
     zellij: TempDir,
+    lists: FakeZellij,
 }
 
 impl Host {
@@ -33,6 +35,7 @@ impl Host {
             runtime: tempfile::tempdir().unwrap(),
             home: tempfile::tempdir().unwrap(),
             zellij: tempfile::tempdir().unwrap(),
+            lists: FakeZellij::new(),
         };
         fs::create_dir_all(host.sessions()).unwrap();
         fs::create_dir_all(host.contract()).unwrap();
@@ -44,6 +47,7 @@ impl Host {
             runtime: Some(self.runtime.path()),
             home: Some(self.home.path()),
             zellij: Some(self.zellij.path()),
+            bin: Some(self.lists.bin()),
             ..Vars::default()
         }
     }

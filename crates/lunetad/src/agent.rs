@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use crate::api;
 use crate::api::agent::Status as Reported;
+use crate::said::Said;
 use crate::zellij::Sessions;
 
 /// An agent that runs on the host.
@@ -21,7 +22,7 @@ pub struct Agent {
     pub started_at: Option<SystemTime>,
     pub name: Option<Name>,
     /// How it was started, in the agent's own word.
-    pub entrypoint: Option<String>,
+    pub entrypoint: Option<Said>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
 }
@@ -33,7 +34,7 @@ pub enum Status {
     Waiting,
     Shell,
     /// A word not known here, as the agent wrote it: a newer agent's.
-    Other(String),
+    Other(Said),
     /// The agent says none.
     Unreported,
 }
@@ -42,22 +43,22 @@ impl Status {
     /// Claude Code's word for it, in any case, as the plugin reads it.
     #[must_use]
     pub fn of(word: Option<&str>) -> Self {
-        let Some(word) = word.map(str::trim).filter(|word| !word.is_empty()) else {
+        let Some(word) = word.map(|word| word.trim().to_owned()).and_then(Said::new) else {
             return Status::Unreported;
         };
-        match word.to_ascii_lowercase().as_str() {
+        match word.as_str().to_ascii_lowercase().as_str() {
             "busy" => Status::Busy,
             "idle" => Status::Idle,
             "waiting" => Status::Waiting,
             "shell" => Status::Shell,
-            _ => Status::Other(word.to_owned()),
+            _ => Status::Other(word),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name {
-    pub text: String,
+    pub text: Said,
     /// Who chose it, when the agent says.
     pub source: Option<Source>,
 }
@@ -116,10 +117,7 @@ impl Agent {
             Status::Idle => known(api::Status::Idle),
             Status::Waiting => known(api::Status::Waiting),
             Status::Shell => known(api::Status::Shell),
-            Status::Other(word) => {
-                assert!(!word.is_empty());
-                Some(Reported::OtherStatus(word.clone()))
-            },
+            Status::Other(word) => Some(Reported::OtherStatus(word.clone().into())),
             Status::Unreported => None,
         };
         let source = |source| -> api::NameSource {
@@ -141,11 +139,10 @@ impl Agent {
             status_since: self.status_since.map(Into::into),
             started_at: self.started_at.map(Into::into),
             name: self.name.as_ref().map(|name| {
-                assert!(!name.text.is_empty());
                 let source = name.source.map(|chose| source(chose).into());
-                api::Name { text: name.text.clone(), source }
+                api::Name { text: name.text.clone().into(), source }
             }),
-            entrypoint: self.entrypoint.clone().inspect(|word| assert!(!word.is_empty())),
+            entrypoint: self.entrypoint.clone().map(String::from),
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),

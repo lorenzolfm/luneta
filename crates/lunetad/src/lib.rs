@@ -12,7 +12,11 @@ mod client;
 mod core;
 mod daemon;
 pub mod folder;
+mod git;
+mod panes;
 mod process;
+mod program;
+mod said;
 mod watch;
 mod zellij;
 
