@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use crate::agents::{AgentSet, Seat, Status};
+use crate::coming::Coming;
 use crate::dock::{self, TabId};
-use crate::elapsed::Age;
+use crate::elapsed::{Age, Moment};
 use crate::fetch::Fetch;
 use crate::panes;
 use crate::tree::{is_placeholder, Leaf};
@@ -89,6 +90,16 @@ pub fn refuge<'a>(others: impl IntoIterator<Item = (&'a str, Age)>) -> Option<St
         .map(|(name, _)| name.to_owned())
 }
 
+/// Where the client goes before the session it is in is killed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refuge {
+    pub session: String,
+    /// The session's sidebar, standing in its column, for the focus to land
+    /// in when you leave from the sidebar: you go on along its rows there.
+    /// None lands you where the session had you.
+    pub sidebar: Option<u32>,
+}
+
 /// An agent of a session: the pane it sits in, the tab that pane is in, and
 /// what it is doing.
 #[derive(Debug)]
@@ -125,7 +136,7 @@ pub struct Subject {
     /// The agents of its session, once claude-ps has said.
     pub agents: Fetch<Vec<Agent>>,
     /// Where the client goes before the session it is in is killed.
-    pub refuge: Option<String>,
+    pub refuge: Option<Refuge>,
 }
 
 /// The pane a menu is for.
@@ -166,7 +177,7 @@ impl Subject {
         id: Option<u32>,
         leaves: &[Leaf],
         agents: Fetch<Vec<Agent>>,
-        refuge: Option<String>,
+        refuge: Option<Refuge>,
     ) -> Self {
         let pane = id.map(|id| Pane::of(id, leaves));
         Subject { seat, pane, agents, refuge }
@@ -304,7 +315,7 @@ pub enum Act {
     Kill(String),
     /// Go to the session `to`, and kill the session you are in once you have
     /// left it.
-    Leave { session: String, to: String },
+    Leave { session: String, to: Refuge },
 }
 
 /// What came of asking.
@@ -412,9 +423,18 @@ pub struct Leaving {
 }
 
 impl Leaving {
-    fn go(session: &str, to: &str) -> Self {
-        switch_session(Some(to));
-        Leaving { session: session.to_owned(), to: to.to_owned(), ticks: 0, asking: false }
+    /// Takes the client to `to`, into its sidebar when it names one. That
+    /// sidebar would send on the focus you come with, as one no key of its
+    /// session asked for: the word left first says you were taken there.
+    fn go(session: &str, to: &Refuge) -> Self {
+        match to.sidebar {
+            Some(sidebar) => {
+                Coming::shared().say(&to.session, sidebar, Moment::now());
+                switch_session_with_focus(&to.session, None, Some((sidebar, true)));
+            },
+            None => switch_session(Some(&to.session)),
+        }
+        Leaving { session: session.to_owned(), to: to.session.clone(), ticks: 0, asking: false }
     }
 
     /// The session the client is on its way to.
@@ -517,11 +537,16 @@ mod tests {
             };
             Pane { id, tab: Some(TabId(tab)), closes }
         });
-        Subject { seat, pane, agents, refuge: Some("elo".to_owned()) }
+        Subject { seat, pane, agents, refuge: Some(to_elo()) }
     }
 
     fn here() -> Seat {
         Seat::Here("luneta".to_owned())
+    }
+
+    /// Session `elo`, its sidebar in pane 4.
+    fn to_elo() -> Refuge {
+        Refuge { session: "elo".to_owned(), sidebar: Some(4) }
     }
 
     /// A pane closes alone, or its tab with it once nothing else holds the
@@ -532,7 +557,7 @@ mod tests {
     #[test]
     fn each_key_deletes_what_it_names_and_what_goes_with_it() {
         let elo = Seat::There("elo".to_owned());
-        let leave = || Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() };
+        let leave = || Act::Leave { session: "luneta".to_owned(), to: to_elo() };
         for (seat, id, scope, act) in [
             (here(), Some(2), Scope::Pane, Act::Pane(here(), 2)),
             (here(), Some(5), Scope::Pane, Act::Tab(here(), TabId(8))),

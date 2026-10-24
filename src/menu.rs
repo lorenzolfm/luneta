@@ -23,7 +23,7 @@ use zellij_tile::prelude::*;
 use crate::agents::{self, AgentSet, Live, Seat};
 use crate::brief;
 use crate::checkouts::{Checkouts, DIR_KEY};
-use crate::close::{self, Act, Leaving, Plan, Ran, Scope};
+use crate::close::{self, Act, Leaving, Plan, Ran, Refuge, Scope};
 use crate::dirs::{self, WORKTREES};
 use crate::dock::TabId;
 use crate::elapsed::{Age, Moment};
@@ -2031,7 +2031,9 @@ impl Menu {
             _ => close::agents_of(&self.agents, session, &leaves),
         };
         let seat = Seat::Here(session.to_owned());
-        Some(close::Subject::new(seat, Some(id), &leaves, agents, self.refuge.clone()))
+        // You came from a pane, and go to the pane the session had you in.
+        let refuge = self.refuge.clone().map(|session| Refuge { session, sidebar: None });
+        Some(close::Subject::new(seat, Some(id), &leaves, agents, refuge))
     }
 
     /// Goes ahead with the delete key that asked, planned again from what
@@ -2524,7 +2526,7 @@ mod tests {
             seat,
             pane: Some(close::Pane { id: 2, tab: Some(TabId(7)), closes: close::Closes::Pane }),
             agents: Fetch::Ready(agents),
-            refuge: Some("elo".to_owned()),
+            refuge: Some(Refuge { session: "elo".to_owned(), sidebar: None }),
         }
     }
 
@@ -2981,7 +2983,8 @@ mod tests {
     #[test]
     fn a_delete_key_with_no_agent_at_work_to_end_deletes_at_once() {
         let idle = closing(luneta(), &[(2, "idle"), (3, "shell")]);
-        let leave = || Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() };
+        let to = Refuge { session: "elo".to_owned(), sidebar: None };
+        let leave = || Act::Leave { session: "luneta".to_owned(), to: to.clone() };
         let session = close::Subject { pane: None, ..closing(luneta(), &[]) };
         for (row, subject, key, act) in [
             (row(None), &idle, 'd', Act::Pane(luneta(), 2)),
