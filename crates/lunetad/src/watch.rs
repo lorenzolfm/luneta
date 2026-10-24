@@ -1,16 +1,25 @@
 //! A folder watched for whoever reads it, to read it again as it changes.
 
-use std::io;
+use std::collections::HashSet;
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// How long a folder is let settle after a change before it is read: a file
 /// written in a few pieces makes a word for each, and one read covers them all.
 const SETTLE: Duration = Duration::from_millis(25);
+
+/// The longest a folder is let settle: one that never stops changing is read
+/// anyway, as often as this.
+const SETTLE_MAX: Duration = Duration::from_millis(250);
+
+const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 
 /// Reads with `read`, and hands what it read to `tell`: once before this
 /// returns, so that what the daemon knows is whole before it answers anyone,
@@ -33,11 +42,15 @@ pub fn watch<T: 'static>(
         return Ok(());
     }
     thread::Builder::new().name(name.to_owned()).spawn(move || {
-        let (changed, heard) = mpsc::channel();
+        // One wake-up is all a read needs, however many changes made it, so
+        // the channel holds one at most.
+        let (changed, heard) = mpsc::sync_channel(1);
         let mut watcher = None;
+        let mut troubles = Troubles::default();
         loop {
             if watcher.is_none() {
-                watcher = watching(&dir, mode, changed.clone());
+                watcher = watching(&dir, mode, &changed, &mut troubles);
+                troubles.done();
             }
             match heard.recv_timeout(sweep) {
                 Ok(()) => settle(&heard),
@@ -51,19 +64,100 @@ pub fn watch<T: 'static>(
     Ok(())
 }
 
-/// A watcher that says so on `changed` when anything in `dir` does, but for a
-/// read: the reads that follow a change would make changes of their own.
-fn watching(dir: &Path, mode: RecursiveMode, changed: Sender<()>) -> Option<RecommendedWatcher> {
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        if event.is_ok_and(|event| !event.kind.is_access()) {
-            let _ = changed.send(());
-        }
-    })
-    .ok()?;
-    watcher.watch(dir, mode).ok()?;
-    Some(watcher)
+/// A watcher of `dir`, or none, which leaves the folder to the sweep. One
+/// that cannot watch a folder that is there says why.
+fn watching(
+    dir: &Path,
+    mode: RecursiveMode,
+    changed: &SyncSender<()>,
+    troubles: &mut Troubles,
+) -> Option<RecommendedWatcher> {
+    match watcher(dir, mode, changed.clone()) {
+        Ok(watcher) => Some(watcher),
+        Err(error) if missing(&error) => None,
+        Err(error) => {
+            troubles.say(format!("{} is read on the sweep alone: {error}", dir.display()));
+            None
+        },
+    }
 }
 
+/// A watcher that says so on `changed` when anything in `dir` does, but for a
+/// read: the reads that follow a change would make changes of their own. A
+/// watcher that goes wrong is a change too, as a read is how the daemon finds
+/// out what it missed.
+fn watcher(
+    dir: &Path,
+    mode: RecursiveMode,
+    changed: SyncSender<()>,
+) -> notify::Result<RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+        if event.is_ok_and(|event| event.kind.is_access()) {
+            return;
+        }
+        match changed.try_send(()) {
+            // A full channel holds a wake-up already, and one that no one
+            // hears is the thread's that has ended.
+            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
+        }
+    })?;
+    watcher.watch(dir, mode)?;
+    Ok(watcher)
+}
+
+/// Whether `error` is the folder's not being there yet.
+fn missing(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(error) => error.kind() == ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+/// Waits out a burst of changes, until `SETTLE` has passed without one, but no
+/// longer than `SETTLE_MAX` in all.
 fn settle(heard: &Receiver<()>) {
-    while heard.recv_timeout(SETTLE).is_ok() {}
+    let deadline = Instant::now() + SETTLE_MAX;
+    while Instant::now() < deadline {
+        match heard.recv_timeout(SETTLE) {
+            Ok(()) => {},
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// The paths in `dir`. A folder that is not there yet holds none.
+pub fn listed(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    entries.map(|entry| Ok(entry?.path())).collect()
+}
+
+/// What went wrong in reading a folder, each said once while it keeps going
+/// wrong: a folder is read again every sweep.
+#[derive(Default)]
+pub struct Troubles {
+    /// What went wrong in the read before, and was said then.
+    said: HashSet<String>,
+    /// What has gone wrong in this read so far.
+    now: HashSet<String>,
+}
+
+impl Troubles {
+    /// Says that `what` went wrong, unless it went wrong in the read before.
+    pub fn say(&mut self, what: String) {
+        if !self.said.contains(&what) {
+            eprintln!("lunetad: {what}");
+        }
+        self.now.insert(what);
+    }
+
+    /// Ends a read. What went wrong in it is said again once it has gone right
+    /// in between.
+    pub fn done(&mut self) {
+        self.said = mem::take(&mut self.now);
+    }
 }

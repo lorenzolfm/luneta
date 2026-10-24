@@ -3,7 +3,8 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,8 @@ impl<'a> Vars<'a> {
 
     pub fn command(self, program: &str) -> Command {
         let mut command = Command::new(program);
-        for name in ["XDG_RUNTIME_DIR", "TMPDIR", "HOME", "CLAUDE_CONFIG_DIR", "ZELLIJ_SOCKET_DIR"] {
+        let names = ["XDG_RUNTIME_DIR", "TMPDIR", "HOME", "CLAUDE_CONFIG_DIR", "ZELLIJ_SOCKET_DIR"];
+        for name in names {
             command.env_remove(name);
         }
         let set = [
@@ -77,14 +79,28 @@ impl Drop for Running {
 /// A daemon that said it listens.
 pub struct Daemon {
     process: Running,
-    /// What the daemon says, kept open so that what it says next has somewhere
-    /// to go.
-    stderr: BufReader<ChildStderr>,
+    /// What the daemon has said, a line at a time.
+    said: Vec<String>,
+    /// What it says next, which a thread of the test's reads as it comes, so
+    /// that it always has somewhere to go.
+    heard: Receiver<String>,
 }
 
 impl Daemon {
     pub fn pid(&self) -> u32 {
         self.process.pid()
+    }
+
+    /// All the daemon has said, once `wait` has passed.
+    pub fn said_after(&mut self, wait: Duration) -> &[String] {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Ok(line) = self.heard.recv_timeout(left) else {
+                return &self.said;
+            };
+            self.said.push(line);
+        }
     }
 }
 
@@ -93,18 +109,22 @@ impl Daemon {
 pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
     let mut process = Running::spawn(vars.command(LUNETAD).stderr(Stdio::piped()));
     let stderr = BufReader::new(process.child.stderr.take().unwrap());
-    let mut daemon = Daemon { process, stderr };
-    let mut said = String::new();
-    loop {
-        let mut line = String::new();
-        if daemon.stderr.read_line(&mut line).unwrap() == 0 {
-            return Err((daemon.process.child.wait().unwrap(), said));
+    let (tell, heard) = mpsc::channel();
+    thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if tell.send(line).is_err() {
+                return;
+            }
         }
+    });
+    let mut said = Vec::new();
+    while let Ok(line) = heard.recv() {
         if line.starts_with("lunetad: listening on ") {
-            return Ok(daemon);
+            return Ok(Daemon { process, said, heard });
         }
-        said.push_str(&line);
+        said.push(line);
     }
+    Err((process.child.wait().unwrap(), said.join("\n")))
 }
 
 /// What `luneta info` says, run with `vars`.

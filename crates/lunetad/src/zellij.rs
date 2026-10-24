@@ -19,10 +19,14 @@
 //! after that, in a pane older than the rename, it puts in the wrong session.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::io::{self, ErrorKind};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+use crate::watch::{self, Troubles};
 
 /// The socket in the folder that is zellij's web server's, and no session's.
 const WEB_SERVER: &str = "web_server_bus";
@@ -67,24 +71,52 @@ struct Id {
     made: SystemTime,
 }
 
-/// The sessions whose sockets are in `folder` now.
-#[must_use]
-pub fn scan(folder: &Path) -> Vec<Socket> {
-    let listed = |dir: &Path| fs::read_dir(dir).into_iter().flatten().flatten();
-    let contracts = listed(folder);
-    let contracts = contracts.filter(|entry| entry.file_name().to_string_lossy().starts_with(CONTRACT));
-    let sockets = contracts.flat_map(|contract| listed(&contract.path()));
-    sockets
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let found = entry.metadata().ok()?;
-            if name == WEB_SERVER || !found.file_type().is_socket() {
-                return None;
+/// The sessions whose sockets are in `folder` now. What goes wrong in reading
+/// it, `troubles` says.
+pub fn scan(folder: &Path, troubles: &mut Troubles) -> Vec<Socket> {
+    let mut sockets = Vec::new();
+    for contract in listed(folder, troubles) {
+        if !contract.file_name().is_some_and(|name| name.to_string_lossy().starts_with(CONTRACT)) {
+            continue;
+        }
+        for path in listed(&contract, troubles) {
+            match socket(&path) {
+                Ok(Some(socket)) => sockets.push(socket),
+                Ok(None) => {},
+                // A socket gone since the folder was listed is a session that
+                // has ended.
+                Err(error) if error.kind() == ErrorKind::NotFound => {},
+                Err(error) => troubles.say(format!("{}: {error}", path.display())),
             }
-            let made = found.modified().ok()?;
-            Some(Socket { name, id: Id { dev: found.dev(), ino: found.ino(), made } })
-        })
-        .collect()
+        }
+    }
+    troubles.done();
+    sockets
+}
+
+/// The paths in `dir`, or none when it cannot be listed, which `troubles` says.
+fn listed(dir: &Path, troubles: &mut Troubles) -> Vec<PathBuf> {
+    watch::listed(dir).unwrap_or_else(|error| {
+        troubles.say(format!("{}: {error}", dir.display()));
+        Vec::new()
+    })
+}
+
+/// The session whose socket is at `path`, if that is one: zellij names a
+/// session in UTF-8, and its web server's socket is no session's.
+fn socket(path: &Path) -> io::Result<Option<Socket>> {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return Ok(None);
+    };
+    if name == WEB_SERVER {
+        return Ok(None);
+    }
+    let found = fs::symlink_metadata(path)?;
+    if !found.file_type().is_socket() {
+        return Ok(None);
+    }
+    let id = Id { dev: found.dev(), ino: found.ino(), made: found.modified()? };
+    Ok(Some(Socket { name: name.to_owned(), id }))
 }
 
 /// What the daemon has seen of zellij's sessions while it ran.
@@ -113,6 +145,16 @@ impl Sessions {
             held.retain(|id| names.contains_key(id));
             !held.is_empty()
         });
+        // Every session that holds a name runs, and holds the one it has now.
+        for held in self.held.values() {
+            assert!(!held.is_empty());
+            for id in held {
+                assert!(self.names.contains_key(id));
+            }
+        }
+        for (id, name) in &self.names {
+            assert!(self.held.get(name).is_some_and(|held| held.contains(id)));
+        }
     }
 
     /// The name that the session once called `named` has now, for an agent
@@ -120,11 +162,12 @@ impl Sessions {
     /// pane opened in. None when no session could be it, or more than one.
     #[must_use]
     pub fn lead(&self, named: &str, started: Option<SystemTime>) -> Option<&str> {
-        let held = self.held.get(named)?;
-        let mut could = held.iter().filter(|id| started.is_none_or(|started| id.made <= started));
+        let before = |id: &&Id| started.is_none_or(|started| id.made <= started);
+        let mut could = self.held.get(named)?.iter().filter(before);
         let (Some(id), None) = (could.next(), could.next()) else {
             return None;
         };
-        self.names.get(id).map(String::as_str)
+        let now = self.names.get(id).expect("a session that holds a name runs");
+        Some(now.as_str())
     }
 }

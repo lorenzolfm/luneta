@@ -11,7 +11,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, SystemTime};
 
 use notify::RecursiveMode;
@@ -25,11 +25,16 @@ use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::{InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse};
 use crate::core::{self, Command};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
-use crate::{claude, watch, zellij};
+use crate::watch::Troubles;
+use crate::{claude, client, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
 /// that crashed, which leaves its file as it was.
 const SWEEP: Duration = Duration::from_secs(2);
+
+/// The most questions a client has open at once on one connection, which
+/// HTTP/2 tells it: `luneta` asks one.
+const QUESTIONS_MAX: u32 = 16;
 
 /// A folder that this process's daemon holds, and the socket it listens on
 /// there.
@@ -58,10 +63,10 @@ impl Claim {
         }
         let socket = folder.join(SOCKET);
         match fs::remove_file(&socket) {
-            Err(error) if error.kind() != ErrorKind::NotFound => {
-                return Err(Refusal::Io(socket, error));
-            },
-            _ => {},
+            Ok(()) => {},
+            // No daemon before this one left a socket.
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => return Err(Refusal::Io(socket, error)),
         }
         Ok(Claim { socket, _lock: lock })
     }
@@ -72,14 +77,16 @@ impl Claim {
     }
 }
 
-/// Makes `folder` for this user alone, or checks that the one there is that,
-/// as the shell hook does before it writes in it.
+/// Makes `folder` for this user alone, unless it is there, and checks that it
+/// is that, as the shell hook does before it writes in it. One just made is
+/// checked too, as whatever made it has no say in what it turned out to be.
 fn own(folder: &Path) -> Result<(), Refusal> {
     match DirBuilder::new().mode(0o700).create(folder) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => folder::check(folder),
-        Err(error) => Err(Refusal::Io(folder.to_owned(), error)),
+        Ok(()) => {},
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
+        Err(error) => return Err(Refusal::Io(folder.to_owned(), error)),
     }
+    folder::check(folder)
 }
 
 /// Listens on the claim's socket and answers there for as long as the
@@ -92,7 +99,10 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     follow(&core)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
     let host = Host { started: SystemTime::now(), core };
+    // Bounds of the daemon's own, rather than tonic's, which are none.
     Server::builder()
+        .max_concurrent_streams(QUESTIONS_MAX)
+        .timeout(client::ANSWER)
         .add_service(DaemonServer::new(host))
         .serve_with_incoming(UnixListenerStream::new(listener))
         .await
@@ -101,13 +111,13 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
 
 /// Has the core told what Claude Code's files and zellij's sockets say, as
 /// they change.
-fn follow(core: &Sender<Command>) -> io::Result<()> {
+fn follow(core: &SyncSender<Command>) -> io::Result<()> {
     match claude::folder() {
         Some(folder) => {
-            let mut sessions = claude::Sessions::new(&folder);
-            let dir = sessions.dir().to_owned();
+            let mut files = claude::SessionFiles::new(&folder);
+            let dir = files.dir().to_owned();
             let core = core.clone();
-            let read = move || sessions.scan();
+            let read = move || files.scan();
             let tell = move |found| core.send(Command::Agents(found)).is_ok();
             watch::watch("claude", dir, RecursiveMode::NonRecursive, SWEEP, read, tell)?;
         },
@@ -117,7 +127,8 @@ fn follow(core: &Sender<Command>) -> io::Result<()> {
     let core = core.clone();
     let read = {
         let folder = folder.clone();
-        move || zellij::scan(&folder)
+        let mut troubles = Troubles::default();
+        move || zellij::scan(&folder, &mut troubles)
     };
     let tell = move |sockets| core.send(Command::Sockets(sockets)).is_ok();
     watch::watch("zellij", folder, RecursiveMode::Recursive, SWEEP, read, tell)
@@ -126,7 +137,7 @@ fn follow(core: &Sender<Command>) -> io::Result<()> {
 /// What the daemon answers from.
 struct Host {
     started: SystemTime,
-    core: Sender<Command>,
+    core: SyncSender<Command>,
 }
 
 #[tonic::async_trait]
@@ -145,7 +156,13 @@ impl Daemon for Host {
     ) -> Result<Response<ListAgentsResponse>, Status> {
         let (answer, answered) = oneshot::channel();
         let stopped = || Status::unavailable("the daemon's core has stopped");
-        self.core.send(Command::List(answer)).map_err(|_| stopped())?;
+        match self.core.try_send(Command::List(answer)) {
+            Ok(()) => {},
+            Err(TrySendError::Full(_)) => {
+                return Err(Status::resource_exhausted("the daemon has too many questions open"));
+            },
+            Err(TrySendError::Disconnected(_)) => return Err(stopped()),
+        }
         Ok(Response::new(answered.await.map_err(|_| stopped())?))
     }
 }

@@ -3,8 +3,9 @@
 //! wait for its answer. So nothing changes what another is reading, and the
 //! commands take effect in the order they came in.
 
+use std::collections::HashSet;
 use std::io;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 
 use tokio::sync::oneshot;
@@ -22,9 +23,14 @@ pub enum Command {
     List(oneshot::Sender<api::ListAgentsResponse>),
 }
 
+/// The most commands that wait for the core. A watcher has one waiting at a
+/// time at most, as it waits for room; the rest are the API's, which tells a
+/// client that the daemon is busy rather than wait.
+const COMMANDS_MAX: usize = 64;
+
 /// Starts the core, which runs until no one is left to send it a command.
-pub fn start() -> io::Result<Sender<Command>> {
-    let (send, commands) = mpsc::channel();
+pub fn start() -> io::Result<SyncSender<Command>> {
+    let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
     thread::Builder::new().name("core".to_owned()).spawn(move || run(&commands))?;
     Ok(send)
 }
@@ -34,14 +40,17 @@ fn run(commands: &Receiver<Command>) {
     let mut sessions = Sessions::default();
     for command in commands {
         match command {
-            Command::Agents(now) => found = now,
+            Command::Agents(now) => {
+                // The adapter keys its files by the pid each is named for.
+                let pids: HashSet<u32> = now.agents.iter().map(|agent| agent.pid).collect();
+                assert_eq!(pids.len(), now.agents.len(), "an agent's pid comes twice");
+                found = now;
+            },
             Command::Sockets(now) => sessions.saw(now),
             Command::List(answer) => {
                 let agents = found.agents.iter().map(|agent| agent.to_api(&sessions)).collect();
-                // Past four billion files, the count says as many as it can.
-                let unread = u32::try_from(found.unread).unwrap_or(u32::MAX);
                 // One who stopped waiting has no use for the answer.
-                let _ = answer.send(api::ListAgentsResponse { agents, unread });
+                let _ = answer.send(api::ListAgentsResponse { agents, unread: found.unread });
             },
         }
     }

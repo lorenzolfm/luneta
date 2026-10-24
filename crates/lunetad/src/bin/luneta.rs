@@ -62,7 +62,9 @@ async fn info(socket: &Path) -> Result<(), Box<dyn Error>> {
     let info = daemon.info(InfoRequest {}).await?.into_inner();
     let started = info.started_at.and_then(|at| SystemTime::try_from(at).ok());
     match started.and_then(|at| at.elapsed().ok()) {
-        Some(up) => println!("lunetad {} (pid {}), up {}", info.version, info.pid, span(up.as_secs())),
+        Some(up) => {
+            println!("lunetad {} (pid {}), up {}", info.version, info.pid, span(up.as_secs()));
+        },
         None => println!("lunetad {} (pid {})", info.version, info.pid),
     }
     Ok(())
@@ -86,7 +88,8 @@ async fn agents(socket: &Path) -> Result<(), Box<dyn Error>> {
             Some(now) => format!("{now}:{}", zellij.pane),
         },
     };
-    let mut rows: Vec<(String, &Agent)> = listed.agents.iter().map(|agent| (pane(agent), agent)).collect();
+    let mut rows: Vec<(String, &Agent)> =
+        listed.agents.iter().map(|agent| (pane(agent), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(pane, _)| pane.len()).max().unwrap_or(0);
     for (pane, agent) in rows {

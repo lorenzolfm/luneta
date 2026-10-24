@@ -107,13 +107,19 @@ impl Agent {
     /// is in now.
     #[must_use]
     pub fn to_api(&self, sessions: &Sessions) -> api::Agent {
+        // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
+        // out what is empty: the protocol says it is absent instead.
+        assert!(self.pid > 1);
         let known = |status: api::Status| Some(Reported::KnownStatus(status.into()));
         let status = match &self.status {
             Status::Busy => known(api::Status::Busy),
             Status::Idle => known(api::Status::Idle),
             Status::Waiting => known(api::Status::Waiting),
             Status::Shell => known(api::Status::Shell),
-            Status::Other(word) => Some(Reported::OtherStatus(word.clone())),
+            Status::Other(word) => {
+                assert!(!word.is_empty());
+                Some(Reported::OtherStatus(word.clone()))
+            },
             Status::Unreported => None,
         };
         let source = |source| -> api::NameSource {
@@ -134,11 +140,12 @@ impl Agent {
             status,
             status_since: self.status_since.map(Into::into),
             started_at: self.started_at.map(Into::into),
-            name: self.name.as_ref().map(|name| api::Name {
-                text: name.text.clone(),
-                source: name.source.map(|chose| source(chose).into()),
+            name: self.name.as_ref().map(|name| {
+                assert!(!name.text.is_empty());
+                let source = name.source.map(|chose| source(chose).into());
+                api::Name { text: name.text.clone(), source }
             }),
-            entrypoint: self.entrypoint.clone(),
+            entrypoint: self.entrypoint.clone().inspect(|word| assert!(!word.is_empty())),
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),

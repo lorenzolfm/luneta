@@ -1,11 +1,16 @@
 //! The agents the daemon finds: Claude Code's session files, the processes
 //! they name, and the zellij panes those run in.
 
-use std::fs;
+use std::collections::HashSet;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, Zellij};
@@ -151,6 +156,11 @@ fn zellij(named: &str, session: Option<&str>, pane: u32) -> Zellij {
     Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane }
 }
 
+/// The session the daemon says an agent's pane is in now, if it says one.
+fn now_in(agent: &Agent) -> Option<&str> {
+    agent.zellij.as_ref().and_then(|zellij| zellij.session.as_deref())
+}
+
 /// A status the daemon knows, as it lists it.
 fn known(status: Status) -> Reported {
     Reported::KnownStatus(status.into())
@@ -179,7 +189,9 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
     let mut elsewhere = file_for("foreign", &foreign, "busy");
     elsewhere["pidDomain"] = json!("linux:elsewhere:pid:[1]");
     host.write(foreign.pid(), &elsewhere);
-    let copy = |name: String| fs::copy(host.file_of(outside.pid()), host.sessions().join(name)).unwrap();
+    let copy = |name: String| {
+        fs::copy(host.file_of(outside.pid()), host.sessions().join(name)).unwrap();
+    };
     copy(format!("{}-before.json", outside.pid()));
     copy(format!("0{}.json", outside.pid()));
     let _daemon = start(host.vars()).unwrap();
@@ -188,7 +200,10 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
     listed.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     let seen: Vec<_> = listed
         .iter()
-        .map(|agent| (agent.session_id.as_str(), agent.pid, agent.status.clone(), agent.zellij.clone()))
+        .map(|agent| {
+            let status = agent.status.clone();
+            (agent.session_id.as_str(), agent.pid, status, agent.zellij.clone())
+        })
         .collect();
     assert_eq!(
         seen,
@@ -230,7 +245,8 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
     let seen: Vec<_> = listed
         .iter()
         .map(|agent| {
-            let source = agent.name.as_ref().and_then(|name| name.source.is_some().then(|| name.source()));
+            let name = agent.name.as_ref();
+            let source = name.and_then(|name| name.source.is_some().then(|| name.source()));
             (agent.session_id.as_str(), agent.status.clone(), source, agent.entrypoint.as_deref())
         })
         .collect();
@@ -280,14 +296,16 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("two is gone", || host.agent("two").is_none().then_some(()));
 }
 
-/// A file that does not parse for longer than a write takes is cut short for
-/// good, or in a shape of a newer Claude Code's. Its agent leaves the list,
-/// rather than stay in it as it was, and the daemon counts the file as one it
-/// cannot read, so that an empty list is not taken for no agents.
+/// A file that does not read for longer than a write takes is cut short for
+/// good, or in a shape of a newer Claude Code's, or no session file at all: a
+/// folder by a session file's name, or one too long to be one. Its agent
+/// leaves the list, rather than stay in it as it was, and the daemon counts the
+/// file as one it cannot read, so that an empty list is not taken for no
+/// agents.
 #[test]
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
-    let (cut, newer) = (process(None), process(None));
+    let (cut, newer, folder, long) = (process(None), process(None), process(None), process(None));
     host.write(cut.pid(), &file_for("cut", &cut, "busy"));
     let _daemon = start(host.vars()).unwrap();
     assert!(host.agent("cut").is_some());
@@ -297,15 +315,67 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let mut shape = file_for("newer", &newer, "busy");
     shape["procStart"] = json!({ "ticks": started(newer.pid()) });
     host.write(newer.pid(), &shape);
-    let unread = eventually("two files are unread", || {
+    fs::create_dir(host.file_of(folder.pid())).unwrap();
+    // JSON a session file's parser would take, but for the spaces ahead of it.
+    let padded = " ".repeat(64 * 1024) + &file_for("long", &long, "busy").to_string();
+    fs::write(host.file_of(long.pid()), padded).unwrap();
+    let unread = eventually("four files are unread", || {
         let listed = host.list();
-        (listed.unread == 2).then_some(listed)
+        (listed.unread == 4).then_some(listed)
     });
     assert!(unread.agents.is_empty(), "{:?}", unread.agents);
 
     let output = host.vars().command(LUNETA).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("cannot read 2 of Claude Code's session files"), "{said}");
+    assert!(said.contains("cannot read 4 of Claude Code's session files"), "{said}");
+}
+
+/// A folder that never stops changing is read anyway: the daemon waits for a
+/// burst of changes to settle before it reads, but only so long. The test
+/// writes a file beside the session files every few milliseconds, more often
+/// than the folder ever settles, and meanwhile changes an agent's status.
+#[test]
+fn a_folder_that_never_settles_is_read_anyway() {
+    let host = Host::new();
+    let one = process(None);
+    host.write(one.pid(), &file_for("one", &one, "busy"));
+    let _daemon = start(host.vars()).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let churn = {
+        let (stop, path) = (Arc::clone(&stop), host.sessions().join("churn"));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                fs::write(&path, "churn").unwrap();
+                thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    host.write(one.pid(), &file_for("one", &one, "idle"));
+    let idle = Some(known(Status::Idle));
+    eventually("one is idle", || host.agent("one").filter(|agent| agent.status == idle));
+    stop.store(true, Ordering::Relaxed);
+    churn.join().unwrap();
+}
+
+/// A folder the daemon cannot read, it says it cannot, and says so once: it
+/// reads the folder again every sweep, and a line for each would bury the
+/// rest of what it says. The test waits out more than two sweeps.
+#[test]
+fn a_folder_the_daemon_cannot_read_it_says_so_once() {
+    let host = Host::new();
+    fs::set_permissions(host.sessions(), Permissions::from_mode(0o000)).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
+    let said = daemon.said_after(Duration::from_secs(5)).to_vec();
+    fs::set_permissions(host.sessions(), Permissions::from_mode(0o755)).unwrap();
+
+    let sessions = host.sessions().display().to_string();
+    let about: Vec<&String> = said.iter().filter(|line| line.contains(&sessions)).collect();
+    assert!(about.iter().any(|line| line.ends_with("Permission denied (os error 13)")), "{said:?}");
+    let once: HashSet<&&String> = about.iter().collect();
+    assert_eq!(once.len(), about.len(), "{said:?}");
+    assert!(host.agents().is_empty());
 }
 
 /// zellij renames a session by moving its socket to the new name. The daemon
@@ -322,7 +392,7 @@ fn a_renamed_session_takes_its_agents_with_it() {
 
     fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
     let moved = eventually("the agent is in play", || {
-        host.agent("agent").filter(|agent| agent.zellij.as_ref().is_some_and(|z| z.session.as_deref() == Some("play")))
+        host.agent("agent").filter(|agent| now_in(agent) == Some("play"))
     });
     assert_eq!(moved.zellij, Some(zellij("work", Some("play"), 2)));
 }
@@ -340,14 +410,15 @@ fn a_session_that_takes_a_name_does_not_take_the_agents_it_had() {
     let _daemon = start(host.vars()).unwrap();
 
     fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
-    let in_play = |agent: &Agent| agent.zellij.as_ref().is_some_and(|z| z.session.as_deref() == Some("play"));
+    let in_play = |agent: &Agent| now_in(agent) == Some("play");
     eventually("the agent is in play", || host.agent("older").filter(in_play));
 
     let _taken = UnixListener::bind(host.contract().join("work")).unwrap();
     let newer = process(Some(("work", 5)));
     host.write(newer.pid(), &file_for("newer", &newer, "idle"));
     let either = eventually("the newer agent could be in either", || {
-        host.agent("newer").filter(|agent| agent.zellij.as_ref().is_some_and(|z| z.session.is_none()))
+        let untold = |agent: &Agent| agent.zellij.as_ref().is_some_and(|z| z.session.is_none());
+        host.agent("newer").filter(untold)
     });
     assert_eq!(either.zellij, Some(zellij("work", None, 5)));
     assert_eq!(host.agent("older").unwrap().zellij, Some(zellij("work", Some("play"), 2)));

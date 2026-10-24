@@ -39,7 +39,10 @@ impl Domain {
 
     /// Whether a pid recorded under `recorded` is one of this system's.
     #[must_use]
-    #[expect(clippy::unused_self, reason = "one signature for both backends, and Linux's reads itself")]
+    #[expect(
+        clippy::unused_self,
+        reason = "one signature for both backends, and Linux's reads itself"
+    )]
     pub fn admits(&self, recorded: &str) -> bool {
         recorded == "darwin"
     }
@@ -54,10 +57,14 @@ fn lstart(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let clock = secs.rem_euclid(86_400);
     let (year, month, day) = civil(days);
+    assert!((1..=12).contains(&month));
+    assert!((1..=31).contains(&day));
+    let weekday = usize::try_from(days.rem_euclid(7)).expect("a remainder of 7 is in 0..7");
+    let month_index = usize::try_from(month - 1).expect("a month is in 1..=12");
     format!(
         "{} {} {day:>2} {:02}:{:02}:{:02} {year}",
-        WEEKDAYS[days.rem_euclid(7) as usize],
-        MONTHS[month as usize - 1],
+        WEEKDAYS[weekday],
+        MONTHS[month_index],
         clock / 3600,
         clock % 3600 / 60,
         clock % 60,

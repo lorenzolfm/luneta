@@ -60,8 +60,13 @@ impl std::error::Error for Refusal {}
 /// shell hook each do before they use it: a socket in a folder that is not
 /// could be anyone's.
 pub fn check(folder: &Path) -> Result<(), Refusal> {
-    let found = fs::symlink_metadata(folder).map_err(|error| Refusal::Io(folder.to_owned(), error))?;
-    if !found.is_dir() || found.uid() != rustix::process::getuid().as_raw() {
+    let found = fs::symlink_metadata(folder);
+    let found = found.map_err(|error| Refusal::Io(folder.to_owned(), error))?;
+    // A link is not taken for the folder it leads to, even one of yours.
+    if !found.is_dir() {
+        return Err(Refusal::NotYours(folder.to_owned()));
+    }
+    if found.uid() != rustix::process::getuid().as_raw() {
         return Err(Refusal::NotYours(folder.to_owned()));
     }
     if found.mode() & 0o077 != 0 {

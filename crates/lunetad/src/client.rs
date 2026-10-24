@@ -15,8 +15,8 @@ use crate::api::daemon_client::DaemonClient;
 const CONNECT: Duration = Duration::from_secs(1);
 
 /// How long a client waits for an answer: a daemon that has none in this time
-/// is stuck.
-const ANSWER: Duration = Duration::from_secs(5);
+/// is stuck. The daemon gives up on a question as soon, too.
+pub const ANSWER: Duration = Duration::from_secs(5);
 
 /// A client of the daemon that listens on `socket`.
 pub async fn connect(socket: &Path) -> Result<DaemonClient<Channel>, Error> {
