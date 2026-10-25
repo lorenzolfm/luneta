@@ -1,6 +1,6 @@
-# The plugin is the root package, and the daemon a member beside it. A plain
-# `cargo build` here builds the plugin alone: the root package is the
-# workspace's default member.
+# The plugin is the root package, and the daemon and the protocol both read
+# are members beside it. A plain `cargo build` here builds the plugin alone:
+# the root package is the workspace's default member.
 [workspace]
 members = ["crates/*"]
 
@@ -36,6 +36,11 @@ serde_json = "1"
 # plugin's configuration that has children. zellij parses its config with this
 # crate, at this version.
 kdl = { version = "4.7.1", default-features = false }
+# What the daemon says of the host comes as the protocol encodes it, and how
+# git says a work tree stands is read the way the daemon reads it. prost is
+# for decoding the one: zellij-tile's own is of another version.
+luneta-protocol = { path = "crates/protocol" }
+prost = "0.14.4"
 
 [profile.release]
 opt-level = "z"

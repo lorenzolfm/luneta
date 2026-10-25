@@ -1356,10 +1356,21 @@ version = "0.2.2"
 dependencies = [
  "fuzzy-matcher",
  "kdl",
+ "luneta-protocol",
+ "prost 0.14.4",
  "serde",
  "serde_json",
  "unicode-width 0.2.2",
  "zellij-tile",
+]
+
+[[package]]
+name = "luneta-protocol"
+version = "0.2.2"
+dependencies = [
+ "prost 0.14.4",
+ "prost-build",
+ "prost-types",
 ]
 
 [[package]]
@@ -1368,9 +1379,9 @@ version = "0.2.2"
 dependencies = [
  "clap",
  "hyper-util",
+ "luneta-protocol",
  "notify",
  "prost 0.14.4",
- "prost-types",
  "rustix",
  "serde",
  "serde_json",

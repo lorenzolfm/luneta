@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use luneta_protocol::v1;
 use serde::Deserialize;
 
 pub const CONTEXT_VALUE: &str = "places";
@@ -69,6 +70,30 @@ impl Places {
             _ => Vec::new(),
         };
         self.sessions.insert(session, panes);
+        self.reindex();
+    }
+
+    /// What the daemon says of every session's panes, in the place of all
+    /// zellij said. A session whose panes it has not listed holds none, as
+    /// one that zellij could not list them of does.
+    pub fn heard(&mut self, sessions: &[v1::Session]) {
+        let panes = |session: &v1::Session| {
+            let listed = session.panes.as_ref().map_or(&[][..], |panes| panes.panes.as_slice());
+            let pane = |pane: &v1::Pane| {
+                let command = pane.command.clone().filter(|command| !command.trim().is_empty());
+                Some(Pane {
+                    id: pane.id,
+                    cwd: pane.cwd.clone().filter(|cwd| !cwd.is_empty())?,
+                    // The daemon leaves titles out: Claude Code turns a frame
+                    // in one as it works.
+                    claude: is_claude(command.as_deref(), None),
+                    command,
+                })
+            };
+            listed.iter().filter_map(pane).collect()
+        };
+        self.sessions =
+            sessions.iter().map(|session| (session.name.clone(), panes(session))).collect();
         self.reindex();
     }
 
@@ -195,6 +220,40 @@ mod tests {
         let mut places = Places::default();
         places.ingest("ghostty".to_owned(), Some(0), GHOSTTY.as_bytes());
         places
+    }
+
+    /// The daemon lists a session's panes as zellij does, and what it says
+    /// takes the place of all zellij said: where each works, and what runs in
+    /// it. A session whose panes it has yet to list holds none.
+    #[test]
+    fn the_daemon_s_panes_stand_in_the_place_of_what_zellij_said() {
+        let mut places = ghostty();
+        let pane = |id, cwd: Option<&str>, command: Option<&str>| v1::Pane {
+            id,
+            tab: 0,
+            tab_name: "Tab #1".to_owned(),
+            cwd: cwd.map(str::to_owned),
+            command: command.map(str::to_owned),
+        };
+        let listed = v1::Panes {
+            panes: vec![
+                pane(0, Some("/w/repo"), Some("claude")),
+                pane(1, Some("/w/repo/src"), None),
+                pane(2, None, Some("fish")),
+            ],
+        };
+        let session = |name: &str, panes| v1::Session {
+            name: name.to_owned(),
+            started_at: None,
+            panes,
+        };
+        places.heard(&[session("luneta", Some(listed)), session("new", None)]);
+        assert_eq!(places.find(0, "/w/repo", ""), Some("luneta"));
+        assert_eq!(places.command("luneta", 0), Some("claude"));
+        assert_eq!(places.cwd("luneta", 1), Some("/w/repo/src"));
+        assert_eq!(places.command("luneta", 1), None);
+        assert_eq!(places.cwd("luneta", 2), None);
+        assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), None);
     }
 
     #[test]

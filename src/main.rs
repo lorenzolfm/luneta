@@ -5,6 +5,7 @@ mod close;
 mod coming;
 mod context;
 mod cursor;
+mod daemon;
 mod dirs;
 mod dock;
 mod elapsed;
@@ -33,6 +34,7 @@ use agents::{AgentRow, AgentSet, Live, Seat};
 use brief::{Brief, Over, Scope};
 use checkouts::Checkouts;
 use context::CONTEXT_KEY;
+use daemon::{Answer, Daemon};
 use dirs::{DirSet, LIST};
 use dock::{Ask, TabId};
 use menu::{Command, Did, RowPane, SidebarMenu, There, Top};
@@ -118,7 +120,8 @@ const PREVIEW_DELAY: u64 = 2;
 
 /// How often the sidebar asks each session for its panes again, so that an
 /// agent started in a new pane, or in a shell that moved, finds its row, and
-/// git how the work tree of each stands, so that a change or a checkout shows.
+/// git how the work tree of each stands, so that a change or a checkout shows,
+/// while the daemon does not answer: it says each as it changes.
 const TICKS_PER_PLACES: u64 = 5 * TICKS_PER_SECOND;
 
 /// How long, in ticks, keys may take to come after the sidebar's menu starts
@@ -190,6 +193,9 @@ struct State {
     live_names: Vec<String>,
     places: Places,
     checkouts: Checkouts,
+    /// What the daemon says of the host, which the panes' places, the work
+    /// trees and the agents come from while it answers.
+    daemon: Daemon,
     active_tab: Option<usize>,
     sessions: Sessions,
     error: Option<String>,
@@ -361,6 +367,7 @@ impl ZellijPlugin for State {
                         resize_self(self.plugin_id);
                         self.ask_zoxide();
                     }
+                    self.ask_daemon();
                     self.ask_agents();
                 } else {
                     self.dirs.fail("permission denied");
@@ -424,6 +431,22 @@ impl ZellijPlugin for State {
                             None => false,
                         }
                     },
+                    // Asked of git, zellij or claude-ps while the daemon did
+                    // not answer, and come after it did: what the daemon said
+                    // stands until it says the host changed. claude-ps would
+                    // seat an agent by the session its environment names,
+                    // which a rename leaves behind.
+                    Some(checkouts::CONTEXT_VALUE) if self.daemon.answers() => {
+                        if let Some(dir) = context.get(checkouts::DIR_KEY) {
+                            self.checkouts.answered_late(dir);
+                        }
+                        false
+                    },
+                    Some(places::CONTEXT_VALUE) if self.daemon.answers() => false,
+                    Some(agents::CONTEXT_VALUE) if self.daemon.answers() => {
+                        self.agents.answered_late();
+                        false
+                    },
                     Some(checkouts::CONTEXT_VALUE) => match context.get(checkouts::DIR_KEY) {
                         Some(dir) => {
                             self.checkouts.ingest(dir.clone(), exit_code, &stdout, &stderr);
@@ -450,6 +473,7 @@ impl ZellijPlugin for State {
                         self.rebuild_tree();
                         true
                     },
+                    Some(daemon::CONTEXT_VALUE) => self.heard(exit_code, &stdout, &stderr),
                     Some(agents::CONTEXT_VALUE) => {
                         self.agents.ingest(exit_code, &stdout, &stderr, Moment::now());
                         self.agents_taken_at = self.frame;
@@ -527,7 +551,8 @@ impl ZellijPlugin for State {
                             if reason.is_empty() { "the pane did not close" } else { reason };
                         self.error = Some(format!("kill \"{label}\": {reason}"));
                         // Brings back the agent the pane still holds.
-                        self.ask_agents();
+                        self.agents.stop_closing();
+                        self.rebuild_agents(Selection::Hold);
                         true
                     },
                     _ => false,
@@ -699,6 +724,7 @@ impl State {
             }
             self.seat_from(&snapshot);
         }
+        self.ask_daemon();
         // The picker too, for each agent to go by the name the sidebar gives
         // its pane.
         let before = std::mem::take(&mut self.branches);
@@ -839,7 +865,54 @@ impl State {
         Age::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
     }
 
+    /// Asks the daemon how the host stands, if it is to be asked now: from
+    /// the version last seen on, for the next. A sidebar its client left asks
+    /// nothing until the client comes back.
+    fn ask_daemon(&mut self) {
+        if self.away {
+            return;
+        }
+        let Some(command) = self.daemon.ask(Moment::now()) else {
+            return;
+        };
+        let command: Vec<&str> = command.iter().map(String::as_str).collect();
+        run_command(
+            &command,
+            BTreeMap::from([(CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned())]),
+        );
+    }
+
+    /// Takes up what the daemon answered, and asks it again for what changes
+    /// next: what it says of the panes, the work trees and the agents, in the
+    /// place of what zellij, git and claude-ps said. When it does not answer,
+    /// those are asked again instead.
+    fn heard(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> bool {
+        match self.daemon.answered(exit_code, stdout, stderr, Moment::now()) {
+            Answer::Changed(host) => {
+                self.places.heard(&host.sessions);
+                self.checkouts.heard(&host.work_trees);
+                self.agents.heard(&host.agents, Moment::now());
+                self.agents_taken_at = self.frame;
+            },
+            Answer::Same => {
+                self.ask_daemon();
+                return false;
+            },
+            Answer::Silent => {
+                self.places.forget();
+                self.checkouts.forget();
+            },
+        }
+        // Every session's panes, with what was said of where they work, and
+        // the daemon asked again, or the rest.
+        self.poll();
+        true
+    }
+
     fn ask_places(&mut self) {
+        if self.daemon.answers() {
+            return;
+        }
         for session in self.places.ask(&self.live_names) {
             run_command(
                 &places::query(&session),
@@ -854,11 +927,14 @@ impl State {
     /// Asks git how the work tree stands in every directory a pane in the
     /// sidebar works in, and that it has not asked about since it last forgot.
     fn ask_checkouts(&mut self) {
+        if self.daemon.answers() {
+            return;
+        }
         let leaves = self.branches.iter().flat_map(|branch| &branch.panes);
         let cwds = leaves.filter_map(|leaf| leaf.cwd.clone()).collect();
         for dir in self.checkouts.ask(&cwds) {
             run_command(
-                &checkouts::query(&dir),
+                &luneta_protocol::git::command(&dir),
                 BTreeMap::from([
                     (CONTEXT_KEY.to_owned(), checkouts::CONTEXT_VALUE.to_owned()),
                     (checkouts::DIR_KEY.to_owned(), dir.clone()),
@@ -868,7 +944,7 @@ impl State {
     }
 
     fn ask_agents(&mut self) {
-        if !self.agents.ask() {
+        if self.daemon.answers() || !self.agents.ask() {
             return;
         }
         agents::ask(self.agents_command.as_deref());
@@ -1446,6 +1522,7 @@ impl State {
     }
 
     fn wake(&mut self) {
+        self.daemon.wake();
         self.places.forget();
         self.checkouts.wake();
         self.places_at = self.frame;
@@ -2865,6 +2942,54 @@ mod tests {
         let refused = opened(Some(1), b"Session 'b' not found\n");
         assert_eq!(refused.as_deref(), Some("new tab in \"b\": Session 'b' not found"));
         assert_eq!(opened(None, b"").as_deref(), Some("new tab in \"b\": zellij opened none"));
+    }
+
+    /// What claude-ps, zellij and git were asked while the daemon did not
+    /// answer, and answer after it did, leaves what the daemon said be: its
+    /// agents, its panes and its work trees. Each is asked again the next
+    /// time the daemon does not answer.
+    #[test]
+    fn what_the_rest_answer_once_the_daemon_answers_again_does_not_stand() {
+        use std::collections::BTreeSet;
+
+        // zellij-tile's prelude has a prost of its own, of another version.
+        use ::prost::Message as _;
+        use luneta_protocol::v1::{Host, Version};
+
+        let at = |secs: u64| Moment::from_millis(1_000_000 + secs * 1000);
+        let refused = b"luneta: lunetad.sock: transport error: Connection refused (os error 111)";
+        let mut state = focused_sidebar();
+        state.daemon.ask(at(0));
+        state.daemon.answered(Some(1), b"", refused, at(0));
+        assert!(state.agents.ask());
+        let dirs = BTreeSet::from(["/w/b".to_owned()]);
+        assert_eq!(state.checkouts.ask(&dirs), ["/w/b"]);
+
+        state.daemon.ask(at(5));
+        let host = Host { version: Some(Version { pid: 7, seq: 0 }), ..Host::default() };
+        state.daemon.answered(Some(0), &host.encode_to_vec(), b"", at(5));
+        state.agents.heard(&host.agents, at(5));
+        let answer = |stdout: &[u8], context: &[(&str, &str)]| {
+            let context = context.iter().map(|&(key, value)| (key.to_owned(), value.to_owned()));
+            Event::RunCommandResult(Some(0), stdout.to_vec(), Vec::new(), context.collect())
+        };
+        let ps = br#"[{"status":"busy","status_age":4,"pid":100,"cwd":"/w/b",
+            "zellij":{"session":"b","pane":"4"}}]"#;
+        assert!(!state.update(answer(ps, &[(CONTEXT_KEY, agents::CONTEXT_VALUE)])));
+        let listed = br#"[{"id":4,"pane_cwd":"/w/b","pane_command":"claude"}]"#;
+        let of_b = [(CONTEXT_KEY, places::CONTEXT_VALUE), (places::SESSION_KEY, "b")];
+        assert!(!state.update(answer(listed, &of_b)));
+        let in_b = [(CONTEXT_KEY, checkouts::CONTEXT_VALUE), (checkouts::DIR_KEY, "/w/b")];
+        assert!(!state.update(answer(b"# branch.head main\n", &in_b)));
+        assert!(matches!(&state.agents.status, fetch::Fetch::Ready(agents) if agents.is_empty()));
+        assert_eq!(state.places.cwd("b", 4), None);
+        assert_eq!(state.checkouts.said("/w/b"), checkouts::Said::Nothing);
+
+        state.daemon.ask(at(6));
+        state.daemon.answered(Some(1), b"", refused, at(6));
+        assert!(state.agents.ask());
+        state.checkouts.forget();
+        assert_eq!(state.checkouts.ask(&dirs), ["/w/b"]);
     }
 
     /// `d s` on a pane of the session you are in, and `d d` on its row, once

@@ -211,7 +211,7 @@ label still starts at the same column, and a program with no icon leaves the
 column blank. What runs is the agent claude-ps finds in the pane, or else
 what zellij says the pane's terminal has in front, by its binary's name: the
 program you started, or the shell itself at its prompt. `sudo`, `env` and
-`nix run` give way to what they run. zellij is asked every five seconds, so
+`nix run` give way to what they run. zellij is asked every few seconds, so
 a program shows its icon a few seconds after it starts.
 
 | icon | Nerd Fonts name | for |
@@ -559,6 +559,7 @@ Needs `claude` and `claude-ps` on the server's `PATH`.
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
+| `luneta`, with [`lunetad`](#building-from-source) running | optional | the sidebar's agents, panes and branches as they change, without each sidebar asking claude-ps, zellij and git |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in the sidebar, and how it ended |
 
 The session list needs nothing but zellij. The optional tools are looked up by
@@ -578,7 +579,7 @@ plugins {
 
 Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
 `ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
-luneta reaches `zoxide`, `eza`, `claude-ps`, `git` and `zellij` itself, and how
+luneta reaches `zoxide`, `eza`, `claude-ps`, `git`, `zellij` and `luneta`, and how
 the [menu](#menu) starts `claude`; `OpenTerminalsOrPlugins` is how the
 [dock](#dock-the-sidebar) opens the sidebar.
 Every mode asks for all four, since zellij keeps one grant for a plugin.
@@ -1093,7 +1094,8 @@ The flake builds on `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`. A
 release is the `x86_64-linux` build; the others work the same, but are not the
 same bytes, as the paths a build runs in are written into the `.wasm`. On any
 other system, build with cargo instead, on the toolchain `rust-toolchain.toml`
-names: `cargo build --release --target wasm32-wasip1` writes
+names and with `protoc` on the `PATH`, for the daemon's protocol the plugin
+reads: `cargo build --release --target wasm32-wasip1` writes
 `target/wasm32-wasip1/release/luneta-plugin.wasm`, which you install as
 `~/.local/share/zellij/plugins/luneta.wasm`.
 
@@ -1105,12 +1107,16 @@ plugins {
 }
 ```
 
-`nix build .#lunetad` builds `lunetad`, the daemon that is to hold what luneta
+`nix build .#lunetad` builds `lunetad`, the daemon that holds what luneta
 knows of a host, and `luneta`, the CLI that talks to it
-([#95](https://github.com/lorenzolfm/luneta/issues/95)). The plugin does not
-use it yet: `luneta agents` lists the agents the daemon finds, and `luneta
-sessions` the sessions, their panes and the branch each works on, to check
-against the sidebar. The daemon asks `zellij` and `git` on its `PATH`.
+([#95](https://github.com/lorenzolfm/luneta/issues/95)). With `luneta` on the
+zellij server's `PATH` and the daemon running, the sidebar and the picker take
+the panes of each session, the branch each works on and the agents from it,
+through `luneta watch`, as they change. Without it, each asks claude-ps, zellij
+and git itself, as before, and the daemon again every few seconds. Nothing
+starts the daemon for you yet: run `lunetad`. `luneta agents` lists the agents
+the daemon finds, and `luneta sessions` the sessions, their panes and the
+branch each works on. The daemon asks `zellij` and `git` on its `PATH`.
 
 ## License
 

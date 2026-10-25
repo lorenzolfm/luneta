@@ -76,9 +76,12 @@
 
             cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
 
+            # protoc is for the build script of the protocol's crate, which the
+            # plugin reads the daemon's answers with.
             nativeBuildInputs = [
               toolchain
               pkgs.rustPlatform.cargoSetupHook
+              pkgs.protobuf
             ];
 
             buildPhase = ''
@@ -137,12 +140,16 @@
                   "-p"
                   "lunetad"
                 ];
+                # The protocol's crate too: what the daemon reads of git is read
+                # there, and tested there.
                 cargoTestFlags = [
                   "-p"
                   "lunetad"
+                  "-p"
+                  "luneta-protocol"
                 ];
 
-                # The build script writes the protocol out as Rust, through protoc.
+                # The build scripts write the protocol out as Rust, through protoc.
                 nativeBuildInputs = [ pkgs.protobuf ];
 
                 # The daemon asks git how each work tree stands, and the tests make
@@ -174,7 +181,8 @@
             name = "dev";
             meta.description = "luneta build recipes on the flake-pinned toolchain";
             # zellij is absent on purpose — see the reload comment in `text` below.
-            # protoc is for the daemon's build script, which `dev clippy` runs.
+            # protoc is for the build scripts of the protocol's crate and of the
+            # daemon, which `dev build` and `dev clippy` run.
             runtimeInputs = [
               toolchain
               pkgs.coreutils

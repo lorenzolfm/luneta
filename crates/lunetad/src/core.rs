@@ -8,11 +8,11 @@ use std::io;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 
+use luneta_protocol::git::WorkTree;
 use tokio::sync::oneshot;
 
 use crate::api;
 use crate::claude::Scan;
-use crate::git::WorkTree;
 use crate::panes::{self, Pane};
 use crate::zellij::{Id, Sessions, Socket};
 

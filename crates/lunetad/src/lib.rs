@@ -16,7 +16,6 @@ mod git;
 mod panes;
 mod process;
 mod program;
-mod said;
 mod watch;
 mod zellij;
 
