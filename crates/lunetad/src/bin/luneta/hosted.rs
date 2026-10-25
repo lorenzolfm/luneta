@@ -8,12 +8,14 @@ use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroU16;
 use std::path::Path;
+use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as Emitted, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
+use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
@@ -40,7 +42,10 @@ pub enum Said {
     AskedSize(Arc<dyn Fn(WindowSize) -> String + Sync + Send>),
     /// It rang the bell.
     Rang,
-    /// It ended.
+    /// It ended, with this status, where its terminal can tell. This comes
+    /// before `Ended`.
+    Exited(ExitStatus),
+    /// Its terminal closed, with all it wrote on the screen.
     Ended,
 }
 
@@ -97,7 +102,8 @@ impl EventListener for Listener {
             Emitted::PtyWrite(answer) => Said::Answer(answer),
             Emitted::TextAreaSizeRequest(answer) => Said::AskedSize(answer),
             Emitted::Bell => Said::Rang,
-            Emitted::ChildExit(_) | Emitted::Exit => Said::Ended,
+            Emitted::ChildExit(status) => Said::Exited(status),
+            Emitted::Exit => Said::Ended,
             // The terminal's colours are luneta's terminal's, which luneta
             // does not know; a program that asks goes without an answer. The
             // rest is of the window a terminal emulator draws in.
@@ -130,10 +136,13 @@ impl Hosted {
         size: Size,
         events: Sender<Event>,
     ) -> io::Result<Self> {
+        // What the program writes as it ends is read before its terminal says
+        // it closed, as zellij's error where it cannot start, which luneta says
+        // again once its own screen is gone.
         let options = tty::Options {
             shell: Some(tty::Shell::new(program, args)),
             working_directory: Some(dir.to_owned()),
-            drain_on_exit: false,
+            drain_on_exit: true,
             env: HashMap::new(),
         };
         let pty = tty::new(&options, size.into(), 0)?;
@@ -152,7 +161,8 @@ impl Hosted {
         };
         let screen = Term::new(config, &size.dimensions(), listener.clone());
         let screen = Arc::new(FairMutex::new(screen));
-        let reader = EventLoop::new(Arc::clone(&screen), listener, pty, false, false)?;
+        let drain_on_exit = options.drain_on_exit;
+        let reader = EventLoop::new(Arc::clone(&screen), listener, pty, drain_on_exit, false)?;
         let pty = reader.channel();
         reader.spawn();
         Ok(Hosted { screen, pty, size, drew })
@@ -205,6 +215,11 @@ impl Hosted {
         self.drew.store(false, Ordering::SeqCst);
         paint(&self.screen.lock(), buffer, area)
     }
+
+    /// What the screen shows, as text.
+    pub fn text(&self) -> String {
+        text(&self.screen.lock())
+    }
 }
 
 impl Drop for Hosted {
@@ -249,6 +264,31 @@ fn paint<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect) ->
         return None;
     }
     at(content.cursor.point.line.0, content.cursor.point.column.0)
+}
+
+/// What `screen` shows, as text: each of its lines, less the blanks it ends
+/// in, and none of the blank lines above and below the rest.
+fn text<T: EventListener>(screen: &Term<T>) -> String {
+    let mut lines = vec![String::new(); screen.screen_lines()];
+    for indexed in screen.renderable_content().display_iter {
+        let cell = indexed.cell;
+        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let line = usize::try_from(indexed.point.line.0).ok();
+        let Some(line) = line.and_then(|line| lines.get_mut(line)) else {
+            continue;
+        };
+        line.push(cell.c);
+        line.extend(cell.zerowidth().into_iter().flatten());
+    }
+    let lines: Vec<&str> = lines.iter().map(|line| line.trim_end()).collect();
+    let said = |line: &&str| !line.is_empty();
+    let (Some(first), Some(last)) = (lines.iter().position(said), lines.iter().rposition(said))
+    else {
+        return String::new();
+    };
+    lines[first..=last].join("\n")
 }
 
 /// The style a cell is drawn in. The colours a terminal names are left for
@@ -364,6 +404,19 @@ mod tests {
         assert_eq!(buffer[(3, 1)].style().fg, Some(Color::Indexed(200)));
         assert_eq!(buffer[(4, 1)].style().fg, Some(Color::Rgb(1, 2, 3)));
         assert_eq!(buffer[(5, 1)].style().fg, Some(Color::Reset));
+    }
+
+    /// What a program printed as it ended reads as the text it was, as
+    /// zellij's error where it cannot start.
+    #[test]
+    fn the_screen_reads_as_its_text() {
+        let dimensions = TermSize::new(12, 4);
+        let mut screen = Term::new(Config::default(), &dimensions, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        parser.advance(&mut screen, "\r\n  \x1b[31m×\x1b[0m bad  \r\n日本\r\n".as_bytes());
+        assert_eq!(text(&screen), "  × bad\n日本");
+        let blank = Term::new(Config::default(), &dimensions, VoidListener);
+        assert_eq!(text(&blank), "");
     }
 
     #[test]

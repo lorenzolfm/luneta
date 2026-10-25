@@ -6,7 +6,7 @@ use std::env;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -75,6 +75,8 @@ struct App {
     /// The cursor as luneta's terminal was last told to draw it.
     cursor: Option<(CursorShape, bool)>,
     events: Sender<Event>,
+    /// How zellij ended, once its terminal says.
+    exited: Option<ExitStatus>,
     ended: bool,
 }
 
@@ -89,6 +91,10 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
         },
     };
     let session = session.or_else(|| zellij::session_for(&dir));
+    if let Some(refusal) = session.as_ref().and_then(zellij::refusal) {
+        eprintln!("luneta: {refusal}");
+        return ExitCode::FAILURE;
+    }
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -132,8 +138,13 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
         SetCursorStyle::DefaultUserShape
     );
     let left = ratatui::try_restore();
-    match ran.and(popped).and(restored).and(left) {
-        Ok(()) => ExitCode::SUCCESS,
+    match ran.and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
+        Ok(None) => ExitCode::SUCCESS,
+        // What zellij said as it failed went with luneta's screen.
+        Ok(Some(failed)) => {
+            eprintln!("{failed}");
+            ExitCode::FAILURE
+        },
         Err(error) => {
             eprintln!("luneta: {error}");
             ExitCode::FAILURE
@@ -141,12 +152,14 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
     }
 }
 
+/// Runs zellij beside the sidebar until it ends, and says what it said as it
+/// failed, if it did.
 fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
     socket: Result<PathBuf, String>,
     dir: &std::path::Path,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     // Not a `sync_channel` of a bound: alacritty hands on what the program
     // does with the screen locked, which the loop locks to draw, so that a
     // full queue would hold each up for the other for good. What fills it are
@@ -171,9 +184,11 @@ fn run_in(
         dragging: false,
         cursor: None,
         events,
+        exited: None,
         ended: false,
     };
-    run_loop(terminal, &mut app, &inbox)
+    run_loop(terminal, &mut app, &inbox)?;
+    Ok(app.failure())
 }
 
 /// Reads luneta's terminal on a thread of its own, for as long as it can.
@@ -397,9 +412,20 @@ impl App {
                 backend.write_all(b"\x07")?;
                 backend.flush()?;
             },
+            Said::Exited(status) => self.exited = Some(status),
             Said::Ended => self.ended = true,
         }
         Ok(())
+    }
+
+    /// What zellij said as it failed, to be said again once luneta's screen is
+    /// gone: the text on its terminal, and how it ended. None for a zellij that
+    /// detached or quit, or that ended in a way its terminal could not tell.
+    fn failure(&self) -> Option<String> {
+        let status = self.exited.filter(|status| !status.success())?;
+        let ended = format!("luneta: zellij ended ({status})");
+        let said = self.hosted.text();
+        Some(if said.is_empty() { ended } else { format!("{said}\n{ended}") })
     }
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {

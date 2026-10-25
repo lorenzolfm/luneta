@@ -566,9 +566,11 @@ luneta's own, drawn by luneta and not by a plugin:
 `luneta` attaches to the session named for the directory you are in, as the
 picker's [directories](#directories) name it, `luneta-main` in a worktree of
 `luneta`, and makes it if none runs; `luneta <name>` attaches to that one.
-When zellij ends, detached or quit, so does luneta. zellij's keys are yours as
-they were, but `Ctrl b`, which goes back and forth between zellij and the
-sidebar. A click goes to whichever you click.
+Run in a pane of zellij, luneta will not attach to the session that pane is
+in, as zellij will not: name another. When zellij ends, detached or quit, so
+does luneta, and when it fails, luneta says what zellij said. zellij's keys
+are yours as they were, but `Ctrl b`, which goes back and forth between zellij
+and the sidebar. A click goes to whichever you click.
 
 The sidebar lists every session, oldest first, the panes in each, in the order
 of their tabs, and what the agent in each pane is doing, with the branch under
@@ -591,8 +593,9 @@ luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not
 `Enter`; what zellij copies, as OSC 52; and the session zellij is in, by the
 title it gives the terminal. To take zellij's client to a pane, luneta types a
-`ScrollLock` into it first, which nothing binds and a shell never sees: zellij
-moves the client of a session that last typed in it. With
+`ScrollLock` let go into it first, which nothing binds, and which a shell, or
+nvim as you type in it, passes over: zellij moves the client of a session that
+last typed in it. With
 `support_kitty_keyboard_protocol false` in zellij's config, the client cannot
 read that key, and the sidebar takes it somewhere only once you have typed in
 the session it is in.

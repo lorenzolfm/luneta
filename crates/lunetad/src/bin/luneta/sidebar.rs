@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::said::Said;
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, Host, Session, Status};
+use lunetad::api::{Agent, Host, NameSource, Pane, Session, Status, Zellij};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -240,6 +240,10 @@ pub struct Sidebar {
     cursor: Option<Place>,
     /// The first line of the rows on screen.
     top: usize,
+    /// How many lines the rows had on screen when last drawn, under the rule
+    /// along the top and over the notes at the bottom, which a click on
+    /// either side of is not on.
+    room: usize,
     /// The last thing that went wrong, until the next key.
     notice: Option<String>,
 }
@@ -297,7 +301,7 @@ impl Sidebar {
             return;
         };
         let here = self.here().map(str::to_owned);
-        let agents = seated(&host.agents);
+        let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
         let (sessions, unlisted) = oldest_first(&host.sessions);
@@ -442,7 +446,8 @@ impl Sidebar {
 
     /// What the mouse does over the sidebar, drawn in `area`: a click on a
     /// pane goes there, and on a session's `▾` or `▸` folds it. A folded
-    /// session goes to the session. The wheel scrolls.
+    /// session goes to the session. A click on the notes goes nowhere, as the
+    /// rows under them are not on screen. The wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -457,8 +462,8 @@ impl Sidebar {
             _ => return Asked::Nothing,
         }
         let line = usize::from(mouse.row.saturating_sub(area.y));
-        let Some(at) = line.checked_sub(HEADER).and_then(|line| self.row_at(self.top + line))
-        else {
+        let shown = line.checked_sub(HEADER).filter(|line| *line < self.room);
+        let Some(at) = shown.and_then(|line| self.row_at(self.top + line)) else {
             return Asked::Nothing;
         };
         let row = &self.rows[at];
@@ -528,6 +533,7 @@ impl Sidebar {
         lines.push(Line::default());
         let notes = self.notes(width, focused);
         let room = height.saturating_sub(HEADER + notes.len());
+        self.room = room;
         if focused {
             self.reveal(room);
         }
@@ -637,14 +643,17 @@ fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
 }
 
 /// The agent in each pane, by its session and the pane's id. A pane holds one:
-/// the agent started at a prompt, or else the one that started first.
-fn seated(agents: &[Agent]) -> HashMap<(&str, u32), &Agent> {
+/// the agent started at a prompt, or else the one that started first. An
+/// agent is in the session the daemon follows its pane to, or, where the
+/// daemon cannot tell, the one `found` finds.
+fn seated<'a>(agents: &'a [Agent], sessions: &'a [Session]) -> HashMap<(&'a str, u32), &'a Agent> {
     let mut seated: HashMap<(&str, u32), &Agent> = HashMap::new();
     for agent in agents {
         let Some(zellij) = &agent.zellij else {
             continue;
         };
-        let Some(session) = zellij.session.as_deref() else {
+        let Some(session) = zellij.session.as_deref().or_else(|| found(agent, zellij, sessions))
+        else {
             continue;
         };
         let rank = |agent: &Agent| {
@@ -663,16 +672,47 @@ fn seated(agents: &[Agent]) -> HashMap<(&str, u32), &Agent> {
     seated
 }
 
+/// The session of an agent the daemon cannot follow to one, as it cannot one
+/// renamed before it started, found as the plugin's sidebar finds it: the one
+/// session that lists a pane of the agent's id that works where the agent
+/// does. Of more than one, the session the agent's environment names, or else
+/// the one whose pane runs `claude`, if one alone does.
+fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<&'a str> {
+    if agent.cwd.is_empty() {
+        return None;
+    }
+    let pane = |session: &'a Session| {
+        let mut panes = session.panes.iter().flat_map(|panes| &panes.panes);
+        let pane = panes.find(|pane| {
+            pane.id == zellij.pane && pane.cwd.as_deref() == Some(agent.cwd.as_str())
+        })?;
+        Some((session.name.as_str(), pane))
+    };
+    let holders: Vec<(&str, &Pane)> = sessions.iter().filter_map(pane).collect();
+    if let [(only, _)] = holders.as_slice() {
+        return Some(only);
+    }
+    if let Some((named, _)) = holders.iter().find(|(name, _)| *name == zellij.named) {
+        return Some(named);
+    }
+    let claude = |pane: &Pane| pane.command.as_deref().is_some_and(|run| run.contains("claude"));
+    let mut claudes = holders.iter().filter(|(_, pane)| claude(pane));
+    match (claudes.next(), claudes.next()) {
+        (Some((one, _)), None) => Some(one),
+        _ => None,
+    }
+}
+
 /// The shells, whose name says only that a pane is at its prompt.
 const SHELLS: [&str; 7] = ["bash", "dash", "fish", "nu", "sh", "zsh", "elvish"];
 
-/// What a pane's row is named: its agent by the name it was given, or else by
-/// where it works; a program by its command line, the program by its binary's
-/// name; a shell at its prompt by its directory's last two parts.
+/// What a pane's row is named: its agent by the name someone gave it, or else
+/// by where it works; a program by its command line, the program by its
+/// binary's name; a shell at its prompt by its directory's last two parts.
 fn label(agent: Option<&Agent>, command: Option<&str>, cwd: Option<&str>, id: u32) -> String {
     if let Some(agent) = agent {
-        return match &agent.name {
-            Some(name) => name.text.clone(),
+        return match given_name(agent) {
+            Some(name) => name.to_owned(),
             None => short_cwd(&agent.cwd),
         };
     }
@@ -687,6 +727,17 @@ fn label(agent: Option<&Agent>, command: Option<&str>, cwd: Option<&str>, id: u3
         },
         _ => cwd.map_or_else(|| format!("pane {id}"), short_cwd),
     }
+}
+
+/// The name of an agent's session, if someone gave it one, as `/rename` does:
+/// one Claude Code derives from the directory, or makes up, is no name a row
+/// goes by, as the plugin's sidebar has it. A name from before Claude Code said
+/// who chose it is taken for given.
+fn given_name(agent: &Agent) -> Option<&str> {
+    let name = agent.name.as_ref()?;
+    let source = name.source.map(NameSource::try_from);
+    let given = matches!(source, None | Some(Ok(NameSource::User | NameSource::Peer)));
+    Some(name.text.trim()).filter(|text| given && !text.is_empty())
 }
 
 /// A directory as luneta shows one: its last two parts.
@@ -1110,16 +1161,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_click_goes_to_a_pane_and_folds_on_the_triangle() {
-        let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 10);
-        let click = |column: u16, row: u16| MouseEvent {
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
             modifiers: KeyModifiers::NONE,
-        };
+        }
+    }
+
+    #[test]
+    fn a_click_goes_to_a_pane_and_folds_on_the_triangle() {
+        let mut sidebar = two_sessions();
+        let area = Rect::new(0, 0, 32, 10);
+        screen(&mut sidebar, false, area.width, area.height);
         let pane = Place::Pane { session: listed("older", 10), pane: 2 };
         assert_eq!(sidebar.mouse(click(10, 4), area), Asked::Go(pane));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Nothing);
@@ -1128,6 +1183,19 @@ mod tests {
         assert!(sidebar.folded.contains("older"));
         let older = Place::Session(listed("older", 10));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Go(older));
+    }
+
+    /// The notes at the bottom stand over the rows that would be there, which
+    /// a click on them does not go to.
+    #[test]
+    fn a_click_on_the_notes_goes_nowhere() {
+        let mut sidebar = two_sessions();
+        let area = Rect::new(0, 0, 32, 5);
+        let lines = screen(&mut sidebar, true, area.width, area.height);
+        assert!(lines[4].contains("esc back"), "{lines:?}");
+        assert_eq!(sidebar.mouse(click(10, 4), area), Asked::Nothing);
+        let fold = Place::Pane { session: listed("older", 10), pane: 1 };
+        assert_eq!(sidebar.mouse(click(10, 3), area), Asked::Go(fold));
     }
 
     #[test]
@@ -1156,6 +1224,32 @@ mod tests {
         assert_eq!(label(Some(&named), Some("claude"), Some("/w/x"), 1), "fold");
         let unnamed = agent("s", 1, Status::Idle, None);
         assert_eq!(label(Some(&unnamed), Some("claude"), Some("/w/x"), 1), "luneta/main");
+        // A name Claude Code gave the session itself is none a row goes by.
+        let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
+        let source = Some(NameSource::Derived.into());
+        derived.name = derived.name.map(|name| api::Name { source, ..name });
+        assert_eq!(label(Some(&derived), Some("claude"), Some("/w/x"), 1), "luneta/main");
+    }
+
+    /// The daemon cannot follow an agent to the session it is in when the
+    /// session was renamed before the daemon started. Its row is the pane of
+    /// its id that works where it does, in the one session that lists one.
+    #[test]
+    fn an_agent_the_daemon_cannot_follow_sits_where_its_pane_works() {
+        let mut lost = agent("gone", 1, Status::Waiting, Some("fold"));
+        lost.zellij = Some(Zellij { named: "gone".to_owned(), session: None, pane: 1 });
+        let sessions = [
+            session("renamed", 10, vec![pane(1, 0, "/w/luneta/main", "claude")]),
+            session("other", 20, vec![pane(1, 0, "/w/elsewhere", "fish")]),
+        ];
+        let agents = [lost];
+        let seated = seated(&agents, &sessions);
+        assert_eq!(seated.keys().collect::<Vec<_>>(), [&("renamed", 1)]);
+
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(sessions.to_vec(), agents.to_vec()));
+        let lines = screen(&mut sidebar, false, 32, 4);
+        assert_eq!(lines[3], "   ● fold                   1m");
     }
 
     #[test]
@@ -1165,7 +1259,7 @@ mod tests {
         let mut headless = agent("s", 1, Status::Busy, Some("headless"));
         headless.entrypoint = Some("sdk-cli".to_owned());
         let agents = [headless, prompt];
-        let seated = seated(&agents);
+        let seated = seated(&agents, &[]);
         assert_eq!(
             seated
                 .get(&("s", 1))

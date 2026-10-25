@@ -2,6 +2,7 @@
 //! that client to a pane. All luneta knows of zellij's ways is here, so that a
 //! multiplexer of luneta's own can take zellij's place behind it.
 
+use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -20,12 +21,17 @@ const NAME_BYTES_MAX: usize = 60;
 // bytes a name must be shorter than.
 const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 
+/// What names the session of a zellij pane, in the variables of what runs in
+/// it.
+const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
+
 /// Variables that zellij's client must not have. With `ZELLIJ` set, it takes
 /// itself for one started in a pane of that session, and will not attach, as
-/// when luneta itself runs in a pane. The window ids are of the terminal
-/// luneta's own is made by, and name no window.
+/// when luneta itself runs in a pane: `refusal` makes the one check it skips
+/// then. The window ids are of the terminal luneta's own is made by, and name
+/// no window.
 const LEFT_OUT: [&str; 5] =
-    ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "WINDOWID", "ALACRITTY_WINDOW_ID"];
+    ["ZELLIJ", SESSION_VAR, "ZELLIJ_PANE_ID", "WINDOWID", "ALACRITTY_WINDOW_ID"];
 
 /// A name zellij can make a session of. `parse` is the one way to make one, so
 /// a name that reaches zellij as one has been held to what zellij takes.
@@ -57,6 +63,26 @@ impl fmt::Display for SessionName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// Why zellij's client must not attach to `session` from the terminal luneta
+/// runs in, where it must not: the terminal is a pane of that session, which
+/// the client would show inside itself, with the focus on it, so that a key
+/// typed there would come round to it again for good. zellij refuses this by
+/// `SESSION_VAR`, which the client runs without. A pane of a session renamed
+/// since it opened holds the name it had then, and zellij's check goes by it.
+pub fn refusal(session: &SessionName) -> Option<String> {
+    refused(session, env::var(SESSION_VAR).ok().as_deref())
+}
+
+/// `refusal`, for a terminal in the session `current`, if it is a pane's.
+fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
+    (current == Some(session.0.as_str())).then(|| {
+        format!(
+            "this terminal is a pane of \"{session}\", which zellij would show inside itself: \
+             name another session, or run luneta outside zellij"
+        )
+    })
 }
 
 /// The program luneta runs beside the sidebar, and its arguments: zellij's
@@ -118,15 +144,18 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 }
 
 /// What luneta types into zellij's client before it asks zellij to move it:
-/// `ScrollLock`, as the kitty keyboard protocol spells it. zellij moves the
-/// client of a session that last sent it a key, and a client that has sent
-/// none since it came to the session, as luneta's has not once the sidebar
-/// took it there, moves for no action. No one binds `ScrollLock`, and zellij
-/// writes nothing of it to a pane that does not read keys as kitty spells
-/// them; one that does gets a key it was never asked for, and leaves it be.
-/// The client reads it as kitty spells it unless its config turns the
+/// `ScrollLock` let go, as the kitty keyboard protocol spells it, with no
+/// modifiers and the event of a release, `1:3`. zellij moves the client of a
+/// session that last sent it a key, and a client that has sent none since it
+/// came to the session, as luneta's has not once the sidebar took it there,
+/// moves for no action. The client counts a key let go as a key. No one binds
+/// `ScrollLock`, and zellij writes nothing of it to a pane that does not read
+/// keys as kitty spells them. One that does gets it as it came, a release it
+/// never asked to hear of, and passes it over: nvim does, where the key
+/// pressed would have it insert a character of the protocol's own in the
+/// text. The client reads it as kitty spells it unless its config turns the
 /// protocol off, and then zellij moves the client only once you type in it.
-pub const NUDGE: &[u8] = b"\x1b[57359u";
+pub const NUDGE: &[u8] = b"\x1b[57359;1:3u";
 
 /// How long an action waits for zellij to take in `NUDGE`, which goes to it
 /// through its client while the action goes straight to its server.
@@ -239,5 +268,17 @@ mod tests {
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
+    }
+
+    /// The client leaves out the variable zellij refuses by to attach a pane's
+    /// terminal to its own session, and luneta refuses in its place.
+    #[test]
+    fn a_pane_does_not_attach_to_its_own_session() {
+        let Ok(session) = SessionName::parse("outer") else {
+            panic!("a name zellij takes");
+        };
+        assert!(refused(&session, Some("outer")).is_some());
+        assert_eq!(refused(&session, Some("other")), None);
+        assert_eq!(refused(&session, None), None);
     }
 }
