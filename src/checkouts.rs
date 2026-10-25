@@ -4,10 +4,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use luneta_protocol::git::WorkTree;
-use luneta_protocol::v1::checkout::Head;
-use luneta_protocol::v1::work_tree::Stands;
-use luneta_protocol::v1::{self, Changes, Upstream};
+use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
+use luneta_protocol::v1;
 
 use crate::context::unstarted;
 
@@ -38,27 +36,17 @@ pub enum Said<'a> {
 }
 
 impl Checkout {
-    /// How a work tree stands, as the daemon says it: the branch checked out
-    /// there, or none for a detached `HEAD` or a directory in no repository.
-    /// `Unread` for an answer that leaves out what the protocol says is always
-    /// there, as a newer daemon's could.
-    fn of(stands: &Stands) -> Result<Option<Self>, Unread> {
-        let checkout = match stands {
-            Stands::Outside(_) => return Ok(None),
-            Stands::Checkout(checkout) => checkout,
+    /// The branch checked out in a work tree, or none for a detached `HEAD`
+    /// or a directory in no repository.
+    fn of(tree: &WorkTree) -> Option<Self> {
+        let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes } = tree
+        else {
+            return None;
         };
-        let changes = checkout.changes.as_ref().ok_or(Unread)?;
-        let branch = match checkout.head.as_ref().ok_or(Unread)? {
-            Head::Detached(_) => return Ok(None),
-            Head::Branch(branch) => branch,
-        };
-        let status = glyphs(changes, checkout.stashes, branch.upstream);
-        Ok(Some(Checkout { branch: branch.name.clone(), status }))
+        let status = glyphs(changes, *stashes, *upstream);
+        Some(Checkout { branch: name.as_str().to_owned(), status })
     }
 }
-
-/// What the daemon says that this plugin cannot read.
-struct Unread;
 
 /// The glyph of each kind of change there is, then the one for where the
 /// branch stands against its upstream, where it has one.
@@ -139,9 +127,14 @@ impl Checkouts {
             // or in one git cannot read.
             Some(_) => WorkTree::Outside,
         };
-        let stands = tree.to_api(&dir).stands;
-        if let Some(Ok(checkout)) = stands.as_ref().map(Checkout::of) {
-            self.known.insert(dir, checkout);
+        self.known.insert(dir, Checkout::of(&tree));
+    }
+
+    /// git answered for `dir` once the daemon answered again, and what it
+    /// said does not stand: `dir` is asked about again at the next `forget`.
+    pub fn answered_late(&mut self, dir: &str) {
+        if let Some(asked) = self.asked.get_mut(dir) {
+            *asked = Asked::Answered;
         }
     }
 
@@ -151,7 +144,7 @@ impl Checkouts {
     /// cannot read of.
     pub fn heard(&mut self, trees: &[v1::WorkTree]) {
         let read = |tree: &v1::WorkTree| {
-            Some((tree.dir.clone(), Checkout::of(tree.stands.as_ref()?).ok()?))
+            Some((tree.dir.clone(), Checkout::of(&WorkTree::of_api(tree)?)))
         };
         self.known = trees.iter().filter_map(read).collect();
     }
@@ -230,6 +223,10 @@ mod tests {
     /// cannot read of, as a newer daemon could, has nothing said of it.
     #[test]
     fn the_daemon_s_work_trees_stand_in_the_place_of_what_git_said() {
+        use v1::checkout::Head;
+        use v1::work_tree::Stands;
+        use v1::{Changes, Upstream};
+
         let mut checkouts = Checkouts::default();
         checkouts.ingest("/w/gone".to_owned(), Some(0), b"# branch.head main\n", b"");
         let stands = |dir: &str, stands| v1::WorkTree { dir: dir.to_owned(), stands: Some(stands) };

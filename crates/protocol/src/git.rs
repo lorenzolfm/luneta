@@ -88,6 +88,22 @@ impl WorkTree {
         v1::WorkTree { dir: dir.to_owned(), stands: Some(stands) }
     }
 
+    /// What `to_api` wrote out, read back. None for a work tree that leaves
+    /// out what the protocol says is always there, or names a branch with no
+    /// name: a newer daemon's.
+    #[must_use]
+    pub fn of_api(tree: &v1::WorkTree) -> Option<Self> {
+        let checkout = match tree.stands.as_ref()? {
+            v1::work_tree::Stands::Outside(_) => return Some(WorkTree::Outside),
+            v1::work_tree::Stands::Checkout(checkout) => checkout,
+        };
+        Some(WorkTree::Checkout {
+            head: Head::of_api(checkout.head.as_ref()?)?,
+            changes: Changes::of_api(checkout.changes.as_ref()?),
+            stashes: checkout.stashes,
+        })
+    }
+
     /// What `command` prints, or the first line that does not read. git says
     /// what is checked out ahead of the rest, and where it is from its
     /// upstream only of a branch.
@@ -125,6 +141,17 @@ impl Head {
         Some(Head::Branch { name: Said::new(named.to_owned())?, upstream: None })
     }
 
+    /// None for a branch with no name.
+    fn of_api(head: &v1::checkout::Head) -> Option<Self> {
+        match head {
+            v1::checkout::Head::Detached(_) => Some(Head::Detached),
+            v1::checkout::Head::Branch(branch) => Some(Head::Branch {
+                name: Said::new(branch.name.clone())?,
+                upstream: branch.upstream.map(Upstream::of_api),
+            }),
+        }
+    }
+
     fn to_api(&self) -> v1::checkout::Head {
         match self {
             Head::Detached => v1::checkout::Head::Detached(v1::checkout::Detached {}),
@@ -142,6 +169,10 @@ impl Upstream {
         let (ahead, behind) = ab.split_once(' ')?;
         let ahead = ahead.strip_prefix('+')?.parse().ok()?;
         Some(Upstream { ahead, behind: behind.strip_prefix('-')?.parse().ok()? })
+    }
+
+    fn of_api(upstream: v1::Upstream) -> Self {
+        Upstream { ahead: upstream.ahead, behind: upstream.behind }
     }
 
     fn to_api(self) -> v1::Upstream {
@@ -178,6 +209,17 @@ impl Changes {
         true
     }
 
+    fn of_api(changes: &v1::Changes) -> Self {
+        Changes {
+            conflicted: changes.conflicted,
+            deleted: changes.deleted,
+            renamed: changes.renamed,
+            modified: changes.modified,
+            staged: changes.staged,
+            untracked: changes.untracked,
+        }
+    }
+
     fn to_api(&self) -> v1::Changes {
         v1::Changes {
             conflicted: self.conflicted,
@@ -200,7 +242,7 @@ impl Changes {
 
 #[cfg(test)]
 mod tests {
-    use super::{Head, WorkTree};
+    use super::{v1, Head, WorkTree};
 
     /// What git says that does not read is no work tree, rather than one
     /// counted short: no git the tests can run says it, so it is tested here.
@@ -234,5 +276,46 @@ mod tests {
         };
         assert_eq!(name.as_str(), "main");
         assert_eq!(changes.untracked, 1);
+    }
+
+    /// What the daemon writes out of a work tree reads back as the same work
+    /// tree, so that the plugin says of it what git said to the daemon. One
+    /// that leaves out what the protocol says is always there, or names a
+    /// branch with no name, reads as none.
+    #[test]
+    fn a_work_tree_reads_back_as_the_daemon_wrote_it() {
+        let statuses = [
+            "# branch.head main\n",
+            "# branch.oid 0123abc\n# branch.head fold\n# branch.upstream origin/fold\n\
+             # branch.ab +1 -2\n# stash 3\n1 MM N... 100644 100644 100644 a b README.md\n\
+             2 R. N... 100644 100644 100644 a a R100 new.rs\told.rs\n\
+             u UU N... 100644 100644 100644 100644 a b c both.rs\n\
+             1 .D N... 100644 100644 000000 a a gone.rs\n? new\n",
+            "# branch.head (detached)\n1 .T N... 100644 100644 120000 a a link\n",
+        ];
+        let mut trees: Vec<WorkTree> =
+            statuses.iter().map(|status| WorkTree::parse(status).unwrap()).collect();
+        trees.push(WorkTree::Outside);
+        for tree in trees {
+            assert_eq!(WorkTree::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
+        }
+
+        let checkout = |head, changes| {
+            Some(v1::work_tree::Stands::Checkout(v1::Checkout { head, changes, stashes: 0 }))
+        };
+        let branch = |name: &str| {
+            let branch = v1::Branch { name: name.to_owned(), upstream: None };
+            Some(v1::checkout::Head::Branch(branch))
+        };
+        let unread = [
+            None,
+            checkout(None, Some(v1::Changes::default())),
+            checkout(branch("main"), None),
+            checkout(branch(""), Some(v1::Changes::default())),
+        ];
+        for stands in unread {
+            let tree = v1::WorkTree { dir: "/w/repo".to_owned(), stands };
+            assert_eq!(WorkTree::of_api(&tree), None, "{tree:?}");
+        }
     }
 }

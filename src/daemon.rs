@@ -32,10 +32,6 @@ pub struct Daemon {
     heard: Heard,
     /// Whether a `luneta watch` is out, yet to answer.
     asking: bool,
-    /// Whether `luneta` could not be started at all: it is not installed, or
-    /// not on the server's `PATH`. It is not looked for again until `wake`,
-    /// so that zellij does not log the failure every few seconds.
-    absent: bool,
 }
 
 /// What the daemon said last.
@@ -48,6 +44,11 @@ enum Heard {
     Host(Version),
     /// No answer that reads, at this moment.
     Silent(Moment),
+    /// `luneta` could not be started at all, at this moment: it is not
+    /// installed, or not on the server's `PATH`. It is not looked for again
+    /// until `wake`, so that zellij does not log the failure every few
+    /// seconds.
+    Absent(Moment),
 }
 
 /// What a `luneta watch` answered.
@@ -65,12 +66,13 @@ impl Daemon {
     /// The command that asks the daemon, if one is to `now`: none while one
     /// is out, nor for `RETRY` after it did not answer.
     pub fn ask(&mut self, now: Moment) -> Option<Vec<String>> {
-        if self.asking || self.absent {
+        if self.asking {
             return None;
         }
         let after = match &self.heard {
             Heard::Host(version) => Some(*version),
             Heard::Silent(at) if now.since(*at) < RETRY => return None,
+            Heard::Absent(_) => return None,
             Heard::Nothing | Heard::Silent(_) => None,
         };
         self.asking = true;
@@ -90,8 +92,8 @@ impl Daemon {
         now: Moment,
     ) -> Answer {
         self.asking = false;
-        let host = match read(exit_code, stdout, stderr) {
-            Ok(host) => host,
+        let (version, host) = match read(exit_code, stdout, stderr) {
+            Ok(read) => read,
             Err(why) => {
                 // Once as it stops, and not at every ask after: one that was
                 // never there is not news, as it is before it is installed.
@@ -101,12 +103,14 @@ impl Daemon {
                          are asked instead: {why}"
                     );
                 }
-                self.absent |= unstarted(exit_code, stderr);
-                self.heard = Heard::Silent(now);
+                self.heard = if unstarted(exit_code, stderr) {
+                    Heard::Absent(now)
+                } else {
+                    Heard::Silent(now)
+                };
                 return Answer::Silent;
             },
         };
-        let version = host.version.unwrap_or_default();
         let seen = matches!(self.heard, Heard::Host(was) if was == version);
         self.heard = Heard::Host(version);
         if seen {
@@ -120,18 +124,21 @@ impl Daemon {
     /// or has yet to say anything. Asked for the first time, it answers at
     /// once, and the sidebar waits for it rather than ask the rest as well.
     pub fn answers(&self) -> bool {
-        !matches!(self.heard, Heard::Silent(_))
+        !matches!(self.heard, Heard::Silent(_) | Heard::Absent(_))
     }
 
     /// `luneta` is looked for again if it could not be started, for a sidebar
     /// that comes back to whatever was installed while it was away.
     pub fn wake(&mut self) {
-        self.absent = false;
+        if let Heard::Absent(at) = self.heard {
+            self.heard = Heard::Silent(at);
+        }
     }
 }
 
-/// The host as `luneta watch` wrote it out, or why it did not.
-fn read(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Host, String> {
+/// The host as `luneta watch` wrote it out, and its version, or why it did
+/// not.
+fn read(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<(Version, Host), String> {
     if exit_code != Some(0) {
         let said = String::from_utf8_lossy(stderr);
         let said = said.lines().next().unwrap_or("").trim();
@@ -139,10 +146,8 @@ fn read(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Host, St
     }
     let host = Host::decode(stdout).map_err(|error| format!("{CLI} watch: {error}"))?;
     // A version is always there: a host without one is a newer daemon's.
-    if host.version.is_none() {
-        return Err(format!("{CLI} watch: an answer with no version"));
-    }
-    Ok(host)
+    let version = host.version.ok_or_else(|| format!("{CLI} watch: an answer with no version"))?;
+    Ok((version, host))
 }
 
 #[cfg(test)]

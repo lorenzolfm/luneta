@@ -463,6 +463,12 @@ impl AgentSet {
         self.closing.clear();
     }
 
+    /// claude-ps answered once the daemon answered again, and what it said
+    /// does not stand: it may be asked again.
+    pub fn answered_late(&mut self) {
+        self.asking = false;
+    }
+
     pub fn fail(&mut self, reason: impl Into<String>) {
         self.asking = false;
         self.status = Fetch::Failed(reason.into());

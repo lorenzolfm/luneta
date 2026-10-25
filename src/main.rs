@@ -431,6 +431,22 @@ impl ZellijPlugin for State {
                             None => false,
                         }
                     },
+                    // Asked of git, zellij or claude-ps while the daemon did
+                    // not answer, and come after it did: what the daemon said
+                    // stands until it says the host changed. claude-ps would
+                    // seat an agent by the session its environment names,
+                    // which a rename leaves behind.
+                    Some(checkouts::CONTEXT_VALUE) if self.daemon.answers() => {
+                        if let Some(dir) = context.get(checkouts::DIR_KEY) {
+                            self.checkouts.answered_late(dir);
+                        }
+                        false
+                    },
+                    Some(places::CONTEXT_VALUE) if self.daemon.answers() => false,
+                    Some(agents::CONTEXT_VALUE) if self.daemon.answers() => {
+                        self.agents.answered_late();
+                        false
+                    },
                     Some(checkouts::CONTEXT_VALUE) => match context.get(checkouts::DIR_KEY) {
                         Some(dir) => {
                             self.checkouts.ingest(dir.clone(), exit_code, &stdout, &stderr);
@@ -2926,6 +2942,54 @@ mod tests {
         let refused = opened(Some(1), b"Session 'b' not found\n");
         assert_eq!(refused.as_deref(), Some("new tab in \"b\": Session 'b' not found"));
         assert_eq!(opened(None, b"").as_deref(), Some("new tab in \"b\": zellij opened none"));
+    }
+
+    /// What claude-ps, zellij and git were asked while the daemon did not
+    /// answer, and answer after it did, leaves what the daemon said be: its
+    /// agents, its panes and its work trees. Each is asked again the next
+    /// time the daemon does not answer.
+    #[test]
+    fn what_the_rest_answer_once_the_daemon_answers_again_does_not_stand() {
+        use std::collections::BTreeSet;
+
+        // zellij-tile's prelude has a prost of its own, of another version.
+        use ::prost::Message as _;
+        use luneta_protocol::v1::{Host, Version};
+
+        let at = |secs: u64| Moment::from_millis(1_000_000 + secs * 1000);
+        let refused = b"luneta: lunetad.sock: transport error: Connection refused (os error 111)";
+        let mut state = focused_sidebar();
+        state.daemon.ask(at(0));
+        state.daemon.answered(Some(1), b"", refused, at(0));
+        assert!(state.agents.ask());
+        let dirs = BTreeSet::from(["/w/b".to_owned()]);
+        assert_eq!(state.checkouts.ask(&dirs), ["/w/b"]);
+
+        state.daemon.ask(at(5));
+        let host = Host { version: Some(Version { pid: 7, seq: 0 }), ..Host::default() };
+        state.daemon.answered(Some(0), &host.encode_to_vec(), b"", at(5));
+        state.agents.heard(&host.agents, at(5));
+        let answer = |stdout: &[u8], context: &[(&str, &str)]| {
+            let context = context.iter().map(|&(key, value)| (key.to_owned(), value.to_owned()));
+            Event::RunCommandResult(Some(0), stdout.to_vec(), Vec::new(), context.collect())
+        };
+        let ps = br#"[{"status":"busy","status_age":4,"pid":100,"cwd":"/w/b",
+            "zellij":{"session":"b","pane":"4"}}]"#;
+        assert!(!state.update(answer(ps, &[(CONTEXT_KEY, agents::CONTEXT_VALUE)])));
+        let listed = br#"[{"id":4,"pane_cwd":"/w/b","pane_command":"claude"}]"#;
+        let of_b = [(CONTEXT_KEY, places::CONTEXT_VALUE), (places::SESSION_KEY, "b")];
+        assert!(!state.update(answer(listed, &of_b)));
+        let in_b = [(CONTEXT_KEY, checkouts::CONTEXT_VALUE), (checkouts::DIR_KEY, "/w/b")];
+        assert!(!state.update(answer(b"# branch.head main\n", &in_b)));
+        assert!(matches!(&state.agents.status, fetch::Fetch::Ready(agents) if agents.is_empty()));
+        assert_eq!(state.places.cwd("b", 4), None);
+        assert_eq!(state.checkouts.said("/w/b"), checkouts::Said::Nothing);
+
+        state.daemon.ask(at(6));
+        state.daemon.answered(Some(1), b"", refused, at(6));
+        assert!(state.agents.ask());
+        state.checkouts.forget();
+        assert_eq!(state.checkouts.ask(&dirs), ["/w/b"]);
     }
 
     /// `d s` on a pane of the session you are in, and `d d` on its row, once
