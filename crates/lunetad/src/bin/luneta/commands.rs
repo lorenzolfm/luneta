@@ -1,4 +1,4 @@
-//! luneta, the CLI that talks to the daemon of this host.
+//! What the CLI asks lunetad, the daemon of this host.
 
 use std::error::Error;
 use std::io::Write as _;
@@ -6,26 +6,17 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::SystemTime;
 
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
     Agent, InfoRequest, ListAgentsRequest, Status, Version, WatchRequest, WorkTree,
 };
-use lunetad::folder::{self, SOCKET};
 use prost::Message as _;
 
-/// Talk to lunetad, the luneta daemon of this host.
-#[derive(Parser)]
-#[command(version)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
 #[derive(Subcommand)]
-enum Command {
+pub enum Command {
     /// Say which lunetad runs, and for how long it has.
     Info,
     /// List the agents that run, and the pane each is in.
@@ -51,18 +42,8 @@ fn version(spelled: &str) -> Result<Version, String> {
     Ok(Version { pid, seq })
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let Some(folder) = folder::find() else {
-        eprintln!("luneta: neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in");
-        return ExitCode::FAILURE;
-    };
-    // The daemon refuses a folder that is not yours alone, and whoever has it
-    // could be listening in it in its place.
-    if let Err(refusal) = folder::check(&folder) {
-        eprintln!("luneta: {refusal}");
-        return ExitCode::FAILURE;
-    }
+/// Asks the daemon on `socket` what `command` asks.
+pub fn run(command: &Command, socket: &Path) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -70,12 +51,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    let socket = folder.join(SOCKET);
-    let done = match cli.command {
-        Command::Info => runtime.block_on(info(&socket)),
-        Command::Agents => runtime.block_on(agents(&socket)),
-        Command::Sessions => runtime.block_on(sessions(&socket)),
-        Command::Watch { after } => runtime.block_on(watch(&socket, after)),
+    let done = match command {
+        Command::Info => runtime.block_on(info(socket)),
+        Command::Agents => runtime.block_on(agents(socket)),
+        Command::Sessions => runtime.block_on(sessions(socket)),
+        Command::Watch { after } => runtime.block_on(watch(socket, *after)),
     };
     if let Err(error) = done {
         eprintln!("luneta: {}: {}", socket.display(), causes(&*error));
@@ -225,7 +205,7 @@ async fn watch(socket: &Path, after: Option<Version>) -> Result<(), Box<dyn Erro
 /// An error and what it came of, on one line. tonic's own says only
 /// "transport error", and why is further down. An error that says what it
 /// came of already is not said twice.
-fn causes(error: &dyn Error) -> String {
+pub fn causes(error: &dyn Error) -> String {
     let mut line = error.to_string();
     let mut cause = error.source();
     while let Some(error) = cause {

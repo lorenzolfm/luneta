@@ -545,6 +545,61 @@ no pane.
 
 Needs `claude` and `claude-ps` on the server's `PATH`.
 
+### luneta in your terminal
+
+luneta is turning inside out: from a plugin in zellij to a program that runs
+zellij. Type `luneta` in a terminal, and zellij runs in it beside a sidebar of
+luneta's own, drawn by luneta and not by a plugin:
+
+```text
+─ 2 sessions ───────────── ●1 ─  Zellij (luneta-main)  Tab #1
+                                ╭ Pane #1 ────────────────────
+ ▾ luneta-main ──────────── ●1  │~/P/m/luneta/main ➜
+   ● fold                   3m  │
+     feat/sidebar            !  │
+     luneta/main                │
+     main                       │
+ ▾ elo ───────────────────────  │
+     elo/main                   │
+```
+
+`luneta` attaches to the session named for the directory you are in, as the
+picker's [directories](#directories) name it, `luneta-main` in a worktree of
+`luneta`, and makes it if none runs; `luneta <name>` attaches to that one.
+Run in a pane of zellij, luneta will not attach to the session that pane is
+in, as zellij will not: name another. When zellij ends, detached or quit, so
+does luneta, and when it fails, luneta says what zellij said. zellij's keys
+are yours as they were, but `Ctrl b`, which goes back and forth between zellij
+and the sidebar. A click goes to whichever you click.
+
+The sidebar lists every session, oldest first, the panes in each, in the order
+of their tabs, and what the agent in each pane is doing, with the branch under
+it, all as [`lunetad`](#building-from-source) says: it needs the daemon
+running, and says so at its bottom while it does not answer. `j` and `k` move,
+`h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
+too, and `Esc` goes back to zellij. The session zellij is in has its rule in
+the accent.
+
+It is the first step, and the plugin's sidebar has more than this one does
+yet: its menu, its search, the brief, the `•` of what finished, a command's
+marks, the icons and the mark of the pane you are in come over one at a time.
+Until then, run luneta without the plugin's sidebar, or the two stand side by
+side: leave the dock out of `load_plugins`, and `default_layout` back at
+zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker,
+the menu and the brief are the plugin's still, and work in the zellij luneta
+runs as in any other.
+
+luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
+where the terminal you run luneta in speaks it, so that `Shift Enter` is not
+`Enter`; what zellij copies, as OSC 52; and the session zellij is in, by the
+title it gives the terminal. To take zellij's client to a pane, luneta types a
+`ScrollLock` let go into it first, which nothing binds, and which a shell, or
+nvim as you type in it, passes over: zellij moves the client of a session that
+last typed in it. With
+`support_kitty_keyboard_protocol false` in zellij's config, the client cannot
+read that key, and the sidebar takes it somewhere only once you have typed in
+the session it is in.
+
 ## Getting started
 
 ### Requirements
@@ -1108,7 +1163,9 @@ plugins {
 ```
 
 `nix build .#lunetad` builds `lunetad`, the daemon that holds what luneta
-knows of a host, and `luneta`, the CLI that talks to it
+knows of a host, and `luneta`: zellij beside a sidebar, as
+[luneta in your terminal](#luneta-in-your-terminal) has it, and with a command,
+the CLI that talks to the daemon
 ([#95](https://github.com/lorenzolfm/luneta/issues/95)). With `luneta` on the
 zellij server's `PATH` and the daemon running, the sidebar and the picker take
 the panes of each session, the branch each works on and the agents from it,
