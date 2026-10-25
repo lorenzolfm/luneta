@@ -2,21 +2,32 @@
 name = "lunetad"
 version.workspace = true
 edition = "2024"
-description = "The luneta daemon, and the CLI that talks to it"
+description = "The luneta daemon, and luneta: zellij beside a sidebar of the host, and the CLI that asks the daemon"
 
 # The daemon and its CLI are one package, as they share all there is so far:
 # the transport, and where the daemon listens. The protocol's messages are
-# `luneta-protocol`'s, which the plugin reads too.
+# `luneta-protocol`'s, which the plugin reads too. With no command, the CLI is
+# luneta itself, zellij beside a sidebar, and the dependencies for that are
+# the CLI's alone: the daemon's binary links none of them.
 [[bin]]
 name = "lunetad"
 path = "src/bin/lunetad.rs"
 
 [[bin]]
 name = "luneta"
-path = "src/bin/luneta.rs"
+path = "src/bin/luneta/main.rs"
 
 [dependencies]
+# The terminal zellij's client runs in, beside the sidebar: a pseudoterminal,
+# and a screen that reads what zellij draws there as a terminal emulator does.
+# Alacritty's, which answers what zellij asks of its terminal.
+alacritty_terminal = "0.26.0"
+# What zellij copies goes to luneta's terminal as OSC 52, in base64. Already in
+# the tree by way of alacritty_terminal.
+base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
+# Reads luneta's terminal as keys and the mouse, and sets its modes.
+crossterm = "0.29.0"
 # `connect` hands tonic a Unix socket of its own making, so that a path is a
 # path and never has to survive being spelled as a URI.
 hyper-util = { version = "0.1.21", features = ["tokio"] }
@@ -25,6 +36,8 @@ luneta-protocol = { path = "../protocol" }
 # FSEvents on macOS.
 notify = "8.2.0"
 prost = "0.14.4"
+# Draws luneta's frame, and puts on the terminal only what changed in it.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 # For the uid the runtime folder must belong to: std has no safe getuid.
 rustix = { version = "1.1.4", features = ["process"] }
 # Claude Code's session files are JSON.
@@ -37,6 +50,7 @@ tokio-stream = { version = "0.1.19", features = ["net"] }
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tower = { version = "0.5.3", features = ["util"] }
+unicode-width = { version = "0.2.2", default-features = false }
 
 # What a process's environment and start are, on macOS. Linux has `/proc` and
 # needs nothing.
@@ -47,6 +61,7 @@ sysinfo = { version = "0.36.1", default-features = false, features = ["system"] 
 tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
+prost-types = "0.14.4"
 tempfile = "3.27.0"
 
 [lints]

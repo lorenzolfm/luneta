@@ -1,0 +1,239 @@
+//! What luneta asks of zellij: a client to run beside the sidebar, and to take
+//! that client to a pane. All luneta knows of zellij's ways is here, so that a
+//! multiplexer of luneta's own can take zellij's place behind it.
+
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::Sender;
+use std::thread;
+use std::time::Duration;
+
+use crate::host::Event;
+
+/// The longest name zellij makes a session of, in bytes.
+const MAX_NAME_BYTES: usize = 60;
+
+/// Variables that zellij's client must not have. With `ZELLIJ` set, it takes
+/// itself for one started in a pane of that session, and will not attach, as
+/// when luneta itself runs in a pane. The window ids are of the terminal
+/// luneta's own is made by, and name no window.
+const LEFT_OUT: [&str; 5] =
+    ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "WINDOWID", "ALACRITTY_WINDOW_ID"];
+
+/// A name zellij can make a session of. `parse` is the one way to make one, so
+/// a name that reaches zellij as one has been held to what zellij takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionName(String);
+
+impl SessionName {
+    pub fn parse(name: &str) -> Result<Self, &'static str> {
+        if name.is_empty() {
+            return Err("name must not be empty");
+        }
+        if name.trim().is_empty() {
+            return Err("name cannot be only whitespace");
+        }
+        if name == "." || name == ".." {
+            return Err("name cannot be '.' or '..'");
+        }
+        if name.contains('/') {
+            return Err("name cannot contain '/'");
+        }
+        if name.len() > MAX_NAME_BYTES {
+            return Err("name must be shorter than 61 bytes");
+        }
+        Ok(SessionName(name.to_owned()))
+    }
+}
+
+impl fmt::Display for SessionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The program luneta runs beside the sidebar, and its arguments: zellij's
+/// client, attached to `session` and making it if none runs, or without one
+/// in a session of a name zellij makes up. It runs through `env`, to leave out
+/// what `LEFT_OUT` names, which luneta cannot take out of its own variables.
+pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
+    let mut args: Vec<String> =
+        LEFT_OUT.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
+    args.push("zellij".to_owned());
+    if let Some(session) = session {
+        args.extend(["attach".to_owned(), "--create".to_owned(), session.0.clone()]);
+    }
+    ("env".to_owned(), args)
+}
+
+/// The session a directory is for, as the picker's directories name it: for
+/// the directory itself, or for its repository too when it is a worktree of
+/// one, as `luneta-main`. None for a directory no session can be named for,
+/// as `/`.
+pub fn session_for(dir: &Path) -> Option<SessionName> {
+    let path = dir.to_str()?;
+    common_dir(dir)
+        .and_then(|common| worktree_name(path, common.to_str()?))
+        .or_else(|| SessionName::parse(path.split('/').rfind(|part| !part.is_empty())?).ok())
+}
+
+/// The repository a linked worktree is of: its git directory, which every
+/// worktree of it shares. A worktree's `.git` is a file that names its own git
+/// directory, and that names the shared one in `commondir`. None for a
+/// directory that is no linked worktree, as a repository's main one is not.
+fn common_dir(dir: &Path) -> Option<PathBuf> {
+    let dot_git = fs::read_to_string(dir.join(".git")).ok()?;
+    let own = dir.join(dot_git.lines().next()?.strip_prefix("gitdir: ")?);
+    let common = fs::read_to_string(own.join("commondir")).ok()?;
+    fs::canonicalize(own.join(common.lines().next()?)).ok()
+}
+
+/// A worktree is named for its repository too, `luneta-main`, where `main`
+/// alone would name one of every repository, wherever the worktree lives. The
+/// repository is its git directory, less a bare repository's `.git`, or, when
+/// that directory is hidden, as a `.git` or a `.bare`, the directory that
+/// holds it. A worktree whose own name starts with its repository's, as
+/// `app-hotfix` beside `app`, keeps it, and so does one whose name would come
+/// out too long for zellij to make a session of.
+fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
+    let base = path.split('/').rfind(|part| !part.is_empty())?;
+    let mut parts = common.split('/').filter(|part| !part.is_empty());
+    let mut repository = parts.next_back()?;
+    if repository.starts_with('.') {
+        repository = parts.next_back()?;
+    }
+    let repository =
+        repository.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(repository);
+    if base.strip_prefix(repository).is_some_and(|rest| !rest.starts_with(char::is_alphanumeric)) {
+        return None;
+    }
+    SessionName::parse(&format!("{repository}-{base}")).ok()
+}
+
+/// What luneta types into zellij's client before it asks zellij to move it:
+/// `ScrollLock`, as the kitty keyboard protocol spells it. zellij moves the
+/// client of a session that last sent it a key, and a client that has sent
+/// none since it came to the session, as luneta's has not once the sidebar
+/// took it there, moves for no action. No one binds `ScrollLock`, and zellij
+/// writes nothing of it to a pane that does not read keys as kitty spells
+/// them; one that does gets a key it was never asked for, and leaves it be.
+/// The client reads it as kitty spells it unless its config turns the
+/// protocol off, and then zellij moves the client only once you type in it.
+pub const NUDGE: &[u8] = b"\x1b[57359u";
+
+/// How long an action waits for zellij to take in `NUDGE`, which goes to it
+/// through its client while the action goes straight to its server.
+const NUDGED: Duration = Duration::from_millis(30);
+
+/// Takes the client from the session `at` to the pane `pane` of `to`, or to
+/// the session `to` alone, on the pane it last had the focus on. The client
+/// must have been sent `NUDGE` first. What zellij says of a failure comes back
+/// as a notice.
+pub fn go(at: &str, to: &str, pane: Option<u32>, events: &Sender<Event>) {
+    let mut command = Command::new("zellij");
+    let pane = pane.map(|id| format!("terminal_{id}"));
+    match pane {
+        Some(pane) if at == to => {
+            command.args(["--session", at, "action", "focus-pane-id", &pane]);
+        },
+        None if at == to => return,
+        pane => {
+            command.args(["--session", at, "action", "switch-session", to]);
+            command.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
+        },
+    }
+    run(command, events);
+}
+
+/// Runs a zellij action on a thread of its own, so that the sidebar goes on
+/// drawing while zellij answers, and says why when it fails. A pane already
+/// focused is where the action would take the client, and no failure.
+fn run(mut command: Command, events: &Sender<Event>) {
+    for name in LEFT_OUT {
+        command.env_remove(name);
+    }
+    command.stdin(Stdio::null());
+    let events = events.clone();
+    thread::spawn(move || {
+        thread::sleep(NUDGED);
+        let said = match command.output() {
+            Ok(output) if output.status.success() => return,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let line = stderr.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("");
+                if line.contains("is already focused") {
+                    return;
+                }
+                format!("zellij: {} ({})", line.trim(), output.status)
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                "zellij is not on the PATH".to_owned()
+            },
+            Err(error) => format!("zellij: {error}"),
+        };
+        // luneta is on its way out.
+        let _ = events.send(Event::Notice(said));
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_is_the_directory_itself() {
+        let named = |dir: &str| session_for(Path::new(dir)).map(|name| name.0);
+        assert_eq!(named("/nowhere/at/all/luneta"), Some("luneta".to_owned()));
+        assert_eq!(named("/nowhere/at/all/luneta/"), Some("luneta".to_owned()));
+        assert_eq!(named("/"), None);
+    }
+
+    #[test]
+    fn a_worktree_is_named_for_its_repository_too() {
+        let named = |path: &str, common: &str| worktree_name(path, common).map(|name| name.0);
+        assert_eq!(named("/w/luneta/main", "/w/luneta/.bare"), Some("luneta-main".to_owned()));
+        assert_eq!(named("/w/trees/main", "/w/luneta/.git"), Some("luneta-main".to_owned()));
+        assert_eq!(named("/w/infra.git/master", "/w/infra.git"), Some("infra-master".to_owned()));
+        assert_eq!(named("/w/app-hotfix", "/w/app/.git"), None);
+        assert_eq!(named("/w/application", "/w/app/.git"), Some("app-application".to_owned()));
+        let long = "x".repeat(MAX_NAME_BYTES);
+        assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
+    }
+
+    /// A worktree made by git is found one, by the files git leaves in it.
+    #[test]
+    fn a_linked_worktree_is_found_by_its_git_files() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        let common = root.join("luneta").join(".bare");
+        let own = common.join("worktrees").join("main");
+        let tree = root.join("luneta").join("main");
+        for dir in [&own, &tree] {
+            assert!(fs::create_dir_all(dir).is_ok());
+        }
+        let wrote = [
+            fs::write(tree.join(".git"), format!("gitdir: {}\n", own.display())),
+            fs::write(own.join("commondir"), "../..\n"),
+        ];
+        assert!(wrote.iter().all(Result::is_ok));
+        assert_eq!(session_for(&tree).map(|name| name.0), Some("luneta-main".to_owned()));
+        let repository = root.join("luneta");
+        assert_eq!(session_for(&repository).map(|name| name.0), Some("luneta".to_owned()));
+    }
+
+    #[test]
+    fn the_client_leaves_zellij_s_variables_out() {
+        let Ok(session) = SessionName::parse("luneta-main") else {
+            panic!("a name zellij takes");
+        };
+        let (program, args) = client(Some(&session));
+        assert_eq!(program, "env");
+        assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
+        assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
+    }
+}
