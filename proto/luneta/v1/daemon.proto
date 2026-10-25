@@ -53,7 +53,8 @@ message Host {
 // A zellij session that runs: its server listens on a socket named for it.
 message Session {
   string name = 1;
-  // When its server started.
+  // When its server started. Always there: a client tells two sessions of one
+  // name apart by it.
   google.protobuf.Timestamp started_at = 2;
   // Its panes, as zellij last listed them. Absent until zellij has, and while
   // another session runs under its name: zellij is asked for them by name, and

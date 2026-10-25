@@ -43,7 +43,13 @@ async fn watch(socket: PathBuf, events: Sender<Event>) {
                 match daemon.watch(WatchRequest { after }).await {
                     Ok(host) => {
                         let host = host.into_inner();
-                        after = host.version;
+                        // One with no version would be asked after again at
+                        // once, as a first look, for as long as it answers so.
+                        let Some(version) = host.version else {
+                            break "an answer with no version, which this luneta does not read"
+                                .to_owned();
+                        };
+                        after = Some(version);
                         // luneta is on its way out.
                         if events.send(Event::Daemon(Ok(host))).is_err() {
                             return;

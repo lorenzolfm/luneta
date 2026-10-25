@@ -28,7 +28,6 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let held = parameter(key.modifiers);
     let cursor = if mode.contains(TermMode::APP_CURSOR) { "\x1bO" } else { "\x1b[" };
     let with_alt = |bytes: &[u8]| {
         let mut sent = Vec::with_capacity(bytes.len() + 1);
@@ -50,19 +49,19 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
         KeyCode::Backspace => with_alt(b"\x7f"),
         KeyCode::Esc => with_alt(b"\x1b"),
         KeyCode::Null => vec![0],
-        KeyCode::Up => lettered(cursor, 'A', held),
-        KeyCode::Down => lettered(cursor, 'B', held),
-        KeyCode::Right => lettered(cursor, 'C', held),
-        KeyCode::Left => lettered(cursor, 'D', held),
-        KeyCode::Home => lettered(cursor, 'H', held),
-        KeyCode::End => lettered(cursor, 'F', held),
-        KeyCode::Insert => numbered(2, held),
-        KeyCode::Delete => numbered(3, held),
-        KeyCode::PageUp => numbered(5, held),
-        KeyCode::PageDown => numbered(6, held),
+        KeyCode::Up => lettered(cursor, 'A', key.modifiers),
+        KeyCode::Down => lettered(cursor, 'B', key.modifiers),
+        KeyCode::Right => lettered(cursor, 'C', key.modifiers),
+        KeyCode::Left => lettered(cursor, 'D', key.modifiers),
+        KeyCode::Home => lettered(cursor, 'H', key.modifiers),
+        KeyCode::End => lettered(cursor, 'F', key.modifiers),
+        KeyCode::Insert => numbered(2, key.modifiers),
+        KeyCode::Delete => numbered(3, key.modifiers),
+        KeyCode::PageUp => numbered(5, key.modifiers),
+        KeyCode::PageDown => numbered(6, key.modifiers),
         // `F1` to `F4` go after `ESC O` whatever the cursor's mode.
-        KeyCode::F(n @ 1..=4) => lettered("\x1bO", char::from(b'P' + n - 1), held),
-        KeyCode::F(n @ 5..=12) => numbered(FUNCTION_NUMBERS[usize::from(n - 5)], held),
+        KeyCode::F(n @ 1..=4) => lettered("\x1bO", char::from(b'P' + n - 1), key.modifiers),
+        KeyCode::F(n @ 5..=12) => numbered(FUNCTION_NUMBERS[usize::from(n - 5)], key.modifiers),
         _ => return None,
     };
     Some(sent)
@@ -79,8 +78,8 @@ fn parameter(modifiers: KeyModifiers) -> u8 {
 /// A key xterm sends as a letter, `last`, after `introducer`: `ESC [`, or
 /// `ESC O`. With a modifier held, the letter goes after `ESC [ 1 ;` and the
 /// modifiers' parameter, which only that form has room for.
-fn lettered(introducer: &str, last: char, held: u8) -> Vec<u8> {
-    assert!((1..=8).contains(&held), "xterm's parameter is 1 and a bit for each modifier");
+fn lettered(introducer: &str, last: char, modifiers: KeyModifiers) -> Vec<u8> {
+    let held = parameter(modifiers);
     if held > 1 {
         return format!("\x1b[1;{held}{last}").into_bytes();
     }
@@ -89,8 +88,8 @@ fn lettered(introducer: &str, last: char, held: u8) -> Vec<u8> {
 
 /// A key xterm sends as `number` and a `~` after `ESC [`, with the modifiers'
 /// parameter between the two while one is held.
-fn numbered(number: u8, held: u8) -> Vec<u8> {
-    assert!((1..=8).contains(&held), "xterm's parameter is 1 and a bit for each modifier");
+fn numbered(number: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    let held = parameter(modifiers);
     if held > 1 {
         return format!("\x1b[{number};{held}~").into_bytes();
     }

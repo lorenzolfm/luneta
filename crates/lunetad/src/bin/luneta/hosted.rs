@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
+use std::num::NonZeroU16;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -41,6 +42,35 @@ pub enum Said {
     Rang,
     /// It ended.
     Ended,
+}
+
+/// How big the terminal luneta runs the program in is: in cells, of which it
+/// has one each way at least, as alacritty's screen keeps its cursor on one,
+/// and how big each cell is in pixels, or 0 where luneta's terminal does not
+/// say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Size {
+    pub columns: NonZeroU16,
+    pub lines: NonZeroU16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+}
+
+impl Size {
+    fn dimensions(self) -> TermSize {
+        TermSize::new(usize::from(self.columns.get()), usize::from(self.lines.get()))
+    }
+}
+
+impl From<Size> for WindowSize {
+    fn from(size: Size) -> Self {
+        WindowSize {
+            num_cols: size.columns.get(),
+            num_lines: size.lines.get(),
+            cell_width: size.cell_width,
+            cell_height: size.cell_height,
+        }
+    }
 }
 
 /// Hands what the program does to luneta's loop.
@@ -86,7 +116,7 @@ impl EventListener for Listener {
 pub struct Hosted {
     screen: Arc<FairMutex<Term<Listener>>>,
     pty: EventLoopSender,
-    size: WindowSize,
+    size: Size,
     /// The listener's, which `draw` clears.
     drew: Arc<AtomicBool>,
 }
@@ -97,20 +127,16 @@ impl Hosted {
         program: String,
         args: Vec<String>,
         dir: &Path,
-        size: WindowSize,
+        size: Size,
         events: Sender<Event>,
     ) -> io::Result<Self> {
-        // alacritty's screen keeps its cursor on a cell, and one of no cells
-        // has none to keep it on. `host::window` makes it one by one at least.
-        assert!(size.num_cols > 0);
-        assert!(size.num_lines > 0);
         let options = tty::Options {
             shell: Some(tty::Shell::new(program, args)),
             working_directory: Some(dir.to_owned()),
             drain_on_exit: false,
             env: HashMap::new(),
         };
-        let pty = tty::new(&options, size, 0)?;
+        let pty = tty::new(&options, size.into(), 0)?;
         let drew = Arc::new(AtomicBool::new(false));
         let listener = Listener { events, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
@@ -124,31 +150,28 @@ impl Hosted {
             default_cursor_style: CursorStyle { shape: CursorShape::HollowBlock, blinking: false },
             ..Config::default()
         };
-        let dimensions = TermSize::new(usize::from(size.num_cols), usize::from(size.num_lines));
-        let screen = Arc::new(FairMutex::new(Term::new(config, &dimensions, listener.clone())));
+        let screen = Term::new(config, &size.dimensions(), listener.clone());
+        let screen = Arc::new(FairMutex::new(screen));
         let reader = EventLoop::new(Arc::clone(&screen), listener, pty, false, false)?;
         let pty = reader.channel();
         reader.spawn();
         Ok(Hosted { screen, pty, size, drew })
     }
 
-    pub fn size(&self) -> WindowSize {
+    pub fn size(&self) -> Size {
         self.size
     }
 
     /// Makes the terminal `size`, and tells the program.
-    pub fn resize(&mut self, size: WindowSize) {
-        assert!(size.num_cols > 0);
-        assert!(size.num_lines > 0);
-        if (size.num_cols, size.num_lines) == (self.size.num_cols, self.size.num_lines) {
+    pub fn resize(&mut self, size: Size) {
+        if (size.columns, size.lines) == (self.size.columns, self.size.lines) {
             self.size = size;
             return;
         }
         self.size = size;
-        let dimensions = TermSize::new(usize::from(size.num_cols), usize::from(size.num_lines));
-        self.screen.lock().resize(dimensions);
+        self.screen.lock().resize(size.dimensions());
         // The reader is gone with the program, which needs no size.
-        let _ = self.pty.send(Msg::Resize(size));
+        let _ = self.pty.send(Msg::Resize(size.into()));
     }
 
     /// Sends the program `bytes`, as typed into its terminal.

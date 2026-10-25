@@ -4,13 +4,13 @@
 
 use std::env;
 use std::io::{self, Write as _};
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use alacritty_terminal::event::WindowSize;
 use alacritty_terminal::term::ClipboardType;
 use alacritty_terminal::vte::ansi::CursorShape;
 use base64::Engine as _;
@@ -27,7 +27,7 @@ use lunetad::api::Host;
 use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
-use crate::hosted::{Hosted, Said};
+use crate::hosted::{Hosted, Said, Size};
 use crate::keys;
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::zellij::{self, SessionName};
@@ -233,14 +233,16 @@ fn areas(frame: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
-/// The size of zellij's terminal, for an `area` of luneta's: in cells, and in
-/// pixels where luneta's terminal says how big its cells are.
-fn window(area: Rect) -> WindowSize {
+/// The size of zellij's terminal, for an `area` of luneta's: in cells, one
+/// each way for an area with none, and in pixels where luneta's terminal says
+/// how big its cells are.
+fn window(area: Rect) -> Size {
     let cell =
         crossterm::terminal::window_size().ok().filter(|size| size.columns > 0 && size.rows > 0);
-    WindowSize {
-        num_cols: area.width.max(1),
-        num_lines: area.height.max(1),
+    let cells = |count: u16| NonZeroU16::new(count).unwrap_or(NonZeroU16::MIN);
+    Size {
+        columns: cells(area.width),
+        lines: cells(area.height),
         cell_width: cell.as_ref().map_or(0, |size| size.width / size.columns),
         cell_height: cell.map_or(0, |size| size.height / size.rows),
     }
@@ -387,7 +389,9 @@ impl App {
                 backend.flush()?;
             },
             Said::Answer(answer) => self.hosted.send(answer.into_bytes()),
-            Said::AskedSize(answer) => self.hosted.send(answer(self.hosted.size()).into_bytes()),
+            Said::AskedSize(answer) => {
+                self.hosted.send(answer(self.hosted.size().into()).into_bytes());
+            },
             Said::Rang => {
                 let backend = terminal.backend_mut();
                 backend.write_all(b"\x07")?;
@@ -404,7 +408,7 @@ impl App {
             let (sidebar, zellij) = areas(frame.area());
             self.areas = (sidebar, zellij);
             let size = self.hosted.size();
-            if (zellij.width, zellij.height) != (size.num_cols, size.num_lines) {
+            if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
                 self.hosted.resize(window(zellij));
             }
             let buffer = frame.buffer_mut();
