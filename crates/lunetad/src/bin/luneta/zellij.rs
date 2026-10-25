@@ -14,7 +14,11 @@ use std::time::Duration;
 use crate::host::Event;
 
 /// The longest name zellij makes a session of, in bytes.
-const MAX_NAME_BYTES: usize = 60;
+const NAME_BYTES_MAX: usize = 60;
+
+// `SessionName::parse` refuses a longer name in zellij's words, which count the
+// bytes a name must be shorter than.
+const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 
 /// Variables that zellij's client must not have. With `ZELLIJ` set, it takes
 /// itself for one started in a pane of that session, and will not attach, as
@@ -42,7 +46,7 @@ impl SessionName {
         if name.contains('/') {
             return Err("name cannot contain '/'");
         }
-        if name.len() > MAX_NAME_BYTES {
+        if name.len() > NAME_BYTES_MAX {
             return Err("name must be shorter than 61 bytes");
         }
         Ok(SessionName(name.to_owned()))
@@ -199,7 +203,7 @@ mod tests {
         assert_eq!(named("/w/infra.git/master", "/w/infra.git"), Some("infra-master".to_owned()));
         assert_eq!(named("/w/app-hotfix", "/w/app/.git"), None);
         assert_eq!(named("/w/application", "/w/app/.git"), Some("app-application".to_owned()));
-        let long = "x".repeat(MAX_NAME_BYTES);
+        let long = "x".repeat(NAME_BYTES_MAX);
         assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
     }
 

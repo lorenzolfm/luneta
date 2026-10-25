@@ -46,9 +46,13 @@ pub enum Event {
 }
 
 /// How often the sidebar is drawn again with nothing else to draw it: every
-/// second for the ages, and ten times a second while a spinner turns.
+/// second for the ages, and at each turn of the spinner while one turns.
 const TICK: Duration = Duration::from_secs(1);
-const SPIN: Duration = Duration::from_millis(100);
+
+/// The most events that go into one frame. Those that come faster wait for the
+/// next, so that luneta draws at least once each this many events, however
+/// fast they come.
+const FRAME_EVENTS_MAX: usize = 256;
 
 /// Which side has the keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,18 +121,18 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
             }
             run_in(&mut terminal, session.as_ref(), socket, &dir)
         });
-    if kitty {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-    }
-    let _ = execute!(
+    // Each mode is put back however the rest went, and the first error is the
+    // one said.
+    let popped = if kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
+    let restored = execute!(
         io::stdout(),
         DisableMouseCapture,
         DisableBracketedPaste,
         DisableFocusChange,
         SetCursorStyle::DefaultUserShape
     );
-    ratatui::restore();
-    match ran {
+    let left = ratatui::try_restore();
+    match ran.and(popped).and(restored).and(left) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("luneta: {error}");
@@ -143,6 +147,11 @@ fn run_in(
     socket: Result<PathBuf, String>,
     dir: &std::path::Path,
 ) -> io::Result<()> {
+    // Not a `sync_channel` of a bound: alacritty hands on what the program
+    // does with the screen locked, which the loop locks to draw, so that a
+    // full queue would hold each up for the other for good. What fills it are
+    // the keys and the mouse, the daemon's answers, zellij's actions and what
+    // zellij does with its terminal, of which `hosted` keeps one draw at most.
     let (events, inbox) = mpsc::channel();
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)));
     let (program, args) = zellij::client(session);
@@ -184,20 +193,28 @@ fn read_input(events: Sender<Event>) {
     });
 }
 
+/// Draws a frame for each batch of events, until zellij ends or luneta's
+/// terminal can no longer be read.
 fn run_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     inbox: &Receiver<Event>,
 ) -> io::Result<()> {
     loop {
-        let wait = if app.sidebar.turning() { SPIN } else { TICK };
+        let wait = if app.sidebar.turning() { sidebar::SPIN } else { TICK };
         match inbox.recv_timeout(wait) {
             Ok(event) => app.handle(event, terminal)?,
             Err(RecvTimeoutError::Timeout) => {},
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => {
+                unreachable!("the app holds a sender, for zellij's actions")
+            },
         }
-        // All that came while luneta drew goes into one frame.
-        while let Ok(event) = inbox.try_recv() {
+        // What came while luneta drew goes into one frame, with the event it
+        // waited for: `FRAME_EVENTS_MAX` in all.
+        for _ in 1..FRAME_EVENTS_MAX {
+            let Ok(event) = inbox.try_recv() else {
+                break;
+            };
             app.handle(event, terminal)?;
         }
         if app.ended {
@@ -351,6 +368,7 @@ impl App {
 
     fn hosted_said(&mut self, said: Said, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match said {
+            // The frame this event goes into draws it.
             Said::Drew => {},
             Said::Titled(title) => {
                 execute!(terminal.backend_mut(), SetTitle(&title))?;

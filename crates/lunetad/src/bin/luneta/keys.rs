@@ -11,6 +11,9 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
+/// The numbers xterm sends `F5` to `F12` as, which skip 16 and 22.
+const FUNCTION_NUMBERS: [u8; 8] = [15, 17, 18, 19, 20, 21, 23, 24];
+
 /// The bytes for a key, or none for a key xterm sends nothing for, or its
 /// release.
 pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
@@ -22,29 +25,11 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
     {
         return Some(sent);
     }
-    let modifiers = key.modifiers;
-    let alt = modifiers.contains(KeyModifiers::ALT);
-    let control = modifiers.contains(KeyModifiers::CONTROL);
-    let shift = modifiers.contains(KeyModifiers::SHIFT);
-    // xterm's parameter for the modifiers held with a key that has an escape
-    // sequence of its own: 1, for none, and a bit for each.
-    let held = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
-    let cursor = |last: char| {
-        if held > 1 {
-            format!("\x1b[1;{held}{last}").into_bytes()
-        } else if mode.contains(TermMode::APP_CURSOR) {
-            format!("\x1bO{last}").into_bytes()
-        } else {
-            format!("\x1b[{last}").into_bytes()
-        }
-    };
-    let tilde = |number: u8| {
-        if held > 1 {
-            format!("\x1b[{number};{held}~").into_bytes()
-        } else {
-            format!("\x1b[{number}~").into_bytes()
-        }
-    };
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let held = parameter(key.modifiers);
+    let cursor = if mode.contains(TermMode::APP_CURSOR) { "\x1bO" } else { "\x1b[" };
     let with_alt = |bytes: &[u8]| {
         let mut sent = Vec::with_capacity(bytes.len() + 1);
         if alt {
@@ -65,28 +50,51 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
         KeyCode::Backspace => with_alt(b"\x7f"),
         KeyCode::Esc => with_alt(b"\x1b"),
         KeyCode::Null => vec![0],
-        KeyCode::Up => cursor('A'),
-        KeyCode::Down => cursor('B'),
-        KeyCode::Right => cursor('C'),
-        KeyCode::Left => cursor('D'),
-        KeyCode::Home => cursor('H'),
-        KeyCode::End => cursor('F'),
-        KeyCode::Insert => tilde(2),
-        KeyCode::Delete => tilde(3),
-        KeyCode::PageUp => tilde(5),
-        KeyCode::PageDown => tilde(6),
-        KeyCode::F(n @ 1..=4) => {
-            let last = char::from(b'P' + n - 1);
-            if held > 1 {
-                format!("\x1b[1;{held}{last}").into_bytes()
-            } else {
-                format!("\x1bO{last}").into_bytes()
-            }
-        },
-        KeyCode::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]),
+        KeyCode::Up => lettered(cursor, 'A', held),
+        KeyCode::Down => lettered(cursor, 'B', held),
+        KeyCode::Right => lettered(cursor, 'C', held),
+        KeyCode::Left => lettered(cursor, 'D', held),
+        KeyCode::Home => lettered(cursor, 'H', held),
+        KeyCode::End => lettered(cursor, 'F', held),
+        KeyCode::Insert => numbered(2, held),
+        KeyCode::Delete => numbered(3, held),
+        KeyCode::PageUp => numbered(5, held),
+        KeyCode::PageDown => numbered(6, held),
+        // `F1` to `F4` go after `ESC O` whatever the cursor's mode.
+        KeyCode::F(n @ 1..=4) => lettered("\x1bO", char::from(b'P' + n - 1), held),
+        KeyCode::F(n @ 5..=12) => numbered(FUNCTION_NUMBERS[usize::from(n - 5)], held),
         _ => return None,
     };
     Some(sent)
+}
+
+/// xterm's parameter for the modifiers held with a key that has an escape
+/// sequence of its own: 1, for none, and a bit for each.
+fn parameter(modifiers: KeyModifiers) -> u8 {
+    1 + u8::from(modifiers.contains(KeyModifiers::SHIFT))
+        + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
+        + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// A key xterm sends as a letter, `last`, after `introducer`: `ESC [`, or
+/// `ESC O`. With a modifier held, the letter goes after `ESC [ 1 ;` and the
+/// modifiers' parameter, which only that form has room for.
+fn lettered(introducer: &str, last: char, held: u8) -> Vec<u8> {
+    assert!((1..=8).contains(&held), "xterm's parameter is 1 and a bit for each modifier");
+    if held > 1 {
+        return format!("\x1b[1;{held}{last}").into_bytes();
+    }
+    format!("{introducer}{last}").into_bytes()
+}
+
+/// A key xterm sends as `number` and a `~` after `ESC [`, with the modifiers'
+/// parameter between the two while one is held.
+fn numbered(number: u8, held: u8) -> Vec<u8> {
+    assert!((1..=8).contains(&held), "xterm's parameter is 1 and a bit for each modifier");
+    if held > 1 {
+        return format!("\x1b[{number};{held}~").into_bytes();
+    }
+    format!("\x1b[{number}~").into_bytes()
 }
 
 /// The bytes the kitty keyboard protocol has for a key that xterm's would not
@@ -96,11 +104,8 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
 /// key, which goes as xterm sends it.
 fn kitty(key: &KeyEvent) -> Option<Vec<u8>> {
     let modifiers = key.modifiers;
-    let held = 1
-        + u8::from(modifiers.contains(KeyModifiers::SHIFT))
-        + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
-        + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
-        + 8 * u8::from(modifiers.contains(KeyModifiers::SUPER));
+    // xterm's parameter, and a bit for `Super`, which kitty's has room for.
+    let held = parameter(modifiers) + 8 * u8::from(modifiers.contains(KeyModifiers::SUPER));
     let code = match key.code {
         KeyCode::Esc => 27,
         KeyCode::Enter if held > 1 => 13,
@@ -124,17 +129,22 @@ fn kitty(key: &KeyEvent) -> Option<Vec<u8>> {
 /// The byte a terminal sends for a character typed with `Ctrl`, as xterm
 /// maps them. None for a character it has none for.
 fn control_byte(c: char) -> Option<u8> {
-    let byte = match c.to_ascii_lowercase() {
-        c @ 'a'..='z' => c as u8 - b'a' + 1,
-        ' ' | '@' | '2' => 0,
-        '[' | '3' => 0x1b,
-        '\\' | '4' => 0x1c,
-        ']' | '5' => 0x1d,
-        '^' | '6' => 0x1e,
-        '_' | '7' | '/' => 0x1f,
-        '?' | '8' => 0x7f,
+    let Ok(typed) = u8::try_from(c.to_ascii_lowercase()) else {
+        return None;
+    };
+    let byte = match typed {
+        b'a'..=b'z' => typed - b'a' + 1,
+        b' ' | b'@' | b'2' => 0,
+        b'[' | b'3' => 0x1b,
+        b'\\' | b'4' => 0x1c,
+        b']' | b'5' => 0x1d,
+        b'^' | b'6' => 0x1e,
+        b'_' | b'7' | b'/' => 0x1f,
+        b'?' | b'8' => 0x7f,
         _ => return None,
     };
+    // A C0 control, or `DEL`.
+    assert!(byte < 0x20 || byte == 0x7f, "{byte:#04x}");
     Some(byte)
 }
 

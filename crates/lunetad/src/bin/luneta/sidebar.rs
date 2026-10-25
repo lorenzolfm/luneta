@@ -22,6 +22,8 @@ const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// How long the spinner shows each of its frames.
+pub const SPIN: Duration = Duration::from_millis(100);
 
 /// The colour of what wants you: an agent that waits for you, and the session
 /// luneta's zellij is in.
@@ -82,13 +84,13 @@ impl Mark {
         }
     }
 
-    /// Its glyph, which the spinner turns in at `frame`, and its style.
+    /// Its glyph, which the spinner shows at `frame`, and its style.
     fn glyph(&self, frame: usize) -> (String, Style) {
         let style = Style::new();
         match self {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
             Mark::Idle => ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Mark::Busy => (SPINNER[frame % SPINNER.len()].to_owned(), style.fg(TAG)),
+            Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Other(word) => {
                 (word.chars().take(1).flat_map(char::to_uppercase).collect(), style.fg(TAG))
@@ -313,7 +315,12 @@ impl Sidebar {
 
     fn cursor_index(&self) -> Option<usize> {
         let place = self.cursor.as_ref()?;
-        self.rows.iter().position(|row| row.place() == *place)
+        // Each time the rows are built, `settle` puts the highlight on one of
+        // them, and `step` and a click move it only onto one. It may not be on
+        // the row found here, which is the first of its place: two sessions
+        // of zellij versions with sockets of their own can share a name.
+        let at = self.rows.iter().position(|row| row.place() == *place);
+        Some(at.expect("the highlight is on a row"))
     }
 
     /// Moves the highlight `by` rows it stops on, down or up, and no further
@@ -331,15 +338,22 @@ impl Sidebar {
         self.cursor = Some(self.rows[stops[next]].place());
     }
 
-    /// Folds the session of the highlighted row, or unfolds it, or turns it
-    /// the other way for none. The highlight goes to the session's row as it
-    /// folds.
-    fn fold(&mut self, folded: Option<bool>) {
-        let Some(place) = self.cursor.clone() else {
+    /// Folds the session of the highlighted row the other way.
+    fn toggle(&mut self) {
+        let Some(place) = &self.cursor else {
+            return;
+        };
+        let folded = self.folded.contains(place.session());
+        self.fold(!folded);
+    }
+
+    /// Folds the session of the highlighted row, or unfolds it. The highlight
+    /// goes to the session's row as it folds.
+    fn fold(&mut self, folded: bool) {
+        let Some(place) = &self.cursor else {
             return;
         };
         let session = place.session().to_owned();
-        let folded = folded.unwrap_or(!self.folded.contains(&session));
         let changed =
             if folded { self.folded.insert(session.clone()) } else { self.folded.remove(&session) };
         if !changed {
@@ -360,9 +374,9 @@ impl Sidebar {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
-            KeyCode::Left | KeyCode::Char('h') => self.fold(Some(true)),
-            KeyCode::Right | KeyCode::Char('l') => self.fold(Some(false)),
-            KeyCode::Char(' ') => self.fold(None),
+            KeyCode::Left | KeyCode::Char('h') => self.fold(true),
+            KeyCode::Right | KeyCode::Char('l') => self.fold(false),
+            KeyCode::Char(' ') => self.toggle(),
             KeyCode::Enter => {
                 if let Some(place) = self.cursor.clone() {
                     return Asked::Go(place);
@@ -397,21 +411,15 @@ impl Sidebar {
         };
         let row = &self.rows[at];
         let place = row.place();
-        if let Row::Session { name, folded, .. } = row {
+        if let Row::Session { folded, .. } = row {
             let on_triangle = mouse.column.saturating_sub(area.x) <= 2;
-            // The name of a session that lists its panes is no place to go.
-            if !on_triangle && !folded {
+            if on_triangle {
+                self.cursor = Some(place);
+                self.toggle();
                 return Asked::Nothing;
             }
-            if on_triangle {
-                let (name, folded) = (name.clone(), *folded);
-                self.cursor = Some(place);
-                if folded {
-                    self.folded.remove(&name);
-                } else {
-                    self.folded.insert(name);
-                }
-                self.rebuild();
+            // The name of a session that lists its panes is no place to go.
+            if !folded {
                 return Asked::Nothing;
             }
         }
@@ -449,6 +457,11 @@ impl Sidebar {
         } else if end > self.top + room {
             self.top = end.saturating_sub(room);
         }
+        // The row shows whole, where it fits.
+        if end - start <= room {
+            assert!(self.top <= start);
+            assert!(end <= self.top + room);
+        }
     }
 
     /// Draws the sidebar into `area`, the highlight on its row while it has
@@ -457,9 +470,7 @@ impl Sidebar {
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, focused: bool, now: SystemTime) {
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
-        let frame = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |since| (since.as_millis() / 100) as usize);
+        let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.push(self.header(width, frame));
         lines.push(Line::default());
@@ -492,8 +503,7 @@ impl Sidebar {
         lines.extend(drawn.into_iter().skip(self.top).take(room));
         lines.resize(height.saturating_sub(notes.len()), Line::default());
         lines.extend(notes);
-        for (y, line) in lines.iter().take(height).enumerate() {
-            let y = area.y + y as u16;
+        for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
             buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset());
             buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
         }
@@ -666,20 +676,21 @@ fn age(since: SystemTime, now: SystemTime) -> String {
     }
 }
 
+/// The frame the spinner shows at `now`: the same on every row, and the next
+/// one each `SPIN`.
+fn frame(now: SystemTime) -> usize {
+    let since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let turns = since.as_millis() / SPIN.as_millis();
+    let frames = u128::try_from(SPINNER.len()).expect("a spinner of ten frames");
+    usize::try_from(turns % frames).expect("a frame of the spinner's")
+}
+
 /// The lines a row is drawn on, `width` wide.
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
         Row::Session { name, folded, here, waiting, busy, .. } => {
-            let badge = if *waiting > 0 {
-                let (dot, style) = Mark::Waiting.glyph(frame);
-                Some(Span::styled(format!("{dot}{waiting}"), style))
-            } else if *folded && *busy {
-                let (spinner, style) = Mark::Busy.glyph(frame);
-                Some(Span::styled(spinner, style))
-            } else {
-                None
-            };
+            let badge = badge(*waiting, *folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let name_style = if *here {
                 Style::new().fg(NAME).add_modifier(Modifier::BOLD)
@@ -727,19 +738,39 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
             if let Some((branch, status)) = checkout {
-                let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-                let branch = cut(branch, width.saturating_sub(5 + reserve + 1));
-                let gap = width.saturating_sub(5 + branch.width() + status.width() + 1);
-                lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(branch, Style::new().fg(Color::DarkGray)),
-                    Span::raw(" ".repeat(gap)),
-                    Span::raw(status.clone()),
-                ]));
+                lines.push(checkout_line(branch, status, width));
             }
             lines
         },
     }
+}
+
+/// What a session's row ends in: how many of its agents wait for you, or else
+/// the spinner, while it is `spinning`.
+fn badge(waiting: usize, spinning: bool, frame: usize) -> Option<Span<'static>> {
+    if waiting > 0 {
+        let (dot, style) = Mark::Waiting.glyph(frame);
+        return Some(Span::styled(format!("{dot}{waiting}"), style));
+    }
+    if spinning {
+        let (spinner, style) = Mark::Busy.glyph(frame);
+        return Some(Span::styled(spinner, style));
+    }
+    None
+}
+
+/// The line under a pane's row, `width` wide: the branch checked out where it
+/// works, under its label, and how its work tree stands.
+fn checkout_line(branch: &str, status: &str, width: usize) -> Line<'static> {
+    let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
+    let branch = cut(branch, width.saturating_sub(5 + reserve + 1));
+    let gap = width.saturating_sub(5 + branch.width() + status.width() + 1);
+    Line::from(vec![
+        Span::raw("     "),
+        Span::styled(branch, Style::new().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(gap)),
+        Span::raw(status.to_owned()),
+    ])
 }
 
 /// `text` cut to `room` columns, with a `…` for what it took.
@@ -922,6 +953,29 @@ mod tests {
             Vec::new(),
         ));
         assert_eq!(sidebar.cursor, Some(Place::Pane { session: "older".to_owned(), pane: 1 }));
+    }
+
+    /// Focused, on fewer lines than its rows take, the sidebar scrolls them
+    /// to keep the highlight on screen as it moves down, and back up.
+    #[test]
+    fn the_rows_scroll_to_keep_the_highlight_on_screen() {
+        let mut sidebar = two_sessions();
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        // Two lines, between the rule along the top and the keys at the bottom.
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 5)[2..4].to_vec();
+        assert_eq!(
+            shown(&mut sidebar),
+            [" ▾ older ────────────────── ●1", "   ● fold                   1m"]
+        );
+        sidebar.key(&down);
+        sidebar.key(&down);
+        assert_eq!(shown(&mut sidebar), [" ▾ newer ─────────────────────", "     w/b"]);
+        sidebar.key(&up);
+        assert_eq!(
+            shown(&mut sidebar),
+            ["     nvim src/main.rs", " ▾ newer ─────────────────────"]
+        );
     }
 
     #[test]

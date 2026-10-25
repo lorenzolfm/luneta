@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
@@ -44,12 +45,23 @@ pub enum Said {
 
 /// Hands what the program does to luneta's loop.
 #[derive(Clone)]
-struct Listener(Sender<Event>);
+struct Listener {
+    events: Sender<Event>,
+    /// Whether the program drew since luneta last drew its screen. One
+    /// `Said::Drew` stands for all it drew until then, so that luneta's queue
+    /// holds one at the most, however fast the program draws.
+    drew: Arc<AtomicBool>,
+}
 
 impl EventListener for Listener {
     fn send_event(&self, event: Emitted) {
         let said = match event {
-            Emitted::Wakeup => Said::Drew,
+            Emitted::Wakeup => {
+                if self.drew.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                Said::Drew
+            },
             Emitted::Title(title) => Said::Titled(title),
             Emitted::ClipboardStore(clipboard, text) => Said::Copied(clipboard, text),
             Emitted::PtyWrite(answer) => Said::Answer(answer),
@@ -66,7 +78,7 @@ impl EventListener for Listener {
             | Emitted::MouseCursorDirty => return,
         };
         // luneta is on its way out.
-        let _ = self.0.send(Event::Hosted(said));
+        let _ = self.events.send(Event::Hosted(said));
     }
 }
 
@@ -75,6 +87,8 @@ pub struct Hosted {
     screen: Arc<FairMutex<Term<Listener>>>,
     pty: EventLoopSender,
     size: WindowSize,
+    /// The listener's, which `draw` clears.
+    drew: Arc<AtomicBool>,
 }
 
 impl Hosted {
@@ -86,6 +100,10 @@ impl Hosted {
         size: WindowSize,
         events: Sender<Event>,
     ) -> io::Result<Self> {
+        // alacritty's screen keeps its cursor on a cell, and one of no cells
+        // has none to keep it on. `host::window` makes it one by one at least.
+        assert!(size.num_cols > 0);
+        assert!(size.num_lines > 0);
         let options = tty::Options {
             shell: Some(tty::Shell::new(program, args)),
             working_directory: Some(dir.to_owned()),
@@ -93,7 +111,8 @@ impl Hosted {
             env: HashMap::new(),
         };
         let pty = tty::new(&options, size, 0)?;
-        let listener = Listener(events);
+        let drew = Arc::new(AtomicBool::new(false));
+        let listener = Listener { events, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
         // each pane itself. It asks for the kitty keyboard protocol, which
         // `keys` speaks. Its cursor is the hollow block a program cannot ask
@@ -110,7 +129,7 @@ impl Hosted {
         let reader = EventLoop::new(Arc::clone(&screen), listener, pty, false, false)?;
         let pty = reader.channel();
         reader.spawn();
-        Ok(Hosted { screen, pty, size })
+        Ok(Hosted { screen, pty, size, drew })
     }
 
     pub fn size(&self) -> WindowSize {
@@ -119,6 +138,8 @@ impl Hosted {
 
     /// Makes the terminal `size`, and tells the program.
     pub fn resize(&mut self, size: WindowSize) {
+        assert!(size.num_cols > 0);
+        assert!(size.num_lines > 0);
         if (size.num_cols, size.num_lines) == (self.size.num_cols, self.size.num_lines) {
             self.size = size;
             return;
@@ -156,6 +177,9 @@ impl Hosted {
     /// Draws the screen into `area` of `buffer`, and says where the cursor is
     /// on it, if it shows.
     pub fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
+        // Cleared before the screen is read, so that what the program draws
+        // from here on sends a `Said::Drew` of its own.
+        self.drew.store(false, Ordering::SeqCst);
         paint(&self.screen.lock(), buffer, area)
     }
 }
@@ -171,9 +195,11 @@ impl Drop for Hosted {
 /// it, if it shows.
 fn paint<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect) -> Option<Position> {
     let content = screen.renderable_content();
-    let offset = content.display_offset as i32;
+    // luneta never scrolls the screen back, and keeps no scrollback for it to
+    // go back into, as zellij keeps each pane's: its lines count from 0.
+    assert_eq!(content.display_offset, 0);
     let at = |line: i32, column: usize| {
-        let row = u16::try_from(line + offset).ok().filter(|row| *row < area.height)?;
+        let row = u16::try_from(line).ok().filter(|row| *row < area.height)?;
         let column = u16::try_from(column).ok().filter(|column| *column < area.width)?;
         Some(Position::new(area.x + column, area.y + row))
     };
@@ -232,6 +258,15 @@ fn style(fg: Colour, bg: Colour, flags: Flags, underline: Option<Colour>) -> Sty
     style
 }
 
+// `colour` reads a named colour as its index: the sixteen a terminal names are
+// 0 to 15, and the eight dim ones are in the order of the first eight.
+const _: () = assert!(NamedColor::Black as usize == 0);
+const _: () = assert!(NamedColor::BrightWhite as usize == 15);
+const _: () = assert!(
+    NamedColor::DimWhite as usize - NamedColor::DimBlack as usize
+        == NamedColor::White as usize - NamedColor::Black as usize
+);
+
 /// A colour as luneta's terminal is told it, and whether it is a dim one of
 /// the sixteen, which a terminal draws as that colour, dimmed.
 fn colour(colour: Colour) -> (Color, bool) {
@@ -245,8 +280,9 @@ fn colour(colour: Colour) -> (Color, bool) {
             }
             let dim = NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize;
             if dim.contains(&index) {
-                let index = index - NamedColor::DimBlack as usize;
-                return (Color::Indexed(u8::try_from(index).unwrap_or(7)), true);
+                let index = u8::try_from(index - NamedColor::DimBlack as usize)
+                    .expect("one of the eight dim colours");
+                return (Color::Indexed(index), true);
             }
             (Color::Reset, named == NamedColor::DimForeground)
         },

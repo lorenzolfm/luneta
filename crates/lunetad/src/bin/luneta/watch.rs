@@ -21,6 +21,7 @@ pub fn start(socket: PathBuf, events: Sender<Event>) {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
+                // luneta is on its way out.
                 let _ = events.send(Event::Daemon(Err(format!("no runtime: {error}"))));
                 return;
             },
@@ -30,11 +31,13 @@ pub fn start(socket: PathBuf, events: Sender<Event>) {
 }
 
 /// Asks again each time the daemon answers, for the host once it is no longer
-/// as last seen. A daemon that goes away is looked for again, and asked for
-/// the whole host, as one started again counts afresh.
+/// as last seen, until luneta's loop is gone. A daemon that goes away is
+/// looked for again, each `AGAIN`.
 async fn watch(socket: PathBuf, events: Sender<Event>) {
-    let mut after: Option<Version> = None;
     loop {
+        // A daemon found afresh is asked for the whole host, as one started
+        // again counts its versions afresh.
+        let mut after: Option<Version> = None;
         let failure = match lunetad::connect(&socket).await {
             Ok(mut daemon) => loop {
                 match daemon.watch(WatchRequest { after }).await {
@@ -51,7 +54,6 @@ async fn watch(socket: PathBuf, events: Sender<Event>) {
             },
             Err(error) => format!("{}: {}", socket.display(), causes(&error)),
         };
-        after = None;
         if events.send(Event::Daemon(Err(failure))).is_err() {
             return;
         }
