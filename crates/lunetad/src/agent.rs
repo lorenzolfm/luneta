@@ -4,9 +4,10 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use luneta_protocol::said::Said;
+
 use crate::api;
 use crate::api::agent::Status as Reported;
-use crate::said::Said;
 use crate::zellij::Sessions;
 
 /// An agent that runs on the host.

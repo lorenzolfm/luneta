@@ -1,33 +1,18 @@
 //! The branch checked out in each directory a pane works in, and how its work
-//! tree stands, for the sidebar to show under the pane's row.
+//! tree stands, for the sidebar to show under the pane's row: as the daemon
+//! says, or as git does while the daemon does not answer.
 
 use std::collections::{BTreeSet, HashMap};
 
+use luneta_protocol::git::WorkTree;
+use luneta_protocol::v1::checkout::Head;
+use luneta_protocol::v1::work_tree::Stands;
+use luneta_protocol::v1::{self, Changes, Upstream};
+
+use crate::context::unstarted;
+
 pub const CONTEXT_VALUE: &str = "checkouts";
 pub const DIR_KEY: &str = "luneta_dir";
-
-/// How the work tree in `dir` stands, as `git status` tells it to a program:
-/// its branch, how far that is from its upstream, its stashes, and a line for
-/// each path with changes. `--no-optional-locks` keeps git from taking the
-/// index lock to refresh the index, which a `git` of your own would trip over.
-/// `core.fsmonitor=false` keeps a repository's own config from naming a
-/// command for every status to run, since git is asked about any directory a
-/// pane works in, trusted or not; a filter driver it names can still run on a
-/// changed file, as with any `git status` there.
-pub fn query(dir: &str) -> [&str; 10] {
-    [
-        "git",
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        dir,
-        "status",
-        "--porcelain=v2",
-        "--branch",
-        "--show-stash",
-    ]
-}
 
 /// The branch checked out in a directory, and how its work tree stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,99 +37,50 @@ pub enum Said<'a> {
     Branch(&'a Checkout),
 }
 
-const DETACHED: &str = "(detached)";
-
 impl Checkout {
-    /// What `query` prints, read as starship reads it. A detached HEAD names
-    /// no branch, and is no checkout.
-    fn parse(status: &str) -> Option<Self> {
-        let mut branch = None;
-        let mut counts = Counts::default();
-        for line in status.lines() {
-            if let Some(head) = line.strip_prefix("# branch.head ") {
-                branch = Some(head).filter(|head| *head != DETACHED);
-            } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
-                counts.upstream = ahead_behind(ab);
-            } else if let Some(stashes) = line.strip_prefix("# stash ") {
-                counts.stashed = stashes.parse().unwrap_or(0);
-            } else {
-                counts.add(line);
-            }
-        }
-        Some(Checkout { branch: branch?.to_owned(), status: counts.glyphs() })
-    }
-}
-
-/// `+<ahead> -<behind>`.
-fn ahead_behind(ab: &str) -> Option<(usize, usize)> {
-    let (ahead, behind) = ab.split_once(' ')?;
-    Some((ahead.strip_prefix('+')?.parse().ok()?, behind.strip_prefix('-')?.parse().ok()?))
-}
-
-/// The paths of each kind starship counts, the stashes, and the commits ahead
-/// of the upstream and behind it, where there is an upstream.
-#[derive(Default)]
-struct Counts {
-    conflicted: usize,
-    stashed: usize,
-    deleted: usize,
-    renamed: usize,
-    modified: usize,
-    staged: usize,
-    untracked: usize,
-    upstream: Option<(usize, usize)>,
-}
-
-impl Counts {
-    /// A line of `git status --porcelain=v2` about a path: `1` for a changed
-    /// one, `2` for a renamed or copied one, `u` for a conflict, `?` for an
-    /// untracked one. The first two say how it stands in the index and in the
-    /// work tree, `.` for unchanged.
-    fn add(&mut self, line: &str) {
-        let mut fields = line.split(' ');
-        match (fields.next(), fields.next()) {
-            (Some("1"), Some(xy)) => self.add_change(xy),
-            (Some("2"), Some(xy)) => {
-                self.renamed += 1;
-                self.add_change(xy);
-            },
-            (Some("u"), _) => self.conflicted += 1,
-            (Some("?"), _) => self.untracked += 1,
-            _ => {},
-        }
-    }
-
-    fn add_change(&mut self, xy: &str) {
-        let mut states = xy.chars();
-        let (Some(index), Some(tree)) = (states.next(), states.next()) else {
-            return;
+    /// How a work tree stands, as the daemon says it: the branch checked out
+    /// there, or none for a detached `HEAD` or a directory in no repository.
+    /// `Unread` for an answer that leaves out what the protocol says is always
+    /// there, as a newer daemon's could.
+    fn of(stands: &Stands) -> Result<Option<Self>, Unread> {
+        let checkout = match stands {
+            Stands::Outside(_) => return Ok(None),
+            Stands::Checkout(checkout) => checkout,
         };
-        self.staged += usize::from(matches!(index, 'M' | 'A' | 'T'));
-        self.deleted += usize::from(index == 'D') + usize::from(tree == 'D');
-        // `A` in the work tree is a path added with `--intent-to-add`.
-        self.modified += usize::from(matches!(tree, 'M' | 'A'));
+        let changes = checkout.changes.as_ref().ok_or(Unread)?;
+        let branch = match checkout.head.as_ref().ok_or(Unread)? {
+            Head::Detached(_) => return Ok(None),
+            Head::Branch(branch) => branch,
+        };
+        let status = glyphs(changes, checkout.stashes, branch.upstream);
+        Ok(Some(Checkout { branch: branch.name.clone(), status }))
     }
+}
 
-    fn glyphs(&self) -> String {
-        let kinds = [
-            (self.conflicted, '='),
-            (self.stashed, '$'),
-            (self.deleted, '✘'),
-            (self.renamed, '»'),
-            (self.modified, '!'),
-            (self.staged, '+'),
-            (self.untracked, '?'),
-        ];
-        let mut glyphs: String =
-            kinds.iter().filter(|(count, _)| *count > 0).map(|(_, glyph)| *glyph).collect();
-        match self.upstream {
-            Some((ahead, behind)) if ahead > 0 && behind > 0 => glyphs.push('⇕'),
-            Some((ahead, _)) if ahead > 0 => glyphs.push('⇡'),
-            Some((_, behind)) if behind > 0 => glyphs.push('⇣'),
-            _ => {},
-        }
-        glyphs
+/// What the daemon says that this plugin cannot read.
+struct Unread;
+
+/// The glyph of each kind of change there is, then the one for where the
+/// branch stands against its upstream, where it has one.
+fn glyphs(changes: &Changes, stashes: u32, upstream: Option<Upstream>) -> String {
+    let kinds = [
+        (changes.conflicted, '='),
+        (stashes, '$'),
+        (changes.deleted, '✘'),
+        (changes.renamed, '»'),
+        (changes.modified, '!'),
+        (changes.staged, '+'),
+        (changes.untracked, '?'),
+    ];
+    let mut glyphs: String =
+        kinds.iter().filter(|(count, _)| *count > 0).map(|(_, glyph)| *glyph).collect();
+    match upstream.map(|upstream| (upstream.ahead, upstream.behind)) {
+        Some((ahead, behind)) if ahead > 0 && behind > 0 => glyphs.push('⇕'),
+        Some((ahead, _)) if ahead > 0 => glyphs.push('⇡'),
+        Some((_, behind)) if behind > 0 => glyphs.push('⇣'),
+        _ => {},
     }
+    glyphs
 }
 
 /// Where a directory stands with git since it was last asked about.
@@ -182,19 +118,42 @@ impl Checkouts {
         new
     }
 
+    /// What `luneta_protocol::git::command` answered for `dir`, read the way
+    /// the daemon reads it, so that the two say the same.
     pub fn ingest(&mut self, dir: String, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if let Some(asked) = self.asked.get_mut(&dir) {
             *asked = Asked::Answered;
         }
         self.absent |= unstarted(exit_code, stderr);
-        let checkout = match exit_code {
-            Some(0) => Checkout::parse(&String::from_utf8_lossy(stdout)),
+        let tree = match exit_code {
+            Some(0) => match WorkTree::parse(&String::from_utf8_lossy(stdout)) {
+                Ok(tree) => tree,
+                // What git said that does not read is not read wrong, and
+                // what it said last stands, as the daemon has it.
+                Err(_) => return,
+            },
             // A signal stopped git before it said anything, and what it said
             // last stands.
             None => return,
-            Some(_) => None,
+            // git ran there and failed: the directory is in no repository,
+            // or in one git cannot read.
+            Some(_) => WorkTree::Outside,
         };
-        self.known.insert(dir, checkout);
+        let stands = tree.to_api(&dir).stands;
+        if let Some(Ok(checkout)) = stands.as_ref().map(Checkout::of) {
+            self.known.insert(dir, checkout);
+        }
+    }
+
+    /// What the daemon says of the work tree in each directory a pane works
+    /// in, in the place of all git said. A directory it has said nothing of
+    /// yet has nothing said of it, and so does one it says what this sidebar
+    /// cannot read of.
+    pub fn heard(&mut self, trees: &[v1::WorkTree]) {
+        let read = |tree: &v1::WorkTree| {
+            Some((tree.dir.clone(), Checkout::of(tree.stands.as_ref()?).ok()?))
+        };
+        self.known = trees.iter().filter_map(read).collect();
     }
 
     /// Has every directory asked about again, for what changed since, but
@@ -219,14 +178,6 @@ impl Checkouts {
             Some(Some(checkout)) => Said::Branch(checkout),
         }
     }
-}
-
-/// Whether zellij could not start git at all, as when it is not on the
-/// server's `PATH`. zellij says so with exit code 2 and the error from the OS,
-/// as `No such file or directory (os error 2)`, which git's own errors never
-/// say.
-fn unstarted(exit_code: Option<i32>, stderr: &[u8]) -> bool {
-    exit_code == Some(2) && String::from_utf8_lossy(stderr).contains("(os error ")
 }
 
 #[cfg(test)]
@@ -264,9 +215,47 @@ mod tests {
                 "=$✘»!?⇡",
             ),
         ] {
-            let checkout = Checkout::parse(&format!("# branch.head main\n{lines}"));
-            let shown = checkout.map(|checkout| checkout.status);
-            assert_eq!(shown.as_deref(), Some(status), "{lines:?}");
+            let mut checkouts = Checkouts::default();
+            let said = format!("# branch.head main\n{lines}");
+            checkouts.ingest("/w/repo".to_owned(), Some(0), said.as_bytes(), b"");
+            let Said::Branch(checkout) = checkouts.said("/w/repo") else {
+                panic!("main is checked out: {lines:?}");
+            };
+            assert_eq!(checkout.status, status, "{lines:?}");
+        }
+    }
+
+    /// What the daemon says of the work trees takes the place of all git
+    /// said, as it reads the same, and a work tree it says what this plugin
+    /// cannot read of, as a newer daemon could, has nothing said of it.
+    #[test]
+    fn the_daemon_s_work_trees_stand_in_the_place_of_what_git_said() {
+        let mut checkouts = Checkouts::default();
+        checkouts.ingest("/w/gone".to_owned(), Some(0), b"# branch.head main\n", b"");
+        let stands = |dir: &str, stands| v1::WorkTree { dir: dir.to_owned(), stands: Some(stands) };
+        let checkout = |head| {
+            Stands::Checkout(v1::Checkout {
+                head: Some(head),
+                changes: Some(Changes { modified: 2, ..Changes::default() }),
+                stashes: 0,
+            })
+        };
+        let upstream = Some(Upstream { ahead: 1, behind: 0 });
+        let fold = v1::Branch { name: "fold".to_owned(), upstream };
+        checkouts.heard(&[
+            stands("/w/repo", checkout(Head::Branch(fold))),
+            stands("/w/detached", checkout(Head::Detached(v1::checkout::Detached {}))),
+            stands("/w/plain", Stands::Outside(v1::work_tree::Outside {})),
+            stands("/w/newer", Stands::Checkout(v1::Checkout::default())),
+            v1::WorkTree { dir: "/w/newest".to_owned(), stands: None },
+        ]);
+        let on = Checkout { branch: "fold".to_owned(), status: "!⇡".to_owned() };
+        assert_eq!(checkouts.said("/w/repo"), Said::Branch(&on));
+        for dir in ["/w/detached", "/w/plain"] {
+            assert_eq!(checkouts.said(dir), Said::NoBranch, "{dir}");
+        }
+        for dir in ["/w/newer", "/w/newest", "/w/gone"] {
+            assert_eq!(checkouts.said(dir), Said::Nothing, "{dir}");
         }
     }
 

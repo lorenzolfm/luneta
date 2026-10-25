@@ -13,6 +13,7 @@
 #[path = "../src/coming.rs"] mod coming;
 #[path = "../src/context.rs"] mod context;
 #[path = "../src/cursor.rs"] mod cursor;
+#[path = "../src/daemon.rs"] mod daemon;
 #[path = "../src/dirs.rs"] mod dirs;
 #[path = "../src/dock.rs"] mod dock;
 #[path = "../src/elapsed.rs"] mod elapsed;

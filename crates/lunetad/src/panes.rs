@@ -12,12 +12,12 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::Duration;
 
+use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::api;
 use crate::core;
 use crate::program;
-use crate::said::Said;
 use crate::watch::Troubles;
 use crate::zellij::Id;
 

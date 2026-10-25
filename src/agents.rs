@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use luneta_protocol::v1::{self, agent::Status as Reported, NameSource};
 use serde::Deserialize;
 use zellij_tile::prelude::run_command;
 
@@ -448,6 +449,20 @@ impl AgentSet {
         }
     }
 
+    /// What the daemon says of the agents, as of `now`, in the place of what
+    /// claude-ps said.
+    pub fn heard(&mut self, agents: &[v1::Agent], now: Moment) {
+        let mut agents: Vec<Agent> =
+            agents.iter().filter_map(|agent| Agent::of(agent, now)).collect();
+        if let Fetch::Ready(before) = &self.status {
+            for agent in &mut agents {
+                settle(agent, before);
+            }
+        }
+        self.status = Fetch::Ready(agents);
+        self.closing.clear();
+    }
+
     pub fn fail(&mut self, reason: impl Into<String>) {
         self.asking = false;
         self.status = Fetch::Failed(reason.into());
@@ -555,6 +570,12 @@ impl AgentSet {
             return;
         };
         self.closing.push((row.seat.session().to_owned(), row.pane));
+    }
+
+    /// Brings back the agents `forget_selected` left out, for a pane that did
+    /// not close after all.
+    pub fn stop_closing(&mut self) {
+        self.closing.clear();
     }
 
     pub fn any_busy(&self) -> bool {
@@ -696,7 +717,7 @@ fn parse(stdout: &str, now: Moment) -> Result<Vec<Agent>, String> {
         agents.push(Agent {
             reported: zellij.session,
             pid: row.pid,
-            name: chosen_name(row.name.as_deref(), row.name_source.as_deref()),
+            name: chosen_name(row.name.as_deref(), row.name_source.as_deref().is_none_or(given)),
             pane,
             status: Status::parse(row.status.as_deref()),
             age,
@@ -711,19 +732,80 @@ fn parse(stdout: &str, now: Moment) -> Result<Vec<Agent>, String> {
     Ok(agents)
 }
 
-fn chosen_name(name: Option<&str>, source: Option<&str>) -> Option<String> {
+/// Whether a name's source, as claude-ps spells it, says someone gave it.
+fn given(source: &str) -> bool {
+    source.eq_ignore_ascii_case("user") || source.eq_ignore_ascii_case("peer")
+}
+
+/// The name of an agent's session, if someone chose it: one Claude Code
+/// derives from the directory is no name the sidebar goes by. A name from
+/// before Claude Code said who chose it is taken for chosen.
+fn chosen_name(name: Option<&str>, chosen: bool) -> Option<String> {
     let name = name.map(str::trim).filter(|name| !name.is_empty())?;
-    let chosen = match source {
-        None => true,
-        Some(source) => {
-            source.eq_ignore_ascii_case("user") || source.eq_ignore_ascii_case("peer")
-        },
-    };
     chosen.then(|| name.to_owned())
+}
+
+impl Agent {
+    /// An agent as the daemon gives it, as of `now`, in the session its pane
+    /// is in now: the daemon follows a session through a rename. Where it
+    /// cannot tell, the session the agent's environment names stands, as
+    /// claude-ps has it. None for one that runs outside zellij.
+    fn of(agent: &v1::Agent, now: Moment) -> Option<Self> {
+        let zellij = agent.zellij.as_ref()?;
+        let reported = zellij.session.clone().unwrap_or_else(|| zellij.named.clone());
+        if reported.is_empty() {
+            return None;
+        }
+        let status = match &agent.status {
+            Some(Reported::KnownStatus(known)) => match v1::Status::try_from(*known) {
+                Ok(v1::Status::Busy) => Status::Busy,
+                Ok(v1::Status::Idle) => Status::Idle,
+                Ok(v1::Status::Waiting) => Status::Waiting,
+                Ok(v1::Status::Shell) => Status::Shell,
+                // A daemon newer than this plugin's.
+                Ok(v1::Status::Unspecified) | Err(_) => Status::Unreported,
+            },
+            Some(Reported::OtherStatus(word)) => Status::parse(Some(word)),
+            None => Status::Unreported,
+        };
+        // A status the daemon cannot date has been held for no time at all,
+        // as claude-ps says of it.
+        let came = agent.status_since.and_then(|at| moment(at.seconds, at.nanos)).unwrap_or(now);
+        let name = agent.name.as_ref().and_then(|name| {
+            let source = name.source.map(NameSource::try_from);
+            let chosen = matches!(source, None | Some(Ok(NameSource::User | NameSource::Peer)));
+            chosen_name(Some(&name.text), chosen)
+        });
+        let started = agent.started_at.as_ref().and_then(|at| u64::try_from(at.seconds).ok());
+        let entrypoint = agent.entrypoint.as_deref();
+        Some(Agent {
+            reported,
+            pid: Pid(agent.pid),
+            name,
+            pane: zellij.pane,
+            status,
+            age: now.since(came),
+            came,
+            cwd: Some(agent.cwd.clone()).filter(|cwd| !cwd.is_empty()),
+            transcript: SessionId::parse(&agent.session_id),
+            started: started.and_then(NonZeroU64::new),
+            cli: entrypoint.is_some_and(|entry| entry.eq_ignore_ascii_case("cli")),
+        })
+    }
+}
+
+/// The moment a timestamp of the protocol's names, by its seconds since the
+/// epoch and the nanoseconds after them, if it is after the epoch.
+fn moment(seconds: i64, nanos: i32) -> Option<Moment> {
+    let seconds = u64::try_from(seconds).ok()?;
+    let millis = u64::try_from(nanos).ok()? / 1_000_000;
+    Some(Moment::from_millis(seconds.checked_mul(1000)?.checked_add(millis)?))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime};
+
     use super::*;
     use crate::close::Closes;
 
@@ -744,6 +826,116 @@ mod tests {
         format!(
             r#"[{{"status":{status},"status_age":4,"pid":100,"cwd":"/w/s","zellij":{{"session":"s","pane":"0"}}}}]"#
         )
+    }
+
+    /// The rows of the agents the daemon gives, as of `now`.
+    fn heard(agents: &[v1::Agent], places: &Places, now: Moment) -> AgentSet {
+        let mut set = AgentSet::default();
+        set.heard(agents, now);
+        let live = Live::new(None, &[], places, &[]);
+        set.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        set
+    }
+
+    /// An agent as the daemon gives it, in `pane` at `/w/repo`, of the session
+    /// called `named` when the pane opened, which the daemon says is `session`
+    /// now.
+    fn given(pid: u32, pane: u32, named: &str, session: Option<&str>) -> v1::Agent {
+        v1::Agent {
+            pid,
+            cwd: "/w/repo".to_owned(),
+            zellij: Some(v1::Zellij {
+                named: named.to_owned(),
+                session: session.map(str::to_owned),
+                pane,
+            }),
+            ..v1::Agent::default()
+        }
+    }
+
+    /// The session an agent's environment names is the one its pane opened
+    /// in, which a rename leaves behind and another session can take up. The
+    /// daemon follows a session through a rename, and where two sessions hold
+    /// a pane like the agent's, the agent sits in the one the daemon says.
+    /// Where the daemon cannot tell, the name the environment holds stands.
+    #[test]
+    fn an_agent_sits_in_the_session_the_daemon_follows_its_pane_to() {
+        let places = Places::of(&[
+            ("old", &[(0, "/w/repo"), (1, "/w/repo")]),
+            ("renamed", &[(0, "/w/repo"), (1, "/w/repo")]),
+        ]);
+        let agents = [given(100, 0, "old", Some("renamed")), given(200, 1, "old", None)];
+        let agents = heard(&agents, &places, Moment::default());
+        let seats: Vec<(u32, &Seat, bool)> =
+            agents.rows.iter().map(|row| (row.pane, &row.seat, row.guessed)).collect();
+        assert_eq!(
+            seats,
+            [
+                (1, &Seat::There("old".to_owned()), false),
+                (0, &Seat::There("renamed".to_owned()), false),
+            ]
+        );
+    }
+
+    /// The daemon reads Claude Code's session files as claude-ps does, and an
+    /// agent it gives makes the row that the same agent from claude-ps makes:
+    /// its status, how long it has held it, its name where someone chose one,
+    /// and its transcript.
+    #[test]
+    fn an_agent_the_daemon_gives_reads_as_one_claude_ps_gives() {
+        let places = Places::of(&[("s", &[(0, "/w/repo")])]);
+        let now = Moment::from_millis(1_000_000_000);
+        let known = |status: v1::Status| Some(Reported::KnownStatus(status.into()));
+        let cases = [
+            (r#""busy""#, known(v1::Status::Busy), r#""fixes""#, r#""user""#, NameSource::User),
+            (r#""idle""#, known(v1::Status::Idle), r#""fixes""#, r#""peer""#, NameSource::Peer),
+            (
+                r#""waiting""#,
+                known(v1::Status::Waiting),
+                r#""luneta""#,
+                r#""derived""#,
+                NameSource::Derived,
+            ),
+            (r#""shell""#, known(v1::Status::Shell), r#""auto-1""#, r#""auto""#, NameSource::Auto),
+            (
+                r#""compacting""#,
+                Some(Reported::OtherStatus("compacting".to_owned())),
+                r#""fixes""#,
+                r#""someone""#,
+                NameSource::Other,
+            ),
+            ("null", None, r#""fixes""#, "null", NameSource::Unspecified),
+        ];
+        for (word, status, name, source_word, source) in cases {
+            let json = format!(
+                r#"[{{"status":{word},"status_age":4,"pid":100,"cwd":"/w/repo",
+                     "name":{name},"name_source":{source_word},
+                     "session_id":"0b6f-77","zellij":{{"session":"s","pane":"0"}}}}]"#
+            );
+            let mut ps = AgentSet::default();
+            ps.ingest(Some(0), json.as_bytes(), b"", now);
+            let live = Live::new(None, &[], &places, &[]);
+            ps.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+
+            let source = (source != NameSource::Unspecified).then_some(source.into());
+            let text = name.trim_matches('"').to_owned();
+            let agent = v1::Agent {
+                session_id: "0b6f-77".to_owned(),
+                status,
+                status_since: Some((SystemTime::UNIX_EPOCH + Duration::from_secs(999_996)).into()),
+                name: Some(v1::Name { text, source }),
+                ..given(100, 0, "s", Some("s"))
+            };
+            let daemon = heard(&[agent], &places, now);
+
+            let row = |set: &AgentSet| {
+                let row = set.rows.iter().next().expect("one row");
+                let (name, transcript, cwd) =
+                    (row.name().to_owned(), row.transcript.clone(), row.cwd.clone());
+                (row.status.clone(), row.age, row.came, name, transcript, cwd)
+            };
+            assert_eq!(row(&daemon), row(&ps), "{word} {source_word}");
+        }
     }
 
     #[test]

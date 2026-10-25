@@ -132,7 +132,7 @@ jobs:
       # the derivation does.
       - name: Test the daemon outside the sandbox
         if: runner.os == 'macOS'
-        run: nix develop -c cargo test --locked -p lunetad
+        run: nix develop -c cargo test --locked -p lunetad -p luneta-protocol
 
       - name: Build the daemon, and on Linux test it
         run: nix build -L .#lunetad

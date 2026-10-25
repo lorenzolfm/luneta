@@ -24,11 +24,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{Agent, Name, Named, Source, Status};
 use crate::process;
-use crate::said::Said;
 use crate::watch::{self, Troubles};
 
 /// How long a file that does not read still says what it said before. Claude

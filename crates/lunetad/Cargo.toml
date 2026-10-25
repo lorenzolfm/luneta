@@ -5,9 +5,8 @@ edition = "2024"
 description = "The luneta daemon, and the CLI that talks to it"
 
 # The daemon and its CLI are one package, as they share all there is so far:
-# the protocol, and where the daemon listens. A crate of its own for the
-# protocol waits for a second user of it, the plugin, which needs the messages
-# without the tokio stack that the transport brings.
+# the transport, and where the daemon listens. The protocol's messages are
+# `luneta-protocol`'s, which the plugin reads too.
 [[bin]]
 name = "lunetad"
 path = "src/bin/lunetad.rs"
@@ -21,11 +20,11 @@ clap = { version = "4.6.6", features = ["derive"] }
 # `connect` hands tonic a Unix socket of its own making, so that a path is a
 # path and never has to survive being spelled as a URI.
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+luneta-protocol = { path = "../protocol" }
 # Watches Claude Code's session files and zellij's sockets: inotify on Linux,
 # FSEvents on macOS.
 notify = "8.2.0"
 prost = "0.14.4"
-prost-types = "0.14.4"
 # For the uid the runtime folder must belong to: std has no safe getuid.
 rustix = { version = "1.1.4", features = ["process"] }
 # Claude Code's session files are JSON.
