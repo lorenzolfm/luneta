@@ -4,6 +4,7 @@
 mod commands;
 mod host;
 mod hosted;
+mod icons;
 mod keys;
 mod sidebar;
 mod watch;
