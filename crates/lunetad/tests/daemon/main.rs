@@ -12,3 +12,5 @@ mod folder;
 mod host;
 #[cfg(test)]
 mod sessions;
+#[cfg(test)]
+mod shells;

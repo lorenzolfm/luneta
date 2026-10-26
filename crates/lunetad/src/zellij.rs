@@ -207,12 +207,19 @@ impl Sessions {
     /// pane opened in. None when no session could be it, or more than one.
     #[must_use]
     pub fn lead(&self, named: &str, started: Option<SystemTime>) -> Option<&str> {
+        let id = self.led(named, started)?;
+        let now = self.names.get(&id).expect("a session that holds a name runs");
+        Some(now.as_str())
+    }
+
+    /// The session that `lead` leads to.
+    #[must_use]
+    pub fn led(&self, named: &str, started: Option<SystemTime>) -> Option<Id> {
         let before = |id: &&Id| started.is_none_or(|started| id.made <= started);
         let mut could = self.held.get(named)?.iter().filter(before);
         let (Some(id), None) = (could.next(), could.next()) else {
             return None;
         };
-        let now = self.names.get(id).expect("a session that holds a name runs");
-        Some(now.as_str())
+        Some(*id)
     }
 }

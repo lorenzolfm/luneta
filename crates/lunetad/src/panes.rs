@@ -20,6 +20,7 @@ use crate::api;
 use crate::clients;
 use crate::core;
 use crate::program;
+use crate::shells::Shell;
 use crate::watch::Troubles;
 use crate::zellij::Id;
 
@@ -42,8 +43,9 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// The pane as the API gives it, with what its `shell` says.
     #[must_use]
-    pub fn to_api(&self) -> api::Pane {
+    pub fn to_api(&self, shell: Option<&Shell>) -> api::Pane {
         api::Pane {
             id: self.id,
             tab: self.tab,
@@ -51,6 +53,7 @@ impl Pane {
             cwd: self.cwd.clone().map(String::from),
             command: self.command.clone().map(String::from),
             titled: self.titled.as_ref().map(Titled::to_api),
+            shell: shell.map(Shell::to_api),
         }
     }
 }

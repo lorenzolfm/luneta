@@ -239,6 +239,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             command: command.map(str::to_owned),
             titled: None,
+            shell: None,
         };
         let listed = v1::Panes {
             panes: vec![
@@ -352,6 +353,7 @@ mod tests {
                     cwd: Some("/w/repo".to_owned()),
                     command: Some("fish".to_owned()),
                     titled,
+                    shell: None,
                 }],
             }),
             clients: None,

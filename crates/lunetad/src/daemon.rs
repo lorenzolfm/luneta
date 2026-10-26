@@ -27,12 +27,17 @@ use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsR
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, git, panes, watch, zellij};
+use crate::{claude, client, git, panes, shells, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
 /// that crashed, which leaves its file as it was. zellij is asked for each
 /// session's panes as often, as it says nothing as they change either.
 const SWEEP: Duration = Duration::from_secs(2);
+
+/// How often the shells' files are read again with no word that they changed,
+/// and with them the terminals of the commands that run: a command comes to
+/// wait for you to type without a word to any file.
+const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 
 /// How long git rests from a work tree, at the least, before it is asked
 /// about it again. `git status` reads the whole tree, which takes a large one
@@ -52,6 +57,7 @@ const QUESTIONS_MAX: u32 = 16;
 /// A folder that this process's daemon holds, and the socket it listens on
 /// there.
 pub struct Claim {
+    folder: PathBuf,
     socket: PathBuf,
     /// Held for as long as the process runs.
     _lock: File,
@@ -81,7 +87,7 @@ impl Claim {
             Err(error) if error.kind() == ErrorKind::NotFound => {},
             Err(error) => return Err(Refusal::Io(socket, error)),
         }
-        Ok(Claim { socket, _lock: lock })
+        Ok(Claim { folder: folder.to_owned(), socket, _lock: lock })
     }
 
     #[must_use]
@@ -113,7 +119,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let core = core::start(Wakes { panes: wake_panes, git: wake_git })?;
-    follow(&core)?;
+    follow(&core, &claim.folder)?;
     panes::follow(core.clone(), panes_woken, SWEEP)?;
     git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
@@ -128,9 +134,9 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-/// Has the core told what Claude Code's files and zellij's sockets say, as
-/// they change.
-fn follow(core: &SyncSender<Command>) -> io::Result<()> {
+/// Has the core told what Claude Code's files, the shells' files in luneta's
+/// `folder` and zellij's sockets say, as they change.
+fn follow(core: &SyncSender<Command>, folder: &Path) -> io::Result<()> {
     match claude::folder() {
         Some(folder) => {
             let mut files = claude::SessionFiles::new(&folder);
@@ -143,6 +149,15 @@ fn follow(core: &SyncSender<Command>) -> io::Result<()> {
         },
         None => eprintln!("lunetad: neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
+    let mut shells = shells::Shells::new(folder);
+    let dir = shells.dir().to_owned();
+    let read = move || shells.read();
+    let tell = {
+        let core = core.clone();
+        move |found| core.send(Command::Shells(found)).is_ok()
+    };
+    let any = |_: &Path| true;
+    watch::watch("shells", dir, RecursiveMode::Recursive, any, TERMINAL_SWEEP, read, tell)?;
     let folder = zellij::folder();
     let core = core.clone();
     let read = {

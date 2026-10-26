@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
+use std::time::Duration;
 
 use luneta_protocol::git::WorkTree;
 use tokio::sync::oneshot;
@@ -15,6 +16,7 @@ use crate::api;
 use crate::claude::Scan;
 use crate::clients::Client;
 use crate::panes::{self, Pane};
+use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
 
 pub enum Command {
@@ -28,6 +30,8 @@ pub enum Command {
     Clients { session: Id, name: String, clients: Vec<Client> },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
+    /// What the shells with luneta's hook say now.
+    Shells(Vec<Shell>),
     /// Asks for the sessions zellij can be asked about, and the name to ask
     /// by, for their panes.
     Sessions(oneshot::Sender<Vec<(Id, String)>>),
@@ -88,6 +92,9 @@ struct Known {
     clients: HashMap<Id, Vec<Client>>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
+    /// What the shells with the hook last said, each in the session it
+    /// started in.
+    shells: Vec<Shell>,
     /// The host as the API gives it, its version with it.
     host: api::Host,
     /// How many times the host has changed.
@@ -103,6 +110,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         panes: HashMap::new(),
         clients: HashMap::new(),
         trees: BTreeMap::new(),
+        shells: Vec::new(),
         host: api::Host::default(),
         seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
@@ -146,6 +154,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 }
                 known.trees.insert(dir, tree);
             },
+            Command::Shells(now) => known.shells = now,
             Command::Sessions(answer) => {
                 // One who stopped waiting has no use for the answer.
                 let _ = answer.send(known.addressed().into_iter().collect());
@@ -235,6 +244,32 @@ impl Known {
         self.found.agents.iter().map(|agent| agent.to_api(&self.sessions)).collect()
     }
 
+    /// The shell of each pane, by its session and its id: of the shells in
+    /// it, the one that started last, as a shell started in another runs in
+    /// front of it. A shell is in the session its session's name leads to, as
+    /// an agent is, and one that started before a session took that name is
+    /// none of that session's.
+    fn shells(&self) -> HashMap<(Id, u32), &Shell> {
+        let mut shells: HashMap<(Id, u32), &Shell> = HashMap::new();
+        for shell in &self.shells {
+            // The hook counts whole seconds: the shell started by the end of
+            // the one it says.
+            let by = shell.started.checked_add(Duration::from_secs(1));
+            let Some(session) = by.and_then(|by| self.sessions.led(&shell.named, Some(by))) else {
+                continue;
+            };
+            shells
+                .entry((session, shell.pane))
+                .and_modify(|was| {
+                    if was.started < shell.started {
+                        *was = shell;
+                    }
+                })
+                .or_insert(shell);
+        }
+        shells
+    }
+
     /// The host as the API gives it, all but its version, which `update`
     /// counts. Each list is in an order of its own, so that a host that has
     /// not changed is built the same.
@@ -252,13 +287,17 @@ impl Known {
         // with contracts of their own can, by when each started.
         let mut running: Vec<(Id, &str)> = self.sessions.running().collect();
         running.sort_unstable_by_key(|&(id, name)| (name, id.started()));
+        let shells = self.shells();
         let sessions = running
             .into_iter()
             .map(|(id, name)| api::Session {
                 name: name.to_owned(),
                 started_at: Some(id.started().into()),
                 panes: self.panes.get(&id).map(|panes| api::Panes {
-                    panes: panes.iter().map(Pane::to_api).collect(),
+                    panes: panes
+                        .iter()
+                        .map(|pane| pane.to_api(shells.get(&(id, pane.id)).copied()))
+                        .collect(),
                 }),
                 clients: self.clients.get(&id).map(|clients| api::Clients {
                     clients: clients.iter().copied().map(Client::to_api).collect(),

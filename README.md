@@ -583,8 +583,8 @@ the sidebar does not have the focus; once it has, the highlight goes with the
 keys, and comes back as the sidebar gives the focus back. A move you make in
 zellij, as with its keys, shows within two seconds, as the daemon asks zellij
 that often; one the sidebar makes shows at once. Another client of the
-session, as a plain `zellij attach`, moves no mark. A pane with no agent in it
-is dimmed, and an icon says what runs in each, as in the plugin's
+session, as a plain `zellij attach`, moves no mark. A pane with no mark, of an
+agent or of a command, is dimmed, and an icon says what runs in each, as in the plugin's
 [sidebar](#sidebar), with the plugin's icons and a terminal for `dash` and
 `elvish` too: `icons` does not change them here, as luneta has no
 configuration of its own yet. `/` searches the rows, as the plugin's sidebar
@@ -603,9 +603,20 @@ its tab or its directory, where the plugin's goes by that name. A pane with no
 agent in it goes by what runs in it, and a shell at its prompt by its
 directory's last two parts.
 
+A command in a shell with the [hook](#hook-the-shell) has the marks an agent
+has, once it has run for a second, as in the plugin's sidebar: the spinner
+while it works, `●` while it waits for you to type, and once it ends, `✓` for
+an exit status of 0, `✗` for any other, or `$` where the shell does not say,
+its row named for the command and its age counting up. A program that takes
+the terminal over, as an editor does, and a job stopped with `Ctrl z` have
+none, and nor does a command that ends within a second. lunetad reads what
+the hook writes, and the terminal of each command that runs. A command that
+ended keeps its mark until the shell runs another: the `•` of what you have
+yet to see has not come over yet. A shell without the hook has no marks
+here, where the plugin's sidebar read its title.
+
 It is the first step, and the plugin's sidebar has more than this one does
-yet: its menu, the brief, the `•` of what finished and a command's marks come
-over one at a time.
+yet: its menu, the brief and the `•` of what finished come over one at a time.
 Until then, run luneta without the plugin's sidebar, or the two stand side by
 side: leave the dock out of `load_plugins`, and `default_layout` back at
 zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker,
@@ -1074,17 +1085,23 @@ stopped <at> <command>
 with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
 milliseconds, `<status>` the exit status, or `-` where the shell cannot say it,
 as fish cannot after `fg`, `<tty>` the path `tty` prints, the command on one
-line, and `stopped` for a job stopped with `Ctrl z`. The sidebar reads the files every
+line, and `stopped` for a job stopped with `Ctrl z`. The plugin's sidebar reads the files every
 second, through `sh`, `stty`, `ps` and `awk` on the zellij server's `PATH`,
 and the server must see the same `XDG_RUNTIME_DIR` as the shells in its panes.
+luneta's own sidebar has them from lunetad, which keeps its socket in the same
+folder: it reads a file as it changes, and the terminal of each command that
+runs every second, through `ps` on its `PATH`.
 A pane's shell is the one that started last on its terminal, and one that
 started before its session was made is another session's. A shell in a window
 opened from the pane has the pane's variables, which the hook passes on, and a
 terminal of its own: it says nothing.
 
 A shell started before its session was renamed goes on writing under the old
-name, and its commands have no marks until it starts again; nor does a session
-made later by that name take them for its own.
+name. In the plugin's sidebar, its commands have no marks until it starts
+again; nor does a session made later by that name take them for its own.
+lunetad follows the session to its new name, as it does an agent, when it saw
+the rename: a session renamed before lunetad started leaves its shells
+unmarked until they start again.
 
 ---
 
