@@ -28,6 +28,10 @@ struct Wire {
 struct Pane {
     id: u32,
     cwd: String,
+    /// Whether claude runs in it, as far as zellij can tell: what runs in front
+    /// says so, or an agent titled it last. zellij keeps the last title a
+    /// program gave, so a pane where claude ended still counts, under a shell
+    /// that sets no title of its own.
     claude: bool,
     /// What its terminal runs in the foreground, when zellij could say: the
     /// command line of the process group in front, or of the shell itself at
@@ -84,9 +88,9 @@ impl Places {
                 Some(Pane {
                     id: pane.id,
                     cwd: pane.cwd.clone().filter(|cwd| !cwd.is_empty())?,
-                    // The daemon gives a title only where an agent's glyph led
-                    // it, as the `✳` does, and without the glyph.
-                    claude: is_claude(command.as_deref(), None) || pane.title.is_some(),
+                    // The daemon says what an agent said in a title only where
+                    // an agent's glyph led it, as the `✳` does.
+                    claude: is_claude(command.as_deref(), None) || pane.titled.is_some(),
                     command,
                 })
             };
@@ -234,7 +238,7 @@ mod tests {
             tab_name: "Tab #1".to_owned(),
             cwd: cwd.map(str::to_owned),
             command: command.map(str::to_owned),
-            title: None,
+            titled: None,
         };
         let listed = v1::Panes {
             panes: vec![
@@ -332,11 +336,12 @@ mod tests {
         assert_eq!(places.find(0, "/w/repo", ""), Some("agent"));
     }
 
-    /// The daemon gives a pane's title only where an agent's glyph led it.
+    /// The daemon says what an agent said in a pane's title only where an
+    /// agent's glyph led it, a bare `Claude Code` too.
     #[test]
     fn a_claude_started_inside_a_shell_is_known_by_the_title_the_daemon_gives() {
         let mut places = Places::default();
-        let session = |name: &str, title: Option<&str>| v1::Session {
+        let session = |name: &str, titled: Option<v1::Titled>| v1::Session {
             name: name.to_owned(),
             started_at: None,
             panes: Some(v1::Panes {
@@ -346,11 +351,13 @@ mod tests {
                     tab_name: "Tab #1".to_owned(),
                     cwd: Some("/w/repo".to_owned()),
                     command: Some("fish".to_owned()),
-                    title: title.map(str::to_owned),
+                    titled,
                 }],
             }),
+            clients: None,
         };
-        places.heard(&[session("shell", None), session("agent", Some("Claude Code"))]);
+        let untopical = v1::Titled { topic: None };
+        places.heard(&[session("shell", None), session("agent", Some(untopical))]);
         assert_eq!(places.find(0, "/w/repo", ""), Some("agent"));
     }
 

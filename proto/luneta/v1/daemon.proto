@@ -103,13 +103,21 @@ message Pane {
   // foreground, or of the shell itself at its prompt. Absent, and kept, as
   // `cwd` is.
   optional string command = 5;
-  // The title an agent gave it, without the glyph the agent leads it with:
-  // `Fix the fold` for Claude Code's `✳ Fix the fold`, and for the frame it
-  // turns in the place of the `✳` while it works, which would change the host
-  // all the time. Absent for a title that leads with no such glyph, as a
-  // shell's, or zellij's own `Pane #1`: it is the glyph that tells an agent's.
-  // zellij keeps the last title a program gave, so an agent's can outlast it.
-  optional string title = 6;
+  // What an agent says in its title, where the glyph an agent leads a title
+  // with leads it: Claude Code's `✳`, or the frame it turns in the place of the
+  // `✳` while it works, which would change the host all the time. Absent for a
+  // title that leads with no such glyph, as a shell's, or zellij's own
+  // `Pane #1`: it is the glyph that tells an agent's. zellij keeps the last
+  // title a program gave, so an agent's can outlast it.
+  Titled titled = 6;
+}
+
+// What an agent says in the title of its pane, without the glyph.
+message Titled {
+  // Its topic: `Fix the fold` for `✳ Fix the fold`, and for the frame turned
+  // in the place of the `✳`. Absent for the bare `Claude Code` Claude Code
+  // titles its pane with until it has a topic, which some never get.
+  optional string topic = 1;
 }
 
 // How the work tree stands where a pane works, as `git status` says it.

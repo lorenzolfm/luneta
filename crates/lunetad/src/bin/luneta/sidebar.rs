@@ -1088,20 +1088,15 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
-/// The title Claude Code gives its pane until the agent has a topic, which
-/// some never get.
-const GENERIC_TITLE: &str = "Claude Code";
-
 /// What a pane's row is named. Its agent goes by the name someone gave it, or
-/// else by its topic, the title Claude Code gives its pane, but for a bare
-/// `Claude Code`; or else by its tab, if someone named it, or else by where
-/// it works. A program goes by its command line, the program by its binary's
+/// else by its topic, as the daemon reads it in the title Claude Code gives
+/// its pane; or else by its tab, if someone named it, or else by where it
+/// works. A program goes by its command line, the program by its binary's
 /// name, and a shell at its prompt by its directory's last two parts.
 fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
-        let topic = pane.title.as_deref().filter(|title| *title != GENERIC_TITLE);
-        let tab = Some(pane.tab_name.as_str()).filter(|tab| is_named_tab(tab));
-        let name = given_name(agent).or(topic).or(tab);
+        let topic = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
+        let name = given_name(agent).or(topic).or(tab::named(&pane.tab_name));
         return name.map_or_else(|| short_cwd(&agent.cwd), str::to_owned);
     }
     let mut words = pane.command.iter().flat_map(|command| command.split_whitespace());
@@ -1115,14 +1110,6 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
         },
         _ => pane.cwd.as_deref().map_or_else(|| format!("pane {}", pane.id), short_cwd),
     }
-}
-
-/// zellij names a tab `Tab #N` until someone renames it.
-fn is_named_tab(tab: &str) -> bool {
-    let unnamed = tab
-        .strip_prefix("Tab #")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    !tab.trim().is_empty() && !unnamed
 }
 
 /// The name of an agent's session, if someone gave it one, as `/rename` does:
@@ -1420,7 +1407,7 @@ mod tests {
             tab_name: format!("Tab #{}", tab + 1),
             cwd: Some(cwd.to_owned()),
             command: Some(command.to_owned()),
-            title: None,
+            titled: None,
         }
     }
 
@@ -1853,24 +1840,25 @@ mod tests {
 
     /// An agent goes by the name someone gave it, then by its topic, the title
     /// Claude Code gives its pane, then by its tab if someone named it, then
-    /// by where it works. A bare `Claude Code` is no topic, and zellij's
-    /// `Tab #N` no name.
+    /// by where it works. An agent's title with no topic, as a bare
+    /// `Claude Code`, is passed over, and so is zellij's `Tab #N`.
     #[test]
     fn an_agent_goes_by_its_name_then_its_topic_then_its_tab_then_its_directory() {
-        let titled = |title: Option<&str>, tab: &str| Pane {
-            title: title.map(str::to_owned),
+        let titled = |topic: Option<&str>, tab: &str| Pane {
+            titled: Some(api::Titled { topic: topic.map(str::to_owned) }),
             tab_name: tab.to_owned(),
             ..pane(1, 0, "/w/x", "claude")
         };
+        let untitled = |tab: &str| Pane { tab_name: tab.to_owned(), ..pane(1, 0, "/w/x", "claude") };
         let named = agent("s", 1, Status::Idle, Some("fold"));
         let unnamed = agent("s", 1, Status::Idle, None);
         let topic = titled(Some("Fix the fold"), "review");
         assert_eq!(label(Some(&named), &topic), "fold");
         assert_eq!(label(Some(&unnamed), &topic), "Fix the fold");
-        assert_eq!(label(Some(&unnamed), &titled(Some(GENERIC_TITLE), "review")), "review");
         assert_eq!(label(Some(&unnamed), &titled(None, "review")), "review");
-        assert_eq!(label(Some(&unnamed), &titled(Some(GENERIC_TITLE), "Tab #12")), "luneta/main");
-        assert_eq!(label(Some(&unnamed), &titled(None, " ")), "luneta/main");
+        assert_eq!(label(Some(&unnamed), &untitled("review")), "review");
+        assert_eq!(label(Some(&unnamed), &titled(None, "Tab #12")), "luneta/main");
+        assert_eq!(label(Some(&unnamed), &untitled(" ")), "luneta/main");
         // A name Claude Code gave the session itself is none a row goes by.
         let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
         let source = Some(NameSource::Derived.into());
