@@ -569,8 +569,21 @@ picker's [directories](#directories) name it, `luneta-main` in a worktree of
 Run in a pane of zellij, luneta will not attach to the session that pane is
 in, as zellij will not: name another. When zellij ends, detached or quit, so
 does luneta, and when it fails, luneta says what zellij said. zellij's keys
-are yours as they were, but `Ctrl b`, which goes back and forth between zellij
-and the sidebar. A click goes to whichever you click.
+are yours as they were, but three, which luneta takes before zellij sees them,
+whichever of the two has the keys:
+
+- `Ctrl b` goes back and forth between zellij and the sidebar. A click goes to
+  whichever you click.
+- `Alt Tab` goes to the next pane the sidebar lists, across sessions, and from
+  the last back to the first. A folded session lists none of its panes, so it
+  goes past them.
+- `Ctrl q` hides the sidebar, zellij taking its columns, and brings it back.
+  `Ctrl b` brings it back too, and goes into it.
+
+Claude Code binds `Ctrl b` to send a task to the background, and neither of
+the other two. zellij's default config binds `Ctrl b` to tmux mode and `Ctrl q`
+to quit. luneta takes all three first: if you use those, bind them to other
+keys, in zellij's config or in Claude Code's `~/.claude/keybindings.json`.
 
 The sidebar lists every session, oldest first, the panes in each, in the order
 of their tabs, and what the agent in each pane is doing, with the branch under
@@ -615,6 +628,12 @@ the hook writes, and the terminal of each command that runs. A command that
 ended keeps its mark until the shell runs another: the `•` of what you have
 yet to see has not come over yet. A shell without the hook has no marks
 here, where the plugin's sidebar read its title.
+
+A fold is the same in every luneta on the host, and lasts until you unfold it:
+each folded session is an empty file named for it in
+`$XDG_STATE_HOME/luneta/folded`, or `~/.local/state/luneta/folded`, which every
+luneta watches. A fold keeps to the session's name, so a session started again
+under it comes back folded.
 
 It is the first step, and the plugin's sidebar has more than this one does
 yet: its menu, the brief and the `•` of what finished come over one at a time.

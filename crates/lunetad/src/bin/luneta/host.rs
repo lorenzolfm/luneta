@@ -1,6 +1,8 @@
 //! luneta's own terminal: the sidebar on the left, zellij on the right, and
 //! which of the two has the keys. `Ctrl b` hands them from one to the other,
-//! and a click hands them to the one clicked.
+//! and a click hands them to the one clicked. `Ctrl q` hides the sidebar,
+//! zellij taking its columns, and brings it back, and `Alt Tab` takes zellij
+//! to the next pane the sidebar lists, whichever has the keys.
 
 use std::collections::VecDeque;
 use std::env;
@@ -28,6 +30,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
+use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
@@ -54,6 +57,9 @@ pub enum Event {
     Stayed(u64),
     /// Something went wrong that the sidebar says.
     Notice(String),
+    /// A fold was made or taken away where the folds are kept: by another
+    /// luneta, or by this one.
+    Folds,
 }
 
 /// How often the sidebar is drawn again with nothing else to draw it: every
@@ -75,11 +81,32 @@ const WAITING_MAX: Duration = Duration::from_secs(2);
 /// own.
 const WAITING_LOOK: Duration = Duration::from_millis(50);
 
-/// Which side has the keys.
+/// The key that hands the keys from zellij to the sidebar, and back.
+const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+/// The key that hides the sidebar, and brings it back.
+const HIDE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
+
+/// The key that takes zellij to the pane the sidebar lists after the one it
+/// is on.
+const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
+
+/// Which side has the keys, and whether the sidebar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
+    /// zellij, beside the sidebar.
     Zellij,
     Sidebar,
+    /// zellij, with the sidebar's columns too: the sidebar is hidden, and
+    /// takes the keys only once it shows again.
+    Hidden,
+}
+
+impl Focus {
+    /// Whether zellij has the keys.
+    fn zellij(self) -> bool {
+        self != Focus::Sidebar
+    }
 }
 
 /// The input luneta holds for zellij until zellij can take it.
@@ -152,6 +179,9 @@ struct App {
     /// in, when zellij is told.
     turned: Option<Theme>,
     events: Sender<Event>,
+    /// What watches the folder the folds are kept in, for as long as luneta
+    /// runs.
+    _watching: Option<notify::RecommendedWatcher>,
     /// How zellij ended, once its terminal says.
     exited: Option<ExitStatus>,
     ended: bool,
@@ -268,13 +298,20 @@ fn run_in(
     events: Sender<Event>,
     inbox: &mut Inbox,
 ) -> io::Result<Option<String>> {
-    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)));
+    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), false);
     // The clients of the session before luneta's comes, of which none is
     // luneta's: none of a session zellij is to make.
     let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
     let (program, args) = zellij::client(session);
     let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
-    let mut sidebar = Sidebar::default();
+    let folds = Folds::shared();
+    let watching = folds.dir().map(|dir| folds::watch(dir, events.clone())).transpose();
+    let mut sidebar = Sidebar::new(folds);
+    let watching = watching.unwrap_or_else(|error| {
+        let unwatched = format!("folds made elsewhere show from luneta's next start: {error}");
+        sidebar.notify(unwatched);
+        None
+    });
     if let (Some(session), Some(before)) = (session, before)
         && let Some(look) = sidebar.sending(&session.to_string())
     {
@@ -295,6 +332,7 @@ fn run_in(
         colours,
         turned: None,
         events,
+        _watching: watching,
         exited: None,
         ended: false,
         waiting: Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX }),
@@ -343,9 +381,10 @@ fn run_loop(
 }
 
 /// The columns the sidebar takes of the terminal, and those left for zellij:
-/// the sidebar's own, or half the terminal's, where that is narrower.
-fn areas(frame: Rect) -> (Rect, Rect) {
-    let sidebar = sidebar::COLUMNS.min(frame.width / 2);
+/// the sidebar's own, or half the terminal's, where that is narrower, and
+/// none while it is `hidden`.
+fn areas(frame: Rect, hidden: bool) -> (Rect, Rect) {
+    let sidebar = if hidden { 0 } else { sidebar::COLUMNS.min(frame.width / 2) };
     let left = Rect::new(frame.x, frame.y, sidebar, frame.height);
     let right = Rect::new(frame.x + sidebar, frame.y, frame.width - sidebar, frame.height);
     (left, right)
@@ -387,6 +426,7 @@ impl App {
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Folds => self.sidebar.refold(),
         }
         Ok(())
     }
@@ -411,7 +451,7 @@ impl App {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
             Input::Paste(text) => {
-                if self.focus == Focus::Zellij {
+                if self.focus.zellij() {
                     self.hosted.send(keys::paste(&text, self.hosted.mode()));
                 }
             },
@@ -426,24 +466,29 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        if key.code == KeyCode::Char('b') && key.modifiers == KeyModifiers::CONTROL {
-            let other = match self.focus {
-                Focus::Zellij => Focus::Sidebar,
-                Focus::Sidebar => Focus::Zellij,
-            };
+        let chord = (key.code, key.modifiers);
+        if chord == SWAP {
+            // A hidden sidebar comes back to take the keys.
+            let other = if self.focus.zellij() { Focus::Sidebar } else { Focus::Zellij };
             self.give(other);
             return;
         }
-        match self.focus {
-            Focus::Zellij => {
-                if let Some(bytes) = keys::key(key, self.hosted.mode()) {
-                    self.hosted.send(bytes);
-                }
-            },
-            Focus::Sidebar => {
-                let asked = self.sidebar.key(key);
-                self.follow(asked);
-            },
+        if chord == HIDE {
+            let other = if self.focus == Focus::Hidden { Focus::Zellij } else { Focus::Hidden };
+            self.give(other);
+            return;
+        }
+        if chord == NEXT {
+            self.next();
+            return;
+        }
+        if self.focus.zellij() {
+            if let Some(bytes) = keys::key(key, self.hosted.mode()) {
+                self.hosted.send(bytes);
+            }
+        } else {
+            let asked = self.sidebar.key(key);
+            self.follow(asked);
         }
     }
 
@@ -454,7 +499,7 @@ impl App {
             match mouse.kind {
                 MouseEventKind::Down(_) => {
                     self.dragging = true;
-                    self.give(Focus::Zellij);
+                    self.leave();
                 },
                 MouseEventKind::Up(_) => self.dragging = false,
                 _ => {},
@@ -477,11 +522,20 @@ impl App {
     fn follow(&mut self, asked: Asked) {
         match asked {
             Asked::Nothing => {},
-            Asked::Leave => self.give(Focus::Zellij),
+            Asked::Leave => self.leave(),
             Asked::Go(place) => {
                 self.go(&place);
-                self.give(Focus::Zellij);
+                self.leave();
             },
+        }
+    }
+
+    /// Takes zellij's client to the pane the sidebar lists after the one it
+    /// is on.
+    fn next(&mut self) {
+        if let Some(place) = self.sidebar.next_pane() {
+            self.go(&place);
+            self.leave();
         }
     }
 
@@ -513,22 +567,27 @@ impl App {
     /// them, as a terminal tells a program in it of the window's focus, and
     /// the sidebar when it loses them.
     fn give(&mut self, side: Focus) {
-        if self.focus == side {
-            return;
-        }
+        let had = self.focus.zellij();
         self.focus = side;
         self.sidebar.focus(side == Focus::Sidebar);
-        if self.focused {
-            let gained = side == Focus::Zellij;
-            if let Some(bytes) = keys::focus(gained, self.hosted.mode()) {
-                self.hosted.send(bytes);
-            }
+        if self.focused
+            && side.zellij() != had
+            && let Some(bytes) = keys::focus(side.zellij(), self.hosted.mode())
+        {
+            self.hosted.send(bytes);
+        }
+    }
+
+    /// Hands zellij the keys, where the sidebar has them.
+    fn leave(&mut self) {
+        if self.focus == Focus::Sidebar {
+            self.give(Focus::Zellij);
         }
     }
 
     fn focus_window(&mut self, focused: bool) {
         self.focused = focused;
-        if self.focus == Focus::Zellij
+        if self.focus.zellij()
             && let Some(bytes) = keys::focus(focused, self.hosted.mode())
         {
             self.hosted.send(bytes);
@@ -618,16 +677,19 @@ impl App {
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let now = SystemTime::now();
         terminal.draw(|frame| {
-            let (sidebar, zellij) = areas(frame.area());
+            let hidden = self.focus == Focus::Hidden;
+            let (sidebar, zellij) = areas(frame.area(), hidden);
             self.areas = (sidebar, zellij);
             let size = self.hosted.size();
             if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
                 self.hosted.resize(window(zellij));
             }
             let buffer = frame.buffer_mut();
-            self.sidebar.draw(buffer, sidebar, now);
+            if !hidden {
+                self.sidebar.draw(buffer, sidebar, now);
+            }
             let cursor = self.hosted.draw(buffer, zellij);
-            if self.focus == Focus::Zellij
+            if self.focus.zellij()
                 && let Some(cursor) = cursor
             {
                 frame.set_cursor_position(cursor);

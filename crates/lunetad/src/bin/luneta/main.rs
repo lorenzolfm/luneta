@@ -4,6 +4,7 @@
 mod answers;
 mod commands;
 mod daemon;
+mod folds;
 mod host;
 mod hosted;
 mod icons;
