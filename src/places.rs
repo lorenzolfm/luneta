@@ -246,6 +246,7 @@ mod tests {
             name: name.to_owned(),
             started_at: None,
             panes,
+            clients: None,
         };
         places.heard(&[session("luneta", Some(listed)), session("new", None)]);
         assert_eq!(places.find(0, "/w/repo", ""), Some("luneta"));

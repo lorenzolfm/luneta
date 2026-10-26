@@ -557,8 +557,8 @@ luneta's own, drawn by luneta and not by a plugin:
  ▾ luneta-main ──────────── ●1  │~/P/m/luneta/main ➜
    ● fold                   3m  │
      feat/sidebar            !  │
-     luneta/main                │
-     main                       │
+▌    luneta/main                │
+▌    main                       │
  ▾ elo ───────────────────────  │
      elo/main                   │
 ```
@@ -578,17 +578,23 @@ it, all as [`lunetad`](#building-from-source) says: it needs the daemon
 running, and says so at its bottom while it does not answer. `j` and `k` move,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, and `Esc` goes back to zellij. The session zellij is in has its rule in
-the accent. A pane with no agent in it is dimmed, and an icon says what runs
-in each, as in the plugin's [sidebar](#sidebar), with the plugin's icons and a
-terminal for `dash` and `elvish` too: `icons` does not change them here, as
-luneta has no configuration of its own yet. `/` searches the rows, as the
-plugin's sidebar does, with what you type at the bottom where the keys were;
-there `Enter` goes to the highlighted row, and `Esc` clears the search. Giving
-zellij the keys clears it too.
+the accent, and `▌` marks the pane it is on. The highlight rests there while
+the sidebar does not have the focus; once it has, the highlight goes with the
+keys, and comes back as the sidebar gives the focus back. A move you make in
+zellij, as with its keys, shows within two seconds, as the daemon asks zellij
+that often; one the sidebar makes shows at once. Another client of the
+session, as a plain `zellij attach`, moves no mark. A pane with no agent in it
+is dimmed, and an icon says what runs in each, as in the plugin's
+[sidebar](#sidebar), with the plugin's icons and a terminal for `dash` and
+`elvish` too: `icons` does not change them here, as luneta has no
+configuration of its own yet. `/` searches the rows, as the plugin's sidebar
+does, with what you type at the bottom where the keys were; there `Enter` goes
+to the highlighted row, and `Esc` clears the search. Giving zellij the keys
+clears it too.
 
 It is the first step, and the plugin's sidebar has more than this one does
-yet: its menu, the brief, the `•` of what finished, a command's marks and the
-mark of the pane you are in come over one at a time.
+yet: its menu, the brief, the `•` of what finished and a command's marks come
+over one at a time.
 Until then, run luneta without the plugin's sidebar, or the two stand side by
 side: leave the dock out of `load_plugins`, and `default_layout` back at
 zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker,
@@ -598,7 +604,9 @@ runs as in any other.
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not
 `Enter`; what zellij copies, as OSC 52; and the session zellij is in, by the
-title it gives the terminal. To take zellij's client to a pane, luneta types a
+title it gives the terminal, or else the session luneta sent it to: zellij
+gives no title to a client that comes to a tab it last gave the same one. To
+take zellij's client to a pane, luneta types a
 `ScrollLock` let go into it first, which nothing binds, and which a shell, or
 nvim as you type in it, passes over: zellij moves the client of a session that
 last typed in it. With

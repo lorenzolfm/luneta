@@ -6,6 +6,7 @@ mod host;
 mod hosted;
 mod icons;
 mod keys;
+mod own;
 mod sidebar;
 mod watch;
 mod zellij;

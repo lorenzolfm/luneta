@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 
 use crate::api;
 use crate::claude::Scan;
+use crate::clients::Client;
 use crate::panes::{self, Pane};
 use crate::zellij::{Id, Sessions, Socket};
 
@@ -23,6 +24,8 @@ pub enum Command {
     Sockets(Vec<Socket>),
     /// What zellij listed of the panes of `session`, asked for by `name`.
     Panes { session: Id, name: String, panes: Vec<Pane> },
+    /// What zellij listed of the clients of `session`, asked for by `name`.
+    Clients { session: Id, name: String, clients: Vec<Client> },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
     /// Asks for the sessions zellij can be asked about, and the name to ask
@@ -81,6 +84,8 @@ struct Known {
     sessions: Sessions,
     /// What zellij last listed of each session's panes.
     panes: HashMap<Id, Vec<Pane>>,
+    /// What zellij last listed of each session's clients, by their ids.
+    clients: HashMap<Id, Vec<Client>>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
     /// The host as the API gives it, its version with it.
@@ -96,6 +101,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         found: Scan { agents: Vec::new(), unread: 0 },
         sessions: Sessions::default(),
         panes: HashMap::new(),
+        clients: HashMap::new(),
         trees: BTreeMap::new(),
         host: api::Host::default(),
         seq: 0,
@@ -124,6 +130,14 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if known.listed(session, panes) {
                     wake(&wakes.git);
                 }
+            },
+            Command::Clients { session, name, clients } => {
+                if known.sessions.addressed(&name) != Some(session) {
+                    continue;
+                }
+                // `clients::parse` lists each once, by its id.
+                assert!(clients.windows(2).all(|pair| pair[0].id < pair[1].id));
+                known.clients.insert(session, clients);
             },
             Command::WorkTree { dir, tree } => {
                 // One that no pane works in since git was asked.
@@ -173,16 +187,18 @@ impl Known {
     }
 
     /// Takes in the sessions that run now. A session that ended takes its
-    /// panes with it, and so does one that now shares its name: zellij is not
-    /// asked about it while it does, and what it listed would only go stale.
-    /// One renamed to a name of its own keeps them. True when zellij can be
-    /// asked about a session it could not be before: one that started, or
-    /// took a name, or has one another session no longer shares.
+    /// panes and clients with it, and so does one that now shares its name:
+    /// zellij is not asked about it while it does, and what it listed would
+    /// only go stale. One renamed to a name of its own keeps them. True when
+    /// zellij can be asked about a session it could not be before: one that
+    /// started, or took a name, or has one another session no longer shares.
     fn saw(&mut self, sockets: Vec<Socket>) -> bool {
         let before = self.addressed();
         self.sessions.saw(sockets);
         let now = self.addressed();
-        self.panes.retain(|session, _| now.iter().any(|(id, _)| id == session));
+        let addressed = |session: &Id| now.iter().any(|(id, _)| id == session);
+        self.panes.retain(|session, _| addressed(session));
+        self.clients.retain(|session, _| addressed(session));
         !now.is_subset(&before)
     }
 
@@ -223,12 +239,13 @@ impl Known {
     /// counts. Each list is in an order of its own, so that a host that has
     /// not changed is built the same.
     fn built(&self) -> api::Host {
-        // The panes of a session zellij cannot be asked about would be left out,
-        // or go stale, without a word: `saw` lets them go as it ends or comes
-        // to share its name, and `run` takes in none for it.
+        // The panes and clients of a session zellij cannot be asked about
+        // would be left out, or go stale, without a word: `saw` lets them go
+        // as it ends or comes to share its name, and `run` takes in none for
+        // it.
         let sessions = &self.sessions;
-        for session in self.panes.keys() {
-            let name = sessions.name_of(*session).expect("a session with panes runs");
+        for session in self.panes.keys().chain(self.clients.keys()) {
+            let name = sessions.name_of(*session).expect("a session zellij listed runs");
             assert_eq!(sessions.addressed(name), Some(*session));
         }
         // By name, and those that share one, as sessions of zellij versions
@@ -242,6 +259,9 @@ impl Known {
                 started_at: Some(id.started().into()),
                 panes: self.panes.get(&id).map(|panes| api::Panes {
                     panes: panes.iter().map(Pane::to_api).collect(),
+                }),
+                clients: self.clients.get(&id).map(|clients| api::Clients {
+                    clients: clients.iter().copied().map(Client::to_api).collect(),
                 }),
             })
             .collect();

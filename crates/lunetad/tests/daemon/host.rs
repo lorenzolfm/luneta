@@ -1,6 +1,7 @@
 //! A host of a test's own: the variables a daemon finds everything by, folders
 //! for them to name, and the daemon itself.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -68,9 +69,10 @@ impl<'a> Vars<'a> {
 
 /// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
 /// lists the panes of a session as a test has it: what it wrote with `list`.
-/// It knows no other command, and of a session it was given no panes for, it
-/// says there is no such session, as zellij does. It notes each session it is
-/// asked about, for `asked`.
+/// It lists the session's clients too, as the test wrote them with `clients`,
+/// and none until it has. It knows no other command, and of a session it was
+/// given no panes for, it says there is no such session, as zellij does. It
+/// notes each session it is asked for the panes of, for `asked`.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -81,16 +83,30 @@ impl FakeZellij {
         fs::create_dir(zellij.panes()).unwrap();
         let script = format!(
             r#"#!/bin/sh
-if [ "$1" != --session ] || [ "$3 $4 $5 $6" != "action list-panes --all --json" ]; then
-    echo "this zellij only lists panes, and was asked: $*" >&2
-    exit 2
+session="$2"
+[ "$1" = --session ] && shift 2
+case "$*" in
+    "action list-panes --all --json") asking=panes ;;
+    "action list-clients") asking=clients ;;
+    *)
+        echo "this zellij only lists panes and clients, and was asked: $*" >&2
+        exit 2
+        ;;
+esac
+if [ "$asking" = panes ]; then
+    echo "$session" >> "{panes}/asked"
 fi
-echo "$2" >> "{panes}/asked"
-if [ ! -f "{panes}/$2.json" ]; then
-    echo "Session '$2' not found." >&2
+if [ ! -f "{panes}/$session.json" ]; then
+    echo "Session '$session' not found." >&2
     exit 1
 fi
-exec cat "{panes}/$2.json"
+if [ "$asking" = panes ]; then
+    exec cat "{panes}/$session.json"
+fi
+if [ -f "{panes}/$session.clients" ]; then
+    exec cat "{panes}/$session.clients"
+fi
+echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 "#,
             panes = zellij.panes().display()
         );
@@ -122,9 +138,25 @@ exec cat "{panes}/$2.json"
     /// `list-panes --json` spells them. The file is written whole before
     /// zellij can read it.
     pub fn list(&self, session: &str, panes: &serde_json::Value) {
-        let path = self.panes().join(format!("{session}.json"));
+        self.write(&format!("{session}.json"), &panes.to_string());
+    }
+
+    /// Has zellij list `clients` for the session `session` from now on, each
+    /// an id and a pane as `list-clients` spells them, `terminal_3` or
+    /// `plugin_2`, and padded as zellij 0.45.1 pads them.
+    pub fn clients(&self, session: &str, clients: &[(u32, &str)]) {
+        let mut said = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n".to_owned();
+        for (id, pane) in clients {
+            writeln!(said, "{id:<9} {pane:<14} {:<15}", "fish").unwrap();
+        }
+        self.write(&format!("{session}.clients"), &said);
+    }
+
+    /// Writes `text` to the file `name`, whole before zellij can read it.
+    fn write(&self, name: &str, text: &str) {
+        let path = self.panes().join(name);
         let writing = path.with_extension("writing");
-        fs::write(&writing, panes.to_string()).unwrap();
+        fs::write(&writing, text).unwrap();
         fs::rename(writing, path).unwrap();
     }
 }

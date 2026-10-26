@@ -16,8 +16,8 @@ service Daemon {
   rpc Info(InfoRequest) returns (InfoResponse);
   // The agents that run on the host, each as it stands now.
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
-  // The host as it stands: its zellij sessions and their panes, how the work
-  // trees those panes are in stand, and its agents. It answers at once when
+  // The host as it stands: its zellij sessions, their panes and clients, how
+  // the work trees those panes are in stand, and its agents. It answers at once when
   // the host is no longer as the client last saw it, and otherwise as soon as
   // the host changes, or after four seconds with the host as it was.
   rpc Watch(WatchRequest) returns (Host);
@@ -60,12 +60,32 @@ message Session {
   // another session runs under its name: zellij is asked for them by name, and
   // answers for one of the two, which the daemon cannot tell.
   Panes panes = 3;
+  // Its clients, as zellij last listed them. Absent as `panes` is.
+  Clients clients = 4;
 }
 
 message Panes {
   // Its terminals. A plugin's pane is left out, and so is a pane zellij keeps
   // off the screen, as one that another took the place of.
   repeated Pane panes = 1;
+}
+
+message Clients {
+  // Those attached to it, by their ids. One that left is not among them.
+  repeated Client clients = 1;
+}
+
+// A client attached to a session, as `zellij action list-clients` lists it.
+// zellij does not say whose it is.
+message Client {
+  // Its id, which zellij gives it as it comes to the session: the lowest that
+  // no other client there has. It keeps it for as long as it stays, and gets
+  // another in each session it goes to.
+  uint32 id = 1;
+  // The pane it has the focus on, in the tab it is on, by the id of one of
+  // its session's `Panes`, unless zellij keeps that one off the screen.
+  // Absent while the focus is on a plugin's pane.
+  optional uint32 pane = 2;
 }
 
 // A terminal, as `zellij action list-panes` lists it. Its title is zellij's

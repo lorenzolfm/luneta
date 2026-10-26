@@ -29,6 +29,7 @@ use ratatui::DefaultTerminal;
 
 use crate::hosted::{Hosted, Said, Size};
 use crate::keys;
+use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::zellij::{self, SessionName};
 
@@ -41,6 +42,10 @@ pub enum Event {
     Hosted(Said),
     /// The host as the daemon says it stands, or why the daemon does not say.
     Daemon(Result<Host, String>),
+    /// What zellij answered a look at the clients of a session.
+    Looked(Looked),
+    /// zellij did not take its client to the session luneta sent it to.
+    Stayed,
     /// Something went wrong that the sidebar says.
     Notice(String),
 }
@@ -167,9 +172,17 @@ fn run_in(
     // zellij does with its terminal, of which `hosted` keeps one draw at most.
     let (events, inbox) = mpsc::channel();
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)));
+    // The clients of the session before luneta's comes, of which none is
+    // luneta's: none of a session zellij is to make.
+    let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
     let (program, args) = zellij::client(session);
     let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
     let mut sidebar = Sidebar::default();
+    if let (Some(session), Some(before)) = (session, before)
+        && let Some(look) = sidebar.sending(&session.to_string())
+    {
+        zellij::arrive(look, before, &events);
+    }
     match socket {
         Ok(socket) => crate::watch::start(socket, events.clone()),
         Err(why) => sidebar.lost(why),
@@ -279,8 +292,16 @@ impl App {
             Event::Input(Input::Resize(..)) => {},
             Event::InputEnded(error) => return Err(error),
             Event::Hosted(said) => self.hosted_said(said, terminal)?,
-            Event::Daemon(Ok(host)) => self.sidebar.heard(host),
+            Event::Daemon(Ok(host)) => {
+                let look = self.sidebar.heard(host);
+                self.look(look);
+            },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
+            Event::Looked(looked) => self.sidebar.looked(looked),
+            Event::Stayed => {
+                let look = self.sidebar.stayed();
+                self.look(look);
+            },
             Event::Notice(notice) => self.sidebar.notify(notice),
         }
         Ok(())
@@ -351,12 +372,20 @@ impl App {
 
     /// Takes zellij's client to `place`.
     fn go(&mut self, place: &Place) {
-        let Some(here) = self.sidebar.here() else {
+        let Some(here) = self.sidebar.here().map(str::to_owned) else {
             self.sidebar.notify("zellij has yet to say which session it is in".to_owned());
             return;
         };
+        let then = self.sidebar.went(place);
         self.hosted.send(zellij::NUDGE);
-        zellij::go(here, place.session(), place.pane(), &self.events);
+        zellij::go(&here, place.session(), place.pane(), then, &self.events);
+    }
+
+    /// Asks zellij for the clients of a session, if the sidebar wants to know.
+    fn look(&self, look: Option<Look>) {
+        if let Some(look) = look {
+            zellij::look(look, &self.events);
+        }
     }
 
     /// Hands the keys to `side`, and tells zellij when it takes them or loses
@@ -367,9 +396,7 @@ impl App {
             return;
         }
         self.focus = side;
-        if side == Focus::Zellij {
-            self.sidebar.unfocused();
-        }
+        self.sidebar.focus(side == Focus::Sidebar);
         if self.focused {
             let gained = side == Focus::Zellij;
             if let Some(bytes) = keys::focus(gained, self.hosted.mode()) {
@@ -394,7 +421,8 @@ impl App {
             Said::Titled(title) => {
                 execute!(terminal.backend_mut(), SetTitle(&title))?;
                 if !title.is_empty() {
-                    self.sidebar.titled(title);
+                    let look = self.sidebar.titled(title);
+                    self.look(look);
                 }
             },
             Said::Copied(clipboard, text) => {
@@ -442,7 +470,7 @@ impl App {
                 self.hosted.resize(window(zellij));
             }
             let buffer = frame.buffer_mut();
-            self.sidebar.draw(buffer, sidebar, self.focus == Focus::Sidebar, now);
+            self.sidebar.draw(buffer, sidebar, now);
             let cursor = self.hosted.draw(buffer, zellij);
             if self.focus == Focus::Zellij
                 && let Some(cursor) = cursor
