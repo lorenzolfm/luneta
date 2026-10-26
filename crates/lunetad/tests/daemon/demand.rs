@@ -148,23 +148,37 @@ fn the_cli_says_that_no_daemon_runs_and_starts_none() {
 
 /// lunetas that find no daemon in the same moment start one each, and the
 /// folder's lock lets one through: each luneta answers, from that one. The
-/// lunetad they start waits a moment before it runs, so that each luneta
-/// finds none.
+/// lunetad they start waits until each luneta has started one, or for 3s at
+/// the most, so that each finds none.
 #[test]
 fn lunetas_that_start_a_daemon_at_once_reach_the_same_one() {
+    const LUNETAS: usize = 12;
     let host = Host::new();
     let elsewhere = moved();
-    script(&elsewhere.path().join("lunetad"), &format!("sleep 0.2\nexec '{LUNETAD}' \"$@\"\n"));
+    let spawned = elsewhere.path().join("spawned");
+    let stand_in = format!(
+        "echo >> '{spawned}'\n\
+         waited=0\n\
+         while [ $(wc -l < '{spawned}') -lt {LUNETAS} ] && [ $waited -lt 300 ]; do\n\
+         \x20   sleep 0.01\n\
+         \x20   waited=$((waited + 1))\n\
+         done\n\
+         exec '{LUNETAD}' \"$@\"\n",
+        spawned = spawned.display()
+    );
+    script(&elsewhere.path().join("lunetad"), &stand_in);
     let luneta = elsewhere.path().join("luneta");
     let pids: Vec<u32> = thread::scope(|scope| {
-        let asking: Vec<_> = (0..12).map(|_| scope.spawn(|| pid(&watch(&host, &luneta)))).collect();
+        let asking: Vec<_> =
+            (0..LUNETAS).map(|_| scope.spawn(|| pid(&watch(&host, &luneta)))).collect();
         asking.into_iter().map(|asked| asked.join().unwrap()).collect()
     });
     let _daemon = Detached { host: &host, pid: pids[0] };
     assert!(pids.iter().all(|pid| *pid == pids[0]), "{pids:?}");
+    assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), LUNETAS);
     let log = log(&host);
     assert_eq!(log.matches("lunetad: listening on ").count(), 1, "{log}");
-    assert!(log.contains("another lunetad already runs"), "{log}");
+    assert_eq!(log.matches("another lunetad already runs").count(), LUNETAS - 1, "{log}");
 }
 
 /// A luneta whose lunetad ends as it finds the folder held, as one that
