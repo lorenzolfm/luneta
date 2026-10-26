@@ -564,7 +564,7 @@ impl Sidebar {
                     Some(_) => Some(icons::AGENT),
                     None => command.and_then(icons::program),
                 };
-                let label = label(agent(pane.id), command, cwd, pane.id);
+                let label = label(agent(pane.id), pane);
                 let branch = checkout.as_ref().map(|(branch, _)| branch.as_str());
                 let found = finder.as_ref().and_then(|finder| finder.pane(&label, branch, pane));
                 if finder.is_some() && found.is_none() && named.is_none() {
@@ -1088,17 +1088,23 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
-/// What a pane's row is named: its agent by the name someone gave it, or else
-/// by where it works; a program by its command line, the program by its
-/// binary's name; a shell at its prompt by its directory's last two parts.
-fn label(agent: Option<&Agent>, command: Option<&str>, cwd: Option<&str>, id: u32) -> String {
+/// The title Claude Code gives its pane until the agent has a topic, which
+/// some never get.
+const GENERIC_TITLE: &str = "Claude Code";
+
+/// What a pane's row is named. Its agent goes by the name someone gave it, or
+/// else by its topic, the title Claude Code gives its pane, but for a bare
+/// `Claude Code`; or else by its tab, if someone named it, or else by where
+/// it works. A program goes by its command line, the program by its binary's
+/// name, and a shell at its prompt by its directory's last two parts.
+fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
-        return match given_name(agent) {
-            Some(name) => name.to_owned(),
-            None => short_cwd(&agent.cwd),
-        };
+        let topic = pane.title.as_deref().filter(|title| *title != GENERIC_TITLE);
+        let tab = Some(pane.tab_name.as_str()).filter(|tab| is_named_tab(tab));
+        let name = given_name(agent).or(topic).or(tab);
+        return name.map_or_else(|| short_cwd(&agent.cwd), str::to_owned);
     }
-    let mut words = command.into_iter().flat_map(str::split_whitespace);
+    let mut words = pane.command.iter().flat_map(|command| command.split_whitespace());
     let program = words.next().map(|program| {
         let program = program.rsplit('/').next().unwrap_or(program);
         program.strip_prefix('-').unwrap_or(program)
@@ -1107,8 +1113,16 @@ fn label(agent: Option<&Agent>, command: Option<&str>, cwd: Option<&str>, id: u3
         Some(program) if !icons::SHELLS.contains(&program) => {
             [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
         },
-        _ => cwd.map_or_else(|| format!("pane {id}"), short_cwd),
+        _ => pane.cwd.as_deref().map_or_else(|| format!("pane {}", pane.id), short_cwd),
     }
+}
+
+/// zellij names a tab `Tab #N` until someone renames it.
+fn is_named_tab(tab: &str) -> bool {
+    let unnamed = tab
+        .strip_prefix("Tab #")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    !tab.trim().is_empty() && !unnamed
 }
 
 /// The name of an agent's session, if someone gave it one, as `/rename` does:
@@ -1406,6 +1420,7 @@ mod tests {
             tab_name: format!("Tab #{}", tab + 1),
             cwd: Some(cwd.to_owned()),
             command: Some(command.to_owned()),
+            title: None,
         }
     }
 
@@ -1827,21 +1842,40 @@ mod tests {
 
     #[test]
     fn a_pane_is_named_for_what_runs_in_it() {
-        assert_eq!(label(None, Some("-fish"), Some("/w/luneta/main"), 3), "luneta/main");
-        assert_eq!(label(None, Some("/bin/zsh -l"), Some("/w/x"), 3), "w/x");
-        assert_eq!(label(None, Some("cargo test"), Some("/w/x"), 3), "cargo test");
-        let nvim = "/nix/store/a1p5-neovim/bin/nvim --clean";
-        assert_eq!(label(None, Some(nvim), Some("/w/x"), 3), "nvim --clean");
-        assert_eq!(label(None, None, None, 3), "pane 3");
+        let named = |command: &str| label(None, &pane(3, 0, "/w/luneta/main", command));
+        assert_eq!(named("-fish"), "luneta/main");
+        assert_eq!(named("/bin/zsh -l"), "luneta/main");
+        assert_eq!(named("cargo test"), "cargo test");
+        assert_eq!(named("/nix/store/a1p5-neovim/bin/nvim --clean"), "nvim --clean");
+        let unsaid = Pane { cwd: None, command: None, ..pane(3, 0, "", "") };
+        assert_eq!(label(None, &unsaid), "pane 3");
+    }
+
+    /// An agent goes by the name someone gave it, then by its topic, the title
+    /// Claude Code gives its pane, then by its tab if someone named it, then
+    /// by where it works. A bare `Claude Code` is no topic, and zellij's
+    /// `Tab #N` no name.
+    #[test]
+    fn an_agent_goes_by_its_name_then_its_topic_then_its_tab_then_its_directory() {
+        let titled = |title: Option<&str>, tab: &str| Pane {
+            title: title.map(str::to_owned),
+            tab_name: tab.to_owned(),
+            ..pane(1, 0, "/w/x", "claude")
+        };
         let named = agent("s", 1, Status::Idle, Some("fold"));
-        assert_eq!(label(Some(&named), Some("claude"), Some("/w/x"), 1), "fold");
         let unnamed = agent("s", 1, Status::Idle, None);
-        assert_eq!(label(Some(&unnamed), Some("claude"), Some("/w/x"), 1), "luneta/main");
+        let topic = titled(Some("Fix the fold"), "review");
+        assert_eq!(label(Some(&named), &topic), "fold");
+        assert_eq!(label(Some(&unnamed), &topic), "Fix the fold");
+        assert_eq!(label(Some(&unnamed), &titled(Some(GENERIC_TITLE), "review")), "review");
+        assert_eq!(label(Some(&unnamed), &titled(None, "review")), "review");
+        assert_eq!(label(Some(&unnamed), &titled(Some(GENERIC_TITLE), "Tab #12")), "luneta/main");
+        assert_eq!(label(Some(&unnamed), &titled(None, " ")), "luneta/main");
         // A name Claude Code gave the session itself is none a row goes by.
         let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
         let source = Some(NameSource::Derived.into());
         derived.name = derived.name.map(|name| api::Name { source, ..name });
-        assert_eq!(label(Some(&derived), Some("claude"), Some("/w/x"), 1), "luneta/main");
+        assert_eq!(label(Some(&derived), &topic), "Fix the fold");
     }
 
     /// The icon of what runs in a pane has a column of its own, so that every

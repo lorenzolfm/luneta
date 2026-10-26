@@ -84,9 +84,9 @@ impl Places {
                 Some(Pane {
                     id: pane.id,
                     cwd: pane.cwd.clone().filter(|cwd| !cwd.is_empty())?,
-                    // The daemon leaves titles out: Claude Code turns a frame
-                    // in one as it works.
-                    claude: is_claude(command.as_deref(), None),
+                    // The daemon gives a title only where an agent's glyph led
+                    // it, as the `✳` does, and without the glyph.
+                    claude: is_claude(command.as_deref(), None) || pane.title.is_some(),
                     command,
                 })
             };
@@ -234,6 +234,7 @@ mod tests {
             tab_name: "Tab #1".to_owned(),
             cwd: cwd.map(str::to_owned),
             command: command.map(str::to_owned),
+            title: None,
         };
         let listed = v1::Panes {
             panes: vec![
@@ -328,6 +329,28 @@ mod tests {
                  "title":"✳ Claude Code"}]"#
                 .as_bytes(),
         );
+        assert_eq!(places.find(0, "/w/repo", ""), Some("agent"));
+    }
+
+    /// The daemon gives a pane's title only where an agent's glyph led it.
+    #[test]
+    fn a_claude_started_inside_a_shell_is_known_by_the_title_the_daemon_gives() {
+        let mut places = Places::default();
+        let session = |name: &str, title: Option<&str>| v1::Session {
+            name: name.to_owned(),
+            started_at: None,
+            panes: Some(v1::Panes {
+                panes: vec![v1::Pane {
+                    id: 0,
+                    tab: 0,
+                    tab_name: "Tab #1".to_owned(),
+                    cwd: Some("/w/repo".to_owned()),
+                    command: Some("fish".to_owned()),
+                    title: title.map(str::to_owned),
+                }],
+            }),
+        };
+        places.heard(&[session("shell", None), session("agent", Some("Claude Code"))]);
         assert_eq!(places.find(0, "/w/repo", ""), Some("agent"));
     }
 

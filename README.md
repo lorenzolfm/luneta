@@ -592,6 +592,15 @@ does, with what you type at the bottom where the keys were; there `Enter` goes
 to the highlighted row, and `Esc` clears the search. Giving zellij the keys
 clears it too.
 
+An agent's row is named as the plugin's sidebar names it: for the name you
+gave it with `/rename`, or else for its topic, the title Claude Code gives its
+pane. A bare `Claude Code` is no topic, and such a row goes by its tab, if you
+named it, or else by the directory the agent works in. The daemon has the
+title without the `✳` Claude Code leads it with, or the frame it turns there
+while it works, so the title changes only as the topic does. A pane with no
+agent in it goes by what runs in it, and a shell at its prompt by its
+directory's last two parts.
+
 It is the first step, and the plugin's sidebar has more than this one does
 yet: its menu, the brief, the `•` of what finished and a command's marks come
 over one at a time.

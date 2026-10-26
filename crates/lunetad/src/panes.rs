@@ -27,9 +27,7 @@ use crate::zellij::Id;
 /// at once.
 const LIMIT: Duration = Duration::from_secs(2);
 
-/// A terminal of a session's. Its title is not kept: Claude Code turns a
-/// frame in it while it works, and a host whose titles count would change
-/// at every sweep.
+/// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     pub id: u32,
@@ -39,6 +37,8 @@ pub struct Pane {
     pub cwd: Option<Said>,
     /// What runs in front in it.
     pub command: Option<Said>,
+    /// The title an agent gave it, as `agent_title` has it.
+    pub title: Option<Said>,
 }
 
 impl Pane {
@@ -50,6 +50,7 @@ impl Pane {
             tab_name: self.tab_name.clone(),
             cwd: self.cwd.clone().map(String::from),
             command: self.command.clone().map(String::from),
+            title: self.title.clone().map(String::from),
         }
     }
 }
@@ -69,6 +70,7 @@ struct Wire {
     pane_cwd: Option<String>,
     #[serde(default)]
     pane_command: Option<String>,
+    title: String,
 }
 
 /// The terminals in what zellij listed, or why it does not read. A plugin's
@@ -85,6 +87,7 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
             tab_name: pane.tab_name,
             cwd: pane.pane_cwd.and_then(Said::new),
             command: pane.pane_command.and_then(Said::new),
+            title: agent_title(&pane.title),
         })
         .collect();
     let mut ids = HashSet::new();
@@ -92,6 +95,18 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
         return Err(format!("pane {} comes twice", twice.id));
     }
     Ok(panes)
+}
+
+/// The title an agent gave a pane, without the glyph it leads the title with:
+/// Claude Code's `✳` at rest, and the frame it turns in its place while it
+/// works, so that the title changes only as the agent's topic does. None for
+/// a title that leads with no such glyph, which no agent gave.
+fn agent_title(title: &str) -> Option<Said> {
+    let mut chars = title.trim().chars();
+    let glyph = chars.next()?;
+    let agent = matches!(glyph, '✳' | '✢' | '✶' | '✻' | '✽' | '·')
+        || ('\u{2800}'..='\u{28ff}').contains(&glyph);
+    agent.then(|| chars.as_str().trim_start().to_owned()).and_then(Said::new)
 }
 
 /// Keeps in `panes` where each worked and what ran in it as `listed` said,
