@@ -15,8 +15,8 @@ use rustix::pty::{self, OpenptFlags};
 use rustix::termios::{self, LocalModes, OptionalActions};
 use serde_json::json;
 
-use crate::host::{eventually, start};
-use crate::sessions::{listed, session, Host};
+use crate::host::{eventually, start, Host};
+use crate::sessions::{listed, session};
 
 /// Has the shell of `pane` of `session` that started in the second `started`
 /// say `line`, as the hook does: written beside its file, and moved into

@@ -16,7 +16,7 @@ pub mod folder;
 mod git;
 mod panes;
 mod process;
-mod program;
+pub mod program;
 mod shells;
 mod watch;
 mod zellij;

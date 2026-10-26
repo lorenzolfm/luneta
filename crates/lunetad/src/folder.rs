@@ -4,9 +4,9 @@
 //! the same rule, and the daemon and its CLI find each other there.
 
 use std::fmt;
-use std::fs;
-use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::fs::{self, DirBuilder, File, TryLockError};
+use std::io::{self, ErrorKind};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 /// The socket the daemon listens on, in the folder.
@@ -14,6 +14,10 @@ pub const SOCKET: &str = "lunetad.sock";
 
 /// The file the daemon holds a lock on while it runs, in the folder.
 pub const LOCK: &str = "lunetad.lock";
+
+/// What a daemon that luneta started says, in the folder: luneta gives it
+/// this file for its stderr.
+pub const LOG: &str = "lunetad.log";
 
 /// The folder, by this process's variables. A variable set to nothing is not
 /// set, as the shell hook takes it.
@@ -25,6 +29,11 @@ pub fn find() -> Option<PathBuf> {
         .find(|root| !root.is_empty())
         .map(|root| PathBuf::from(root).join("luneta"))
 }
+
+/// How lunetad ends when another daemon holds its folder: apart from the
+/// other ways it fails, so that a luneta that started it waits for the one
+/// that runs, which another luneta may have started in the same moment.
+pub const ANOTHER_RUNS: u8 = 3;
 
 /// Why a folder is not one to run a daemon in, or to reach one through.
 #[derive(Debug)]
@@ -55,6 +64,38 @@ impl fmt::Display for Refusal {
 }
 
 impl std::error::Error for Refusal {}
+
+/// Makes `folder` for this user alone, unless it is there, and checks that it
+/// is that, as the shell hook does before it writes in it. One just made is
+/// checked too, as whatever made it has no say in what it turned out to be.
+pub fn make(folder: &Path) -> Result<(), Refusal> {
+    match DirBuilder::new().mode(0o700).create(folder) {
+        Ok(()) => {},
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
+        Err(error) => return Err(Refusal::Io(folder.to_owned(), error)),
+    }
+    check(folder)
+}
+
+/// Whether a daemon holds `folder`, which is this user's alone: one does from
+/// the moment it starts until it has ended, however it ends. To tell, the
+/// lock is taken and let go at once, and a daemon that starts in that moment
+/// takes the folder for another's, and ends.
+pub fn held(folder: &Path) -> Result<bool, Refusal> {
+    let path = folder.join(LOCK);
+    let lock = match File::open(&path) {
+        Ok(lock) => lock,
+        // No daemon has run in the folder, or in a folder that is there at all.
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(Refusal::Io(path, error)),
+    };
+    match lock.try_lock() {
+        // Let go of as `lock` closes.
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(Refusal::Io(path, error)),
+    }
+}
 
 /// Checks that `folder` is this user's alone, as the daemon, its CLI and the
 /// shell hook each do before they use it: a socket in a folder that is not

@@ -3,6 +3,7 @@
 
 mod answers;
 mod commands;
+mod daemon;
 mod host;
 mod hosted;
 mod icons;
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use lunetad::folder::{self, SOCKET};
+use lunetad::folder;
 
 use crate::commands::Command;
 use crate::zellij::SessionName;
@@ -37,7 +38,11 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let socket = socket();
+    // `daemon::reach` checks it before it reaches a daemon there: in a folder
+    // that is not this user's alone, whoever has it could be listening in its
+    // place.
+    let folder: Result<PathBuf, String> = folder::find()
+        .ok_or_else(|| "neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in".to_owned());
     let Some(command) = cli.command else {
         let session = match cli.session.as_deref().map(SessionName::parse).transpose() {
             Ok(session) => session,
@@ -46,23 +51,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        return host::run(session, socket);
+        return host::run(session, folder);
     };
-    match socket {
-        Ok(socket) => commands::run(&command, &socket),
+    match folder {
+        Ok(folder) => commands::run(&command, &folder),
         Err(why) => {
             eprintln!("luneta: {why}");
             ExitCode::FAILURE
         },
     }
-}
-
-/// The socket the daemon listens on, or why luneta will not look for it there:
-/// in a folder that is not this user's alone, whoever has it could be
-/// listening in the daemon's place.
-fn socket() -> Result<PathBuf, String> {
-    let folder = folder::find()
-        .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
-    folder::check(&folder).map_err(|refusal| refusal.to_string())?;
-    Ok(folder.join(SOCKET))
 }

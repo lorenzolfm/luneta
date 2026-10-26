@@ -1,6 +1,7 @@
 //! Another program the daemon asks something of: zellij what panes a session
-//! has, git how a work tree stands. Each answers on its stdout, and has a time
-//! to answer in: one that takes longer is stuck, and is killed.
+//! has, git how a work tree stands; or that luneta does: lunetad its version.
+//! Each answers on its stdout, and has a time to answer in: one that takes
+//! longer is stuck, and is killed.
 
 use std::io::{self, Read};
 use std::process::{Command, ExitStatus, Stdio};

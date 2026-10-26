@@ -9,12 +9,19 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
+use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
     Agent, InfoRequest, ListAgentsRequest, Status, Version, WatchRequest, WorkTree,
 };
+use lunetad::folder::SOCKET;
 use prost::Message as _;
+use tonic::transport::Channel;
 
+use crate::daemon::{self, Reach};
+
+/// What the CLI asks lunetad. Only `watch` starts one where none runs, as it
+/// is what luneta's zellij plugin asks: the rest say that none does.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -25,7 +32,8 @@ pub enum Command {
     /// each pane works in stands.
     Sessions,
     /// Wait for the host to change, and write it out as the protocol encodes
-    /// it, for a program to read: luneta's zellij plugin.
+    /// it, for a program to read: luneta's zellij plugin. lunetad is started
+    /// where none runs, and again where one of another version does.
     Watch {
         /// The host as last seen, `<pid>:<seq>` from its version, to wait for
         /// the next. Without it, the host is written out at once.
@@ -42,8 +50,8 @@ fn version(spelled: &str) -> Result<Version, String> {
     Ok(Version { pid, seq })
 }
 
-/// Asks the daemon on `socket` what `command` asks.
-pub fn run(command: &Command, socket: &Path) -> ExitCode {
+/// Asks the daemon in `folder` what `command` asks.
+pub fn run(command: &Command, folder: &Path) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -51,21 +59,31 @@ pub fn run(command: &Command, socket: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
+    let wanted = match command {
+        Command::Info | Command::Agents | Command::Sessions => Reach::Running,
+        Command::Watch { .. } => Reach::Current,
+    };
+    let daemon = match runtime.block_on(daemon::reach(folder, wanted)) {
+        Ok(daemon) => daemon,
+        Err(why) => {
+            eprintln!("luneta: {why}");
+            return ExitCode::FAILURE;
+        },
+    };
     let done = match command {
-        Command::Info => runtime.block_on(info(socket)),
-        Command::Agents => runtime.block_on(agents(socket)),
-        Command::Sessions => runtime.block_on(sessions(socket)),
-        Command::Watch { after } => runtime.block_on(watch(socket, *after)),
+        Command::Info => runtime.block_on(info(daemon)),
+        Command::Agents => runtime.block_on(agents(daemon)),
+        Command::Sessions => runtime.block_on(sessions(daemon)),
+        Command::Watch { after } => runtime.block_on(watch(daemon, *after)),
     };
     if let Err(error) = done {
-        eprintln!("luneta: {}: {}", socket.display(), causes(&*error));
+        eprintln!("luneta: {}: {}", folder.join(SOCKET).display(), causes(&*error));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
 
-async fn info(socket: &Path) -> Result<(), Box<dyn Error>> {
-    let mut daemon = lunetad::connect(socket).await?;
+async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let info = daemon.info(InfoRequest {}).await?.into_inner();
     let started = info.started_at.and_then(|at| SystemTime::try_from(at).ok());
     match started.and_then(|at| at.elapsed().ok()) {
@@ -82,8 +100,7 @@ async fn info(socket: &Path) -> Result<(), Box<dyn Error>> {
 /// pane. One whose session was renamed says what it was named, and one whose
 /// session the daemon cannot tell has `?` for one. A status the CLI does not
 /// know is the word Claude Code wrote, and none at all is `?`.
-async fn agents(socket: &Path) -> Result<(), Box<dyn Error>> {
-    let mut daemon = lunetad::connect(socket).await?;
+async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(ListAgentsRequest {}).await?.into_inner();
     let pane = |agent: &Agent| match &agent.zellij {
         None => "-".to_owned(),
@@ -128,8 +145,7 @@ async fn agents(socket: &Path) -> Result<(), Box<dyn Error>> {
 /// where it works, then what is checked out there and what changed on it. A
 /// pane zellij says no directory of has `-` for one, and a directory git has
 /// said nothing of yet has nothing after it.
-async fn sessions(socket: &Path) -> Result<(), Box<dyn Error>> {
-    let mut daemon = lunetad::connect(socket).await?;
+async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let mut host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
     host.sessions.sort_by(|a, b| a.name.cmp(&b.name));
     for session in &host.sessions {
@@ -193,8 +209,10 @@ fn stands(tree: &WorkTree) -> Option<String> {
 }
 
 /// Writes out the host once it is no longer as `after` saw it.
-async fn watch(socket: &Path, after: Option<Version>) -> Result<(), Box<dyn Error>> {
-    let mut daemon = lunetad::connect(socket).await?;
+async fn watch(
+    mut daemon: DaemonClient<Channel>,
+    after: Option<Version>,
+) -> Result<(), Box<dyn Error>> {
     let host = daemon.watch(WatchRequest { after }).await?.into_inner();
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&host.encode_to_vec())?;

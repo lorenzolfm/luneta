@@ -10,13 +10,14 @@ use std::time::Duration;
 use lunetad::api::{Version, WatchRequest};
 
 use crate::commands::causes;
+use crate::daemon::{self, Reach};
 use crate::host::Event;
 
 /// How long luneta waits to ask again a daemon that did not answer.
 const AGAIN: Duration = Duration::from_secs(1);
 
-/// Watches the daemon on `socket`, or says why it cannot, until luneta ends.
-pub fn start(socket: PathBuf, events: Sender<Event>) {
+/// Watches the daemon in `folder`, or says why it cannot, until luneta ends.
+pub fn start(folder: PathBuf, events: Sender<Event>) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -26,20 +27,27 @@ pub fn start(socket: PathBuf, events: Sender<Event>) {
                 return;
             },
         };
-        runtime.block_on(watch(socket, events));
+        runtime.block_on(watch(folder, events));
     });
 }
 
 /// Asks again each time the daemon answers, for the host once it is no longer
 /// as last seen, until luneta's loop is gone. A daemon that goes away is
-/// looked for again, each `AGAIN`.
-async fn watch(socket: PathBuf, events: Sender<Event>) {
+/// looked for again, each `AGAIN`, and started where none runs.
+///
+/// The first daemon luneta reaches is of its version, as an upgrade leaves
+/// the one before it running. Any it reaches after that will do: a luneta
+/// of the version it stopped, which ran from before the upgrade, would stop
+/// the next in turn, and the two would take turns for good.
+async fn watch(folder: PathBuf, events: Sender<Event>) {
+    let mut wanted = Reach::Current;
     loop {
         // A daemon found afresh is asked for the whole host, as one started
         // again counts its versions afresh.
         let mut after: Option<Version> = None;
-        let failure = match lunetad::connect(&socket).await {
+        let failure = match daemon::reach(&folder, wanted).await {
             Ok(mut daemon) => loop {
+                wanted = Reach::Started;
                 match daemon.watch(WatchRequest { after }).await {
                     Ok(host) => {
                         let host = host.into_inner();
@@ -58,7 +66,7 @@ async fn watch(socket: PathBuf, events: Sender<Event>) {
                     Err(status) => break causes(&status),
                 }
             },
-            Err(error) => format!("{}: {}", socket.display(), causes(&error)),
+            Err(why) => why,
         };
         if events.send(Event::Daemon(Err(failure))).is_err() {
             return;

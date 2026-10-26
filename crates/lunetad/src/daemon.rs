@@ -6,13 +6,17 @@
 //! running daemon's. The kernel lets go of the lock as the process ends,
 //! however it ends, so that a daemon that crashed never keeps the next one
 //! from starting.
+//!
+//! A daemon lives as long as zellij does: once zellij has had no session for
+//! `ALONE`, it ends. It takes its socket away first, while it still holds the
+//! folder, so that a luneta that comes for it then finds none there, and
+//! starts the next.
 
-use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
@@ -54,6 +58,10 @@ const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 /// HTTP/2 tells it: `luneta` asks one.
 const QUESTIONS_MAX: u32 = 16;
 
+/// How long the daemon runs on once zellij has no session: long enough that
+/// ending the last one and opening another does not end it.
+const ALONE: Duration = Duration::from_secs(30);
+
 /// A folder that this process's daemon holds, and the socket it listens on
 /// there.
 pub struct Claim {
@@ -67,7 +75,7 @@ impl Claim {
     /// Takes `folder` for this process's daemon, and makes it if it is not
     /// there.
     pub fn take(folder: &Path) -> Result<Claim, Refusal> {
-        own(folder)?;
+        folder::make(folder)?;
         let path = folder.join(LOCK);
         let lock = OpenOptions::new()
             .create(true)
@@ -96,22 +104,11 @@ impl Claim {
     }
 }
 
-/// Makes `folder` for this user alone, unless it is there, and checks that it
-/// is that, as the shell hook does before it writes in it. One just made is
-/// checked too, as whatever made it has no say in what it turned out to be.
-fn own(folder: &Path) -> Result<(), Refusal> {
-    match DirBuilder::new().mode(0o700).create(folder) {
-        Ok(()) => {},
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
-        Err(error) => return Err(Refusal::Io(folder.to_owned(), error)),
-    }
-    folder::check(folder)
-}
-
-/// Listens on the claim's socket and answers there for as long as the
-/// process runs. It says on stderr that it listens once it does, which is
-/// how whoever started it can tell that it is ready: by then it has read
-/// what runs, and answers with all of it.
+/// Listens on the claim's socket and answers there until zellij has had no
+/// session for `ALONE`. It says on stderr that it listens once it does, which
+/// is how whoever started it can tell that it is ready: by then it has read
+/// what runs, and answers with all of it. As it ends, it answers what it was
+/// asked already, and no more.
 pub async fn serve(claim: Claim) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     // One wake-up is all a thread that asks on a sweep needs, however many
@@ -119,24 +116,55 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let core = core::start(Wakes { panes: wake_panes, git: wake_git })?;
-    follow(&core, &claim.folder)?;
+    let (end, ending) = oneshot::channel();
+    follow(&core, &claim.folder, end)?;
     panes::follow(core.clone(), panes_woken, SWEEP)?;
     git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
     let host = Host { started: SystemTime::now(), core };
+    let socket = claim.socket.clone();
+    // Once zellij has been alone long enough, or the thread that would say so
+    // has ended, which leaves the daemon blind to it.
+    let ended = async move {
+        let _ = ending.await;
+        match fs::remove_file(&socket) {
+            Ok(()) => {},
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => eprintln!("lunetad: {}: {error}", socket.display()),
+        }
+    };
     // Bounds of the daemon's own, rather than tonic's, which are none.
     Server::builder()
         .max_concurrent_streams(QUESTIONS_MAX)
         .timeout(client::ANSWER)
         .add_service(DaemonServer::new(host))
-        .serve_with_incoming(UnixListenerStream::new(listener))
+        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended)
         .await
         .map_err(io::Error::other)
 }
 
+/// Since when zellij has had no session, as the daemon has seen it.
+#[derive(Default)]
+struct Alone {
+    since: Option<Instant>,
+}
+
+impl Alone {
+    /// For how long zellij has had no session, as it has `sessions` at `now`.
+    fn saw(&mut self, sessions: usize, now: Instant) -> Duration {
+        if sessions > 0 {
+            self.since = None;
+            return Duration::ZERO;
+        }
+        let since = *self.since.get_or_insert(now);
+        now.saturating_duration_since(since)
+    }
+}
+
 /// Has the core told what Claude Code's files, the shells' files in luneta's
-/// `folder` and zellij's sockets say, as they change.
-fn follow(core: &SyncSender<Command>, folder: &Path) -> io::Result<()> {
+/// `folder` and zellij's sockets say, as they change, and says on `end` once
+/// zellij has had no session for `ALONE`.
+fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -> io::Result<()> {
     match claude::folder() {
         Some(folder) => {
             let mut files = claude::SessionFiles::new(&folder);
@@ -165,7 +193,19 @@ fn follow(core: &SyncSender<Command>, folder: &Path) -> io::Result<()> {
         let mut troubles = Troubles::default();
         move || zellij::scan(&folder, &mut troubles)
     };
-    let tell = move |sockets| core.send(Command::Sockets(sockets)).is_ok();
+    let mut alone = Alone::default();
+    let mut end = Some(end);
+    let tell = move |sockets: Vec<zellij::Socket>| {
+        if alone.saw(sockets.len(), Instant::now()) >= ALONE
+            && let Some(end) = end.take()
+        {
+            let secs = ALONE.as_secs();
+            eprintln!("lunetad: zellij has had no session for {secs}s, and so lunetad ends");
+            // The server has ended already, if no one waits for the word.
+            let _ = end.send(());
+        }
+        core.send(Command::Sockets(sockets)).is_ok()
+    };
     let wanted = zellij::of_sessions;
     watch::watch("zellij", folder, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
 }
@@ -231,5 +271,28 @@ impl Host {
     async fn watched(&self, after: Option<api::Version>) -> Result<api::Host, Status> {
         let host = self.ask(|answer| Command::Watch { after, answer }).await?;
         host.ok_or_else(|| Status::resource_exhausted("too many clients wait for the host"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::Alone;
+
+    /// zellij is alone from the first look that finds no session, and a
+    /// session, however short its life, has it start over: ending the last
+    /// one and opening another does not end the daemon.
+    #[test]
+    fn zellij_is_alone_from_the_first_look_that_finds_no_session() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let mut alone = Alone::default();
+        assert_eq!(alone.saw(0, at(0)), Duration::ZERO);
+        assert_eq!(alone.saw(0, at(20)), Duration::from_secs(20));
+        assert_eq!(alone.saw(1, at(25)), Duration::ZERO);
+        assert_eq!(alone.saw(0, at(40)), Duration::ZERO);
+        assert_eq!(alone.saw(0, at(69)), Duration::from_secs(29));
+        assert_eq!(alone.saw(0, at(70)), Duration::from_secs(30));
     }
 }
