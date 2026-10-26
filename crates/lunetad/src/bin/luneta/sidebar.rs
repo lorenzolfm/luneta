@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
+use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Host, NameSource, Pane, Session, Status, Zellij};
 use ratatui::buffer::Buffer;
@@ -162,14 +163,12 @@ impl Seat {
 enum Row {
     Session {
         session: Listed,
-        folded: bool,
+        under: Under,
         /// Whether luneta's zellij is in it.
         here: bool,
         /// How many of its agents wait for you, and whether one is at work.
         waiting: usize,
         busy: bool,
-        /// Whether it lists no pane under it: folded, or with none listed.
-        bare: bool,
     },
     Pane {
         session: Listed,
@@ -207,10 +206,21 @@ impl Row {
     /// panes, and is no place to go.
     fn stops(&self) -> bool {
         match self {
-            Row::Session { bare, .. } => *bare,
+            Row::Session { under, .. } => *under != Under::Panes,
             Row::Pane { .. } => true,
         }
     }
+}
+
+/// What a session's row has under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Under {
+    /// Its panes, or the ones of them a search finds.
+    Panes,
+    /// None, as it is folded.
+    Folded,
+    /// None, as zellij has listed none.
+    Empty,
 }
 
 /// What the sidebar asks of luneta.
@@ -269,12 +279,13 @@ pub struct Sidebar {
     search: Option<Search>,
 }
 
-/// The search, while it is open: what is typed, which narrows the rows once it
-/// is something, and whether the highlight has yet to go to the row that
-/// matches it best.
-struct Search {
-    term: String,
-    seek: bool,
+/// The search, while it is open.
+enum Search {
+    /// Nothing typed: the rows under it are the rows without it.
+    Empty,
+    /// What is typed narrows the rows, and `seek` until the highlight has gone
+    /// to the row that matches it best.
+    Typed { term: String, seek: bool },
 }
 
 impl Sidebar {
@@ -342,12 +353,11 @@ impl Sidebar {
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
         let (sessions, unlisted) = oldest_first(&host.sessions);
-        let typed = self.search.as_mut().filter(|search| !search.term.is_empty());
-        let seek = typed.as_ref().is_some_and(|search| search.seek);
-        let finder = typed.map(|search| {
-            search.seek = false;
-            Finder { matcher: SkimMatcherV2::default(), term: &search.term }
-        });
+        let (term, seek) = match &mut self.search {
+            Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
+            Some(Search::Empty) | None => (None, false),
+        };
+        let finder = term.map(|term| Finder { matcher: SkimMatcherV2::default(), term });
         let mut counts = Counts { sessions: sessions.len(), ..Counts::default() };
         let mut rows = Vec::new();
         let mut best: Option<(usize, Fit)> = None;
@@ -405,14 +415,20 @@ impl Sidebar {
             if finder.is_some() && named.is_none() && shown.is_empty() {
                 continue;
             }
+            let under = if !shown.is_empty() {
+                Under::Panes
+            } else if folded {
+                Under::Folded
+            } else {
+                Under::Empty
+            };
             let head = rows.len();
             rows.push(Row::Session {
                 session: listed.clone(),
-                folded: folded && shown.is_empty(),
+                under,
                 here: here.as_deref() == Some(listed.name.as_str()),
                 waiting,
                 busy: busy > 0,
-                bare: shown.is_empty(),
             });
             // The pane of the session that matches best, which a session found
             // by its name hands the highlight on to. With none, its row hands it
@@ -515,8 +531,8 @@ impl Sidebar {
         if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             return Asked::Nothing;
         }
-        if let Some(search) = &self.search {
-            let term = search.term.clone();
+        if let Some(term) = self.search() {
+            let term = term.to_owned();
             return self.search_key(key, term);
         }
         match key.code {
@@ -556,10 +572,21 @@ impl Sidebar {
         Asked::Nothing
     }
 
+    /// What is typed in the search, while it is open.
+    fn search(&self) -> Option<&str> {
+        self.search.as_ref().map(|search| match search {
+            Search::Empty => "",
+            Search::Typed { term, .. } => term.as_str(),
+        })
+    }
+
     /// Opens the search with `term` in it, or puts `term` in the open one.
-    /// The highlight goes to the row that matches it best.
+    /// The highlight goes to the row that matches it best. An empty `term`
+    /// narrows nothing.
     fn find(&mut self, term: String) {
-        self.search = Some(Search { term, seek: true });
+        let search =
+            if term.is_empty() { Search::Empty } else { Search::Typed { term, seek: true } };
+        self.search = Some(search);
         self.rebuild();
     }
 
@@ -588,9 +615,10 @@ impl Sidebar {
     }
 
     /// What the mouse does over the sidebar, drawn in `area`: a click on a
-    /// pane goes there, and on a session's `▾` or `▸` folds it. A folded
-    /// session goes to the session. A click on the notes goes nowhere, as the
-    /// rows under them are not on screen. The wheel scrolls.
+    /// pane goes there, and on a session's `▾` or `▸` folds it. A session
+    /// with no panes under it, folded or not, goes to the session. A click on
+    /// the notes goes nowhere, as the rows under them are not on screen. The
+    /// wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -611,7 +639,7 @@ impl Sidebar {
         };
         let row = &self.rows[at];
         let place = row.place();
-        if let Row::Session { folded, .. } = row {
+        if matches!(row, Row::Session { .. }) {
             // A search shows the panes it finds whatever the folds, so there
             // the triangle is the name's.
             let on_triangle = mouse.column.saturating_sub(area.x) <= 2;
@@ -621,7 +649,7 @@ impl Sidebar {
                 return Asked::Nothing;
             }
             // The name of a session that lists its panes is no place to go.
-            if !folded {
+            if !row.stops() {
                 return Asked::Nothing;
             }
         }
@@ -689,7 +717,7 @@ impl Sidebar {
                 Style::new().add_modifier(Modifier::DIM),
             ));
         } else if self.rows.is_empty() {
-            let typed = self.search.as_ref().is_some_and(|search| !search.term.is_empty());
+            let typed = matches!(self.search, Some(Search::Typed { .. }));
             let none = if typed { " no match" } else { " no sessions" };
             lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
@@ -768,8 +796,8 @@ impl Sidebar {
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
         }
-        if let Some(search) = &self.search {
-            notes.push(query(&search.term, width));
+        if let Some(term) = self.search() {
+            notes.push(query(term, width));
         } else if focused {
             let dim = Style::new().add_modifier(Modifier::DIM);
             notes.push(Line::styled(cut(" ↵ go  h/l fold  esc back", width), dim));
@@ -927,7 +955,7 @@ impl Finder<'_> {
     /// parts, as a shell's row shows it: a whole path has the letters for a
     /// few typed ones to land on nearly any of it.
     fn pane(&self, label: &str, branch: Option<&str>, pane: &Pane) -> Option<Fit> {
-        let tab = named_tab(&pane.tab_name);
+        let tab = tab::named(&pane.tab_name);
         let cwd = pane.cwd.as_deref().map(short_cwd);
         self.find(label, &[branch, tab, cwd.as_deref()])
     }
@@ -939,14 +967,6 @@ impl Finder<'_> {
         let score = texts.filter_map(|text| self.matcher.fuzzy_match(text, self.term)).max()?;
         Some((shown == self.term, score))
     }
-}
-
-/// The name of a tab, if someone gave it one: zellij names a tab `Tab #N`
-/// until then.
-fn named_tab(tab: &str) -> Option<&str> {
-    let number = tab.strip_prefix("Tab #");
-    let unnamed = number.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    Some(tab).filter(|tab| !unnamed && !tab.trim().is_empty())
 }
 
 /// The branch checked out in a work tree, and how the tree stands, or none
@@ -1008,8 +1028,9 @@ fn frame(now: SystemTime) -> usize {
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
-        Row::Session { session, folded, here, waiting, busy, .. } => {
-            let badge = badge(*waiting, *folded && *busy, frame);
+        Row::Session { session, under, here, waiting, busy } => {
+            let folded = *under == Under::Folded;
+            let badge = badge(*waiting, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let name_style = if *here {
                 Style::new().fg(NAME).add_modifier(Modifier::BOLD)
@@ -1021,7 +1042,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
                 Span::raw(" "),
-                Span::styled(if *folded { FOLDED } else { UNFOLDED }, dim),
+                Span::styled(if folded { FOLDED } else { UNFOLDED }, dim),
                 Span::raw(" "),
                 Span::styled(name, name_style),
                 Span::raw(" "),
@@ -1419,6 +1440,22 @@ mod tests {
         assert!(sidebar.folded.contains("older"));
         let older = Place::Session(listed("older", 10));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Go(older));
+    }
+
+    /// A session zellij has yet to list the panes of stands in for them, as a
+    /// folded one does, for a click as for `Enter`.
+    #[test]
+    fn a_click_on_a_session_with_no_panes_goes_there() {
+        let mut sidebar = Sidebar::default();
+        let mut starting = session("x", 10, Vec::new());
+        starting.panes = None;
+        sidebar.heard(host(vec![starting], Vec::new()));
+        let area = Rect::new(0, 0, 32, 5);
+        screen(&mut sidebar, false, area.width, area.height);
+        let x = Place::Session(listed("x", 10));
+        assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Go(x.clone()));
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(sidebar.key(&enter), Asked::Go(x));
     }
 
     /// The notes at the bottom stand over the rows that would be there, which

@@ -5,6 +5,7 @@
 
 pub mod git;
 pub mod said;
+pub mod tab;
 
 /// The protocol's messages, as prost-build writes them out. The service that
 /// answers with them is the daemon's, and so is the code for it.

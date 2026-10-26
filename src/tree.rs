@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use luneta_protocol::tab;
 use zellij_tile::prelude::{PaneInfo, PaneManifest, TabInfo};
 
 use crate::agents::{AgentRow, AgentSet, Status};
@@ -847,7 +848,7 @@ impl Finder<'_> {
     /// and a cwd is its last two parts, as the agent list shows it: a whole
     /// path has the letters for a few typed ones to land on nearly any of it.
     fn pane(&self, label: &str, leaf: &Leaf) -> Option<(Fit, Vec<usize>)> {
-        let tab = is_named_tab(&leaf.tab).then_some(leaf.tab.as_str());
+        let tab = tab::named(&leaf.tab);
         let cwd = leaf.cwd.as_deref().map(short_cwd);
         let branch = leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str());
         self.find(label, &[branch, tab, cwd.as_deref()])
@@ -888,8 +889,8 @@ pub fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
     if !title.is_empty() && title != GENERIC_TITLE {
         return title.to_owned();
     }
-    if is_named_tab(&leaf.tab) {
-        return leaf.tab.clone();
+    if let Some(tab) = tab::named(&leaf.tab) {
+        return tab.to_owned();
     }
     if let Some(cwd) = agent.and_then(|agent| agent.cwd.as_deref()) {
         return short_cwd(cwd);
@@ -991,14 +992,6 @@ fn bare_title(title: &str) -> &str {
 
 fn is_agent_glyph(glyph: char) -> bool {
     matches!(glyph, '✳' | '✢' | '✶' | '✻' | '✽' | '·') || ('\u{2800}'..='\u{28ff}').contains(&glyph)
-}
-
-/// zellij names a tab `Tab #N` until someone renames it.
-fn is_named_tab(tab: &str) -> bool {
-    let unnamed = tab
-        .strip_prefix("Tab #")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    !tab.trim().is_empty() && !unnamed
 }
 
 #[cfg(test)]
@@ -1205,10 +1198,6 @@ mod tests {
         assert_eq!(label(&leaf("✳ pix outflow", "liquid dual"), None), "pix outflow");
         assert_eq!(label(&leaf("", "Tab #2"), None), "pane 7");
         assert_eq!(label(&leaf("", "notes"), None), "notes");
-        assert!(!is_named_tab("Tab #4"));
-        assert!(is_named_tab("Tab #"));
-        assert!(is_named_tab("Tab #4b"));
-        assert!(!is_named_tab("  "));
     }
 
     #[test]
