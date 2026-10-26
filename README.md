@@ -579,9 +579,9 @@ running, and says so at its bottom while it does not answer. `j` and `k` move,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, and `Esc` goes back to zellij. The session zellij is in has its rule in
 the accent. A pane with no agent in it is dimmed, and an icon says what runs
-in each, as in the plugin's [sidebar](#sidebar), with the plugin's icons:
-`icons` does not change them here, as luneta has no configuration of its own
-yet.
+in each, as in the plugin's [sidebar](#sidebar), with the plugin's icons and a
+terminal for `dash` and `elvish` too: `icons` does not change them here, as
+luneta has no configuration of its own yet.
 
 It is the first step, and the plugin's sidebar has more than this one does
 yet: its menu, its search, the brief, the `•` of what finished, a command's

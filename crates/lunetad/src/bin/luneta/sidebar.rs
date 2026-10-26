@@ -7,7 +7,6 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
-use luneta_protocol::said::Said;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Host, NameSource, Pane, Session, Status, Zellij};
 use ratatui::buffer::Buffer;
@@ -36,9 +35,13 @@ const NAME: Color = Color::Cyan;
 /// The colour of an agent at work.
 const TAG: Color = Color::Yellow;
 
+/// How many columns a mark takes: one, as each glyph of `Mark` does. Each
+/// pane's row keeps that many for one, whether it has one or not.
+const MARK: usize = 1;
+
 /// The column a pane's label starts at, and the branch under it: past the
 /// indent, the mark and the icon, and a space after each of those two.
-const LABEL: usize = 3 + 1 + 1 + icons::WIDTH + 1;
+const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 
 /// A session as the sidebar tells it from another of its name: zellij
 /// versions with sockets of their own can each run one under it.
@@ -92,9 +95,10 @@ enum Mark {
     Idle,
     Busy,
     Shell,
-    /// A word the daemon passed on as Claude Code wrote it, by its initial.
-    Other(Said),
-    /// An agent that says nothing.
+    /// A word the daemon passed on as Claude Code wrote it, by its initial as
+    /// a capital, which takes the one column a mark does.
+    Other(char),
+    /// An agent that says nothing, or nothing a mark can show in its column.
     Unreported,
 }
 
@@ -109,7 +113,7 @@ impl Mark {
                 Ok(Status::Unspecified) | Err(_) => Mark::Unreported,
             },
             Some(Reported::OtherStatus(word)) => {
-                Said::new(word.clone()).map_or(Mark::Unreported, Mark::Other)
+                initial(word).map_or(Mark::Unreported, Mark::Other)
             },
             None => Mark::Unreported,
         }
@@ -123,13 +127,18 @@ impl Mark {
             Mark::Idle => ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD)),
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
-            Mark::Other(word) => {
-                let initial = word.as_str().chars().take(1).flat_map(char::to_uppercase);
-                (initial.collect(), style.fg(TAG))
-            },
+            Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
         }
     }
+}
+
+/// The initial of `word` as a capital, if it takes one column: the first
+/// letter of a capital of two, as `ß`'s `SS`. A letter two wide, or a mark
+/// that sits on the letter before it, would put the label off its column.
+fn initial(word: &str) -> Option<char> {
+    let initial = word.chars().next()?.to_uppercase().next()?;
+    (initial.width() == Some(MARK)).then_some(initial)
 }
 
 /// The agent in a pane, as its row shows it.
@@ -346,8 +355,9 @@ impl Sidebar {
                     .and_then(|tree| checkout(&tree));
                 let command = pane.command.as_deref();
                 // An agent's pane runs Claude Code, whatever its terminal has
-                // in front.
-                let program = match seat {
+                // in front. It goes by the agent, as the label does, and not
+                // by the mark: a mark need not be an agent's.
+                let program = match agent(pane.id) {
                     Some(_) => Some(icons::AGENT),
                     None => command.and_then(icons::program),
                 };
@@ -719,9 +729,6 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
-/// The shells, whose name says only that a pane is at its prompt.
-const SHELLS: [&str; 7] = ["bash", "dash", "fish", "nu", "sh", "zsh", "elvish"];
-
 /// What a pane's row is named: its agent by the name someone gave it, or else
 /// by where it works; a program by its command line, the program by its
 /// binary's name; a shell at its prompt by its directory's last two parts.
@@ -738,7 +745,7 @@ fn label(agent: Option<&Agent>, command: Option<&str>, cwd: Option<&str>, id: u3
         program.strip_prefix('-').unwrap_or(program)
     });
     match program {
-        Some(program) if !SHELLS.contains(&program) => {
+        Some(program) if !icons::SHELLS.contains(&program) => {
             [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
         },
         _ => cwd.map_or_else(|| format!("pane {id}"), short_cwd),
@@ -868,7 +875,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                     let (glyph, style) = mark.glyph(frame);
                     spans.push(Span::styled(glyph, style));
                 },
-                None => spans.push(Span::raw(" ")),
+                None => spans.push(Span::raw(" ".repeat(MARK))),
             }
             spans.push(Span::raw(" "));
             match icon {
@@ -1266,6 +1273,7 @@ mod tests {
     /// label starts at the same column, and a program with none leaves it
     /// blank. An agent's is Claude's, whatever its terminal has in front, and
     /// `sudo` gives way to what it runs, though the row goes by its command.
+    /// A shell the row is named for the directory of has a terminal's.
     #[test]
     fn a_pane_s_icon_says_what_runs_in_it_in_a_column_of_its_own() {
         let mut sidebar = Sidebar::default();
@@ -1278,14 +1286,44 @@ mod tests {
                     pane(1, 0, "/w/a", "cargo test"),
                     pane(2, 0, "/w/b", sudo),
                     pane(3, 0, "/w/c", "make"),
+                    pane(4, 0, "/w/d", "dash"),
                 ],
             )],
             vec![agent("s", 1, Status::Idle, Some("fold"))],
         ));
-        let lines = screen(&mut sidebar, false, 32, 6);
+        let lines = screen(&mut sidebar, false, 32, 7);
         assert_eq!(
             lines[3..],
-            ["   ✓ \u{ec82} fold                 1m", "     \u{e6ae} sudo -k nvim x", "       make"]
+            [
+                "   ✓ \u{ec82} fold                 1m",
+                "     \u{e6ae} sudo -k nvim x",
+                "       make",
+                "     \u{e795} w/d",
+            ]
+        );
+    }
+
+    /// A word an agent says that luneta does not know is marked by its
+    /// initial, as a capital, in the one column a mark takes, so that its
+    /// label starts where every other does. An initial that takes another
+    /// number of columns marks it as one that says nothing.
+    #[test]
+    fn a_word_an_agent_says_is_marked_in_the_one_column_a_mark_takes() {
+        let words = ["compacting", "ßa", "日本", "\u{301}a"];
+        let says = |pane: u32, word: &str| Agent {
+            status: Some(Reported::OtherStatus(word.to_owned())),
+            ..agent("s", pane, Status::Idle, Some("x"))
+        };
+        let mut sidebar = Sidebar::default();
+        let panes = (1..=4).map(|id| pane(id, 0, "/w/a", "claude")).collect();
+        let agents = words.into_iter().zip(1..).map(|(word, id)| says(id, word)).collect();
+        sidebar.heard(host(vec![session("s", 10, panes)], agents));
+        // Up to the label's first letter, a character to a column.
+        let start = |line: &String| line.chars().take(8).collect::<String>();
+        let lines = screen(&mut sidebar, false, 32, 7);
+        assert_eq!(
+            lines[3..].iter().map(start).collect::<Vec<_>>(),
+            ["   C \u{ec82} x", "   S \u{ec82} x", "   ? \u{ec82} x", "   ? \u{ec82} x"]
         );
     }
 

@@ -4,8 +4,10 @@
 //! The program is the agent in the pane, or else what the daemon says the
 //! pane's terminal runs in the foreground: the process group in front, or the
 //! shell itself at its prompt. The icons are the plugin's own, from its
-//! `src/icons.rs`, and Nerd Fonts', which only a Nerd Font draws. The plugin's
-//! configuration changes them with `icons`; luneta has no configuration yet.
+//! `src/icons.rs`, and Nerd Fonts', which only a Nerd Font draws, with the
+//! terminal for each shell a row is named as one for: `dash` and `elvish` too.
+//! The plugin's configuration changes them with `icons`; luneta has no
+//! configuration yet.
 
 use std::iter::Peekable;
 use std::str::SplitWhitespace;
@@ -17,6 +19,10 @@ pub const AGENT: &str = "claude";
 /// name ends in "Mono". Each pane's row keeps that many for one, whether its
 /// program has one or not.
 pub const WIDTH: usize = 1;
+
+/// The shells, whose name says only that a pane is at its prompt: each has the
+/// terminal for its icon, and a row of one is named for its directory.
+pub const SHELLS: [&str; 7] = ["bash", "dash", "elvish", "fish", "nu", "sh", "zsh"];
 
 /// `dev-terminal`, for a shell.
 const TERMINAL: &str = "\u{e795}";
@@ -30,16 +36,12 @@ const PYTHON: &str = "\u{e73c}";
 /// `dev-git`.
 const GIT: &str = "\u{e702}";
 
-/// The icons, by the name of the binary each is for, as Nerd Fonts 3.5
-/// numbers them. Claude's came with Nerd Fonts 3.5.0, and ssh's with 3.3.0: an
-/// older font has neither, and the terminal draws a box or nothing for them.
-const ICONS: [(&str, &str); 16] = [
+/// The icons of what is not a shell, by the name of the binary each is for,
+/// as Nerd Fonts 3.5 numbers them. Claude's came with Nerd Fonts 3.5.0, and
+/// ssh's with 3.3.0: an older font has neither, and the terminal draws a box
+/// or nothing for them.
+const ICONS: [(&str, &str); 11] = [
     (AGENT, "\u{ec82}"), // `cod-claude`
-    ("bash", TERMINAL),
-    ("fish", TERMINAL),
-    ("nu", TERMINAL),
-    ("sh", TERMINAL),
-    ("zsh", TERMINAL),
     ("nvim", NEOVIM),
     ("vim", NEOVIM),
     ("cargo", "\u{e7a8}"), // `dev-rust`
@@ -54,6 +56,9 @@ const ICONS: [(&str, &str); 16] = [
 
 /// The icon of `program`, by its binary's name, if it has one.
 pub fn of(program: &str) -> Option<&'static str> {
+    if SHELLS.contains(&program) {
+        return Some(TERMINAL);
+    }
     ICONS.iter().find(|(name, _)| *name == program).map(|(_, icon)| *icon)
 }
 
@@ -200,8 +205,8 @@ mod tests {
     /// starts at the same column: one that took more would push its label on.
     #[test]
     fn every_icon_takes_the_columns_a_row_keeps_for_one() {
-        for (program, icon) in ICONS {
-            assert_eq!(icon.width(), WIDTH, "{program}");
+        for program in SHELLS.into_iter().chain(ICONS.map(|(program, _)| program)) {
+            assert_eq!(of(program).map(UnicodeWidthStr::width), Some(WIDTH), "{program}");
         }
     }
 }
