@@ -28,6 +28,9 @@ base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
 # Reads luneta's terminal as keys and the mouse, and sets its modes.
 crossterm = "0.29.0"
+# The sidebar's search scores its rows as the plugin's does: skim's scorer, at
+# the version the plugin pins.
+fuzzy-matcher = { version = "0.3.7", default-features = false }
 # `connect` hands tonic a Unix socket of its own making, so that a path is a
 # path and never has to survive being spelled as a URI.
 hyper-util = { version = "0.1.21", features = ["tokio"] }

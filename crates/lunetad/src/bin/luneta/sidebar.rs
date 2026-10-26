@@ -6,6 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Host, NameSource, Pane, Session, Status, Zellij};
@@ -32,7 +34,7 @@ pub const SPIN: Duration = Duration::from_millis(100);
 const ACCENT: Color = Color::Magenta;
 /// The colour of the session luneta's zellij is in.
 const NAME: Color = Color::Cyan;
-/// The colour of an agent at work.
+/// The colour of an agent at work, and of the search's `/`.
 const TAG: Color = Color::Yellow;
 
 /// How many columns a mark takes: one, as each glyph of `Mark` does. Each
@@ -263,6 +265,16 @@ pub struct Sidebar {
     room: usize,
     /// The last thing that went wrong, until the next key.
     notice: Option<String>,
+    /// The search, while it is open.
+    search: Option<Search>,
+}
+
+/// The search, while it is open: what is typed, which narrows the rows once it
+/// is something, and whether the highlight has yet to go to the row that
+/// matches it best.
+struct Search {
+    term: String,
+    seek: bool,
 }
 
 impl Sidebar {
@@ -313,6 +325,14 @@ impl Sidebar {
         self.counts.busy > 0
     }
 
+    /// Makes the rows again from what the daemon said last.
+    ///
+    /// While the search holds something typed, only the rows that match it
+    /// are kept, in their order, and a session with them, unfolded. A session
+    /// found by its name keeps all its panes. The highlight goes to the best
+    /// match as what is typed changes, and stays on its row otherwise. A
+    /// session that matches best by its name has it on the pane of it that
+    /// matches best, or else on its first.
     fn rebuild(&mut self) {
         let Some(host) = &self.host else {
             return;
@@ -322,8 +342,20 @@ impl Sidebar {
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
         let (sessions, unlisted) = oldest_first(&host.sessions);
+        let typed = self.search.as_mut().filter(|search| !search.term.is_empty());
+        let seek = typed.as_ref().is_some_and(|search| search.seek);
+        let finder = typed.map(|search| {
+            search.seek = false;
+            Finder { matcher: SkimMatcherV2::default(), term: &search.term }
+        });
         let mut counts = Counts { sessions: sessions.len(), ..Counts::default() };
         let mut rows = Vec::new();
+        let mut best: Option<(usize, Fit)> = None;
+        let mut weigh = |at: usize, fit: Fit| {
+            if best.is_none_or(|(_, top)| fit > top) {
+                best = Some((at, fit));
+            }
+        };
         for (listed, session) in sessions {
             let mut panes: Vec<_> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
             panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -336,18 +368,11 @@ impl Sidebar {
             counts.waiting += waiting;
             counts.busy += busy;
             let folded = self.folded.contains(&listed.name);
-            rows.push(Row::Session {
-                session: listed.clone(),
-                folded,
-                here: here.as_deref() == Some(listed.name.as_str()),
-                waiting,
-                busy: busy > 0,
-                bare: folded || panes.is_empty(),
-            });
-            if folded {
-                continue;
-            }
-            for (pane, seat) in panes.into_iter().zip(seats) {
+            let named = finder.as_ref().and_then(|finder| finder.session(&listed.name));
+            // A search looks inside a folded session too.
+            let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
+            let mut shown: Vec<(Row, Option<Fit>)> = Vec::new();
+            for (pane, seat) in listing.into_iter().zip(seats) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd
                     .and_then(|cwd| trees.get(cwd))
@@ -361,26 +386,62 @@ impl Sidebar {
                     Some(_) => Some(icons::AGENT),
                     None => command.and_then(icons::program),
                 };
-                rows.push(Row::Pane {
+                let label = label(agent(pane.id), command, cwd, pane.id);
+                let branch = checkout.as_ref().map(|(branch, _)| branch.as_str());
+                let found = finder.as_ref().and_then(|finder| finder.pane(&label, branch, pane));
+                if finder.is_some() && found.is_none() && named.is_none() {
+                    continue;
+                }
+                let row = Row::Pane {
                     session: listed.clone(),
                     pane: pane.id,
                     seat,
                     icon: program.and_then(icons::of),
-                    label: label(agent(pane.id), command, cwd, pane.id),
+                    label,
                     checkout,
-                });
+                };
+                shown.push((row, found));
+            }
+            if finder.is_some() && named.is_none() && shown.is_empty() {
+                continue;
+            }
+            let head = rows.len();
+            rows.push(Row::Session {
+                session: listed.clone(),
+                folded: folded && shown.is_empty(),
+                here: here.as_deref() == Some(listed.name.as_str()),
+                waiting,
+                busy: busy > 0,
+                bare: shown.is_empty(),
+            });
+            // The pane of the session that matches best, which a session found
+            // by its name hands the highlight on to. With none, its row hands it
+            // on to its first pane.
+            let mut lead: Option<(usize, Fit)> = None;
+            for (row, found) in shown {
+                if let Some(found) = found {
+                    weigh(rows.len(), found);
+                    if lead.is_none_or(|(_, top)| found > top) {
+                        lead = Some((rows.len(), found));
+                    }
+                }
+                rows.push(row);
+            }
+            if let Some(named) = named {
+                weigh(lead.map_or(head, |(at, _)| at), named);
             }
         }
         self.rows = rows;
         self.counts = counts;
         self.unlisted = unlisted;
-        self.settle();
+        self.settle(best.map(|(at, _)| at), seek);
     }
 
     /// Puts the highlight back on a row it stops on: the one it was on, or
-    /// else the one where that was.
-    fn settle(&mut self) {
-        let at = self.cursor.as_ref().and_then(|place| {
+    /// else the one where that was, or else the row that matches the search
+    /// `best`. It goes to that one first while it `seek`s it.
+    fn settle(&mut self, best: Option<usize>, seek: bool) {
+        let held = self.cursor.as_ref().and_then(|place| {
             self.rows.iter().position(|row| row.place() == *place).or_else(|| {
                 // A pane gone, or folded away, leaves the highlight on its
                 // session.
@@ -388,6 +449,7 @@ impl Sidebar {
                 self.rows.iter().position(|row| row.place() == session)
             })
         });
+        let at = if seek { best.or(held) } else { held.or(best) };
         let at = at.unwrap_or(0);
         let stop =
             (at..self.rows.len()).chain((0..at).rev()).find(|index| self.rows[*index].stops());
@@ -453,21 +515,76 @@ impl Sidebar {
         if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             return Asked::Nothing;
         }
+        if let Some(search) = &self.search {
+            let term = search.term.clone();
+            return self.search_key(key, term);
+        }
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::Left | KeyCode::Char('h') => self.fold(true),
             KeyCode::Right | KeyCode::Char('l') => self.fold(false),
             KeyCode::Char(' ') => self.toggle(),
-            KeyCode::Enter => {
-                if let Some(place) = self.cursor.clone() {
-                    return Asked::Go(place);
-                }
-            },
+            KeyCode::Char('/') => self.find(String::new()),
+            KeyCode::Enter => return self.go(),
             KeyCode::Esc => return Asked::Leave,
             _ => {},
         }
         Asked::Nothing
+    }
+
+    /// What a key does while the search is open, with `term` typed in it:
+    /// every character types, `j` and `h` too. `Esc` closes it, and so does
+    /// `Backspace` once there is nothing left to take back, as in less and vim.
+    fn search_key(&mut self, key: &KeyEvent, mut term: String) -> Asked {
+        match key.code {
+            KeyCode::Down => self.step(1),
+            KeyCode::Up => self.step(-1),
+            KeyCode::Enter => return self.go(),
+            KeyCode::Esc => self.close_search(),
+            KeyCode::Backspace if term.is_empty() => self.close_search(),
+            KeyCode::Backspace => {
+                term.pop();
+                self.find(term);
+            },
+            KeyCode::Char(c) => {
+                term.push(c);
+                self.find(term);
+            },
+            _ => {},
+        }
+        Asked::Nothing
+    }
+
+    /// Opens the search with `term` in it, or puts `term` in the open one.
+    /// The highlight goes to the row that matches it best.
+    fn find(&mut self, term: String) {
+        self.search = Some(Search { term, seek: true });
+        self.rebuild();
+    }
+
+    /// Closes the search, and brings back every row, the highlight on the row
+    /// it was on.
+    fn close_search(&mut self) {
+        if self.search.take().is_some() {
+            self.rebuild();
+        }
+    }
+
+    /// zellij has the keys now. A search lasts while the sidebar has them:
+    /// one left open would keep the rows it hides out of sight.
+    pub fn unfocused(&mut self) {
+        self.close_search();
+    }
+
+    /// Goes to the highlighted row. Going anywhere closes the search, so that
+    /// the sidebar you come back to shows every row.
+    fn go(&mut self) -> Asked {
+        let Some(place) = self.cursor.clone() else {
+            return Asked::Nothing;
+        };
+        self.close_search();
+        Asked::Go(place)
     }
 
     /// What the mouse does over the sidebar, drawn in `area`: a click on a
@@ -495,8 +612,10 @@ impl Sidebar {
         let row = &self.rows[at];
         let place = row.place();
         if let Row::Session { folded, .. } = row {
+            // A search shows the panes it finds whatever the folds, so there
+            // the triangle is the name's.
             let on_triangle = mouse.column.saturating_sub(area.x) <= 2;
-            if on_triangle {
+            if on_triangle && self.search.is_none() {
                 self.cursor = Some(place);
                 self.toggle();
                 return Asked::Nothing;
@@ -506,8 +625,8 @@ impl Sidebar {
                 return Asked::Nothing;
             }
         }
-        self.cursor = Some(place.clone());
-        Asked::Go(place)
+        self.cursor = Some(place);
+        self.go()
     }
 
     /// How many lines all the rows take.
@@ -570,7 +689,9 @@ impl Sidebar {
                 Style::new().add_modifier(Modifier::DIM),
             ));
         } else if self.rows.is_empty() {
-            lines.push(Line::styled(" no sessions", Style::new().add_modifier(Modifier::DIM)));
+            let typed = self.search.as_ref().is_some_and(|search| !search.term.is_empty());
+            let none = if typed { " no match" } else { " no sessions" };
+            lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
         let cursor = if focused { self.cursor_index() } else { None };
         let mut drawn: Vec<Line<'static>> = Vec::new();
@@ -630,8 +751,8 @@ impl Sidebar {
     }
 
     /// What goes at the bottom: why the daemon does not answer, the sessions
-    /// it lists that the rows leave out, what went wrong last, and the keys
-    /// while the sidebar has the focus.
+    /// it lists that the rows leave out, what went wrong last, and the search
+    /// while it is open, or else the keys while the sidebar has the focus.
     fn notes(&self, width: usize, focused: bool) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
         let error = Style::new().fg(Color::Red);
@@ -647,12 +768,25 @@ impl Sidebar {
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
         }
-        if focused {
+        if let Some(search) = &self.search {
+            notes.push(query(&search.term, width));
+        } else if focused {
             let dim = Style::new().add_modifier(Modifier::DIM);
             notes.push(Line::styled(cut(" ↵ go  h/l fold  esc back", width), dim));
         }
         notes
     }
+}
+
+/// The search, `width` wide: a `/`, and then what is typed, before a `_` for
+/// the cursor, its end where it is too long.
+fn query(term: &str, width: usize) -> Line<'static> {
+    let typed = tail(&format!("{term}_"), width.saturating_sub(2));
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("/", Style::new().fg(TAG)),
+        Span::styled(typed, Style::new().fg(ACCENT)),
+    ])
 }
 
 /// The sessions the daemon lists, as the sidebar tells them apart, oldest
@@ -771,6 +905,48 @@ fn short_cwd(path: &str) -> String {
         [only] => (*only).to_owned(),
         [.., parent, base] => format!("{parent}/{base}"),
     }
+}
+
+/// How well a row matches a search: a row that shows what is typed itself
+/// beats any other, and then the higher score wins.
+type Fit = (bool, i64);
+
+/// What is typed in the search, and the matcher the picker uses.
+struct Finder<'a> {
+    matcher: SkimMatcherV2,
+    term: &'a str,
+}
+
+impl Finder<'_> {
+    fn session(&self, name: &str) -> Option<Fit> {
+        self.find(name, &[])
+    }
+
+    /// A pane by its row, its branch, its tab and its directory. A tab zellij
+    /// named `Tab #N` is no name to find, and a directory is its last two
+    /// parts, as a shell's row shows it: a whole path has the letters for a
+    /// few typed ones to land on nearly any of it.
+    fn pane(&self, label: &str, branch: Option<&str>, pane: &Pane) -> Option<Fit> {
+        let tab = named_tab(&pane.tab_name);
+        let cwd = pane.cwd.as_deref().map(short_cwd);
+        self.find(label, &[branch, tab, cwd.as_deref()])
+    }
+
+    /// What is typed against what a row shows, and against what else the row
+    /// goes by, of which it need not have each.
+    fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<Fit> {
+        let texts = also.iter().flatten().copied().chain([shown]);
+        let score = texts.filter_map(|text| self.matcher.fuzzy_match(text, self.term)).max()?;
+        Some((shown == self.term, score))
+    }
+}
+
+/// The name of a tab, if someone gave it one: zellij names a tab `Tab #N`
+/// until then.
+fn named_tab(tab: &str) -> Option<&str> {
+    let number = tab.strip_prefix("Tab #");
+    let unnamed = number.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    Some(tab).filter(|tab| !unnamed && !tab.trim().is_empty())
 }
 
 /// The branch checked out in a work tree, and how the tree stands, or none
@@ -946,6 +1122,27 @@ fn cut(text: &str, room: usize) -> String {
     kept
 }
 
+/// `text` cut to its last `room` columns, with a `…` for what it took.
+fn tail(text: &str, room: usize) -> String {
+    if text.width() <= room {
+        return text.to_owned();
+    }
+    let mut start = text.len();
+    let mut taken = 0;
+    for (at, c) in text.char_indices().rev() {
+        let width = c.width().unwrap_or(0);
+        if taken + width + 1 > room {
+            break;
+        }
+        start = at;
+        taken += width;
+    }
+    if room == 0 {
+        return String::new();
+    }
+    format!("…{}", &text[start..])
+}
+
 /// `text` on as many lines of `width` as it takes, a space in from the edge.
 fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(2).max(1);
@@ -966,6 +1163,7 @@ fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use luneta_protocol::said::Said;
     use lunetad::api::{self, Pane, Panes, Version, Zellij};
     use prost_types::Timestamp;
 
@@ -1392,5 +1590,168 @@ mod tests {
         assert_eq!(cut("handoff-eng-11259", 8), "handoff…");
         assert_eq!(cut("short", 8), "short");
         assert_eq!(cut("日本語", 4), "日…");
+        assert_eq!(tail("handoff-eng-11259", 8), "…g-11259");
+        assert_eq!(tail("short", 8), "short");
+        assert_eq!(tail("日本語", 4), "…語");
+    }
+
+    /// Sessions to search, each pane named for what it runs.
+    fn searched() -> Sidebar {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(
+            vec![
+                session(
+                    "bipa",
+                    10,
+                    vec![
+                        pane(1, 0, "/w/a", "a-p-i-x"),
+                        pane(2, 0, "/w/b", "dda-bank-slip"),
+                        pane(3, 0, "/w/c", "pix outflow"),
+                    ],
+                ),
+                session("notes", 20, vec![pane(1, 0, "/home/me/Documents", "fish")]),
+                session(
+                    "zed",
+                    30,
+                    vec![
+                        pane(1, 0, "/w/q", "htop"),
+                        pane(2, 0, "/w/r", "z-e-d"),
+                        pane(3, 0, "/w/s", "less logs"),
+                    ],
+                ),
+            ],
+            Vec::new(),
+        ));
+        sidebar
+    }
+
+    /// Types `text` into the sidebar, a key for each character.
+    fn type_in(sidebar: &mut Sidebar, text: &str) {
+        for c in text.chars() {
+            sidebar.key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    /// The lines of the rows the sidebar shows, focused, with no rule after a
+    /// session's name.
+    fn rows_shown(sidebar: &mut Sidebar) -> Vec<String> {
+        let lines = screen(sidebar, true, 32, 16);
+        let rows = lines[HEADER..15].iter().filter(|line| !line.is_empty());
+        rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
+    }
+
+    /// The last line of the sidebar, focused: the search, or else the keys.
+    fn bottom(sidebar: &mut Sidebar) -> String {
+        screen(sidebar, true, 32, 16)[15].clone()
+    }
+
+    /// A session found by its name keeps all its panes, the highlight on the
+    /// one of them that matches best, or else on the first, though the name
+    /// matches better. The rule along the top counts what the search hides.
+    #[test]
+    fn a_search_keeps_the_rows_that_match_where_they_were() {
+        let bipa = Place::Pane { session: listed("bipa", 10), pane: 3 };
+        let notes = Place::Pane { session: listed("notes", 20), pane: 1 };
+        let zed = Place::Pane { session: listed("zed", 30), pane: 2 };
+        for (typed, rows, best) in [
+            ("pix", &[" ▾ bipa", "       a-p-i-x", "       pix outflow"][..], bipa),
+            ("note", &[" ▾ notes", "     \u{e795} me/Documents"][..], notes),
+            ("zed", &[" ▾ zed", "     \u{eb31} htop", "       z-e-d", "       less logs"][..], zed),
+        ] {
+            let mut sidebar = searched();
+            type_in(&mut sidebar, &format!("/{typed}"));
+            assert_eq!(rows_shown(&mut sidebar), rows, "{typed}");
+            let rule = screen(&mut sidebar, true, 32, 16)[0].clone();
+            assert!(rule.starts_with("─ 3 sessions ─"), "{typed}: {rule}");
+            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(sidebar.key(&enter), Asked::Go(best), "{typed}");
+        }
+    }
+
+    /// A tab zellij named, and the parts of a directory a row leaves out,
+    /// find nothing.
+    #[test]
+    fn a_pane_is_found_by_its_branch_its_named_tab_and_its_directory() {
+        let mut notes = pane(1, 0, "/w/a", "nvim a");
+        notes.tab_name = "notes".to_owned();
+        let deep = pane(2, 1, "/home/lorenzo/Projects/misc/luneta", "nvim b");
+        let branched = pane(3, 2, "/w/c", "nvim c");
+        let mut host = host(vec![session("s", 10, vec![notes, deep, branched])], Vec::new());
+        let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
+        let head = Head::Branch { name, upstream: None };
+        let tree = WorkTree::Checkout { head, changes: Changes::default(), stashes: 0 };
+        host.work_trees.push(tree.to_api("/w/c"));
+        let found = |typed: &str| {
+            let mut sidebar = Sidebar::default();
+            sidebar.heard(host.clone());
+            type_in(&mut sidebar, &format!("/{typed}"));
+            rows_shown(&mut sidebar)
+        };
+        assert_eq!(found("notes"), [" ▾ s", "     \u{e6ae} nvim a"]);
+        assert_eq!(found("luneta"), [" ▾ s", "     \u{e6ae} nvim b"]);
+        assert_eq!(found("sidebar"), [" ▾ s", "     \u{e6ae} nvim c", "       feature/sidebar"]);
+        assert_eq!(found("tab"), [" no match"]);
+        assert_eq!(found("loren"), [" no match"]);
+    }
+
+    /// Closed by `Esc`, by `Enter` going to the row, or by zellij taking the
+    /// keys.
+    #[test]
+    fn a_search_opens_a_folded_session_until_it_closes() {
+        let keys = " ↵ go  h/l fold  esc back";
+        for close in [Some(KeyCode::Esc), Some(KeyCode::Enter), None] {
+            let mut sidebar = searched();
+            sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+            type_in(&mut sidebar, "/pix");
+            let found = [" ▾ bipa", "       a-p-i-x", "       pix outflow"];
+            assert_eq!(rows_shown(&mut sidebar), found, "{close:?}");
+            let asked = if let Some(code) = close {
+                sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE))
+            } else {
+                sidebar.unfocused();
+                Asked::Nothing
+            };
+            let pix = Place::Pane { session: listed("bipa", 10), pane: 3 };
+            let went = if close == Some(KeyCode::Enter) { Asked::Go(pix) } else { Asked::Nothing };
+            assert_eq!(asked, went, "{close:?}");
+            assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"], "{close:?}");
+            assert_eq!(bottom(&mut sidebar), keys, "{close:?}");
+        }
+    }
+
+    /// Every character types, `j` and `h` too, where the keys were. A long
+    /// search shows its end. `Backspace` takes a character back, and closes
+    /// the search once there is none.
+    #[test]
+    fn what_is_typed_shows_where_the_keys_were() {
+        let mut sidebar = searched();
+        let backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        type_in(&mut sidebar, "/pixjh");
+        assert_eq!(bottom(&mut sidebar), " /pixjh_");
+        assert_eq!(rows_shown(&mut sidebar), [" no match"]);
+        sidebar.key(&backspace);
+        sidebar.key(&backspace);
+        assert_eq!(rows_shown(&mut sidebar), [" ▾ bipa", "       a-p-i-x", "       pix outflow"]);
+        for _ in 0..4 {
+            sidebar.key(&backspace);
+        }
+        assert_eq!(bottom(&mut sidebar), " ↵ go  h/l fold  esc back");
+        type_in(&mut sidebar, "/a-very-long-search-for-something");
+        assert_eq!(bottom(&mut sidebar), " /…y-long-search-for-something_");
+    }
+
+    /// The highlight goes to the best match as what is typed changes, and
+    /// stays where it is moved to as the daemon says more.
+    #[test]
+    fn the_highlight_seeks_the_best_match_only_as_the_search_changes() {
+        let mut sidebar = searched();
+        let pane = |pane| Some(Place::Pane { session: listed("bipa", 10), pane });
+        type_in(&mut sidebar, "/pi");
+        assert_eq!(sidebar.cursor, pane(3));
+        sidebar.key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        sidebar.heard(sidebar.host.clone().expect("heard"));
+        assert_eq!(sidebar.cursor, pane(1));
+        type_in(&mut sidebar, "x");
+        assert_eq!(sidebar.cursor, pane(3));
     }
 }
