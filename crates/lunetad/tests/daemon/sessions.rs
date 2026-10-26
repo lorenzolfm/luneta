@@ -204,11 +204,13 @@ fn a_session_has_its_clients_once_zellij_lists_them() {
 /// A pane's title is on the host when an agent gave it, without the glyph
 /// the agent leads it with, so that the frame Claude Code turns there while it
 /// works leaves the host as it was. A title that leads with no such glyph, as
-/// a shell's, is no agent's. The test waits out two sweeps.
+/// a shell's, is no agent's. The pane works nowhere zellij says, so that git's
+/// word on where it works changes the host at no moment the test counts on.
+/// The test waits out two sweeps.
 #[test]
 fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
     let host = Host::new();
-    let titled = |title: &str| json!([listed(1, title, (0, "Tab #1"), Some("/home/you"))]);
+    let titled = |title: &str| json!([listed(1, title, (0, "Tab #1"), None)]);
     host.zellij.list("work", &titled("⠂ Fix the fold"));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
