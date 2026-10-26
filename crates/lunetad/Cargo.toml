@@ -35,6 +35,9 @@ fuzzy-matcher = { version = "0.3.7", default-features = false }
 # path and never has to survive being spelled as a URI.
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 luneta-protocol = { path = "../protocol" }
+# Waits on luneta's terminal for what it answers as luneta starts, for a time,
+# as crossterm waits on it for keys. Already in the tree by way of crossterm.
+mio = { version = "1.2.2", features = ["os-ext", "os-poll"] }
 # Watches Claude Code's session files and zellij's sockets: inotify on Linux,
 # FSEvents on macOS.
 notify = "8.2.0"

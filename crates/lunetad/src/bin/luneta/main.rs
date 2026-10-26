@@ -1,6 +1,7 @@
 //! luneta: zellij, beside a sidebar of every session on this host and what
 //! runs in each, and the CLI that asks lunetad, the daemon of this host.
 
+mod answers;
 mod commands;
 mod host;
 mod hosted;

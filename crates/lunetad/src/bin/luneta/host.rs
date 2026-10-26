@@ -27,6 +27,7 @@ use lunetad::api::Host;
 use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
+use crate::answers::{self, Colours};
 use crate::hosted::{Hosted, Said, Size};
 use crate::keys;
 use crate::own::{Look, Looked};
@@ -123,19 +124,21 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
     }));
     // The kitty keyboard protocol, where luneta's terminal speaks it, tells
     // apart keys that zellij's client can then tell apart too, as `Shift
-    // Enter` from `Enter`. Asked before anything reads the terminal's input.
-    let kitty = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    // Enter` from `Enter`. Its colours are what zellij asks its own terminal
+    // for, as a program in a pane asks zellij.
+    let answers = answers::ask();
     let ran = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)
         .and_then(|()| {
-            if kitty {
+            if answers.kitty {
                 let disambiguate = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
                 execute!(io::stdout(), PushKeyboardEnhancementFlags(disambiguate))?;
             }
-            run_in(&mut terminal, session.as_ref(), socket, &dir)
+            run_in(&mut terminal, session.as_ref(), socket, &dir, answers.colours)
         });
     // Each mode is put back however the rest went, and the first error is the
     // one said.
-    let popped = if kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
+    let popped =
+        if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
     let restored = execute!(
         io::stdout(),
         DisableMouseCapture,
@@ -159,12 +162,13 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
 }
 
 /// Runs zellij beside the sidebar until it ends, and says what it said as it
-/// failed, if it did.
+/// failed, if it did. zellij's terminal answers it with `colours`.
 fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
     socket: Result<PathBuf, String>,
     dir: &std::path::Path,
+    colours: Colours,
 ) -> io::Result<Option<String>> {
     // Not a `sync_channel` of a bound: alacritty hands on what the program
     // does with the screen locked, which the loop locks to draw, so that a
@@ -177,7 +181,7 @@ fn run_in(
     // luneta's: none of a session zellij is to make.
     let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
     let (program, args) = zellij::client(session);
-    let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
+    let hosted = Hosted::start(program, args, dir, window(areas.1), colours, events.clone())?;
     let mut sidebar = Sidebar::default();
     if let (Some(session), Some(before)) = (session, before)
         && let Some(look) = sidebar.sending(&session.to_string())
