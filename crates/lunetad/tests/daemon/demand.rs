@@ -176,9 +176,12 @@ fn lunetas_that_start_a_daemon_at_once_reach_the_same_one() {
     let _daemon = Detached { host: &host, pid: pids[0] };
     assert!(pids.iter().all(|pid| *pid == pids[0]), "{pids:?}");
     assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), LUNETAS);
+    // The rest lose in their own time, which can be after their lunetas have
+    // answered from the one that listens.
+    let lost = || log(&host).matches("another lunetad already runs").count();
+    eventually("the other lunetads lose", || (lost() == LUNETAS - 1).then_some(()));
     let log = log(&host);
     assert_eq!(log.matches("lunetad: listening on ").count(), 1, "{log}");
-    assert_eq!(log.matches("another lunetad already runs").count(), LUNETAS - 1, "{log}");
 }
 
 /// A luneta whose lunetad ends as it finds the folder held, as one that
