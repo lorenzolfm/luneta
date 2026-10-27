@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io;
 use std::num::NonZeroU16;
 use std::path::Path;
@@ -20,13 +21,12 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode};
-use alacritty_terminal::tty::{self, ToWinsize as _};
+use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, NamedColor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use rustix::termios::{self, LocalModes, OptionalActions};
-use rustix_openpty::openpty;
+use rustix::termios::{self, LocalModes};
 
 use crate::host::Event;
 
@@ -128,6 +128,9 @@ impl EventListener for Listener {
 pub struct Hosted {
     screen: Arc<FairMutex<Term<Listener>>>,
     pty: EventLoopSender,
+    /// luneta's end of the terminal, which says the modes the program set
+    /// the terminal to.
+    modes: File,
     size: Size,
     /// The listener's, which `draw` clears.
     drew: Arc<AtomicBool>,
@@ -151,15 +154,8 @@ impl Hosted {
             drain_on_exit: true,
             env: HashMap::new(),
         };
-        // A pseudoterminal as alacritty's, but that echoes nothing it is sent.
-        // zellij's client puts back the modes it found as it ends, as where it
-        // gives up as it starts: luneta's answers to what it asked, that come
-        // after, would show on its screen, and in zellij's error.
-        let pty = openpty(None, Some(&WindowSize::from(size).to_winsize()))?;
-        let mut modes = termios::tcgetattr(&pty.user)?;
-        modes.local_modes.remove(LocalModes::ECHO);
-        termios::tcsetattr(&pty.user, OptionalActions::Now, &modes)?;
-        let pty = tty::from_fd(&options, 0, pty.controller, pty.user)?;
+        let pty = tty::new(&options, size.into(), 0)?;
+        let modes = pty.file().try_clone()?;
         let drew = Arc::new(AtomicBool::new(false));
         let listener = Listener { events, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
@@ -179,7 +175,7 @@ impl Hosted {
         let reader = EventLoop::new(Arc::clone(&screen), listener, pty, drain_on_exit, false)?;
         let pty = reader.channel();
         reader.spawn();
-        Ok(Hosted { screen, pty, size, drew })
+        Ok(Hosted { screen, pty, modes, size, drew })
     }
 
     pub fn size(&self) -> Size {
@@ -206,6 +202,21 @@ impl Hosted {
         }
         // The reader is gone with the program, which reads no more.
         let _ = self.pty.send(Msg::Input(bytes));
+    }
+
+    /// Sends the program `bytes`, the answer to what it asked of its
+    /// terminal, unless the terminal echoes. zellij's client asks with its
+    /// terminal echoing nothing, and puts back the modes it found as it ends,
+    /// as where it gives up as it starts: an answer that comes after would
+    /// only show, on its screen and in its error, which luneta says again.
+    /// It can put them back between luneta's look and the answer going in:
+    /// an answer in that moment still shows.
+    pub fn answer(&self, bytes: impl Into<Cow<'static, [u8]>>) {
+        let modes = termios::tcgetattr(&self.modes);
+        if modes.is_ok_and(|modes| modes.local_modes.contains(LocalModes::ECHO)) {
+            return;
+        }
+        self.send(bytes);
     }
 
     /// What the program asked of its terminal: how it wants keys and the
@@ -471,12 +482,11 @@ mod tests {
         assert_eq!(answers, ["\x1b]11;rgb:1e1e/1e1e/2e2e\x07", "\x1b[?6c"]);
     }
 
-    /// The terminal echoes nothing luneta writes to it, even in the modes it
-    /// starts in, which zellij's client puts back as it gives up. luneta's
-    /// answers to what it asked as it started, that come after, would show in
-    /// zellij's error, which luneta says again.
-    #[test]
-    fn what_luneta_writes_is_never_echoed() {
+    /// What `/bin/sh` shows as it ends, run with `stty` first in a terminal
+    /// that starts as luneta's does, once it printed `ready`, then was sent an
+    /// answer to what the terminal is and a line typed. It reads the line,
+    /// and prints it with each escape as an `E`.
+    fn answered(stty: &str) -> String {
         let (events, inbox) = mpsc::channel();
         let size = Size {
             columns: NonZeroU16::new(20).unwrap(),
@@ -484,10 +494,10 @@ mod tests {
             cell_width: 0,
             cell_height: 0,
         };
-        // Reads a line in the modes it found, then prints, so that whatever
-        // was echoed of the line shows before `done`.
-        let program = "printf ready; read -r line; printf done";
-        let args = vec!["-c".to_owned(), program.to_owned()];
+        let program = format!(
+            r#"stty {stty}; printf ready; read -r line; printf '[%s]' "$line" | tr '\033' E"#
+        );
+        let args = vec!["-c".to_owned(), program];
         let hosted =
             Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, events).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -495,14 +505,31 @@ mod tests {
             assert!(Instant::now() < deadline, "the program printed {:?}", hosted.text());
             thread::sleep(Duration::from_millis(10));
         }
-        hosted.send(&b"\x1b[?6c\n"[..]);
+        hosted.answer(&b"\x1b[?6c"[..]);
+        hosted.send(&b"typed\n"[..]);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if let Event::Hosted(Said::Ended) = inbox.recv_timeout(left).unwrap() {
                 break;
             }
         }
-        assert_eq!(hosted.text(), "readydone");
+        hosted.text()
+    }
+
+    /// zellij's client puts back the modes its terminal started in, which
+    /// echo, as it gives up: luneta's answer to what it asked, that comes
+    /// after, is left out, where it would show in zellij's error, which
+    /// luneta says again. What is typed still goes in.
+    #[test]
+    fn an_answer_to_a_terminal_that_echoes_is_left_out() {
+        assert_eq!(answered("echo"), "readytyped\n[typed]");
+    }
+
+    /// zellij's client turns the echo off as it starts, to read the answers
+    /// to what it asks.
+    #[test]
+    fn an_answer_to_a_terminal_that_echoes_nothing_goes_in() {
+        assert_eq!(answered("-echo"), "ready[E[?6ctyped]");
     }
 
     #[test]
