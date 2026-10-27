@@ -644,10 +644,10 @@ impl App {
             return;
         }
         if chord == COLLAPSE {
-            // The strip has no edge nor rows to hold: what the mouse holds of
-            // either is let go, as a release would let it go. A press held on
-            // the rows would keep the mouse from zellij, and the strip never
-            // hears the release.
+            // The strip has no edge to drag nor rows to hold: what the mouse
+            // holds of either is let go, as a release would let it go. A press
+            // held on the rows would keep the mouse from zellij, and the strip
+            // never hears the release.
             self.let_go();
             self.sidebar.let_go();
             let collapsed = matches!(self.focus, Focus::Collapsed);
