@@ -590,8 +590,9 @@ zellij sees them, whichever of the two has the keys:
 - `Alt Tab` goes to the next pane the sidebar lists, across sessions, and from
   the last back to the first. A folded session lists none of its panes, so it
   goes past them.
-- `Ctrl q` hides the sidebar, zellij taking its columns, and brings it back.
-  `Ctrl b` brings it back too, and goes into it.
+- `Ctrl q` collapses the sidebar to a strip four columns wide, zellij taking
+  the rest of its columns, and opens it again, as a click on the strip does.
+  `Ctrl b` opens it too, and goes into it.
 
 Claude Code binds `Ctrl b` to send a task to the background, and neither of
 the other two. zellij's default config binds `Ctrl b` to tmux mode and `Ctrl q`
@@ -722,7 +723,9 @@ folder, as the socket does.
 The rule along the top counts the sessions, the agents and commands that wait
 for you, the panes with a `•`, those at work, and the agents in `shell`, as
 `$2`, dimmed as their `$` is, a folded session's too. A count of none is left
-out. The plugin's rule does not count the agents in `shell`.
+out. The plugin's rule does not count the agents in `shell`. Collapsed, the
+sidebar keeps three of those counts, one to a line under a short rule: the
+panes with a `•`, those at work, and the agents in `shell`.
 
 A fold is the same in every luneta on the host, and lasts until you unfold it:
 each folded session is an empty file named for it in

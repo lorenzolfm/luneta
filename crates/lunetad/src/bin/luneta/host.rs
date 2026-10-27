@@ -1,8 +1,9 @@
 //! luneta's own terminal: the sidebar on the left, zellij on the right, and
 //! which of the two has the keys. `Ctrl b` hands them from one to the other,
-//! and a click hands them to the one clicked. `Ctrl q` hides the sidebar,
-//! zellij taking its columns, and brings it back, and `Alt Tab` takes zellij
-//! to the next pane the sidebar lists, whichever has the keys.
+//! and a click hands them to the one clicked. `Ctrl q` collapses the sidebar
+//! to what it counts, zellij taking the rest of its columns, and opens it
+//! again, as a click on it does, and `Alt Tab` takes zellij to the next pane
+//! the sidebar lists, whichever has the keys.
 
 use std::collections::VecDeque;
 use std::env;
@@ -99,22 +100,22 @@ const WAITING_LOOK: Duration = Duration::from_millis(50);
 /// The key that hands the keys from zellij to the sidebar, and back.
 const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
 
-/// The key that hides the sidebar, and brings it back.
-const HIDE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
+/// The key that collapses the sidebar, and opens it again.
+const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
 
 /// The key that takes zellij to the pane the sidebar lists after the one it
 /// is on.
 const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
 
-/// Which side has the keys, and whether the sidebar shows.
+/// Which side has the keys, and whether the sidebar is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     /// zellij, beside the sidebar.
     Zellij,
     Sidebar,
-    /// zellij, with the sidebar's columns too: the sidebar is hidden, and
-    /// takes the keys only once it shows again.
-    Hidden,
+    /// zellij, beside the sidebar collapsed, with the rest of its columns:
+    /// the sidebar takes the keys only once it opens again.
+    Collapsed,
 }
 
 impl Focus {
@@ -436,10 +437,11 @@ fn run_loop(
 }
 
 /// The columns the sidebar takes of the terminal, and those left for zellij:
-/// the sidebar's own, or half the terminal's, where that is narrower, and
-/// none while it is `hidden`.
-fn areas(frame: Rect, hidden: bool) -> (Rect, Rect) {
-    let sidebar = if hidden { 0 } else { sidebar::COLUMNS.min(frame.width / 2) };
+/// the sidebar's own, open or `collapsed`, or half the terminal's, where that
+/// is narrower.
+fn areas(frame: Rect, collapsed: bool) -> (Rect, Rect) {
+    let own = if collapsed { sidebar::COLLAPSED } else { sidebar::COLUMNS };
+    let sidebar = own.min(frame.width / 2);
     let left = Rect::new(frame.x, frame.y, sidebar, frame.height);
     let right = Rect::new(frame.x + sidebar, frame.y, frame.width - sidebar, frame.height);
     (left, right)
@@ -546,13 +548,14 @@ impl App {
         }
         let chord = (key.code, key.modifiers);
         if chord == SWAP {
-            // A hidden sidebar comes back to take the keys.
+            // A collapsed sidebar opens to take the keys.
             let other = if self.focus.zellij() { Focus::Sidebar } else { Focus::Zellij };
             self.give(other);
             return;
         }
-        if chord == HIDE {
-            let other = if self.focus == Focus::Hidden { Focus::Zellij } else { Focus::Hidden };
+        if chord == COLLAPSE {
+            let other =
+                if self.focus == Focus::Collapsed { Focus::Zellij } else { Focus::Collapsed };
             self.give(other);
             return;
         }
@@ -586,6 +589,13 @@ impl App {
             let row = mouse.row.saturating_sub(zellij.y);
             if let Some(bytes) = keys::mouse(mouse, column, row, self.client.hosted.mode()) {
                 self.client.hosted.send(bytes);
+            }
+            return;
+        }
+        // A click on the sidebar collapsed opens it, as `COLLAPSE` does.
+        if self.focus == Focus::Collapsed {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.give(Focus::Zellij);
             }
             return;
         }
@@ -830,15 +840,17 @@ impl App {
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let now = SystemTime::now();
         terminal.draw(|frame| {
-            let hidden = self.focus == Focus::Hidden;
-            let (sidebar, zellij) = areas(frame.area(), hidden);
+            let collapsed = self.focus == Focus::Collapsed;
+            let (sidebar, zellij) = areas(frame.area(), collapsed);
             self.areas = (sidebar, zellij);
             let size = self.client.hosted.size();
             if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
                 self.client.hosted.resize(window(zellij));
             }
             let buffer = frame.buffer_mut();
-            if !hidden {
+            if collapsed {
+                self.sidebar.draw_collapsed(buffer, sidebar, now);
+            } else {
                 self.sidebar.draw(buffer, sidebar, now);
             }
             let cursor = self.client.hosted.draw(buffer, zellij);
