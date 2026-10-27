@@ -1,9 +1,11 @@
 //! What luneta's daemon and its zellij plugin both read: the protocol the
 //! daemon answers in, as `proto/luneta/v1` defines it, and what `git status`
 //! says of a work tree, which the daemon asks git, and the plugin too while
-//! the daemon does not answer.
+//! the daemon does not answer. The pull request gh finds of a branch is here
+//! too, which only the daemon asks gh.
 
 pub mod git;
+pub mod github;
 pub mod said;
 pub mod tab;
 

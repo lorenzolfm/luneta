@@ -7,12 +7,13 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use clap::Subcommand;
+use luneta_protocol::github::{self, State};
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, Status, Version, WatchRequest, WorkTree,
+    Agent, InfoRequest, ListAgentsRequest, PullRequest, Status, Version, WatchRequest, WorkTree,
 };
 use lunetad::folder::SOCKET;
 use prost::Message as _;
@@ -142,9 +143,9 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
 }
 
 /// A session to a line, with its panes under it, each by its tab and its id:
-/// where it works, then what is checked out there and what changed on it. A
-/// pane zellij says no directory of has `-` for one, and a directory git has
-/// said nothing of yet has nothing after it.
+/// where it works, then what is checked out there and what changed on it, and
+/// the pull request of its branch. A pane zellij says no directory of has `-`
+/// for one, and a directory git has said nothing of yet has nothing after it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let mut host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
     host.sessions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -165,7 +166,12 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
                 continue;
             };
             let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
-            println!("  {at}  {cwd}  {stands}");
+            let pull_request = host.pull_requests.iter().find(|it| it.dir == cwd);
+            let pulled = pull_request.map(|it| {
+                format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
+            });
+            let pulled = pulled.unwrap_or_default();
+            println!("  {at}  {cwd}  {stands}{pulled}");
         }
     }
     Ok(())
@@ -206,6 +212,19 @@ fn stands(tree: &WorkTree) -> Option<String> {
         said.extend((behind > 0).then(|| format!("{behind} behind")));
     }
     Some(said.join(", "))
+}
+
+/// A pull request, in words: its number and its state. None for one that
+/// does not read, as a newer daemon's could send.
+fn pulled(pull_request: &PullRequest) -> Option<String> {
+    let github::PullRequest { number, state } = github::PullRequest::of_api(pull_request)?;
+    let state = match state {
+        State::Open => "open",
+        State::Draft => "draft",
+        State::Merged => "merged",
+        State::Closed => "closed",
+    };
+    Some(format!("#{number} {state}"))
 }
 
 /// Writes out the host once it is no longer as `after` saw it.

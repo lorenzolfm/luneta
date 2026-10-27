@@ -39,18 +39,24 @@ const REPOSITORY_VARS: [&str; 6] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ];
 
+/// Has `command`, which runs git, or a program that does, find the repository
+/// by the directory it runs in. The variables that would have it read some
+/// other repository, as a git hook that started the daemon would pass them
+/// on, are left out.
+pub fn local(command: &mut Command) -> &mut Command {
+    for repository in REPOSITORY_VARS {
+        command.env_remove(repository);
+    }
+    command
+}
+
 /// What git says of the work tree in `dir`: how it stands, or that `dir` is
 /// outside one, where git fails. When git did not say, as it did not answer
 /// in time, what is to be said of it instead.
 fn status(dir: &str) -> Result<WorkTree, String> {
     let [program, args @ ..] = git::command(dir);
     let mut git = Command::new(program);
-    git.args(args);
-    // These would have git read some other repository than the one at `dir`,
-    // as a git hook that started the daemon would pass them on.
-    for repository in REPOSITORY_VARS {
-        git.env_remove(repository);
-    }
+    local(git.args(args));
     let ran = program::run(&mut git, LIMIT)
         .map_err(|error| format!("git status in {dir} could not be run: {error}"))?;
     match ran {
@@ -63,6 +69,31 @@ fn status(dir: &str) -> Result<WorkTree, String> {
         Ran::Ended { .. } => Ok(WorkTree::Outside),
         Ran::Stuck => Err(format!("git status in {dir} did not answer in time")),
     }
+}
+
+/// The repository the work tree in `dir` is of, by its common directory,
+/// which every work tree of a repository shares. None where git does not say
+/// one, as of a directory in no repository. `safe.bareRepository` is explicit
+/// as it is for `git status`, so that git finds the repository `status` does.
+pub fn repository(dir: &str) -> Option<String> {
+    let mut git = Command::new("git");
+    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
+    let common = String::from_utf8(said).ok()?;
+    Some(common.strip_suffix('\n')?.to_owned()).filter(|common| !common.is_empty())
+}
+
+/// The branch checked out in `dir` now, named as `git status` names it: its
+/// ref without `refs/heads/`, which `--short` would keep a part of for a name
+/// a tag has too. None for a detached `HEAD`, or where git does not say.
+pub fn branch(dir: &str) -> Option<String> {
+    let mut git = Command::new("git");
+    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
+        .args(["symbolic-ref", "--quiet", "HEAD"]);
+    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
+    let head = String::from_utf8(said).ok()?;
+    Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
 }
 
 /// Where git stands with a directory it has been asked about.

@@ -1,5 +1,6 @@
 //! Another program the daemon asks something of: zellij what panes a session
-//! has, git how a work tree stands; or that luneta does: lunetad its version.
+//! has, git how a work tree stands, gh what pull request a branch has; or that
+//! luneta does: lunetad its version.
 //! Each answers on its stdout, and has a time to answer in: one that takes
 //! longer is stuck, and is killed.
 

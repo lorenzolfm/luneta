@@ -9,12 +9,13 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
 
-use luneta_protocol::git::WorkTree;
+use luneta_protocol::git::{Head, WorkTree};
 use tokio::sync::oneshot;
 
 use crate::api;
 use crate::claude::Scan;
 use crate::clients::Client;
+use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
@@ -30,6 +31,9 @@ pub enum Command {
     Clients { session: Id, name: String, clients: Vec<Client> },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
+    /// The pull request gh found last of the branch in each directory, by
+    /// the directory.
+    PullRequests(BTreeMap<String, Found>),
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
     /// Asks for the sessions zellij can be asked about, and the name to ask
@@ -37,6 +41,9 @@ pub enum Command {
     Sessions(oneshot::Sender<Vec<(Id, String)>>),
     /// Asks for the directories the panes work in, for git to be asked about.
     Dirs(oneshot::Sender<BTreeSet<String>>),
+    /// Asks for the branch checked out in each directory a pane works in, by
+    /// the directory, where git has said one is, for gh to be asked about.
+    Branches(oneshot::Sender<BTreeMap<String, String>>),
     /// Asks for every agent, as the API gives it.
     List(oneshot::Sender<api::ListAgentsResponse>),
     /// Asks for the host once it is no longer as `after` saw it: at once if it
@@ -53,6 +60,9 @@ pub struct Wakes {
     /// The thread that asks git about work trees, as a pane works in a
     /// directory it has not asked about.
     pub git: SyncSender<()>,
+    /// The thread that asks gh about pull requests, as a branch is checked
+    /// out where a pane works that was not before.
+    pub github: SyncSender<()>,
 }
 
 /// The most commands that wait for the core. A watcher has one waiting at a
@@ -92,6 +102,8 @@ struct Known {
     clients: HashMap<Id, Vec<Client>>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
+    /// What gh last found of the branch in each directory a pane works in.
+    pull_requests: BTreeMap<String, Found>,
     /// What the shells with the hook last said, each in the session it
     /// started in.
     shells: Vec<Shell>,
@@ -110,6 +122,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         panes: HashMap::new(),
         clients: HashMap::new(),
         trees: BTreeMap::new(),
+        pull_requests: BTreeMap::new(),
         shells: Vec::new(),
         host: api::Host::default(),
         seq: 0,
@@ -152,8 +165,13 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if !known.dirs().contains(&dir) {
                     continue;
                 }
-                known.trees.insert(dir, tree);
+                let before = known.branch(&dir).map(str::to_owned);
+                known.trees.insert(dir.clone(), tree);
+                if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
+                    wake(&wakes.github);
+                }
             },
+            Command::PullRequests(now) => known.pull_requests = now,
             Command::Shells(now) => known.shells = now,
             Command::Sessions(answer) => {
                 // One who stopped waiting has no use for the answer.
@@ -162,6 +180,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Dirs(answer) => {
                 let _ = answer.send(known.dirs());
+                continue;
+            },
+            Command::Branches(answer) => {
+                let _ = answer.send(known.branches());
                 continue;
             },
             Command::List(answer) => {
@@ -234,10 +256,25 @@ impl Known {
         cwds.map(|cwd| cwd.as_str().to_owned()).collect()
     }
 
-    /// Lets go of what git said of a directory no pane works in now.
+    /// Lets go of what git and gh said of a directory no pane works in now.
     fn forget_dirs(&mut self) {
         let dirs = self.dirs();
         self.trees.retain(|dir, _| dirs.contains(dir));
+        self.pull_requests.retain(|dir, _| dirs.contains(dir));
+    }
+
+    /// The branch checked out in `dir`, where git has said one is.
+    fn branch(&self, dir: &str) -> Option<&str> {
+        match self.trees.get(dir)? {
+            WorkTree::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
+            WorkTree::Checkout { head: Head::Detached, .. } | WorkTree::Outside => None,
+        }
+    }
+
+    /// The branch checked out in each directory, where git has said one is.
+    fn branches(&self) -> BTreeMap<String, String> {
+        let branch = |dir: &String| Some((dir.clone(), self.branch(dir)?.to_owned()));
+        self.trees.keys().filter_map(branch).collect()
     }
 
     fn agents(&self) -> Vec<api::Agent> {
@@ -307,12 +344,22 @@ impl Known {
             .collect();
         let mut agents = self.agents();
         agents.sort_by_key(|agent| agent.pid);
+        // What gh found of a branch that is no longer checked out where it
+        // was asked about is not that directory's, until gh has said of the
+        // one that is.
+        let pull_requests = self
+            .pull_requests
+            .iter()
+            .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
+            .map(|(dir, found)| found.pull_request.to_api(dir))
+            .collect();
         api::Host {
             version: None,
             sessions,
             work_trees: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
             agents,
             unread: self.found.unread,
+            pull_requests,
         }
     }
 

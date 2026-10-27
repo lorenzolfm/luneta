@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
+use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::shell::Doing;
@@ -294,10 +295,21 @@ enum Row {
         /// The icon of what runs in it, if that has one.
         icon: Option<&'static str>,
         label: String,
-        /// The branch checked out where it works, and how its work tree
-        /// stands, as starship shows it.
-        checkout: Option<(String, String)>,
+        /// The branch checked out where it works, if one is.
+        checkout: Option<Checkout>,
     },
+}
+
+/// The branch checked out where a pane works, as its row shows it under its
+/// label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Checkout {
+    branch: String,
+    /// How its work tree stands, as starship shows it.
+    status: String,
+    /// The number of its pull request, and the colour of its state, if it
+    /// has one to show.
+    pull_request: Option<(u32, Color)>,
 }
 
 impl Row {
@@ -682,6 +694,11 @@ impl Sidebar {
         let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
+        let pull_requests: HashMap<&str, PullRequest> = host
+            .pull_requests
+            .iter()
+            .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
+            .collect();
         let (sessions, unlisted) = oldest_first(&host.sessions);
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
@@ -742,10 +759,10 @@ impl Sidebar {
             let mut shown: Vec<(Row, Option<Fit>)> = Vec::new();
             for (pane, marked) in listing.into_iter().zip(marked) {
                 let cwd = pane.cwd.as_deref();
-                let checkout = cwd
-                    .and_then(|cwd| trees.get(cwd))
-                    .and_then(|tree| WorkTree::of_api(tree))
-                    .and_then(|tree| checkout(&tree));
+                let checkout = cwd.and_then(|cwd| {
+                    let tree = WorkTree::of_api(trees.get(cwd)?)?;
+                    checkout(&tree, pull_requests.get(cwd).copied())
+                });
                 let command = pane.command.as_deref();
                 // An agent's pane runs Claude Code, whatever its terminal has
                 // in front. It goes by the agent, as the label does, and not
@@ -760,7 +777,7 @@ impl Sidebar {
                     Some(ran) => ran.to_owned(),
                     None => label(agent(pane.id), pane),
                 };
-                let branch = checkout.as_ref().map(|(branch, _)| branch.as_str());
+                let branch = checkout.as_ref().map(|checkout| checkout.branch.as_str());
                 let found = finder.as_ref().and_then(|finder| finder.pane(&label, branch, pane));
                 if finder.is_some() && found.is_none() && named.is_none() {
                     continue;
@@ -1619,14 +1636,32 @@ impl Finder<'_> {
     }
 }
 
-/// The branch checked out in a work tree, and how the tree stands, or none
-/// for a detached `HEAD` or a directory in no repository.
-fn checkout(tree: &WorkTree) -> Option<(String, String)> {
+/// The branch checked out in a work tree, how the tree stands, and its
+/// `pull_request`, or none for a detached `HEAD` or a directory in no
+/// repository.
+fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes } = tree
     else {
         return None;
     };
-    Some((name.as_str().to_owned(), glyphs(changes, *stashes, *upstream)))
+    Some(Checkout {
+        branch: name.as_str().to_owned(),
+        status: glyphs(changes, *stashes, *upstream),
+        pull_request: pull_request.and_then(numbered),
+    })
+}
+
+/// The number of a pull request and the colour of its state, which gh lists
+/// it in: green while it is open, grey while it is a draft, and magenta once
+/// it is merged. A closed one is none.
+fn numbered(pull_request: PullRequest) -> Option<(u32, Color)> {
+    let colour = match pull_request.state {
+        State::Open => Color::Green,
+        State::Draft => Color::DarkGray,
+        State::Merged => Color::Magenta,
+        State::Closed => return None,
+    };
+    Some((pull_request.number.get(), colour))
 }
 
 /// The glyph of each kind of change there is, then the one for where the
@@ -1736,8 +1771,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
-            if let Some((branch, status)) = checkout {
-                lines.push(checkout_line(*here, branch, status, width));
+            if let Some(checkout) = checkout {
+                lines.push(checkout_line(*here, checkout, width));
             }
             lines
         },
@@ -1769,19 +1804,30 @@ fn margin(here: bool) -> Span<'static> {
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
-/// works, under its label, and how its work tree stands. The mark of the pane
-/// luneta's zellij is on, `here`, runs down it too.
-fn checkout_line(here: bool, branch: &str, status: &str, width: usize) -> Line<'static> {
+/// works, under its label, then the number of its pull request, and how its
+/// work tree stands. The branch is cut to leave the other two whole. The mark
+/// of the pane luneta's zellij is on, `here`, runs down it too.
+fn checkout_line(here: bool, checkout: &Checkout, width: usize) -> Line<'static> {
+    let status = &checkout.status;
+    let number = checkout.pull_request.map(|(number, colour)| {
+        Span::styled(format!("#{number}"), Style::new().fg(colour))
+    });
+    let held = number.as_ref().map_or(0, |number| number.content.width() + 1);
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-    let branch = cut(branch, width.saturating_sub(LABEL + reserve + 1));
-    let gap = width.saturating_sub(LABEL + branch.width() + status.width() + 1);
-    Line::from(vec![
+    let branch = cut(&checkout.branch, width.saturating_sub(LABEL + held + reserve + 1));
+    let gap = width.saturating_sub(LABEL + branch.width() + held + status.width() + 1);
+    let mut spans = vec![
         margin(here),
         Span::raw(" ".repeat(LABEL - 1)),
         Span::styled(branch, Style::new().fg(Color::DarkGray)),
-        Span::raw(" ".repeat(gap)),
-        Span::raw(status.to_owned()),
-    ])
+    ];
+    if let Some(number) = number {
+        spans.push(Span::raw(" "));
+        spans.push(number);
+    }
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::raw(status.clone()));
+    Line::from(spans)
 }
 
 /// `text` cut to `room` columns, with a `…` for what it took.
@@ -1846,6 +1892,8 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use luneta_protocol::said::Said;
     use lunetad::api::shell::{Ended, Going, Stopped};
     use lunetad::api::{self, Clients, Pane, Panes, Version, Zellij};
@@ -1906,6 +1954,7 @@ mod tests {
             work_trees: Vec::new(),
             agents,
             unread: 0,
+            pull_requests: Vec::new(),
         }
     }
 
@@ -2623,6 +2672,53 @@ mod tests {
         assert_eq!(glyphs(&changes, 1, both), "=$✘»!+?⇕");
         assert_eq!(glyphs(&Changes::default(), 0, Some(Upstream { ahead: 0, behind: 2 })), "⇣");
         assert_eq!(glyphs(&Changes::default(), 0, None), "");
+    }
+
+    /// A branch's pull request follows it, in the colour gh lists its state
+    /// in, and a branch too long for both gives way to the number and to how
+    /// the work tree stands. A closed one shows nothing.
+    #[test]
+    fn a_branch_shows_the_number_of_its_pull_request_in_its_state_s_colour() {
+        let panes = ["/w/a", "/w/b", "/w/c", "/w/d"];
+        let panes = panes.iter().zip(1..).map(|(cwd, id)| pane(id, 0, cwd, "fish")).collect();
+        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        let checkouts = [
+            ("/w/a", "main", 0, 126, State::Open),
+            ("/w/b", "handoff-eng-11259-and-more", 1, 4321, State::Merged),
+            ("/w/c", "fold", 0, 7, State::Draft),
+            ("/w/d", "old", 0, 9, State::Closed),
+        ];
+        for (dir, branch, modified, number, state) in checkouts {
+            let name = Said::new(branch.to_owned()).expect("a branch's name");
+            let head = Head::Branch { name, upstream: None };
+            let changes = Changes { modified, ..Changes::default() };
+            host.work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
+            let number = NonZeroU32::new(number).expect("a pull request's number");
+            host.pull_requests.push(PullRequest { number, state }.to_api(dir));
+        }
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host);
+
+        let buffer = drawn(&mut sidebar, false, 32, 12);
+        let line = |y: u16| {
+            let line: String = (0..32).map(|x| buffer[(x, y)].symbol()).collect();
+            line.trim_end().to_owned()
+        };
+        let number = |y: u16| (0..32).find(|x| buffer[(*x, y)].symbol() == "#");
+        let colour = |y: u16| number(y).map(|x| buffer[(x, y)].fg);
+        let branches: Vec<String> = [4, 6, 8, 10].into_iter().map(line).collect();
+        assert_eq!(
+            branches,
+            [
+                "       main #126",
+                "       handoff-eng-11… #4321 !",
+                "       fold #7",
+                "       old",
+            ]
+        );
+        assert_eq!(colour(4), Some(Color::Green));
+        assert_eq!(colour(6), Some(Color::Magenta));
+        assert_eq!(colour(8), Some(Color::DarkGray));
     }
 
     #[test]
