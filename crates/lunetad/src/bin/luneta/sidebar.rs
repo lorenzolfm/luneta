@@ -2287,11 +2287,28 @@ mod tests {
         sidebar.focus(focused);
         sidebar.draw(&mut buffer, area, now);
         let lit = if focused { LIT } else { RESTING };
+        in_gruvbox(&buffer, &[Color::Reset, lit]);
+        buffer
+    }
+
+    /// The sidebar collapsed, `height` tall, as it is drawn at `now`. Each
+    /// cell is in gruvbox's colours, on the terminal's background.
+    fn collapsed(sidebar: &mut Sidebar, height: u16, now: SystemTime) -> Buffer {
+        let area = Rect::new(0, 0, COLLAPSED, height);
+        let mut buffer = Buffer::empty(area);
+        sidebar.draw_collapsed(&mut buffer, area, now);
+        in_gruvbox(&buffer, &[Color::Reset]);
+        buffer
+    }
+
+    /// Holds each cell of `buffer` to gruvbox's colours, on one of
+    /// `backgrounds`: a colour named at a call site, as `Color::Red`, or a
+    /// line drawn without `fg1`, would be the terminal's.
+    fn in_gruvbox(buffer: &Buffer, backgrounds: &[Color]) {
         for cell in buffer.content() {
             assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
-            assert!([Color::Reset, lit].contains(&cell.bg), "{:?} on {:?}", cell.symbol(), cell.bg);
+            assert!(backgrounds.contains(&cell.bg), "{:?} on {:?}", cell.symbol(), cell.bg);
         }
-        buffer
     }
 
     /// The sidebar `width` columns wide and `height` tall, as text.
@@ -2416,11 +2433,9 @@ mod tests {
         agents.extend((3..=103).map(|id| agent("s", id, Status::Shell, None)));
         sidebar.heard(host(vec![session("s", 10, panes)], agents));
         let strip = |sidebar: &mut Sidebar, now| {
-            let area = Rect::new(0, 0, COLLAPSED, 6);
-            let mut buffer = Buffer::empty(area);
-            sidebar.draw_collapsed(&mut buffer, area, now);
-            let line = |y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-            (0..area.height).map(|y| line(y).trim_end().to_owned()).collect::<Vec<_>>()
+            let buffer = collapsed(sidebar, 6, now);
+            let line = |y| (0..COLLAPSED).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            (0..6).map(|y| line(y).trim_end().to_owned()).collect::<Vec<_>>()
         };
         assert_eq!(strip(&mut sidebar, moment(160_500)), ["───", "", "•1", "$1…", "", ""]);
         assert_eq!(strip(&mut sidebar, moment(161_000)), ["───", "", "•1", "⠋1", "$1…", ""]);
@@ -2437,12 +2452,7 @@ mod tests {
             let cell = &buffer[(x, y)];
             (cell.fg, cell.modifier.contains(Modifier::DIM))
         };
-        let rule = |sidebar: &mut Sidebar| {
-            let area = Rect::new(0, 0, COLLAPSED, 3);
-            let mut buffer = Buffer::empty(area);
-            sidebar.draw_collapsed(&mut buffer, area, moment(160_000));
-            look(&buffer, 0, 0)
-        };
+        let rule = |sidebar: &mut Sidebar| look(&collapsed(sidebar, 3, moment(160_000)), 0, 0);
         let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 0);
         assert_eq!(rule(&mut sidebar), open);
         sidebar.lost("gone".to_owned());
