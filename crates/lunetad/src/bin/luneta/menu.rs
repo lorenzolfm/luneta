@@ -1131,6 +1131,10 @@ mod tests {
             ["─ Skills ──────── luneta/main ─", " /_", " finding skills…"]
         );
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
+        // The one the cursor is on is lit, as the sidebar's row is while it
+        // has the focus, which it has while the search is open.
+        let lit: Vec<_> = menu.lines(31, 6)[2..4].iter().map(|line| line.style.bg).collect();
+        assert_eq!(lit, [Some(LIT), None]);
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
         assert_eq!(text(&menu.lines(31, 6))[..3], [
