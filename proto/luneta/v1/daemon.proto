@@ -59,8 +59,8 @@ message Host {
 // A zellij session that runs: its server listens on a socket named for it.
 message Session {
   string name = 1;
-  // When its server started. Always there: a client tells two sessions of one
-  // name apart by it.
+  // When its server started: when it made its socket, which a rename keeps.
+  // Always there.
   google.protobuf.Timestamp started_at = 2;
   // Its panes, as zellij last listed them. Absent until zellij has, and while
   // another session runs under its name: zellij is asked for them by name, and
@@ -68,6 +68,11 @@ message Session {
   Panes panes = 3;
   // Its clients, as zellij last listed them. Absent as `panes` is.
   Clients clients = 4;
+  // The inode of its socket, which a rename keeps too. With `started_at` it
+  // tells every session from every other: two servers can make their sockets
+  // in one tick of the clock that dates them, and a socket made later can
+  // take the inode of one gone, but not both. Never 0.
+  uint64 socket = 5;
 }
 
 message Panes {

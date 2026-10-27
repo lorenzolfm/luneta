@@ -591,7 +591,8 @@ it, all as [`lunetad`](#building-from-source) says: luneta starts the daemon
 when none runs, and the sidebar says so at its bottom while it does not
 answer. `j` and `k` move,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
-too, and `Esc` goes back to zellij. The session zellij is in has its rule in
+too, `u` marks a pane unread, and `Esc` goes back to zellij. The session
+zellij is in has its rule in
 the accent, and `▌` marks the pane it is on. The highlight rests there while
 the sidebar does not have the focus; once it has, the highlight goes with the
 keys, and comes back as the sidebar gives the focus back. A move you make in
@@ -614,6 +615,7 @@ no menu is open, its bottom lists what you can press there:
 ```text
 ─ luneta ──────────────────────
  /  Search
+ u  Unread
  n  New ▸
  d  Delete ▸
 ```
@@ -664,8 +666,8 @@ its row named for the command and its age counting up. A program that takes
 the terminal over, as an editor does, and a job stopped with `Ctrl z` have
 none, and nor does a command that ends within a second. lunetad reads what
 the hook writes, and the terminal of each command that runs. A command that
-ended keeps its mark until the shell runs another: the `•` of what you have
-yet to see has not come over yet. A shell without the hook has no marks
+ended keeps its mark until you have seen it, as the next paragraph says, and
+its row is then the plain row it was. A shell without the hook has no marks
 here, where the plugin's sidebar read its title.
 
 Under a pane's row is the branch checked out where it works, as in the
@@ -680,10 +682,30 @@ however many panes are on it, as a pane comes to the branch and then every
 minute: each ask counts against GitHub's hourly limit, which every other `gh`
 you run shares. A pull request opened or merged shows within a minute.
 
+A `•` before a pane's mark says that something finished there since you were
+last in it, as in the plugin's sidebar: an agent, its `✓` in green, or a
+command, after its `✓`, `✗` or `$`. You were in a pane once luneta's zellij
+stayed on it a second while luneta's window had the focus. So one you only
+pass through keeps its `•`, and so does one luneta's zellij is on in a window
+you are not using, and the pane it is on has none, as you see it. Once you
+have been there, the agent keeps its `✓`, dimmed. `u` marks the highlighted
+pane unread, as an email is: its row gets the `•` whatever finished there,
+and keeps it until you go to the pane again and stay a second. On the pane
+you are in, that is once you leave it, or luneta's window, and come back. `u`
+again takes the mark away. A folded session shows the `•` when any of its
+panes has one, unless one waits for you. Each luneta sees you only on the
+pane its own zellij is on, and every luneta on the host shares what they saw
+and marked: a file for each pane in `$XDG_STATE_HOME/luneta/seen` and
+`$XDG_STATE_HOME/luneta/unread`, or under `~/.local/state/luneta`, which every
+luneta watches. A pane's file keeps to the session's socket, by when it was
+made and its inode, so a session renamed keeps them, and one started again
+under its name has none. They go once the daemon has not listed the session
+for ten seconds.
+
 The rule along the top counts the sessions, the agents and commands that wait
-for you, those at work, and the agents in `shell`, as `$2`, dimmed as their
-`$` is, a folded session's too. A count of none is left out. The plugin's rule
-does not count the agents in `shell`.
+for you, the panes with a `•`, those at work, and the agents in `shell`, as
+`$2`, dimmed as their `$` is, a folded session's too. A count of none is left
+out. The plugin's rule does not count the agents in `shell`.
 
 A fold is the same in every luneta on the host, and lasts until you unfold it:
 each folded session is an empty file named for it in
@@ -692,12 +714,12 @@ luneta watches. A fold keeps to the session's name, so a session started again
 under it comes back folded.
 
 It is the first step, and the plugin's sidebar has more than this one does
-yet: your groups in its menu, the brief and the `•` of what finished come over
-one at a time. Until then, run luneta without the plugin's sidebar, or the two
-stand side by side: leave the dock out of `load_plugins`, and `default_layout`
-back at zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The
-picker, the floating menu and the brief are the plugin's still, and work in the
-zellij luneta runs as in any other.
+yet: your groups in its menu and the brief come over one at a time. Until
+then, run luneta without the plugin's sidebar, or the two stand side by side:
+leave the dock out of `load_plugins`, and `default_layout` back at zellij's
+own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker, the
+floating menu and the brief are the plugin's still, and work in the zellij
+luneta runs as in any other.
 
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not

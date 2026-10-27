@@ -35,6 +35,7 @@ use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
+use crate::news::{self, News};
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::skills::{self, Skill};
@@ -71,6 +72,9 @@ pub enum Event {
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
+    /// Something was kept of what you saw or marked unread: by another
+    /// luneta, or by this one.
+    News,
 }
 
 /// How often the sidebar is drawn again with nothing else to draw it: every
@@ -176,7 +180,8 @@ struct App {
     /// Where the sidebar and zellij were last drawn, which the mouse goes by.
     areas: (Rect, Rect),
     focus: Focus,
-    /// Whether the window luneta's terminal is in has the focus.
+    /// Whether the window luneta's terminal is in has the focus. The sidebar
+    /// sees you in a pane only while it does.
     focused: bool,
     /// Whether a button went down over zellij and is still held: what it
     /// drags goes to zellij, wherever the mouse goes.
@@ -190,9 +195,9 @@ struct App {
     /// in, when zellij is told.
     turned: Option<Theme>,
     events: Sender<Event>,
-    /// What watches the folder the folds are kept in, for as long as luneta
-    /// runs.
-    _watching: Option<notify::RecommendedWatcher>,
+    /// What watches the folders the folds and the news are kept in, for as
+    /// long as luneta runs.
+    _watching: Vec<notify::RecommendedWatcher>,
     /// How zellij ended, once its terminal says.
     exited: Option<ExitStatus>,
     ended: bool,
@@ -316,13 +321,21 @@ fn run_in(
     let (program, args) = zellij::client(session);
     let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
     let folds = Folds::shared();
-    let watching = folds.dir().map(|dir| folds::watch(dir, events.clone())).transpose();
-    let mut sidebar = Sidebar::new(folds);
-    let watching = watching.unwrap_or_else(|error| {
-        let unwatched = format!("folds made elsewhere show from luneta's next start: {error}");
-        sidebar.notify(unwatched);
-        None
-    });
+    let news = News::shared();
+    let folds_watched = folds.dir().map(|dir| folds::watch(dir, events.clone())).transpose();
+    let news_watched = news::watch(&news, events.clone());
+    let mut sidebar = Sidebar::new(folds, news);
+    let mut watching = Vec::new();
+    match folds_watched {
+        Ok(watcher) => watching.extend(watcher),
+        Err(error) => sidebar
+            .notify(format!("folds made elsewhere show from luneta's next start: {error}")),
+    }
+    match news_watched {
+        Ok(watcher) => watching.push(watcher),
+        Err(error) => sidebar
+            .notify(format!("dots of other lunetas show from luneta's next start: {error}")),
+    }
     if let (Some(session), Some(before)) = (session, before)
         && let Some(look) = sidebar.sending(&session.to_string())
     {
@@ -337,6 +350,8 @@ fn run_in(
         sidebar,
         areas,
         focus: Focus::Zellij,
+        // Until the terminal says otherwise. One that never tells a program
+        // of its window's focus has you in it all along.
         focused: true,
         dragging: false,
         cursor: None,
@@ -386,7 +401,7 @@ fn run_loop(
             return Ok(());
         }
         app.wait_on(Instant::now());
-        app.sidebar.ticked();
+        app.sidebar.ticked(SystemTime::now(), app.focused);
         app.draw(terminal)?;
     }
 }
@@ -447,6 +462,7 @@ impl App {
                 self.follow(asked);
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
+            Event::News => self.sidebar.reread(),
         }
         Ok(())
     }
@@ -507,7 +523,7 @@ impl App {
                 self.hosted.send(bytes);
             }
         } else {
-            let asked = self.sidebar.key(key);
+            let asked = self.sidebar.key(key, SystemTime::now());
             self.follow(asked);
         }
     }

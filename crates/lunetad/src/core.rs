@@ -331,6 +331,7 @@ impl Known {
             .map(|(id, name)| api::Session {
                 name: name.to_owned(),
                 started_at: Some(id.started().into()),
+                socket: id.socket(),
                 panes: self.panes.get(&id).map(|panes| api::Panes {
                     panes: panes
                         .iter()

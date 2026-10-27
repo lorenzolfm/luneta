@@ -11,10 +11,13 @@ mod hosted;
 mod icons;
 mod input;
 mod keys;
+mod ledger;
 mod menu;
+mod news;
 mod own;
 mod sidebar;
 mod skills;
+mod state;
 mod watch;
 mod zellij;
 

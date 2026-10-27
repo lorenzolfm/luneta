@@ -1,10 +1,12 @@
 //! The sidebar: every session on the host, the panes in each, and what the
 //! agent in each pane is doing, or the command its shell runs, as the daemon
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
-//! `▌` marks the pane it is on. The menu opens at its bottom, for the row
-//! highlighted.
+//! `▌` marks the pane it is on. `•` dots a pane where something finished since
+//! you were last there, and one you marked unread. The menu opens at its
+//! bottom, for the row highlighted.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -26,7 +28,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject};
 use crate::folds::Folds;
 use crate::icons;
+use crate::ledger::{self, Key};
 use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
+use crate::news::News;
 use crate::own::{Look, Looked, OwnClient};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
@@ -37,6 +41,10 @@ pub const COLUMNS: u16 = 32;
 /// What marks the pane luneta's zellij is on, in its first column, whether
 /// the sidebar has the focus or not.
 const HERE_MARK: &str = "▌";
+/// The dot of a pane where something finished since you were last there, or
+/// that you marked unread, before its mark; and on a folded session's row, of
+/// one of its panes.
+const NEW: &str = "•";
 const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
@@ -65,23 +73,38 @@ const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 const LONG: Duration = Duration::from_secs(1);
 
 /// A session as the sidebar tells it from another of its name: zellij
-/// versions with sockets of their own can each run one under it.
+/// versions with sockets of their own can each run one under it. Its start
+/// and its socket tell it from every other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listed {
     name: String,
     started: SystemTime,
+    socket: NonZeroU64,
 }
 
 impl Listed {
-    /// `session`, or none for one with no start: a daemon of another build's.
+    /// `session`, or none for one with no start or no socket: a daemon of
+    /// another build's.
     fn of(session: &Session) -> Option<Self> {
         let started = SystemTime::try_from(session.started_at?).ok()?;
-        Some(Listed { name: session.name.clone(), started })
+        let socket = NonZeroU64::new(session.socket)?;
+        Some(Listed { name: session.name.clone(), started, socket })
     }
 
+    /// The session, as the news keeps it.
+    fn kept(&self) -> ledger::Session {
+        ledger::Session { started: self.started, socket: self.socket }
+    }
+
+    /// Its pane `pane`, as the news keeps it.
+    fn key(&self, pane: u32) -> Key {
+        Key { session: self.kept(), pane }
+    }
+
+    /// A session of the tests', whose socket is the first there is.
     #[cfg(test)]
     pub fn new(name: &str, started: SystemTime) -> Self {
-        Listed { name: name.to_owned(), started }
+        Listed { name: name.to_owned(), started, socket: NonZeroU64::MIN }
     }
 }
 
@@ -136,7 +159,11 @@ impl Place {
 enum Mark {
     /// An agent that waits for you, or a command that waits for you to type.
     Waiting,
+    /// An agent done, which you have seen since it finished, or see: it is
+    /// in the pane luneta's zellij is on.
     Idle,
+    /// An agent that finished since you were last in its pane.
+    Finished,
     /// An agent at work, or a command.
     Busy,
     Shell,
@@ -175,7 +202,7 @@ impl Mark {
     fn doing(&self) -> close::Doing {
         match self {
             Mark::Waiting => close::Doing::Waiting,
-            Mark::Idle => close::Doing::Idle,
+            Mark::Idle | Mark::Finished => close::Doing::Idle,
             Mark::Busy => close::Doing::Busy,
             Mark::Shell => close::Doing::Shell,
             Mark::Other(_) | Mark::Unreported | Mark::Passed | Mark::Failed | Mark::Ran => {
@@ -184,12 +211,19 @@ impl Mark {
         }
     }
 
+    /// Whether it says that something finished since you were last in its
+    /// pane: an agent, or a command, which shows how it ended until then.
+    fn is_news(&self) -> bool {
+        matches!(self, Mark::Finished | Mark::Passed | Mark::Failed | Mark::Ran)
+    }
+
     /// Its glyph, which the spinner shows at `frame`, and its style.
     fn glyph(&self, frame: usize) -> (String, Style) {
         let style = Style::new();
         match self {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Mark::Idle | Mark::Passed => {
+            Mark::Idle => ("✓".to_owned(), style.add_modifier(Modifier::DIM)),
+            Mark::Finished | Mark::Passed => {
                 ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD))
             },
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
@@ -258,6 +292,42 @@ impl Marked {
         };
         Some((Marked { mark, since: Some(since) }, command))
     }
+
+    /// When the command it marks ended, if it did.
+    fn ended(&self) -> Option<SystemTime> {
+        match self.mark {
+            Mark::Passed | Mark::Failed | Mark::Ran => self.since,
+            _ => None,
+        }
+    }
+}
+
+/// What a pane's row shows of what goes on in it.
+struct Shows<'a> {
+    /// What its agent is doing, or else the command its shell runs, or ran.
+    marked: Option<Marked>,
+    /// That command, by which its row is named.
+    ran: Option<&'a str>,
+    /// Whether you marked it unread.
+    unread: bool,
+}
+
+impl Shows<'_> {
+    /// Whether its row has the dot.
+    fn dotted(&self) -> bool {
+        dotted(self.unread, self.marked.as_ref())
+    }
+}
+
+/// Whether a pane's row has the dot: something finished in it since you were
+/// last there, as its mark says, or you marked it unread.
+fn dotted(unread: bool, marked: Option<&Marked>) -> bool {
+    unread || marked.is_some_and(|marked| marked.mark.is_news())
+}
+
+/// The dot of `NEW`, and its style.
+fn dot() -> Span<'static> {
+    Span::styled(NEW, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
 /// A moment the shell hook said, which it counts in whole seconds: the last
@@ -282,8 +352,10 @@ enum Row {
         under: Under,
         /// Whether luneta's zellij is in it.
         here: bool,
-        /// How many of its agents wait for you, and whether one is at work.
+        /// How many of its agents wait for you, whether one of its panes has
+        /// the dot, and whether one is at work.
         waiting: usize,
+        dot: bool,
         busy: bool,
     },
     Pane {
@@ -291,6 +363,8 @@ enum Row {
         pane: u32,
         /// Whether luneta's zellij is on it.
         here: bool,
+        /// Whether you marked it unread.
+        unread: bool,
         marked: Option<Marked>,
         /// The icon of what runs in it, if that has one.
         icon: Option<&'static str>,
@@ -382,13 +456,14 @@ pub enum Asked {
 /// The rows the top of the sidebar takes: its rule, and a blank line.
 const HEADER: usize = 2;
 
-/// What the rule along the top counts, of the rows: the sessions, and the
-/// agents in their panes that wait for you, that are at work and that are in
-/// a shell, a folded session's among them.
+/// What the rule along the top counts, of the rows: the sessions, the agents
+/// in their panes that wait for you, the panes with the dot, and the agents
+/// that are at work and that are in a shell, a folded session's among them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Counts {
     sessions: usize,
     waiting: usize,
+    new: usize,
     busy: usize,
     shell: usize,
 }
@@ -407,10 +482,16 @@ pub struct Sidebar {
     sent: Option<Sent>,
     /// The sessions folded, by name.
     folds: Folds,
+    /// What you saw in each pane, and the panes you marked unread.
+    news: News,
+    /// The pane luneta's zellij is on, as the rows were last built.
+    here_key: Option<Key>,
+    /// When what finished last in each pane did, as the rows were last built.
+    finished: HashMap<Key, SystemTime>,
     rows: Vec<Row>,
     counts: Counts,
-    /// How many sessions the daemon lists with no start, which the rows leave
-    /// out, as they tell sessions apart by theirs.
+    /// How many sessions the daemon lists with no start or no socket, which
+    /// the rows leave out, as they tell sessions apart by both.
     unlisted: usize,
     /// Which client of its session is luneta's zellij, and the pane it is on.
     own: OwnClient,
@@ -469,14 +550,23 @@ enum Search {
 }
 
 impl Sidebar {
-    /// The sidebar, with the sessions `folds` has folded.
-    pub fn new(folds: Folds) -> Self {
-        Sidebar { folds, ..Sidebar::default() }
+    /// The sidebar, with the sessions `folds` has folded, and what `news` has
+    /// of what you saw and marked.
+    pub fn new(folds: Folds, news: News) -> Self {
+        Sidebar { folds, news, ..Sidebar::default() }
     }
 
     /// Takes up the folds as they are kept now, as another luneta left them.
     pub fn refold(&mut self) {
         if self.folds.reload() {
+            self.rebuild();
+        }
+    }
+
+    /// Takes up what you saw and marked as it is kept now, as another luneta
+    /// left it.
+    pub fn reread(&mut self) {
+        if self.news.reload() {
             self.rebuild();
         }
     }
@@ -498,17 +588,35 @@ impl Sidebar {
         look
     }
 
-    /// Time went by. What luneta saw of its zellij's client may have stood
-    /// long enough against the daemon's list for that list to be the newer.
-    pub fn ticked(&mut self) {
-        let Some(session) = self.own.session() else {
-            return;
-        };
-        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
-        let pane = self.own.pane();
-        self.own.heard(listed.as_deref(), Instant::now());
-        if self.own.pane() != pane {
+    /// Time went by, to `now`, with luneta's window `watched`, as it has the
+    /// focus. What luneta saw of its zellij's client may have stood long
+    /// enough against the daemon's list for that list to be the newer. The
+    /// client may have stayed on its pane long enough for you to have been
+    /// there, whether the sidebar shows or not: it has been on the pane, and
+    /// the window has had the focus, since the first tick that found both.
+    /// And the daemon may have left a session out of its lists for long
+    /// enough for what was kept of it to go.
+    pub fn ticked(&mut self, now: SystemTime, watched: bool) {
+        if let Some(session) = self.own.session() {
+            let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+            let pane = self.own.pane();
+            self.own.heard(listed.as_deref(), Instant::now());
+            if self.own.pane() != pane {
+                self.rebuild();
+            }
+        }
+        let here = self.here_key.filter(|_| watched);
+        let finished = &self.finished;
+        if self.news.dwell(here, |key| finished.get(&key).copied(), now) {
             self.rebuild();
+        }
+        if let Some(host) = &self.host {
+            let live: Option<BTreeSet<ledger::Session>> = host
+                .sessions
+                .iter()
+                .map(|session| Listed::of(session).map(|listed| listed.kept()))
+                .collect();
+            self.news.listed(live.as_ref(), now);
         }
     }
 
@@ -716,6 +824,9 @@ impl Sidebar {
                 _ => None,
             }
         };
+        let here_key =
+            here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
+        let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut counts = Counts { sessions: sessions.len(), ..Counts::default() };
         let mut rows = Vec::new();
         let mut best: Option<(usize, Fit)> = None;
@@ -729,27 +840,50 @@ impl Sidebar {
             panes.sort_by_key(|pane| (pane.tab, pane.id));
             let agent = |pane: u32| agents.get(&(session.name.as_str(), pane)).copied();
             // A pane's agent, or else the command its shell runs, by which
-            // its row is named.
-            let mut marked: Vec<Option<(Marked, Option<&str>)>> = Vec::with_capacity(panes.len());
+            // its row is named, and whether its row has the dot. What
+            // finished in the pane luneta's zellij is on is no news: you see
+            // it. A command that ended shows until you have seen it end.
+            let mut by_pane: Vec<Shows> = Vec::with_capacity(panes.len());
             for pane in &panes {
+                let key = listed.key(pane.id);
+                let here = here_key == Some(key);
+                let unread = self.news.is_unread(key);
                 if let Some(agent) = agent(pane.id) {
-                    marked.push(Some((Marked::of(agent), None)));
+                    let mut agent = Marked::of(agent);
+                    let done = agent.since.filter(|_| agent.mark == Mark::Idle);
+                    if let Some(done) = done {
+                        finished.insert(key, done);
+                    }
+                    if !here && self.news.is_new(key, done) {
+                        agent.mark = Mark::Finished;
+                    }
+                    by_pane.push(Shows { marked: Some(agent), ran: None, unread });
                     continue;
                 }
                 let Some(shell) = &pane.shell else {
-                    marked.push(None);
+                    by_pane.push(Shows { marked: None, ran: None, unread });
                     continue;
                 };
                 if let Some(long) = long_at(shell).filter(|long| *long > now) {
                     due = Some(due.map_or(long, |due| due.min(long)));
                 }
-                let shell = Marked::of_shell(shell, now);
-                marked.push(shell.map(|(shell, command)| (shell, Some(command))));
+                let mut shell = Marked::of_shell(shell, now);
+                let ended = shell.as_ref().and_then(|(shell, _)| shell.ended());
+                if let Some(ended) = ended {
+                    finished.insert(key, ended);
+                    if here || !self.news.is_new(key, Some(ended)) {
+                        shell = None;
+                    }
+                }
+                let (marked, ran) = shell.unzip();
+                by_pane.push(Shows { marked, ran, unread });
             }
-            let marks = || marked.iter().flatten().map(|(marked, _)| &marked.mark);
+            let marks = || by_pane.iter().filter_map(|shows| Some(&shows.marked.as_ref()?.mark));
             let waiting = marks().filter(|mark| **mark == Mark::Waiting).count();
             let busy = marks().filter(|mark| **mark == Mark::Busy).count();
+            let dots = by_pane.iter().filter(|shows| shows.dotted()).count();
             counts.waiting += waiting;
+            counts.new += dots;
             counts.busy += busy;
             counts.shell += marks().filter(|mark| **mark == Mark::Shell).count();
             let folded = self.folds.contains(&listed.name);
@@ -757,7 +891,7 @@ impl Sidebar {
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
             let mut shown: Vec<(Row, Option<Fit>)> = Vec::new();
-            for (pane, marked) in listing.into_iter().zip(marked) {
+            for (pane, Shows { marked, ran, unread }) in listing.into_iter().zip(by_pane) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
                     let tree = WorkTree::of_api(trees.get(cwd)?)?;
@@ -771,8 +905,6 @@ impl Sidebar {
                     Some(_) => Some(icons::AGENT),
                     None => command.and_then(icons::program),
                 };
-                let (marked, ran) =
-                    marked.map_or((None, None), |(marked, ran)| (Some(marked), ran));
                 let label = match ran {
                     Some(ran) => ran.to_owned(),
                     None => label(agent(pane.id), pane),
@@ -787,6 +919,7 @@ impl Sidebar {
                     session: listed.clone(),
                     pane: pane.id,
                     here: here_pane.as_ref() == Some(&place),
+                    unread,
                     marked,
                     icon: program.and_then(icons::of),
                     label,
@@ -810,6 +943,7 @@ impl Sidebar {
                 under,
                 here: here.as_deref() == Some(listed.name.as_str()),
                 waiting,
+                dot: dots > 0,
                 busy: busy > 0,
             });
             // The pane of the session that matches best, which a session found
@@ -832,6 +966,8 @@ impl Sidebar {
         self.rows = rows;
         self.counts = counts;
         self.unlisted = unlisted;
+        self.here_key = here_key;
+        self.finished = finished;
         self.here_row = here_pane.as_ref().and_then(|place| self.row_for(place));
         if !self.focused && self.here_row.is_some() {
             self.cursor.clone_from(&self.here_row);
@@ -944,10 +1080,11 @@ impl Sidebar {
         (Some(next) != here).then(|| self.rows[next].place())
     }
 
-    /// What a key does while the sidebar has the focus. The menu takes every
-    /// key while it is open. Without it, a character does what `Top::of`
-    /// says, which the legend goes by too, and one it has not is the menu's.
-    pub fn key(&mut self, key: &KeyEvent) -> Asked {
+    /// What a key does while the sidebar has the focus, pressed at `now`. The
+    /// menu takes every key while it is open. Without it, a character does
+    /// what `Top::of` says, which the legend goes by too, and one it has not
+    /// is the menu's.
+    pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
         self.notice = None;
         if let Some(menu) = self.menu.take() {
             return self.menu_did(menu.key(key));
@@ -972,6 +1109,7 @@ impl Sidebar {
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
                 Some(Top::Command(Command::Search)) => self.find(String::new()),
+                Some(Top::Command(Command::Unread)) => self.mark_unread(now),
                 None => return self.open_menu(Some(c)),
             },
             _ => {},
@@ -998,7 +1136,7 @@ impl Sidebar {
         let place = self.cursor.clone()?;
         let row = self.rows.iter().find(|row| row.place() == place)?;
         let branch = match row {
-            Row::Pane { checkout, .. } => checkout.as_ref().map(|(branch, _)| branch.clone()),
+            Row::Pane { checkout, .. } => checkout.as_ref().map(|checkout| checkout.branch.clone()),
             Row::Session { .. } => None,
         };
         let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
@@ -1181,6 +1319,18 @@ impl Sidebar {
         if let Some(open) = self.menu.as_mut().filter(|it| it.number() == menu) {
             open.found(skills);
         }
+    }
+
+    /// Marks the highlighted pane unread at `now`, so that its row has the
+    /// dot until you go there again, or takes the mark away from one that has
+    /// it. A visit any luneta is on already started before now, and the next
+    /// starts after.
+    fn mark_unread(&mut self, now: SystemTime) {
+        let Some(Place::Pane { session, pane }) = &self.cursor else {
+            return;
+        };
+        self.news.toggle_unread(session.key(*pane), now);
+        self.rebuild();
     }
 
     /// What a key does while the search is open, with `term` typed in it:
@@ -1383,20 +1533,26 @@ impl Sidebar {
     }
 
     /// The rule along the top: how many sessions the rows list, how many
-    /// agents on them wait for you, how many are at work, and how many are in
-    /// a shell.
+    /// agents on them wait for you, how many panes have the dot, and how many
+    /// agents are at work, and how many are in a shell.
     fn header(&self, width: usize, frame: usize) -> Line<'static> {
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let Counts { sessions, waiting, busy, shell } = self.counts;
+        let Counts { sessions, waiting, new, busy, shell } = self.counts;
         let mut counts: Vec<Span<'static>> = Vec::new();
-        for (count, mark) in [(waiting, Mark::Waiting), (busy, Mark::Busy), (shell, Mark::Shell)] {
+        let dot = dot();
+        let glyphs = [
+            (waiting, Mark::Waiting.glyph(frame)),
+            (new, (dot.content.into_owned(), dot.style)),
+            (busy, Mark::Busy.glyph(frame)),
+            (shell, Mark::Shell.glyph(frame)),
+        ];
+        for (count, (glyph, style)) in glyphs {
             if count == 0 {
                 continue;
             }
             if !counts.is_empty() {
                 counts.push(Span::raw(" "));
             }
-            let (glyph, style) = mark.glyph(frame);
             counts.push(Span::styled(glyph, style));
             counts.push(Span::styled(count.to_string(), style));
         }
@@ -1433,11 +1589,15 @@ impl Sidebar {
         if self.unlisted > 0 {
             let count = self.unlisted;
             let sessions = if count == 1 { "session" } else { "sessions" };
-            let unlisted = format!("lunetad: {count} {sessions} with no start, not listed");
+            let unlisted =
+                format!("lunetad: {count} {sessions} with no start or socket, not listed");
             notes.extend(wrapped(&unlisted, width, error));
         }
         if let Some(lost) = self.folds.lost() {
             notes.extend(wrapped(&format!("folds stay in this luneta: {lost}"), width, error));
+        }
+        if let Some(lost) = self.news.lost() {
+            notes.extend(wrapped(&format!("dots stay in this luneta: {lost}"), width, error));
         }
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
@@ -1713,9 +1873,9 @@ fn frame(now: SystemTime) -> usize {
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
-        Row::Session { session, under, here, waiting, busy } => {
+        Row::Session { session, under, here, waiting, dot, busy } => {
             let folded = *under == Under::Folded;
-            let badge = badge(*waiting, folded && *busy, frame);
+            let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let name_style = if *here {
                 Style::new().fg(NAME).add_modifier(Modifier::BOLD)
@@ -1739,7 +1899,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { here, marked, icon, label, checkout, .. } => {
+        Row::Pane { here, unread, marked, icon, label, checkout, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
@@ -1751,7 +1911,9 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 Some(_) => Style::new(),
                 None => dim,
             };
-            let mut spans = vec![margin(*here), Span::raw("  ")];
+            let mut spans = vec![margin(*here), Span::raw(" ")];
+            let dotted = dotted(*unread, marked.as_ref());
+            spans.push(if dotted { dot() } else { Span::raw(" ") });
             match mark {
                 Some(mark) => {
                     let (glyph, style) = mark.glyph(frame);
@@ -1780,11 +1942,14 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
 }
 
 /// What a session's row ends in: how many of its agents wait for you, or else
-/// the spinner, while it is `spinning`.
-fn badge(waiting: usize, spinning: bool, frame: usize) -> Option<Span<'static>> {
+/// the dot, while it is `dotted`, or else the spinner, while it is `spinning`.
+fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<Span<'static>> {
     if waiting > 0 {
         let (dot, style) = Mark::Waiting.glyph(frame);
         return Some(Span::styled(format!("{dot}{waiting}"), style));
+    }
+    if dotted {
+        return Some(dot());
     }
     if spinning {
         let (spinner, style) = Mark::Busy.glyph(frame);
@@ -1913,12 +2078,14 @@ mod tests {
         }
     }
 
+    /// A session whose socket has the inode of the second it started at.
     fn session(name: &str, started: i64, panes: Vec<Pane>) -> Session {
         Session {
             name: name.to_owned(),
             started_at: Some(Timestamp { seconds: started, nanos: 0 }),
             panes: Some(Panes { panes }),
             clients: None,
+            socket: started as u64,
         }
     }
 
@@ -1926,6 +2093,7 @@ mod tests {
         Listed {
             name: name.to_owned(),
             started: SystemTime::UNIX_EPOCH + Duration::from_secs(started),
+            socket: NonZeroU64::new(started).unwrap(),
         }
     }
 
@@ -2074,7 +2242,7 @@ mod tests {
                 outside,
             ],
         ));
-        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         let rule = screen(&mut sidebar, false, 32, 3)[0].clone();
         assert_eq!((rule.as_str(), sidebar.turning()), ("─ 1 session ─────────── ⠋1 $2 ─", true));
         let buffer = drawn(&mut sidebar, false, 32, 3);
@@ -2087,18 +2255,20 @@ mod tests {
         );
     }
 
-    /// A daemon of another build can list a session with no start, which the
-    /// sidebar cannot tell from another of its name.
+    /// A daemon of another build can list a session with no start, or with
+    /// no socket, which the sidebar cannot tell from another.
     #[test]
-    fn a_session_with_no_start_is_left_out_and_said() {
+    fn a_session_with_no_start_or_socket_is_left_out_and_said() {
         let mut sidebar = Sidebar::default();
         let mut unstarted = session("x", 0, vec![]);
         unstarted.started_at = None;
-        sidebar.heard(host(vec![unstarted, session("y", 20, vec![])], Vec::new()));
+        let mut unsocketed = session("z", 30, vec![]);
+        unsocketed.socket = 0;
+        sidebar.heard(host(vec![unstarted, session("y", 20, vec![]), unsocketed], Vec::new()));
         let lines = screen(&mut sidebar, false, 60, 5);
         assert_eq!(lines[0], format!("─ 1 session {}", "─".repeat(47)));
         assert_eq!(lines[2], format!(" ▾ y {}", "─".repeat(53)));
-        assert_eq!(lines[4], " lunetad: 1 session with no start, not listed");
+        assert_eq!(lines[4], " lunetad: 2 sessions with no start or socket, not listed");
     }
 
     /// `▌` marks the pane luneta's zellij is on, down the line of its branch
@@ -2138,7 +2308,7 @@ mod tests {
         assert_eq!(lit, [4, 5]);
         let (_, lit) = seen(&mut sidebar, true, 32, 12);
         assert_eq!(lit, [4, 5]);
-        sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
         let (lines, lit) = seen(&mut sidebar, true, 32, 12);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
@@ -2177,24 +2347,25 @@ mod tests {
         ));
         let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         for _ in 0..3 {
-            sidebar.key(&down);
+            sidebar.key(&down, moment(160_000));
         }
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(sidebar.key(&enter), Asked::Go(Place::Session(listed("z", 40))));
+        let z = Place::Session(listed("z", 40));
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(z));
     }
 
     #[test]
     fn folding_a_pane_s_session_stops_the_highlight_on_its_row() {
         let mut sidebar = two_sessions();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         let older = Place::Session(listed("older", 10));
         assert_eq!(sidebar.cursor, Some(older.clone()));
-        assert_eq!(sidebar.key(&enter), Asked::Go(older));
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(older));
         let lines = screen(&mut sidebar, false, 32, 5);
         assert!(lines[2].starts_with(" ▸ older"), "{lines:?}");
         assert!(lines[3].starts_with(" ▾ newer"), "{lines:?}");
-        sidebar.key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), moment(160_000));
         assert_eq!(sidebar.rows.len(), 5);
     }
 
@@ -2239,7 +2410,7 @@ mod tests {
     fn the_next_pane_passes_over_a_folded_session() {
         let mut sidebar = two_sessions();
         sidebar.went(&Place::Pane { session: listed("older", 10), pane: 2 });
-        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
         assert_eq!(sidebar.next_pane(), Some(newer.clone()));
         // The only pane listed is luneta's own.
@@ -2267,15 +2438,15 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the rule along the top and the legend at the
         // bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 8)[2..4].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 9)[2..4].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
         );
-        sidebar.key(&down);
-        sidebar.key(&down);
+        sidebar.key(&down, moment(160_000));
+        sidebar.key(&down, moment(160_000));
         assert_eq!(shown(&mut sidebar), [" ▾ newer ─────────────────────", "     \u{e795} w/b"]);
-        sidebar.key(&up);
+        sidebar.key(&up, moment(160_000));
         assert_eq!(
             shown(&mut sidebar),
             ["     \u{e6ae} nvim src/main.rs", " ▾ newer ─────────────────────"]
@@ -2312,7 +2483,7 @@ mod tests {
     fn a_click_on_the_triangle_folds_until_a_search_is_typed() {
         let mut sidebar = two_sessions();
         let area = Rect::new(0, 0, 32, 10);
-        sidebar.key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), moment(160_000));
         screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
         assert!(sidebar.folds.contains("older"));
@@ -2338,7 +2509,7 @@ mod tests {
         let x = Place::Session(listed("x", 10));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Go(x.clone()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(sidebar.key(&enter), Asked::Go(x));
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(x));
     }
 
     /// The notes at the bottom stand over the rows that would be there, which
@@ -2346,7 +2517,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 8);
+        let area = Rect::new(0, 0, 32, 9);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[4].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(sidebar.mouse(click(10, 4), area), Asked::Nothing);
@@ -2483,7 +2654,7 @@ mod tests {
         assert_eq!(
             lines[3..],
             [
-                "   ✓ \u{ec82} fold                 1m",
+                "  •✓ \u{ec82} fold                 1m",
                 "     \u{e6ae} sudo -k nvim x",
                 "       make",
                 "     \u{e795} w/d",
@@ -2596,8 +2767,9 @@ mod tests {
 
     /// A command in a shell has an agent's marks, its row named for it: the
     /// spinner while it works, the dot of an agent that waits for you while
-    /// it waits for you to type, and once it ends, how it ended. The rule
-    /// along the top counts them with the agents. One that takes the terminal
+    /// it waits for you to type, and once it ends, how it ended, with the dot
+    /// of what you have yet to see. The rule along the top counts them with
+    /// the agents. One that takes the terminal
     /// over has no mark while you use it, nor has a job stopped, nor one that
     /// ended within a second. The hook counts whole seconds, and a command is
     /// dated to the last moment of its second. The icon goes by what zellij
@@ -2632,20 +2804,229 @@ mod tests {
         assert_eq!(
             screen(&mut sidebar, false, 32, 11),
             [
-                "─ 1 session ─────────── ●1 ⠋1 ─",
+                "─ 1 session ──────── ●1 •3 ⠋1 ─",
                 "",
                 " ▾ s ────────────────────── ●1",
                 "   ⠋ \u{e795} cargo build --rele… 59s",
                 "   ● \u{e795} sudo -k true        59s",
                 "     \u{e6ae} nvim notes",
-                "   ✓ \u{e795} cargo test          29s",
-                "   ✗ \u{e795} cargo clippy        29s",
-                "   $ \u{e795} cargo run           29s",
+                "  •✓ \u{e795} cargo test          29s",
+                "  •✗ \u{e795} cargo clippy        29s",
+                "  •$ \u{e795} cargo run           29s",
                 "     \u{e795} luneta/main",
                 "     \u{e795} luneta/main",
             ]
         );
         assert!(sidebar.turning());
+    }
+
+    fn moment(millis: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
+    }
+
+    /// Whether the cell on line `y` at column `x` is dimmed, drawn at `now`.
+    fn dimmed(sidebar: &mut Sidebar, x: u16, y: u16, now: SystemTime) -> bool {
+        drawn_at(sidebar, false, 32, 7, now)[(x, y)].modifier.contains(Modifier::DIM)
+    }
+
+    /// An agent that finished, and a command that ended, have the dot until
+    /// luneta's zellij stays on their panes for a second, a folded session
+    /// the dot of one of its panes, and the rule along the top counts them.
+    /// Seen, the agent's `✓` is dimmed, and the command's row goes back to
+    /// its shell. On the pane luneta's zellij is on,
+    /// an end is no news: you see it. A pane it only passed through keeps the
+    /// dot.
+    #[test]
+    fn what_finished_has_the_dot_until_you_stay_in_its_pane() {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(
+            vec![session(
+                "s",
+                10,
+                vec![
+                    pane(1, 0, "/w/luneta/main", "claude"),
+                    in_shell(2, ended("cargo test", Some(0), 5_000)),
+                    pane(3, 0, "/w/a", "fish"),
+                ],
+            )],
+            vec![agent("s", 1, Status::Idle, Some("fold"))],
+        ));
+        sidebar.titled("s | fish".to_owned());
+        let lines = |sidebar: &mut Sidebar, now| {
+            sidebar.ticked(now, true);
+            seen_at(sidebar, false, 32, 6, now).0
+        };
+        assert_eq!(
+            lines(&mut sidebar, moment(160_000)),
+            [
+                "─ 1 session ────────────── •2 ─",
+                "",
+                " ▾ s ─────────────────────────",
+                "  •✓ \u{ec82} fold                 1m",
+                "  •✓ \u{e795} cargo test          29s",
+                "     \u{e795} w/a",
+            ]
+        );
+        assert!(!dimmed(&mut sidebar, 3, 3, moment(160_000)));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
+        assert!(lines(&mut sidebar, moment(160_000))[2].ends_with(" •"));
+        sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
+
+        let s = |pane| Place::Pane { session: listed("s", 10), pane };
+        sidebar.went(&s(2));
+        assert_eq!(lines(&mut sidebar, moment(160_000))[4], "▌    \u{e795} luneta/main");
+        sidebar.went(&s(1));
+        lines(&mut sidebar, moment(160_500));
+        lines(&mut sidebar, moment(161_500));
+        sidebar.went(&s(3));
+        assert_eq!(
+            lines(&mut sidebar, moment(162_000))[..5],
+            [
+                "─ 1 session ────────────── •1 ─",
+                "",
+                " ▾ s ─────────────────────────",
+                "   ✓ \u{ec82} fold                 1m",
+                "  •✓ \u{e795} cargo test          31s",
+            ]
+        );
+        assert!(dimmed(&mut sidebar, 3, 3, moment(162_000)));
+
+        sidebar.went(&s(2));
+        lines(&mut sidebar, moment(163_000));
+        lines(&mut sidebar, moment(164_000));
+        sidebar.went(&s(3));
+        let seen = lines(&mut sidebar, moment(164_500));
+        assert_eq!(seen[0], format!("─ 1 session {}", "─".repeat(19)));
+        assert_eq!(seen[4], "     \u{e795} luneta/main");
+    }
+
+    /// `u` marks the highlighted pane unread, and gives its row the dot, with
+    /// nothing new in it, and on the pane luneta's zellij is on, until it
+    /// leaves and comes back for a second. `u` again takes the mark away.
+    #[test]
+    fn u_marks_a_pane_unread_until_you_come_back_to_it() {
+        let mut sidebar = two_sessions();
+        let older = |pane| Place::Pane { session: listed("older", 10), pane };
+        let u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
+        let nvim = |sidebar: &mut Sidebar, now| {
+            sidebar.ticked(now, true);
+            let lines = seen_at(sidebar, true, 32, 12, now).0;
+            lines.into_iter().find(|line| line.contains("nvim")).expect("nvim's row")
+        };
+        sidebar.went(&older(2));
+        nvim(&mut sidebar, moment(160_000));
+        sidebar.key(&u, moment(161_000));
+        assert_eq!(nvim(&mut sidebar, moment(165_000)), "▌ •  \u{e6ae} nvim src/main.rs");
+        assert!(screen(&mut sidebar, true, 32, 7)[0].ends_with(" ●1 •1 ─"));
+
+        sidebar.went(&older(1));
+        nvim(&mut sidebar, moment(166_000));
+        sidebar.went(&older(2));
+        assert_eq!(nvim(&mut sidebar, moment(167_000)), "▌ •  \u{e6ae} nvim src/main.rs");
+        assert_eq!(nvim(&mut sidebar, moment(168_000)), "▌    \u{e6ae} nvim src/main.rs");
+
+        sidebar.key(&u, moment(168_000));
+        assert_eq!(nvim(&mut sidebar, moment(168_000)), "▌ •  \u{e6ae} nvim src/main.rs");
+        sidebar.key(&u, moment(168_000));
+        assert_eq!(nvim(&mut sidebar, moment(168_000)), "▌    \u{e6ae} nvim src/main.rs");
+    }
+
+    /// The session `s` of the tests of the dot: an agent that came to `idle`
+    /// at 100 in pane 1, and a shell in pane 3.
+    fn idle_agent() -> Host {
+        host(
+            vec![session(
+                "s",
+                10,
+                vec![pane(1, 0, "/w/luneta/main", "claude"), pane(3, 0, "/w/a", "fish")],
+            )],
+            vec![agent("s", 1, Status::Idle, Some("fold"))],
+        )
+    }
+
+    /// The row of the agent of `idle_agent`, once the sidebar ticks at `now`
+    /// with luneta's window `watched`.
+    fn agent_row(sidebar: &mut Sidebar, now: SystemTime, watched: bool) -> String {
+        sidebar.ticked(now, watched);
+        seen_at(sidebar, false, 32, 6, now).0[3].clone()
+    }
+
+    /// luneta's zellij on a pane while luneta's window does not have the
+    /// focus is not you there: what finished there keeps the dot, until you
+    /// look for a second.
+    #[test]
+    fn a_pane_is_yours_only_while_luneta_s_window_has_the_focus() {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(idle_agent());
+        sidebar.titled("s | fish".to_owned());
+        let s = |pane| Place::Pane { session: listed("s", 10), pane };
+        sidebar.went(&s(1));
+        agent_row(&mut sidebar, moment(160_000), false);
+        agent_row(&mut sidebar, moment(165_000), false);
+        sidebar.went(&s(3));
+        let new = "  •✓ \u{ec82} fold                 1m";
+        assert_eq!(agent_row(&mut sidebar, moment(166_000), true), new);
+
+        sidebar.went(&s(1));
+        agent_row(&mut sidebar, moment(167_000), false);
+        agent_row(&mut sidebar, moment(168_000), true);
+        agent_row(&mut sidebar, moment(169_000), true);
+        sidebar.went(&s(3));
+        let seen = "   ✓ \u{ec82} fold                 1m";
+        assert_eq!(agent_row(&mut sidebar, moment(170_000), true), seen);
+    }
+
+    /// Two sessions whose servers made their sockets in one tick of the
+    /// clock, and so started at one moment, keep what you saw in each apart:
+    /// their sockets tell them apart.
+    #[test]
+    fn sessions_that_started_at_once_keep_their_dots_apart() {
+        let mut sidebar = Sidebar::default();
+        let claude = || vec![pane(1, 0, "/w/luneta/main", "claude")];
+        let mut twin = session("b", 10, claude());
+        twin.socket = 11;
+        let mut there = agent("b", 1, Status::Idle, Some("fold"));
+        there.pid = 2;
+        sidebar.heard(host(
+            vec![session("a", 10, claude()), twin],
+            vec![agent("a", 1, Status::Idle, Some("fold")), there],
+        ));
+        sidebar.titled("a | claude".to_owned());
+        sidebar.went(&Place::Pane { session: listed("a", 10), pane: 1 });
+        let lines = |sidebar: &mut Sidebar, now| {
+            sidebar.ticked(now, true);
+            seen_at(sidebar, false, 32, 6, now).0
+        };
+        lines(&mut sidebar, moment(160_000));
+        let lines = lines(&mut sidebar, moment(161_000));
+        assert_eq!(
+            [&lines[3], &lines[5]],
+            ["▌  ✓ \u{ec82} fold                 1m", "  •✓ \u{ec82} fold                 1m"]
+        );
+    }
+
+    /// A session the daemon leaves out of a list, as a rename made while it
+    /// reads zellij's folder can, keeps what you saw in it. One it has not
+    /// listed for `GONE` has it no more, should it come back.
+    #[test]
+    fn a_session_left_out_of_a_list_keeps_what_you_saw_until_it_is_gone() {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(idle_agent());
+        sidebar.titled("s | fish".to_owned());
+        let s = |pane| Place::Pane { session: listed("s", 10), pane };
+        sidebar.went(&s(1));
+        sidebar.ticked(moment(160_000), true);
+        sidebar.ticked(moment(161_000), true);
+        sidebar.went(&s(3));
+        let seen = "   ✓ \u{ec82} fold                 1m";
+        let new = "  •✓ \u{ec82} fold                 1m";
+        for (left, back, row) in [(163_000, 172_000, seen), (173_000, 183_000, new)] {
+            sidebar.heard(host(Vec::new(), Vec::new()));
+            sidebar.ticked(moment(left), true);
+            sidebar.ticked(moment(back), true);
+            sidebar.heard(idle_agent());
+            assert_eq!(agent_row(&mut sidebar, moment(back + 500), true), row);
+        }
     }
 
     /// A command shows once it has run for a second, with no word from the
@@ -2764,7 +3145,7 @@ mod tests {
     /// Types `text` into the sidebar, a key for each character.
     fn type_in(sidebar: &mut Sidebar, text: &str) {
         for c in text.chars() {
-            sidebar.key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            sidebar.key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), moment(160_000));
         }
     }
 
@@ -2801,7 +3182,7 @@ mod tests {
             let rule = screen(&mut sidebar, true, 32, 16)[0].clone();
             assert!(rule.starts_with("─ 3 sessions ─"), "{typed}: {rule}");
             let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-            assert_eq!(sidebar.key(&enter), Asked::Go(best), "{typed}");
+            assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(best), "{typed}");
         }
     }
 
@@ -2838,12 +3219,12 @@ mod tests {
         let keys = " d  Delete ▸";
         for close in [Some(KeyCode::Esc), Some(KeyCode::Enter), None] {
             let mut sidebar = searched();
-            sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+            sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
             type_in(&mut sidebar, "/pix");
             let found = [" ▾ bipa", "       a-p-i-x", "       pix outflow"];
             assert_eq!(rows_shown(&mut sidebar), found, "{close:?}");
             let asked = if let Some(code) = close {
-                sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE))
+                sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE), moment(160_000))
             } else {
                 sidebar.focus(false);
                 Asked::Nothing
@@ -2866,11 +3247,11 @@ mod tests {
         type_in(&mut sidebar, "/pixjh");
         assert_eq!(bottom(&mut sidebar), " /pixjh_");
         assert_eq!(rows_shown(&mut sidebar), [" no match"]);
-        sidebar.key(&backspace);
-        sidebar.key(&backspace);
+        sidebar.key(&backspace, moment(160_000));
+        sidebar.key(&backspace, moment(160_000));
         assert_eq!(rows_shown(&mut sidebar), [" ▾ bipa", "       a-p-i-x", "       pix outflow"]);
         for _ in 0..4 {
-            sidebar.key(&backspace);
+            sidebar.key(&backspace, moment(160_000));
         }
         assert_eq!(bottom(&mut sidebar), " d  Delete ▸");
         type_in(&mut sidebar, "/a-very-long-search-for-something");
@@ -2889,7 +3270,7 @@ mod tests {
     fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
         let mut sidebar = two_sessions();
         sidebar.focus(true);
-        assert_eq!(sidebar.key(&char('n')), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[11..], [
             "─ New ─────────── luneta/main ─",
@@ -2900,7 +3281,7 @@ mod tests {
         ]);
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
         let tab = Open::Tab { session: older, cwd };
-        assert_eq!(sidebar.key(&char('t')), Asked::Open { menu: 1, open: tab });
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Open { menu: 1, open: tab });
         let opened = Place::Pane { session: listed("older", 10), pane: 7 };
         assert_eq!(sidebar.opened(1, Ok(7)), Asked::Go(opened));
         // What zellij answers a menu that is gone takes luneta nowhere.
@@ -2915,7 +3296,7 @@ mod tests {
         let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
         let tab = Open::Tab { session: "newer".to_owned(), cwd: "/w/b".to_owned() };
         let asked = Asked::OpenThere { menu: 2, place: newer, open: tab };
-        assert_eq!(sidebar.key(&char('t')), asked);
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(false);
         assert!(sidebar.menu.is_none());
     }
@@ -2930,10 +3311,10 @@ mod tests {
         sidebar.step(2);
         type_in(&mut sidebar, "d");
         let closes = || Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
-        assert_eq!(sidebar.key(&char('d')), closes());
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
         assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
-        assert_eq!(sidebar.key(&char('y')), closes());
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
         let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
         assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
     }
@@ -2945,9 +3326,9 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(true);
         sidebar.step(1);
-        assert_eq!(sidebar.key(&char('d')), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let closes = Asked::Closes { menu: 1, session: "older".to_owned(), pane: 2 };
-        assert_eq!(sidebar.key(&char('d')), closes);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         let act = Act::Pane { session: "older".to_owned(), pane: 2 };
         assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
         assert!(sidebar.menu.is_none());
@@ -2970,23 +3351,23 @@ mod tests {
         sidebar.focus(true);
         type_in(&mut sidebar, "d");
         let closes = || Asked::Closes { menu: 1, session: "older".to_owned(), pane: 1 };
-        assert_eq!(sidebar.key(&char('d')), closes());
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
         let tab = || Closes::Tab { id: 0, panes: vec![1] };
         assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Nothing);
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close its tab? 1 agent, 1");
-        assert_eq!(sidebar.key(&char('y')), closes());
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
         let act = Act::Tab { session: "older".to_owned(), tab: 0, panes: vec![1] };
         assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Delete(act));
 
         type_in(&mut sidebar, "d");
-        assert_eq!(sidebar.key(&char('s')), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13..15], [" Kill session older? 1 agent,", " 1 waiting"]);
         let to = Place::Session(listed("newer", 20));
         let leave = Act::Leave { session: "older".to_owned(), to };
-        assert_eq!(sidebar.key(&char('s')), Asked::Delete(leave));
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
         assert_eq!(sidebar.menu.as_ref().and_then(Menu::leaving), Some("newer"));
         // It says where it goes for as long as it takes, with the focus or not.
         sidebar.focus(false);
@@ -3011,13 +3392,13 @@ mod tests {
         for place in [older, newer.clone()] {
             sidebar.cursor = Some(place);
             type_in(&mut sidebar, "d");
-            assert_eq!(sidebar.key(&char('s')), Asked::Nothing);
+            assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
             assert!(moving(&sidebar));
         }
         // Nor does its last pane close it.
         type_in(&mut sidebar, "d");
         let closes = Asked::Closes { menu: 3, session: "newer".to_owned(), pane: 1 };
-        assert_eq!(sidebar.key(&char('d')), closes);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         assert_eq!(sidebar.closes(3, Ok(Closes::Session)), Asked::Nothing);
         assert!(moving(&sidebar));
 
@@ -3025,7 +3406,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         let to = Place::Session(listed("older", 10));
         let leave = Act::Leave { session: "newer".to_owned(), to };
-        assert_eq!(sidebar.key(&char('s')), Asked::Delete(leave));
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
     }
 
     /// The highlight goes to the best match as what is typed changes, and
@@ -3036,7 +3417,7 @@ mod tests {
         let pane = |pane| Some(Place::Pane { session: listed("bipa", 10), pane });
         type_in(&mut sidebar, "/pi");
         assert_eq!(sidebar.cursor, pane(3));
-        sidebar.key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        sidebar.key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), moment(160_000));
         sidebar.heard(sidebar.host.clone().expect("heard"));
         assert_eq!(sidebar.cursor, pane(1));
         type_in(&mut sidebar, "x");

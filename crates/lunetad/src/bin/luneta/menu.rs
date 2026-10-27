@@ -71,15 +71,18 @@ const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor
 pub enum Command {
     /// Narrows the rows to those that match what you type.
     Search,
+    /// Marks the highlighted pane unread, or takes the mark away.
+    Unread,
 }
 
 impl Command {
     /// Every command, in the order the legend lists them.
-    const ALL: [Command; 1] = [Command::Search];
+    const ALL: [Command; 2] = [Command::Search, Command::Unread];
 
     const fn key(self) -> char {
         match self {
             Command::Search => '/',
+            Command::Unread => 'u',
         }
     }
 
@@ -87,6 +90,7 @@ impl Command {
     const fn does(self) -> &'static str {
         match self {
             Command::Search => "Search",
+            Command::Unread => "Unread",
         }
     }
 
@@ -1065,14 +1069,22 @@ mod tests {
     }
 
     #[test]
-    fn the_legend_lists_the_sidebar_s_search_then_the_menu_s_groups() {
+    fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
             text(&legend(31, 9)),
-            ["─ luneta ──────────────────────", " /  Search", " n  New ▸", " d  Delete ▸"]
+            [
+                "─ luneta ──────────────────────",
+                " /  Search",
+                " u  Unread",
+                " n  New ▸",
+                " d  Delete ▸",
+            ]
         );
-        // `m` and the keys that move are the sidebar's, and `/` its search.
+        // `m` and the keys that move are the sidebar's, and `/` and `u` its
+        // commands.
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
+        assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
         assert_eq!(Top::of('n'), None);
         assert_eq!(Top::of('d'), None);
     }
