@@ -1061,7 +1061,7 @@ fn seated<'a>(agents: &'a [Agent], sessions: &'a [Session]) -> HashMap<(&'a str,
 /// renamed before it started, found as the plugin's sidebar finds it: the one
 /// session that lists a pane of the agent's id that works where the agent
 /// does. Of more than one, the session the agent's environment names, or else
-/// the one whose pane runs `claude`, if one alone does.
+/// the one whose pane runs `claude` or an agent titled, if one alone does.
 fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<&'a str> {
     if agent.cwd.is_empty() {
         return None;
@@ -1080,7 +1080,9 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     if let Some((named, _)) = holders.iter().find(|(name, _)| *name == zellij.named) {
         return Some(named);
     }
-    let claude = |pane: &Pane| pane.command.as_deref().is_some_and(|run| run.contains("claude"));
+    let claude = |pane: &Pane| {
+        pane.command.as_deref().is_some_and(|run| run.contains("claude")) || pane.titled.is_some()
+    };
     let mut claudes = holders.iter().filter(|(_, pane)| claude(pane));
     match (claudes.next(), claudes.next()) {
         (Some((one, _)), None) => Some(one),
@@ -1947,13 +1949,26 @@ mod tests {
             session("other", 20, vec![pane(1, 0, "/w/elsewhere", "fish")]),
         ];
         let agents = [lost];
-        let seated = seated(&agents, &sessions);
-        assert_eq!(seated.keys().collect::<Vec<_>>(), [&("renamed", 1)]);
+        let held = seated(&agents, &sessions);
+        assert_eq!(held.keys().collect::<Vec<_>>(), [&("renamed", 1)]);
 
         let mut sidebar = Sidebar::default();
         sidebar.heard(host(sessions.to_vec(), agents.to_vec()));
         let lines = screen(&mut sidebar, false, 32, 4);
         assert_eq!(lines[3], "   ● \u{ec82} fold                 1m");
+
+        // Two sessions list a pane of its id where it works, and the agent
+        // runs inside a shell: the one whose pane it titled holds it.
+        let titled = Pane {
+            titled: Some(api::Titled { topic: None }),
+            ..pane(1, 0, "/w/luneta/main", "fish")
+        };
+        let sessions = [
+            session("renamed", 10, vec![titled]),
+            session("other", 20, vec![pane(1, 0, "/w/luneta/main", "fish")]),
+        ];
+        let held = seated(&agents, &sessions);
+        assert_eq!(held.keys().collect::<Vec<_>>(), [&("renamed", 1)]);
     }
 
     #[test]
