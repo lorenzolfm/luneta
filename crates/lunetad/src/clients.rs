@@ -69,9 +69,10 @@ pub fn parse(said: &str) -> Result<Vec<Client>, String> {
     Ok(clients)
 }
 
-/// The clients of `session`, or why zellij did not list them.
-pub(crate) fn list(session: &str) -> Result<Vec<Client>, String> {
-    let mut zellij = Command::new("zellij");
+/// The clients of `session`, as `zellij` lists them, or why it did not in
+/// `LIMIT`: a command of zellij's, set up as its caller needs, which this
+/// asks for them.
+pub fn list(mut zellij: Command, session: &str) -> Result<Vec<Client>, String> {
     zellij.args(["--session", session, "action", "list-clients"]);
     let ran = program::run(&mut zellij, LIMIT)
         .map_err(|error| format!("zellij could not be run: {error}"))?;

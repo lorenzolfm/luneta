@@ -3,7 +3,7 @@
 //! runs. A row takes zellij's client there, and `▌` marks the pane it is on.
 
 use std::collections::{BTreeSet, HashMap};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fuzzy_matcher::FuzzyMatcher;
@@ -77,6 +77,9 @@ struct Sent {
     /// Whether the client is there. Until it is, a title of another session
     /// is of the one it is leaving.
     landed: bool,
+    /// The number of the look that finds the client there, by which what
+    /// comes back of a go luneta sent it on before is told from this one's.
+    look: Option<u64>,
 }
 
 /// What a row stands for, by which the highlight keeps to it as rows come and
@@ -332,10 +335,24 @@ impl Sidebar {
             && let Some(session) = self.own.session()
         {
             let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
-            self.own.heard(listed.as_deref());
+            self.own.heard(listed.as_deref(), Instant::now());
         }
         self.rebuild();
         look
+    }
+
+    /// Time went by. What luneta saw of its zellij's client may have stood
+    /// long enough against the daemon's list for that list to be the newer.
+    pub fn ticked(&mut self) {
+        let Some(session) = self.own.session() else {
+            return;
+        };
+        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+        let pane = self.own.pane();
+        self.own.heard(listed.as_deref(), Instant::now());
+        if self.own.pane() != pane {
+            self.rebuild();
+        }
     }
 
     /// The daemon does not answer, for `why`. What it said last stands.
@@ -362,16 +379,27 @@ impl Sidebar {
     /// luneta sends its zellij to `session`, which it is in from now on, as
     /// far as the sidebar knows. A look for zellij to answer once it is there.
     pub fn sending(&mut self, session: &str) -> Option<Look> {
-        self.sent = Some(Sent { session: session.to_owned(), landed: false });
+        self.sent = Some(Sent { session: session.to_owned(), landed: false, look: None });
         let look = self.arrived();
+        if let Some(sent) = &mut self.sent {
+            sent.look = look.as_ref().map(|look| look.number);
+        }
         self.rebuild();
         look
     }
 
-    /// zellij did not take luneta's zellij to the session it was sent to. A
-    /// look at the one it is in still.
-    pub fn stayed(&mut self) -> Option<Look> {
-        if self.sent.as_ref().is_none_or(|sent| sent.landed) {
+    /// The session luneta sent its zellij to, while zellij has yet to take
+    /// its client there.
+    pub fn going(&self) -> Option<&str> {
+        let sent = self.sent.as_ref().filter(|sent| !sent.landed)?;
+        Some(&sent.session)
+    }
+
+    /// zellij did not take luneta's zellij to the session it was sent to on
+    /// the go that `look` was to find it there. A look at the one it is in
+    /// still.
+    pub fn stayed(&mut self, look: u64) -> Option<Look> {
+        if self.sent.as_ref().is_none_or(|sent| sent.landed || sent.look != Some(look)) {
             return None;
         }
         self.sent = None;
@@ -381,16 +409,18 @@ impl Sidebar {
     }
 
     /// zellij answered a look so. One that says what it listed before
-    /// luneta's zellij came is from once it had.
+    /// luneta's zellij came, of the go luneta sent it on last, is from once
+    /// it had.
     pub fn looked(&mut self, looked: Looked) {
-        if looked.before.is_some()
-            && let Some(sent) = &mut self.sent
+        if let Some(sent) = &mut self.sent
+            && looked.before.is_some()
+            && sent.look == Some(looked.number)
         {
             sent.landed = true;
         }
         let listed = self.own.session().and_then(|session| clients(self.host.as_ref(), session));
         let listed = listed.map(<[Client]>::to_vec);
-        self.own.looked(looked, listed.as_deref());
+        self.own.looked(looked, listed.as_deref(), Instant::now());
         self.rebuild();
     }
 
@@ -398,7 +428,8 @@ impl Sidebar {
     /// has: in the session it is in, or the one it goes to.
     pub fn went(&mut self, place: &Place) -> Option<Look> {
         let listed = clients(self.host.as_ref(), place.session()).map(<[Client]>::to_vec);
-        let look = self.own.went(place.session(), place.pane(), listed.as_deref());
+        let now = Instant::now();
+        let look = self.own.went(place.session(), place.pane(), listed.as_deref(), now);
         if self.here() == Some(place.session()) {
             self.rebuild();
             return look;
@@ -430,7 +461,7 @@ impl Sidebar {
             return None;
         }
         let listed = clients(self.host.as_ref(), &here).map(<[Client]>::to_vec);
-        Some(self.own.came(&here, listed.as_deref()))
+        Some(self.own.came(&here, listed.as_deref(), Instant::now()))
     }
 
     /// The session zellij's client is in: the one luneta sent it to, until
@@ -1755,17 +1786,43 @@ mod tests {
         let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
         let look = sidebar.went(&newer).unwrap();
         assert_eq!((sidebar.here(), look.session.as_str()), (Some("newer"), "newer"));
+        assert_eq!(sidebar.going(), Some("newer"));
         sidebar.titled("older | ~/w/luneta/main".to_owned());
         assert_eq!(sidebar.here(), Some("newer"));
         let clients = vec![Client { id: 1, pane: Some(1) }];
         sidebar.looked(Looked { number: look.number, went: Some(1), clients, before: Some(vec![]) });
-        assert_eq!(sidebar.here(), Some("newer"));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
         sidebar.titled("older".to_owned());
         assert_eq!(sidebar.here(), Some("older"));
 
-        sidebar.went(&newer);
-        assert_eq!(sidebar.stayed().map(|look| look.session), Some("older".to_owned()));
-        assert_eq!(sidebar.here(), Some("older"));
+        let look = sidebar.went(&newer).unwrap();
+        let stayed = sidebar.stayed(look.number).map(|look| look.session);
+        assert_eq!(stayed, Some("older".to_owned()));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
+    }
+
+    /// luneta sends its zellij to another session, and then to a third
+    /// before it is there. What comes back of the first go says nothing of
+    /// the second: neither that the client is there, nor that it stayed.
+    #[test]
+    fn what_comes_back_of_an_earlier_go_says_nothing_of_the_last() {
+        let mut sidebar = two_sessions();
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        let older = Place::Pane { session: listed("older", 10), pane: 2 };
+        let first = sidebar.went(&newer).unwrap();
+        let last = sidebar.went(&older).unwrap();
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        let came = |look: &Look| Looked {
+            number: look.number,
+            went: look.went,
+            clients: clients.clone(),
+            before: Some(vec![]),
+        };
+        sidebar.looked(came(&first));
+        assert_eq!(sidebar.stayed(first.number), None);
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), Some("older")));
+        sidebar.looked(came(&last));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
     #[test]

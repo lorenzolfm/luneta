@@ -217,19 +217,14 @@ pub fn arrive(look: Look, before: Vec<Client>, events: &Sender<Event>) {
 }
 
 /// The clients of `session`, as zellij lists them now, by their ids, or why
-/// zellij did not list them, as of a session that does not run.
+/// zellij did not list them, as of a session that does not run, or in time:
+/// zellij's CLI waits on every session's server, and one that hangs holds it
+/// up for good.
 pub fn clients(session: &str) -> Result<Vec<Client>, String> {
     let mut command = Command::new("zellij");
-    command.args(["--session", session, "action", "list-clients"]);
     quiet(&mut command);
-    match command.output() {
-        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
-            .map_err(|_| "zellij listed clients in what is not UTF-8".to_owned())
-            .and_then(|said| clients::parse(&said).map_err(|why| format!("zellij: {why}")))
-            .map(|clients| clients.into_iter().map(clients::Client::to_api).collect()),
-        Ok(output) => Err(failure(&output)),
-        Err(error) => Err(unrun(&error)),
-    }
+    let clients = clients::list(command, session)?;
+    Ok(clients.into_iter().map(clients::Client::to_api).collect())
 }
 
 /// What luneta asks of zellij once an action has run.
@@ -277,7 +272,7 @@ fn run(mut command: Command, then: Option<Then>, events: &Sender<Event>) {
                     let _ = events.send(Event::Notice(said));
                 }
                 if !came {
-                    let _ = events.send(Event::Stayed);
+                    let _ = events.send(Event::Stayed(look.number));
                 }
             },
         }

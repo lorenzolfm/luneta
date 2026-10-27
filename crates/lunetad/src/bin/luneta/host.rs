@@ -44,8 +44,9 @@ pub enum Event {
     Daemon(Result<Host, String>),
     /// What zellij answered a look at the clients of a session.
     Looked(Looked),
-    /// zellij did not take its client to the session luneta sent it to.
-    Stayed,
+    /// zellij did not take its client to the session luneta sent it to, on
+    /// the go whose look, by its number, was to find it there.
+    Stayed(u64),
     /// Something went wrong that the sidebar says.
     Notice(String),
 }
@@ -248,6 +249,7 @@ fn run_loop(
         if app.ended {
             return Ok(());
         }
+        app.sidebar.ticked();
         app.draw(terminal)?;
     }
 }
@@ -298,8 +300,8 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => self.sidebar.looked(looked),
-            Event::Stayed => {
-                let look = self.sidebar.stayed();
+            Event::Stayed(look) => {
+                let look = self.sidebar.stayed(look);
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
@@ -376,6 +378,12 @@ impl App {
             self.sidebar.notify("zellij has yet to say which session it is in".to_owned());
             return;
         };
+        // An action would move the client that last typed in a session that
+        // luneta's has yet to come to.
+        if let Some(going) = self.sidebar.going() {
+            self.sidebar.notify(format!("zellij has yet to take its client to {going}"));
+            return;
+        }
         let then = self.sidebar.went(place);
         self.hosted.send(zellij::NUDGE);
         zellij::go(&here, place.session(), place.pane(), then, &self.events);

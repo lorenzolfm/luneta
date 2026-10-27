@@ -79,8 +79,9 @@ message Clients {
 // zellij does not say whose it is.
 message Client {
   // Its id, which zellij gives it as it comes to the session: the lowest that
-  // no other client there has. It keeps it for as long as it stays, and gets
-  // another in each session it goes to.
+  // nothing connected to the session holds, where a `zellij action` holds one
+  // too while it runs. It keeps it for as long as it stays, no other client
+  // gets it meanwhile, and it gets another in each session it goes to.
   uint32 id = 1;
   // The pane it has the focus on, in the tab it is on, by the id of one of
   // its session's `Panes`, unless zellij keeps that one off the screen.

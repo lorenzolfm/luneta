@@ -149,7 +149,8 @@ pub fn follow(
                     }
                 }
                 let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
-                if let Ok(clients) = clients::list(&name).inspect_err(said)
+                let zellij = Command::new("zellij");
+                if let Ok(clients) = clients::list(zellij, &name).inspect_err(said)
                     && core.send(core::Command::Clients { session, name, clients }).is_err()
                 {
                     return;
