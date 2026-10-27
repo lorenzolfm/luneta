@@ -1097,13 +1097,15 @@ opened from the pane has the pane's variables, which the hook passes on, and a
 terminal of its own: it says nothing.
 
 A shell started before its session was renamed goes on writing under the old
-name. In the plugin's sidebar, its commands have no marks until it starts
-again; nor does a session made later by that name take them for its own.
-lunetad follows the session to its new name, as it does an agent, when it saw
-the rename: a session renamed before lunetad started leaves its shells
-unmarked until they start again. A session made later under the old name, in
-both sidebars, has the shells started in it since, and so does a shell started
-since in an old pane of the one renamed, which says the old name too.
+name, and so does one started again in a pane the session had then, as the
+pane's variables still say that name; a pane opened since says the new one. In
+the plugin's sidebar, the commands of those shells have no marks; nor does a
+session made later by the old name take them for its own. lunetad follows the
+session to its new name, as it does an agent, when it saw the rename: a
+session renamed before lunetad started leaves those shells unmarked. A session
+made later under the old name, in both sidebars, has the shells started in it
+since, and so does a shell started since in an old pane of the one renamed,
+which says the old name too.
 
 A shell killed with `kill -9`, or by the kernel when memory runs out, cannot
 take its file away, and the file stays until you log out. One that ran in a
