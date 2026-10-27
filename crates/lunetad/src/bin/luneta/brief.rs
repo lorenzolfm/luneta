@@ -212,7 +212,7 @@ pub struct Note {
     /// Since when it has been in that status, where Claude Code says.
     pub since: Option<SystemTime>,
     pub branch: Option<String>,
-    pub cwd: Option<String>,
+    pub cwd: String,
     /// The id of its Claude Code session, which names its transcript.
     pub transcript: Option<SessionId>,
 }
@@ -222,6 +222,8 @@ pub struct Note {
 pub struct Brief {
     over: Over,
     notes: Vec<Note>,
+    /// What the box says the brief is of.
+    title: String,
 }
 
 impl Brief {
@@ -232,13 +234,6 @@ impl Brief {
     pub fn new(over: Over, notes: Vec<Note>) -> Result<Self, String> {
         let mut notes: Vec<Note> =
             notes.into_iter().filter(|note| over.covers(note)).collect();
-        if notes.is_empty() {
-            return Err(match &over {
-                Over::Sessions(_) => "brief: no agents to brief you on".to_owned(),
-                Over::Session(session) => format!("brief: no agents in {session}"),
-                Over::Agent(..) => "brief: no agent in this pane".to_owned(),
-            });
-        }
         let alike: Vec<bool> = notes
             .iter()
             .map(|note| {
@@ -251,19 +246,25 @@ impl Brief {
                 note.name = format!("{}:{}", note.name, note.pane);
             }
         }
-        Ok(Brief { over, notes })
+        let Some(first) = notes.first() else {
+            return Err(match &over {
+                Over::Sessions(_) => "brief: no agents to brief you on".to_owned(),
+                Over::Session(session) => format!("brief: no agents in {session}"),
+                Over::Agent(..) => "brief: no agent in this pane".to_owned(),
+            });
+        };
+        let title = match &over {
+            Over::Sessions(_) => "Brief of every session".to_owned(),
+            Over::Session(session) => format!("Brief of {session}"),
+            // A pane has one agent at the most.
+            Over::Agent(session, _) => format!("Brief of {}, in {session}", first.name),
+        };
+        Ok(Brief { over, notes, title })
     }
 
     /// What the box says the brief is of.
-    pub fn title(&self) -> String {
-        match &self.over {
-            Over::Sessions(_) => "Brief of every session".to_owned(),
-            Over::Session(session) => format!("Brief of {session}"),
-            Over::Agent(session, _) => match self.notes.first() {
-                Some(note) => format!("Brief of {}, in {session}", note.name),
-                None => format!("Brief of an agent in {session}"),
-            },
-        }
+    pub fn title(&self) -> &str {
+        &self.title
     }
 
     /// The end of each transcript the brief has room for, by its id, each
@@ -388,12 +389,10 @@ impl Note {
             Some(since) => format!("Status: {}, for {}", self.status, sidebar::age(since, now)),
             None => format!("Status: {}", self.status),
         });
-        match (&self.branch, &self.cwd) {
-            (Some(branch), Some(cwd)) => lines.push(format!("Branch: {branch}, in {cwd}")),
-            (Some(branch), None) => lines.push(format!("Branch: {branch}")),
-            (None, Some(cwd)) => lines.push(format!("Works in {cwd}")),
-            (None, None) => {},
-        }
+        lines.push(match &self.branch {
+            Some(branch) => format!("Branch: {branch}, in {}", self.cwd),
+            None => format!("Works in {}", self.cwd),
+        });
         match told {
             Told::NoId => {
                 lines.push("Its transcript is unknown: Claude Code names none for it.".to_owned());
@@ -410,8 +409,8 @@ enum Told {
     /// Claude Code gave no id for its session, or one that names no
     /// transcript.
     NoId,
-    /// No transcript has its id in Claude Code's folder: one written under
-    /// another `CLAUDE_CONFIG_DIR`, or one not written yet.
+    /// No transcript has its id in the folder the daemon reads Claude Code's
+    /// sessions in: one not written yet, or there was no folder to look in.
     NotFound,
     Read(Digest),
 }
@@ -574,13 +573,14 @@ pub struct Written {
 }
 
 /// Asks for `brief`, numbered `number`, on a thread of its own: reads the end
-/// of each transcript it covers in Claude Code's folder, has the model write
-/// the brief, and hands back what it wrote, or why it wrote nothing.
-pub fn ask(number: u64, brief: Brief, events: &Sender<Event>) {
+/// of each transcript it covers in `claude_folder`, the folder the daemon
+/// reads Claude Code's sessions in, has the model write the brief, and hands
+/// back what it wrote, or why it wrote nothing.
+pub fn ask(number: u64, brief: Brief, claude_folder: Option<PathBuf>, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
         let at = clock();
-        let projects = lunetad::claude_folder().map(|folder| folder.join("projects"));
+        let projects = claude_folder.map(|folder| folder.join("projects"));
         let ends = projects.map(|projects| brief.ends(&projects)).unwrap_or_default();
         let said = write(&brief.prompt(&ends, SystemTime::now()));
         // luneta is on its way out.
@@ -608,9 +608,19 @@ fn write(prompt: &str) -> Result<String, String> {
     for name in LEFT_OUT {
         claude.env_remove(name);
     }
-    match program::run(&mut claude, WRITING) {
+    wrote(program::run(&mut claude, WRITING))
+}
+
+/// What the model wrote, as `claude` `ran`, or why it wrote nothing: a brief
+/// that says nothing would read as one with nothing to tell.
+fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
+    match ran {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => {
-            Ok(String::from_utf8_lossy(&stdout).trim_end().to_owned())
+            let said = String::from_utf8_lossy(&stdout).trim_end().to_owned();
+            if said.trim().is_empty() {
+                return Err("brief: claude wrote nothing".to_owned());
+            }
+            Ok(said)
         },
         // What it said goes on either, as it fails.
         Ok(Ran::Ended { status, stdout, stderr }) => {
@@ -629,6 +639,7 @@ fn write(prompt: &str) -> Result<String, String> {
 }
 
 /// A brief over zellij, from when it is asked until a key closes it.
+#[derive(Debug)]
 pub struct Briefing {
     /// Its number among the briefs luneta has asked for, which what comes of
     /// it carries.
@@ -747,6 +758,9 @@ fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::ExitStatus;
+
     use serde_json::json;
 
     use super::*;
@@ -759,7 +773,7 @@ mod tests {
             status: "idle".to_owned(),
             since: Some(SystemTime::UNIX_EPOCH),
             branch: (pane == 4).then(|| "feat/fold".to_owned()),
-            cwd: Some(format!("/w/{session}")),
+            cwd: format!("/w/{session}"),
             transcript: transcript.map(|id| SessionId::parse(id).expect("a UUID")),
         }
     }
@@ -908,7 +922,7 @@ Its transcript is unknown: Claude Code names none for it.
             status: "busy".to_owned(),
             since: None,
             branch: None,
-            cwd: None,
+            cwd: "/w".to_owned(),
             transcript: Some(SessionId::parse(id).expect("a UUID")),
         };
         let notes = ids.iter().enumerate().map(note).collect();
@@ -938,7 +952,7 @@ Its transcript is unknown: Claude Code names none for it.
             status: "busy".to_owned(),
             since: None,
             branch: None,
-            cwd: None,
+            cwd: "/w".to_owned(),
             transcript: None,
         };
         let session = |pane: usize| if pane < MAX_NOTES { "a" } else { "b" };
@@ -964,6 +978,20 @@ Its transcript is unknown: Claude Code names none for it.
         for id in ["", "../0b7c5e1a", "0b7c5e1a/x", "id-1"] {
             assert_eq!(SessionId::parse(id), None, "{id}");
         }
+    }
+
+    /// What `claude` wrote is the brief, and a run that wrote nothing but
+    /// blanks is none: an empty box would read as a brief with nothing to
+    /// tell.
+    #[test]
+    fn a_run_of_claude_that_wrote_nothing_is_no_brief() {
+        let ended = |stdout: &str| {
+            let (status, stdout) = (ExitStatus::from_raw(0), stdout.as_bytes().to_vec());
+            Ok(Ran::Ended { status, stdout, stderr: Vec::new() })
+        };
+        let brief = "You have 1 session open:\n- luneta: the brief is back";
+        assert_eq!(wrote(ended(&format!("{brief}\n"))), Ok(brief.to_owned()));
+        assert_eq!(wrote(ended(" \n\n")), Err("brief: claude wrote nothing".to_owned()));
     }
 
     /// The box over zellij's columns, `width` by `height`, as text.

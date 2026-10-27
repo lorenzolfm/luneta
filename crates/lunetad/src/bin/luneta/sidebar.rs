@@ -1613,7 +1613,7 @@ impl Sidebar {
                     status: status_word(agent),
                     since: agent.status_since.and_then(|at| at.try_into().ok()),
                     branch,
-                    cwd: Some(cwd.to_owned()),
+                    cwd: cwd.to_owned(),
                     transcript: SessionId::parse(&agent.session_id),
                 });
             }
@@ -4211,7 +4211,7 @@ mod tests {
             status: "waiting".to_owned(),
             since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
             branch: Some("feat/brief".to_owned()),
-            cwd: Some("/w/luneta/main".to_owned()),
+            cwd: "/w/luneta/main".to_owned(),
             transcript: SessionId::parse(id),
         };
         let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fold.clone()]).unwrap());

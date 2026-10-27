@@ -672,8 +672,10 @@ agents are among them. The brief shows in a box over zellij, which has the
 keys and the mouse until it closes: while the model writes, `Esc` gives it up
 and any other key waits, and once it shows, any key or a click closes it,
 leaving the sidebar the keys and the highlight where it was. The rule along
-the box's top says when you asked. luneta reads the transcripts and runs
-`claude` itself, so it needs `claude` on its own `PATH`.
+the box's top says when you asked. luneta reads the transcripts in the folder
+lunetad reads Claude Code's sessions in, where the agents it lists come from,
+whatever `CLAUDE_CONFIG_DIR` luneta has. It runs `claude` itself, so it needs
+`claude` on its own `PATH`.
 
 ```text
 ┌─ Brief of every session ───────────── at 18:42 ─┐

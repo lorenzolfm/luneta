@@ -60,6 +60,9 @@ pub enum Event {
     /// luneta's terminal cannot be read any more.
     InputEnded(io::Error),
     Hosted(Said),
+    /// luneta reached a daemon, which reads Claude Code's sessions in
+    /// `claude_folder`, where the transcripts of the agents it lists are.
+    Reached { claude_folder: Option<PathBuf> },
     /// The host as the daemon says it stands, or why the daemon does not say.
     Daemon(Result<Host, String>),
     /// What zellij answered a look at the clients of a session.
@@ -125,7 +128,7 @@ const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
 /// Which side has the keys, and whether the sidebar is open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Focus {
     /// zellij, beside the sidebar.
     Zellij,
@@ -133,14 +136,18 @@ enum Focus {
     /// zellij, beside the sidebar collapsed, with the rest of its columns:
     /// the sidebar takes the keys only once it opens again.
     Collapsed,
+    /// A brief in a box over zellij, beside the sidebar, from when the
+    /// sidebar asks for it: it has the keys and the mouse until it closes,
+    /// when the sidebar has them again.
+    Brief(Briefing),
 }
 
 impl Focus {
     /// Whether zellij has the keys.
-    fn zellij(self) -> bool {
+    fn zellij(&self) -> bool {
         match self {
             Focus::Zellij | Focus::Collapsed => true,
-            Focus::Sidebar => false,
+            Focus::Sidebar | Focus::Brief(_) => false,
         }
     }
 }
@@ -266,12 +273,13 @@ struct App {
     /// What luneta's terminal turned to, until the colours it turned to are
     /// in, when zellij is told.
     turned: Option<Theme>,
-    /// The brief over zellij, from when the sidebar asks for it until it
-    /// closes.
-    briefing: Option<Briefing>,
     /// How many briefs luneta has asked for. A brief takes the next number
     /// as it is asked, which what comes of it carries.
     briefs: u64,
+    /// The folder the daemon reads Claude Code's sessions in, where a brief
+    /// reads the transcripts of the agents it lists: none until luneta has
+    /// reached one.
+    claude_folder: Option<PathBuf>,
     events: Sender<Event>,
     /// What watches where the folds, the news and the order are kept, for as
     /// long as luneta runs.
@@ -446,8 +454,8 @@ fn run_in(
         cursor: None,
         colours,
         turned: None,
-        briefing: None,
         briefs: 0,
+        claude_folder: None,
         events,
         _watching: watching,
         dir: dir.to_owned(),
@@ -533,6 +541,7 @@ impl App {
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
             Event::Hosted(said) => self.hosted_said(said, terminal)?,
+            Event::Reached { claude_folder } => self.claude_folder = claude_folder,
             Event::Daemon(Ok(host)) => {
                 let look = self.sidebar.heard(host);
                 self.look(look);
@@ -555,7 +564,9 @@ impl App {
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
             Event::Briefed { number, written } => {
-                if let Some(briefing) = self.briefing.as_mut().filter(|it| it.number() == number) {
+                if let Focus::Brief(briefing) = &mut self.focus
+                    && briefing.number() == number
+                {
                     briefing.written(written);
                 }
             },
@@ -614,9 +625,9 @@ impl App {
             return;
         }
         // A brief takes every key, which does nothing else.
-        if let Some(briefing) = &self.briefing {
+        if let Focus::Brief(briefing) = &self.focus {
             if briefing.closes(key) {
-                self.briefing = None;
+                self.give(Focus::Sidebar);
             }
             return;
         }
@@ -634,8 +645,8 @@ impl App {
             // hears the release.
             self.let_go();
             self.sidebar.let_go();
-            let other =
-                if self.focus == Focus::Collapsed { Focus::Zellij } else { Focus::Collapsed };
+            let collapsed = matches!(self.focus, Focus::Collapsed);
+            let other = if collapsed { Focus::Zellij } else { Focus::Collapsed };
             self.give(other);
             return;
         }
@@ -656,9 +667,9 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent) {
         // A brief takes the mouse too, and a click, wherever it is, closes
         // one written, and does nothing else.
-        if let Some(briefing) = &self.briefing {
+        if let Focus::Brief(briefing) = &self.focus {
             if matches!(mouse.kind, MouseEventKind::Down(_)) && briefing.clicked() {
-                self.briefing = None;
+                self.give(Focus::Sidebar);
             }
             return;
         }
@@ -686,7 +697,7 @@ impl App {
         // A click on the sidebar collapsed opens it, as `COLLAPSE` does.
         let at = Position::new(mouse.column, mouse.row);
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
-        if self.focus == Focus::Collapsed {
+        if matches!(self.focus, Focus::Collapsed) {
             if down {
                 self.give(Focus::Zellij);
                 self.opener = Some((Instant::now(), at));
@@ -777,8 +788,8 @@ impl App {
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
-                self.briefing = Some(Briefing::new(self.briefs, brief.title()));
-                brief::ask(self.briefs, brief, &self.events);
+                self.give(Focus::Brief(Briefing::new(self.briefs, brief.title().to_owned())));
+                brief::ask(self.briefs, brief, self.claude_folder.clone(), &self.events);
             },
         }
     }
@@ -850,12 +861,14 @@ impl App {
     /// them, as a terminal tells a program in it of the window's focus, and
     /// the sidebar when it loses them.
     fn give(&mut self, side: Focus) {
-        let had = self.focus.zellij();
+        let (had, has) = (self.focus.zellij(), side.zellij());
+        // A brief leaves the sidebar as it stands, highlight and all, for the
+        // keys to go back to as it closes.
+        self.sidebar.focus(matches!(side, Focus::Sidebar | Focus::Brief(_)));
         self.focus = side;
-        self.sidebar.focus(side == Focus::Sidebar);
         if self.focused
-            && side.zellij() != had
-            && let Some(bytes) = keys::focus(side.zellij(), self.client.hosted.mode())
+            && has != had
+            && let Some(bytes) = keys::focus(has, self.client.hosted.mode())
         {
             self.client.hosted.send(bytes);
         }
@@ -863,7 +876,7 @@ impl App {
 
     /// Hands zellij the keys, where the sidebar has them.
     fn leave(&mut self) {
-        if self.focus == Focus::Sidebar {
+        if matches!(self.focus, Focus::Sidebar) {
             self.give(Focus::Zellij);
         }
     }
@@ -984,7 +997,7 @@ impl App {
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let now = SystemTime::now();
         terminal.draw(|frame| {
-            let collapsed = self.focus == Focus::Collapsed;
+            let collapsed = matches!(self.focus, Focus::Collapsed);
             let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
             let (sidebar, zellij) = areas(frame.area(), own);
             self.areas = (sidebar, zellij);
@@ -999,7 +1012,7 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now);
             }
             let cursor = self.client.hosted.draw(buffer, zellij);
-            if let Some(briefing) = &self.briefing {
+            if let Focus::Brief(briefing) = &self.focus {
                 briefing.draw(buffer, zellij);
             } else if self.focus.zellij()
                 && let Some(cursor) = cursor

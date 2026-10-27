@@ -293,6 +293,11 @@ message InfoResponse {
   // `Host.sessions` are those of this folder alone. Absent from a daemon
   // older than this field, which could not say.
   optional bytes zellij_folder = 4;
+  // The folder it reads Claude Code's sessions in, as its environment named it
+  // when it started, in the bytes of its path. Its agents are those of this
+  // folder alone, and their transcripts are in it. Absent when its environment
+  // named none, and from a daemon older than this field.
+  optional bytes claude_folder = 5;
 }
 
 message ListAgentsRequest {}
