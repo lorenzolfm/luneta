@@ -356,20 +356,42 @@ impl Shells {
     /// terminal says it does. One going on a terminal that is gone is no
     /// pane's: its shell went without a word.
     pub fn read(&mut self) -> Vec<Shell> {
-        let lines = self.lines();
+        self.read_by(modes)
+    }
+
+    /// What `read` says, with how each terminal takes keys as `modes` says.
+    fn read_by(&mut self, modes: impl Fn(&Path) -> Option<Modes>) -> Vec<Shell> {
+        let mut lines = self.lines();
         let going = lines.iter().any(|(_, line)| matches!(line, Line::Going { .. }));
         let processes = if going { self.processes() } else { Vec::new() };
         let mut fronts: HashMap<PathBuf, Front> = HashMap::new();
+        let mut front = |tty: &Path| {
+            if !fs::metadata(tty).is_ok_and(|found| found.file_type().is_char_device()) {
+                return None;
+            }
+            let front = fronts.entry(tty.to_owned());
+            Some(*front.or_insert_with_key(|tty| Front::at(tty, &processes, &modes)))
+        };
+        if going {
+            // The terminals, then the files again. A command that ended
+            // after its file was read left its shell at its prompt, with
+            // the terminal's modes the shell's own, which read as asking:
+            // what the file says once the terminal has been read stands.
+            for (_, line) in &lines {
+                if let Line::Going { tty, .. } = line {
+                    front(tty);
+                }
+            }
+            lines = self.lines();
+        }
         let mut shells = Vec::with_capacity(lines.len());
         for ((named, pane, started), line) in lines {
             let doing = match line {
                 Line::Whole(doing) => doing,
                 Line::Going { command, since, tty } => {
-                    if !fs::metadata(&tty).is_ok_and(|found| found.file_type().is_char_device()) {
+                    let Some(front) = front(&tty) else {
                         continue;
-                    }
-                    let front = fronts.entry(tty);
-                    let front = *front.or_insert_with_key(|tty| Front::at(tty, &processes, modes));
+                    };
                     Doing::Going { command, since, front }
                 },
             };
@@ -579,6 +601,27 @@ mod tests {
             let front = Front::at(Path::new("/dev/pts/3"), &processes, modes);
             assert_eq!(front, said, "{relay} {name} {stat}");
         }
+    }
+
+    /// A command that ends as its terminal is read leaves its shell at its
+    /// prompt, with the terminal's modes the shell's own, which read as
+    /// asking. Its file, read once the terminal has been, says it ended.
+    #[test]
+    fn a_command_that_ends_as_its_terminal_is_read_has_ended() {
+        let folder = tempfile::tempdir().unwrap();
+        let dir = folder.path().join(FOLDER).join("work");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("1.100");
+        fs::write(&file, "going 100 /dev/null make\n").unwrap();
+        let ending = |_: &Path| {
+            fs::write(&file, "ended 102 0 1500 make\n").unwrap();
+            Some(Modes { lines: true, echo: false })
+        };
+        let read = Shells::new(folder.path()).read_by(ending);
+        let took = Duration::from_millis(1500);
+        let doing = Doing::Ended { command: said("make"), at: at(102), status: Some(0), took };
+        let shell = Shell { named: "work".to_owned(), pane: 1, started: at(100), doing };
+        assert_eq!(read, [shell]);
     }
 
     /// `ps` cuts where a process sleeps to six characters unless it comes
