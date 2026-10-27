@@ -132,15 +132,16 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (wake_github, github_woken) = mpsc::sync_channel(1);
     let core = core::start(Wakes { panes: wake_panes, git: wake_git, github: wake_github })?;
     let (end, ending) = oneshot::channel();
-    // Read once, so that the folder the daemon says it reads is the one it
+    // Read once, so that the folders the daemon says it reads are the ones it
     // does.
     let sockets = zellij::folder();
-    follow(&core, &claim.folder, sockets.clone(), end)?;
+    let claude_folder = claude::folder();
+    follow(&core, &claim.folder, claude_folder.clone(), sockets.clone(), end)?;
     panes::follow(core.clone(), panes_woken, SWEEP)?;
     git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
-    let host = Host { started: SystemTime::now(), sockets, core };
+    let host = Host { started: SystemTime::now(), sockets, claude_folder, core };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     // Once zellij has been alone long enough, or the thread that would say so
@@ -197,16 +198,17 @@ impl Alone {
     }
 }
 
-/// Has the core told what Claude Code's files, the shells' files in luneta's
-/// `folder` and zellij's sockets in `sockets` say, as they change, and says
-/// on `end` once zellij has had no session for `ALONE`.
+/// Has the core told what Claude Code's files in `claude_folder`, the shells'
+/// files in luneta's `folder` and zellij's sockets in `sockets` say, as they
+/// change, and says on `end` once zellij has had no session for `ALONE`.
 fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
+    claude_folder: Option<PathBuf>,
     sockets: PathBuf,
     end: oneshot::Sender<()>,
 ) -> io::Result<()> {
-    match claude::folder() {
+    match claude_folder {
         Some(folder) => {
             let mut files = claude::SessionFiles::new(&folder);
             let dir = files.dir().to_owned();
@@ -255,6 +257,9 @@ struct Host {
     started: SystemTime,
     /// The folder it reads zellij's sessions in.
     sockets: PathBuf,
+    /// The folder it reads Claude Code's sessions in, if its environment
+    /// named one.
+    claude_folder: Option<PathBuf>,
     core: SyncSender<Command>,
 }
 
@@ -266,6 +271,7 @@ impl Daemon for Host {
             pid: std::process::id(),
             started_at: Some(self.started.into()),
             zellij_folder: Some(self.sockets.as_os_str().as_bytes().to_vec()),
+            claude_folder: self.claude_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
         }))
     }
 

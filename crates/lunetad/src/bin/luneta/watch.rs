@@ -1,13 +1,16 @@
 //! The host as the daemon says it stands, each time it changes, for the
 //! sidebar: a thread of its own that waits on the daemon's `Watch`, and hands
-//! each answer to luneta's loop.
+//! each answer to luneta's loop, after the folder each daemon it reaches reads
+//! Claude Code's sessions in.
 
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
-use lunetad::api::{Version, WatchRequest};
+use lunetad::api::{InfoRequest, Version, WatchRequest};
 
 use crate::commands::causes;
 use crate::daemon::{self, Reach};
@@ -34,30 +37,48 @@ pub fn start(folder: PathBuf, events: Sender<Event>) {
 /// Asks again each time the daemon answers, for the host once it is no longer
 /// as last seen, until luneta's loop is gone. A daemon that goes away is
 /// looked for again, each `AGAIN`, and started where none runs, or in the
-/// place of an older one.
+/// place of an older one. Each daemon found is asked first where it reads
+/// Claude Code's sessions, which are those of the agents it lists.
 async fn watch(folder: PathBuf, events: Sender<Event>) {
     loop {
         // A daemon found afresh is asked for the whole host, as one started
         // again counts its versions afresh.
         let mut after: Option<Version> = None;
         let failure = match daemon::reach(&folder, Reach::Current).await {
-            Ok(mut daemon) => loop {
-                match daemon.watch(WatchRequest { after }).await {
-                    Ok(host) => {
-                        let host = host.into_inner();
-                        // One with no version would be asked after again at
-                        // once, as a first look, for as long as it answers so.
-                        let Some(version) = host.version else {
-                            break "an answer with no version, which this luneta does not read"
-                                .to_owned();
-                        };
-                        after = Some(version);
-                        // luneta is on its way out.
-                        if events.send(Event::Daemon(Ok(host))).is_err() {
-                            return;
-                        }
-                    },
-                    Err(status) => break causes(&status),
+            Ok(mut daemon) => 'reached: {
+                let claude_folder = match daemon.info(InfoRequest {}).await {
+                    // A daemon that says no folder, as one older than the
+                    // field, is taken to read luneta's, as before: one whose
+                    // environment named none lists no agents to look for.
+                    Ok(info) => info
+                        .into_inner()
+                        .claude_folder
+                        .map(|folder| PathBuf::from(OsString::from_vec(folder)))
+                        .or_else(lunetad::claude_folder),
+                    Err(status) => break 'reached causes(&status),
+                };
+                // luneta is on its way out.
+                if events.send(Event::Reached { claude_folder }).is_err() {
+                    return;
+                }
+                loop {
+                    match daemon.watch(WatchRequest { after }).await {
+                        Ok(host) => {
+                            let host = host.into_inner();
+                            // One with no version would be asked after again at
+                            // once, as a first look, for as long as it answers so.
+                            let Some(version) = host.version else {
+                                break "an answer with no version, which this luneta does not read"
+                                    .to_owned();
+                            };
+                            after = Some(version);
+                            // luneta is on its way out.
+                            if events.send(Event::Daemon(Ok(host))).is_err() {
+                                return;
+                            }
+                        },
+                        Err(status) => break causes(&status),
+                    }
                 }
             },
             Err(why) => why,

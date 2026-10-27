@@ -7,8 +7,10 @@
 //! pane. `n` opens the New group: your shell beside the pane, a tab of its
 //! session, or a session, in the directory it works in. `d` opens the Delete
 //! group, which closes the pane or kills its session, and asks first when
-//! that would end an agent at work. The plugin's menu takes keys of yours
-//! besides, from its configuration, which luneta has none of yet.
+//! that would end an agent at work. `b` opens the Brief group, which briefs
+//! you on every session, the row's session, or the agent in its pane. The
+//! plugin's menu takes keys of yours besides, from its configuration, which
+//! luneta has none of yet.
 //!
 //! At the top of the sidebar, a key the sidebar has no use of its own for
 //! opens the menu on the group it opens, and `m` opens it on its first group,
@@ -20,6 +22,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::sidebar::{self, ACCENT, LIT, NAME, Place, TAG};
@@ -40,6 +43,10 @@ const DELETE: char = 'd';
 const DELETE_NAME: &str = "Delete";
 const DELETE_ROW: char = 'd';
 const DELETE_SESSION: char = 's';
+
+/// The key of luneta's own Brief group, and its name.
+const BRIEF: char = 'b';
+const BRIEF_NAME: &str = "Brief";
 
 /// What the rule over the menu's first group, and over the legend, names
 /// them, and what it names the search box.
@@ -158,15 +165,16 @@ impl Top {
     }
 }
 
-/// No command takes the key of luneta's New or Delete group, which would be
-/// out of reach at the top of the sidebar, and gone from the legend; nor a
-/// key the sidebar moves, folds or opens the menu with, which `Top::of` finds
-/// first.
+/// No command takes the key of luneta's New, Delete or Brief group, which
+/// would be out of reach at the top of the sidebar, and gone from the legend;
+/// nor a key the sidebar moves, folds or opens the menu with, which `Top::of`
+/// finds first.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
         let key = Command::ALL[at].key();
-        assert!(key != NEW && key != DELETE, "a command on a key of luneta's groups");
+        let group = key == NEW || key == DELETE || key == BRIEF;
+        assert!(!group, "a command on a key of luneta's groups");
         assert!(Top::moves(key).is_none(), "a command on a key the sidebar moves with");
         at += 1;
     }
@@ -215,6 +223,9 @@ enum Entry {
     /// A key of the Delete group: closes the pane the menu is for, or kills
     /// its session.
     Close { key: char, scope: Scope },
+    /// A key of the Brief group: briefs you on what the agents it covers are
+    /// doing.
+    Brief(brief::Scope),
     /// A command of the sidebar's own, which the legend lists beside the
     /// menu's keys.
     Command(Command),
@@ -227,6 +238,7 @@ impl Entry {
         match self {
             Entry::Group { key, .. } | Entry::Close { key, .. } => *key,
             Entry::New(new) => new.key(),
+            Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
             Entry::Search => SEARCH,
         }
@@ -247,6 +259,8 @@ enum Pressed {
     New(New),
     /// Closes the pane the menu is for, or kills its session, by `key`.
     Delete { key: char, scope: Scope },
+    /// Asks for a brief of what the scope covers.
+    Brief(brief::Scope),
     /// Closes the menu.
     Close,
     /// Nothing: the group open has no such key.
@@ -264,9 +278,10 @@ struct Keys {
 
 impl Keys {
     /// The menu's keys: `/`, which opens the search over the skills, and the
-    /// New and Delete groups: `n p`, `n t` and `n s` open a pane, a tab and a
-    /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
-    /// kills its session.
+    /// New, Delete and Brief groups: `n p`, `n t` and `n s` open a pane, a
+    /// tab and a session, `d d` deletes what the menu is for, as `row` says,
+    /// and `d s` kills its session, and `b z`, `b s` and `b h` brief you on
+    /// every session, its session and what the menu is for.
     fn new(row: Scope) -> Self {
         let root = vec![
             Entry::Search,
@@ -282,6 +297,11 @@ impl Keys {
                     Entry::Close { key: DELETE_ROW, scope: row },
                     Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
                 ],
+            },
+            Entry::Group {
+                key: BRIEF,
+                name: BRIEF_NAME,
+                entries: brief::Scope::ALL.into_iter().map(Entry::Brief).collect(),
             },
         ];
         Keys { root, open: Vec::new(), search: None }
@@ -353,6 +373,7 @@ impl Keys {
         match &entries[at] {
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
+            Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             // The legend only shows, and runs nothing.
             Entry::Command(_) => return Pressed::Nothing,
@@ -550,6 +571,9 @@ pub enum Done {
     Start(String),
     /// Have zellij do what a delete key planned.
     Act(Act),
+    /// Brief you on what the agents `scope` covers are doing, by `place`, the
+    /// row the menu was for.
+    Brief { scope: brief::Scope, place: Place },
 }
 
 /// The menu at the bottom of the sidebar, for the row highlighted when it
@@ -675,6 +699,9 @@ impl Menu {
                     let delete = Delete { key, scope };
                     stays(Stage::Planning { keys, delete, agreed: None }, Wants::Plan(scope))
                 },
+                Pressed::Brief(scope) => {
+                    Did::Closed(Done::Brief { scope, place: target.place.clone() })
+                },
             },
             Stage::Planning { .. } | Stage::Opening(_) if closes(key) => {
                 Did::Closed(Done::Nothing)
@@ -786,7 +813,7 @@ impl Menu {
 
 /// `text` on as many lines of `width` as it takes, a space in from the edge,
 /// broken between words where it can be.
-fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -831,7 +858,7 @@ pub fn legend(width: usize, room: usize) -> Vec<Line<'static>> {
 
 /// The rule over the menu, `width` wide: its title, and where its pane works
 /// while the rule has room for all of both.
-fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
+pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     // `─ `, the title, a space and at least one `─` of the rule.
     let head = 2 + 1 + 1;
@@ -875,6 +902,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         },
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
+        Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
         Entry::Search => spans.push(does(SEARCH_DOES)),
     }
@@ -883,7 +911,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
 
 /// The keys that go back and close, and what each does, in as many words as
 /// `width` has room for: all of them, or else the keys alone.
-fn keys_line(width: usize, keys: &[(&str, &str)]) -> Line<'static> {
+pub fn keys_line(width: usize, keys: &[(&str, &str)]) -> Line<'static> {
     let spelled = |sep: &str, joiner: &str| {
         let each = keys.iter().map(|(key, does)| format!("{key}{sep}{does}"));
         each.collect::<Vec<_>>().join(joiner)
@@ -1077,6 +1105,7 @@ mod tests {
                 " /  Search skills",
                 " n  New ▸",
                 " d  Delete ▸",
+                " b  Brief ▸",
                 " <ESC> - Close",
             ]
         );
@@ -1099,6 +1128,7 @@ mod tests {
                 " v  Reorder",
                 " n  New ▸",
                 " d  Delete ▸",
+                " b  Brief ▸",
             ]
         );
         // `m` and the keys that move are the sidebar's, and `/` and `u` its
@@ -1108,6 +1138,34 @@ mod tests {
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
         assert_eq!(Top::of('n'), None);
         assert_eq!(Top::of('d'), None);
+        assert_eq!(Top::of('b'), None);
+    }
+
+    /// `b` opens the Brief group, on any row, and a key in it closes the menu
+    /// for the sidebar to brief you by the row the menu was for: `z` on
+    /// every session, `s` on the row's session, and `h` on what the row is.
+    #[test]
+    fn the_brief_group_briefs_you_by_the_row_the_menu_is_for() {
+        let (menu, _) = stays(opened(session_row(), Some('b')));
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ Brief ───────────────────────",
+                " z  Every session",
+                " s  This session",
+                " h  Highlighted",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        for (key, scope) in [
+            ('z', brief::Scope::Every),
+            ('s', brief::Scope::Session),
+            ('h', brief::Scope::Highlighted),
+        ] {
+            let (menu, _) = stays(opened(pane_row(), Some('b')));
+            let place = pane_row().place;
+            assert_eq!(closed(menu.key(&char(key))), Done::Brief { scope, place }, "{key}");
+        }
     }
 
     #[test]

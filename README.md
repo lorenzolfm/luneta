@@ -530,10 +530,11 @@ In the sidebar, `b` opens the brief's keys, for the row the cursor is on, and
 | `b` `s` | the row's session, a line for each agent in it |
 | `b` `h` | the agent in the row's pane, in a few lines; on a session's row, its session |
 
-The brief opens floating over the tab, and any key closes it. It says when it
-was made, and nothing is kept: each key asks again, so a brief costs only when
-you ask for one. With no agent to brief you on, or transcripts that could not
-be read, the sidebar says so where the keys were.
+The brief opens floating over the tab, and any key closes it; in
+[luneta's sidebar](#luneta-in-your-terminal), it opens in a box over zellij
+instead. It says when it was made, and nothing is kept: each key asks again,
+so a brief costs only when you ask for one. With no agent to brief you on, or
+transcripts that could not be read, the sidebar says so where the keys were.
 
 For each agent, the model is told its session, its row's name, its status and
 for how long, and its branch, as the sidebar knows them, and from the end of
@@ -634,6 +635,7 @@ no menu is open, its bottom lists what you can press there:
  v  Reorder
  n  New ▸
  d  Delete ▸
+ b  Brief ▸
 ```
 
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
@@ -662,6 +664,29 @@ luneta asks zellij what a pane takes along as you press the key, and again as
 you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
 and is not closed with it. A delete leaves you in the sidebar, the highlight on
 the row after once what it took is gone.
+
+`b` opens the [brief](#brief)'s keys, as in the plugin's sidebar: `b z` briefs
+you on every session, `b s` on the highlighted row's session, and `b h` on the
+agent in its pane, or on a session's row, on its session. A folded session's
+agents are among them. The brief shows in a box over zellij, which has the
+keys and the mouse until it closes: while the model writes, `Esc` gives it up,
+`claude` with it, and any other key waits, and once it shows, any key or a
+click closes it, leaving the sidebar the keys and the highlight where it was.
+The rule along the box's top says when you asked. luneta reads the transcripts
+in the folder lunetad reads Claude Code's sessions in, where the agents it
+lists come from, whatever `CLAUDE_CONFIG_DIR` luneta has. It runs `claude`
+itself, so it needs `claude` on its own `PATH`.
+
+```text
+┌─ Brief of every session ───────────── at 18:42 ─┐
+│ You have 3 sessions open:                       │
+│ - cipher: an agent waits for CI to finish       │
+│ - luneta: the sidebar fold is done              │
+│ - dotfiles: your nvim config is fixed           │
+│                                                 │
+│ <any key> - Close                               │
+└─────────────────────────────────────────────────┘
+```
 
 An agent's row is named as the plugin's sidebar names it: for the name you
 gave it with `/rename`, or else for its topic, the title Claude Code gives its
@@ -775,12 +800,12 @@ goes after those it has, as a new session always went last. The order is the
 sidebar's only: zellij's tabs keep theirs.
 
 It is the first step, and the plugin's sidebar has more than this one does
-yet: your groups in its menu and the brief come over one at a time. Until
+yet: your groups in its menu are still to come over. Until
 then, run luneta without the plugin's sidebar, or the two stand side by side:
 leave the dock out of `load_plugins`, and `default_layout` back at zellij's
-own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker, the
-floating menu and the brief are the plugin's still, and work in the zellij
-luneta runs as in any other.
+own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker and the
+floating menu are the plugin's still, and work in the zellij luneta runs as in
+any other.
 
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not

@@ -23,7 +23,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
 use crate::host::{
-    answered, eventually, folder_in, info, start, Host, Running, LUNETA, LUNETAD, SOCKET,
+    answered, eventually, folder_in, info, start, Host, Running, Vars, LUNETA, LUNETAD, SOCKET,
 };
 
 /// The version of the stand-in for a daemon an upgrade left running.
@@ -361,6 +361,19 @@ fn the_daemon_says_the_folder_it_reads_zellij_s_sessions_in() {
     assert_eq!(reads.as_deref(), Some(host.sockets.path().as_os_str().as_bytes()));
 }
 
+/// The daemon says which folder it reads Claude Code's sessions in, where the
+/// transcripts of the agents it lists are: the one its environment names.
+#[test]
+fn the_daemon_says_the_folder_it_reads_claude_code_s_sessions_in() {
+    let host = Host::new();
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    fs::create_dir_all(claude.join("sessions")).unwrap();
+    let _daemon = start(Vars { home: Some(home.path()), ..host.vars() }).unwrap();
+    let reads = told(&host).and_then(|info| info.claude_folder);
+    assert_eq!(reads.as_deref(), Some(claude.as_os_str().as_bytes()));
+}
+
 /// A daemon that reads zellij's sessions in another folder than luneta's
 /// zellij keeps them in, as one started with another `ZELLIJ_SOCKET_DIR`
 /// does, `luneta watch` neither asks nor stops, older though it is, and says
@@ -446,7 +459,8 @@ impl Daemon for StandIn {
     async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
         let (version, pid) = (self.version.clone(), self.pid);
         let zellij_folder = self.reads.as_ref().map(|reads| reads.as_os_str().as_bytes().to_vec());
-        Ok(Response::new(InfoResponse { version, pid, started_at: None, zellij_folder }))
+        let info = InfoResponse { version, pid, zellij_folder, ..InfoResponse::default() };
+        Ok(Response::new(info))
     }
 
     async fn list_agents(

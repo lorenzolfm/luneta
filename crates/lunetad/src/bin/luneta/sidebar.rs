@@ -3,7 +3,8 @@
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
 //! `▌` marks the pane it is on. `•` dots a pane where something finished since
 //! you were last there, and one you marked unread, and `u` takes the dot away
-//! or gives it. The menu opens at its bottom, for the row highlighted.
+//! or gives it. The menu opens at its bottom, for the row highlighted, and
+//! its Brief group asks for a brief of the agents by that row.
 //! Collapsed, it keeps only what it counts of the dots, the agents at work and
 //! those in a shell.
 //!
@@ -34,6 +35,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::brief::{self, Brief, Note, Over, SessionId};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject};
 use crate::folds::Folds;
 use crate::gruvbox;
@@ -487,6 +489,8 @@ pub enum Asked {
     Start { session: SessionName, cwd: String },
     /// Find the skills that `cwd` can run, for the menu numbered `menu`.
     Find { menu: u64, cwd: String },
+    /// Have the model write this brief, and show it.
+    Brief(Brief),
 }
 
 /// The rows the top of the sidebar takes: its rule, and a blank line.
@@ -1494,6 +1498,7 @@ impl Sidebar {
                     },
                     Done::Start(cwd) => self.start(&cwd),
                     Done::Act(act) => self.delete(act),
+                    Done::Brief { scope, place } => self.brief(scope, &place),
                 };
             },
         };
@@ -1562,6 +1567,71 @@ impl Sidebar {
             refuge = others.rfind(|listed| listed.name != session);
         }
         Subject { session, seat, deletes, agents, refuge: refuge.map(Place::Session) }
+    }
+
+    /// Asks for a brief of what `scope` covers, by `place`, the row the menu
+    /// was for: every session, in the rows' order, or the row's session, or
+    /// the agent in the row's pane, and on a session's row, its session. An
+    /// agent is told of as its row shows it, a folded session's too, by the
+    /// name, the status and the branch on its row. With no agent there, the
+    /// sidebar says so where the menu was.
+    fn brief(&mut self, scope: brief::Scope, place: &Place) -> Asked {
+        let Some(host) = &self.host else {
+            return Asked::Nothing;
+        };
+        // In the order of their rows, whatever orders them, and any without
+        // one after them.
+        let (mut sessions, _) = oldest_first(&host.sessions);
+        let row = |listed: &Listed| {
+            let of = |row: &Row| matches!(row, Row::Session { session, .. } if session == listed);
+            self.rows.iter().position(of).unwrap_or(usize::MAX)
+        };
+        sessions.sort_by_key(|(listed, _)| row(listed));
+        let over = match (scope, place) {
+            (brief::Scope::Every, _) => {
+                Over::Sessions(sessions.iter().map(|(listed, _)| listed.name.clone()).collect())
+            },
+            (brief::Scope::Highlighted, Place::Pane { session, pane }) => {
+                Over::Agent(session.name.clone(), *pane)
+            },
+            (brief::Scope::Session | brief::Scope::Highlighted, _) => {
+                Over::Session(place.session().to_owned())
+            },
+        };
+        let agents = seated(&host.agents, &host.sessions);
+        let trees: HashMap<&str, &lunetad::api::WorkTree> =
+            host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
+        let mut notes = Vec::new();
+        for (_, session) in sessions {
+            let mut panes: Vec<_> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
+            panes.sort_by_key(|pane| (pane.tab, pane.id));
+            for pane in panes {
+                let Some(agent) = agents.get(&(session.name.as_str(), pane.id)) else {
+                    continue;
+                };
+                let cwd = pane.cwd.as_deref().unwrap_or(agent.cwd.as_str());
+                let branch = trees.get(cwd).and_then(|tree| {
+                    checkout(&WorkTree::of_api(tree)?, None).map(|checkout| checkout.branch)
+                });
+                notes.push(Note {
+                    session: session.name.clone(),
+                    pane: pane.id,
+                    name: label(Some(agent), pane),
+                    status: status_word(agent),
+                    since: agent.status_since.and_then(|at| at.try_into().ok()),
+                    branch,
+                    cwd: cwd.to_owned(),
+                    transcript: SessionId::parse(&agent.session_id),
+                });
+            }
+        }
+        match Brief::new(over, notes) {
+            Ok(brief) => Asked::Brief(brief),
+            Err(reason) => {
+                self.notice = Some(reason);
+                Asked::Nothing
+            },
+        }
     }
 
     /// Takes luneta's zellij to a session that starts in `cwd`, named for it
@@ -2330,6 +2400,21 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     }
 }
 
+/// What an agent is doing, in the word Claude Code says it in, for the brief.
+fn status_word(agent: &Agent) -> String {
+    match &agent.status {
+        Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
+            Ok(Status::Waiting) => "waiting".to_owned(),
+            Ok(Status::Idle) => "idle".to_owned(),
+            Ok(Status::Busy) => "busy".to_owned(),
+            Ok(Status::Shell) => "shell".to_owned(),
+            Ok(Status::Unspecified) | Err(_) => "unknown".to_owned(),
+        },
+        Some(Reported::OtherStatus(word)) => word.clone(),
+        None => "unreported".to_owned(),
+    }
+}
+
 /// The name of an agent's session, if someone gave it one, as `/rename` does:
 /// one Claude Code derives from the directory, or makes up, is no name a row
 /// goes by, as the plugin's sidebar has it. A name from before Claude Code said
@@ -2438,7 +2523,7 @@ fn glyphs(changes: &Changes, stashes: u32, upstream: Option<Upstream>) -> String
 }
 
 /// How long ago `since` was, in the unit that says the most of it.
-fn age(since: SystemTime, now: SystemTime) -> String {
+pub fn age(since: SystemTime, now: SystemTime) -> String {
     let secs = now.duration_since(since).unwrap_or(Duration::ZERO).as_secs();
     match secs {
         0..=59 => format!("{secs}s"),
@@ -2965,20 +3050,20 @@ mod tests {
         let clients = vec![Client { id: 1, pane: Some(2) }];
         sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
 
-        let (lines, lit) = seen(&mut sidebar, false, 32, 12);
+        let (lines, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lines[4..6], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
         assert_eq!(lit, [4, 5]);
-        let (_, lit) = seen(&mut sidebar, true, 32, 12);
+        let (_, lit) = seen(&mut sidebar, true, 32, 13);
         assert_eq!(lit, [4, 5]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 12);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 13);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
-        let (_, lit) = seen(&mut sidebar, false, 32, 12);
+        let (_, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lit, [4, 5]);
         let fish = Place::Pane { session: listed("older", 10), pane: 1 };
-        assert_eq!(click(&mut sidebar, 10, 3, Rect::new(0, 0, 32, 12)), Asked::Go(fish));
-        let (_, lit) = seen(&mut sidebar, false, 32, 12);
+        assert_eq!(click(&mut sidebar, 10, 3, Rect::new(0, 0, 32, 13)), Asked::Go(fish));
+        let (_, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lit, [4, 5]);
     }
 
@@ -3028,7 +3113,7 @@ mod tests {
             sidebar.key(&pressed, moment(160_000));
         }
         assert_eq!(sidebar.cursor, second);
-        let area = Rect::new(0, 0, 32, 12);
+        let area = Rect::new(0, 0, 32, 13);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -3159,7 +3244,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the rule along the top and the legend at the
         // bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 10)[2..4].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 11)[2..4].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -3242,7 +3327,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 10);
+        let area = Rect::new(0, 0, 32, 11);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[4].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Take);
@@ -4019,7 +4104,7 @@ mod tests {
     /// keys.
     #[test]
     fn a_search_opens_a_folded_session_until_it_closes() {
-        let keys = " d  Delete ▸";
+        let keys = " b  Brief ▸";
         for close in [Some(KeyCode::Esc), Some(KeyCode::Enter), None] {
             let mut sidebar = searched();
             sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
@@ -4056,7 +4141,7 @@ mod tests {
         for _ in 0..4 {
             sidebar.key(&backspace, moment(160_000));
         }
-        assert_eq!(bottom(&mut sidebar), " d  Delete ▸");
+        assert_eq!(bottom(&mut sidebar), " b  Brief ▸");
         type_in(&mut sidebar, "/a-very-long-search-for-something");
         assert_eq!(bottom(&mut sidebar), " /…y-long-search-for-something_");
     }
@@ -4102,6 +4187,69 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(false);
         assert!(sidebar.menu.is_none());
+    }
+
+    /// The Brief group's keys brief you by the row the menu was for: `b z` on
+    /// every session, in the rows' order, as you moved them too, `b s` on the
+    /// row's session, and `b h` on the agent in the row's pane, or on a
+    /// session's row, on its session. An agent is told of by its row's name,
+    /// its status and its branch, a folded session's too. With none there,
+    /// the sidebar says so.
+    #[test]
+    fn the_brief_s_keys_brief_you_by_the_row_the_menu_was_for() {
+        let mut sidebar = two_sessions();
+        let mut host = sidebar.host.clone().expect("a host");
+        let id = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
+        host.agents[0].session_id = id.to_owned();
+        let head = Some(api::checkout::Head::Branch(api::Branch {
+            name: "feat/brief".to_owned(),
+            upstream: None,
+        }));
+        let checkout = api::Checkout { head, changes: Some(api::Changes::default()), stashes: 0 };
+        host.work_trees = vec![api::WorkTree {
+            dir: "/w/luneta/main".to_owned(),
+            stands: Some(api::work_tree::Stands::Checkout(checkout)),
+        }];
+        sidebar.heard(host);
+        sidebar.focus(true);
+        let fold = Note {
+            session: "older".to_owned(),
+            pane: 1,
+            name: "fold".to_owned(),
+            status: "waiting".to_owned(),
+            since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+            branch: Some("feat/brief".to_owned()),
+            cwd: "/w/luneta/main".to_owned(),
+            transcript: SessionId::parse(id),
+        };
+        let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fold.clone()]).unwrap());
+        let every = || Over::Sessions(vec!["older".to_owned(), "newer".to_owned()]);
+        let older = || Over::Session("older".to_owned());
+        for (key, over) in [('z', every()), ('s', older()), ('h', Over::Agent("older".to_owned(), 1))]
+        {
+            type_in(&mut sidebar, "b");
+            assert_eq!(sidebar.key(&char(key), moment(160_000)), brief(over), "{key}");
+            assert!(sidebar.menu.is_none(), "{key}");
+        }
+        // nvim's pane has no agent, and the newer session none.
+        sidebar.step(1);
+        type_in(&mut sidebar, "bh");
+        assert_eq!(sidebar.notice.as_deref(), Some("brief: no agent in this pane"));
+        sidebar.step(1);
+        type_in(&mut sidebar, "bs");
+        assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents in newer"));
+        // Folded, the older session's row stands for its panes.
+        sidebar.step(-2);
+        type_in(&mut sidebar, "h");
+        assert_eq!(sidebar.cursor, Some(Place::Session(listed("older", 10))));
+        type_in(&mut sidebar, "b");
+        assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(older()));
+        type_in(&mut sidebar, "b");
+        assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(every()));
+        // The older session moved under the newer one.
+        type_in(&mut sidebar, "vJb");
+        let moved = Over::Sessions(vec!["newer".to_owned(), "older".to_owned()]);
+        assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(moved));
     }
 
     /// While lunetad does not answer, what it said last of the agents may be
@@ -4440,8 +4588,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 12);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 12)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 13);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 13)[HEADER].clone();
         assert_eq!(first(&mut sidebar), " ▾ bipa ──────────────────────");
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 2), area);

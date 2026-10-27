@@ -22,6 +22,7 @@ mod shells;
 mod watch;
 mod zellij;
 
+pub use claude::folder as claude_folder;
 pub use client::{connect, listening};
 pub use daemon::{serve, Claim};
 pub use folder::Refusal;

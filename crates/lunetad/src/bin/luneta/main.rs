@@ -2,6 +2,7 @@
 //! runs in each, and the CLI that asks lunetad, the daemon of this host.
 
 mod answers;
+mod brief;
 mod close;
 mod commands;
 mod daemon;
