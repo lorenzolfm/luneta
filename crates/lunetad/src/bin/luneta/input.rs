@@ -173,8 +173,11 @@ fn parse(bytes: &[u8], more: bool) -> Parsed {
         [] => Parsed::Partial,
         [ESC] if more => Parsed::Partial,
         [ESC] | [ESC, ESC] => key(KeyCode::Esc, KeyModifiers::NONE),
-        // An introducer that came last is the key it is, with `Alt`.
-        [ESC, b'[' | b'O' | b']'] if !more => alt(parse(&bytes[1..], more)),
+        // `ESC ]` that came last is `Alt ]`, as crossterm reads it. `ESC [`
+        // and `ESC O` wait for what comes after, as they do in crossterm: a
+        // mouse report or a paste that a read cuts after them would otherwise
+        // be typed, and kitty's keys send `Alt [` as `ESC [ 91 ; 3 u`.
+        [ESC, b']'] if !more => alt(parse(&bytes[1..], more)),
         [ESC, b'[', ..] => csi(bytes),
         [ESC, b'O', ..] => ss3(bytes),
         [ESC, b']', ..] => osc(bytes),
@@ -722,7 +725,6 @@ mod tests {
             (b"\x1b", KeyCode::Esc, none),
             (b"\x1bx", KeyCode::Char('x'), alt),
             (b"\x1b\r", KeyCode::Enter, alt),
-            (b"\x1b[", KeyCode::Char('['), alt),
             (b"\x1b[A", KeyCode::Up, none),
             (b"\x1bOA", KeyCode::Up, none),
             (b"\x1b[1;5A", KeyCode::Up, control),
@@ -760,6 +762,22 @@ mod tests {
         parser.advance(b"\x1b", true, &mut |sent| all.push(sent));
         parser.advance(b"x", false, &mut |sent| all.push(sent));
         assert_eq!(all, [pressed(KeyCode::Char('x'), alt)]);
+    }
+
+    /// A read that ends after `ESC [` or `ESC O` leaves them for the next, as
+    /// a burst of mouse reports or a paste may be cut there.
+    #[test]
+    fn an_introducer_a_read_ends_on_waits_for_the_rest() {
+        let moved = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 2,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(sent(&[b"\x1b[", b"<35;3;4M"]), [Sent::Input(Input::Mouse(moved))]);
+        let paste = Sent::Input(Input::Paste("ls\r".to_owned()));
+        assert_eq!(sent(&[b"\x1b[", b"200~ls\r\x1b[201~"]), [paste]);
+        assert_eq!(sent(&[b"\x1bO", b"A"]), [pressed(KeyCode::Up, KeyModifiers::NONE)]);
     }
 
     #[test]
