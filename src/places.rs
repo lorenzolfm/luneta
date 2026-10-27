@@ -251,6 +251,7 @@ mod tests {
         let session = |name: &str, panes| v1::Session {
             name: name.to_owned(),
             started_at: None,
+            socket: 0,
             panes,
             clients: None,
         };
@@ -345,6 +346,7 @@ mod tests {
         let session = |name: &str, titled: Option<v1::Titled>| v1::Session {
             name: name.to_owned(),
             started_at: None,
+            socket: 0,
             panes: Some(v1::Panes {
                 panes: vec![v1::Pane {
                     id: 0,

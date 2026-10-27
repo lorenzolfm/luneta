@@ -93,6 +93,13 @@ impl Id {
     pub fn started(self) -> SystemTime {
         self.made
     }
+
+    /// The inode of its socket. Every socket the daemon reads is in zellij's
+    /// folder, and so on one device.
+    #[must_use]
+    pub fn socket(self) -> u64 {
+        self.ino
+    }
 }
 
 /// What a scan of zellij's folder finds.

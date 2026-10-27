@@ -12,15 +12,15 @@
 //! back folded, and the sessions that share one fold together.
 
 use std::collections::BTreeSet;
-use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::RecommendedWatcher;
 
 use crate::host::Event;
+use crate::state;
 
 #[derive(Default)]
 pub struct Folds {
@@ -35,7 +35,7 @@ pub struct Folds {
 impl Folds {
     /// The folds every luneta on the host shares, as they stand.
     pub fn shared() -> Self {
-        match folder() {
+        match state::folder("folded") {
             Some(dir) => Folds::within(dir),
             None => Folds {
                 lost: Some("neither XDG_STATE_HOME nor HOME is set, to keep them in".to_owned()),
@@ -116,30 +116,10 @@ impl Folds {
     }
 }
 
-/// The folder the folds are kept in, by this process's variables: of
-/// `$XDG_STATE_HOME`, or of `~/.local/state`. A variable set to nothing is not
-/// set, and the spec has a relative `XDG_STATE_HOME` passed over.
-fn folder() -> Option<PathBuf> {
-    let set = |name: &str| env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
-    let state = set("XDG_STATE_HOME")
-        .filter(|state| state.is_absolute())
-        .or_else(|| set("HOME").map(|home| home.join(".local").join("state")))?;
-    Some(state.join("luneta").join("folded"))
-}
-
 /// Tells luneta's loop each time a fold is made or taken away in `dir`, for
-/// as long as the watcher it returns is kept. A read's own access to the
-/// folder is no change, or each read would bring on another.
+/// as long as the watcher it returns is kept.
 pub fn watch(dir: &Path, events: Sender<Event>) -> notify::Result<RecommendedWatcher> {
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|event| event.kind.is_access()) {
-            return;
-        }
-        // luneta is on its way out.
-        let _ = events.send(Event::Folds);
-    })?;
-    watcher.watch(dir, RecursiveMode::NonRecursive)?;
-    Ok(watcher)
+    state::watch(&[dir], events, || Event::Folds)
 }
 
 #[cfg(test)]
