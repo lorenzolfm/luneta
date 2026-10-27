@@ -601,7 +601,7 @@ it, all as [`lunetad`](#building-from-source) says: luneta starts the daemon
 when none runs, and the sidebar says so at its bottom while it does not
 answer. `j` and `k` move,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
-too, `u` marks a pane unread, and `Esc` goes back to zellij. The session
+too, `u` marks a pane read or unread, and `Esc` goes back to zellij. The session
 zellij is in has its rule in
 the accent, and `▌` marks the pane it is on. The highlight rests there while
 the sidebar does not have the focus; once it has, the highlight goes with the
@@ -699,11 +699,13 @@ stayed on it a second while luneta's window had the focus. So one you only
 pass through keeps its `•`, and so does one luneta's zellij is on in a window
 you are not using, and the pane it is on has none, as you see it. Once you
 have been there, the agent keeps its `✓`, dimmed. `u` marks the highlighted
-pane unread, as an email is: its row gets the `•` whatever finished there,
-and keeps it until you go to the pane again and stay a second. On the pane
-you are in, that is once you leave it, or luneta's window, and come back. `u`
-again takes the mark away. A folded session shows the `•` when any of its
-panes has one, unless one waits for you. Each luneta sees you only on the
+pane read or unread, as an email is: a row with the `•` is unread, whatever
+gave it the `•`. On one, `u` is as going there: the `•` goes, a command's row
+goes back to its shell, and an agent's `✓` is dimmed. On a row without it,
+`u` gives it the `•`, which it keeps until you go to the pane again and stay
+a second. On the pane you are in, that is once you leave it, or luneta's
+window, and come back. A folded session shows the `•` when any of its panes
+has one, unless one waits for you. Each luneta sees you only on the
 pane its own zellij is on, and every luneta of one daemon shares what they
 saw and marked: a file for each pane in `seen` and `unread` in luneta's
 runtime folder, `$XDG_RUNTIME_DIR/luneta` or `$TMPDIR/luneta`, beside the

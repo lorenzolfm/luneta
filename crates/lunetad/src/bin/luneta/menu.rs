@@ -71,7 +71,8 @@ const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor
 pub enum Command {
     /// Narrows the rows to those that match what you type.
     Search,
-    /// Marks the highlighted pane unread, or takes the mark away.
+    /// Marks the highlighted pane read while its row has the dot, or else
+    /// unread.
     Unread,
 }
 
