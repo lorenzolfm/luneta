@@ -2,6 +2,7 @@
 //! runs in each, and the CLI that asks lunetad, the daemon of this host.
 
 mod answers;
+mod close;
 mod commands;
 mod daemon;
 mod folds;
@@ -10,8 +11,10 @@ mod hosted;
 mod icons;
 mod input;
 mod keys;
+mod menu;
 mod own;
 mod sidebar;
+mod skills;
 mod watch;
 mod zellij;
 

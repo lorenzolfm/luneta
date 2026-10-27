@@ -1,0 +1,1232 @@
+//! The menu: a key, then another, and a pane opens where you work, as
+//! which-key shows the keys in neovim. It opens at the bottom of the sidebar,
+//! for the row highlighted then.
+//!
+//! Its keys are luneta's own. `/` searches every skill the directory of the
+//! row's pane can run, for an agent to start on the one you pick, beside that
+//! pane. `n` opens the New group: your shell beside the pane, a tab of its
+//! session, or a session, in the directory it works in. `d` opens the Delete
+//! group, which closes the pane or kills its session, and asks first when
+//! that would end an agent at work. The plugin's menu takes keys of yours
+//! besides, from its configuration, which luneta has none of yet.
+//!
+//! At the top of the sidebar, a key the sidebar has no use of its own for
+//! opens the menu on the group it opens, and `m` opens it on its first group,
+//! where every key is the menu's. While the sidebar has the focus and no menu
+//! is open, the legend at its bottom lists the keys it takes there.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
+
+use crate::close::{Act, Plan, Scope};
+use crate::sidebar::{self, ACCENT, NAME, Place, TAG};
+use crate::skills::{Search, Skills};
+
+/// The key that opens the search over the skills, at the top of the menu, and
+/// what the menu says it does.
+const SEARCH: char = '/';
+const SEARCH_DOES: &str = "Search skills";
+
+/// The key of luneta's own New group, and its name.
+const NEW: char = 'n';
+const NEW_NAME: &str = "New";
+
+/// The key of luneta's own Delete group, its name, and its keys: one deletes
+/// what the menu is for, the other its session.
+const DELETE: char = 'd';
+const DELETE_NAME: &str = "Delete";
+const DELETE_ROW: char = 'd';
+const DELETE_SESSION: char = 's';
+
+/// What the rule over the menu's first group, and over the legend, names
+/// them, and what it names the search box.
+const TITLE: &str = "luneta";
+const SEARCH_TITLE: &str = "Skills";
+
+/// What follows a group's name: it opens, as a folded session does.
+const GROUP: &str = "▸";
+
+/// The columns between a key and what it does.
+const GAP: usize = 2;
+
+/// The most skills the search box shows at once. The list scrolls under it.
+const SEARCH_ROWS: usize = 8;
+
+/// What a key that starts an agent starts.
+const CLAUDE: &str = "claude";
+
+/// What the menu says of a key that starts an agent, or opens a pane, a tab
+/// or a session, on a session's row, which the highlight is only on while it
+/// lists none of the session's panes: folded, or with none to list.
+const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor a directory to \
+                           open in; highlight a pane, unfolding its session first if it is folded";
+
+/// A key of the sidebar's own that does more than move the highlight or fold
+/// a session. The legend lists each before the menu's keys, and a key of the
+/// menu's that one has stays the command's at the top of the sidebar: `/`
+/// searches the rows there, and the skills only in the menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// Narrows the rows to those that match what you type.
+    Search,
+}
+
+impl Command {
+    /// Every command, in the order the legend lists them.
+    const ALL: [Command; 1] = [Command::Search];
+
+    const fn key(self) -> char {
+        match self {
+            Command::Search => '/',
+        }
+    }
+
+    /// What the legend says the command does.
+    const fn does(self) -> &'static str {
+        match self {
+            Command::Search => "Search",
+        }
+    }
+
+    /// The command `key` runs at the top of the sidebar, if any.
+    fn of(key: char) -> Option<Command> {
+        Command::ALL.into_iter().find(|command| command.key() == key)
+    }
+}
+
+/// What a key does at the top of the sidebar, ahead of the menu's keys. The
+/// sidebar does what `of` says, and the legend leaves out a key of the menu's
+/// that `moves` takes, so the legend shows no key that does something else
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Top {
+    /// Moves the highlight so many rows down, or up.
+    Move(isize),
+    /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
+    Fold(Option<bool>),
+    /// Opens the menu on its first group, where every key is the menu's.
+    Menu,
+    /// Runs a command of the sidebar's own.
+    Command(Command),
+}
+
+impl Top {
+    /// What `key` does at the top of the sidebar besides a command: moves the
+    /// highlight, folds, or opens the menu.
+    const fn moves(key: char) -> Option<Top> {
+        match key {
+            'j' => Some(Top::Move(1)),
+            'k' => Some(Top::Move(-1)),
+            'h' => Some(Top::Fold(Some(true))),
+            'l' => Some(Top::Fold(Some(false))),
+            ' ' => Some(Top::Fold(None)),
+            'm' => Some(Top::Menu),
+            _ => None,
+        }
+    }
+
+    /// What `key` does at the top of the sidebar. None for a key the menu has
+    /// the say on.
+    pub fn of(key: char) -> Option<Top> {
+        Top::moves(key).or_else(|| Command::of(key).map(Top::Command))
+    }
+}
+
+/// No command takes the key of luneta's New or Delete group, which would be
+/// out of reach at the top of the sidebar, and gone from the legend; nor a
+/// key the sidebar moves, folds or opens the menu with, which `Top::of` finds
+/// first.
+const _: () = {
+    let mut at = 0;
+    while at < Command::ALL.len() {
+        let key = Command::ALL[at].key();
+        assert!(key != NEW && key != DELETE, "a command on a key of luneta's groups");
+        assert!(Top::moves(key).is_none(), "a command on a key the sidebar moves with");
+        at += 1;
+    }
+};
+
+/// What a key of the New group opens, for the pane the menu is for, in the
+/// directory it works in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum New {
+    /// Your shell, in a pane of its own beside that pane.
+    Pane,
+    /// A tab of that pane's session.
+    Tab,
+    /// A session, named for the directory, as the picker's directories are.
+    Session,
+}
+
+impl New {
+    /// Each, in the order the New group shows them.
+    const ALL: [New; 3] = [New::Pane, New::Tab, New::Session];
+
+    const fn key(self) -> char {
+        match self {
+            New::Pane => 'p',
+            New::Tab => 't',
+            New::Session => 's',
+        }
+    }
+
+    /// What the menu says the key does.
+    const fn does(self) -> &'static str {
+        match self {
+            New::Pane => "new pane",
+            New::Tab => "new tab",
+            New::Session => "new session",
+        }
+    }
+}
+
+enum Entry {
+    /// A key that opens a group, the name the menu shows for it, and the keys
+    /// in it.
+    Group { key: char, name: &'static str, entries: Vec<Entry> },
+    /// A key of the New group: opens a pane, a tab or a session.
+    New(New),
+    /// A key of the Delete group: closes the pane the menu is for, or kills
+    /// its session.
+    Close { key: char, scope: Scope },
+    /// A command of the sidebar's own, which the legend lists beside the
+    /// menu's keys.
+    Command(Command),
+    /// The key that opens the search over the skills.
+    Search,
+}
+
+impl Entry {
+    fn key(&self) -> char {
+        match self {
+            Entry::Group { key, .. } | Entry::Close { key, .. } => *key,
+            Entry::New(new) => new.key(),
+            Entry::Command(command) => command.key(),
+            Entry::Search => SEARCH,
+        }
+    }
+}
+
+/// What a key did to the keys.
+#[derive(Debug, PartialEq, Eq)]
+enum Pressed {
+    /// Opened a group, or went back to the one before, or typed in the search
+    /// box, moved its cursor or closed it.
+    Moved,
+    /// Asks for the search box over the skills.
+    Search,
+    /// Starts an agent on the prompt.
+    Start(String),
+    /// Opens a pane, a tab or a session.
+    New(New),
+    /// Closes the pane the menu is for, or kills its session, by `key`.
+    Delete { key: char, scope: Scope },
+    /// Closes the menu.
+    Close,
+    /// Nothing: the group open has no such key.
+    Nothing,
+}
+
+/// The menu's entries, the groups opened so far, and the search box over the
+/// skills while it is open.
+struct Keys {
+    root: Vec<Entry>,
+    /// Each group opened, by where it stands in the one before.
+    open: Vec<usize>,
+    search: Option<Search>,
+}
+
+impl Keys {
+    /// The menu's keys: `/`, which opens the search over the skills, and the
+    /// New and Delete groups: `n p`, `n t` and `n s` open a pane, a tab and a
+    /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
+    /// kills its session.
+    fn new(row: Scope) -> Self {
+        let root = vec![
+            Entry::Search,
+            Entry::Group {
+                key: NEW,
+                name: NEW_NAME,
+                entries: New::ALL.into_iter().map(Entry::New).collect(),
+            },
+            Entry::Group {
+                key: DELETE,
+                name: DELETE_NAME,
+                entries: vec![
+                    Entry::Close { key: DELETE_ROW, scope: row },
+                    Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
+                ],
+            },
+        ];
+        Keys { root, open: Vec::new(), search: None }
+    }
+
+    /// The legend: the sidebar's commands, then the keys at the top of the
+    /// menu, but for those a command has, or the sidebar moves with, which
+    /// `m` reaches. It shows the Delete group's key and not what it deletes,
+    /// which is the row's, so any row's will do.
+    fn legend() -> Self {
+        let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
+        let shown = |entry: &Entry| Top::of(entry.key()).is_none();
+        root.extend(Keys::new(Scope::Session).root.into_iter().filter(shown));
+        Keys { root, open: Vec::new(), search: None }
+    }
+
+    /// The groups opened, each its name and its entries.
+    fn trail(&self) -> Vec<(&'static str, &[Entry])> {
+        let mut trail = Vec::with_capacity(self.open.len());
+        let mut entries = self.root.as_slice();
+        for at in &self.open {
+            if let Some(Entry::Group { name, entries: inner, .. }) = entries.get(*at) {
+                trail.push((*name, inner.as_slice()));
+                entries = inner;
+            }
+        }
+        trail
+    }
+
+    /// The entries of the group open.
+    fn entries(&self) -> &[Entry] {
+        self.trail().last().map_or(self.root.as_slice(), |(_, entries)| entries)
+    }
+
+    /// What `key` does: a key the group open shows opens its group, opens or
+    /// closes what it opens or closes, or asks for the search box,
+    /// `Backspace` goes back a group, and out of the menu from the first, and
+    /// `Esc` closes it. While the search box is open, it takes the keys
+    /// instead.
+    fn key(&mut self, key: &KeyEvent) -> Pressed {
+        if let Some(search) = &mut self.search {
+            let (pressed, open) = searched(search, key);
+            if !open {
+                self.search = None;
+            }
+            return pressed;
+        }
+        if closes(key) {
+            return Pressed::Close;
+        }
+        if !bare(key) {
+            return Pressed::Nothing;
+        }
+        match key.code {
+            KeyCode::Backspace => match self.open.pop() {
+                Some(_) => Pressed::Moved,
+                None => Pressed::Close,
+            },
+            KeyCode::Char(c) => self.press(c),
+            _ => Pressed::Nothing,
+        }
+    }
+
+    fn press(&mut self, key: char) -> Pressed {
+        let entries = self.entries();
+        let Some(at) = entries.iter().position(|entry| entry.key() == key) else {
+            return Pressed::Nothing;
+        };
+        match &entries[at] {
+            Entry::New(new) => return Pressed::New(*new),
+            Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
+            Entry::Search => return Pressed::Search,
+            // The legend only shows, and runs nothing.
+            Entry::Command(_) => return Pressed::Nothing,
+            Entry::Group { .. } => {},
+        }
+        self.open.push(at);
+        Pressed::Moved
+    }
+}
+
+/// Whether `key` is pressed with no modifier but `Shift`, which is in the
+/// character it types.
+fn bare(key: &KeyEvent) -> bool {
+    key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+}
+
+/// Whether `key` closes the menu, whatever group is open.
+fn closes(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('c') => key.modifiers == KeyModifiers::CONTROL,
+        KeyCode::Esc => bare(key),
+        _ => false,
+    }
+}
+
+/// What `key` does in the search box, as in the sidebar's: a character types,
+/// `Backspace` takes one back, `Down` and `Up` move the cursor, and `Enter`
+/// starts an agent on the skill it is on. `Esc` closes the box, back to the
+/// keys, and so does `Backspace` once there is nothing to take back; `Ctrl c`
+/// closes the menu. Says too whether the box stays open.
+fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        return (Pressed::Close, true);
+    }
+    if !bare(key) {
+        return (Pressed::Nothing, true);
+    }
+    match key.code {
+        KeyCode::Esc => (Pressed::Moved, false),
+        KeyCode::Backspace => (Pressed::Moved, search.pop()),
+        KeyCode::Down => {
+            search.move_by(1);
+            (Pressed::Moved, true)
+        },
+        KeyCode::Up => {
+            search.move_by(-1);
+            (Pressed::Moved, true)
+        },
+        KeyCode::Enter => match search.chosen() {
+            Some(skill) => (Pressed::Start(format!("/{}", skill.name)), true),
+            None => (Pressed::Nothing, true),
+        },
+        KeyCode::Char(c) => {
+            search.push(c);
+            (Pressed::Moved, true)
+        },
+        _ => (Pressed::Nothing, true),
+    }
+}
+
+/// What a key says to a delete key that asks before it goes ahead.
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    Yes,
+    Back,
+    Close,
+    Nothing,
+}
+
+/// `y`, or the delete key `asked` again, goes ahead; `n` and `Backspace` go
+/// back to the keys; `Esc` closes the menu.
+fn answer(key: &KeyEvent, asked: char) -> Answer {
+    if closes(key) {
+        return Answer::Close;
+    }
+    if !bare(key) {
+        return Answer::Nothing;
+    }
+    match key.code {
+        KeyCode::Char(c) if c == 'y' || c == asked => Answer::Yes,
+        KeyCode::Char('n') | KeyCode::Backspace => Answer::Back,
+        _ => Answer::Nothing,
+    }
+}
+
+/// A key of the Delete group: the key, which goes ahead pressed again once
+/// it asks, and what it deletes.
+#[derive(Clone, Copy, Debug)]
+struct Delete {
+    key: char,
+    scope: Scope,
+}
+
+/// What the menu is for: the row highlighted as it opened, the directory
+/// its pane works in and the branch checked out there, as the daemon last
+/// said. A session's row has neither, having no pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub place: Place,
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+}
+
+impl Target {
+    /// What luneta's Delete group deletes on the row: its pane, or on a
+    /// session's row, its session.
+    fn deletes(&self) -> Scope {
+        self.place.pane().map_or(Scope::Session, Scope::Pane)
+    }
+
+    /// The pane a key starts an agent or opens a pane beside, and the
+    /// directory it works in, where a tab or a session opens too, or why
+    /// there is none: a session's row has no pane, and a pane the daemon has
+    /// not said the directory of yet opens nothing, rather than wherever
+    /// zellij runs.
+    fn beside(&self) -> Result<(u32, String), String> {
+        let Some(pane) = self.place.pane() else {
+            return Err(NO_ROW_PANE.to_owned());
+        };
+        let Some(cwd) = self.cwd.clone() else {
+            return Err(format!(
+                "menu: luneta does not know yet where pane {pane} works; try again in a moment"
+            ));
+        };
+        Ok((pane, cwd))
+    }
+}
+
+/// Claude Code on `prompt`, as a command line. A prompt that runs a skill
+/// names the agent for the skill and the branch it works on, as `/rename`
+/// would, so that the sidebar and the picker say what it is doing from the
+/// start.
+fn claude(prompt: &str, branch: Option<&str>) -> Vec<String> {
+    let mut command = vec![CLAUDE.to_owned()];
+    if let Some(skill) = skill(prompt) {
+        command.push("--name".to_owned());
+        command.push(match branch {
+            Some(branch) => format!("{skill}: {branch}"),
+            None => skill.to_owned(),
+        });
+    }
+    command.push(prompt.to_owned());
+    command
+}
+
+/// The skill a prompt runs, as `/tigerstyle` or `/plugin:skill`: the command
+/// it starts with.
+fn skill(prompt: &str) -> Option<&str> {
+    let command = prompt.strip_prefix('/')?.split(char::is_whitespace).next()?;
+    (!command.is_empty()).then_some(command)
+}
+
+/// What a key of the New group opens in the menu's session, or an agent a
+/// skill starts. A new session is none of them: luneta goes to that itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Opens {
+    /// `command`, or your shell for none, in a pane beside the pane `beside`.
+    Pane { beside: u32, command: Vec<String> },
+    /// A tab of the pane's session.
+    Tab,
+}
+
+/// What a key of the menu leaves the sidebar to do: the menu open still,
+/// and what it wants asked for, or what is left to do once it closed.
+#[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
+pub enum Did {
+    Stays(Menu, Wants),
+    Closed(Done),
+}
+
+/// What a menu that stays open wants the sidebar to ask for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Wants {
+    Nothing,
+    /// The skills that `cwd` can run, for the search box.
+    Skills(String),
+    /// What the delete key deletes planned, for `planned`: for a pane, once
+    /// zellij has said what closing it closes.
+    Plan(Scope),
+    /// zellij to open what `opens` says, in `cwd`, for luneta to take its
+    /// client there.
+    Open { cwd: String, opens: Opens },
+    /// luneta's zellij taken to `to`, and `session`, which it is in, killed
+    /// once it has left. The menu says so meanwhile.
+    Leave { session: String, to: Place },
+}
+
+/// What a menu that closed leaves the sidebar to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Done {
+    Nothing,
+    /// Say why what a key asked went wrong.
+    Wrong(String),
+    /// Take luneta's zellij to a session it makes, that starts in `cwd`.
+    Start(String),
+    /// Have zellij do what a delete key planned.
+    Act(Act),
+}
+
+/// The menu at the bottom of the sidebar, for the row highlighted when it
+/// opened.
+pub struct Menu {
+    /// Its number among the menus the sidebar has opened, which what zellij
+    /// answers for it carries.
+    number: u64,
+    target: Target,
+    stage: Stage,
+}
+
+enum Stage {
+    /// The keys of the group open, pressed one after another.
+    Choosing(Keys),
+    /// A delete key waits for what it deletes to be planned: for zellij to
+    /// say what closing a pane closes, before it asks, and again before it
+    /// goes ahead once you said yes to `agreed`, what it asked of.
+    Planning { keys: Keys, delete: Delete, agreed: Option<Plan> },
+    /// A delete key that asks before it goes ahead: what it would do, and
+    /// what it asks.
+    Asking { keys: Keys, delete: Delete, plan: Plan, asks: String },
+    /// zellij opens what a key asked for, for luneta to take its client
+    /// there. Keys do nothing but close the menu.
+    Opening(Keys),
+    /// luneta's zellij is on its way to this session, and the session it
+    /// leaves ends once it is gone. Keys do nothing.
+    Leaving(String),
+}
+
+impl Menu {
+    /// The menu numbered `number` for `target`, on the group `key` opens, or
+    /// on the first with no key, and what a key that does more than open a
+    /// group leaves the sidebar to do. None, and no menu, for a key the menu
+    /// has not.
+    pub fn open(number: u64, target: Target, key: Option<char>) -> Option<Did> {
+        let keys = Keys::new(target.deletes());
+        if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
+            return None;
+        }
+        let menu = Menu { number, target, stage: Stage::Choosing(keys) };
+        Some(match key {
+            Some(key) => menu.key(&KeyEvent::from(KeyCode::Char(key))),
+            None => Did::Stays(menu, Wants::Nothing),
+        })
+    }
+
+    pub fn number(&self) -> u64 {
+        self.number
+    }
+
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
+
+    /// The pane a delete key waits on, for zellij to say what closing it
+    /// closes. A session's is planned at once.
+    pub fn planning(&self) -> Option<u32> {
+        match &self.stage {
+            Stage::Planning { delete: Delete { scope: Scope::Pane(pane), .. }, .. } => Some(*pane),
+            Stage::Planning { .. }
+            | Stage::Choosing(_)
+            | Stage::Asking { .. }
+            | Stage::Opening(_)
+            | Stage::Leaving(_) => None,
+        }
+    }
+
+    /// Whether the menu waits for zellij to open what a key asked for.
+    pub fn opening(&self) -> bool {
+        matches!(self.stage, Stage::Opening(_))
+    }
+
+    /// The session luneta's zellij is on its way to, while the session it
+    /// leaves ends once it is there. The menu outlasts the focus meanwhile.
+    pub fn leaving(&self) -> Option<&str> {
+        match &self.stage {
+            Stage::Leaving(to) => Some(to),
+            _ => None,
+        }
+    }
+
+    /// What `key` does to the menu, and what that leaves the sidebar to do.
+    /// What a key opens, it opens beside the pane of the menu's row, in the
+    /// directory it works in, and the menu waits for zellij to say it has,
+    /// but for a session, which leaves the menu done.
+    pub fn key(self, key: &KeyEvent) -> Did {
+        let Menu { number, target, stage } = self;
+        let stays = |stage: Stage, wants: Wants| {
+            Did::Stays(Menu { number, target: target.clone(), stage }, wants)
+        };
+        match stage {
+            Stage::Choosing(mut keys) => match keys.key(key) {
+                Pressed::Close => Did::Closed(Done::Nothing),
+                Pressed::Moved | Pressed::Nothing => stays(Stage::Choosing(keys), Wants::Nothing),
+                Pressed::Search => match target.beside() {
+                    Ok((_, cwd)) => {
+                        keys.search = Some(Search::new());
+                        stays(Stage::Choosing(keys), Wants::Skills(cwd))
+                    },
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                Pressed::Start(prompt) => match target.beside() {
+                    Ok((beside, cwd)) => {
+                        let command = claude(&prompt, target.branch.as_deref());
+                        let opens = Opens::Pane { beside, command };
+                        stays(Stage::Opening(keys), Wants::Open { cwd, opens })
+                    },
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                Pressed::New(new) => match (target.beside(), new) {
+                    (Err(reason), _) => Did::Closed(Done::Wrong(reason)),
+                    (Ok((beside, cwd)), New::Pane) => {
+                        let opens = Opens::Pane { beside, command: Vec::new() };
+                        stays(Stage::Opening(keys), Wants::Open { cwd, opens })
+                    },
+                    (Ok((_, cwd)), New::Tab) => {
+                        stays(Stage::Opening(keys), Wants::Open { cwd, opens: Opens::Tab })
+                    },
+                    (Ok((_, cwd)), New::Session) => Did::Closed(Done::Start(cwd)),
+                },
+                Pressed::Delete { key, scope } => {
+                    let delete = Delete { key, scope };
+                    stays(Stage::Planning { keys, delete, agreed: None }, Wants::Plan(scope))
+                },
+            },
+            Stage::Planning { .. } | Stage::Opening(_) if closes(key) => {
+                Did::Closed(Done::Nothing)
+            },
+            stage @ (Stage::Planning { .. } | Stage::Opening(_) | Stage::Leaving(_)) => {
+                stays(stage, Wants::Nothing)
+            },
+            Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
+                Answer::Yes => {
+                    let planning = Stage::Planning { keys, delete, agreed: Some(plan) };
+                    stays(planning, Wants::Plan(delete.scope))
+                },
+                Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
+                Answer::Close => Did::Closed(Done::Nothing),
+                Answer::Nothing => {
+                    stays(Stage::Asking { keys, delete, plan, asks }, Wants::Nothing)
+                },
+            },
+        }
+    }
+
+    /// What the delete key the menu waits on does, as `plan` says: asks
+    /// first, or goes ahead, or says why it does nothing. Going ahead after
+    /// you said yes does what you were asked about: the same, ending the
+    /// same agents, doing the same. Once that changed while you read, it
+    /// asks again, while an agent at work would end.
+    pub fn planned(self, plan: Result<Plan, String>) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Planning { keys, delete, agreed } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(reason) => return Did::Closed(Done::Wrong(reason)),
+        };
+        let asks = if agreed.as_ref() == Some(&plan) { None } else { plan.question() };
+        if let Some(asks) = asks {
+            let stage = Stage::Asking { keys, delete, plan, asks };
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        }
+        match plan.act {
+            Act::Leave { session, to } => {
+                let stage = Stage::Leaving(to.session().to_owned());
+                Did::Stays(Menu { number, target, stage }, Wants::Leave { session, to })
+            },
+            act @ (Act::Pane { .. } | Act::Tab { .. } | Act::Kill(_)) => {
+                Did::Closed(Done::Act(act))
+            },
+        }
+    }
+
+    /// Fills the search box with what the finder said, while it is open.
+    pub fn found(&mut self, skills: Result<Vec<crate::skills::Skill>, String>) {
+        if let Stage::Choosing(keys) = &mut self.stage
+            && let Some(search) = &mut keys.search
+        {
+            search.fill(skills);
+        }
+    }
+
+    /// What the menu shows at the bottom of the sidebar, `width` wide, in
+    /// `room` lines at most: a rule that names the groups opened and says
+    /// where the pane works, what the menu shows under it, and the keys that
+    /// go back and close under them. Short of room, what it shows goes first,
+    /// then the rule.
+    pub fn lines(&self, width: usize, room: usize) -> Vec<Line<'static>> {
+        let inner = width.saturating_sub(1);
+        let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
+        let body_room = room.saturating_sub(2);
+        let (title, right, body, footer) = match &self.stage {
+            Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
+                if let Some(search) = &keys.search {
+                    let moves = [("<↓↑>", "Move"), ("<ENTER>", "Start"), ("<ESC>", "Back")];
+                    let body = search_lines(search, width, body_room);
+                    (SEARCH_TITLE.to_owned(), right, body, keys_line(width, &moves))
+                } else {
+                    let back: &[(&str, &str)] = if keys.open.is_empty() {
+                        &[("<ESC>", "Close")]
+                    } else {
+                        &[("<BS>", "Back"), ("<ESC>", "Close")]
+                    };
+                    let body = keys.entries().iter().map(|entry| entry_line(entry, inner));
+                    (title(keys), right, body.collect(), keys_line(width, back))
+                }
+            },
+            Stage::Asking { keys, asks, .. } => (
+                title(keys),
+                right,
+                wrap(asks, width, Style::new().fg(NAME)),
+                keys_line(width, &[("<y>", "Yes"), ("<BS>", "Back"), ("<ESC>", "Close")]),
+            ),
+            Stage::Leaving(to) => {
+                let going = format!("Going to {to}; this session ends once you are there");
+                let body = wrap(&going, width, Style::new().fg(NAME));
+                (TITLE.to_owned(), String::new(), body, Line::default())
+            },
+        };
+        let mut lines = Vec::with_capacity(room);
+        if room >= 2 {
+            lines.push(rule(&title, &right, width));
+        }
+        lines.extend(body.into_iter().take(body_room));
+        if room >= 1 {
+            lines.push(footer);
+        }
+        lines
+    }
+}
+
+/// `text` on as many lines of `width` as it takes, a space in from the edge,
+/// broken between words where it can be.
+fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let room = width.saturating_sub(2).max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let spaced = usize::from(!line.is_empty());
+        if !line.is_empty() && line.width() + spaced + word.width() > room {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    let lines = lines.into_iter().flat_map(|line| sidebar::wrapped(&line, width, style));
+    lines.collect()
+}
+
+/// What the rule over the menu names: the groups opened.
+fn title(keys: &Keys) -> String {
+    let names: Vec<&str> = keys.trail().into_iter().map(|(name, _)| name).collect();
+    if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
+}
+
+/// The legend at the bottom of the sidebar, `width` wide, in `room` lines at
+/// most: under a rule, the keys the top of the sidebar takes, as `Top::of`
+/// leaves them to the menu, and the sidebar's command, each with what it
+/// does.
+pub fn legend(width: usize, room: usize) -> Vec<Line<'static>> {
+    let keys = Keys::legend();
+    let mut lines = Vec::with_capacity(room);
+    if room == 0 {
+        return lines;
+    }
+    lines.push(rule(TITLE, "", width));
+    let inner = width.saturating_sub(1);
+    lines.extend(keys.root.iter().map(|entry| entry_line(entry, inner)).take(room - 1));
+    lines
+}
+
+/// The rule over the menu, `width` wide: its title, and where its pane works
+/// while the rule has room for all of both.
+fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    // `─ `, the title, a space and at least one `─` of the rule.
+    let head = 2 + 1 + 1;
+    // A space, the right, a space and a last `─`.
+    let tail = right.width() + 3;
+    let fits = !right.is_empty() && head + title.width() + tail <= width;
+    let tail = if fits { tail } else { 0 };
+    let title = sidebar::cut(title, width.saturating_sub(head + tail));
+    let stretch = width.saturating_sub(head - 1 + title.width() + tail);
+    let mut spans = vec![
+        Span::styled("─ ", dim),
+        Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+        Span::styled("─".repeat(stretch), dim),
+    ];
+    if fits {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(right.to_owned(), Style::new().fg(TAG)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("─", dim));
+    }
+    Line::from(spans)
+}
+
+/// An entry of the menu, `inner` wide past the space it starts with: its key,
+/// and what it does.
+fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
+    let key = entry.key().to_string();
+    let room = inner.saturating_sub(key.width() + GAP);
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(key, Style::new().fg(ACCENT)),
+        Span::raw(" ".repeat(GAP)),
+    ];
+    let does = |does: &str| Span::styled(sidebar::cut(does, room), Style::new().fg(NAME));
+    match entry {
+        Entry::Group { name, .. } => {
+            spans.push(Span::raw(sidebar::cut(name, room.saturating_sub(1 + GROUP.width()))));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(GROUP, Style::new().fg(TAG)));
+        },
+        Entry::New(new) => spans.push(does(new.does())),
+        Entry::Close { scope, .. } => spans.push(does(scope.does())),
+        Entry::Command(command) => spans.push(does(command.does())),
+        Entry::Search => spans.push(does(SEARCH_DOES)),
+    }
+    Line::from(spans)
+}
+
+/// The keys that go back and close, and what each does, in as many words as
+/// `width` has room for: all of them, or else the keys alone.
+fn keys_line(width: usize, keys: &[(&str, &str)]) -> Line<'static> {
+    let spelled = |sep: &str, joiner: &str| {
+        let each = keys.iter().map(|(key, does)| format!("{key}{sep}{does}"));
+        each.collect::<Vec<_>>().join(joiner)
+    };
+    let bare = |joiner: &str| keys.iter().map(|(key, _)| *key).collect::<Vec<_>>().join(joiner);
+    let candidates =
+        [spelled(" - ", ", "), spelled(" ", "  "), spelled(" ", " "), bare("/"), bare("")];
+    let room = width.saturating_sub(1);
+    let line = candidates.into_iter().find(|line| line.width() <= room).unwrap_or_else(|| bare(""));
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    // Each key in the accent, and the words between them dimmed.
+    let mut spans = vec![Span::raw(" ")];
+    let mut rest = line.as_str();
+    for (key, _) in keys {
+        let Some(at) = rest.find(key) else {
+            continue;
+        };
+        if at > 0 {
+            spans.push(Span::styled(rest[..at].to_owned(), dim));
+        }
+        spans.push(Span::styled((*key).to_owned(), Style::new().fg(ACCENT)));
+        rest = &rest[at + key.len()..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_owned(), dim));
+    }
+    Line::from(spans)
+}
+
+/// The search box over the skills, in at most `room` lines `width` wide: what
+/// is typed, and under it the skills that match, best first, as many as
+/// `SEARCH_ROWS` and the room show around the one the cursor is on, or a line
+/// that says why there are none. It keeps the lines the skills found fill,
+/// however many of them match, so the menu keeps its size as you type.
+fn search_lines(search: &Search, width: usize, room: usize) -> Vec<Line<'static>> {
+    let Some(list) = room.checked_sub(1) else {
+        return Vec::new();
+    };
+    let total = match search.skills() {
+        Skills::Found(skills) => skills.len(),
+        Skills::Finding | Skills::Failed(_) => 0,
+    };
+    let list = total.clamp(1, SEARCH_ROWS).min(list);
+    let mut lines = Vec::with_capacity(1 + list);
+    lines.push(sidebar::query(search.term(), width));
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let note = match search.skills() {
+        Skills::Finding => Some(("finding skills…".to_owned(), dim)),
+        Skills::Failed(why) => Some((why.clone(), Style::new().fg(Color::Red))),
+        Skills::Found(skills) if skills.is_empty() => Some(("no skills here".to_owned(), dim)),
+        Skills::Found(_) if search.count() == 0 => Some(("no match".to_owned(), dim)),
+        Skills::Found(_) => None,
+    };
+    if let Some((note, style)) = note {
+        let inner = width.saturating_sub(1);
+        let note = Line::styled(format!(" {}", sidebar::cut(&note, inner)), style);
+        lines.extend((list > 0).then_some(note));
+    } else {
+        let selected = search.selected().unwrap_or(0);
+        let start = (selected + 1).saturating_sub(list);
+        let shown = search.found().enumerate().skip(start).take(list);
+        lines.extend(shown.map(|(at, (skill, hits))| {
+            skill_line(&skill.name.to_string(), &skill.description, hits, at == selected, width)
+        }));
+    }
+    lines.resize(1 + list, Line::default());
+    lines
+}
+
+/// A skill in the search box, `width` wide: its name as a prompt runs it,
+/// with the characters the term lit in the accent, and what it does, dimmed,
+/// cut to the room its name leaves. The one the cursor is on is lit.
+fn skill_line(
+    name: &str,
+    description: &str,
+    hits: &[usize],
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let inner = width.saturating_sub(1);
+    let name = sidebar::cut(&format!("/{name}"), inner);
+    let lit = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::raw(" ")];
+    // The `/` before the name is none of the characters the term lit.
+    for (at, c) in name.chars().enumerate() {
+        let hit = at > 0 && hits.contains(&(at - 1));
+        spans.push(Span::styled(c.to_string(), if hit { lit } else { Style::new().fg(NAME) }));
+    }
+    let room = inner.saturating_sub(name.width() + GAP);
+    if room > 0 && !description.is_empty() {
+        spans.push(Span::raw(" ".repeat(GAP)));
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        spans.push(Span::styled(sidebar::cut(description, room), dim));
+    }
+    let line = Line::from(spans);
+    if selected { line.patch_style(Style::new().add_modifier(Modifier::REVERSED)) } else { line }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+    use crate::close::{self, Deletes, Doing, Seat, Subject};
+    use crate::sidebar::Listed;
+    use crate::skills::{Name, Skill};
+    use crate::zellij::Closes;
+
+    fn listed() -> Listed {
+        Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+    }
+
+    fn pane_row() -> Target {
+        Target {
+            place: Place::Pane { session: listed(), pane: 4 },
+            cwd: Some("/w/luneta/main".to_owned()),
+            branch: Some("feat/menu".to_owned()),
+        }
+    }
+
+    fn session_row() -> Target {
+        Target { place: Place::Session(listed()), cwd: None, branch: None }
+    }
+
+    fn char(key: char) -> KeyEvent {
+        KeyEvent::from(KeyCode::Char(key))
+    }
+
+    fn opened(target: Target, key: Option<char>) -> Did {
+        Menu::open(1, target, key).expect("a key of the menu")
+    }
+
+    /// The menu a key left open, and what it wants asked for.
+    fn stays(did: Did) -> (Menu, Wants) {
+        match did {
+            Did::Stays(menu, wants) => (menu, wants),
+            Did::Closed(done) => panic!("the menu closed, leaving {done:?}"),
+        }
+    }
+
+    /// What a key that closed the menu left to do.
+    fn closed(did: Did) -> Done {
+        match did {
+            Did::Closed(done) => done,
+            Did::Stays(_, wants) => panic!("the menu stays open, wanting {wants:?}"),
+        }
+    }
+
+    /// The text of each line.
+    fn text(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_key_opens_its_group_and_a_key_in_it_opens_a_pane_beside_the_row() {
+        let (menu, wants) = stays(opened(pane_row(), Some('n')));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ New ─────────── luneta/main ─",
+                " p  new pane",
+                " t  new tab",
+                " s  new session",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        let (menu, wants) = stays(menu.key(&char('p')));
+        let cwd = "/w/luneta/main".to_owned();
+        let opens = Opens::Pane { beside: 4, command: Vec::new() };
+        assert_eq!(wants, Wants::Open { cwd: cwd.clone(), opens });
+        assert!(menu.opening());
+        // Keys do nothing while zellij opens it, but close the menu.
+        let (menu, wants) = stays(menu.key(&char('p')));
+        assert_eq!(wants, Wants::Nothing);
+        assert!(menu.opening());
+        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+
+        // luneta goes to a new session itself.
+        let (menu, _) = stays(opened(pane_row(), Some('n')));
+        assert_eq!(closed(menu.key(&char('s'))), Done::Start(cwd));
+    }
+
+    #[test]
+    fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
+        let (menu, _) = stays(opened(pane_row(), None));
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ luneta ──────── luneta/main ─",
+                " /  Search skills",
+                " n  New ▸",
+                " d  Delete ▸",
+                " <ESC> - Close",
+            ]
+        );
+        let (menu, _) = stays(menu.key(&char('d')));
+        let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        assert_eq!(text(&menu.lines(31, 9))[0], "─ luneta ──────── luneta/main ─");
+        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
+        // A key the menu has not opens none.
+        assert!(Menu::open(1, pane_row(), Some('x')).is_none());
+    }
+
+    #[test]
+    fn the_legend_lists_the_sidebar_s_search_then_the_menu_s_groups() {
+        assert_eq!(
+            text(&legend(31, 9)),
+            ["─ luneta ──────────────────────", " /  Search", " n  New ▸", " d  Delete ▸"]
+        );
+        // `m` and the keys that move are the sidebar's, and `/` its search.
+        assert_eq!(Top::of('m'), Some(Top::Menu));
+        assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
+        assert_eq!(Top::of('n'), None);
+        assert_eq!(Top::of('d'), None);
+    }
+
+    #[test]
+    fn a_menu_that_cannot_open_beside_its_row_says_why() {
+        let (menu, _) = stays(opened(session_row(), Some('n')));
+        assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_ROW_PANE.to_owned()));
+        let unknown = Target { cwd: None, ..pane_row() };
+        let (menu, _) = stays(opened(unknown, None));
+        let done = closed(menu.key(&char('/')));
+        assert!(matches!(done, Done::Wrong(why) if why.contains("where pane 4 works")));
+    }
+
+    #[test]
+    fn a_skill_names_the_agent_for_it_and_its_branch() {
+        assert_eq!(
+            claude("/tigerstyle", Some("feat/menu")),
+            ["claude", "--name", "tigerstyle: feat/menu", "/tigerstyle"]
+        );
+        assert_eq!(
+            claude("/code-review since main", None),
+            ["claude", "--name", "code-review", "/code-review since main"]
+        );
+        assert_eq!(claude("fix the fold", None), ["claude", "fix the fold"]);
+    }
+
+    fn skills(names: &[&str]) -> Vec<Skill> {
+        let skill = |name: &&str| Skill {
+            name: Name::new((*name).to_owned()).expect("a name"),
+            description: format!("{name} it"),
+        };
+        names.iter().map(skill).collect()
+    }
+
+    #[test]
+    fn slash_searches_the_skills_and_enter_starts_an_agent_on_the_one_picked() {
+        let (menu, _) = stays(opened(pane_row(), None));
+        let (mut menu, wants) = stays(menu.key(&char('/')));
+        assert_eq!(wants, Wants::Skills("/w/luneta/main".to_owned()));
+        assert_eq!(
+            text(&menu.lines(31, 6))[..3],
+            ["─ Skills ──────── luneta/main ─", " /_", " finding skills…"]
+        );
+        menu.found(Ok(skills(&["code-review", "tigerstyle"])));
+        let (menu, _) = stays(menu.key(&char('t')));
+        let (menu, _) = stays(menu.key(&char('i')));
+        assert_eq!(text(&menu.lines(31, 6))[..3], [
+            "─ Skills ──────── luneta/main ─".to_owned(),
+            " /ti_".to_owned(),
+            " /tigerstyle  tigerstyle it".to_owned(),
+        ]);
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
+        let command = claude("/tigerstyle", Some("feat/menu"));
+        let opens = Opens::Pane { beside: 4, command };
+        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
+        assert!(menu.opening());
+    }
+
+    /// What closing pane 4 of `luneta` does, as zellij says what it closes,
+    /// with `agents` at work there.
+    fn plan(closes: Closes, agents: Vec<(u32, Doing)>) -> Result<Plan, String> {
+        let subject = Subject {
+            session: "luneta",
+            seat: Seat::Elsewhere,
+            deletes: Deletes::Pane { pane: 4, closes },
+            agents: Some(agents),
+            refuge: None,
+        };
+        close::plan(&subject)
+    }
+
+    #[test]
+    fn a_delete_with_no_agent_at_work_to_end_goes_ahead_at_once() {
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, wants) = stays(menu.key(&char('d')));
+        assert_eq!(wants, Wants::Plan(Scope::Pane(4)));
+        assert_eq!(menu.planning(), Some(4));
+        let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
+        assert_eq!(done, Done::Act(Act::Pane { session: "luneta".to_owned(), pane: 4 }));
+        // On a session's row, `d d` kills the session, which zellij need not
+        // say anything of first.
+        let (menu, _) = stays(opened(session_row(), Some('d')));
+        let (menu, wants) = stays(menu.key(&char('d')));
+        assert_eq!(wants, Wants::Plan(Scope::Session));
+        assert_eq!(menu.planning(), None);
+    }
+
+    /// A delete that would end an agent at work asks first. `y`, or the key
+    /// again, plans it again and goes ahead with what you were asked about;
+    /// once that changed, what it closes or the agents it ends, it asks
+    /// again. `n` goes back to the keys.
+    #[test]
+    fn a_delete_that_would_end_an_agent_at_work_asks_first() {
+        let busy = || vec![(4, Doing::Busy)];
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('d')));
+        let (menu, wants) = stays(menu.planned(plan(Closes::Pane, busy())));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ Delete ──────── luneta/main ─",
+                " Close the pane? 1 agent, 1",
+                " busy",
+                " <y> Yes <BS> Back <ESC> Close",
+            ]
+        );
+        let (menu, _) = stays(menu.key(&char('n')));
+        let (menu, _) = stays(menu.key(&char('d')));
+        let (menu, _) = stays(menu.planned(plan(Closes::Pane, busy())));
+        let (menu, wants) = stays(menu.key(&char('d')));
+        assert_eq!(wants, Wants::Plan(Scope::Pane(4)));
+        // Another pane closes with it now: its tab, which it asks of again.
+        let tab = || Closes::Tab { id: 2, panes: vec![4, 5] };
+        let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
+        let (menu, wants) = stays(menu.planned(plan(tab(), at_work)));
+        assert_eq!(wants, Wants::Nothing);
+        let asking = text(&menu.lines(31, 9));
+        assert_eq!(asking[1..3], [" Close its tab? 2 agents, 1", " busy, 1 waiting"]);
+        // The tab is the same, but its other agent went to work as you read.
+        let (menu, _) = stays(menu.key(&char('y')));
+        let busier = || vec![(4, Doing::Busy), (5, Doing::Busy)];
+        let (menu, wants) = stays(menu.planned(plan(tab(), busier())));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(text(&menu.lines(31, 9))[1..3], [" Close its tab? 2 agents, 2", " busy"]);
+        let (menu, _) = stays(menu.key(&char('y')));
+        let act = Act::Tab { session: "luneta".to_owned(), tab: 2, panes: vec![4, 5] };
+        assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(act));
+    }
+
+    #[test]
+    fn leaving_the_session_luneta_is_in_shows_where_you_are_going() {
+        let (menu, _) = stays(opened(session_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('s')));
+        let elo = Place::Session(Listed::new("elo", SystemTime::UNIX_EPOCH));
+        let subject = Subject {
+            session: "luneta",
+            seat: Seat::In,
+            deletes: Deletes::Session,
+            agents: Some(Vec::new()),
+            refuge: Some(elo.clone()),
+        };
+        let (menu, wants) = stays(menu.planned(close::plan(&subject)));
+        assert_eq!(wants, Wants::Leave { session: "luneta".to_owned(), to: elo });
+        assert_eq!(menu.leaving(), Some("elo"));
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ luneta ──────────────────────",
+                " Going to elo; this session",
+                " ends once you are there",
+                "",
+            ]
+        );
+    }
+}

@@ -1,9 +1,11 @@
 //! The sidebar: every session on the host, the panes in each, and what the
 //! agent in each pane is doing, or the command its shell runs, as the daemon
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
-//! `▌` marks the pane it is on.
+//! `▌` marks the pane it is on. The menu opens at its bottom, for the row
+//! highlighted.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -20,9 +22,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject};
 use crate::folds::Folds;
 use crate::icons;
+use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
 use crate::own::{Look, Looked, OwnClient};
+use crate::skills::Skill;
+use crate::zellij::{self, Closes, Open, SessionName};
 
 /// How many columns the sidebar takes, as the plugin's column did.
 pub const COLUMNS: u16 = 32;
@@ -39,11 +45,11 @@ pub const SPIN: Duration = Duration::from_millis(100);
 
 /// The colour of what wants you: an agent that waits for you, and the session
 /// luneta's zellij is in.
-const ACCENT: Color = Color::Magenta;
+pub const ACCENT: Color = Color::Magenta;
 /// The colour of the session luneta's zellij is in.
-const NAME: Color = Color::Cyan;
+pub const NAME: Color = Color::Cyan;
 /// The colour of an agent at work, and of the search's `/`.
-const TAG: Color = Color::Yellow;
+pub const TAG: Color = Color::Yellow;
 
 /// How many columns a mark takes: one, as each glyph of `Mark` does. Each
 /// pane's row keeps that many for one, whether it has one or not.
@@ -70,6 +76,11 @@ impl Listed {
     fn of(session: &Session) -> Option<Self> {
         let started = SystemTime::try_from(session.started_at?).ok()?;
         Some(Listed { name: session.name.clone(), started })
+    }
+
+    #[cfg(test)]
+    pub fn new(name: &str, started: SystemTime) -> Self {
+        Listed { name: name.to_owned(), started }
     }
 }
 
@@ -156,6 +167,19 @@ impl Mark {
                 initial(word).map_or(Mark::Unreported, Mark::Other)
             },
             None => Mark::Unreported,
+        }
+    }
+
+    /// What an agent marked so is doing, as far as deleting it goes.
+    fn doing(&self) -> close::Doing {
+        match self {
+            Mark::Waiting => close::Doing::Waiting,
+            Mark::Idle => close::Doing::Idle,
+            Mark::Busy => close::Doing::Busy,
+            Mark::Shell => close::Doing::Shell,
+            Mark::Other(_) | Mark::Unreported | Mark::Passed | Mark::Failed | Mark::Ran => {
+                close::Doing::Unknown
+            },
         }
     }
 
@@ -325,6 +349,22 @@ pub enum Asked {
     Go(Place),
     /// Give the focus back to zellij.
     Leave,
+    /// Ask zellij what closing the pane `pane` of `session` closes, for the
+    /// menu numbered `menu` to plan its delete by.
+    Closes { menu: u64, session: String, pane: u32 },
+    /// Have zellij do what a delete key planned.
+    Delete(Act),
+    /// Have zellij open this, for the menu numbered `menu`, which takes its
+    /// client there once zellij says what it opened.
+    Open { menu: u64, open: Open },
+    /// Take zellij's client to `place` first, and have zellij open this once
+    /// it is there: a tab of another session, which may have no client to
+    /// make room for it.
+    OpenThere { menu: u64, place: Place, open: Open },
+    /// Take zellij's client to a session it makes, that starts in `cwd`.
+    Start { session: SessionName, cwd: String },
+    /// Find the skills that `cwd` can run, for the menu numbered `menu`.
+    Find { menu: u64, cwd: String },
 }
 
 /// The rows the top of the sidebar takes: its rule, and a blank line.
@@ -383,12 +423,28 @@ pub struct Sidebar {
     notice: Option<String>,
     /// The search, while it is open.
     search: Option<Search>,
+    /// The menu, while it is open.
+    menu: Option<Menu>,
+    /// How many menus the sidebar has opened. A menu takes the next number
+    /// as it opens, which what zellij answers for it carries.
+    menus: u64,
+    /// What a delete took away, and the row the highlight goes to once it is
+    /// gone.
+    closing: Option<Closing>,
     /// When the sidebar was last drawn: the rows are built for then, by which
     /// a command has run long enough to show, or has yet to.
     drawn: Option<SystemTime>,
     /// The soonest a command that runs, and has yet to show, will have run
     /// long enough to: the rows are built again once it has.
     due: Option<SystemTime>,
+}
+
+/// What a delete takes away: the row the highlight was on, which goes, and
+/// the row it goes to once that is gone, the first after it that stays.
+#[derive(Debug)]
+struct Closing {
+    gone: Place,
+    after: Option<Place>,
 }
 
 /// The search, while it is open.
@@ -426,6 +482,7 @@ impl Sidebar {
             self.own.heard(listed.as_deref(), Instant::now());
         }
         self.rebuild();
+        self.left();
         look
     }
 
@@ -461,6 +518,7 @@ impl Sidebar {
         self.title = Some(title);
         let look = self.arrived();
         self.rebuild();
+        self.left();
         look
     }
 
@@ -491,6 +549,11 @@ impl Sidebar {
             return None;
         }
         self.sent = None;
+        // A menu that took luneta's zellij out of the session it kills is
+        // done: the session stays.
+        if self.menu.as_ref().is_some_and(|menu| menu.leaving().is_some()) {
+            self.menu = None;
+        }
         let look = self.arrived();
         self.rebuild();
         look
@@ -510,6 +573,7 @@ impl Sidebar {
         let listed = listed.map(<[Client]>::to_vec);
         self.own.looked(looked, listed.as_deref(), Instant::now());
         self.rebuild();
+        self.left();
     }
 
     /// luneta takes its zellij to `place`. A look to ask zellij for once it
@@ -529,7 +593,8 @@ impl Sidebar {
     /// The sidebar takes the keys, or gives them back. The highlight goes
     /// back to where luneta's zellij is as it does. A search lasts while the
     /// sidebar has them: one left open would keep the rows it hides out of
-    /// sight.
+    /// sight. So does the menu, but while it takes luneta's zellij out of the
+    /// session it kills.
     pub fn focus(&mut self, focused: bool) {
         if self.focused == focused {
             return;
@@ -537,8 +602,26 @@ impl Sidebar {
         self.focused = focused;
         if !focused {
             self.search = None;
+            self.close_menu();
         }
         self.rebuild();
+    }
+
+    /// Closes the menu, but while it takes luneta's zellij out of the session
+    /// it kills, which it says until zellij's client has left.
+    pub fn close_menu(&mut self) {
+        if self.menu.as_ref().is_none_or(|menu| menu.leaving().is_none()) {
+            self.menu = None;
+        }
+    }
+
+    /// Closes the menu once luneta's zellij is in the session it went to,
+    /// leaving the one the menu kills.
+    fn left(&mut self) {
+        let to = self.menu.as_ref().and_then(Menu::leaving);
+        if to.is_some_and(|to| self.going().is_none() && self.here() == Some(to)) {
+            self.menu = None;
+        }
     }
 
     /// A look for the session zellij's client is in, as `here` says, if it
@@ -736,6 +819,14 @@ impl Sidebar {
         if !self.focused && self.here_row.is_some() {
             self.cursor.clone_from(&self.here_row);
         }
+        // The highlight goes past what a delete took away, once it is gone.
+        if let Some(closing) = &self.closing
+            && self.cursor.as_ref() == Some(&closing.gone)
+            && self.rows.iter().all(|row| row.place() != closing.gone)
+        {
+            self.cursor.clone_from(&closing.after);
+            self.closing = None;
+        }
         self.due = due;
         self.settle(best.map(|(at, _)| at), seek);
     }
@@ -773,8 +864,9 @@ impl Sidebar {
     }
 
     /// Moves the highlight `by` rows it stops on, down or up, and no further
-    /// than the ends.
+    /// than the ends. It no longer waits for a delete to take its row away.
     fn step(&mut self, by: isize) {
+        self.closing = None;
         let stops: Vec<usize> = (0..self.rows.len()).filter(|at| self.rows[*at].stops()).collect();
         let Some(last) = stops.len().checked_sub(1) else {
             return;
@@ -835,9 +927,14 @@ impl Sidebar {
         (Some(next) != here).then(|| self.rows[next].place())
     }
 
-    /// What a key does while the sidebar has the focus.
+    /// What a key does while the sidebar has the focus. The menu takes every
+    /// key while it is open. Without it, a character does what `Top::of`
+    /// says, which the legend goes by too, and one it has not is the menu's.
     pub fn key(&mut self, key: &KeyEvent) -> Asked {
         self.notice = None;
+        if let Some(menu) = self.menu.take() {
+            return self.menu_did(menu.key(key));
+        }
         if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             return Asked::Nothing;
         }
@@ -846,17 +943,227 @@ impl Sidebar {
             return self.search_key(key, term);
         }
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.step(1),
-            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
-            KeyCode::Left | KeyCode::Char('h') => self.fold(true),
-            KeyCode::Right | KeyCode::Char('l') => self.fold(false),
-            KeyCode::Char(' ') => self.toggle(),
-            KeyCode::Char('/') => self.find(String::new()),
+            KeyCode::Down => self.step(1),
+            KeyCode::Up => self.step(-1),
+            KeyCode::Left => self.fold(true),
+            KeyCode::Right => self.fold(false),
             KeyCode::Enter => return self.go(),
             KeyCode::Esc => return Asked::Leave,
+            KeyCode::Char(c) => match Top::of(c) {
+                Some(Top::Move(by)) => self.step(by),
+                Some(Top::Fold(Some(folded))) => self.fold(folded),
+                Some(Top::Fold(None)) => self.toggle(),
+                Some(Top::Menu) => return self.open_menu(None),
+                Some(Top::Command(Command::Search)) => self.find(String::new()),
+                None => return self.open_menu(Some(c)),
+            },
             _ => {},
         }
         Asked::Nothing
+    }
+
+    /// Opens the menu for the highlighted row, on the group `key` opens, or on
+    /// the first with no key. A key the menu has not opens nothing.
+    fn open_menu(&mut self, key: Option<char>) -> Asked {
+        let Some(target) = self.target() else {
+            return Asked::Nothing;
+        };
+        self.menus += 1;
+        let Some(did) = Menu::open(self.menus, target, key) else {
+            return Asked::Nothing;
+        };
+        self.menu_did(did)
+    }
+
+    /// What the menu is for, as it opens on the highlighted row: the row, the
+    /// directory its pane works in, and the branch checked out there.
+    fn target(&self) -> Option<Target> {
+        let place = self.cursor.clone()?;
+        let row = self.rows.iter().find(|row| row.place() == place)?;
+        let branch = match row {
+            Row::Pane { checkout, .. } => checkout.as_ref().map(|(branch, _)| branch.clone()),
+            Row::Session { .. } => None,
+        };
+        let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
+        Some(Target { cwd: pane.and_then(|pane| pane.cwd.clone()), branch, place })
+    }
+
+    /// The pane `id` of the session `listed`, as the daemon last said.
+    fn pane_of(&self, listed: &Listed, id: u32) -> Option<&Pane> {
+        let host = self.host.as_ref()?;
+        let session = host.sessions.iter().find(|it| Listed::of(it).as_ref() == Some(listed))?;
+        session.panes.iter().flat_map(|panes| &panes.panes).find(|pane| pane.id == id)
+    }
+
+    /// Keeps the menu a key left open, if any, does what the key left the
+    /// sidebar to do, and asks luneta for what that takes.
+    fn menu_did(&mut self, did: Did) -> Asked {
+        let (menu, wants) = match did {
+            Did::Stays(menu, wants) => (menu, wants),
+            Did::Closed(done) => {
+                self.menu = None;
+                return match done {
+                    Done::Nothing => Asked::Nothing,
+                    Done::Wrong(reason) => {
+                        self.notice = Some(reason);
+                        Asked::Nothing
+                    },
+                    Done::Start(cwd) => self.start(&cwd),
+                    Done::Act(act) => self.delete(act),
+                };
+            },
+        };
+        let (number, target) = (menu.number(), menu.target().clone());
+        self.menu = Some(menu);
+        let session = target.place.session().to_owned();
+        match wants {
+            Wants::Nothing => Asked::Nothing,
+            Wants::Skills(cwd) => Asked::Find { menu: number, cwd },
+            Wants::Open { cwd, opens: Opens::Pane { beside, command } } => {
+                Asked::Open { menu: number, open: Open::Pane { session, beside, cwd, command } }
+            },
+            // A tab needs a client of its session to make room for it. The
+            // session luneta's zellij is in has one, and another opens it once
+            // luneta's zellij is there: its last client may have left since
+            // lunetad listed them.
+            Wants::Open { cwd, opens: Opens::Tab } => {
+                let open = Open::Tab { session: session.clone(), cwd };
+                if self.going().is_none() && self.here() == Some(session.as_str()) {
+                    Asked::Open { menu: number, open }
+                } else {
+                    Asked::OpenThere { menu: number, place: target.place, open }
+                }
+            },
+            Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
+            Wants::Plan(Scope::Session) => {
+                let plan = close::plan(&self.subject(&target, Deletes::Session));
+                self.planned(plan)
+            },
+            Wants::Leave { session, to } => self.delete(Act::Leave { session, to }),
+        }
+    }
+
+    /// The menu planned what its delete key deletes so: what it asks of
+    /// luneta.
+    fn planned(&mut self, plan: Result<Plan, String>) -> Asked {
+        let Some(menu) = self.menu.take() else {
+            return Asked::Nothing;
+        };
+        self.menu_did(menu.planned(plan))
+    }
+
+    /// What the delete is for, as the sidebar knows it: the menu's row, in
+    /// its session, where luneta's zellij is, and what it `deletes`.
+    fn subject<'a>(&'a self, target: &'a Target, deletes: Deletes) -> Subject<'a> {
+        let session = target.place.session();
+        let seat = match (self.going(), self.here()) {
+            (None, Some(here)) if here == session => Seat::In,
+            (None, Some(_)) => Seat::Elsewhere,
+            (Some(_), _) | (None, None) => Seat::Moving,
+        };
+        let mut agents = None;
+        let mut refuge: Option<Listed> = None;
+        if let Some(host) = &self.host {
+            // What lunetad said last of its agents may be out of date while it
+            // does not answer: one may have gone to work, or started since.
+            if self.away.is_none() {
+                let seated = seated(&host.agents, &host.sessions);
+                let doing = seated.iter().filter(|((at, _), _)| *at == session);
+                let doing = doing.map(|((_, pane), agent)| (*pane, Mark::of(agent).doing()));
+                agents = Some(doing.collect());
+            }
+            // The newest of the other sessions, which the picker lists first.
+            let (sessions, _) = oldest_first(&host.sessions);
+            let mut others = sessions.into_iter().map(|(listed, _)| listed);
+            refuge = others.rfind(|listed| listed.name != session);
+        }
+        Subject { session, seat, deletes, agents, refuge: refuge.map(Place::Session) }
+    }
+
+    /// Takes luneta's zellij to a session that starts in `cwd`, named for it
+    /// as the picker's directories name it, with a `-2` where a session has
+    /// that name.
+    fn start(&mut self, cwd: &str) -> Asked {
+        let Some(name) = zellij::session_for(Path::new(cwd)) else {
+            self.notice = Some(format!("menu: no session can be named for {cwd}"));
+            return Asked::Nothing;
+        };
+        let sessions = self.host.iter().flat_map(|host| &host.sessions);
+        let names: Vec<&str> = sessions.map(|session| session.name.as_str()).collect();
+        let taken = |name: &SessionName| names.contains(&name.as_str());
+        // Of more names than there are sessions, one is free.
+        let session = std::iter::once(name.clone())
+            .chain((2..names.len() + 3).map(|n| name.with_postfix(n)))
+            .find(|name| !taken(name))
+            .expect("one of more names than there are sessions is free");
+        Asked::Start { session, cwd: cwd.to_owned() }
+    }
+
+    /// Has zellij do what a delete key planned, and the highlight go past the
+    /// rows it takes away, once they are gone.
+    fn delete(&mut self, act: Act) -> Asked {
+        let takes = |place: &Place| match (&act, place.pane()) {
+            (Act::Pane { session, pane }, Some(at)) => place.session() == session && at == *pane,
+            (Act::Tab { session, panes, .. }, Some(at)) => {
+                place.session() == session && panes.contains(&at)
+            },
+            (Act::Pane { .. } | Act::Tab { .. }, None) => false,
+            (Act::Kill(session) | Act::Leave { session, .. }, _) => place.session() == session,
+        };
+        if let Some(gone) = self.cursor.clone().filter(|cursor| takes(cursor)) {
+            let at = self.cursor_index().unwrap_or(0);
+            let stays = |index: &usize| {
+                let row = &self.rows[*index];
+                row.stops() && !takes(&row.place())
+            };
+            let after = (at..self.rows.len()).chain((0..at).rev()).find(stays);
+            let after = after.map(|index| self.rows[index].place());
+            self.closing = Some(Closing { gone, after });
+        }
+        Asked::Delete(act)
+    }
+
+    /// zellij opened the terminal `opened` for the menu numbered `menu`, or
+    /// says why it did not. luneta takes its client there while the menu
+    /// still waits on it: one closed since is no longer what you are on.
+    pub fn opened(&mut self, menu: u64, opened: Result<u32, String>) -> Asked {
+        let waiting = self.menu.as_ref().filter(|it| it.number() == menu && it.opening());
+        let Some(session) = waiting.map(|it| it.target().place.listed().clone()) else {
+            return Asked::Nothing;
+        };
+        self.menu = None;
+        match opened {
+            Ok(pane) => Asked::Go(Place::Pane { session, pane }),
+            Err(why) => {
+                self.notice = Some(format!("menu: nothing opened: {why}"));
+                Asked::Nothing
+            },
+        }
+    }
+
+    /// zellij said what closing the pane of the menu numbered `menu` closes,
+    /// or why it could not: the menu plans its delete key by it, while it
+    /// waits on it.
+    pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
+        let waiting = self.menu.as_ref().filter(|it| it.number() == menu);
+        let Some((pane, target)) =
+            waiting.and_then(|it| Some((it.planning()?, it.target().clone())))
+        else {
+            return Asked::Nothing;
+        };
+        let plan = match closes {
+            Ok(closes) => close::plan(&self.subject(&target, Deletes::Pane { pane, closes })),
+            Err(why) => Err(format!("menu: nothing closed: {why}")),
+        };
+        self.planned(plan)
+    }
+
+    /// The finder found `skills` for the menu numbered `menu`, or says why it
+    /// found none, for its search box.
+    pub fn found(&mut self, menu: u64, skills: Result<Vec<Skill>, String>) {
+        if let Some(open) = self.menu.as_mut().filter(|it| it.number() == menu) {
+            open.found(skills);
+        }
     }
 
     /// What a key does while the search is open, with `term` typed in it:
@@ -933,7 +1240,7 @@ impl Sidebar {
                 self.top = self.top.saturating_sub(3);
                 return Asked::Nothing;
             },
-            MouseEventKind::Down(MouseButton::Left) => {},
+            MouseEventKind::Down(MouseButton::Left) => self.close_menu(),
             _ => return Asked::Nothing,
         }
         let line = usize::from(mouse.row.saturating_sub(area.y));
@@ -1015,7 +1322,7 @@ impl Sidebar {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.push(self.header(width, frame));
         lines.push(Line::default());
-        let notes = self.notes(width);
+        let notes = self.notes(width, height);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
         let lit = self.focused || self.here_row.is_some();
@@ -1095,10 +1402,12 @@ impl Sidebar {
         Line::from(spans)
     }
 
-    /// What goes at the bottom: why the daemon does not answer, the sessions
-    /// it lists that the rows leave out, what went wrong last, and the search
-    /// while it is open, or else the keys while the sidebar has the focus.
-    fn notes(&self, width: usize) -> Vec<Line<'static>> {
+    /// What goes at the bottom of a sidebar `height` tall: why the daemon
+    /// does not answer, the sessions it lists that the rows leave out, what
+    /// went wrong last, and the menu while it is open, or else the search
+    /// while that is, or else the legend while the sidebar has the focus.
+    /// The menu and the legend leave the rows a line.
+    fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
         let error = Style::new().fg(Color::Red);
         if let Some(away) = &self.away {
@@ -1116,11 +1425,13 @@ impl Sidebar {
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
         }
-        if let Some(term) = self.search() {
+        let room = height.saturating_sub(HEADER + 1 + notes.len());
+        if let Some(menu) = &self.menu {
+            notes.extend(menu.lines(width, room));
+        } else if let Some(term) = self.search() {
             notes.push(query(term, width));
         } else if self.focused {
-            let dim = Style::new().add_modifier(Modifier::DIM);
-            notes.push(Line::styled(cut(" ↵ go  h/l fold  esc back", width), dim));
+            notes.extend(menu::legend(width, room));
         }
         notes
     }
@@ -1128,7 +1439,7 @@ impl Sidebar {
 
 /// The search, `width` wide: a `/`, and then what is typed, before a `_` for
 /// the cursor, its end where it is too long.
-fn query(term: &str, width: usize) -> Line<'static> {
+pub fn query(term: &str, width: usize) -> Line<'static> {
     let typed = tail(&format!("{term}_"), width.saturating_sub(2));
     Line::from(vec![
         Span::raw(" "),
@@ -1265,7 +1576,7 @@ fn given_name(agent: &Agent) -> Option<&str> {
 }
 
 /// A directory as luneta shows one: its last two parts.
-fn short_cwd(path: &str) -> String {
+pub fn short_cwd(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     match parts.as_slice() {
         [] => path.to_owned(),
@@ -1474,7 +1785,7 @@ fn checkout_line(here: bool, branch: &str, status: &str, width: usize) -> Line<'
 }
 
 /// `text` cut to `room` columns, with a `…` for what it took.
-fn cut(text: &str, room: usize) -> String {
+pub fn cut(text: &str, room: usize) -> String {
     if text.width() <= room {
         return text.to_owned();
     }
@@ -1516,7 +1827,7 @@ fn tail(text: &str, room: usize) -> String {
 }
 
 /// `text` on as many lines of `width` as it takes, a space in from the edge.
-fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -1537,7 +1848,7 @@ fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 mod tests {
     use luneta_protocol::said::Said;
     use lunetad::api::shell::{Ended, Going, Stopped};
-    use lunetad::api::{self, Pane, Panes, Version, Zellij};
+    use lunetad::api::{self, Clients, Pane, Panes, Version, Zellij};
     use prost_types::Timestamp;
 
     use super::*;
@@ -1773,16 +2084,16 @@ mod tests {
         let clients = vec![Client { id: 1, pane: Some(2) }];
         sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
 
-        let (lines, lit) = seen(&mut sidebar, false, 32, 8);
+        let (lines, lit) = seen(&mut sidebar, false, 32, 12);
         assert_eq!(lines[4..6], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
         assert_eq!(lit, [4, 5]);
-        let (_, lit) = seen(&mut sidebar, true, 32, 8);
+        let (_, lit) = seen(&mut sidebar, true, 32, 12);
         assert_eq!(lit, [4, 5]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 8);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 12);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
-        let (_, lit) = seen(&mut sidebar, false, 32, 8);
+        let (_, lit) = seen(&mut sidebar, false, 32, 12);
         assert_eq!(lit, [4, 5]);
     }
 
@@ -1905,8 +2216,9 @@ mod tests {
         let mut sidebar = two_sessions();
         let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
-        // Two lines, between the rule along the top and the keys at the bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 5)[2..4].to_vec();
+        // Two lines, between the rule along the top and the legend at the
+        // bottom.
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 8)[2..4].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -1985,9 +2297,9 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 5);
+        let area = Rect::new(0, 0, 32, 8);
         let lines = screen(&mut sidebar, true, area.width, area.height);
-        assert!(lines[4].contains("esc back"), "{lines:?}");
+        assert!(lines[4].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(sidebar.mouse(click(10, 4), area), Asked::Nothing);
         let fold = Place::Pane { session: listed("older", 10), pane: 1 };
         assert_eq!(sidebar.mouse(click(10, 3), area), Asked::Go(fold));
@@ -2368,7 +2680,8 @@ mod tests {
         rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
     }
 
-    /// The last line of the sidebar, focused: the search, or else the keys.
+    /// The last line of the sidebar, focused: the search, or else the last of
+    /// the legend.
     fn bottom(sidebar: &mut Sidebar) -> String {
         screen(sidebar, true, 32, 16)[15].clone()
     }
@@ -2426,7 +2739,7 @@ mod tests {
     /// keys.
     #[test]
     fn a_search_opens_a_folded_session_until_it_closes() {
-        let keys = " ↵ go  h/l fold  esc back";
+        let keys = " d  Delete ▸";
         for close in [Some(KeyCode::Esc), Some(KeyCode::Enter), None] {
             let mut sidebar = searched();
             sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
@@ -2463,9 +2776,160 @@ mod tests {
         for _ in 0..4 {
             sidebar.key(&backspace);
         }
-        assert_eq!(bottom(&mut sidebar), " ↵ go  h/l fold  esc back");
+        assert_eq!(bottom(&mut sidebar), " d  Delete ▸");
         type_in(&mut sidebar, "/a-very-long-search-for-something");
         assert_eq!(bottom(&mut sidebar), " /…y-long-search-for-something_");
+    }
+
+    fn char(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// A key of the menu opens it at the bottom, for the highlighted row, and
+    /// what it opens is where luneta goes, once zellij says what it opened. A
+    /// tab of another session opens once luneta's zellij is there, whatever
+    /// lunetad says of its clients: the last may have left since.
+    #[test]
+    fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(true);
+        assert_eq!(sidebar.key(&char('n')), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 32, 16);
+        assert_eq!(lines[11..], [
+            "─ New ─────────── luneta/main ─",
+            " p  new pane",
+            " t  new tab",
+            " s  new session",
+            " <BS> - Back, <ESC> - Close",
+        ]);
+        let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
+        let tab = Open::Tab { session: older, cwd };
+        assert_eq!(sidebar.key(&char('t')), Asked::Open { menu: 1, open: tab });
+        let opened = Place::Pane { session: listed("older", 10), pane: 7 };
+        assert_eq!(sidebar.opened(1, Ok(7)), Asked::Go(opened));
+        // What zellij answers a menu that is gone takes luneta nowhere.
+        assert_eq!(sidebar.opened(1, Ok(8)), Asked::Nothing);
+
+        let client = Client { id: 9, pane: None };
+        if let Some(host) = &mut sidebar.host {
+            host.sessions[0].clients = Some(Clients { clients: vec![client] });
+        }
+        sidebar.step(2);
+        type_in(&mut sidebar, "n");
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        let tab = Open::Tab { session: "newer".to_owned(), cwd: "/w/b".to_owned() };
+        let asked = Asked::OpenThere { menu: 2, place: newer, open: tab };
+        assert_eq!(sidebar.key(&char('t')), asked);
+        sidebar.focus(false);
+        assert!(sidebar.menu.is_none());
+    }
+
+    /// While lunetad does not answer, what it said last of the agents may be
+    /// out of date: a delete asks first, whatever it ends, and `y` goes ahead.
+    #[test]
+    fn a_delete_asks_first_while_lunetad_does_not_answer() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(true);
+        sidebar.lost("gone".to_owned());
+        sidebar.step(2);
+        type_in(&mut sidebar, "d");
+        let closes = || Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
+        assert_eq!(sidebar.key(&char('d')), closes());
+        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
+        assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
+        assert_eq!(sidebar.key(&char('y')), closes());
+        let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
+        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+    }
+
+    /// `d d` plans by what zellij says closing the pane closes, and the
+    /// highlight goes to the row after it once the pane is gone.
+    #[test]
+    fn a_delete_goes_by_what_zellij_closes_and_the_highlight_past_it() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(true);
+        sidebar.step(1);
+        assert_eq!(sidebar.key(&char('d')), Asked::Nothing);
+        let closes = Asked::Closes { menu: 1, session: "older".to_owned(), pane: 2 };
+        assert_eq!(sidebar.key(&char('d')), closes);
+        let act = Act::Pane { session: "older".to_owned(), pane: 2 };
+        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+        assert!(sidebar.menu.is_none());
+        sidebar.heard(host(
+            vec![
+                session("newer", 20, vec![pane(1, 0, "/w/b", "fish")]),
+                session("older", 10, vec![pane(1, 0, "/w/luneta/main", "claude")]),
+            ],
+            vec![agent("older", 1, Status::Waiting, Some("fold"))],
+        ));
+        assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("newer", 20), pane: 1 }));
+    }
+
+    /// A delete that would end an agent at work asks first, and `y` asks
+    /// zellij again before it goes ahead. The session luneta's zellij is in
+    /// goes once it is in the newest of the others.
+    #[test]
+    fn a_delete_that_ends_an_agent_at_work_asks_and_looks_again() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(true);
+        type_in(&mut sidebar, "d");
+        let closes = || Asked::Closes { menu: 1, session: "older".to_owned(), pane: 1 };
+        assert_eq!(sidebar.key(&char('d')), closes());
+        let tab = || Closes::Tab { id: 0, panes: vec![1] };
+        assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Nothing);
+        assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
+        let lines = screen(&mut sidebar, true, 32, 16);
+        assert_eq!(lines[13], " Close its tab? 1 agent, 1");
+        assert_eq!(sidebar.key(&char('y')), closes());
+        let act = Act::Tab { session: "older".to_owned(), tab: 0, panes: vec![1] };
+        assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Delete(act));
+
+        type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('s')), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 32, 16);
+        assert_eq!(lines[13..15], [" Kill session older? 1 agent,", " 1 waiting"]);
+        let to = Place::Session(listed("newer", 20));
+        let leave = Act::Leave { session: "older".to_owned(), to };
+        assert_eq!(sidebar.key(&char('s')), Asked::Delete(leave));
+        assert_eq!(sidebar.menu.as_ref().and_then(Menu::leaving), Some("newer"));
+        // It says where it goes for as long as it takes, with the focus or not.
+        sidebar.focus(false);
+        assert!(sidebar.menu.is_some());
+    }
+
+    /// While luneta's zellij is on its way to a session, it may be in that
+    /// one or the one it leaves: a key that would kill either says so, and
+    /// kills neither, rather than luneta's own with it, or wait for ever on a
+    /// go that zellij would not be sent. Once it is there, it does.
+    #[test]
+    fn no_session_goes_while_luneta_s_zellij_is_on_its_way_to_one() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(true);
+        sidebar.sending("newer");
+        let moving = |sidebar: &Sidebar| {
+            sidebar.menu.is_none()
+                && sidebar.notice.as_ref().is_some_and(|it| it.contains("which session it is in"))
+        };
+        let older = Place::Pane { session: listed("older", 10), pane: 1 };
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        for place in [older, newer.clone()] {
+            sidebar.cursor = Some(place);
+            type_in(&mut sidebar, "d");
+            assert_eq!(sidebar.key(&char('s')), Asked::Nothing);
+            assert!(moving(&sidebar));
+        }
+        // Nor does its last pane close it.
+        type_in(&mut sidebar, "d");
+        let closes = Asked::Closes { menu: 3, session: "newer".to_owned(), pane: 1 };
+        assert_eq!(sidebar.key(&char('d')), closes);
+        assert_eq!(sidebar.closes(3, Ok(Closes::Session)), Asked::Nothing);
+        assert!(moving(&sidebar));
+
+        sidebar.titled("newer | fish".to_owned());
+        type_in(&mut sidebar, "d");
+        let to = Place::Session(listed("older", 10));
+        let leave = Act::Leave { session: "newer".to_owned(), to };
+        assert_eq!(sidebar.key(&char('s')), Asked::Delete(leave));
     }
 
     /// The highlight goes to the best match as what is typed changes, and

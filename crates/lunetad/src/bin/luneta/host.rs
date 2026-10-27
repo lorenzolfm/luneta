@@ -30,13 +30,15 @@ use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
+use crate::close::Act;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
-use crate::zellij::{self, SessionName};
+use crate::skills::{self, Skill};
+use crate::zellij::{self, After, Closes, SessionName};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -57,6 +59,15 @@ pub enum Event {
     Stayed(u64),
     /// Something went wrong that the sidebar says.
     Notice(String),
+    /// What zellij opened for the menu numbered `menu`: the terminal, or why
+    /// none.
+    Opened { menu: u64, opened: Result<u32, String> },
+    /// What closing the pane of the menu numbered `menu` closes, as zellij
+    /// lists its session, or why it does not say.
+    Closes { menu: u64, closes: Result<Closes, String> },
+    /// The skills the directory of the menu numbered `menu` can run, or why
+    /// the finder found none.
+    Skills { menu: u64, skills: Result<Vec<Skill>, String> },
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -427,6 +438,15 @@ impl App {
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
             Event::Folds => self.sidebar.refold(),
+            Event::Opened { menu, opened } => {
+                let asked = self.sidebar.opened(menu, opened);
+                self.follow(asked);
+            },
+            Event::Closes { menu, closes } => {
+                let asked = self.sidebar.closes(menu, closes);
+                self.follow(asked);
+            },
+            Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
         }
         Ok(())
     }
@@ -518,15 +538,40 @@ impl App {
         self.follow(asked);
     }
 
-    /// Does what the sidebar asked.
+    /// Does what the sidebar asked. What the menu opens is where you go, with
+    /// the keys; a delete leaves you in the sidebar, to go on along its rows.
     fn follow(&mut self, asked: Asked) {
         match asked {
             Asked::Nothing => {},
             Asked::Leave => self.leave(),
             Asked::Go(place) => {
-                self.go(&place);
+                self.go(&place, None);
                 self.leave();
             },
+            Asked::Closes { menu, session, pane } => {
+                zellij::closes(menu, &session, pane, &self.events);
+            },
+            Asked::Delete(act) => match act {
+                Act::Pane { session, pane } => zellij::close_pane(&session, pane, &self.events),
+                Act::Tab { session, tab, .. } => zellij::close_tab(&session, tab, &self.events),
+                Act::Kill(session) => zellij::kill(&session, &self.events),
+                // The plan found zellij's client in `session`, and on its
+                // way nowhere, as the key was pressed.
+                Act::Leave { session, to } => {
+                    self.go_from(&session, &to, Some(After::Kill(session.clone())));
+                },
+            },
+            Asked::Open { menu, open } => zellij::open(menu, open, &self.events),
+            Asked::OpenThere { menu, place, open } => {
+                if !self.go(&place, Some(After::Open(menu, open))) {
+                    self.sidebar.close_menu();
+                }
+            },
+            Asked::Start { session, cwd } => {
+                self.start(&session, &cwd);
+                self.leave();
+            },
+            Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
         }
     }
 
@@ -537,25 +582,53 @@ impl App {
     fn next(&mut self) {
         self.leave();
         if let Some(place) = self.sidebar.next_pane() {
-            self.go(&place);
+            self.go(&place, None);
         }
     }
 
-    /// Takes zellij's client to `place`.
-    fn go(&mut self, place: &Place) {
+    /// Takes zellij's client to `place`, and does `after` once it is there,
+    /// in another session. Whether it went.
+    fn go(&mut self, place: &Place, after: Option<After>) -> bool {
+        let Some(here) = self.here() else {
+            return false;
+        };
+        self.go_from(&here, place, after);
+        true
+    }
+
+    /// Takes zellij's client from `here`, the session it is in, to `place`,
+    /// and does `after` once it is there, in another session.
+    fn go_from(&mut self, here: &str, place: &Place, after: Option<After>) {
+        let then = self.sidebar.went(place);
+        self.hosted.send(zellij::NUDGE);
+        zellij::go(here, place.session(), place.pane(), then, after, &self.events);
+    }
+
+    /// Takes zellij's client to a session it makes, `session`, that starts in
+    /// `cwd`.
+    fn start(&mut self, session: &SessionName, cwd: &str) {
+        let Some(here) = self.here() else {
+            return;
+        };
+        let then = self.sidebar.sending(session.as_str());
+        self.hosted.send(zellij::NUDGE);
+        zellij::start(&here, session, cwd, then, &self.events);
+    }
+
+    /// The session zellij's client is in, for an action to take it from, or
+    /// none while it is on its way to another, which the sidebar then says.
+    fn here(&mut self) -> Option<String> {
         let Some(here) = self.sidebar.here().map(str::to_owned) else {
             self.sidebar.notify("zellij has yet to say which session it is in".to_owned());
-            return;
+            return None;
         };
         // An action would move the client that last typed in a session that
         // luneta's has yet to come to.
         if let Some(going) = self.sidebar.going() {
             self.sidebar.notify(format!("zellij has yet to take its client to {going}"));
-            return;
+            return None;
         }
-        let then = self.sidebar.went(place);
-        self.hosted.send(zellij::NUDGE);
-        zellij::go(&here, place.session(), place.pane(), then, &self.events);
+        Some(here)
     }
 
     /// Asks zellij for the clients of a session, if the sidebar wants to know.
