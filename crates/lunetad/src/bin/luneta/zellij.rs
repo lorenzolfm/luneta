@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::Client;
 use lunetad::{clients, program};
@@ -114,16 +114,66 @@ fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
 
 /// The program luneta runs beside the sidebar, and its arguments: zellij's
 /// client, attached to `session` and making it if none runs, or without one
-/// in a session of a name zellij makes up. It runs through `env`, to leave out
-/// what `LEFT_OUT` names, which luneta cannot take out of its own variables.
+/// in a session of a name zellij makes up.
 pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
-    let mut args: Vec<String> =
-        LEFT_OUT.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
-    args.push("zellij".to_owned());
-    if let Some(session) = session {
-        args.extend(["attach".to_owned(), "--create".to_owned(), session.0.clone()]);
+    match session {
+        Some(session) => client_with(&["attach", "--create", &session.0]),
+        None => client_with(&[]),
     }
-    ("env".to_owned(), args)
+}
+
+/// The program luneta runs beside the sidebar in place of a client that
+/// ended, and its arguments: zellij's client, attached to `session`, which
+/// runs. Without `--create`, which would make one gone since anew, empty.
+pub fn rejoin(session: &str) -> (String, Vec<String>) {
+    client_with(&["attach", session])
+}
+
+/// zellij's client, with `args`. It runs through `env`, to leave out what
+/// `LEFT_OUT` names, which luneta cannot take out of its own variables.
+fn client_with(args: &[&str]) -> (String, Vec<String>) {
+    let mut through: Vec<String> =
+        LEFT_OUT.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
+    through.push("zellij".to_owned());
+    through.extend(args.iter().map(|arg| (*arg).to_owned()));
+    ("env".to_owned(), through)
+}
+
+/// How long luneta looks for the session its client was in to be gone, once
+/// the client ended. zellij takes the session's socket away a moment before
+/// its clients end, measured at under a millisecond, and a client that
+/// detached leaves it there: that one costs luneta this long as it ends.
+const ENDING: Duration = Duration::from_millis(100);
+
+/// How often luneta looks meanwhile.
+const ENDING_LOOK: Duration = Duration::from_millis(10);
+
+/// Where luneta's zellij goes on once its client ended in `left`: the newest
+/// session that runs, which the picker lists first, where `left` went with
+/// the client, as it does once zellij quits, its last pane exits, or it is
+/// killed. None where `left` runs still, as the client detached; where no
+/// other session runs; and where luneta cannot read all of zellij's folder,
+/// as either could be in what it cannot.
+pub fn refuge(left: &str) -> Option<String> {
+    let folder = lunetad::zellij_folder();
+    let deadline = Instant::now() + ENDING;
+    loop {
+        let running = lunetad::zellij_sessions(&folder)?;
+        if running.iter().all(|(name, _)| name != left) {
+            return newest(running);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(ENDING_LOOK);
+    }
+}
+
+/// The newest of `running`, by when each started and then by name, as the
+/// picker lists them first.
+fn newest(running: Vec<(String, SystemTime)>) -> Option<String> {
+    let newest = running.into_iter().max_by(|(a, a_at), (b, b_at)| (a_at, a).cmp(&(b_at, b)));
+    newest.map(|(name, _)| name)
 }
 
 /// The session a directory is for, as the picker's directories name it: for
@@ -697,6 +747,22 @@ mod tests {
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
+        let (program, args) = rejoin("elo");
+        assert_eq!(program, "env");
+        assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
+        assert_eq!(args[args.len() - 3..], ["zellij", "attach", "elo"]);
+    }
+
+    /// luneta goes on in the session the picker lists first: the newest, and
+    /// of two that started at once, the one whose name comes last, as the
+    /// sidebar has them.
+    #[test]
+    fn the_refuge_is_the_session_the_picker_lists_first() {
+        let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        let running = [("b", at(2)), ("c", at(1)), ("a", at(2))];
+        let running = running.map(|(name, started)| (name.to_owned(), started)).to_vec();
+        assert_eq!(newest(running), Some("b".to_owned()));
+        assert_eq!(newest(Vec::new()), None);
     }
 
     #[test]

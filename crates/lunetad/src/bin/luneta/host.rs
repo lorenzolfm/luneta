@@ -198,22 +198,27 @@ struct App {
     /// What watches the folders the folds and the news are kept in, for as
     /// long as luneta runs.
     _watching: Vec<notify::RecommendedWatcher>,
-    /// How zellij ended, once its terminal says.
+    /// The directory luneta started in, which zellij's client runs in.
+    dir: PathBuf,
+    /// How zellij's client ended, once its terminal says.
     exited: Option<ExitStatus>,
     ended: bool,
     /// The input that came before zellij was in its session, as keys typed as
-    /// luneta starts: zellij 0.45 drops keys that reach it before it puts its
-    /// client on its screen. None once zellij is in, which it says as it first
-    /// draws for its client, as it draws only for one on its screen: once it
-    /// titles its terminal, or once anything shows there. zellij titles a tab
-    /// once for all its clients, so that a client that comes to a session
-    /// already titled gets none.
+    /// luneta starts, or as a client takes the place of one that ended: zellij
+    /// 0.45 drops keys that reach it before it puts its client on its screen.
+    /// None once zellij is in, which it says as it first draws for its client,
+    /// as it draws only for one on its screen: once it titles its terminal, or
+    /// once anything shows there. zellij titles a tab once for all its
+    /// clients, so that a client that comes to a session already titled gets
+    /// none.
     waiting: Option<Waiting>,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
-/// it detaches, or its session does. The sidebar is of what the daemon in
-/// `folder` says, which is started if none runs.
+/// its client detaches or fails, or its session ends and no other runs. Where
+/// another does, a client of the newest takes the place of the one that
+/// ended. The sidebar is of what the daemon in `folder` says, which is
+/// started if none runs.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -363,6 +368,7 @@ fn run_in(
         turned: None,
         events,
         _watching: watching,
+        dir: dir.to_owned(),
         exited: None,
         ended: false,
         waiting: Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX }),
@@ -371,8 +377,8 @@ fn run_in(
     Ok(app.failure())
 }
 
-/// Draws a frame for each batch of events, until zellij ends or luneta's
-/// terminal can no longer be read.
+/// Draws a frame for each batch of events, until zellij ends with no client
+/// to take the place of its own, or luneta's terminal can no longer be read.
 fn run_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -728,7 +734,31 @@ impl App {
                 backend.flush()?;
             },
             Said::Exited(status) => self.exited = Some(status),
-            Said::Ended => self.ended = true,
+            Said::Ended => self.client_ended()?,
+        }
+        Ok(())
+    }
+
+    /// zellij's client ended. Where it ended well, and its session with it, as
+    /// zellij quits, the session's last pane exits, or the session is killed,
+    /// a client of the newest session that runs takes its place, and luneta
+    /// goes on. luneta ends where none runs, and where the client detached,
+    /// or failed, as where zellij cannot attach.
+    fn client_ended(&mut self) -> io::Result<()> {
+        let left = self.exited.filter(ExitStatus::success).and(self.sidebar.here());
+        let Some(to) = left.and_then(zellij::refuge) else {
+            self.ended = true;
+            return Ok(());
+        };
+        let before = zellij::clients(&to).unwrap_or_default();
+        let (program, args) = zellij::rejoin(&to);
+        let size = window(self.areas.1);
+        self.hosted = Hosted::start(program, args, &self.dir, size, self.events.clone())?;
+        self.exited = None;
+        self.dragging = false;
+        self.waiting = Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX });
+        if let Some(look) = self.sidebar.sending(&to) {
+            zellij::arrive(look, before, &self.events);
         }
         Ok(())
     }

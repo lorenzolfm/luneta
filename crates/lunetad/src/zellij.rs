@@ -122,12 +122,30 @@ impl Scan {
 /// The sessions whose sockets are in `folder` now. What goes wrong in reading
 /// it, `troubles` says.
 pub fn scan(folder: &Path, troubles: &mut Troubles) -> Scan {
+    let scan = read(folder, &mut |what| troubles.say(what));
+    troubles.done();
+    scan
+}
+
+/// The sessions that run, as their sockets in `folder` say now: each by its
+/// name, and when it started. None where any of the folder could not be
+/// read, as a session's socket could be in what was not. For luneta, which
+/// says nothing of what went wrong: its screen is zellij's.
+#[must_use]
+pub fn running(folder: &Path) -> Option<Vec<(String, SystemTime)>> {
+    let scan = read(folder, &mut |_| {});
+    let sockets = scan.sockets.into_iter().map(|socket| (socket.name, socket.id.started()));
+    (scan.unread == 0).then(|| sockets.collect())
+}
+
+/// `scan`, with what goes wrong told to `say`.
+fn read(folder: &Path, say: &mut dyn FnMut(String)) -> Scan {
     let mut scan = Scan { sockets: Vec::new(), unread: 0 };
-    for contract in listed(folder, troubles, &mut scan.unread) {
+    for contract in listed(folder, say, &mut scan.unread) {
         if !contract.file_name().is_some_and(|name| name.to_string_lossy().starts_with(CONTRACT)) {
             continue;
         }
-        for path in listed(&contract, troubles, &mut scan.unread) {
+        for path in listed(&contract, say, &mut scan.unread) {
             match socket(&path) {
                 Ok(Some(socket)) => scan.sockets.push(socket),
                 Ok(None) => {},
@@ -135,21 +153,20 @@ pub fn scan(folder: &Path, troubles: &mut Troubles) -> Scan {
                 // has ended.
                 Err(error) if error.kind() == ErrorKind::NotFound => {},
                 Err(error) => {
-                    troubles.say(format!("{}: {error}", path.display()));
+                    say(format!("{}: {error}", path.display()));
                     scan.unread += 1;
                 },
             }
         }
     }
-    troubles.done();
     scan
 }
 
-/// The paths in `dir`, or none when it cannot be listed, which `troubles` says
+/// The paths in `dir`, or none when it cannot be listed, which `say` hears
 /// and `unread` counts.
-fn listed(dir: &Path, troubles: &mut Troubles, unread: &mut u32) -> Vec<PathBuf> {
+fn listed(dir: &Path, say: &mut dyn FnMut(String), unread: &mut u32) -> Vec<PathBuf> {
     watch::listed(dir).unwrap_or_else(|error| {
-        troubles.say(format!("{}: {error}", dir.display()));
+        say(format!("{}: {error}", dir.display()));
         *unread += 1;
         Vec::new()
     })
@@ -286,8 +303,9 @@ impl Sessions {
 mod tests {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
 
-    use super::{scan, CONTRACT};
+    use super::{running, scan, CONTRACT, WEB_SERVER};
     use crate::watch::Troubles;
 
     /// zellij is alone only as far as a scan can tell: a folder of its
@@ -304,5 +322,24 @@ mod tests {
         let unread = scan(folder.path(), &mut troubles);
         fs::set_permissions(&contract, Permissions::from_mode(0o755)).unwrap();
         assert!(!unread.alone());
+    }
+
+    /// luneta hears of each session by its socket and when that was made,
+    /// and of none where a folder that could hold one cannot be read.
+    #[test]
+    fn the_sessions_that_run_are_their_sockets_unless_one_could_go_unread() {
+        let folder = tempfile::tempdir().unwrap();
+        let contract = folder.path().join(format!("{CONTRACT}1"));
+        fs::create_dir(&contract).unwrap();
+        let _work = UnixListener::bind(contract.join("work")).unwrap();
+        let _web = UnixListener::bind(contract.join(WEB_SERVER)).unwrap();
+        fs::write(contract.join("notes"), "").unwrap();
+        let made = fs::metadata(contract.join("work")).unwrap().modified().unwrap();
+        assert_eq!(running(folder.path()), Some(vec![("work".to_owned(), made)]));
+
+        fs::set_permissions(&contract, Permissions::from_mode(0o000)).unwrap();
+        let unread = running(folder.path());
+        fs::set_permissions(&contract, Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(unread, None);
     }
 }
