@@ -27,9 +27,7 @@ use crate::zellij::Id;
 /// at once.
 const LIMIT: Duration = Duration::from_secs(2);
 
-/// A terminal of a session's. Its title is not kept: Claude Code turns a
-/// frame in it while it works, and a host whose titles count would change
-/// at every sweep.
+/// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     pub id: u32,
@@ -39,6 +37,8 @@ pub struct Pane {
     pub cwd: Option<Said>,
     /// What runs in front in it.
     pub command: Option<Said>,
+    /// What an agent says in its title, as `titled` has it.
+    pub titled: Option<Titled>,
 }
 
 impl Pane {
@@ -50,7 +50,23 @@ impl Pane {
             tab_name: self.tab_name.clone(),
             cwd: self.cwd.clone().map(String::from),
             command: self.command.clone().map(String::from),
+            titled: self.titled.as_ref().map(Titled::to_api),
         }
+    }
+}
+
+/// What an agent says in the title of its pane, without the glyph it leads
+/// the title with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Titled {
+    /// Its topic: none while Claude Code titles the pane a bare `Claude Code`,
+    /// as it does until it has one.
+    pub topic: Option<Said>,
+}
+
+impl Titled {
+    fn to_api(&self) -> api::Titled {
+        api::Titled { topic: self.topic.clone().map(String::from) }
     }
 }
 
@@ -69,6 +85,7 @@ struct Wire {
     pane_cwd: Option<String>,
     #[serde(default)]
     pane_command: Option<String>,
+    title: String,
 }
 
 /// The terminals in what zellij listed, or why it does not read. A plugin's
@@ -85,6 +102,7 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
             tab_name: pane.tab_name,
             cwd: pane.pane_cwd.and_then(Said::new),
             command: pane.pane_command.and_then(Said::new),
+            titled: titled(&pane.title),
         })
         .collect();
     let mut ids = HashSet::new();
@@ -92,6 +110,24 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
         return Err(format!("pane {} comes twice", twice.id));
     }
     Ok(panes)
+}
+
+/// The title Claude Code gives its pane until the agent has a topic, which
+/// some never get.
+const GENERIC_TITLE: &str = "Claude Code";
+
+/// What an agent says in a pane's title, without the glyph it leads the title
+/// with: Claude Code's `✳` at rest, and the frame it turns in its place while
+/// it works, `◐` and `◑` as 2.1.310 turns them, so that the host changes only
+/// as the agent's topic does. None for a title that leads with no such glyph,
+/// which no agent gave.
+fn titled(title: &str) -> Option<Titled> {
+    let mut chars = title.trim().chars();
+    let glyph = chars.next()?;
+    let agent = matches!(glyph, '✳' | '◐' | '◑' | '✢' | '✶' | '✻' | '✽' | '·')
+        || ('\u{2800}'..='\u{28ff}').contains(&glyph);
+    let topic = Some(chars.as_str().trim_start()).filter(|topic| *topic != GENERIC_TITLE);
+    agent.then(|| Titled { topic: topic.map(str::to_owned).and_then(Said::new) })
 }
 
 /// Keeps in `panes` where each worked and what ran in it as `listed` said,

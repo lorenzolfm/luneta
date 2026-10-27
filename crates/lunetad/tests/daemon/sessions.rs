@@ -112,6 +112,7 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
         tab_name: tab.1.to_owned(),
         cwd: cwd.map(str::to_owned),
         command: cwd.map(|_| "fish".to_owned()),
+        titled: None,
     }
 }
 
@@ -198,6 +199,53 @@ fn a_session_has_its_clients_once_zellij_lists_them() {
     let clients = session(&moved, "work").unwrap().clients.clone().unwrap();
     assert_eq!(clients.clients, [client(1, Some(1)), client(2, Some(1))]);
     assert!(took < Duration::from_secs(4), "{took:?}");
+}
+
+/// What an agent says in a pane's title is on the host, without the glyph the
+/// agent leads it with, so that the frame Claude Code turns there while it
+/// works leaves the host as it was. A bare `Claude Code` is an agent's title
+/// with no topic, and a title that leads with no such glyph, as a shell's, is
+/// no agent's. The pane works nowhere zellij says, so that git's word on where
+/// it works changes the host at no moment the test counts on. The test waits
+/// out two sweeps.
+#[test]
+fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
+    let host = Host::new();
+    let titled = |title: &str| json!([listed(1, title, (0, "Tab #1"), None)]);
+    host.zellij.list("work", &titled("◐ Fix the fold"));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let said = |host: &api::Host| {
+        let panes = session(host, "work")?.panes.clone()?;
+        panes.panes[0].titled.clone()
+    };
+    // zellij lists the session's clients after its panes, which changes the
+    // host once more as it first does.
+    let topic_is = |what: &str, wanted: Option<&str>| {
+        eventually(what, || {
+            let now = host.host();
+            session(&now, "work")?.clients.as_ref()?;
+            (said(&now)?.topic.as_deref() == wanted).then_some(now.version.unwrap())
+        })
+    };
+
+    let busy = topic_is("the agent's topic is on the host", Some("Fix the fold"));
+    host.zellij.list("work", &titled("◑ Fix the fold"));
+    let asked = host.zellij.asked().len();
+    eventually("zellij lists the next frame", || {
+        (host.zellij.asked().len() >= asked + 2).then_some(())
+    });
+    assert_eq!(host.host().version, Some(busy));
+
+    host.zellij.list("work", &titled("✳ Claude Code"));
+    let rested = topic_is("the agent has no topic", None);
+    assert!(rested.seq > busy.seq);
+
+    host.zellij.list("work", &titled("~"));
+    eventually("a shell's title is no agent's", || {
+        let panes = session(&host.host(), "work")?.panes.clone()?;
+        panes.panes[0].titled.is_none().then_some(())
+    });
 }
 
 /// What zellij lists that does not read, the daemon says it cannot, and what
