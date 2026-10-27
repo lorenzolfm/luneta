@@ -3,7 +3,8 @@
 //! and a click hands them to the one clicked. `Ctrl q` collapses the sidebar
 //! to what it counts, zellij taking the rest of its columns, and opens it
 //! again, as a click on it does, and `Alt Tab` takes zellij to the next pane
-//! the sidebar lists, whichever has the keys.
+//! the sidebar lists, whichever has the keys. The sidebar's edge, its last
+//! column, drags it wider or narrower, zellij taking the columns it leaves.
 
 use std::collections::VecDeque;
 use std::env;
@@ -21,7 +22,7 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -40,6 +41,7 @@ use crate::news::{self, News};
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::skills::{self, Skill};
+use crate::width::Width;
 use crate::zellij::{self, After, Closes, Refuge, SessionName};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
@@ -132,6 +134,20 @@ impl Focus {
     }
 }
 
+/// What a button held down holds, wherever the mouse goes, until it is let
+/// go: zellij, or the sidebar's edge, its last column, and never both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// Nothing: no button is down, or one went down on the sidebar's rows.
+    Nothing,
+    /// zellij, as a button went down over it: what it drags goes to zellij.
+    Zellij,
+    /// The sidebar's edge, as the left button went down on it, and whether
+    /// it was dragged since. One let go undragged keeps no width, so that
+    /// what another luneta dragged meanwhile stays.
+    Edge { dragged: bool },
+}
+
 /// The input luneta holds for zellij until zellij can take it.
 struct Waiting {
     input: Vec<Input>,
@@ -146,9 +162,6 @@ struct Client {
     hosted: Hosted,
     /// How it ended, once its terminal says.
     exited: Option<ExitStatus>,
-    /// Whether a button went down over zellij and is still held: what it
-    /// drags goes to zellij, wherever the mouse goes.
-    dragging: bool,
     /// The input that came before zellij was in its session, as keys typed as
     /// it starts: zellij 0.45 drops keys that reach it before it puts its
     /// client on its screen. None once zellij is in, which it says as it first
@@ -171,7 +184,7 @@ impl Client {
     ) -> io::Result<Self> {
         let hosted = Hosted::start(program, args, dir, size, events)?;
         let waiting = Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX });
-        Ok(Client { hosted, exited: None, dragging: false, waiting })
+        Ok(Client { hosted, exited: None, waiting })
     }
 }
 
@@ -223,6 +236,9 @@ struct App {
     sidebar: Sidebar,
     /// Where the sidebar and zellij were last drawn, which the mouse goes by.
     areas: (Rect, Rect),
+    /// How wide the sidebar opens.
+    width: Width,
+    held: Held,
     focus: Focus,
     /// Whether the window luneta's terminal is in has the focus. The sidebar
     /// sees you in a pane only while it does.
@@ -352,7 +368,8 @@ fn run_in(
     events: Sender<Event>,
     inbox: &mut Inbox,
 ) -> io::Result<Option<String>> {
-    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), false);
+    let (width, width_unread) = Width::kept();
+    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     // The clients of the session before luneta's comes, of which none is
     // luneta's: none of a session zellij is to make.
     let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
@@ -378,6 +395,9 @@ fn run_in(
         Err(error) => sidebar
             .notify(format!("dots of other lunetas show from luneta's next start: {error}")),
     }
+    if let Some(why) = width_unread {
+        sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
+    }
     if let (Some(session), Some(before)) = (session, before)
         && let Some(look) = sidebar.sending(&session.to_string())
     {
@@ -391,6 +411,8 @@ fn run_in(
         client,
         sidebar,
         areas,
+        width,
+        held: Held::Nothing,
         focus: Focus::Zellij,
         // Until the terminal says otherwise. One that never tells a program
         // of its window's focus has you in it all along.
@@ -448,10 +470,9 @@ fn run_loop(
 }
 
 /// The columns the sidebar takes of the terminal, and those left for zellij:
-/// the sidebar's own, open or `collapsed`, or half the terminal's, where that
+/// `own`, the sidebar's, open or collapsed, or half the terminal's, where that
 /// is narrower.
-fn areas(frame: Rect, collapsed: bool) -> (Rect, Rect) {
-    let own = if collapsed { sidebar::COLLAPSED } else { sidebar::COLUMNS };
+fn areas(frame: Rect, own: u16) -> (Rect, Rect) {
     let sidebar = own.min(frame.width / 2);
     let left = Rect::new(frame.x, frame.y, sidebar, frame.height);
     let right = Rect::new(frame.x + sidebar, frame.y, frame.width - sidebar, frame.height);
@@ -565,6 +586,9 @@ impl App {
             return;
         }
         if chord == COLLAPSE {
+            // The strip has no edge to hold: one held is let go, as a
+            // release would let it go.
+            self.let_go();
             let other =
                 if self.focus == Focus::Collapsed { Focus::Zellij } else { Focus::Collapsed };
             self.give(other);
@@ -586,14 +610,17 @@ impl App {
 
     fn mouse(&mut self, mouse: MouseEvent) {
         let (sidebar, zellij) = self.areas;
+        if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
+            return;
+        }
         let over_zellij = mouse.column >= zellij.x;
-        if self.client.dragging || over_zellij {
+        if self.held == Held::Zellij || over_zellij {
             match mouse.kind {
                 MouseEventKind::Down(_) => {
-                    self.client.dragging = true;
+                    self.held = Held::Zellij;
                     self.leave();
                 },
-                MouseEventKind::Up(_) => self.client.dragging = false,
+                MouseEventKind::Up(_) => self.held = Held::Nothing,
                 _ => {},
             }
             let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
@@ -620,11 +647,47 @@ impl App {
         if opener.is_some_and(|(when, was)| was == at && when.elapsed() < DOUBLE_CLICK) {
             return;
         }
+        // A press on its edge drags it wider or narrower, and leaves the keys
+        // where they are.
+        let edge = sidebar.right().checked_sub(1);
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && edge == Some(mouse.column) {
+            self.held = Held::Edge { dragged: false };
+            return;
+        }
         let asked = self.sidebar.mouse(mouse, sidebar);
         if asked == Asked::Nothing && down {
             self.give(Focus::Sidebar);
         }
         self.follow(asked);
+    }
+
+    /// Takes what the mouse does while the sidebar's edge is held, and says
+    /// whether that is all it does. A drag puts the edge where the mouse is.
+    /// Anything else lets the edge go: a release, or whatever comes after a
+    /// release luneta never heard, as of a button let go outside its window,
+    /// which then does what it does besides.
+    fn resize(&mut self, mouse: MouseEvent) -> bool {
+        let (sidebar, zellij) = self.areas;
+        if let MouseEventKind::Drag(_) = mouse.kind {
+            let terminal = sidebar.width + zellij.width;
+            self.width.drag(mouse.column.saturating_sub(sidebar.x), terminal);
+            self.held = Held::Edge { dragged: true };
+            return true;
+        }
+        self.let_go();
+        matches!(mouse.kind, MouseEventKind::Up(_))
+    }
+
+    /// Lets the sidebar's edge go, where it is held, and keeps the width for
+    /// the next luneta where it was dragged.
+    fn let_go(&mut self) {
+        let Held::Edge { dragged } = self.held else {
+            return;
+        };
+        self.held = Held::Nothing;
+        if dragged && let Err(why) = self.width.keep() {
+            self.sidebar.notify(format!("the sidebar's width stays in this luneta: {why}"));
+        }
     }
 
     /// Does what the sidebar asked. What the menu opens is where you go, with
@@ -817,6 +880,10 @@ impl App {
         let (program, args) = zellij::rejoin(&to);
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, self.events.clone())?;
+        // The client that takes its place heard no button go down over it.
+        if self.held == Held::Zellij {
+            self.held = Held::Nothing;
+        }
         let look = self.sidebar.rejoining(&to);
         zellij::arrive(look, before, &self.events);
         Ok(())
@@ -862,7 +929,8 @@ impl App {
         let now = SystemTime::now();
         terminal.draw(|frame| {
             let collapsed = self.focus == Focus::Collapsed;
-            let (sidebar, zellij) = areas(frame.area(), collapsed);
+            let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
+            let (sidebar, zellij) = areas(frame.area(), own);
             self.areas = (sidebar, zellij);
             let size = self.client.hosted.size();
             if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
