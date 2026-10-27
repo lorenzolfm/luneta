@@ -75,16 +75,20 @@ pub enum Command {
     /// Marks the highlighted pane read while its row has the dot, or else
     /// unread.
     Unread,
+    /// Selects the session of the highlighted row, for `Top::Shift` to move,
+    /// and ends the selection.
+    Reorder,
 }
 
 impl Command {
     /// Every command, in the order the legend lists them.
-    const ALL: [Command; 2] = [Command::Search, Command::Unread];
+    const ALL: [Command; 3] = [Command::Search, Command::Unread, Command::Reorder];
 
     const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Unread => 'u',
+            Command::Reorder => 'v',
         }
     }
 
@@ -93,6 +97,7 @@ impl Command {
         match self {
             Command::Search => "Search",
             Command::Unread => "Unread",
+            Command::Reorder => "Reorder",
         }
     }
 
@@ -116,6 +121,9 @@ pub enum Top {
     /// `gg`. Pressed once, the sidebar waits for the second, and any other
     /// key drops the first: `Esc` does only that, as in vim.
     First,
+    /// Moves the sessions a selection holds so many places down, or up.
+    /// Without a selection, nothing.
+    Shift(isize),
     /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     Fold(Option<bool>),
     /// Opens the menu on its first group, where every key is the menu's.
@@ -126,13 +134,15 @@ pub enum Top {
 
 impl Top {
     /// What `key` does at the top of the sidebar besides a command: moves the
-    /// highlight, folds, or opens the menu.
+    /// highlight or the sessions selected, folds, or opens the menu.
     const fn moves(key: char) -> Option<Top> {
         match key {
             'j' => Some(Top::Move(1)),
             'k' => Some(Top::Move(-1)),
             'g' => Some(Top::First),
             'G' => Some(Top::Last),
+            'J' => Some(Top::Shift(1)),
+            'K' => Some(Top::Shift(-1)),
             'h' => Some(Top::Fold(Some(true))),
             'l' => Some(Top::Fold(Some(false))),
             ' ' => Some(Top::Fold(None)),
@@ -1086,6 +1096,7 @@ mod tests {
                 "─ luneta ──────────────────────",
                 " /  Search",
                 " u  Unread",
+                " v  Reorder",
                 " n  New ▸",
                 " d  Delete ▸",
             ]

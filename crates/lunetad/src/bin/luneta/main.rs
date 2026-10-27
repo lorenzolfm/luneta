@@ -15,6 +15,7 @@ mod keys;
 mod ledger;
 mod menu;
 mod news;
+mod order;
 mod own;
 mod sidebar;
 mod skills;

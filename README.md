@@ -599,12 +599,12 @@ the other two. zellij's default config binds `Ctrl b` to tmux mode and `Ctrl q`
 to quit. luneta takes all three first: if you use those, bind them to other
 keys, in zellij's config or in Claude Code's `~/.claude/keybindings.json`.
 
-The sidebar lists every session, oldest first, the panes in each, in the order
-of their tabs, and what the agent in each pane is doing, with the branch under
-it, all as [`lunetad`](#building-from-source) says: luneta starts the daemon
-when none runs, and the sidebar says so at its bottom while it does not
-answer. `j` and `k` move, `gg` and `Home` go to the first row, `G` and `End`
-to the last,
+The sidebar lists every session, oldest first until you move them, the panes
+in each, in the order of their tabs, and what the agent in each pane is doing,
+with the branch under it, all as [`lunetad`](#building-from-source) says:
+luneta starts the daemon when none runs, and the sidebar says so at its bottom
+while it does not answer. `j` and `k` move, `gg` and `Home` go to the first
+row, `G` and `End` to the last,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, `u` marks a pane read or unread, and `Esc` goes back to zellij. The session
 zellij is in has its rule in
@@ -631,6 +631,7 @@ no menu is open, its bottom lists what you can press there:
 ─ luneta ──────────────────────
  /  Search
  u  Unread
+ v  Reorder
  n  New ▸
  d  Delete ▸
 ```
@@ -743,6 +744,35 @@ go, in `$XDG_STATE_HOME/luneta/width`, or `~/.local/state/luneta/width`, and
 every luneta opens that wide from its next start: one already running keeps
 its own. Collapsed, the strip stays four columns wide, and opens to the width
 you dragged.
+
+You can move the sessions; their panes stay in the order of their tabs. `v`
+selects the session of the highlighted row, `j` and `k` grow the selection
+from session to session, folded or not, and `J` and `K` move the sessions it
+holds, each with its panes, one down or one up, as a visual selection and
+`:m` do in vim. They stay selected, so `JJJ` goes on. `v` or `Esc` ends the
+selection, `Esc` doing nothing else; any other key ends it and does what it
+does.
+
+With the mouse, a press on a session's row lifts the session once the mouse
+moves a line, and the sidebar takes the keys. It shows where it lands, lit,
+with its panes, the sessions around it making room. Held on the first or last
+line of the rows, it scrolls them. Let go, it stays there. Let go off the
+sidebar, or press `Esc`, and it goes back. A press on a pane's row lifts
+nothing. What the mouse holds stays with the sidebar until it lets go, over
+zellij too, and while the button is down the sidebar does nothing with a key
+but `Esc`, which lets go. So a click is a press let go on the line it went
+down on, and acts as it lets go.
+While the search has something typed, no session lifts.
+
+The order is the same in every luneta on the host, and lasts: it is kept in
+`$XDG_STATE_HOME/luneta/order`, or `~/.local/state/luneta/order`, which every
+luneta watches. A session keeps its place by its name, as a fold does, so one
+started again under it comes back there, and two that share one, as zellij
+versions with sockets of their own can each run, move together. A move is made
+to the order as it is kept then, so it undoes none that another luneta made,
+heard or not. A session the order does not have
+goes after those it has, as a new session always went last. The order is the
+sidebar's only: zellij's tabs keep theirs.
 
 It is the first step, and the plugin's sidebar has more than this one does
 yet: your groups in its menu and the brief come over one at a time. Until
