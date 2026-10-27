@@ -15,7 +15,8 @@
 //!
 //! A pane marked unread keeps its dot whatever is new in it, until you go
 //! there: a visit that started after the mark was made. So a pane you mark as
-//! you stay in it keeps its dot until you leave it and come back.
+//! you stay in it keeps its dot until you leave it and come back. A pane
+//! marked read is one you were just in: whatever gave it its dot, it has none.
 //!
 //! What was kept of a session goes once the daemon has not listed it for a
 //! while, `GONE`: a session renamed as the daemon reads zellij's folder is
@@ -108,11 +109,18 @@ impl News {
         self.unread.get(key).is_some()
     }
 
-    /// Marks the pane of `key` unread at `now`, or takes the mark away from
-    /// one that has it.
-    pub fn toggle_unread(&mut self, key: Key, now: SystemTime) {
-        let marked = (!self.is_unread(key)).then_some(now);
-        self.unread.set(key, marked);
+    /// Marks the pane of `key` unread at `now`.
+    pub fn mark_unread(&mut self, key: Key, now: SystemTime) {
+        self.unread.set(key, Some(now));
+    }
+
+    /// Marks the pane of `key` read at `now`, as a visit would: what finished
+    /// there last, at `finished`, you saw, and its unread mark goes.
+    pub fn read(&mut self, key: Key, finished: Option<SystemTime>, now: SystemTime) {
+        self.saw(key, finished, now);
+        if self.is_unread(key) {
+            self.unread.set(key, None);
+        }
     }
 
     /// luneta's zellij is on the pane of `here` at `now`, and at `at` by
@@ -153,18 +161,24 @@ impl News {
         finished: Option<SystemTime>,
         now: SystemTime,
     ) -> bool {
-        let mut changed = false;
-        if self.is_new(key, finished) {
-            // The hook dates a command's end to the last moment of its
-            // second, which can be a moment from now.
-            self.seen.set(key, finished.map(|finished| finished.max(now)));
-            changed = true;
-        }
+        let mut changed = self.saw(key, finished, now);
         if self.unread.get(key).is_some_and(|marked| marked < since) {
             self.unread.set(key, None);
             changed = true;
         }
         changed
+    }
+
+    /// You saw by `now` what finished last in the pane of `key`, at
+    /// `finished`. Says whether that changed anything.
+    fn saw(&mut self, key: Key, finished: Option<SystemTime>, now: SystemTime) -> bool {
+        if !self.is_new(key, finished) {
+            return false;
+        }
+        // The hook dates a command's end to the last moment of its second,
+        // which can be a moment from now.
+        self.seen.set(key, finished.map(|finished| finished.max(now)));
+        true
     }
 
     /// The daemon lists the sessions of `live` at `at`, by luneta's own
@@ -294,13 +308,13 @@ mod tests {
     /// A pane marked unread keeps its mark until luneta's zellij comes to it
     /// and stays: one it is on as the mark is made keeps it until it leaves
     /// and comes back. A pane with nothing new in it can be marked too, and
-    /// the mark taken away.
+    /// marked read again.
     #[test]
     fn a_pane_marked_unread_stays_so_until_you_come_back_to_it() {
         let mut news = News::default();
         dwell(&mut news, Some(pane(1)), at(200));
-        news.toggle_unread(pane(1), at(201));
-        news.toggle_unread(pane(3), at(201));
+        news.mark_unread(pane(1), at(201));
+        news.mark_unread(pane(3), at(201));
         dwell(&mut news, Some(pane(1)), at(205));
         assert!(news.is_unread(pane(1)));
 
@@ -312,8 +326,24 @@ mod tests {
         dwell(&mut news, Some(pane(1)), at(209));
         assert!(!news.is_unread(pane(1)) && news.is_unread(pane(3)));
 
-        news.toggle_unread(pane(3), at(210));
+        news.read(pane(3), None, at(210));
         assert!(!news.is_unread(pane(3)));
+    }
+
+    /// A pane marked read is one you were just in, whatever is new in it:
+    /// what finished there you saw, though the hook dates its end after now,
+    /// and its unread mark goes. What finishes there after is new again.
+    #[test]
+    fn a_pane_marked_read_is_one_you_were_just_in() {
+        let mut news = News::default();
+        news.mark_unread(pane(2), at(101));
+        news.read(pane(1), finished(pane(1)), ms(101_500));
+        news.read(pane(2), finished(pane(2)), ms(101_500));
+        assert_eq!(new(&news), [false, false]);
+        assert!(!news.is_unread(pane(2)));
+
+        let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
+        assert!([1, 2].iter().all(|id| news.is_new(pane(*id), later(pane(*id)))));
     }
 
     /// A session the daemon has not listed for `GONE` takes what you saw and
@@ -325,7 +355,7 @@ mod tests {
         let mut news = News::default();
         dwell(&mut news, Some(pane(1)), at(200));
         dwell(&mut news, Some(pane(1)), at(201));
-        news.toggle_unread(pane(2), at(201));
+        news.mark_unread(pane(2), at(201));
         let (live, other) = (BTreeSet::from([session(10)]), BTreeSet::from([session(20)]));
         news.listed(Some(&other), steady(at(210)));
         news.listed(Some(&live), steady(at(215)));

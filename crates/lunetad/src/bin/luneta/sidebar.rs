@@ -2,8 +2,8 @@
 //! agent in each pane is doing, or the command its shell runs, as the daemon
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
 //! `▌` marks the pane it is on. `•` dots a pane where something finished since
-//! you were last there, and one you marked unread. The menu opens at its
-//! bottom, for the row highlighted.
+//! you were last there, and one you marked unread, and `u` takes the dot away
+//! or gives it. The menu opens at its bottom, for the row highlighted.
 
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroU64;
@@ -1114,7 +1114,7 @@ impl Sidebar {
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
                 Some(Top::Command(Command::Search)) => self.find(String::new()),
-                Some(Top::Command(Command::Unread)) => self.mark_unread(now),
+                Some(Top::Command(Command::Unread)) => self.toggle_unread(now),
                 None => return self.open_menu(Some(c)),
             },
             _ => {},
@@ -1326,15 +1326,26 @@ impl Sidebar {
         }
     }
 
-    /// Marks the highlighted pane unread at `now`, so that its row has the
-    /// dot until you go there again, or takes the mark away from one that has
-    /// it. A visit any luneta is on already started before now, and the next
-    /// starts after.
-    fn mark_unread(&mut self, now: SystemTime) {
-        let Some(Place::Pane { session, pane }) = &self.cursor else {
+    /// Marks the highlighted pane read at `now`, as going there would, while
+    /// its row has the dot, whatever gave it the dot. Otherwise marks it
+    /// unread, so that its row has the dot until you go there again: a visit
+    /// any luneta is on already started before now, and the next starts
+    /// after.
+    fn toggle_unread(&mut self, now: SystemTime) {
+        let Some(place) = &self.cursor else {
             return;
         };
-        self.news.toggle_unread(session.key(*pane), now);
+        let Some(Row::Pane { session, pane, unread, marked, .. }) =
+            self.rows.iter().find(|row| row.place() == *place)
+        else {
+            return;
+        };
+        let key = session.key(*pane);
+        if dotted(*unread, marked.as_ref()) {
+            self.news.read(key, self.finished.get(&key).copied(), now);
+        } else {
+            self.news.mark_unread(key, now);
+        }
         self.rebuild();
     }
 
@@ -2994,6 +3005,34 @@ mod tests {
         sidebar.went(&s(3));
         let seen = "   ✓ \u{ec82} fold                 1m";
         assert_eq!(agent_row(&mut sidebar, moment(170_000), true), seen);
+    }
+
+    /// `u` on a row with the dot marks its pane read, as going there would,
+    /// whatever gave it the dot: the agent's `✓` is dimmed. `u` again marks
+    /// it unread, and the dot comes back, and once more takes it away.
+    #[test]
+    fn u_marks_a_pane_with_the_dot_read() {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(idle_agent());
+        sidebar.titled("s | fish".to_owned());
+        sidebar.went(&Place::Pane { session: listed("s", 10), pane: 3 });
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let row = |sidebar: &mut Sidebar, now| {
+            sidebar.ticked(now, steady(now), true);
+            seen_at(sidebar, true, 32, 12, now).0[3].clone()
+        };
+        let (new, seen) =
+            ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
+        assert_eq!(row(&mut sidebar, moment(160_000)), new);
+        sidebar.key(&key('k'), moment(160_000));
+        sidebar.key(&key('u'), moment(160_000));
+        assert_eq!(row(&mut sidebar, moment(160_000)), seen);
+
+        sidebar.key(&key('u'), moment(161_000));
+        assert_eq!(row(&mut sidebar, moment(161_000)), new);
+        sidebar.key(&key('u'), moment(161_000));
+        assert_eq!(row(&mut sidebar, moment(161_000)), seen);
+        assert!(dimmed(&mut sidebar, 3, 3, moment(161_000)));
     }
 
     /// Two sessions whose servers made their sockets in one tick of the
