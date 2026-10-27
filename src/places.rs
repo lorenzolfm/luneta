@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use luneta_protocol::said::Said;
 use luneta_protocol::v1;
 
 struct Pane {
     id: u32,
-    cwd: String,
+    cwd: Said,
     /// Whether claude runs in it, as far as zellij can tell: what runs in front
     /// says so, or an agent titled it last. zellij keeps the last title a
     /// program gave, so a pane where claude ended still counts, under a shell
@@ -21,7 +22,7 @@ struct Pane {
 /// instead of being searched for across every session's pane list.
 struct Holder {
     session: String,
-    cwd: String,
+    cwd: Said,
     claude: bool,
 }
 
@@ -43,7 +44,7 @@ impl Places {
                 let command = pane.command.clone().filter(|command| !command.trim().is_empty());
                 Some(Pane {
                     id: pane.id,
-                    cwd: pane.cwd.clone().filter(|cwd| !cwd.is_empty())?,
+                    cwd: Said::new(pane.cwd.clone()?)?,
                     // The daemon says what an agent said in a title only where
                     // an agent's glyph led it, as the `✳` does.
                     claude: command.as_deref().is_some_and(|command| command.contains("claude"))
@@ -95,7 +96,7 @@ impl Places {
 
     pub fn find(&self, pane: u32, cwd: &str, reported: &str) -> Option<&str> {
         let holders = self.holders.get(&pane)?;
-        let held = || holders.iter().filter(|held| held.cwd == cwd);
+        let held = || holders.iter().filter(|held| held.cwd.as_str() == cwd);
         let mut only = held();
         match (only.next(), only.next()) {
             (Some(only), None) => return Some(only.session.as_str()),
@@ -124,7 +125,7 @@ impl Places {
                         .iter()
                         .map(|(id, cwd)| Pane {
                             id: *id,
-                            cwd: cwd.to_string(),
+                            cwd: Said::new((*cwd).to_owned()).expect("a pane works somewhere"),
                             claude: true,
                             command: None,
                         })

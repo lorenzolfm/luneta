@@ -5,10 +5,11 @@ use std::num::NonZeroU64;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use luneta_protocol::said::Said;
 use luneta_protocol::v1::{self, agent::Status as Reported, NameSource};
 
 use crate::cursor::{Cursor, Stops};
-use crate::elapsed::{Age, Held, Moment};
+use crate::elapsed::{Held, Moment};
 use crate::fetch::Fetch;
 use crate::places::Places;
 use crate::sessions::{Selection, Session};
@@ -137,16 +138,43 @@ enum Housed {
     Named(String),
 }
 
+impl Housed {
+    /// The session the daemon says: the one it followed the agent to, or
+    /// else the one its environment names.
+    fn session(&self) -> &str {
+        match self {
+            Housed::Followed(session) | Housed::Named(session) => session,
+        }
+    }
+}
+
+/// When an agent came to its status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Came {
+    /// As Claude Code dates it, to the millisecond, which the daemon says
+    /// alike to every sidebar.
+    Dated(Moment),
+    /// When this sidebar first heard it at its status, which Claude Code
+    /// dates not: another sidebar may hear it later, and so may this one
+    /// once the daemon has not answered a while.
+    Heard(Moment),
+}
+
+impl Came {
+    pub fn moment(self) -> Moment {
+        match self {
+            Came::Dated(at) | Came::Heard(at) => at,
+        }
+    }
+}
+
 pub struct Agent {
     housed: Housed,
     pid: Pid,
     name: Option<String>,
     pane: u32,
     status: Status,
-    age: Held,
-    /// When it came to its status, as Claude Code dates it, or else when it
-    /// was first heard at it.
-    came: Moment,
+    came: Came,
     /// Where the agent works, when Claude Code says.
     cwd: Option<String>,
     /// The id of its Claude Code session, which names its transcript.
@@ -166,9 +194,9 @@ pub struct AgentRow {
     name: Name,
     pub pane: u32,
     pub status: Status,
+    /// How long it has held its status.
     pub age: Held,
-    /// When it came to its status.
-    pub came: Moment,
+    pub came: Came,
     pub cwd: Option<String>,
     /// The id of its Claude Code session, which names its transcript, when
     /// Claude Code says.
@@ -186,8 +214,8 @@ pub struct AgentRow {
 impl Stops for AgentRow {}
 
 impl AgentRow {
-    /// `agent` in `seat`, going by what the sidebar names its pane.
-    fn new(Seated { agent, seat, guessed }: Seated, live: &Live, since: Age) -> Self {
+    /// `agent` in `seat` at `now`, going by what the sidebar names its pane.
+    fn new(Seated { agent, seat, guessed }: Seated, live: &Live, now: Moment) -> Self {
         let mut row = AgentRow {
             pid: agent.pid,
             rank: live.rank(seat.session()),
@@ -196,7 +224,7 @@ impl AgentRow {
             name: agent.name.clone().map_or(Name::Session, Name::Chosen),
             pane: agent.pane,
             status: agent.status.clone(),
-            age: agent.age.grown_by(since),
+            age: now.since(agent.came.moment()),
             came: agent.came,
             cwd: agent.cwd.clone(),
             transcript: agent.transcript.clone(),
@@ -287,26 +315,21 @@ enum Shared {
     AcrossSessions,
 }
 
+/// The word Claude Code wrote for a status luneta does not know.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StatusWord {
-    initial: char,
-    word: String,
-}
+pub struct StatusWord(Said);
 
 impl StatusWord {
     fn new(word: &str) -> Option<Self> {
-        Some(StatusWord {
-            initial: word.chars().next()?,
-            word: word.to_owned(),
-        })
+        Said::new(word.to_owned()).map(StatusWord)
     }
 
     pub fn initial(&self) -> char {
-        self.initial
+        self.0.as_str().chars().next().expect("what is said is never empty")
     }
 
     pub fn as_str(&self) -> &str {
-        &self.word
+        self.0.as_str()
     }
 }
 
@@ -363,6 +386,36 @@ impl Status {
     }
 }
 
+/// An agent the daemon gives, where a delete key counts it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Counted {
+    /// The session it sits in, or else the one its environment names.
+    pub session: String,
+    /// The pane it sits in. None where luneta found it in no pane, or
+    /// guessed it into one its session's own agent holds: it may be in any
+    /// pane of the session.
+    pub pane: Option<u32>,
+    pub status: Status,
+}
+
+impl Counted {
+    fn seated(seated: &Seated) -> Self {
+        Counted {
+            session: seated.seat.session().to_owned(),
+            pane: Some(seated.agent.pane),
+            status: seated.agent.status.clone(),
+        }
+    }
+
+    fn unplaced(agent: &Agent) -> Self {
+        Counted {
+            session: agent.housed.session().to_owned(),
+            pane: None,
+            status: agent.status.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AgentSet {
     pub status: Fetch<Vec<Agent>>,
@@ -373,6 +426,11 @@ pub struct AgentSet {
     pub unplaced: usize,
     /// The agents left out for sitting in a pane that another agent holds.
     pub doubled: usize,
+    /// Every agent the daemon gives, as a delete key counts them: those the
+    /// rows leave out too, for sitting nowhere luneta can find, in a pane
+    /// another agent holds, in one closing, in the pane the picker was opened
+    /// from, or out of the term.
+    counted: Vec<Counted>,
     /// The panes closing since the daemon last said what the agents are
     /// doing, whose agents stay out of the rows until it says again.
     closing: Vec<(String, u32)>,
@@ -406,13 +464,15 @@ impl AgentSet {
     /// session's name, as the sidebar finds a session's panes, and only its
     /// label is lit up. Each label is told apart from the others whatever the
     /// term leaves out, so that it stays what was typed. The cursor holds to
-    /// its agent, wherever the agent turns up.
+    /// its agent, wherever the agent turns up. Every agent, those the rows
+    /// leave out too, is counted where a delete key ends it. Each row has
+    /// held its status until `now`.
     pub fn rebuild(
         &mut self,
         term: &str,
         live: &Live,
         origin: Option<u32>,
-        since: Age,
+        now: Moment,
         policy: Selection,
     ) {
         let held = match policy {
@@ -422,16 +482,20 @@ impl AgentSet {
         let mut rows: Vec<AgentRow> = Vec::new();
         let mut current = None;
         let (mut unplaced, mut doubled) = (0, 0);
+        let mut counted = Vec::new();
 
         if let Fetch::Ready(all) = &self.status {
             let mut seated: HashMap<(String, u32), Seated> = HashMap::with_capacity(all.len());
+            counted.reserve(all.len());
             for agent in all {
                 let Some(placed) = live.place(agent) else {
                     unplaced += 1;
+                    counted.push(Counted::unplaced(agent));
                     continue;
                 };
                 let pane = (placed.seat.session().to_owned(), agent.pane);
                 if self.closing.contains(&pane) {
+                    counted.push(Counted::seated(&placed));
                     continue;
                 }
                 match seated.entry(pane) {
@@ -439,20 +503,25 @@ impl AgentSet {
                         pane.insert(placed);
                     },
                     Entry::Occupied(mut pane) => {
+                        let out = if holds_before(&placed, pane.get()) {
+                            pane.insert(placed)
+                        } else {
+                            placed
+                        };
                         // A pane its session names refutes the guess that put
                         // another agent in it.
-                        if placed.guessed == pane.get().guessed {
+                        if out.guessed == pane.get().guessed {
                             doubled += 1;
+                            counted.push(Counted::seated(&out));
                         } else {
                             unplaced += 1;
-                        }
-                        if holds_before(&placed, pane.get()) {
-                            pane.insert(placed);
+                            counted.push(Counted::unplaced(out.agent));
                         }
                     },
                 }
             }
-            let row = |placed| AgentRow::new(placed, live, since);
+            counted.extend(seated.values().map(Counted::seated));
+            let row = |placed| AgentRow::new(placed, live, now);
             let here = live.current.zip(origin).map(|(session, pane)| (session.to_owned(), pane));
             current = here.and_then(|here| seated.remove(&here)).map(row);
             rows = seated.into_values().map(row).collect();
@@ -480,8 +549,15 @@ impl AgentSet {
         self.current = current;
         self.unplaced = unplaced;
         self.doubled = doubled;
+        self.counted = counted;
 
         self.rows.replace(rows, |row| Some(row.pid) == held);
+    }
+
+    /// Every agent the daemon gave, where a delete key counts it, as of the
+    /// last `rebuild`.
+    pub fn counted(&self) -> &[Counted] {
+        &self.counted
     }
 
     pub fn selected_row(&self) -> Option<&AgentRow> {
@@ -629,8 +705,7 @@ impl Agent {
             Some(session) => Housed::Followed(session.clone()),
             None => Housed::Named(zellij.named.clone()),
         };
-        let (Housed::Followed(session) | Housed::Named(session)) = &housed;
-        if session.is_empty() {
+        if housed.session().is_empty() {
             return None;
         }
         let pid = Pid(agent.pid);
@@ -638,10 +713,13 @@ impl Agent {
         // A status Claude Code does not date came when it was first heard: as
         // the answer before heard it, while it holds, or now.
         let dated = agent.status_since.and_then(|at| moment(at.seconds, at.nanos));
-        let came = dated.unwrap_or_else(|| {
-            let held = before.iter().find(|was| was.pid == pid && was.status == status);
-            held.map_or(now, |was| was.came)
-        });
+        let came = dated.map_or_else(
+            || {
+                let held = before.iter().find(|was| was.pid == pid && was.status == status);
+                Came::Heard(held.map_or(now, |was| was.came.moment()))
+            },
+            Came::Dated,
+        );
         let name = agent.name.as_ref().and_then(|name| {
             let source = name.source.map(NameSource::try_from);
             let chosen = matches!(source, None | Some(Ok(NameSource::User | NameSource::Peer)));
@@ -655,7 +733,6 @@ impl Agent {
             name,
             pane: zellij.pane,
             status,
-            age: now.since(came),
             came,
             cwd: Some(agent.cwd.clone()).filter(|cwd| !cwd.is_empty()),
             transcript: SessionId::parse(&agent.session_id),
@@ -745,6 +822,7 @@ pub mod given {
 #[cfg(test)]
 mod tests {
     use super::given::{self, agent, unfollowed, NOW};
+    use crate::elapsed::Age;
     use super::*;
     use crate::close::Closes;
 
@@ -757,7 +835,7 @@ mod tests {
         let mut set = AgentSet::default();
         set.heard(agents, NOW);
         let live = Live::new(current, &[], places, &[]);
-        set.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        set.rebuild("", &live, None, NOW, Selection::SnapToTop);
         set
     }
 
@@ -840,7 +918,7 @@ mod tests {
 
         let given = v1::Agent { session_id: UUID.to_owned(), ..agent(100, "s", 0, "/w/repo", "idle") };
         let read = read(&given);
-        assert_eq!((read.age, read.came), (Held::from_secs(4), NOW.back(Held::from_secs(4))));
+        assert_eq!(read.came, Came::Dated(NOW.back(Held::from_secs(4))));
         assert_eq!(read.transcript.as_ref().map(SessionId::as_str), Some(UUID));
         assert_eq!(read.cwd.as_deref(), Some("/w/repo"));
     }
@@ -853,7 +931,7 @@ mod tests {
 
         agents.fail("lunetad does not answer");
         let live = Live::new(None, &[], &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert!(agents.rows.selected().is_none());
     }
@@ -921,18 +999,18 @@ mod tests {
         };
 
         let unlisted = Live::new(Some("luneta"), &[], &places, &[]);
-        agents.rebuild("", &unlisted, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &unlisted, None, NOW, Selection::SnapToTop);
         assert_eq!(named(&agents), ["luneta:29", "luneta:31"]);
 
         let live = Live::new(Some("luneta"), &[], &places, &branches);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
         assert_eq!(named(&agents), ["Name agents as the sidebar does", "review"]);
 
-        agents.rebuild("luneta", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("luneta", &live, None, NOW, Selection::SnapToTop);
         assert_eq!(named(&agents), ["Name agents as the sidebar does", "review"]);
         assert!(agents.rows.iter().all(|row| row.hits().is_empty()));
 
-        agents.rebuild("rev", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("rev", &live, None, NOW, Selection::SnapToTop);
         assert_eq!(named(&agents), ["review"]);
         assert_eq!(agents.rows[0].hits(), [0, 1, 2]);
     }
@@ -955,7 +1033,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&given, NOW);
         let live = Live::new(Some("a"), &sessions, &places, &branches);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
 
         let labels: Vec<String> = agents.rows.iter().map(AgentRow::label).collect();
         assert_eq!(labels, ["w/luneta (a:0)", "w/luneta (b:0)"]);
@@ -978,7 +1056,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&given, NOW);
         let live = Live::new(Some("luneta"), &[], &places, &branches);
-        agents.rebuild("luneta:6", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("luneta:6", &live, None, NOW, Selection::SnapToTop);
 
         let labels: Vec<String> = agents.rows.iter().map(AgentRow::label).collect();
         assert_eq!(labels, ["w/luneta:6"]);
@@ -1003,13 +1081,13 @@ mod tests {
         agents.heard(&given, NOW);
         let live = Live::new(Some("luneta"), &[], &places, &[]);
 
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
         let statuses: Vec<&Status> = agents.rows.iter().map(|row| &row.status).collect();
         assert_eq!(statuses, [&Status::Waiting]);
         assert_eq!(agents.rows[0].label(), "luneta");
         assert_eq!(agents.doubled, 1);
 
-        agents.rebuild("", &live, Some(29), Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, Some(29), NOW, Selection::SnapToTop);
         assert!(agents.rows.is_empty());
         assert_eq!(agents.current.as_ref().map(|row| &row.status), Some(&Status::Waiting));
         assert_eq!(agents.doubled, 1);
@@ -1022,7 +1100,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(given, NOW);
         let live = Live::new(Some("luneta"), &[], &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
         assert_eq!(agents.doubled, 1);
         agents.rows.iter().map(|row| row.status.clone()).collect()
     }
@@ -1071,7 +1149,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&given, NOW);
         let live = Live::new(Some("a"), &sessions, &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
 
         let held: Vec<(&Status, bool)> =
             agents.rows.iter().map(|row| (&row.status, row.guessed)).collect();
@@ -1101,7 +1179,7 @@ mod tests {
             |name: &str, age: u64| Session { name: name.to_owned(), age: Age::from_secs(age) };
         let sessions = [named("x", 10), named("y", 20)];
         let live = Live::new(None, &sessions, &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
+        agents.rebuild("", &live, None, NOW, Selection::Hold);
     }
 
     #[test]
@@ -1140,7 +1218,7 @@ mod tests {
             "misc",
             &Live::new(Some("luneta"), &[], &places, &[]),
             Some(0),
-            Age::ZERO,
+            NOW,
             Selection::SnapToTop,
         );
         assert!(agents.rows.is_empty());
@@ -1150,7 +1228,7 @@ mod tests {
             "",
             &Live::new(Some("luneta"), &[], &places, &[]),
             Some(0),
-            Age::ZERO,
+            NOW,
             Selection::SnapToTop,
         );
         let labels: Vec<String> = agents.rows.iter().map(AgentRow::label).collect();
@@ -1239,7 +1317,7 @@ mod tests {
             "luneta",
             &Live::new(Some("luneta"), &[], &places, &[]),
             None,
-            Age::ZERO,
+            NOW,
             Selection::SnapToTop,
         );
         assert_eq!(agents.rows.len(), 2);
@@ -1247,7 +1325,7 @@ mod tests {
             "misc",
             &Live::new(Some("luneta"), &[], &places, &[]),
             None,
-            Age::ZERO,
+            NOW,
             Selection::SnapToTop,
         );
         assert!(agents.rows.is_empty());
@@ -1296,8 +1374,9 @@ mod tests {
 
     /// An agent came to its status when the daemon says it did, as Claude
     /// Code dates it. A status the daemon cannot date came when an answer
-    /// first said it, and the moment holds while the status does, and the
-    /// time it has been held with it.
+    /// first said it, and the moment holds while the status does. A row has
+    /// held its status from then until it is built, whenever the daemon
+    /// last said.
     #[test]
     fn an_agent_came_to_its_status_when_the_daemon_says_or_else_first_said() {
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
@@ -1309,16 +1388,17 @@ mod tests {
             };
             agents.heard(&[given], Moment::from_millis(now));
             let live = Live::new(None, &[], &places, &[]);
-            agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
-            (agents.rows[0].came.millis(), agents.rows[0].age)
+            agents.rebuild("", &live, None, Moment::from_millis(now + 500), Selection::Hold);
+            (agents.rows[0].came, agents.rows[0].age)
         };
-        let held = Held::from_millis;
-        assert_eq!(came("idle", Some(9_000), 10_400), (9_000, held(1_400)));
-        assert_eq!(came("idle", Some(9_000), 20_000), (9_000, held(11_000)));
-        assert_eq!(came("busy", None, 21_000), (21_000, held(0)));
-        assert_eq!(came("busy", None, 30_000), (21_000, held(9_000)));
-        assert_eq!(came("idle", None, 31_000), (31_000, held(0)));
-        assert_eq!(came("idle", Some(35_000), 40_000), (35_000, held(5_000)));
+        let (dated, heard) = (Came::Dated, Came::Heard);
+        let (at, held) = (Moment::from_millis, Held::from_millis);
+        assert_eq!(came("idle", Some(9_000), 10_400), (dated(at(9_000)), held(1_900)));
+        assert_eq!(came("idle", Some(9_000), 20_000), (dated(at(9_000)), held(11_500)));
+        assert_eq!(came("busy", None, 21_000), (heard(at(21_000)), held(500)));
+        assert_eq!(came("busy", None, 30_000), (heard(at(21_000)), held(9_500)));
+        assert_eq!(came("idle", None, 31_000), (heard(at(31_000)), held(500)));
+        assert_eq!(came("idle", Some(35_000), 40_000), (dated(at(35_000)), held(5_500)));
     }
 
     #[test]
@@ -1364,7 +1444,7 @@ mod tests {
             |name: &str, age: u64| Session { name: name.to_owned(), age: Age::from_secs(age) };
         let sessions = [named("old", 900), named("new", 60)];
         let live = Live::new(Some("here"), &sessions, &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
+        agents.rebuild("", &live, None, NOW, Selection::Hold);
     }
 
     fn seats(agents: &AgentSet) -> Vec<(&str, u32)> {
@@ -1411,7 +1491,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&given, NOW);
         let live = Live::new(None, &sessions, &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
         let guessed: Vec<(&str, u32, bool)> =
             agents.rows.iter().map(|row| (row.seat.session(), row.pane, row.guessed)).collect();
         assert_eq!(guessed, [("notes", 2, true), ("notes", 5, false), ("notes", 7, false)]);

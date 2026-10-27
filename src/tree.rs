@@ -1073,7 +1073,7 @@ mod tests {
         let mut set = AgentSet::default();
         set.heard(&listed, Moment::from_millis(4000));
         let live = Live::new(None, &[], &places, &[]);
-        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
+        set.rebuild("", &live, None, Moment::from_millis(4000), Selection::SnapToTop);
         set
     }
 
@@ -1150,7 +1150,7 @@ mod tests {
         set.heard(&[orca], given::NOW);
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
         let live = Live::new(None, &[], &places, &[]);
-        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
+        set.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
 
         let mut tree = Tree::default();
         tree.rebuild(&[branch("s", 1, &[(0, "⠂ Building the sidebar")])], None, &set, None, true);
@@ -1174,7 +1174,7 @@ mod tests {
         set.heard(&listed, given::NOW);
         let places = Places::of(&[("luneta", &[(1, "/w/luneta/main"), (4, "/w/luneta/agents-tab")])]);
         let live = Live::new(None, &[], &places, &[]);
-        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
+        set.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
 
         let branches = [branch("luneta", 1, &[(1, "✳ Claude Code"), (4, "✳ Claude Code")])];
         let mut tree = Tree::default();
@@ -1933,7 +1933,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             runs: None,
             checkout: branch
-                .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
+                .map(|branch| Checkout::on(branch, "")),
             closes: Closes::Pane,
         };
         let branches = [Branch {

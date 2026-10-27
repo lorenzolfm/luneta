@@ -195,7 +195,6 @@ struct State {
     frame: u64,
     peeks: Peeks,
     preview_at: Option<(Target, u64)>,
-    agents_taken_at: u64,
     role: Role,
     plugin_id: u32,
     /// This plugin's client, which the sidebar's menu takes out of the
@@ -775,10 +774,9 @@ impl State {
 
     fn rebuild_agents(&mut self, policy: Selection) {
         let origin = if self.is_sidebar() { None } else { self.origin_pane() };
-        let since = self.agents_since();
         let current = self.matches.current_session.as_deref();
         let live = Live::new(current, &self.sessions.live, &self.places, &self.branches);
-        self.agents.rebuild(&self.matches.search_term, &live, origin, since, policy);
+        self.agents.rebuild(&self.matches.search_term, &live, origin, Moment::now(), policy);
         self.land();
         self.rebuild_tree();
     }
@@ -799,10 +797,6 @@ impl State {
             self.matches.rows.select(at);
         }
         self.agents.select_seated(session, pane);
-    }
-
-    fn agents_since(&self) -> Age {
-        Age::from_secs(self.frame.wrapping_sub(self.agents_taken_at) / TICKS_PER_SECOND)
     }
 
     /// Asks the daemon how the host stands, if it is to be asked now: from
@@ -833,7 +827,6 @@ impl State {
                 self.places.heard(&host.sessions);
                 self.checkouts.heard(&host.work_trees);
                 self.agents.heard(&host.agents, Moment::now());
-                self.agents_taken_at = self.frame;
             },
             Answer::Same => {
                 self.ask_daemon();
@@ -1614,7 +1607,7 @@ impl State {
                     name: tree::label(leaf, Some(agent)),
                     status: agent.status.word().to_owned(),
                     held: agent.age.label(),
-                    branch: leaf.checkout.as_ref().map(|checkout| checkout.branch.clone()),
+                    branch: leaf.checkout.as_ref().map(|out| out.branch.clone().into()),
                     cwd: leaf.cwd.clone().or_else(|| agent.cwd.clone()),
                     transcript: agent.transcript.clone(),
                 });
@@ -1781,7 +1774,8 @@ impl State {
         let cwd = leaf
             .and_then(|leaf| leaf.cwd.clone())
             .or_else(|| agent.and_then(|row| row.cwd.clone()));
-        let branch = leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.clone());
+        let branch =
+            leaf.and_then(|leaf| leaf.checkout.as_ref()).map(|out| out.branch.as_str().to_owned());
         let here = current == Some(session.as_str());
         let tab = leaf.and_then(|leaf| leaf.tab_id);
         let there = (!here).then_some(There { session, tab });
@@ -2446,7 +2440,7 @@ mod tests {
         let four = &mut state.branches[1].panes[0];
         four.cwd = Some("/w/b".to_owned());
         four.tab_id = Some(TabId(7));
-        four.checkout = Some(Checkout { branch: "feat/menu".to_owned(), status: String::new() });
+        four.checkout = Some(Checkout::on("feat/menu", ""));
         state.rebuild_tree();
         let there = There { session: "b".to_owned(), tab: Some(TabId(7)) };
         let pane = |id, cwd: Option<&str>, branch: Option<&str>| {

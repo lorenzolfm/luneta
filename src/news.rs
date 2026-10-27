@@ -8,7 +8,8 @@
 //! session's sidebar, each of which sees you only in its own session's panes,
 //! and the shells only while its session has a client.
 //!
-//! An agent finished when the daemon says it came to `idle`. A shell with
+//! An agent finished when the daemon says it came to `idle`, which every
+//! sidebar dates alike where Claude Code dates it. A shell with
 //! luneta's hook says what it runs, and how it ended, in `Shells`, and only a
 //! command that ran a while, `LONG`, counts: an `ls` is no news. A shell
 //! without it says what it is doing in its title, as fish titles its pane:
@@ -30,7 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use crate::agents::{AgentRow, AgentSet, Status};
+use crate::agents::{AgentRow, AgentSet, Came, Status};
 use crate::elapsed::{Held, Moment};
 use crate::ledger::{Ledger, Record};
 use crate::shells::{Front, Said, Shells};
@@ -58,10 +59,11 @@ const GONE: u32 = 5;
 const MADE: Held = Held::from_secs(3);
 
 /// How much later than another a sidebar may date the moment an agent
-/// finished. The daemon dates it as Claude Code does, but a status it cannot
-/// date each sidebar dates as it hears it, and one may hear it a moment
-/// after another: after the visit the other wrote as you watched the agent
-/// finish.
+/// finished, where Claude Code does not date it and each sidebar dates it as
+/// it hears it: one may hear it a moment after another, after the visit the
+/// other wrote as you watched the agent finish. A sidebar that first hears it
+/// later than that, as one that opens later does, or one the daemon did not
+/// answer a while, takes it for new.
 const SKEW: Held = Held::from_secs(3);
 
 /// How far the session list's titles may lag behind the title a pane gives
@@ -130,9 +132,13 @@ pub struct Visit {
 
 impl Visit {
     /// Whether you saw an agent finish, as `came` dates it: by the time you
-    /// were there, as late as another sidebar may date what this one did.
-    fn saw_finish(&self, came: Moment) -> bool {
-        came.since(self.at) <= SKEW
+    /// were there, or as late as another sidebar may date one Claude Code
+    /// does not.
+    fn saw_finish(&self, came: Came) -> bool {
+        match came {
+            Came::Dated(at) => at <= self.at,
+            Came::Heard(at) => at.since(self.at) <= SKEW,
+        }
     }
 
     /// Whether you saw `command` end, as its record dates it `at`: by the
@@ -424,7 +430,8 @@ impl News {
     /// When the last thing finished in a pane, whether its agent or its
     /// shell: a visit after that has seen it all.
     fn latest(&self, session: &str, pane: u32, agent: Option<&AgentRow>) -> Option<Moment> {
-        let finished = agent.filter(|agent| agent.status == Status::Idle).map(|agent| agent.came);
+        let idle = agent.filter(|agent| agent.status == Status::Idle);
+        let finished = idle.map(|agent| agent.came.moment());
         let ran = match (self.said(session, pane), self.runs.get(session, pane)) {
             (Some(Said::Ended { at, .. }), _) | (None, Some(Run::Ended { at, .. })) => Some(*at),
             (Some(Said::Going { .. } | Said::Stopped), _)
@@ -587,6 +594,18 @@ mod tests {
     /// Session `s`, made at 0, with a shell in pane 1, as titled, and an
     /// agent in pane 2 whose status came `age` seconds before `now`.
     fn session(title: &str, agent: &str, age: u64, now: Moment) -> (Vec<Branch>, AgentSet) {
+        dated(title, agent, Some(now.back(Held::from_secs(age))), now)
+    }
+
+    /// Session `s` as `session` has it, heard at `now` by a sidebar that
+    /// heard nothing before, where the daemon says the agent came to its
+    /// status `since`, or cannot date it.
+    fn dated(
+        title: &str,
+        agent: &str,
+        since: Option<Moment>,
+        now: Moment,
+    ) -> (Vec<Branch>, AgentSet) {
         let leaf = |id: u32, title: &str| Leaf {
             id,
             title: title.to_owned(),
@@ -602,13 +621,13 @@ mod tests {
             age: Age::from_secs(now.millis() / 1000),
             panes: vec![leaf(1, title), leaf(2, "✳ Claude Code")],
         }];
-        let since = Some(given::at(now.millis() - age * 1000));
+        let since = since.map(|since| given::at(since.millis()));
         let seated = given::agent(7, "s", 2, "/home/you/w/s", agent);
         let mut agents = AgentSet::default();
         agents.heard(&[v1::Agent { status_since: since, ..seated }], now);
         let places = Places::of(&[("s", &[(1, "/home/you/w/s"), (2, "/home/you/w/s")])]);
         let live = Live::new(Some("s"), &[], &places, &branches);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, now, Selection::SnapToTop);
         (branches, agents)
     }
 
@@ -765,24 +784,37 @@ mod tests {
         assert_eq!(news_of(&news, &agents), (Some(ran("make", 0)), false));
     }
 
-    /// Two sessions' sidebars may date an agent's finish seconds apart. You
-    /// watch the agent in pane 2 finish at 100.1s: this sidebar dates it at
-    /// 100.35s, and writes your visit at 100.5s; another hears at 401s, and
-    /// dates it at 102s. Both have seen it. One that finishes once you have
-    /// gone is new.
+    /// Every sidebar dates an agent's finish as Claude Code does. You watch
+    /// the agent in pane 2 finish at 100.1s, and this sidebar writes your
+    /// visit at 100.5s: another that hears of it at 401s has seen it too.
+    /// One that finishes once you have gone is new, however soon after. Where
+    /// Claude Code does not date it, each sidebar dates it as it hears it:
+    /// one that hears of it a second after this one has seen it too, and one
+    /// that hears of it later takes it for new.
     #[test]
     fn an_agent_you_saw_finish_is_seen_however_a_sidebar_dates_it() {
         let ms = Moment::from_millis;
-        let mut news = News::default();
-        let (busy, agents) = session("~/w/s", "busy", 30, ms(98_000));
-        news.watch(&busy, &agents, Some(("s", 2)), untitled, ms(98_000));
-        news.watch(&busy, &agents, Some(("s", 2)), untitled, ms(99_000));
-        let (idle, here) = session("~/w/s", "idle", 0, ms(100_350));
-        news.watch(&idle, &here, Some(("s", 2)), untitled, ms(100_500));
-        let (_, there) = session("~/w/s", "idle", 299, ms(401_000));
-        assert!(!news_of(&news, &here).1 && !news_of(&news, &there).1);
+        let watched = |since: Option<Moment>| {
+            let mut news = News::default();
+            let (busy, agents) = session("~/w/s", "busy", 30, ms(98_000));
+            news.watch(&busy, &agents, Some(("s", 2)), untitled, ms(98_000));
+            news.watch(&busy, &agents, Some(("s", 2)), untitled, ms(99_000));
+            let (idle, here) = dated("~/w/s", "idle", since, ms(100_350));
+            news.watch(&idle, &here, Some(("s", 2)), untitled, ms(100_500));
+            assert!(!news_of(&news, &here).1, "{since:?}");
+            news
+        };
 
-        let (_, later) = session("~/w/s", "idle", 0, ms(104_000));
+        let news = watched(Some(ms(100_100)));
+        let (_, there) = dated("~/w/s", "idle", Some(ms(100_100)), ms(401_000));
+        assert!(!news_of(&news, &there).1);
+        let (_, after) = dated("~/w/s", "idle", Some(ms(100_600)), ms(101_000));
+        assert!(news_of(&news, &after).1);
+
+        let news = watched(None);
+        let (_, soon) = dated("~/w/s", "idle", None, ms(101_500));
+        assert!(!news_of(&news, &soon).1);
+        let (_, later) = dated("~/w/s", "idle", None, ms(104_000));
         assert!(news_of(&news, &later).1);
     }
 

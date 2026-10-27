@@ -225,7 +225,8 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
 
 /// What Claude Code says in words the daemon knows, it lists as those; a word
 /// it does not know comes through as Claude Code wrote it, and what Claude
-/// Code does not say, the daemon does not either.
+/// Code does not say, the daemon does not either: a status it does not date
+/// has no date, though the file says when the session started.
 #[test]
 fn the_daemon_says_what_claude_code_says_and_no_more() {
     let host = Host::new();
@@ -239,7 +240,7 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
     said["entrypoint"] = json!("claude-vscode");
     host.write(newer.pid(), &said);
     let mut said = file_for("older", &older, "");
-    for unsaid in ["status", "nameSource", "entrypoint"] {
+    for unsaid in ["status", "statusUpdatedAt", "nameSource", "entrypoint"] {
         said.as_object_mut().unwrap().remove(unsaid);
     }
     host.write(older.pid(), &said);
@@ -252,16 +253,17 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
         .map(|agent| {
             let name = agent.name.as_ref();
             let source = name.and_then(|name| name.source.is_some().then(|| name.source()));
-            (agent.session_id.as_str(), agent.status.clone(), source, agent.entrypoint.as_deref())
+            let (id, dated) = (agent.session_id.as_str(), agent.status_since.is_some());
+            (id, agent.status.clone(), dated, source, agent.entrypoint.as_deref())
         })
         .collect();
     let other = |word: &str| Some(Reported::OtherStatus(word.to_owned()));
     assert_eq!(
         seen,
         [
-            ("newer", other("Compacting"), Some(NameSource::Other), Some("claude-vscode")),
-            ("older", None, None, None),
-            ("shell", Some(known(Status::Shell)), Some(NameSource::User), Some("sdk-cli")),
+            ("newer", other("Compacting"), true, Some(NameSource::Other), Some("claude-vscode")),
+            ("older", None, false, None, None),
+            ("shell", Some(known(Status::Shell)), true, Some(NameSource::User), Some("sdk-cli")),
         ]
     );
 }
@@ -303,14 +305,15 @@ fn the_daemon_follows_the_files_as_they_change() {
 
 /// A file that does not read for longer than a write takes is cut short for
 /// good, or in a shape of a newer Claude Code's, or no session file at all: a
-/// folder by a session file's name, or one too long to be one. Its agent
-/// leaves the list, rather than stay in it as it was, and the daemon counts the
-/// file as one it cannot read, so that an empty list is not taken for no
-/// agents.
+/// folder by a session file's name, one too long to be one, or one that
+/// names no session or no directory. Its agent leaves the list, rather than
+/// stay in it as it was, and the daemon counts the file as one it cannot
+/// read, so that an empty list is not taken for no agents.
 #[test]
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
     let (cut, newer, folder, long) = (process(None), process(None), process(None), process(None));
+    let (unnamed, nowhere) = (process(None), process(None));
     host.write(cut.pid(), &file_for("cut", &cut, "busy"));
     let _daemon = start(host.vars()).unwrap();
     assert!(host.agent("cut").is_some());
@@ -324,15 +327,19 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     // JSON a session file's parser would take, but for the spaces ahead of it.
     let padded = " ".repeat(64 * 1024) + &file_for("long", &long, "busy").to_string();
     fs::write(host.file_of(long.pid()), padded).unwrap();
-    let unread = eventually("four files are unread", || {
+    host.write(unnamed.pid(), &file_for("", &unnamed, "busy"));
+    let mut blank = file_for("nowhere", &nowhere, "busy");
+    blank["cwd"] = json!("");
+    host.write(nowhere.pid(), &blank);
+    let unread = eventually("six files are unread", || {
         let listed = host.list();
-        (listed.unread == 4).then_some(listed)
+        (listed.unread == 6).then_some(listed)
     });
     assert!(unread.agents.is_empty(), "{:?}", unread.agents);
 
     let output = host.vars().command(LUNETA).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("cannot read 4 of Claude Code's session files"), "{said}");
+    assert!(said.contains("cannot read 6 of Claude Code's session files"), "{said}");
 }
 
 /// A folder that never stops changing is read anyway: the daemon waits for a

@@ -1877,7 +1877,7 @@ impl Menu {
     /// Puts each agent in the pane of the session it sits in.
     fn seat_agents(&mut self) {
         let live = Live::new(self.session.as_deref(), &[], &self.places, &[]);
-        self.agents.rebuild("", &live, None, Age::from_secs(0), Selection::Hold);
+        self.agents.rebuild("", &live, None, Moment::now(), Selection::Hold);
     }
 
     /// Starts Claude Code on `prompt` in a pane of its own, beside the pane
@@ -2510,8 +2510,7 @@ mod tests {
         let agents = seated
             .iter()
             .map(|(pane, status)| close::Agent {
-                pane: *pane,
-                tab: Some(TabId(7)),
+                sits: close::Sits::Pane { id: *pane, tab: Some(TabId(7)) },
                 status: given::status(status),
             })
             .collect();

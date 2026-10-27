@@ -490,8 +490,12 @@ menu asks first, and says what goes:
 
 `y`, or the key again, goes ahead; `n` or `Backspace` goes back to the keys. An
 idle agent or a shell goes without asking. An agent whose status luneta does
-not know, or that reports none, may be at work, and asks. While the daemon does
-not answer, luneta cannot tell, and asks every time, saying why.
+not know, or that reports none, may be at work, and asks. The menu counts every
+agent of the session, those the list leaves out too: a `claude -p` in the pane
+of the agent it runs from, and one luneta cannot find a pane for, which may be
+in any pane of the session that names it, and asks while it is at work. While
+the daemon does not answer, luneta cannot tell, and asks every time, saying
+why.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 

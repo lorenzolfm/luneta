@@ -1,7 +1,6 @@
 //! What the daemon knows of an agent, whichever adapter found it. Claude Code's
 //! is the only one so far.
 
-use std::path::PathBuf;
 use std::time::SystemTime;
 
 use luneta_protocol::said::Said;
@@ -15,8 +14,9 @@ use crate::zellij::Sessions;
 pub struct Agent {
     pub pid: u32,
     /// The agent's own id for its session.
-    pub session_id: String,
-    pub cwd: PathBuf,
+    pub session_id: Said,
+    /// Where it works.
+    pub cwd: Said,
     pub status: Status,
     /// When it came to its status, as the agent dates it.
     pub status_since: Option<SystemTime>,
@@ -134,8 +134,8 @@ impl Agent {
         };
         api::Agent {
             pid: self.pid,
-            session_id: self.session_id.clone(),
-            cwd: self.cwd.to_string_lossy().into_owned(),
+            session_id: self.session_id.clone().into(),
+            cwd: self.cwd.clone().into(),
             status,
             status_since: self.status_since.map(Into::into),
             started_at: self.started_at.map(Into::into),

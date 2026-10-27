@@ -298,9 +298,10 @@ message ListAgentsResponse {
 // A Claude Code agent: the one process of it that runs, and its session.
 message Agent {
   uint32 pid = 1;
-  // Claude Code's id for the session, which names its transcript.
+  // Claude Code's id for the session, which names its transcript. Never
+  // empty: the daemon reads a session file that names none as no agent's.
   string session_id = 2;
-  // Where it works.
+  // Where it works. Never empty, as `session_id` is not.
   string cwd = 3;
   // What it is doing, as Claude Code says. Neither when it says nothing.
   oneof status {
@@ -309,7 +310,9 @@ message Agent {
     // A word it does not, as Claude Code wrote it: a newer Claude Code's.
     string other_status = 10;
   }
-  // When it came to its status, as Claude Code dates it.
+  // When it came to its status, as Claude Code dates it. Absent where it
+  // does not: when it last wrote the session file, or when the session
+  // started, is no date of the status.
   google.protobuf.Timestamp status_since = 5;
   // When its session started.
   google.protobuf.Timestamp started_at = 6;

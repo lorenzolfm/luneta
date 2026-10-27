@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
-use luneta_protocol::v1;
+use luneta_protocol::{said, v1};
 
 /// The branch checked out in a directory, and how its work tree stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Checkout {
-    pub branch: String,
+    pub branch: said::Said,
     /// What starship's `git_status` shows, with its default glyphs and in its
     /// order: one for each kind of change there is, then one for where the
     /// branch stands against its upstream. Empty for a clean tree that is
@@ -39,7 +39,16 @@ impl Checkout {
             return None;
         };
         let status = glyphs(changes, *stashes, *upstream);
-        Some(Checkout { branch: name.as_str().to_owned(), status })
+        Some(Checkout { branch: name.clone(), status })
+    }
+}
+
+#[cfg(test)]
+impl Checkout {
+    /// `branch` checked out, with `status` as starship shows it.
+    pub fn on(branch: &str, status: &str) -> Self {
+        let branch = said::Said::new(branch.to_owned()).expect("a branch has a name");
+        Checkout { branch, status: status.to_owned() }
     }
 }
 
@@ -170,7 +179,7 @@ mod tests {
             stands("/w/newer", Stands::Checkout(v1::Checkout::default())),
             v1::WorkTree { dir: "/w/newest".to_owned(), stands: None },
         ]);
-        let on = Checkout { branch: "fold".to_owned(), status: "!⇡".to_owned() };
+        let on = Checkout::on("fold", "!⇡");
         assert_eq!(checkouts.said("/w/repo"), Said::Branch(&on));
         for dir in ["/w/detached", "/w/plain"] {
             assert_eq!(checkouts.said(dir), Said::NoBranch, "{dir}");
@@ -189,7 +198,7 @@ mod tests {
             told("/w/detached", Some("# branch.head (detached)\n")),
             told("/w/plain", None),
         ]);
-        let on = |branch: &str| Checkout { branch: branch.to_owned(), status: String::new() };
+        let on = |branch: &str| Checkout::on(branch, "");
         assert_eq!(checkouts.said("/w/repo"), Said::Branch(&on("feat/x")));
         assert_eq!(checkouts.said("/w/new"), Said::Branch(&on("main")));
         for dir in ["/w/detached", "/w/plain"] {

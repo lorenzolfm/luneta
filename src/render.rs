@@ -1859,7 +1859,7 @@ fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: 
     let status = checkout.status.as_str();
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
-    line.push(&truncate(&checkout.branch, room), Ink::Gray);
+    line.push(&truncate(checkout.branch.as_str(), room), Ink::Gray);
     if !status.is_empty() {
         line.pad_to(cols.saturating_sub(status.width() + MARGIN));
         line.push(status, Ink::Plain);
@@ -2503,7 +2503,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&listed, given::NOW);
         let live = agents::Live::new(Some("luneta"), &[], &places, &[]);
-        agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
 
         assert_eq!(agents.rows.len(), 1);
         assert_eq!(agents.rows[0].name(), "luneta");
@@ -2529,7 +2529,7 @@ mod tests {
             let mut agents = AgentSet::default();
             agents.heard(&listed, given::NOW);
             let live = agents::Live::new(Some("notes"), &[], &places, &[]);
-            agents.rebuild(term, &live, origin, Age::ZERO, Selection::SnapToTop);
+            agents.rebuild(term, &live, origin, given::NOW, Selection::SnapToTop);
             agent_body(&agents, term, &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect()
         };
         let banner = "   handoff ───────────────── 🏠 Current ";
@@ -2549,7 +2549,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&[agent(104, "notes", 1, "/w/notes", "idle")], given::NOW);
         let live = agents::Live::new(Some("notes"), &[], &places, &[]);
-        agents.rebuild("", &live, Some(1), Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, Some(1), given::NOW, Selection::SnapToTop);
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
         let body: Vec<String> =
             agent_body(&agents, "", &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect();
@@ -2613,7 +2613,7 @@ mod tests {
             ("notes", &[(7, "/home/lorenzo/Documents")]),
         ]);
         let live = agents::Live::new(Some("notes"), &sessions.live, &places, &[]);
-        agents.rebuild("", &live, Some(7), Age::ZERO, Selection::SnapToTop);
+        agents.rebuild("", &live, Some(7), given::NOW, Selection::SnapToTop);
         let rect = screen.results.as_ref().unwrap();
         let notes = agent_note_texts(&agents, help_width(cols));
         let body = agent_body(&agents, "", rect, notes.len(), 0);
@@ -2752,7 +2752,7 @@ mod tests {
 
     /// `node`, in a work tree on `branch` that stands as `status` says.
     fn on(branch: &str, status: &str, node: Node) -> Node {
-        let checkout = Checkout { branch: branch.to_owned(), status: status.to_owned() };
+        let checkout = Checkout::on(branch, status);
         match node {
             Node::Pane(pane) => Node::Pane(PaneNode { checkout: Some(checkout), ..pane }),
             session @ Node::Session(_) => session,
