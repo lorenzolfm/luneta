@@ -148,19 +148,43 @@ const ENDING: Duration = Duration::from_millis(100);
 /// How often luneta looks meanwhile.
 const ENDING_LOOK: Duration = Duration::from_millis(10);
 
+/// How long luneta goes on trying one session after another for one that
+/// answers, once its client's is gone. A session whose server is gone
+/// answers at once that it does not run, and a server that hangs holds up
+/// every zellij command for as long as `clients` waits, which is longer: it
+/// costs luneta one try.
+const SEEKING: Duration = Duration::from_secs(1);
+
+/// A session luneta's zellij can go on in: one that runs, as it answered for
+/// its clients, which are those it has before luneta's comes.
+pub struct Refuge {
+    pub session: String,
+    pub before: Vec<Client>,
+}
+
 /// Where luneta's zellij goes on once its client ended in `left`: the newest
-/// session that runs, which the picker lists first, where `left` went with
-/// the client, as it does once zellij quits, its last pane exits, or it is
-/// killed. None where `left` runs still, as the client detached; where no
-/// other session runs; and where luneta cannot read all of zellij's folder,
-/// as either could be in what it cannot.
-pub fn refuge(left: &str) -> Option<String> {
+/// session that answers for its clients, which the picker lists first, where
+/// `left` went with the client, as it does once zellij quits, its last pane
+/// exits, or it is killed. None where `left` runs still, as the client
+/// detached; where no other session answers; and where luneta cannot read
+/// all of zellij's folder, as either could be in what it cannot.
+///
+/// A socket can outlive its server, as one that crashed, and a session can
+/// end as luneta looks. `attach` brings back a session that ended, where
+/// zellij kept it to resurrect, and otherwise zellij's client fails: only a
+/// session that answers is one to go on in.
+pub fn refuge(left: &str) -> Option<Refuge> {
     let folder = lunetad::zellij_folder();
     let deadline = Instant::now() + ENDING;
     loop {
         let running = lunetad::zellij_sessions(&folder)?;
         if running.iter().all(|(name, _)| name != left) {
-            return newest(running);
+            let seeking = Instant::now() + SEEKING;
+            let sessions = newest_first(running).into_iter();
+            return sessions.take_while(|_| Instant::now() < seeking).find_map(|session| {
+                let before = clients(&session).ok()?;
+                Some(Refuge { session, before })
+            });
         }
         if Instant::now() >= deadline {
             return None;
@@ -169,11 +193,11 @@ pub fn refuge(left: &str) -> Option<String> {
     }
 }
 
-/// The newest of `running`, by when each started and then by name, as the
-/// picker lists them first.
-fn newest(running: Vec<(String, SystemTime)>) -> Option<String> {
-    let newest = running.into_iter().max_by(|(a, a_at), (b, b_at)| (a_at, a).cmp(&(b_at, b)));
-    newest.map(|(name, _)| name)
+/// The names of `running`, newest first, by when each started and then by
+/// name, as the picker lists them.
+fn newest_first(mut running: Vec<(String, SystemTime)>) -> Vec<String> {
+    running.sort_by(|(a, a_at), (b, b_at)| (b_at, b).cmp(&(a_at, a)));
+    running.into_iter().map(|(name, _)| name).collect()
 }
 
 /// The session a directory is for, as the picker's directories name it: for
@@ -753,16 +777,16 @@ mod tests {
         assert_eq!(args[args.len() - 3..], ["zellij", "attach", "elo"]);
     }
 
-    /// luneta goes on in the session the picker lists first: the newest, and
-    /// of two that started at once, the one whose name comes last, as the
-    /// sidebar has them.
+    /// luneta tries the sessions for one to go on in as the picker lists
+    /// them: the newest first, and of two that started at once, the one whose
+    /// name comes last, as the sidebar has them.
     #[test]
-    fn the_refuge_is_the_session_the_picker_lists_first() {
+    fn the_refuge_is_sought_in_the_order_the_picker_lists_sessions() {
         let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
         let running = [("b", at(2)), ("c", at(1)), ("a", at(2))];
         let running = running.map(|(name, started)| (name.to_owned(), started)).to_vec();
-        assert_eq!(newest(running), Some("b".to_owned()));
-        assert_eq!(newest(Vec::new()), None);
+        assert_eq!(newest_first(running), ["b", "a", "c"]);
+        assert!(newest_first(Vec::new()).is_empty());
     }
 
     #[test]

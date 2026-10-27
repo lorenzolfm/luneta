@@ -39,7 +39,7 @@ use crate::news::{self, News};
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::skills::{self, Skill};
-use crate::zellij::{self, After, Closes, SessionName};
+use crate::zellij::{self, After, Closes, Refuge, SessionName};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -773,16 +773,15 @@ impl App {
 
     /// zellij's client ended. Where it ended well, and its session with it, as
     /// zellij quits, the session's last pane exits, or the session is killed,
-    /// a client of the newest session that runs takes its place, and luneta
-    /// goes on. luneta ends where none runs, and where the client detached,
-    /// or failed, as where zellij cannot attach.
+    /// a client of the newest session that answers takes its place, and
+    /// luneta goes on. luneta ends where none does, and where the client
+    /// detached, or failed, as where zellij cannot attach.
     fn client_ended(&mut self) -> io::Result<()> {
         let left = self.client.exited.filter(ExitStatus::success).and(self.sidebar.here());
-        let Some(to) = left.and_then(zellij::refuge) else {
+        let Some(Refuge { session: to, before }) = left.and_then(zellij::refuge) else {
             self.ended = true;
             return Ok(());
         };
-        let before = zellij::clients(&to).unwrap_or_default();
         let (program, args) = zellij::rejoin(&to);
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, self.events.clone())?;
