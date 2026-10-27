@@ -17,11 +17,20 @@
 //! beside it, would take turns at it for as long as both ask: zellij's
 //! plugin runs a `luneta watch` for each answer, which knows nothing of the
 //! one before it.
+//!
+//! A daemon that reads zellij's sessions in another folder than luneta's
+//! zellij keeps them in, as one started with another `ZELLIJ_SOCKET_DIR`
+//! does, luneta neither asks nor stops, whatever its version: its sessions
+//! are not luneta's, and one started in its place would leave out those of
+//! every luneta that reaches it, which would take what they kept of those
+//! sessions for gone.
 
 use std::cell::OnceCell;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -94,6 +103,8 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
     let mut doubted: Option<u32> = None;
     // The release of the lunetad luneta starts, once asked.
     let starting = OnceCell::new();
+    // Where luneta's zellij keeps its sessions.
+    let own = lunetad::zellij_folder();
     loop {
         let why = match lunetad::connect(&folder).await {
             // `Running` starts none, so there is none to reap.
@@ -102,8 +113,19 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
                 Ok(info) => {
                     let info = info.into_inner();
                     let (version, pid) = (info.version, info.pid);
+                    // A daemon older than the field says no folder, and is
+                    // taken to read luneta's, as before.
+                    let reads = info.zellij_folder.map(OsString::from_vec).map(PathBuf::from);
                     if stopped == Some(pid) {
                         format!("lunetad {version} (pid {pid}) was stopped, and has not ended")
+                    } else if let Some(reads) = reads.filter(|reads| !same_folder(reads, &own)) {
+                        reap(started);
+                        return Err(format!(
+                            "lunetad {version} (pid {pid}) reads zellij's sessions in {}, not in \
+                             {}, where luneta's zellij keeps them",
+                            reads.display(),
+                            own.display()
+                        ));
                     } else if !makes_way(&version, || *starting.get_or_init(release)) {
                         reap(started);
                         return Ok(daemon);
@@ -176,6 +198,12 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
 /// What luneta says where no daemon runs in the folder at `path`.
 fn none_runs(path: &Path) -> String {
     format!("no lunetad runs in {}", path.display())
+}
+
+/// Whether `a` and `b` are one folder: by the same path, or by two that lead
+/// to it, as a link and the folder it leads to do.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b || fs::canonicalize(a).is_ok_and(|a| fs::canonicalize(b).is_ok_and(|b| a == b))
 }
 
 /// Waits for whatever luneta `started` as it ends, so that one that ends

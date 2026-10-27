@@ -1,7 +1,9 @@
-//! What luneta keeps for every luneta on the host, and for the next: a folder
-//! of `luneta` in `$XDG_STATE_HOME`, or in `~/.local/state` where that is not
-//! set, for each kind of thing kept. Each luneta watches the folders, and
-//! takes up what another keeps as it keeps it.
+//! What luneta keeps for every luneta on the host, and for the next, whatever
+//! runs then: a folder of `luneta` in `$XDG_STATE_HOME`, or in
+//! `~/.local/state` where that is not set, for each kind of thing kept, as the
+//! folds. What is kept of the sessions that run is kept beside the daemon
+//! instead, as the news is. Each luneta watches the folders, and takes up
+//! what another keeps as it keeps it.
 
 use std::env;
 use std::path::{Path, PathBuf};

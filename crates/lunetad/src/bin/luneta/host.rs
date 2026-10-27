@@ -321,7 +321,11 @@ fn run_in(
     let (program, args) = zellij::client(session);
     let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
     let folds = Folds::shared();
-    let news = News::shared();
+    // Kept beside the daemon, which lists the sessions it is kept of.
+    let news = match &folder {
+        Ok(runtime) => News::within(runtime),
+        Err(why) => News::unshared(why),
+    };
     let folds_watched = folds.dir().map(|dir| folds::watch(dir, events.clone())).transpose();
     let news_watched = news::watch(&news, events.clone());
     let mut sidebar = Sidebar::new(folds, news);
@@ -401,7 +405,7 @@ fn run_loop(
             return Ok(());
         }
         app.wait_on(Instant::now());
-        app.sidebar.ticked(SystemTime::now(), app.focused);
+        app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
         app.draw(terminal)?;
     }
 }

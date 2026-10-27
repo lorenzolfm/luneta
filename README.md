@@ -704,13 +704,15 @@ and keeps it until you go to the pane again and stay a second. On the pane
 you are in, that is once you leave it, or luneta's window, and come back. `u`
 again takes the mark away. A folded session shows the `•` when any of its
 panes has one, unless one waits for you. Each luneta sees you only on the
-pane its own zellij is on, and every luneta on the host shares what they saw
-and marked: a file for each pane in `$XDG_STATE_HOME/luneta/seen` and
-`$XDG_STATE_HOME/luneta/unread`, or under `~/.local/state/luneta`, which every
-luneta watches. A pane's file keeps to the session's socket, by when it was
-made and its inode, so a session renamed keeps them, and one started again
-under its name has none. They go once the daemon has not listed the session
-for ten seconds.
+pane its own zellij is on, and every luneta of one daemon shares what they
+saw and marked: a file for each pane in `seen` and `unread` in luneta's
+runtime folder, `$XDG_RUNTIME_DIR/luneta` or `$TMPDIR/luneta`, beside the
+daemon's socket, which every luneta watches. A pane's file keeps to the
+session's socket, by when it was made and its inode, so a session renamed
+keeps them, and one started again under its name has none. They go once the
+daemon has not listed the session for ten seconds, counted only while it
+answers and says it has read all of zellij's folder, and with the runtime
+folder, as the socket does.
 
 The rule along the top counts the sessions, the agents and commands that wait
 for you, the panes with a `•`, those at work, and the agents in `shell`, as
@@ -1346,6 +1348,10 @@ zellij has had no session for 30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A
 newer one they keep, so that two versions in use at once never take turns at
 it: after a rollback, the newer daemon runs on until zellij's last session ends.
+One that reads zellij's sessions in another folder than their zellij keeps
+them in, as one started with another `ZELLIJ_SOCKET_DIR` does, they neither
+ask nor stop, and say so: one of theirs in its place would leave out the
+sessions of every luneta that reaches it.
 `luneta info` says which daemon runs, `luneta agents` lists the agents it
 finds, and `luneta sessions` the sessions, their panes and the branch each
 works on, with its pull request; none of the three starts one. The daemon asks

@@ -2,8 +2,8 @@
 //! work trees the panes work in stand, and when it answers.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::os::unix::fs::symlink;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -277,6 +277,30 @@ fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
         let now = host.host();
         let game: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "game").collect();
         (game.len() == 2 && game.iter().all(|session| session.panes.is_none())).then_some(())
+    });
+}
+
+/// A folder of zellij's sockets the daemon cannot read could hold a session
+/// that runs: the host says how many it could not read, so that a client
+/// takes nothing it leaves out for gone, and lists what it holds once it
+/// reads again.
+#[test]
+fn the_host_says_how_many_of_zellij_s_folders_it_could_not_read() {
+    let host = Host::new();
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("work runs", || session(&host.host(), "work").map(|_| ()));
+
+    let mode = |mode| fs::set_permissions(host.contract(), Permissions::from_mode(mode)).unwrap();
+    mode(0o000);
+    let unread = eventually("the folder of work does not read", || {
+        Some(host.host()).filter(|now| now.unread_sockets == Some(1))
+    });
+    mode(0o755);
+    assert!(session(&unread, "work").is_none(), "{:?}", unread.sessions);
+    eventually("work runs again, and every folder reads", || {
+        let now = host.host();
+        (now.unread_sockets == Some(0) && session(&now, "work").is_some()).then_some(())
     });
 }
 
