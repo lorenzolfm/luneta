@@ -99,7 +99,9 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
                     let (version, pid) = (info.version, info.pid);
                     if stopped == Some(pid) {
                         format!("lunetad {version} (pid {pid}) was stopped, and has not ended")
-                    } else if !makes_way(&version, || *starting.get_or_init(release)) {
+                    } else if !makes_way(&version, || *starting.get_or_init(release))
+                        || !listens(&folder, pid).await
+                    {
                         reap(started);
                         return Ok(daemon);
                     } else {
@@ -272,8 +274,17 @@ fn release() -> Option<Release> {
     Release::parse(said.trim().strip_prefix(LUNETAD)?.strip_prefix(' ')?)
 }
 
-/// Has the daemon `pid` end. SIGTERM ends a daemon of any version, where an
-/// older one knows nothing of how a newer luneta would ask it to.
+/// Whether the process that listens in `folder` is `pid`, as the kernel says.
+/// luneta stops no process on a daemon's word alone: one in another namespace
+/// of pids says a pid that is another process's here. A daemon it cannot
+/// stop, it asks as it is.
+async fn listens(folder: &Folder, pid: u32) -> bool {
+    lunetad::listening(folder).await.is_ok_and(|listening| listening == Some(pid))
+}
+
+/// Has the daemon `pid` end, which the kernel says listens in the folder.
+/// SIGTERM ends a daemon of any version, where an older one knows nothing of
+/// how a newer luneta would ask it to.
 fn stop(pid: u32) -> Result<(), String> {
     let id = i32::try_from(pid).ok().and_then(Pid::from_raw);
     let id = id.ok_or_else(|| format!("{LUNETAD} says its pid is {pid}, which none is"))?;

@@ -36,10 +36,20 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
     Ok(DaemonClient::new(channel))
 }
 
+/// The pid of the process that listens in `folder`, as the kernel says: in
+/// the namespace of pids that this process is in, and so none where that
+/// process is in one this one cannot see. A daemon's own word for its pid is
+/// of the namespace it is in.
+pub async fn listening(folder: &Folder) -> io::Result<Option<u32>> {
+    let stream = mine(UnixStream::connect(folder.socket()).await?)?;
+    let pid = stream.peer_cred()?.pid().and_then(|pid| u32::try_from(pid).ok());
+    // Linux says 0 for a process it cannot name in this namespace.
+    Ok(pid.filter(|pid| *pid != 0))
+}
+
 /// `stream`, if this user's process is at its other end, as the kernel says:
 /// whoever made the socket answers on it, whatever folder it turned up in,
-/// and the daemon a client asks is told what it answers, and whose pid to
-/// stop.
+/// and the daemon a client asks is told what it answers.
 fn mine(stream: UnixStream) -> io::Result<UnixStream> {
     if stream.peer_cred()?.uid() != rustix::process::getuid().as_raw() {
         let refusal = "another user's process listens on lunetad's socket";

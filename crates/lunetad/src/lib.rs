@@ -21,6 +21,6 @@ mod shells;
 mod watch;
 mod zellij;
 
-pub use client::connect;
+pub use client::{connect, listening};
 pub use daemon::{serve, Claim};
 pub use folder::Refusal;

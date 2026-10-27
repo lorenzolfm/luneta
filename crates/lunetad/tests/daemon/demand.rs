@@ -37,6 +37,10 @@ const STAND_IN: &str = "LUNETA_TEST_STAND_IN_FOLDER";
 
 const STAND_IN_VERSION: &str = "LUNETA_TEST_STAND_IN_VERSION";
 
+/// Set, the stand-in says that this is its pid, as a daemon in another
+/// namespace of pids says one that is another process's here.
+const STAND_IN_PID: &str = "LUNETA_TEST_STAND_IN_PID";
+
 /// `luneta watch`, run as `luneta`, and the host it wrote out.
 fn watch(host: &Host, luneta: &Path) -> api::Host {
     written(host.vars().command(&luneta.display().to_string()).arg("watch"))
@@ -270,7 +274,7 @@ fn luneta_starts_the_lunetad_beside_it_or_else_the_one_on_the_path() {
 #[test]
 fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let host = Host::new();
-    let mut older = stand_in(&host, OLDER);
+    let mut older = stand_in(&host, OLDER, None);
     let said = info(host.vars());
     assert!(said.starts_with(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
 
@@ -296,14 +300,28 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
 #[test]
 fn luneta_watch_keeps_a_daemon_newer_than_it() {
     let host = Host::new();
-    let mut newer = stand_in(&host, NEWER);
+    let mut newer = stand_in(&host, NEWER, None);
     assert_eq!(pid(&watch(&host, Path::new(LUNETA))), newer.pid());
     assert_eq!(newer.ended_within(Duration::ZERO), None);
 }
 
+/// A daemon older than luneta whose pid is not the one the kernel says
+/// listens, as one in another namespace of pids says a pid that is another
+/// process's here, `luneta watch` keeps, and stops neither: it stops no
+/// process on a daemon's word alone.
+#[test]
+fn luneta_watch_stops_no_process_but_the_one_the_kernel_says_listens() {
+    let host = Host::new();
+    let mut decoy = Running::spawn(Command::new("sleep").arg("60"));
+    let mut older = stand_in(&host, OLDER, Some(decoy.pid()));
+    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), decoy.pid());
+    assert_eq!(decoy.ended_within(Duration::ZERO), None);
+    assert_eq!(older.ended_within(Duration::ZERO), None);
+}
+
 /// Starts the stand-in for a daemon of `version` in the host's folder, and
-/// waits for it to answer.
-fn stand_in(host: &Host, version: &str) -> Running {
+/// waits for it to answer. It says that `says` is its pid, if given.
+fn stand_in(host: &Host, version: &str, says: Option<u32>) -> Running {
     let mut command = Command::new(env::current_exe().unwrap());
     command
         .args(["demand::stand_in_lunetad", "--exact", "--ignored"])
@@ -311,8 +329,12 @@ fn stand_in(host: &Host, version: &str) -> Running {
         .env(STAND_IN_VERSION, version)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(pid) = says {
+        command.env(STAND_IN_PID, pid.to_string());
+    }
     let stand_in = Running::spawn(&mut command);
-    eventually("the stand-in answers", || (answering(host)? == stand_in.pid()).then_some(()));
+    let said = says.unwrap_or(stand_in.pid());
+    eventually("the stand-in answers", || (answering(host)? == said).then_some(()));
     stand_in
 }
 
@@ -326,12 +348,13 @@ fn stand_in_lunetad() {
         return;
     };
     let version = env::var(STAND_IN_VERSION).unwrap();
+    let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
     let claim = Claim::take(Path::new(&folder)).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(claim.socket()).unwrap();
         tonic::transport::Server::builder()
-            .add_service(DaemonServer::new(StandIn { version }))
+            .add_service(DaemonServer::new(StandIn { version, pid }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
@@ -340,12 +363,14 @@ fn stand_in_lunetad() {
 
 struct StandIn {
     version: String,
+    /// The pid it says it has.
+    pid: u32,
 }
 
 #[tonic::async_trait]
 impl Daemon for StandIn {
     async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
-        let (version, pid) = (self.version.clone(), std::process::id());
+        let (version, pid) = (self.version.clone(), self.pid);
         Ok(Response::new(InfoResponse { version, pid, started_at: None }))
     }
 
@@ -357,7 +382,7 @@ impl Daemon for StandIn {
     }
 
     async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
-        let version = Version { pid: std::process::id(), seq: 0 };
+        let version = Version { pid: self.pid, seq: 0 };
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
     }
 }
