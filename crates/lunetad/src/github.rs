@@ -10,14 +10,15 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::num::NonZeroU32;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use luneta_protocol::github::{PullRequest, State};
 use serde::Deserialize;
 
-use crate::api;
 use crate::core;
 use crate::git;
 use crate::program;
@@ -30,30 +31,19 @@ const LIMIT: Duration = Duration::from_secs(30);
 /// failure to the daemon: gh fails the same way at anything else.
 const NONE: &str = "no pull requests found";
 
-/// The pull request of a branch.
+/// The pull request gh found of the branch checked out in a directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullRequest {
-    /// The branch, as it was checked out where gh was asked.
+pub struct Found {
+    /// The branch, as it was checked out where gh was asked, when it answered.
     pub branch: String,
-    pub number: u32,
-    pub state: State,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum State {
-    Open,
-    /// Open, and a draft.
-    Draft,
-    Merged,
-    /// Closed, and not merged.
-    Closed,
+    pub pull_request: PullRequest,
 }
 
 /// A pull request as `gh pr view --json number,state,isDraft` writes it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
-    number: u32,
+    number: NonZeroU32,
     state: Stands,
     /// Whether it is a draft, which a closed one can still be.
     is_draft: bool,
@@ -68,51 +58,54 @@ enum Stands {
     Merged,
 }
 
-impl PullRequest {
-    /// What gh wrote of the pull request of `branch`, or why it does not read.
-    fn parse(branch: &str, said: &[u8]) -> Result<Self, String> {
-        let viewed: Viewed = serde_json::from_slice(said).map_err(|error| error.to_string())?;
-        let state = match (viewed.state, viewed.is_draft) {
-            (Stands::Open, false) => State::Open,
-            (Stands::Open, true) => State::Draft,
-            (Stands::Merged, _) => State::Merged,
-            (Stands::Closed, _) => State::Closed,
-        };
-        Ok(PullRequest { branch: branch.to_owned(), number: viewed.number, state })
-    }
+/// What gh wrote of a pull request, or why it does not read.
+fn parse(said: &[u8]) -> Result<PullRequest, String> {
+    let viewed: Viewed = serde_json::from_slice(said).map_err(|error| error.to_string())?;
+    let state = match (viewed.state, viewed.is_draft) {
+        (Stands::Open, false) => State::Open,
+        (Stands::Open, true) => State::Draft,
+        (Stands::Merged, _) => State::Merged,
+        (Stands::Closed, _) => State::Closed,
+    };
+    Ok(PullRequest { number: viewed.number, state })
+}
 
-    /// The pull request as the API gives it, of the branch checked out in
-    /// `dir`.
-    #[must_use]
-    pub fn to_api(&self, dir: &str) -> api::PullRequest {
-        let state = match self.state {
-            State::Open => api::PullRequestState::Open,
-            State::Draft => api::PullRequestState::Draft,
-            State::Merged => api::PullRequestState::Merged,
-            State::Closed => api::PullRequestState::Closed,
-        };
-        api::PullRequest { dir: dir.to_owned(), number: self.number, state: state.into() }
-    }
+/// What gh said of the branch it was asked about.
+enum Answer {
+    /// The branch was still checked out as gh answered: the pull request gh
+    /// found of it, or none.
+    Stayed(Option<PullRequest>),
+    /// Another branch was checked out by the time gh answered, which git has
+    /// yet to see: what gh said was of that one.
+    Moved,
 }
 
 /// What gh says of the pull request of `branch`, checked out in `dir`: the
-/// one it finds, or none. When gh did not say, as it is not logged in, or
-/// did not answer in time, what is to be said of it instead.
+/// one it finds, or none, or that `branch` is no longer checked out there.
+/// When gh did not say, as it is not logged in, or did not answer in time,
+/// what is to be said of it instead.
 ///
 /// gh finds it as it does in a shell in `dir`: by the work tree's remotes,
-/// and the branch's config for where it pushes the branch.
-fn view(dir: &str, branch: &str) -> Result<Option<PullRequest>, String> {
+/// and the branch's config for where it pushes the branch. It reads what is
+/// checked out as it starts, where git can have last looked a sweep before,
+/// so what is checked out is read again once gh has answered.
+fn view(dir: &str, branch: &str) -> Result<Answer, String> {
     let mut gh = Command::new("gh");
     git::local(gh.args(["pr", "view", "--json", "number,state,isDraft"]).current_dir(dir));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh pr view in {dir} could not be run: {error}"))?;
-    match ran.answer() {
-        Ok(said) => PullRequest::parse(branch, &said)
-            .map(Some)
-            .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}")),
-        Err(why) if why.starts_with(NONE) => Ok(None),
-        Err(why) => Err(format!("gh pr view in {dir}: {why}")),
+    let found = match ran.answer() {
+        Ok(said) => Some(
+            parse(&said)
+                .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}"))?,
+        ),
+        Err(why) if why.starts_with(NONE) => None,
+        Err(why) => return Err(format!("gh pr view in {dir}: {why}")),
+    };
+    if git::branch(dir).as_deref() != Some(branch) {
+        return Ok(Answer::Moved);
     }
+    Ok(Answer::Stayed(found))
 }
 
 /// A branch of a repository, by the repository's common directory and the
@@ -141,28 +134,19 @@ pub fn follow(
     sweep: Duration,
 ) -> io::Result<()> {
     thread::Builder::new().name("gh".to_owned()).spawn(move || {
-        // The repository of each directory, which stays as long as it does.
-        let mut repositories: HashMap<String, String> = HashMap::new();
         let mut asked: HashMap<Branch, Asked> = HashMap::new();
         let mut troubles = Troubles::default();
         'sweep: loop {
             let Some(branches) = core::ask(&core, core::Command::Branches) else {
                 return;
             };
-            repositories.retain(|dir, _| branches.contains_key(dir));
-            for dir in branches.keys() {
-                if !repositories.contains_key(dir)
-                    && let Some(repository) = git::repository(dir)
-                {
-                    repositories.insert(dir.clone(), repository);
-                }
-            }
-            // The directories each branch is checked out in.
+            // The directories each branch is checked out in. git says the
+            // repository of each afresh: a directory a pane stays in can be
+            // cloned over, with a branch of the same name checked out.
             let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
-            for (dir, branch) in &branches {
-                if let Some(repository) = repositories.get(dir) {
-                    let key = (repository.clone(), branch.clone());
-                    on.entry(key).or_default().push(dir.clone());
+            for (dir, branch) in branches {
+                if let Some(repository) = git::repository(&dir) {
+                    on.entry((repository, branch)).or_default().push(dir);
                 }
             }
             asked.retain(|branch, _| on.contains_key(branch));
@@ -180,7 +164,9 @@ pub fn follow(
                 let next = Instant::now() + sweep;
                 let was = asked.remove(branch).and_then(|was| was.found);
                 let (found, trouble) = match said {
-                    Ok(found) => (found, None),
+                    Ok(Answer::Stayed(found)) => (found, None),
+                    // The core wakes the thread once git sees the checkout.
+                    Ok(Answer::Moved) => (was, None),
                     Err(trouble) => {
                         troubles.say(trouble.clone());
                         (was, Some(trouble))
@@ -220,28 +206,35 @@ fn tell(
 ) -> bool {
     let mut found = BTreeMap::new();
     for (branch, dirs) in on {
-        let Some(pull_request) = asked.get(branch).and_then(|was| was.found.as_ref()) else {
+        let Some(pull_request) = asked.get(branch).and_then(|was| was.found) else {
             continue;
         };
-        found.extend(dirs.iter().map(|dir| (dir.clone(), pull_request.clone())));
+        let of = Found { branch: branch.1.clone(), pull_request };
+        found.extend(dirs.iter().map(|dir| (dir.clone(), of.clone())));
     }
     core.send(core::Command::PullRequests(found)).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PullRequest, State};
+    use std::num::NonZeroU32;
+
+    use luneta_protocol::github::{PullRequest, State};
+
+    use super::parse;
 
     /// A draft is open: one closed or merged is closed or merged, though
     /// GitHub still says it is a draft. What does not read, as a state GitHub
-    /// has not spelled before, is no pull request.
+    /// has not spelled before, or a number it does not count, is no pull
+    /// request.
     #[test]
     fn a_pull_request_reads_as_gh_writes_it() {
-        let read = |said: &str| PullRequest::parse("fold", said.as_bytes());
+        let read = |said: &str| parse(said.as_bytes());
         let state = |said: &str| read(said).map(|pull_request| pull_request.state);
+        let number = NonZeroU32::new(126).unwrap();
         assert_eq!(
             read(r#"{"isDraft":false,"number":126,"state":"OPEN"}"#),
-            Ok(PullRequest { branch: "fold".to_owned(), number: 126, state: State::Open })
+            Ok(PullRequest { number, state: State::Open })
         );
         assert_eq!(state(r#"{"isDraft":true,"number":1,"state":"OPEN"}"#), Ok(State::Draft));
         assert_eq!(state(r#"{"isDraft":true,"number":1,"state":"MERGED"}"#), Ok(State::Merged));
@@ -250,6 +243,7 @@ mod tests {
             r#"{"isDraft":false,"number":1,"state":"QUEUED"}"#,
             r#"{"number":1,"state":"OPEN"}"#,
             r#"{"isDraft":false,"number":-1,"state":"OPEN"}"#,
+            r#"{"isDraft":false,"number":0,"state":"OPEN"}"#,
             "",
         ];
         for said in unread {

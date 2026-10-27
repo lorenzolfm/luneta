@@ -169,7 +169,8 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 /// with `open` for the branch's name, whatever the repository. Of a branch it
 /// was given none for, it says there is none, as gh does. It knows no other
 /// command. It notes the branch of each pull request it is asked for, for
-/// `asked`.
+/// `asked`. Given a branch with `switch`, it checks that out first, the next
+/// time it is asked.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -185,6 +186,10 @@ if [ "$*" != "pr view --json number,state,isDraft" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
+if [ -f "{pulls}/switch" ]; then
+    git switch -q "$(cat "{pulls}/switch")" || exit 1
+    rm "{pulls}/switch"
+fi
 branch=$(git symbolic-ref --short HEAD) || exit 1
 echo "$branch" >> "{pulls}/asked"
 if [ ! -f "{pulls}/$branch.json" ]; then
@@ -199,6 +204,13 @@ exec cat "{pulls}/$branch.json"
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         gh
+    }
+
+    /// Has gh check out `branch` where it is asked next, before it reads what
+    /// is checked out there: as one checks it out in a shell just before gh
+    /// is asked, where git has yet to see it.
+    pub fn switch(&self, branch: &str) {
+        fs::write(self.pulls.join("switch"), branch).unwrap();
     }
 
     /// The branches gh has been asked about, in the order it was asked.

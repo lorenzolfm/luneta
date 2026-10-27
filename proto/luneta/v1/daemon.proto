@@ -249,6 +249,7 @@ message PullRequest {
   // The directory, as `WorkTree` has it: the pull request is of the branch
   // its work tree has checked out.
   string dir = 1;
+  // Never 0: GitHub counts them from 1.
   uint32 number = 2;
   // Never unspecified.
   PullRequestState state = 3;

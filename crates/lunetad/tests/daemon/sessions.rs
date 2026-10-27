@@ -444,6 +444,49 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     assert!(!found().contains_key(&beside));
 }
 
+/// gh finds the pull request of the branch checked out as it is asked, which
+/// git can have yet to see: git looks again only every few seconds. What gh
+/// says then is of the branch checked out since, and never shows under the
+/// one before, nor is it trouble to the daemon. Once git sees the checkout,
+/// the new branch has its pull request.
+#[test]
+fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    assert!(git(tree.path(), &["init", "-q", "-b", "main"]));
+    commit(tree.path(), "README", "start\n");
+    assert!(git(tree.path(), &["branch", "fold"]));
+    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true }));
+    host.gh.switch("fold");
+    let cwd = tree.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    // The branch git says is checked out in the tree, and the number of the
+    // pull request listed there.
+    let seen = || {
+        let host = host.host();
+        let tree = host.work_trees.iter().find(|tree| tree.dir == cwd);
+        let branch = match tree.and_then(|tree| tree.stands.as_ref()) {
+            Some(Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. })) => {
+                Some(branch.name.clone())
+            },
+            _ => None,
+        };
+        let number = host.pull_requests.iter().find(|it| it.dir == cwd).map(|it| it.number);
+        (branch, number)
+    };
+
+    eventually("git sees fold checked out, and gh finds its pull request", || {
+        let (branch, number) = seen();
+        let seen = (branch.as_deref(), number);
+        assert_ne!(seen, (Some("main"), Some(8)), "fold's pull request under main");
+        (seen == (Some("fold"), Some(8))).then_some(())
+    });
+    let said = daemon.said_after(Duration::from_secs(1));
+    assert!(!said.iter().any(|line| line.contains("gh pr view")), "{said:?}");
+}
+
 /// `luneta watch` writes out the host at once. With the version it last
 /// wrote, it waits: it answers as soon as the host changes, and with the
 /// host as it was once it has waited four seconds, so that a client that

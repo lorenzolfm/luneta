@@ -84,6 +84,18 @@ pub fn repository(dir: &str) -> Option<String> {
     Some(common.strip_suffix('\n')?.to_owned()).filter(|common| !common.is_empty())
 }
 
+/// The branch checked out in `dir` now, named as `git status` names it: its
+/// ref without `refs/heads/`, which `--short` would keep a part of for a name
+/// a tag has too. None for a detached `HEAD`, or where git does not say.
+pub fn branch(dir: &str) -> Option<String> {
+    let mut git = Command::new("git");
+    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
+        .args(["symbolic-ref", "--quiet", "HEAD"]);
+    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
+    let head = String::from_utf8(said).ok()?;
+    Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
+}
+
 /// Where git stands with a directory it has been asked about.
 struct Asked {
     /// When it is to be asked about again.

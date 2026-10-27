@@ -10,13 +10,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
+use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::shell::Doing;
-use lunetad::api::{
-    Agent, Client, Front, Host, NameSource, Pane, PullRequest, PullRequestState, Session, Shell,
-    Status, Zellij,
-};
+use lunetad::api::{Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, Zellij};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -613,8 +611,11 @@ impl Sidebar {
         let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
-        let pull_requests: HashMap<&str, &PullRequest> =
-            host.pull_requests.iter().map(|it| (it.dir.as_str(), it)).collect();
+        let pull_requests: HashMap<&str, PullRequest> = host
+            .pull_requests
+            .iter()
+            .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
+            .collect();
         let (sessions, unlisted) = oldest_first(&host.sessions);
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
@@ -1327,7 +1328,7 @@ impl Finder<'_> {
 /// The branch checked out in a work tree, how the tree stands, and its
 /// `pull_request`, or none for a detached `HEAD` or a directory in no
 /// repository.
-fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
+fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes } = tree
     else {
         return None;
@@ -1341,16 +1342,15 @@ fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Check
 
 /// The number of a pull request and the colour of its state, which gh lists
 /// it in: green while it is open, grey while it is a draft, and magenta once
-/// it is merged. A closed one is none, and so is one in a state of a newer
-/// daemon's.
-fn numbered(pull_request: &PullRequest) -> Option<(u32, Color)> {
-    let colour = match PullRequestState::try_from(pull_request.state).ok()? {
-        PullRequestState::Open => Color::Green,
-        PullRequestState::Draft => Color::DarkGray,
-        PullRequestState::Merged => Color::Magenta,
-        PullRequestState::Closed | PullRequestState::Unspecified => return None,
+/// it is merged. A closed one is none.
+fn numbered(pull_request: PullRequest) -> Option<(u32, Color)> {
+    let colour = match pull_request.state {
+        State::Open => Color::Green,
+        State::Draft => Color::DarkGray,
+        State::Merged => Color::Magenta,
+        State::Closed => return None,
     };
-    Some((pull_request.number, colour))
+    Some((pull_request.number.get(), colour))
 }
 
 /// The glyph of each kind of change there is, then the one for where the
@@ -1581,6 +1581,8 @@ fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use luneta_protocol::said::Said;
     use lunetad::api::shell::{Ended, Going, Stopped};
     use lunetad::api::{self, Pane, Panes, Version, Zellij};
@@ -2369,18 +2371,18 @@ mod tests {
         let panes = panes.iter().zip(1..).map(|(cwd, id)| pane(id, 0, cwd, "fish")).collect();
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
         let checkouts = [
-            ("/w/a", "main", 0, 126, PullRequestState::Open),
-            ("/w/b", "handoff-eng-11259-and-more", 1, 4321, PullRequestState::Merged),
-            ("/w/c", "fold", 0, 7, PullRequestState::Draft),
-            ("/w/d", "old", 0, 9, PullRequestState::Closed),
+            ("/w/a", "main", 0, 126, State::Open),
+            ("/w/b", "handoff-eng-11259-and-more", 1, 4321, State::Merged),
+            ("/w/c", "fold", 0, 7, State::Draft),
+            ("/w/d", "old", 0, 9, State::Closed),
         ];
         for (dir, branch, modified, number, state) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
             let head = Head::Branch { name, upstream: None };
             let changes = Changes { modified, ..Changes::default() };
             host.work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
-            let dir = dir.to_owned();
-            host.pull_requests.push(api::PullRequest { dir, number, state: state.into() });
+            let number = NonZeroU32::new(number).expect("a pull request's number");
+            host.pull_requests.push(PullRequest { number, state }.to_api(dir));
         }
         let mut sidebar = Sidebar::default();
         sidebar.heard(host);

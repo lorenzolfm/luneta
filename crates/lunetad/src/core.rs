@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use crate::api;
 use crate::claude::Scan;
 use crate::clients::Client;
-use crate::github::PullRequest;
+use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
@@ -33,7 +33,7 @@ pub enum Command {
     WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
     /// the directory.
-    PullRequests(BTreeMap<String, PullRequest>),
+    PullRequests(BTreeMap<String, Found>),
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
     /// Asks for the sessions zellij can be asked about, and the name to ask
@@ -103,7 +103,7 @@ struct Known {
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
     /// What gh last found of the branch in each directory a pane works in.
-    pull_requests: BTreeMap<String, PullRequest>,
+    pull_requests: BTreeMap<String, Found>,
     /// What the shells with the hook last said, each in the session it
     /// started in.
     shells: Vec<Shell>,
@@ -350,8 +350,8 @@ impl Known {
         let pull_requests = self
             .pull_requests
             .iter()
-            .filter(|(dir, pull_request)| self.branch(dir) == Some(&pull_request.branch))
-            .map(|(dir, pull_request)| pull_request.to_api(dir))
+            .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
+            .map(|(dir, found)| found.pull_request.to_api(dir))
             .collect();
         api::Host {
             version: None,

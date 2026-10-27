@@ -7,13 +7,13 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use clap::Subcommand;
+use luneta_protocol::github::{self, State};
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, PullRequest, PullRequestState, Status, Version,
-    WatchRequest, WorkTree,
+    Agent, InfoRequest, ListAgentsRequest, PullRequest, Status, Version, WatchRequest, WorkTree,
 };
 use lunetad::folder::SOCKET;
 use prost::Message as _;
@@ -167,7 +167,10 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
             };
             let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
             let pull_request = host.pull_requests.iter().find(|it| it.dir == cwd);
-            let pulled = pull_request.map(|it| format!("  {}", pulled(it))).unwrap_or_default();
+            let pulled = pull_request.map(|it| {
+                format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
+            });
+            let pulled = pulled.unwrap_or_default();
             println!("  {at}  {cwd}  {stands}{pulled}");
         }
     }
@@ -211,16 +214,17 @@ fn stands(tree: &WorkTree) -> Option<String> {
     Some(said.join(", "))
 }
 
-/// A pull request, in words: its number and its state.
-fn pulled(pull_request: &PullRequest) -> String {
-    let state = match PullRequestState::try_from(pull_request.state) {
-        Ok(PullRequestState::Open) => "open",
-        Ok(PullRequestState::Draft) => "draft",
-        Ok(PullRequestState::Merged) => "merged",
-        Ok(PullRequestState::Closed) => "closed",
-        Ok(PullRequestState::Unspecified) | Err(_) => "(does not read)",
+/// A pull request, in words: its number and its state. None for one that
+/// does not read, as a newer daemon's could send.
+fn pulled(pull_request: &PullRequest) -> Option<String> {
+    let github::PullRequest { number, state } = github::PullRequest::of_api(pull_request)?;
+    let state = match state {
+        State::Open => "open",
+        State::Draft => "draft",
+        State::Merged => "merged",
+        State::Closed => "closed",
     };
-    format!("#{} {state}", pull_request.number)
+    Some(format!("#{number} {state}"))
 }
 
 /// Writes out the host once it is no longer as `after` saw it.
