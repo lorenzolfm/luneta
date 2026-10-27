@@ -3,6 +3,7 @@
 
 use std::env;
 use std::fs;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -362,7 +363,9 @@ impl Daemon for StandIn {
 }
 
 /// The daemon ends once zellij has had no session for 30 seconds, and not
-/// before. It ends well, says why, and takes its socket with it. The test
+/// before. It ends well, says why, and takes its socket with it. A client
+/// that holds a connection and never says anything does not keep it: the
+/// daemon waits for its clients to go for 5 seconds at the most. The test
 /// waits it out.
 #[test]
 fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
@@ -370,13 +373,14 @@ fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
     let work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
     eventually("work runs", || (!host.host().sessions.is_empty()).then_some(()));
+    let _silent = UnixStream::connect(host.runtime.path().join(SOCKET)).unwrap();
 
     drop(work);
     fs::remove_file(host.contract().join("work")).unwrap();
     let alone = Instant::now();
     eventually("work has ended", || host.host().sessions.is_empty().then_some(()));
     assert_eq!(daemon.ended_within(Duration::from_secs(25)), None);
-    let ended = daemon.ended_within(Duration::from_secs(15)).expect("the daemon runs on");
+    let ended = daemon.ended_within(Duration::from_secs(20)).expect("the daemon runs on");
     let took = alone.elapsed();
 
     assert!(ended.success(), "{ended}");

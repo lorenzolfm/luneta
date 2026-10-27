@@ -62,6 +62,13 @@ const QUESTIONS_MAX: u32 = 16;
 /// ending the last one and opening another does not end it.
 const ALONE: Duration = Duration::from_secs(30);
 
+/// How long the daemon waits, as it ends, for its clients to go: as long as
+/// a question takes to answer, at the most, and so long enough for each one
+/// asked already. A client that keeps its connection open for longer, as one
+/// that never says anything, would keep it from ever ending, and holding its
+/// folder, with no socket there to reach it by.
+const DRAIN: Duration = client::ANSWER;
+
 /// A folder that this process's daemon holds, and the socket it listens on
 /// there.
 pub struct Claim {
@@ -108,7 +115,8 @@ impl Claim {
 /// session for `ALONE`. It says on stderr that it listens once it does, which
 /// is how whoever started it can tell that it is ready: by then it has read
 /// what runs, and answers with all of it. As it ends, it answers what it was
-/// asked already, and no more.
+/// asked already, and no more, and waits for its clients to go for `DRAIN`
+/// at the most.
 pub async fn serve(claim: Claim) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     // One wake-up is all a thread that asks on a sweep needs, however many
@@ -123,6 +131,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     eprintln!("lunetad: listening on {}", claim.socket.display());
     let host = Host { started: SystemTime::now(), core };
     let socket = claim.socket.clone();
+    let (begun, beginning) = oneshot::channel();
     // Once zellij has been alone long enough, or the thread that would say so
     // has ended, which leaves the daemon blind to it.
     let ended = async move {
@@ -134,15 +143,29 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
             Err(error) if error.kind() == ErrorKind::NotFound => {},
             Err(error) => eprintln!("lunetad: {}: {error}", socket.display()),
         }
+        let _ = begun.send(());
     };
     // Bounds of the daemon's own, rather than tonic's, which are none.
-    Server::builder()
-        .max_concurrent_streams(QUESTIONS_MAX)
-        .timeout(client::ANSWER)
-        .add_service(DaemonServer::new(host))
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended)
-        .await
-        .map_err(io::Error::other)
+    let served = tokio::spawn(
+        Server::builder()
+            .max_concurrent_streams(QUESTIONS_MAX)
+            .timeout(client::ANSWER)
+            .add_service(DaemonServer::new(host))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
+    );
+    // The daemon has begun to end, or the server has ended on its own, which
+    // lets go of `begun`. Either way, the server ends within `DRAIN`, as it
+    // waits for every connection to close.
+    let _ = beginning.await;
+    match timeout(DRAIN, served).await {
+        Ok(Ok(served)) => served.map_err(io::Error::other),
+        Ok(Err(error)) => Err(io::Error::other(error)),
+        Err(_) => {
+            let secs = DRAIN.as_secs();
+            eprintln!("lunetad: clients still connected after {secs}s are left");
+            Ok(())
+        },
+    }
 }
 
 /// Since when zellij has had no session, as the daemon has seen it.
