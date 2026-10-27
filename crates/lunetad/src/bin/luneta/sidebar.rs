@@ -1104,6 +1104,17 @@ impl Sidebar {
         self.cursor = Some(self.rows[stops[next]].place());
     }
 
+    /// Moves the highlight to the last row it stops on, or the first. It no
+    /// longer waits for a delete to take its row away.
+    fn end(&mut self, last: bool) {
+        self.closing = None;
+        let mut stops = self.rows.iter().filter(|row| row.stops());
+        let stop = if last { stops.next_back() } else { stops.next() };
+        if let Some(stop) = stop {
+            self.cursor = Some(stop.place());
+        }
+    }
+
     /// Folds the session of the highlighted row the other way.
     fn toggle(&mut self) {
         let Some(place) = &self.cursor else {
@@ -1172,8 +1183,8 @@ impl Sidebar {
         match key.code {
             KeyCode::Down => self.step(1),
             KeyCode::Up => self.step(-1),
-            KeyCode::Home => self.step(isize::MIN),
-            KeyCode::End => self.step(isize::MAX),
+            KeyCode::Home => self.end(false),
+            KeyCode::End => self.end(true),
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
             KeyCode::Enter => return self.go(),
@@ -1182,7 +1193,8 @@ impl Sidebar {
             KeyCode::Esc => return Asked::Leave,
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
-                Some(Top::First) if first_pressed => self.step(isize::MIN),
+                Some(Top::Last) => self.end(true),
+                Some(Top::First) if first_pressed => self.end(false),
                 Some(Top::First) => self.first_pressed = true,
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
@@ -1430,8 +1442,8 @@ impl Sidebar {
         match key.code {
             KeyCode::Down => self.step(1),
             KeyCode::Up => self.step(-1),
-            KeyCode::Home => self.step(isize::MIN),
-            KeyCode::End => self.step(isize::MAX),
+            KeyCode::Home => self.end(false),
+            KeyCode::End => self.end(true),
             KeyCode::Enter => return self.go(),
             KeyCode::Esc => self.close_search(),
             KeyCode::Backspace if term.is_empty() => self.close_search(),

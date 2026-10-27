@@ -108,9 +108,10 @@ impl Command {
 /// there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Top {
-    /// Moves the highlight so many rows down, or up, and no further than the
-    /// ends: `isize::MAX` rows to the last.
+    /// Moves the highlight so many rows down, or up.
     Move(isize),
+    /// Moves the highlight to the last row, as vim's `G`.
+    Last,
     /// Moves the highlight to the first row once pressed twice, as vim's
     /// `gg`. Pressed once, the sidebar waits for the second, and any other
     /// key drops the first: `Esc` does only that, as in vim.
@@ -131,7 +132,7 @@ impl Top {
             'j' => Some(Top::Move(1)),
             'k' => Some(Top::Move(-1)),
             'g' => Some(Top::First),
-            'G' => Some(Top::Move(isize::MAX)),
+            'G' => Some(Top::Last),
             'h' => Some(Top::Fold(Some(true))),
             'l' => Some(Top::Fold(Some(false))),
             ' ' => Some(Top::Fold(None)),
