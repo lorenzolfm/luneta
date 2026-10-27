@@ -16,12 +16,13 @@
 //! is open, the legend at its bottom lists the keys it takes there.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::close::{Act, Plan, Scope};
-use crate::sidebar::{self, ACCENT, NAME, Place, TAG};
+use crate::gruvbox;
+use crate::sidebar::{self, ACCENT, LIT, NAME, Place, TAG};
 use crate::skills::{Search, Skills};
 
 /// The key that opens the search over the skills, at the top of the menu, and
@@ -912,7 +913,7 @@ fn search_lines(search: &Search, width: usize, room: usize) -> Vec<Line<'static>
     let dim = Style::new().add_modifier(Modifier::DIM);
     let note = match search.skills() {
         Skills::Finding => Some(("finding skills…".to_owned(), dim)),
-        Skills::Failed(why) => Some((why.clone(), Style::new().fg(Color::Red))),
+        Skills::Failed(why) => Some((why.clone(), Style::new().fg(gruvbox::RED))),
         Skills::Found(skills) if skills.is_empty() => Some(("no skills here".to_owned(), dim)),
         Skills::Found(_) if search.count() == 0 => Some(("no match".to_owned(), dim)),
         Skills::Found(_) => None,
@@ -959,7 +960,7 @@ fn skill_line(
         spans.push(Span::styled(sidebar::cut(description, room), dim));
     }
     let line = Line::from(spans);
-    if selected { line.patch_style(Style::new().add_modifier(Modifier::REVERSED)) } else { line }
+    if selected { line.patch_style(Style::new().bg(LIT)) } else { line }
 }
 
 #[cfg(test)]

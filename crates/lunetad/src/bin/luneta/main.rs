@@ -6,6 +6,7 @@ mod close;
 mod commands;
 mod daemon;
 mod folds;
+mod gruvbox;
 mod host;
 mod hosted;
 mod icons;

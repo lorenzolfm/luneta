@@ -27,6 +27,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject};
 use crate::folds::Folds;
+use crate::gruvbox;
 use crate::icons;
 use crate::ledger::{self, Key};
 use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
@@ -54,11 +55,17 @@ pub const SPIN: Duration = Duration::from_millis(100);
 
 /// The colour of what wants you: an agent that waits for you, and the session
 /// luneta's zellij is in.
-pub const ACCENT: Color = Color::Magenta;
+pub const ACCENT: Color = gruvbox::PURPLE;
 /// The colour of the session luneta's zellij is in.
-pub const NAME: Color = Color::Cyan;
+pub const NAME: Color = gruvbox::AQUA;
 /// The colour of an agent at work, and of the search's `/`.
-pub const TAG: Color = Color::Yellow;
+pub const TAG: Color = gruvbox::YELLOW;
+/// The background of the highlight while the sidebar has the focus, on the
+/// row the keys took it to.
+pub const LIT: Color = gruvbox::BG2;
+/// The background of the highlight while it rests on your pane, the sidebar
+/// without the focus: a step softer, as `▌` marks that row already.
+const RESTING: Color = gruvbox::BG1;
 
 /// How many columns a mark takes: one, as each glyph of `Mark` does. Each
 /// pane's row keeps that many for one, whether it has one or not.
@@ -221,13 +228,13 @@ impl Mark {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
             Mark::Idle => ("✓".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Finished | Mark::Passed => {
-                ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD))
+                ("✓".to_owned(), style.fg(gruvbox::GREEN).add_modifier(Modifier::BOLD))
             },
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
-            Mark::Failed => ("✗".to_owned(), style.fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Mark::Failed => ("✗".to_owned(), style.fg(gruvbox::RED).add_modifier(Modifier::BOLD)),
             Mark::Ran => ("$".to_owned(), style),
         }
     }
@@ -1480,9 +1487,9 @@ impl Sidebar {
 
     /// Draws the sidebar into `area`, the highlight on its row: where the keys
     /// took it while the sidebar has the focus, and on the pane luneta's
-    /// zellij is on while it does not, which the view scrolls to show as the
-    /// pane changes. Its last column is left blank, to keep it off what is
-    /// beside it.
+    /// zellij is on while it does not, softer, which the view scrolls to show
+    /// as the pane changes. Its last column is left blank, to keep it off what
+    /// is beside it.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawn = Some(now);
         if self.due.is_some_and(|due| due <= now) {
@@ -1517,12 +1524,13 @@ impl Sidebar {
             lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
         let cursor = if lit { self.cursor_index() } else { None };
+        let highlight = Style::new().bg(if self.focused { LIT } else { RESTING });
         let mut drawn: Vec<Line<'static>> = Vec::new();
         for (at, row) in self.rows.iter().enumerate() {
             let lit = cursor == Some(at);
             for mut line in row_lines(row, width, frame, now) {
                 if lit {
-                    line = line.patch_style(Style::new().add_modifier(Modifier::REVERSED));
+                    line = line.patch_style(highlight);
                 }
                 drawn.push(line);
             }
@@ -1532,7 +1540,7 @@ impl Sidebar {
         lines.resize(height.saturating_sub(notes.len()), Line::default());
         lines.extend(notes);
         for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
-            buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset());
+            buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset().fg(gruvbox::FG1));
             buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
         }
     }
@@ -1587,7 +1595,7 @@ impl Sidebar {
     /// The menu and the legend leave the rows a line.
     fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
-        let error = Style::new().fg(Color::Red);
+        let error = Style::new().fg(gruvbox::RED);
         if let Some(away) = &self.away {
             notes.extend(wrapped(&format!("lunetad: {away}"), width, error));
         }
@@ -1819,13 +1827,13 @@ fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checko
 }
 
 /// The number of a pull request and the colour of its state, which gh lists
-/// it in: green while it is open, grey while it is a draft, and magenta once
+/// it in: green while it is open, grey while it is a draft, and purple once
 /// it is merged. A closed one is none.
 fn numbered(pull_request: PullRequest) -> Option<(u32, Color)> {
     let colour = match pull_request.state {
-        State::Open => Color::Green,
-        State::Draft => Color::DarkGray,
-        State::Merged => Color::Magenta,
+        State::Open => gruvbox::GREEN,
+        State::Draft => gruvbox::GREY,
+        State::Merged => gruvbox::PURPLE,
         State::Closed => return None,
     };
     Some((pull_request.number.get(), colour))
@@ -1991,7 +1999,7 @@ fn checkout_line(here: bool, checkout: &Checkout, width: usize) -> Line<'static>
     let mut spans = vec![
         margin(here),
         Span::raw(" ".repeat(LABEL - 1)),
-        Span::styled(branch, Style::new().fg(Color::DarkGray)),
+        Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
     if let Some(number) = number {
         spans.push(Span::raw(" "));
@@ -2187,7 +2195,7 @@ mod tests {
             })
             .collect();
         let lit = (0..height)
-            .filter(|y| buffer[(0, *y)].style().add_modifier.contains(Modifier::REVERSED))
+            .filter(|y| buffer[(0, *y)].bg != Color::Reset)
             .collect();
         (lines, lit)
     }
@@ -3154,9 +3162,9 @@ mod tests {
                 "       old",
             ]
         );
-        assert_eq!(colour(4), Some(Color::Green));
-        assert_eq!(colour(6), Some(Color::Magenta));
-        assert_eq!(colour(8), Some(Color::DarkGray));
+        assert_eq!(colour(4), Some(gruvbox::GREEN));
+        assert_eq!(colour(6), Some(gruvbox::PURPLE));
+        assert_eq!(colour(8), Some(gruvbox::GREY));
     }
 
     #[test]
