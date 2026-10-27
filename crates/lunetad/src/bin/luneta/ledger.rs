@@ -35,6 +35,11 @@ impl Session {
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
         Some(Session { started: nanos(started)?, socket })
     }
+
+    /// When its socket was made.
+    pub fn started(self) -> SystemTime {
+        moment(self.started)
+    }
 }
 
 /// A pane, as a ledger keeps it.

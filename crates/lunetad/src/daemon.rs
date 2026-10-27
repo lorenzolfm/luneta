@@ -14,6 +14,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::time::{Duration, Instant, SystemTime};
@@ -131,12 +132,15 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (wake_github, github_woken) = mpsc::sync_channel(1);
     let core = core::start(Wakes { panes: wake_panes, git: wake_git, github: wake_github })?;
     let (end, ending) = oneshot::channel();
-    follow(&core, &claim.folder, end)?;
+    // Read once, so that the folder the daemon says it reads is the one it
+    // does.
+    let sockets = zellij::folder();
+    follow(&core, &claim.folder, sockets.clone(), end)?;
     panes::follow(core.clone(), panes_woken, SWEEP)?;
     git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
-    let host = Host { started: SystemTime::now(), core };
+    let host = Host { started: SystemTime::now(), sockets, core };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     // Once zellij has been alone long enough, or the thread that would say so
@@ -194,9 +198,14 @@ impl Alone {
 }
 
 /// Has the core told what Claude Code's files, the shells' files in luneta's
-/// `folder` and zellij's sockets say, as they change, and says on `end` once
-/// zellij has had no session for `ALONE`.
-fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -> io::Result<()> {
+/// `folder` and zellij's sockets in `sockets` say, as they change, and says
+/// on `end` once zellij has had no session for `ALONE`.
+fn follow(
+    core: &SyncSender<Command>,
+    folder: &Path,
+    sockets: PathBuf,
+    end: oneshot::Sender<()>,
+) -> io::Result<()> {
     match claude::folder() {
         Some(folder) => {
             let mut files = claude::SessionFiles::new(&folder);
@@ -218,12 +227,11 @@ fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -
     };
     let any = |_: &Path| true;
     watch::watch("shells", dir, RecursiveMode::Recursive, any, TERMINAL_SWEEP, read, tell)?;
-    let folder = zellij::folder();
     let core = core.clone();
     let read = {
-        let folder = folder.clone();
+        let sockets = sockets.clone();
         let mut troubles = Troubles::default();
-        move || zellij::scan(&folder, &mut troubles)
+        move || zellij::scan(&sockets, &mut troubles)
     };
     let mut alone = Alone::default();
     let mut end = Some(end);
@@ -239,12 +247,14 @@ fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -
         core.send(Command::Sockets { sockets: scan.sockets, unread: scan.unread }).is_ok()
     };
     let wanted = zellij::of_sessions;
-    watch::watch("zellij", folder, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
+    watch::watch("zellij", sockets, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
 }
 
 /// What the daemon answers from.
 struct Host {
     started: SystemTime,
+    /// The folder it reads zellij's sessions in.
+    sockets: PathBuf,
     core: SyncSender<Command>,
 }
 
@@ -255,6 +265,7 @@ impl Daemon for Host {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             pid: std::process::id(),
             started_at: Some(self.started.into()),
+            zellij_folder: Some(self.sockets.as_os_str().as_bytes().to_vec()),
         }))
     }
 

@@ -78,8 +78,7 @@ const LONG: Duration = Duration::from_secs(1);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listed {
     name: String,
-    started: SystemTime,
-    /// The session, as the news keeps it.
+    /// The session, as the news keeps it, which says when it started.
     kept: ledger::Session,
 }
 
@@ -90,7 +89,7 @@ impl Listed {
     fn of(session: &Session) -> Option<Self> {
         let started = SystemTime::try_from(session.started_at?).ok()?;
         let kept = ledger::Session::new(started, NonZeroU64::new(session.socket)?)?;
-        Some(Listed { name: session.name.clone(), started, kept })
+        Some(Listed { name: session.name.clone(), kept })
     }
 
     /// Its pane `pane`, as the news keeps it.
@@ -102,7 +101,7 @@ impl Listed {
     #[cfg(test)]
     pub fn new(name: &str, started: SystemTime) -> Self {
         let kept = ledger::Session::new(started, NonZeroU64::MIN).unwrap();
-        Listed { name: name.to_owned(), started, kept }
+        Listed { name: name.to_owned(), kept }
     }
 }
 
@@ -615,11 +614,12 @@ impl Sidebar {
 
     /// The sessions that run, as the daemon lists them now, or none where its
     /// list may leave out one that does: it does not answer, and what it said
-    /// last stands; or it could not read all of zellij's folder; or it lists
-    /// one the news cannot tell from another.
+    /// last stands; or it could not read all of zellij's folder, or does not
+    /// say whether it could, as one older than the count; or it lists one the
+    /// news cannot tell from another.
     fn live(&self) -> Option<BTreeSet<ledger::Session>> {
         let host = self.host.as_ref()?;
-        if self.away.is_some() || host.unread_sockets > 0 {
+        if self.away.is_some() || host.unread_sockets != Some(0) {
             return None;
         }
         host.sessions.iter().map(|session| Some(Listed::of(session)?.kept)).collect()
@@ -1655,7 +1655,9 @@ fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
         .filter_map(|session| Some((Listed::of(session)?, session)))
         .collect();
     let unlisted = sessions.len() - listed.len();
-    listed.sort_by(|(a, _), (b, _)| (a.started, &a.name).cmp(&(b.started, &b.name)));
+    listed.sort_by(|(a, _), (b, _)| {
+        (a.kept.started(), &a.name).cmp(&(b.kept.started(), &b.name))
+    });
     (listed, unlisted)
 }
 
@@ -2098,7 +2100,7 @@ mod tests {
     fn listed(name: &str, started: u64) -> Listed {
         let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(started);
         let kept = ledger::Session::new(started_at, NonZeroU64::new(started).unwrap()).unwrap();
-        Listed { name: name.to_owned(), started: started_at, kept }
+        Listed { name: name.to_owned(), kept }
     }
 
     fn agent(session: &str, pane: u32, status: Status, name: Option<&str>) -> Agent {
@@ -2127,7 +2129,7 @@ mod tests {
             agents,
             unread: 0,
             pull_requests: Vec::new(),
-            unread_sockets: 0,
+            unread_sockets: Some(0),
         }
     }
 
@@ -3049,17 +3051,21 @@ mod tests {
 
     /// A list the daemon may have left a session out of takes nothing of
     /// what you saw in it, however long it stands: what it said last, while
-    /// it does not answer, as a session may have started since, and one it
-    /// could not read all of zellij's folder for.
+    /// it does not answer, as a session may have started since; one it
+    /// could not read all of zellij's folder for; and one from a daemon older
+    /// than the count, which does not say whether it could.
     #[test]
     fn a_session_a_list_falls_short_of_keeps_what_you_saw() {
-        let short: [fn(&mut Sidebar); 2] = [
+        let short: [fn(&mut Sidebar); 3] = [
             |sidebar| {
                 sidebar.heard(host(Vec::new(), Vec::new()));
                 sidebar.lost("lunetad does not answer".to_owned());
             },
             |sidebar| {
-                sidebar.heard(Host { unread_sockets: 1, ..host(Vec::new(), Vec::new()) });
+                sidebar.heard(Host { unread_sockets: Some(1), ..host(Vec::new(), Vec::new()) });
+            },
+            |sidebar| {
+                sidebar.heard(Host { unread_sockets: None, ..host(Vec::new(), Vec::new()) });
             },
         ];
         for short in short {

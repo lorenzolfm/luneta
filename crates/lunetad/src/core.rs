@@ -366,7 +366,7 @@ impl Known {
             agents,
             unread: self.found.unread,
             pull_requests,
-            unread_sockets: self.unread_sockets,
+            unread_sockets: Some(self.unread_sockets),
         }
     }
 

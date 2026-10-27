@@ -56,9 +56,10 @@ message Host {
   repeated PullRequest pull_requests = 6;
   // The folders and sockets of zellij's the daemon could not read as it last
   // looked, any of which could be a session's: while there are any,
-  // `sessions` may leave out one that runs. 0 from a daemon older than this
-  // field, which could not say.
-  uint32 unread_sockets = 7;
+  // `sessions` may leave out one that runs. Absent from a daemon older than
+  // this field, which could not say, and whose `sessions` may leave one out
+  // too.
+  optional uint32 unread_sockets = 7;
 }
 
 // A zellij session that runs: its server listens on a socket named for it.
@@ -287,6 +288,11 @@ message InfoResponse {
   uint32 pid = 2;
   // When it started.
   google.protobuf.Timestamp started_at = 3;
+  // The folder it reads zellij's sessions in, as its environment named it
+  // when it started, in the bytes of its path, which need not be UTF-8. Its
+  // `Host.sessions` are those of this folder alone. Absent from a daemon
+  // older than this field, which could not say.
+  optional bytes zellij_folder = 4;
 }
 
 message ListAgentsRequest {}

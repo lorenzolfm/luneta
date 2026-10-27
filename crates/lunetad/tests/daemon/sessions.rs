@@ -294,13 +294,13 @@ fn the_host_says_how_many_of_zellij_s_folders_it_could_not_read() {
     let mode = |mode| fs::set_permissions(host.contract(), Permissions::from_mode(mode)).unwrap();
     mode(0o000);
     let unread = eventually("the folder of work does not read", || {
-        Some(host.host()).filter(|now| now.unread_sockets == 1)
+        Some(host.host()).filter(|now| now.unread_sockets == Some(1))
     });
     mode(0o755);
     assert!(session(&unread, "work").is_none(), "{:?}", unread.sessions);
     eventually("work runs again, and every folder reads", || {
         let now = host.host();
-        (now.unread_sockets == 0 && session(&now, "work").is_some()).then_some(())
+        (now.unread_sockets == Some(0) && session(&now, "work").is_some()).then_some(())
     });
 }
 
