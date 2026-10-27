@@ -1,6 +1,5 @@
 //! The daemon on demand: `luneta` starts it where none runs, and in the place
-//! of one of another version, and it ends once zellij has had no session for
-//! a while.
+//! of an older one, and it ends once zellij has had no session for a while.
 
 use std::env;
 use std::fs;
@@ -20,14 +19,22 @@ use rustix::process::{Pid, Signal};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::host::{answered, eventually, info, start, Host, Running, LUNETA, LUNETAD, SOCKET};
+use crate::host::{
+    answered, eventually, folder_in, info, start, Host, Running, LUNETA, LUNETAD, SOCKET,
+};
 
-/// The version the stand-in for a daemon an upgrade left running says it is.
+/// The version of the stand-in for a daemon an upgrade left running.
 const OLDER: &str = "0.0.1";
 
-/// Set, it has the test binary, run again, stand in for a daemon of the
-/// version `OLDER` in the folder it names.
-const STAND_IN: &str = "LUNETA_TEST_OLDER_LUNETAD";
+/// The version of the stand-in for a daemon that a luneta from before an
+/// upgrade finds running.
+const NEWER: &str = "99.0.0";
+
+/// Set, it has the test binary, run again, stand in for a daemon in the
+/// folder it names, of the version that `STAND_IN_VERSION` says.
+const STAND_IN: &str = "LUNETA_TEST_STAND_IN_FOLDER";
+
+const STAND_IN_VERSION: &str = "LUNETA_TEST_STAND_IN_VERSION";
 
 /// `luneta watch`, run as `luneta`, and the host it wrote out.
 fn watch(host: &Host, luneta: &Path) -> api::Host {
@@ -44,12 +51,18 @@ fn pid(host: &api::Host) -> u32 {
 
 /// The pid of the daemon that answers in the host's folder, if one does.
 fn answering(host: &Host) -> Option<u32> {
-    let socket = host.runtime.path().join(SOCKET);
+    let folder = folder_in(host.runtime.path())?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&socket).await.ok()?;
+        let mut daemon = lunetad::connect(&folder).await.ok()?;
         Some(daemon.info(InfoRequest {}).await.ok()?.into_inner().pid)
     })
+}
+
+/// Whether a daemon holds the host's folder, which none does that is not
+/// there.
+fn held(host: &Host) -> bool {
+    folder_in(host.runtime.path()).is_some_and(|folder| folder::held(&folder).unwrap())
 }
 
 fn stop(pid: u32) {
@@ -137,7 +150,7 @@ fn the_cli_says_that_no_daemon_runs_and_starts_none() {
             assert!(said.contains(&none), "{command}: {said}");
         }
         assert_eq!(answering(host), None);
-        assert!(!folder::held(&host.folder()).unwrap());
+        assert!(!held(host));
     };
     none_runs(&host);
 
@@ -233,23 +246,21 @@ fn luneta_starts_the_lunetad_beside_it_or_else_the_one_on_the_path() {
     let luneta = elsewhere.path().join("luneta");
 
     stop(pid(&watch(&host, &luneta)));
-    eventually("the daemon beside luneta ends", || {
-        (!folder::held(&host.folder()).unwrap()).then_some(())
-    });
+    eventually("the daemon beside luneta ends", || (!held(&host)).then_some(()));
     fs::remove_file(elsewhere.path().join("lunetad")).unwrap();
     let _daemon = Detached { host: &host, pid: pid(&watch(&host, &luneta)) };
     assert_eq!(fs::read_to_string(&started).unwrap(), "beside\npath\n");
 }
 
-/// A daemon of another version than luneta's, as an upgrade leaves running,
-/// `luneta watch` stops, and starts one of its own version in its place. It
-/// does so only where the lunetad it starts is of its version: one of another
-/// would be stopped in its turn by the next luneta, for good. `luneta info`
-/// says which runs, and stops none.
+/// A daemon older than luneta, as an upgrade leaves running, `luneta watch`
+/// stops, and starts one of its own version in its place. It does so only
+/// where the lunetad it starts is newer than that one: one that is not would
+/// be stopped in its turn by the next luneta of the daemon's version, for
+/// good. `luneta info` says which runs, and stops none.
 #[test]
-fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_another() {
+fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let host = Host::new();
-    let mut older = older(&host);
+    let mut older = stand_in(&host, OLDER);
     let said = info(host.vars());
     assert!(said.starts_with(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
 
@@ -268,48 +279,64 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_another() {
     assert!(said.starts_with(&format!("lunetad {} ", env!("CARGO_PKG_VERSION"))), "{said}");
 }
 
-/// Starts the stand-in for a daemon of the version `OLDER` in the host's
-/// folder, and waits for it to answer.
-fn older(host: &Host) -> Running {
-    let mut command = Command::new(env::current_exe().unwrap());
-    command
-        .args(["demand::older_lunetad", "--exact", "--ignored"])
-        .env(STAND_IN, host.folder())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let older = Running::spawn(&mut command);
-    eventually("the older daemon answers", || (answering(host)? == older.pid()).then_some(()));
-    older
+/// A daemon newer than luneta, as a luneta from before an upgrade finds
+/// running, `luneta watch` keeps: were it to stop it, the newer luneta would
+/// stop the one it started in turn, and the two would take turns at it for
+/// as long as both ask.
+#[test]
+fn luneta_watch_keeps_a_daemon_newer_than_it() {
+    let host = Host::new();
+    let mut newer = stand_in(&host, NEWER);
+    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), newer.pid());
+    assert_eq!(newer.ended_within(Duration::ZERO), None);
 }
 
-/// A daemon of the version `OLDER`, as the test binary that `older` runs
+/// Starts the stand-in for a daemon of `version` in the host's folder, and
+/// waits for it to answer.
+fn stand_in(host: &Host, version: &str) -> Running {
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args(["demand::stand_in_lunetad", "--exact", "--ignored"])
+        .env(STAND_IN, host.folder())
+        .env(STAND_IN_VERSION, version)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let stand_in = Running::spawn(&mut command);
+    eventually("the stand-in answers", || (answering(host)? == stand_in.pid()).then_some(()));
+    stand_in
+}
+
+/// A daemon of another version, as the test binary that `stand_in` runs
 /// again: it holds the folder and answers there as one would, and ends as
 /// SIGTERM ends it. Run on its own, as the tests are, it does nothing.
 #[test]
 #[ignore = "the stand-in for a daemon of another version, which a test runs as a process"]
-fn older_lunetad() {
+fn stand_in_lunetad() {
     let Some(folder) = env::var_os(STAND_IN) else {
         return;
     };
+    let version = env::var(STAND_IN_VERSION).unwrap();
     let claim = Claim::take(Path::new(&folder)).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(claim.socket()).unwrap();
         tonic::transport::Server::builder()
-            .add_service(DaemonServer::new(Older))
+            .add_service(DaemonServer::new(StandIn { version }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
     });
 }
 
-struct Older;
+struct StandIn {
+    version: String,
+}
 
 #[tonic::async_trait]
-impl Daemon for Older {
+impl Daemon for StandIn {
     async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
-        let pid = std::process::id();
-        Ok(Response::new(InfoResponse { version: OLDER.to_owned(), pid, started_at: None }))
+        let (version, pid) = (self.version.clone(), std::process::id());
+        Ok(Response::new(InfoResponse { version, pid, started_at: None }))
     }
 
     async fn list_agents(

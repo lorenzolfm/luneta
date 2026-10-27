@@ -38,9 +38,6 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // `daemon::reach` checks it before it reaches a daemon there: in a folder
-    // that is not this user's alone, whoever has it could be listening in its
-    // place.
     let folder: Result<PathBuf, String> = folder::find()
         .ok_or_else(|| "neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in".to_owned());
     let Some(command) = cli.command else {

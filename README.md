@@ -1232,8 +1232,10 @@ servers. They start the `lunetad` beside them, which the same build made, or
 else the first on the `PATH`, detached, with what it says in `lunetad.log`
 beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
 It lives as long as zellij does, not as long as a client is attached: once
-zellij has had no session for 30 seconds, it ends. A daemon of another version,
-as an upgrade leaves running, they stop, and start their own in its place.
+zellij has had no session for 30 seconds, it ends. A daemon older than them,
+as an upgrade leaves running, they stop, and start their own in its place. A
+newer one they keep, so that two versions in use at once never take turns at
+it: after a rollback, the newer daemon runs on until zellij's last session ends.
 `luneta info` says which daemon runs, `luneta agents` lists the agents it
 finds, and `luneta sessions` the sessions, their panes and the branch each
 works on; none of the three starts one. The daemon asks `zellij` and `git` on

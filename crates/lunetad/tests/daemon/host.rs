@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::{self, WatchRequest};
+use lunetad::folder::{self, Folder};
 use tempfile::TempDir;
 
 pub const LUNETAD: &str = env!("CARGO_BIN_EXE_lunetad");
@@ -208,13 +209,18 @@ impl Host {
 
     /// The host, as the daemon answers a first look.
     pub fn host(&self) -> api::Host {
-        let socket = self.runtime.path().join(SOCKET);
+        let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let mut daemon = lunetad::connect(&socket).await.unwrap();
+            let mut daemon = lunetad::connect(&folder).await.unwrap();
             daemon.watch(WatchRequest { after: None }).await.unwrap().into_inner()
         })
     }
+}
+
+/// The folder in `runtime` that a daemon reaches, if one has made it.
+pub fn folder_in(runtime: &Path) -> Option<Folder> {
+    folder::open(&runtime.join("luneta")).unwrap()
 }
 
 /// A process of a test's, killed as it goes out of scope, as a crash would end

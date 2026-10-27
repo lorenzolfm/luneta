@@ -95,33 +95,55 @@ impl Id {
     }
 }
 
+/// What a scan of zellij's folder finds.
+pub struct Scan {
+    pub sockets: Vec<Socket>,
+    /// The folders and sockets it cannot read, any of which could be a
+    /// session's.
+    pub unread: u32,
+}
+
+impl Scan {
+    /// Whether zellij has no session, as far as the scan can tell: one that
+    /// could not read all of the folder cannot.
+    #[must_use]
+    pub fn alone(&self) -> bool {
+        self.sockets.is_empty() && self.unread == 0
+    }
+}
+
 /// The sessions whose sockets are in `folder` now. What goes wrong in reading
 /// it, `troubles` says.
-pub fn scan(folder: &Path, troubles: &mut Troubles) -> Vec<Socket> {
-    let mut sockets = Vec::new();
-    for contract in listed(folder, troubles) {
+pub fn scan(folder: &Path, troubles: &mut Troubles) -> Scan {
+    let mut scan = Scan { sockets: Vec::new(), unread: 0 };
+    for contract in listed(folder, troubles, &mut scan.unread) {
         if !contract.file_name().is_some_and(|name| name.to_string_lossy().starts_with(CONTRACT)) {
             continue;
         }
-        for path in listed(&contract, troubles) {
+        for path in listed(&contract, troubles, &mut scan.unread) {
             match socket(&path) {
-                Ok(Some(socket)) => sockets.push(socket),
+                Ok(Some(socket)) => scan.sockets.push(socket),
                 Ok(None) => {},
                 // A socket gone since the folder was listed is a session that
                 // has ended.
                 Err(error) if error.kind() == ErrorKind::NotFound => {},
-                Err(error) => troubles.say(format!("{}: {error}", path.display())),
+                Err(error) => {
+                    troubles.say(format!("{}: {error}", path.display()));
+                    scan.unread += 1;
+                },
             }
         }
     }
     troubles.done();
-    sockets
+    scan
 }
 
-/// The paths in `dir`, or none when it cannot be listed, which `troubles` says.
-fn listed(dir: &Path, troubles: &mut Troubles) -> Vec<PathBuf> {
+/// The paths in `dir`, or none when it cannot be listed, which `troubles` says
+/// and `unread` counts.
+fn listed(dir: &Path, troubles: &mut Troubles, unread: &mut u32) -> Vec<PathBuf> {
     watch::listed(dir).unwrap_or_else(|error| {
         troubles.say(format!("{}: {error}", dir.display()));
+        *unread += 1;
         Vec::new()
     })
 }
@@ -250,5 +272,30 @@ impl Sessions {
     fn could_be(&self, named: &str, started: Option<SystemTime>) -> impl Iterator<Item = Id> {
         let before = move |id: &Id| started.is_none_or(|started| id.made <= started);
         self.held.get(named).into_iter().flatten().copied().filter(before)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{scan, CONTRACT};
+    use crate::watch::Troubles;
+
+    /// zellij is alone only as far as a scan can tell: a folder of its
+    /// sessions that cannot be listed could hold one, and so it is not.
+    #[test]
+    fn zellij_is_not_alone_where_its_folder_cannot_be_read() {
+        let folder = tempfile::tempdir().unwrap();
+        let contract = folder.path().join(format!("{CONTRACT}1"));
+        fs::create_dir(&contract).unwrap();
+        let mut troubles = Troubles::default();
+        assert!(scan(folder.path(), &mut troubles).alone());
+
+        fs::set_permissions(&contract, Permissions::from_mode(0o000)).unwrap();
+        let unread = scan(folder.path(), &mut troubles);
+        fs::set_permissions(&contract, Permissions::from_mode(0o755)).unwrap();
+        assert!(!unread.alone());
     }
 }

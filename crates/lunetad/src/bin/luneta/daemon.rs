@@ -1,5 +1,5 @@
 //! lunetad as luneta reaches it: on its socket in the folder, started where
-//! none answers, and started afresh in the place of one of another version.
+//! none answers, and started afresh in the place of an older one.
 //!
 //! luneta starts the lunetad beside it, which the same build made, or else
 //! the first on the `PATH`. It starts it detached: in a session of its own,
@@ -11,10 +11,17 @@
 //! Two lunetas that find none in the same moment start one each, and the
 //! folder's lock lets one through. The other ends at once, and both lunetas
 //! reach the one that runs.
+//!
+//! A daemon makes way only for a newer one. Were it to make way for one of
+//! any other version, two lunetas of two versions, each with its lunetad
+//! beside it, would take turns at it for as long as both ask: zellij's
+//! plugin runs a `luneta watch` for each answer, which knows nothing of the
+//! one before it.
 
+use std::cell::OnceCell;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom};
+use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -23,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::InfoRequest;
-use lunetad::folder::{self, Refusal, ANOTHER_RUNS, LOG, SOCKET};
+use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use lunetad::program;
 use rustix::process::{Pid, Signal};
 use tonic::transport::Channel;
@@ -59,62 +66,55 @@ const VERSION_LIMIT: Duration = Duration::from_secs(2);
 pub enum Reach {
     /// The one that runs, if one does, whatever it is: to say what runs.
     Running,
-    /// The one that runs, or one started where none does.
-    Started,
-    /// As `Started`, and one of this luneta's version in the place of one of
-    /// another, as an upgrade leaves running.
+    /// The one that runs, or one started where none does, or in the place of
+    /// an older one, as an upgrade leaves running.
     Current,
 }
 
-/// A client of the daemon in `folder`, as `wanted`, or why there is none.
-pub async fn reach(folder: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, String> {
-    match folder::check(folder) {
-        Ok(()) => {},
-        // No daemon has run yet, as one makes the folder as it starts.
-        Err(Refusal::Io(_, error)) if error.kind() == ErrorKind::NotFound => {},
-        Err(refusal) => return Err(refusal.to_string()),
-    }
-    let socket = folder.join(SOCKET);
+/// A client of the daemon in the folder at `path`, as `wanted`, or why there
+/// is none.
+pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, String> {
+    let folder = match folder::open(path).map_err(|refusal| refusal.to_string())? {
+        Some(folder) => folder,
+        None if wanted == Reach::Running => return Err(none_runs(path)),
+        // No daemon has run yet, as one makes the folder as it starts. luneta
+        // makes it first, as it reaches into no folder that it has not
+        // checked.
+        None => folder::make(path).map_err(|refusal| refusal.to_string())?,
+    };
+    let socket = folder.socket();
     let deadline = Instant::now() + START;
     let mut started: Option<Started> = None;
-    // The daemon luneta has stopped, by its pid, and waits to end. It stops
-    // one at the most: a luneta of the version it stopped would stop the next
-    // in turn, and the two would take turns for good.
+    // The daemon luneta has stopped, by its pid, and waits to end.
     let mut stopped: Option<u32> = None;
-    // Whether the lunetad luneta starts is of its version, once asked.
-    let mut current: Option<bool> = None;
+    // The release of the lunetad luneta starts, once asked.
+    let starting = OnceCell::new();
     loop {
-        let why = match lunetad::connect(&socket).await {
-            Ok(daemon) if wanted != Reach::Current => {
-                reap(started);
-                return Ok(daemon);
-            },
+        let why = match lunetad::connect(&folder).await {
+            // `Running` starts none, so there is none to reap.
+            Ok(daemon) if wanted == Reach::Running => return Ok(daemon),
             Ok(mut daemon) => match daemon.info(InfoRequest {}).await {
                 Ok(info) => {
                     let info = info.into_inner();
                     let (version, pid) = (info.version, info.pid);
                     if stopped == Some(pid) {
                         format!("lunetad {version} (pid {pid}) was stopped, and has not ended")
-                    } else if version == VERSION
-                        || stopped.is_some()
-                        || !*current.get_or_insert_with(starts_current)
-                    {
+                    } else if !makes_way(&version, || *starting.get_or_init(release)) {
                         reap(started);
                         return Ok(daemon);
                     } else {
                         stop(pid)?;
                         stopped = Some(pid);
-                        format!("lunetad {version} (pid {pid}) is of another version, and ends")
+                        format!("lunetad {version} (pid {pid}) is older than luneta, and ends")
                     }
                 },
                 Err(status) => format!("{}: {}", socket.display(), causes(&status)),
             },
             Err(error) => format!("{}: {}", socket.display(), causes(&error)),
         };
-        let held = || folder::held(folder).map_err(|refusal| refusal.to_string());
+        let held = || folder::held(&folder).map_err(|refusal| refusal.to_string());
         if wanted == Reach::Running {
-            let none = || format!("no lunetad runs in {}", folder.display());
-            return Err(if held()? { why } else { none() });
+            return Err(if held()? { why } else { none_runs(path) });
         }
         // The folder's lock is not looked at while a daemon luneta started is
         // starting: it is taken to look, and that daemon could find it taken.
@@ -123,7 +123,7 @@ pub async fn reach(folder: &Path, wanted: Reach) -> Result<DaemonClient<Channel>
             // for it to answer, or to let the folder go.
             None => {
                 if !held()? {
-                    started = Some(start(folder)?);
+                    started = Some(start(&folder)?);
                 }
             },
             Some(daemon) => match daemon.child.try_wait() {
@@ -148,6 +148,11 @@ pub async fn reach(folder: &Path, wanted: Reach) -> Result<DaemonClient<Channel>
         }
         tokio::time::sleep(LOOK).await;
     }
+}
+
+/// What luneta says where no daemon runs in the folder at `path`.
+fn none_runs(path: &Path) -> String {
+    format!("no lunetad runs in {}", path.display())
 }
 
 /// Waits for whatever luneta `started` as it ends, so that one that ends
@@ -191,9 +196,8 @@ impl Started {
 }
 
 /// Starts lunetad, detached, to hold `folder`.
-fn start(folder: &Path) -> Result<Started, String> {
-    folder::make(folder).map_err(|refusal| refusal.to_string())?;
-    let path = folder.join(LOG);
+fn start(folder: &Folder) -> Result<Started, String> {
+    let path = folder.path().join(LOG);
     let opened = || {
         let log = OpenOptions::new().create(true).append(true).mode(0o600).open(&path)?;
         let mut from = log.metadata()?.len();
@@ -227,13 +231,45 @@ fn lunetad() -> PathBuf {
     beside.unwrap_or_else(|| PathBuf::from(LUNETAD))
 }
 
-/// Whether the lunetad that luneta starts is of luneta's version. One of
-/// another would be stopped in its turn by the next luneta to come.
-fn starts_current() -> bool {
+/// A release of luneta and lunetad, by its version, as `0.2.2`. Releases are
+/// ordered, and a daemon makes way for a newer one alone.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Release(u64, u64, u64);
+
+impl Release {
+    /// The release `version` names, or none: a version of luneta's is three
+    /// numbers and no more.
+    fn parse(version: &str) -> Option<Release> {
+        let mut numbers = version.split('.').map(|number| number.parse().ok());
+        match (numbers.next(), numbers.next(), numbers.next(), numbers.next()) {
+            (Some(Some(major)), Some(Some(minor)), Some(Some(patch)), None) => {
+                Some(Release(major, minor, patch))
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Whether the daemon of the version `running` makes way for the lunetad
+/// that luneta starts, of the release `starting` says: only where that one
+/// is newer than it, and luneta too. A daemon as new as luneta makes way for
+/// none, and so luneta asks that lunetad nothing while it is; and a lunetad
+/// that is no newer than the daemon would be stopped in its turn by the next
+/// luneta of the daemon's version. A daemon whose version luneta cannot read
+/// is older than any.
+fn makes_way(running: &str, starting: impl FnOnce() -> Option<Release>) -> bool {
+    let running = Release::parse(running);
+    let older = |than: Release| running.is_none_or(|running| running < than);
+    Release::parse(VERSION).is_some_and(older) && starting().is_some_and(older)
+}
+
+/// The release of the lunetad that luneta starts, as it says to `--version`.
+fn release() -> Option<Release> {
     let mut lunetad = Command::new(lunetad());
     lunetad.arg("--version");
-    let said = program::run(&mut lunetad, VERSION_LIMIT).ok().and_then(|ran| ran.answer().ok());
-    said.is_some_and(|said| String::from_utf8_lossy(&said).trim() == format!("{LUNETAD} {VERSION}"))
+    let said = program::run(&mut lunetad, VERSION_LIMIT).ok()?.answer().ok()?;
+    let said = String::from_utf8_lossy(&said);
+    Release::parse(said.trim().strip_prefix(LUNETAD)?.strip_prefix(' ')?)
 }
 
 /// Has the daemon `pid` end. SIGTERM ends a daemon of any version, where an

@@ -33,21 +33,15 @@ pub fn start(folder: PathBuf, events: Sender<Event>) {
 
 /// Asks again each time the daemon answers, for the host once it is no longer
 /// as last seen, until luneta's loop is gone. A daemon that goes away is
-/// looked for again, each `AGAIN`, and started where none runs.
-///
-/// The first daemon luneta reaches is of its version, as an upgrade leaves
-/// the one before it running. Any it reaches after that will do: a luneta
-/// of the version it stopped, which ran from before the upgrade, would stop
-/// the next in turn, and the two would take turns for good.
+/// looked for again, each `AGAIN`, and started where none runs, or in the
+/// place of an older one.
 async fn watch(folder: PathBuf, events: Sender<Event>) {
-    let mut wanted = Reach::Current;
     loop {
         // A daemon found afresh is asked for the whole host, as one started
         // again counts its versions afresh.
         let mut after: Option<Version> = None;
-        let failure = match daemon::reach(&folder, wanted).await {
+        let failure = match daemon::reach(&folder, Reach::Current).await {
             Ok(mut daemon) => loop {
-                wanted = Reach::Started;
                 match daemon.watch(WatchRequest { after }).await {
                     Ok(host) => {
                         let host = host.into_inner();

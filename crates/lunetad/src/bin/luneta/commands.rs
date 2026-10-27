@@ -33,7 +33,7 @@ pub enum Command {
     Sessions,
     /// Wait for the host to change, and write it out as the protocol encodes
     /// it, for a program to read: luneta's zellij plugin. lunetad is started
-    /// where none runs, and again where one of another version does.
+    /// where none runs, and again where an older one does.
     Watch {
         /// The host as last seen, `<pid>:<seq>` from its version, to wait for
         /// the next. Without it, the host is written out at once.

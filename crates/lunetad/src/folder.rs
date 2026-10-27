@@ -65,27 +65,57 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Makes `folder` for this user alone, unless it is there, and checks that it
-/// is that, as the shell hook does before it writes in it. One just made is
-/// checked too, as whatever made it has no say in what it turned out to be.
-pub fn make(folder: &Path) -> Result<(), Refusal> {
-    match DirBuilder::new().mode(0o700).create(folder) {
-        Ok(()) => {},
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
-        Err(error) => return Err(Refusal::Io(folder.to_owned(), error)),
+/// A folder that is this user's alone, as `open` or `make` found it: the only
+/// place a daemon is reached in, or looked for. A socket in a folder that is
+/// not could be anyone's.
+pub struct Folder(PathBuf);
+
+impl Folder {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
     }
-    check(folder)
+
+    /// The socket the daemon listens on, in the folder.
+    #[must_use]
+    pub fn socket(&self) -> PathBuf {
+        self.0.join(SOCKET)
+    }
 }
 
-/// Whether a daemon holds `folder`, which is this user's alone: one does from
-/// the moment it starts until it has ended, however it ends. To tell, the
-/// lock is taken and let go at once, and a daemon that starts in that moment
-/// takes the folder for another's, and ends.
-pub fn held(folder: &Path) -> Result<bool, Refusal> {
-    let path = folder.join(LOCK);
+/// The folder at `path`, which must be this user's alone if it is there.
+/// None is there before a daemon has made it.
+pub fn open(path: &Path) -> Result<Option<Folder>, Refusal> {
+    match check(path) {
+        Ok(()) => Ok(Some(Folder(path.to_owned()))),
+        Err(Refusal::Io(_, error)) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// Makes the folder at `path` for this user alone, unless it is there, and
+/// checks that it is that, as the shell hook does before it writes in it. One
+/// just made is checked too, as whatever made it has no say in what it turned
+/// out to be.
+pub fn make(path: &Path) -> Result<Folder, Refusal> {
+    match DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {},
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
+        Err(error) => return Err(Refusal::Io(path.to_owned(), error)),
+    }
+    check(path)?;
+    Ok(Folder(path.to_owned()))
+}
+
+/// Whether a daemon holds `folder`: one does from the moment it starts until
+/// it has ended, however it ends. To tell, the lock is taken and let go at
+/// once, and a daemon that starts in that moment takes the folder for
+/// another's, and ends.
+pub fn held(folder: &Folder) -> Result<bool, Refusal> {
+    let path = folder.0.join(LOCK);
     let lock = match File::open(&path) {
         Ok(lock) => lock,
-        // No daemon has run in the folder, or in a folder that is there at all.
+        // No daemon has run in the folder.
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(Refusal::Io(path, error)),
     };
@@ -98,9 +128,8 @@ pub fn held(folder: &Path) -> Result<bool, Refusal> {
 }
 
 /// Checks that `folder` is this user's alone, as the daemon, its CLI and the
-/// shell hook each do before they use it: a socket in a folder that is not
-/// could be anyone's.
-pub fn check(folder: &Path) -> Result<(), Refusal> {
+/// shell hook each do before they use it.
+fn check(folder: &Path) -> Result<(), Refusal> {
     let found = fs::symlink_metadata(folder);
     let found = found.map_err(|error| Refusal::Io(folder.to_owned(), error))?;
     // A link is not taken for the folder it leads to, even one of yours.

@@ -126,7 +126,9 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     // Once zellij has been alone long enough, or the thread that would say so
     // has ended, which leaves the daemon blind to it.
     let ended = async move {
-        let _ = ending.await;
+        if ending.await.is_err() {
+            eprintln!("lunetad: zellij's sessions are no longer followed, and so lunetad ends");
+        }
         match fs::remove_file(&socket) {
             Ok(()) => {},
             Err(error) if error.kind() == ErrorKind::NotFound => {},
@@ -150,9 +152,9 @@ struct Alone {
 }
 
 impl Alone {
-    /// For how long zellij has had no session, as it has `sessions` at `now`.
-    fn saw(&mut self, sessions: usize, now: Instant) -> Duration {
-        if sessions > 0 {
+    /// For how long zellij has had no session, as it is `alone` at `now`.
+    fn saw(&mut self, alone: bool, now: Instant) -> Duration {
+        if !alone {
             self.since = None;
             return Duration::ZERO;
         }
@@ -195,8 +197,8 @@ fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -
     };
     let mut alone = Alone::default();
     let mut end = Some(end);
-    let tell = move |sockets: Vec<zellij::Socket>| {
-        if alone.saw(sockets.len(), Instant::now()) >= ALONE
+    let tell = move |scan: zellij::Scan| {
+        if alone.saw(scan.alone(), Instant::now()) >= ALONE
             && let Some(end) = end.take()
         {
             let secs = ALONE.as_secs();
@@ -204,7 +206,7 @@ fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -
             // The server has ended already, if no one waits for the word.
             let _ = end.send(());
         }
-        core.send(Command::Sockets(sockets)).is_ok()
+        core.send(Command::Sockets(scan.sockets)).is_ok()
     };
     let wanted = zellij::of_sessions;
     watch::watch("zellij", folder, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
@@ -288,11 +290,11 @@ mod tests {
         let start = Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
         let mut alone = Alone::default();
-        assert_eq!(alone.saw(0, at(0)), Duration::ZERO);
-        assert_eq!(alone.saw(0, at(20)), Duration::from_secs(20));
-        assert_eq!(alone.saw(1, at(25)), Duration::ZERO);
-        assert_eq!(alone.saw(0, at(40)), Duration::ZERO);
-        assert_eq!(alone.saw(0, at(69)), Duration::from_secs(29));
-        assert_eq!(alone.saw(0, at(70)), Duration::from_secs(30));
+        assert_eq!(alone.saw(true, at(0)), Duration::ZERO);
+        assert_eq!(alone.saw(true, at(20)), Duration::from_secs(20));
+        assert_eq!(alone.saw(false, at(25)), Duration::ZERO);
+        assert_eq!(alone.saw(true, at(40)), Duration::ZERO);
+        assert_eq!(alone.saw(true, at(69)), Duration::from_secs(29));
+        assert_eq!(alone.saw(true, at(70)), Duration::from_secs(30));
     }
 }
