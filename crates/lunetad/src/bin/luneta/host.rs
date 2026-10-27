@@ -121,7 +121,10 @@ enum Focus {
 impl Focus {
     /// Whether zellij has the keys.
     fn zellij(self) -> bool {
-        self != Focus::Sidebar
+        match self {
+            Focus::Zellij | Focus::Collapsed => true,
+            Focus::Sidebar => false,
+        }
     }
 }
 
