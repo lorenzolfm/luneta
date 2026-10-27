@@ -1,9 +1,9 @@
 //! The sidebar: every session on the host, the panes in each, and what the
 //! agent in each pane is doing, as the daemon says, beside the zellij luneta
-//! runs. A row takes zellij's client there.
+//! runs. A row takes zellij's client there, and `▌` marks the pane it is on.
 
 use std::collections::{BTreeSet, HashMap};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fuzzy_matcher::FuzzyMatcher;
@@ -11,7 +11,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, Host, NameSource, Pane, Session, Status, Zellij};
+use lunetad::api::{Agent, Client, Host, NameSource, Pane, Session, Status, Zellij};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -19,10 +19,14 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::icons;
+use crate::own::{Look, Looked, OwnClient};
 
 /// How many columns the sidebar takes, as the plugin's column did.
 pub const COLUMNS: u16 = 32;
 
+/// What marks the pane luneta's zellij is on, in its first column, whether
+/// the sidebar has the focus or not.
+const HERE_MARK: &str = "▌";
 const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
@@ -60,6 +64,22 @@ impl Listed {
         let started = SystemTime::try_from(session.started_at?).ok()?;
         Some(Listed { name: session.name.clone(), started })
     }
+}
+
+/// The session luneta sent its zellij to itself, which stands for the one
+/// zellij is in until zellij titles luneta's terminal once it is there.
+/// zellij sends a title only as it changes, in a tab, whichever client it
+/// goes to: a client that comes to a tab whose title went to another, or to
+/// it before, gets none, and its terminal keeps the last session's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sent {
+    session: String,
+    /// Whether the client is there. Until it is, a title of another session
+    /// is of the one it is leaving.
+    landed: bool,
+    /// The number of the look that finds the client there, by which what
+    /// comes back of a go luneta sent it on before is told from this one's.
+    look: Option<u64>,
 }
 
 /// What a row stands for, by which the highlight keeps to it as rows come and
@@ -173,6 +193,8 @@ enum Row {
     Pane {
         session: Listed,
         pane: u32,
+        /// Whether luneta's zellij is on it.
+        here: bool,
         seat: Option<Seat>,
         /// The icon of what runs in it, if that has one.
         icon: Option<&'static str>,
@@ -256,6 +278,9 @@ pub struct Sidebar {
     /// is in, and then ` | ` and the title of the pane it has the focus on,
     /// when that has one.
     title: Option<String>,
+    /// The session luneta sent its zellij to, until zellij titles luneta's
+    /// terminal after.
+    sent: Option<Sent>,
     /// The names of the sessions folded. A fold keeps to the name, so that a
     /// session started again under it comes back folded, and the sessions
     /// that share one fold together.
@@ -265,8 +290,19 @@ pub struct Sidebar {
     /// How many sessions the daemon lists with no start, which the rows leave
     /// out, as they tell sessions apart by theirs.
     unlisted: usize,
-    /// The row the highlight is on.
+    /// Which client of its session is luneta's zellij, and the pane it is on.
+    own: OwnClient,
+    /// Whether the sidebar has the keys.
+    focused: bool,
+    /// The row of the pane luneta's zellij is on, or of its session, while
+    /// that one is folded.
+    here_row: Option<Place>,
+    /// The row the highlight is on: on `here_row` while the sidebar does not
+    /// have the focus, and where the keys take it while it does.
     cursor: Option<Place>,
+    /// The row the view last scrolled to show while the sidebar did not have
+    /// the focus, after which the wheel can scroll it out of sight.
+    revealed: Option<Place>,
     /// The first line of the rows on screen.
     top: usize,
     /// How many lines the rows had on screen when last drawn, under the rule
@@ -289,10 +325,34 @@ enum Search {
 }
 
 impl Sidebar {
-    pub fn heard(&mut self, host: Host) {
+    /// The daemon says the host stands as `host`. A look to ask zellij for,
+    /// as luneta's zellij comes to a session.
+    pub fn heard(&mut self, host: Host) -> Option<Look> {
         self.host = Some(host);
         self.away = None;
+        let look = self.arrived();
+        if look.is_none()
+            && let Some(session) = self.own.session()
+        {
+            let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+            self.own.heard(listed.as_deref(), Instant::now());
+        }
         self.rebuild();
+        look
+    }
+
+    /// Time went by. What luneta saw of its zellij's client may have stood
+    /// long enough against the daemon's list for that list to be the newer.
+    pub fn ticked(&mut self) {
+        let Some(session) = self.own.session() else {
+            return;
+        };
+        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+        let pane = self.own.pane();
+        self.own.heard(listed.as_deref(), Instant::now());
+        if self.own.pane() != pane {
+            self.rebuild();
+        }
     }
 
     /// The daemon does not answer, for `why`. What it said last stands.
@@ -300,24 +360,121 @@ impl Sidebar {
         self.away = Some(why);
     }
 
-    /// zellij titled luneta's terminal `title`.
-    pub fn titled(&mut self, title: String) {
+    /// zellij titled luneta's terminal `title`. A look to ask zellij for, as
+    /// its client comes to a session.
+    pub fn titled(&mut self, title: String) -> Option<Look> {
         if self.title.as_ref() == Some(&title) {
-            return;
+            return None;
+        }
+        let newer = |sent: &Sent| sent.landed || in_session(&title, &sent.session);
+        if self.sent.as_ref().is_none_or(newer) {
+            self.sent = None;
         }
         self.title = Some(title);
+        let look = self.arrived();
+        self.rebuild();
+        look
+    }
+
+    /// luneta sends its zellij to `session`, which it is in from now on, as
+    /// far as the sidebar knows. A look for zellij to answer once it is there.
+    pub fn sending(&mut self, session: &str) -> Option<Look> {
+        self.sent = Some(Sent { session: session.to_owned(), landed: false, look: None });
+        let look = self.arrived();
+        if let Some(sent) = &mut self.sent {
+            sent.look = look.as_ref().map(|look| look.number);
+        }
+        self.rebuild();
+        look
+    }
+
+    /// The session luneta sent its zellij to, while zellij has yet to take
+    /// its client there.
+    pub fn going(&self) -> Option<&str> {
+        let sent = self.sent.as_ref().filter(|sent| !sent.landed)?;
+        Some(&sent.session)
+    }
+
+    /// zellij did not take luneta's zellij to the session it was sent to on
+    /// the go that `look` was to find it there. A look at the one it is in
+    /// still.
+    pub fn stayed(&mut self, look: u64) -> Option<Look> {
+        if self.sent.as_ref().is_none_or(|sent| sent.landed || sent.look != Some(look)) {
+            return None;
+        }
+        self.sent = None;
+        let look = self.arrived();
+        self.rebuild();
+        look
+    }
+
+    /// zellij answered a look so. One that says what it listed before
+    /// luneta's zellij came, of the go luneta sent it on last, is from once
+    /// it had.
+    pub fn looked(&mut self, looked: Looked) {
+        if let Some(sent) = &mut self.sent
+            && looked.before.is_some()
+            && sent.look == Some(looked.number)
+        {
+            sent.landed = true;
+        }
+        let listed = self.own.session().and_then(|session| clients(self.host.as_ref(), session));
+        let listed = listed.map(<[Client]>::to_vec);
+        self.own.looked(looked, listed.as_deref(), Instant::now());
         self.rebuild();
     }
 
-    /// The session zellij's client is in, by its title: the longest name of
-    /// a session the daemon knows that the title is, or starts with before a
-    /// ` | `, as a session's name can hold one too. Until the daemon says,
-    /// what comes before the first.
+    /// luneta takes its zellij to `place`. A look to ask zellij for once it
+    /// has: in the session it is in, or the one it goes to.
+    pub fn went(&mut self, place: &Place) -> Option<Look> {
+        let listed = clients(self.host.as_ref(), place.session()).map(<[Client]>::to_vec);
+        let now = Instant::now();
+        let look = self.own.went(place.session(), place.pane(), listed.as_deref(), now);
+        if self.here() == Some(place.session()) {
+            self.rebuild();
+            return look;
+        }
+        // The client is on the pane as it comes to the other session.
+        self.sending(place.session())
+    }
+
+    /// The sidebar takes the keys, or gives them back. The highlight goes
+    /// back to where luneta's zellij is as it does. A search lasts while the
+    /// sidebar has them: one left open would keep the rows it hides out of
+    /// sight.
+    pub fn focus(&mut self, focused: bool) {
+        if self.focused == focused {
+            return;
+        }
+        self.focused = focused;
+        if !focused {
+            self.search = None;
+        }
+        self.rebuild();
+    }
+
+    /// A look for the session zellij's client is in, as `here` says, if it
+    /// has come to it since luneta last followed it.
+    fn arrived(&mut self) -> Option<Look> {
+        let here = self.here()?.to_owned();
+        if self.own.session() == Some(here.as_str()) {
+            return None;
+        }
+        let listed = clients(self.host.as_ref(), &here).map(<[Client]>::to_vec);
+        Some(self.own.came(&here, listed.as_deref(), Instant::now()))
+    }
+
+    /// The session zellij's client is in: the one luneta sent it to, until
+    /// zellij titles luneta's terminal after, or else by its title: the
+    /// longest name of a session the daemon knows that the title is, or
+    /// starts with before a ` | `, as a session's name can hold one too.
+    /// Until the daemon says, what comes before the first.
     pub fn here(&self) -> Option<&str> {
+        if let Some(sent) = &self.sent {
+            return Some(&sent.session);
+        }
         let title = self.title.as_deref()?;
-        let named = |name: &&str| {
-            title.strip_prefix(*name).is_some_and(|rest| rest.is_empty() || rest.starts_with(" | "))
-        };
+        let named = |name: &&str| in_session(title, name);
         let sessions = self.host.iter().flat_map(|host| &host.sessions);
         sessions
             .map(|session| session.name.as_str())
@@ -358,6 +515,17 @@ impl Sidebar {
             Some(Search::Empty) | None => (None, false),
         };
         let finder = term.map(|term| Finder { matcher: SkimMatcherV2::default(), term });
+        // The pane luneta's zellij is on, in the one session of the name.
+        let here_pane = {
+            let mut named =
+                sessions.iter().filter(|(listed, _)| Some(&listed.name) == here.as_ref());
+            match (named.next(), named.next(), self.own.pane()) {
+                (Some((listed, _)), None, Some(pane)) => {
+                    Some(Place::Pane { session: listed.clone(), pane })
+                },
+                _ => None,
+            }
+        };
         let mut counts = Counts { sessions: sessions.len(), ..Counts::default() };
         let mut rows = Vec::new();
         let mut best: Option<(usize, Fit)> = None;
@@ -402,9 +570,11 @@ impl Sidebar {
                 if finder.is_some() && found.is_none() && named.is_none() {
                     continue;
                 }
+                let place = Place::Pane { session: listed.clone(), pane: pane.id };
                 let row = Row::Pane {
                     session: listed.clone(),
                     pane: pane.id,
+                    here: here_pane.as_ref() == Some(&place),
                     seat,
                     icon: program.and_then(icons::of),
                     label,
@@ -450,20 +620,29 @@ impl Sidebar {
         self.rows = rows;
         self.counts = counts;
         self.unlisted = unlisted;
+        self.here_row = here_pane.as_ref().and_then(|place| self.row_for(place));
+        if !self.focused && self.here_row.is_some() {
+            self.cursor.clone_from(&self.here_row);
+        }
         self.settle(best.map(|(at, _)| at), seek);
+    }
+
+    /// The row that stands for `place`: its own, or its session's, once that
+    /// is folded.
+    fn row_for(&self, place: &Place) -> Option<Place> {
+        let session = Place::Session(place.listed().clone());
+        let listed = |place: &&Place| self.rows.iter().any(|row| row.place() == **place);
+        [place, &session].into_iter().find(listed).cloned()
     }
 
     /// Puts the highlight back on a row it stops on: the one it was on, or
     /// else the one where that was, or else the row that matches the search
-    /// `best`. It goes to that one first while it `seek`s it.
+    /// `best`. It goes to that one first while it `seek`s it. A pane gone, or
+    /// folded away, leaves the highlight on its session.
     fn settle(&mut self, best: Option<usize>, seek: bool) {
         let held = self.cursor.as_ref().and_then(|place| {
-            self.rows.iter().position(|row| row.place() == *place).or_else(|| {
-                // A pane gone, or folded away, leaves the highlight on its
-                // session.
-                let session = Place::Session(place.listed().clone());
-                self.rows.iter().position(|row| row.place() == session)
-            })
+            let row = self.row_for(place)?;
+            self.rows.iter().position(|it| it.place() == row)
         });
         let at = if seek { best.or(held) } else { held.or(best) };
         let at = at.unwrap_or(0);
@@ -598,12 +777,6 @@ impl Sidebar {
         }
     }
 
-    /// zellij has the keys now. A search lasts while the sidebar has them:
-    /// one left open would keep the rows it hides out of sight.
-    pub fn unfocused(&mut self) {
-        self.close_search();
-    }
-
     /// Goes to the highlighted row. Going anywhere closes the search, so that
     /// the sidebar you come back to shows every row.
     fn go(&mut self) -> Asked {
@@ -695,21 +868,28 @@ impl Sidebar {
         }
     }
 
-    /// Draws the sidebar into `area`, the highlight on its row while it has
-    /// the focus. Its last column is left blank, to keep it off what is
+    /// Draws the sidebar into `area`, the highlight on its row: where the keys
+    /// took it while the sidebar has the focus, and on the pane luneta's
+    /// zellij is on while it does not, which the view scrolls to show as the
+    /// pane changes. Its last column is left blank, to keep it off what is
     /// beside it.
-    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, focused: bool, now: SystemTime) {
+    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.push(self.header(width, frame));
         lines.push(Line::default());
-        let notes = self.notes(width, focused);
+        let notes = self.notes(width);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
-        if focused {
+        let lit = self.focused || self.here_row.is_some();
+        if self.focused {
             self.reveal(room);
+            self.revealed = None;
+        } else if lit && self.revealed != self.cursor {
+            self.reveal(room);
+            self.revealed.clone_from(&self.cursor);
         }
         if self.host.is_none() {
             let waiting = if self.away.is_some() { "" } else { "asking lunetad…" };
@@ -722,7 +902,7 @@ impl Sidebar {
             let none = if typed { " no match" } else { " no sessions" };
             lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
-        let cursor = if focused { self.cursor_index() } else { None };
+        let cursor = if lit { self.cursor_index() } else { None };
         let mut drawn: Vec<Line<'static>> = Vec::new();
         for (at, row) in self.rows.iter().enumerate() {
             let lit = cursor == Some(at);
@@ -782,7 +962,7 @@ impl Sidebar {
     /// What goes at the bottom: why the daemon does not answer, the sessions
     /// it lists that the rows leave out, what went wrong last, and the search
     /// while it is open, or else the keys while the sidebar has the focus.
-    fn notes(&self, width: usize, focused: bool) -> Vec<Line<'static>> {
+    fn notes(&self, width: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
         let error = Style::new().fg(Color::Red);
         if let Some(away) = &self.away {
@@ -799,7 +979,7 @@ impl Sidebar {
         }
         if let Some(term) = self.search() {
             notes.push(query(term, width));
-        } else if focused {
+        } else if self.focused {
             let dim = Style::new().add_modifier(Modifier::DIM);
             notes.push(Line::styled(cut(" ↵ go  h/l fold  esc back", width), dim));
         }
@@ -816,6 +996,22 @@ fn query(term: &str, width: usize) -> Line<'static> {
         Span::styled("/", Style::new().fg(TAG)),
         Span::styled(typed, Style::new().fg(ACCENT)),
     ])
+}
+
+/// Whether zellij's `title` for a terminal can be of the session `name`: it is
+/// the name, or starts with it before a ` | `.
+fn in_session(title: &str, name: &str) -> bool {
+    title.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with(" | "))
+}
+
+/// The clients the daemon lists of the session called `name`, unless another
+/// runs under that name too, which it lists none of either.
+fn clients<'a>(host: Option<&'a Host>, name: &str) -> Option<&'a [Client]> {
+    let mut named = host?.sessions.iter().filter(|session| session.name == name);
+    let (Some(session), None) = (named.next(), named.next()) else {
+        return None;
+    };
+    session.clients.as_ref().map(|clients| clients.clients.as_slice())
 }
 
 /// The sessions the daemon lists, as the sidebar tells them apart, oldest
@@ -1055,7 +1251,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { seat, icon, label, checkout, .. } => {
+        Row::Pane { here, seat, icon, label, checkout, .. } => {
             let mark = seat.as_ref().map(|seat| &seat.mark);
             let since = seat.as_ref().and_then(|seat| seat.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
@@ -1067,7 +1263,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 Some(_) => Style::new(),
                 None => dim,
             };
-            let mut spans = vec![Span::raw("   ")];
+            let mut spans = vec![margin(*here), Span::raw("  ")];
             match mark {
                 Some(mark) => {
                     let (glyph, style) = mark.glyph(frame);
@@ -1088,7 +1284,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
             if let Some((branch, status)) = checkout {
-                lines.push(checkout_line(branch, status, width));
+                lines.push(checkout_line(*here, branch, status, width));
             }
             lines
         },
@@ -1109,14 +1305,26 @@ fn badge(waiting: usize, spinning: bool, frame: usize) -> Option<Span<'static>> 
     None
 }
 
+/// The first column of a pane's lines: `HERE_MARK` on the pane luneta's
+/// zellij is on, `here`.
+fn margin(here: bool) -> Span<'static> {
+    if here {
+        Span::styled(HERE_MARK, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+    } else {
+        Span::raw(" ")
+    }
+}
+
 /// The line under a pane's row, `width` wide: the branch checked out where it
-/// works, under its label, and how its work tree stands.
-fn checkout_line(branch: &str, status: &str, width: usize) -> Line<'static> {
+/// works, under its label, and how its work tree stands. The mark of the pane
+/// luneta's zellij is on, `here`, runs down it too.
+fn checkout_line(here: bool, branch: &str, status: &str, width: usize) -> Line<'static> {
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let branch = cut(branch, width.saturating_sub(LABEL + reserve + 1));
     let gap = width.saturating_sub(LABEL + branch.width() + status.width() + 1);
     Line::from(vec![
-        Span::raw(" ".repeat(LABEL)),
+        margin(here),
+        Span::raw(" ".repeat(LABEL - 1)),
         Span::styled(branch, Style::new().fg(Color::DarkGray)),
         Span::raw(" ".repeat(gap)),
         Span::raw(status.to_owned()),
@@ -1206,6 +1414,7 @@ mod tests {
             name: name.to_owned(),
             started_at: Some(Timestamp { seconds: started, nanos: 0 }),
             panes: Some(Panes { panes }),
+            clients: None,
         }
     }
 
@@ -1244,24 +1453,40 @@ mod tests {
         }
     }
 
-    /// The sidebar drawn `width` columns wide and `height` tall.
+    /// The sidebar drawn `width` columns wide and `height` tall, with the
+    /// focus or without.
     fn drawn(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
-        sidebar.draw(&mut buffer, area, focused, now);
+        sidebar.focus(focused);
+        sidebar.draw(&mut buffer, area, now);
         buffer
     }
 
     /// The sidebar `width` columns wide and `height` tall, as text.
     fn screen(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Vec<String> {
+        seen(sidebar, focused, width, height).0
+    }
+
+    /// The sidebar as `screen` draws it, and the lines the highlight is on.
+    fn seen(
+        sidebar: &mut Sidebar,
+        focused: bool,
+        width: u16,
+        height: u16,
+    ) -> (Vec<String>, Vec<u16>) {
         let buffer = drawn(sidebar, focused, width, height);
-        (0..height)
+        let lines = (0..height)
             .map(|y| {
                 let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
                 line.trim_end().to_owned()
             })
-            .collect()
+            .collect();
+        let lit = (0..height)
+            .filter(|y| buffer[(0, *y)].style().add_modifier.contains(Modifier::REVERSED))
+            .collect();
+        (lines, lit)
     }
 
     /// Two sessions, whose rows have Claude's icon, `\u{ec82}`, neovim's,
@@ -1331,6 +1556,51 @@ mod tests {
         assert_eq!(lines[0], format!("─ 1 session {}", "─".repeat(47)));
         assert_eq!(lines[2], format!(" ▾ y {}", "─".repeat(53)));
         assert_eq!(lines[4], " lunetad: 1 session with no start, not listed");
+    }
+
+    /// `▌` marks the pane luneta's zellij is on, down the line of its branch
+    /// too, with the focus or without. While the sidebar does not have the
+    /// focus, the highlight rests on that pane; once it has, the highlight
+    /// goes with the keys, and comes back as the sidebar gives the focus
+    /// back.
+    #[test]
+    fn the_highlight_rests_on_your_pane_until_the_sidebar_has_the_focus() {
+        let mut sidebar = Sidebar::default();
+        let mut host = host(
+            vec![
+                session("newer", 20, vec![pane(1, 0, "/w/b", "fish")]),
+                session(
+                    "older",
+                    10,
+                    vec![pane(2, 1, "/w/c", "nvim src/main.rs"), pane(1, 0, "/w/a", "fish")],
+                ),
+            ],
+            Vec::new(),
+        );
+        let changes = Some(api::Changes::default());
+        let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None }));
+        let checkout = api::Checkout { head, changes, stashes: 0 };
+        host.work_trees = vec![api::WorkTree {
+            dir: "/w/c".to_owned(),
+            stands: Some(api::work_tree::Stands::Checkout(checkout)),
+        }];
+        assert_eq!(sidebar.heard(host), None);
+        let look = sidebar.titled("older | nvim".to_owned()).unwrap();
+        assert_eq!(look.session, "older");
+        let clients = vec![Client { id: 1, pane: Some(2) }];
+        sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
+
+        let (lines, lit) = seen(&mut sidebar, false, 32, 8);
+        assert_eq!(lines[4..6], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
+        assert_eq!(lit, [4, 5]);
+        let (_, lit) = seen(&mut sidebar, true, 32, 8);
+        assert_eq!(lit, [4, 5]);
+        sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        let (lines, lit) = seen(&mut sidebar, true, 32, 8);
+        let nvim = "▌    \u{e6ae} nvim src/main.rs";
+        assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
+        let (_, lit) = seen(&mut sidebar, false, 32, 8);
+        assert_eq!(lit, [4, 5]);
     }
 
     #[test]
@@ -1503,6 +1773,56 @@ mod tests {
         assert_eq!(sidebar.here(), Some("odd"));
         sidebar.titled("oddly | ~/w".to_owned());
         assert_eq!(sidebar.here(), Some("oddly"));
+    }
+
+    /// zellij sends a client no title as it comes back to a tab that had the
+    /// same title before. So the session luneta sends its zellij to is the
+    /// one it is in, until zellij titles the terminal once it is there; a
+    /// title of the session it leaves can come on the way. A session zellij
+    /// did not take it to leaves it in the one the title names.
+    #[test]
+    fn the_session_is_the_one_luneta_sent_zellij_to_until_a_title_after() {
+        let mut sidebar = two_sessions();
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        let look = sidebar.went(&newer).unwrap();
+        assert_eq!((sidebar.here(), look.session.as_str()), (Some("newer"), "newer"));
+        assert_eq!(sidebar.going(), Some("newer"));
+        sidebar.titled("older | ~/w/luneta/main".to_owned());
+        assert_eq!(sidebar.here(), Some("newer"));
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: look.number, went: Some(1), clients, before: Some(vec![]) });
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
+        sidebar.titled("older".to_owned());
+        assert_eq!(sidebar.here(), Some("older"));
+
+        let look = sidebar.went(&newer).unwrap();
+        let stayed = sidebar.stayed(look.number).map(|look| look.session);
+        assert_eq!(stayed, Some("older".to_owned()));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
+    }
+
+    /// luneta sends its zellij to another session, and then to a third
+    /// before it is there. What comes back of the first go says nothing of
+    /// the second: neither that the client is there, nor that it stayed.
+    #[test]
+    fn what_comes_back_of_an_earlier_go_says_nothing_of_the_last() {
+        let mut sidebar = two_sessions();
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        let older = Place::Pane { session: listed("older", 10), pane: 2 };
+        let first = sidebar.went(&newer).unwrap();
+        let last = sidebar.went(&older).unwrap();
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        let came = |look: &Look| Looked {
+            number: look.number,
+            went: look.went,
+            clients: clients.clone(),
+            before: Some(vec![]),
+        };
+        sidebar.looked(came(&first));
+        assert_eq!(sidebar.stayed(first.number), None);
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), Some("older")));
+        sidebar.looked(came(&last));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
     #[test]
@@ -1765,7 +2085,7 @@ mod tests {
             let asked = if let Some(code) = close {
                 sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE))
             } else {
-                sidebar.unfocused();
+                sidebar.focus(false);
                 Asked::Nothing
             };
             let pix = Place::Pane { session: listed("bipa", 10), pane: 3 };

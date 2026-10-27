@@ -1,9 +1,10 @@
 //! The panes of each zellij session that runs, as `zellij action list-panes`
-//! lists them.
+//! lists them, and its clients.
 //!
 //! zellij tells no one as a pane opens, closes, or changes where it works or
-//! what it runs. So each session is asked again every sweep, and one the
-//! daemon has not asked about yet as soon as it turns up.
+//! what it runs, nor as a client comes, goes, or moves its focus. So each
+//! session is asked again every sweep, and one the daemon has not asked about
+//! yet as soon as it turns up.
 
 use std::collections::HashSet;
 use std::io;
@@ -16,6 +17,7 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::api;
+use crate::clients;
 use crate::core;
 use crate::program;
 use crate::watch::Troubles;
@@ -116,11 +118,12 @@ fn list(session: &str) -> Result<Vec<Pane>, String> {
     parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
-/// Asks zellij for the panes of each session it can be asked about, in a
-/// thread of its own, and tells the core what it says: every `sweep`, and at
-/// once when `woken`, as a session turns up. One zellij has not listed yet
-/// goes first, and one that turns up while the others are asked about goes
-/// before those left. The thread ends once the core has.
+/// Asks zellij for the panes and the clients of each session it can be asked
+/// about, in a thread of its own, and tells the core what it says: every
+/// `sweep`, and at once when `woken`, as a session turns up. One zellij has
+/// not listed the panes of yet goes first, and one that turns up while the
+/// others are asked about goes before those left. The thread ends once the
+/// core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     woken: Receiver<()>,
@@ -140,9 +143,17 @@ pub fn follow(
                 let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
                 if let Ok(panes) = list(&name).inspect_err(said) {
                     listed.insert(session);
+                    let name = name.clone();
                     if core.send(core::Command::Panes { session, name, panes }).is_err() {
                         return;
                     }
+                }
+                let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
+                let zellij = Command::new("zellij");
+                if let Ok(clients) = clients::list(zellij, &name).inspect_err(said)
+                    && core.send(core::Command::Clients { session, name, clients }).is_err()
+                {
+                    return;
                 }
                 if woken.try_recv().is_ok() {
                     continue 'sweep;

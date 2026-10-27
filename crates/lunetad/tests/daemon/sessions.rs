@@ -161,6 +161,45 @@ fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them(
     assert_eq!(panes.panes[0], pane(3, (0, "Tab #1"), Some("/home/you/work")));
 }
 
+fn client(id: u32, pane: Option<u32>) -> api::Client {
+    api::Client { id, pane }
+}
+
+/// A session has its clients once zellij lists them, none at first: each by
+/// its id, and the terminal it has the focus on, or none for a plugin's pane.
+/// One that moves its focus changes the host, and a `Watch` that waits for a
+/// change answers with it.
+#[test]
+fn a_session_has_its_clients_once_zellij_lists_them() {
+    let host = Host::new();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some("/home/you"))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+
+    let none = eventually("zellij lists the clients of work", || {
+        session(&host.host(), "work")?.clients.clone()
+    });
+    assert_eq!(none.clients, []);
+
+    host.zellij.clients("work", &[(2, "plugin_4"), (1, "terminal_1")]);
+    let (two, version) = eventually("zellij lists two clients of work", || {
+        let now = host.host();
+        let clients = session(&now, "work")?.clients.clone()?;
+        (!clients.clients.is_empty()).then_some((clients, now.version?))
+    });
+    assert_eq!(two.clients, [client(1, Some(1)), client(2, None)]);
+
+    let (moved, took) = thread::scope(|scope| {
+        let waiting = scope.spawn(|| host.watch(Some(version)));
+        thread::sleep(Duration::from_millis(300));
+        host.zellij.clients("work", &[(1, "terminal_1"), (2, "terminal_1")]);
+        waiting.join().unwrap()
+    });
+    let clients = session(&moved, "work").unwrap().clients.clone().unwrap();
+    assert_eq!(clients.clients, [client(1, Some(1)), client(2, Some(1))]);
+    assert!(took < Duration::from_secs(4), "{took:?}");
+}
+
 /// What zellij lists that does not read, the daemon says it cannot, and what
 /// zellij listed before stands: a pane that leaves out whether it is a
 /// plugin's, which a default would read as a terminal, and a pane listed

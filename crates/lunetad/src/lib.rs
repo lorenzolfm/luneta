@@ -9,6 +9,7 @@ mod agent;
 pub mod api;
 mod claude;
 mod client;
+pub mod clients;
 mod core;
 mod daemon;
 pub mod folder;
