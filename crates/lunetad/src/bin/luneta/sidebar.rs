@@ -3,7 +3,7 @@
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
 //! `▌` marks the pane it is on.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -20,6 +20,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::folds::Folds;
 use crate::icons;
 use crate::own::{Look, Looked, OwnClient};
 
@@ -351,10 +352,8 @@ pub struct Sidebar {
     /// The session luneta sent its zellij to, until zellij titles luneta's
     /// terminal after.
     sent: Option<Sent>,
-    /// The names of the sessions folded. A fold keeps to the name, so that a
-    /// session started again under it comes back folded, and the sessions
-    /// that share one fold together.
-    folded: BTreeSet<String>,
+    /// The sessions folded, by name.
+    folds: Folds,
     rows: Vec<Row>,
     counts: Counts,
     /// How many sessions the daemon lists with no start, which the rows leave
@@ -401,6 +400,18 @@ enum Search {
 }
 
 impl Sidebar {
+    /// The sidebar, with the sessions `folds` has folded.
+    pub fn new(folds: Folds) -> Self {
+        Sidebar { folds, ..Sidebar::default() }
+    }
+
+    /// Takes up the folds as they are kept now, as another luneta left them.
+    pub fn refold(&mut self) {
+        if self.folds.reload() {
+            self.rebuild();
+        }
+    }
+
     /// The daemon says the host stands as `host`. A look to ask zellij for,
     /// as luneta's zellij comes to a session.
     pub fn heard(&mut self, host: Host) -> Option<Look> {
@@ -639,7 +650,7 @@ impl Sidebar {
             let busy = marks().filter(|mark| **mark == Mark::Busy).count();
             counts.waiting += waiting;
             counts.busy += busy;
-            let folded = self.folded.contains(&listed.name);
+            let folded = self.folds.contains(&listed.name);
             let named = finder.as_ref().and_then(|finder| finder.session(&listed.name));
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
@@ -779,7 +790,7 @@ impl Sidebar {
         let Some(place) = &self.cursor else {
             return;
         };
-        let folded = self.folded.contains(place.session());
+        let folded = self.folds.contains(place.session());
         self.fold(!folded);
     }
 
@@ -790,18 +801,36 @@ impl Sidebar {
             return;
         };
         let session = place.listed().clone();
-        let changed = if folded {
-            self.folded.insert(session.name.clone())
-        } else {
-            self.folded.remove(&session.name)
-        };
-        if !changed {
+        if !self.folds.set(&session.name, folded) {
             return;
         }
         if folded {
             self.cursor = Some(Place::Session(session));
         }
         self.rebuild();
+    }
+
+    /// The pane listed after the one luneta's zellij is on, and from the last
+    /// back to the first: where `Alt Tab` goes. None where that pane is the
+    /// only one listed. From a folded session, or a pane no row lists, as a
+    /// plugin's or one luneta is not sure its zellij is on, it is the pane
+    /// listed after the session's row, and from a session no row lists, the
+    /// first.
+    pub fn next_pane(&self) -> Option<Place> {
+        let row = |place: &Place| self.rows.iter().position(|row| row.place() == *place);
+        let here = self.here_row.as_ref().and_then(row);
+        let start = here.or_else(|| {
+            let session = self.here()?;
+            self.rows.iter().position(|row| {
+                matches!(row, Row::Session { session: listed, .. } if listed.name == session)
+            })
+        });
+        let from = start.map_or(0, |at| at + 1);
+        let count = self.rows.len();
+        let next = (0..count)
+            .map(|step| (from + step) % count)
+            .find(|at| matches!(self.rows[*at], Row::Pane { .. }))?;
+        (Some(next) != here).then(|| self.rows[next].place())
     }
 
     /// What a key does while the sidebar has the focus.
@@ -1077,6 +1106,9 @@ impl Sidebar {
             let sessions = if count == 1 { "session" } else { "sessions" };
             let unlisted = format!("lunetad: {count} {sessions} with no start, not listed");
             notes.extend(wrapped(&unlisted, width, error));
+        }
+        if let Some(lost) = self.folds.lost() {
+            notes.extend(wrapped(&format!("folds stay in this luneta: {lost}"), width, error));
         }
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
@@ -1788,6 +1820,55 @@ mod tests {
         assert_eq!(sidebar.rows.len(), 5);
     }
 
+    /// `Alt Tab` goes to the pane listed after the one luneta's zellij is on,
+    /// across sessions, and from the last back to the first.
+    #[test]
+    fn the_next_pane_is_the_one_listed_after_luneta_s() {
+        let older = |pane| Place::Pane { session: listed("older", 10), pane };
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        let cases = [
+            ("within its session", older(1), older(2)),
+            ("into the next session", older(2), newer.clone()),
+            ("from the last to the first", newer.clone(), older(1)),
+        ];
+        for (case, on, next) in cases {
+            let mut sidebar = two_sessions();
+            sidebar.went(&on);
+            assert_eq!(sidebar.next_pane(), Some(next), "{case}");
+        }
+        // On a pane no row lists, as a plugin's, or one luneta is not sure
+        // its zellij is on; and in a session no row lists.
+        let mut sidebar = two_sessions();
+        assert_eq!(sidebar.next_pane(), Some(older(1)));
+        sidebar.titled("gone".to_owned());
+        assert_eq!(sidebar.next_pane(), Some(older(1)));
+    }
+
+    /// Back in a session zellij titles nothing for, luneta's zellij goes on
+    /// from where luneta sent it, and not from the session of the title, whose
+    /// clients are another's.
+    #[test]
+    fn the_next_pane_follows_luneta_s_zellij_past_a_stale_title() {
+        let mut sidebar = two_sessions();
+        let older = |pane| Place::Pane { session: listed("older", 10), pane };
+        sidebar.went(&Place::Pane { session: listed("newer", 20), pane: 1 });
+        sidebar.titled("newer | fish".to_owned());
+        sidebar.went(&older(1));
+        assert_eq!(sidebar.next_pane(), Some(older(2)));
+    }
+
+    #[test]
+    fn the_next_pane_passes_over_a_folded_session() {
+        let mut sidebar = two_sessions();
+        sidebar.went(&Place::Pane { session: listed("older", 10), pane: 2 });
+        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
+        assert_eq!(sidebar.next_pane(), Some(newer.clone()));
+        // The only pane listed is luneta's own.
+        sidebar.went(&newer);
+        assert_eq!(sidebar.next_pane(), None);
+    }
+
     #[test]
     fn a_gone_pane_leaves_the_highlight_in_its_session() {
         let mut sidebar = two_sessions();
@@ -1839,9 +1920,9 @@ mod tests {
         let pane = Place::Pane { session: listed("older", 10), pane: 2 };
         assert_eq!(sidebar.mouse(click(10, 4), area), Asked::Go(pane));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Nothing);
-        assert!(!sidebar.folded.contains("older"));
+        assert!(!sidebar.folds.contains("older"));
         assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
-        assert!(sidebar.folded.contains("older"));
+        assert!(sidebar.folds.contains("older"));
         let older = Place::Session(listed("older", 10));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Go(older));
     }
@@ -1855,14 +1936,14 @@ mod tests {
         sidebar.key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
-        assert!(sidebar.folded.contains("older"));
+        assert!(sidebar.folds.contains("older"));
         assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
-        assert!(!sidebar.folded.contains("older"));
+        assert!(!sidebar.folds.contains("older"));
         assert!(sidebar.search.is_some());
         type_in(&mut sidebar, "older");
         screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
-        assert!(!sidebar.folded.contains("older"));
+        assert!(!sidebar.folds.contains("older"));
     }
 
     /// A session zellij has yet to list the panes of stands in for them, as a
