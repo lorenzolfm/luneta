@@ -606,6 +606,45 @@ does, with what you type at the bottom where the keys were; there `Enter` goes
 to the highlighted row, and `Esc` clears the search. Giving zellij the keys
 clears it too.
 
+The sidebar has the plugin's [menu](#menu) too, at its bottom, for the
+highlighted row, with luneta's own keys but none of yours: luneta has no
+configuration to read your groups from yet. While the sidebar has the keys and
+no menu is open, its bottom lists what you can press there:
+
+```text
+─ luneta ──────────────────────
+ /  Search
+ n  New ▸
+ d  Delete ▸
+```
+
+`n p` opens your shell in a pane of its own beside the highlighted pane, in its
+tab and in the directory it works in, `n t` a tab of its session there, and
+`n s` a session there, named as the picker's directories name the directory,
+with a `-2` when a session runs by that name. Each takes zellij there, and
+gives it the keys. A tab of another session opens once zellij is there: zellij
+makes a tab as big as a client of its session, and most have none attached.
+`m` opens the menu on its first group, where `/` searches the skills the pane's
+directory can run, as the plugin's does, and `Enter` starts Claude Code on the
+one highlighted, beside the pane, named for the skill and the branch.
+
+`d d` closes the highlighted pane, or its tab once nothing else holds the tab
+open, floating panes and all, and the column of the plugin's dock where the
+plugin's sidebar stands beside luneta's. `d s` kills its session. On the last
+pane that holds a session's only tab open, or on a session's row, `d d` kills
+the session too: zellij would leave an empty tab in a session with no client,
+and end the one zellij is in, and luneta with it. The session zellij is in is
+killed once zellij is in another, the newest, and with no other, the menu says
+so and kills nothing. When that would end an agent that is busy, waiting on
+you, or that says nothing luneta knows, the menu asks first, as the plugin's
+does, and so does every delete while lunetad does not answer, as what it said
+last of the agents may be out of date: `y`, or the key again, goes ahead, and
+`n` or `Backspace` goes back.
+luneta asks zellij what a pane takes along as you press the key, and again as
+you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
+and is not closed with it. A delete leaves you in the sidebar, the highlight on
+the row after once what it took is gone.
+
 An agent's row is named as the plugin's sidebar names it: for the name you
 gave it with `/rename`, or else for its topic, the title Claude Code gives its
 pane. A bare `Claude Code` is no topic, and such a row goes by its tab, if you
@@ -641,12 +680,12 @@ luneta watches. A fold keeps to the session's name, so a session started again
 under it comes back folded.
 
 It is the first step, and the plugin's sidebar has more than this one does
-yet: its menu, the brief and the `•` of what finished come over one at a time.
-Until then, run luneta without the plugin's sidebar, or the two stand side by
-side: leave the dock out of `load_plugins`, and `default_layout` back at
-zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker,
-the menu and the brief are the plugin's still, and work in the zellij luneta
-runs as in any other.
+yet: your groups in its menu, the brief and the `•` of what finished come over
+one at a time. Until then, run luneta without the plugin's sidebar, or the two
+stand side by side: leave the dock out of `load_plugins`, and `default_layout`
+back at zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The
+picker, the floating menu and the brief are the plugin's still, and work in the
+zellij luneta runs as in any other.
 
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not
