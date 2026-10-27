@@ -6,6 +6,7 @@
 //! and takes up what another keeps in them as it keeps it.
 
 use std::env;
+use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
@@ -22,6 +23,14 @@ pub fn path(name: &str) -> Option<PathBuf> {
         .filter(|state| state.is_absolute())
         .or_else(|| set("HOME").map(|home| home.join(".local").join("state")))?;
     Some(state.join("luneta").join(name))
+}
+
+/// What a file kept is called after its own name while it is written, before
+/// it takes that name, so that no luneta reads one halfway written: a name no
+/// other luneta's file takes, as each `RandomState` is seeded from the
+/// system's randomness.
+pub fn unfinished() -> String {
+    format!("{:016x}.new", RandomState::new().hash_one(()))
 }
 
 /// Sends luneta's loop `event` each time something changes in one of `dirs`,

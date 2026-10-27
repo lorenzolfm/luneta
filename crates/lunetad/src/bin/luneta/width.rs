@@ -1,9 +1,9 @@
 //! How wide the sidebar opens: as wide as its edge was last dragged, in any
 //! luneta on the host, and kept for the next, in the file `luneta/width` of
 //! `$XDG_STATE_HOME`, or of `~/.local/state` where that is not set. A luneta
-//! reads it as it starts, and writes it as the edge is let go: what another
-//! drags shows from the next start, so that one window does not resize
-//! another.
+//! reads it as it starts, and writes it as the edge is let go, once dragged:
+//! what another drags shows from the next start, so that one window does not
+//! resize another.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -31,12 +31,17 @@ impl Width {
 
     fn within(file: PathBuf) -> (Self, Option<String>) {
         let read = match fs::read_to_string(&file) {
-            Ok(text) => text.trim().parse::<u16>().map_err(|error| error.to_string()),
+            Ok(text) => match text.trim().parse::<u16>() {
+                Ok(columns) if columns < sidebar::NARROWEST => {
+                    Err(format!("{columns} is narrower than {}", sidebar::NARROWEST))
+                },
+                parsed => parsed.map_err(|error| error.to_string()),
+            },
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(sidebar::COLUMNS),
             Err(error) => Err(error.to_string()),
         };
         let (columns, unread) = match read {
-            Ok(columns) => (columns.max(sidebar::NARROWEST), None),
+            Ok(columns) => (columns, None),
             Err(error) => (sidebar::COLUMNS, Some(format!("{}: {error}", file.display()))),
         };
         (Width { columns, file: Some(file) }, unread)
@@ -55,14 +60,19 @@ impl Width {
         self.columns = column.saturating_add(1).min(terminal / 2).max(sidebar::NARROWEST);
     }
 
-    /// Keeps the width for the next luneta, or says why it cannot.
+    /// Keeps the width for the next luneta, or says why it cannot. It is
+    /// written whole under a name of this luneta's own before it takes the
+    /// file's, as the ledger's moments are, so that no luneta that starts
+    /// meanwhile reads it halfway written.
     pub fn keep(&self) -> Result<(), String> {
         let Some(file) = &self.file else {
             return Err("neither XDG_STATE_HOME nor HOME is set, to keep it in".to_owned());
         };
         let folder = file.parent().expect("a file of `state::path` is in a folder");
+        let unfinished = folder.join(format!("width.{}", state::unfinished()));
         fs::create_dir_all(folder)
-            .and_then(|()| fs::write(file, format!("{}\n", self.columns)))
+            .and_then(|()| fs::write(&unfinished, format!("{}\n", self.columns)))
+            .and_then(|()| fs::rename(&unfinished, file))
             .map_err(|error| format!("{}: {error}", file.display()))
     }
 }
@@ -101,9 +111,10 @@ mod tests {
         }
     }
 
-    /// A file that names no width, or one too narrow, as one written by
-    /// hand, opens the sidebar as wide as it may, and the next drag writes
-    /// over it. One that cannot be written says why.
+    /// A file that names no width, or one narrower than the narrowest, as
+    /// one written by hand, opens the sidebar `sidebar::COLUMNS` wide and
+    /// says why, and the next drag writes over it. One that cannot be written
+    /// says why.
     #[test]
     fn a_file_that_fails_the_width_says_why() {
         let scratch = tempfile::tempdir().unwrap();
@@ -117,7 +128,9 @@ mod tests {
         assert_eq!(Width::within(file.clone()).0.columns(), 40);
 
         fs::write(&file, "3").unwrap();
-        assert_eq!(Width::within(file).0.columns(), sidebar::NARROWEST);
+        let (width, unread) = Width::within(file);
+        assert_eq!(width.columns(), sidebar::COLUMNS);
+        assert!(unread.is_some_and(|unread| unread.contains("3 is narrower than 16")));
 
         let blocker = scratch.path().join("not a folder");
         fs::write(&blocker, "").unwrap();

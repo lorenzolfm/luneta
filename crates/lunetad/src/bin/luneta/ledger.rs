@@ -12,11 +12,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::hash::{BuildHasher, RandomState};
 use std::io::ErrorKind;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+use crate::state;
 
 /// A session, as a ledger keeps it: when its socket was made, in nanoseconds
 /// since the epoch, and its inode. Two sockets can be made in one tick of the
@@ -84,10 +85,6 @@ fn moment(nanos: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
 }
 
-/// How the name a file takes while it is written ends, before it takes its
-/// pane's.
-const UNFINISHED: &str = "new";
-
 /// Who the moments of a ledger are kept for.
 enum Shared {
     /// Every luneta, through this folder.
@@ -106,7 +103,8 @@ pub struct Ledger {
     leftovers: BTreeSet<Session>,
     shared: Shared,
     /// What this ledger's files are called after their pane while it writes
-    /// them, and no other ledger's are.
+    /// them, and no other ledger's are. A pane's name does not read from it,
+    /// so no luneta takes it for a moment.
     unfinished: String,
 }
 
@@ -116,16 +114,9 @@ impl Default for Ledger {
             moments: BTreeMap::new(),
             leftovers: BTreeSet::new(),
             shared: Shared::Alone,
-            unfinished: unfinished(),
+            unfinished: state::unfinished(),
         }
     }
-}
-
-/// A name no other ledger's files take while they are written: each
-/// `RandomState` is seeded from the system's randomness. A pane's name does
-/// not read from it, so no luneta takes it for a moment.
-fn unfinished() -> String {
-    format!("{:016x}.{UNFINISHED}", RandomState::new().hash_one(()))
 }
 
 impl Ledger {
@@ -332,7 +323,7 @@ mod tests {
         let name = |pane| key(10, pane).name();
         let other = |name: String| fs::write(scratch.path().join(name), "5").unwrap();
         fs::write(scratch.path().join(name(2)), "\n").unwrap();
-        other(format!("{}.{}", name(3), unfinished()));
+        other(format!("{}.{}", name(3), state::unfinished()));
         other("4".to_owned());
         other(format!("+{}", name(5)));
         other(format!("0{}", name(6)));
@@ -380,7 +371,7 @@ mod tests {
         here.set(twin, Some(at(5)));
         here.set(key(20, 1), Some(at(6)));
         let left = [key(10, 2), key(20, 2)]
-            .map(|key| scratch.path().join(format!("{}.{}", key.name(), unfinished())));
+            .map(|key| scratch.path().join(format!("{}.{}", key.name(), state::unfinished())));
         for file in &left {
             fs::write(file, "5").unwrap();
         }
@@ -398,7 +389,7 @@ mod tests {
     fn a_session_only_leftovers_are_named_for_is_one_to_forget() {
         let scratch = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::within(scratch.path().to_owned());
-        let half = format!("{}.{}", key(30, 1).name(), unfinished());
+        let half = format!("{}.{}", key(30, 1).name(), state::unfinished());
         let [half, empty] = [half, key(40, 1).name()].map(|name| scratch.path().join(name));
         fs::write(&half, "5").unwrap();
         fs::write(&empty, "").unwrap();
