@@ -754,8 +754,9 @@ out. The plugin's rule does not count the agents in `shell`. Collapsed, the
 sidebar keeps three of those counts, one to a line under a short rule: the
 panes with a `•`, those at work, and the agents in `shell`. The short rule is
 red while lunetad does not answer, and the counts under it are the last it
-gave. A dim `│` down the sidebar's last column, open or collapsed, parts it
-from zellij.
+gave. A `│` down the sidebar's last column, open or collapsed, parts it from
+zellij: in the accent while the sidebar has the keys, and dim while it does
+not.
 
 A fold is the same in every luneta on the host, and lasts until you unfold it:
 each folded session is an empty file named for it in

@@ -2073,8 +2073,7 @@ impl Sidebar {
     /// a selection holds, and on the pane luneta's zellij is on while it does
     /// not, softer, which the view scrolls to show as the pane changes. A
     /// session the mouse lifted has it, where it lands, the others making room
-    /// for it. Its last column is the edge, dim, as the rule along the top
-    /// is.
+    /// for it. Its last column is the edge, drawn as the title's rule is.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
@@ -2148,7 +2147,7 @@ impl Sidebar {
         lines.extend(drawn.into_iter().skip(self.top).take(room));
         lines.resize(height.saturating_sub(notes.len()), Line::default());
         lines.extend(notes);
-        put(buffer, area, &lines);
+        put(buffer, area, &lines, self.framing());
     }
 
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
@@ -2172,7 +2171,7 @@ impl Sidebar {
             let count = cut(&count.to_string(), width.saturating_sub(glyph.width()));
             lines.push(Line::from(vec![Span::styled(glyph, style), Span::styled(count, style)]));
         }
-        put(buffer, area, &lines);
+        put(buffer, area, &lines, self.framing());
     }
 
     /// Builds the rows again, as the sidebar is drawn at `now`, where a
@@ -2190,20 +2189,22 @@ impl Sidebar {
         [self.title(width), self.header(width, frame), Line::default()]
     }
 
-    /// The first line: `menu::TITLE` on a rule out to the edge, in `ACCENT`,
-    /// the word bold, while the sidebar has the keys, and dim while zellij or
-    /// a brief has them, as zellij's frame was around the plugin's.
+    /// How the title's rule and the edge are drawn: in `ACCENT` while the
+    /// sidebar has the keys, and dim while zellij or a brief has them, as
+    /// zellij's frame was around the plugin's.
+    fn framing(&self) -> Style {
+        match self.keys {
+            Keys::Sidebar => Style::new().fg(ACCENT),
+            Keys::Zellij | Keys::Lent => Style::new().add_modifier(Modifier::DIM),
+        }
+    }
+
+    /// The first line: `menu::TITLE` on a rule out to the edge, drawn as
+    /// `framing` says, the word bold while the sidebar has the keys.
     fn title(&self, width: usize) -> Line<'static> {
-        let (rule, name) = match self.keys {
-            Keys::Sidebar => {
-                let accent = Style::new().fg(ACCENT);
-                (accent, accent.add_modifier(Modifier::BOLD))
-            },
-            Keys::Zellij | Keys::Lent => {
-                let dim = Style::new().add_modifier(Modifier::DIM);
-                (dim, dim)
-            },
-        };
+        let rule = self.framing();
+        let name =
+            if self.keys == Keys::Sidebar { rule.add_modifier(Modifier::BOLD) } else { rule };
         let word = format!(" {} ", menu::TITLE);
         let rest = width.saturating_sub(RULE.width() + word.width());
         Line::from(vec![
@@ -2314,16 +2315,16 @@ pub fn edge(area: Rect) -> Option<u16> {
 }
 
 /// Puts `lines` into `area` of `buffer`, one to each of its lines, with what
-/// was there before gone, and the edge down its last column, on every line
-/// of it, however few `lines` there are.
-fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
+/// was there before gone, and the edge down its last column in `framing`, on
+/// every line of it, however few `lines` there are.
+fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>], framing: Style) {
     buffer.set_style(area, Style::reset().fg(gruvbox::FG1));
     for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
         buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
     }
     if let Some(x) = edge(area) {
         for y in area.top()..area.bottom() {
-            buffer.set_string(x, y, EDGE, Style::new().add_modifier(Modifier::DIM));
+            buffer.set_string(x, y, EDGE, framing);
         }
     }
 }
@@ -3123,26 +3124,32 @@ mod tests {
     }
 
     /// The sidebar's last column is its edge, open or collapsed: a `│` down
-    /// every line, drawn as the rule along the top is, dim, and on the
-    /// terminal's background beside the highlight too.
+    /// every line, on the terminal's background beside the highlight too, and
+    /// drawn as the title's rule is, in the accent while the sidebar has the
+    /// keys, and dim while zellij or a brief has them.
     #[test]
-    fn the_sidebar_ends_in_an_edge_drawn_as_its_rule_is() {
+    fn the_sidebar_ends_in_an_edge_in_the_accent_while_it_has_the_keys() {
         let mut sidebar = two_sessions();
-        let look = |buffer: &Buffer, x: u16, y: u16| {
-            let cell = &buffer[(x, y)];
-            (cell.symbol().to_owned(), cell.fg, cell.bg, cell.modifier)
-        };
         let edge = |buffer: &Buffer| {
             let x = buffer.area.width - 1;
-            (0..buffer.area.height).map(|y| look(buffer, x, y)).collect::<Vec<_>>()
+            let look = |y| {
+                let cell = &buffer[(x, y)];
+                (cell.symbol().to_owned(), cell.fg, cell.bg, cell.modifier)
+            };
+            (0..buffer.area.height).map(look).collect::<Vec<_>>()
         };
+        let accent = ("│".to_owned(), ACCENT, Color::Reset, Modifier::empty());
+        let dim = ("│".to_owned(), gruvbox::FG1, Color::Reset, Modifier::DIM);
         let open = drawn(&mut sidebar, true, COLUMNS, 10);
         assert!((0..10).any(|y| open[(0, y)].bg == LIT), "a row is lit");
-        let (rule, fg, bg, modifier) = look(&open, 0, 0);
-        assert_eq!((rule.as_str(), modifier), ("─", Modifier::DIM));
-        let drawn = ("│".to_owned(), fg, bg, modifier);
-        assert_eq!(edge(&open), vec![drawn.clone(); 10]);
-        assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![drawn; 10]);
+        assert_eq!(edge(&open), vec![accent; 10]);
+        sidebar.focus(Keys::Lent);
+        let area = Rect::new(0, 0, COLUMNS, 10);
+        let mut lent = Buffer::empty(area);
+        sidebar.draw(&mut lent, area, moment(160_000));
+        assert_eq!(edge(&lent), vec![dim.clone(); 10]);
+        assert_eq!(edge(&drawn(&mut sidebar, false, COLUMNS, 10)), vec![dim.clone(); 10]);
+        assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![dim; 10]);
     }
 
     /// A daemon of another build can list a session with no start, or with
