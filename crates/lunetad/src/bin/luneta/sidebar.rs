@@ -655,23 +655,24 @@ impl Sidebar {
     /// far as the sidebar knows. A look for zellij to answer once it is there.
     pub fn sending(&mut self, session: &str) -> Option<Look> {
         let from = self.here().filter(|here| *here != session).map(str::to_owned);
-        self.send(session, from)
-    }
-
-    /// A client of `session` takes the place of luneta's zellij's, which
-    /// ended: it is in that session or none. A look for zellij to answer once
-    /// it is there.
-    pub fn rejoining(&mut self, session: &str) -> Option<Look> {
-        self.send(session, None)
-    }
-
-    /// The client goes to `session` from `from`.
-    fn send(&mut self, session: &str, from: Option<String>) -> Option<Look> {
         self.sent = Some(Sent { session: session.to_owned(), from, landed: false, look: None });
         let look = self.arrived();
         if let Some(sent) = &mut self.sent {
             sent.look = look.as_ref().map(|look| look.number);
         }
+        self.rebuild();
+        look
+    }
+
+    /// A client of `session` takes the place of luneta's zellij's, which
+    /// ended: it is in that session or none. A look for zellij to answer once
+    /// it is there. luneta has yet to find it there, in the session it
+    /// followed the one before to as well, as one on its way that ended.
+    pub fn rejoining(&mut self, session: &str) -> Look {
+        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+        let look = self.own.came(session, listed.as_deref(), Instant::now());
+        let number = Some(look.number);
+        self.sent = Some(Sent { session: session.to_owned(), from: None, landed: false, look: number });
         self.rebuild();
         look
     }
@@ -3509,6 +3510,21 @@ mod tests {
         assert_eq!(sidebar.seats(), ["newer"]);
         sidebar.rejoining("older");
         assert_eq!(sidebar.seats(), ["older"]);
+    }
+
+    /// A client that takes the place of one that ended on its way to a
+    /// session is one luneta has yet to find, in that session too: zellij
+    /// sends it no title where the tab had the same one before, and luneta
+    /// looks for it, and has it there once zellij lists it.
+    #[test]
+    fn a_client_that_rejoins_where_the_last_was_going_is_looked_for() {
+        let mut sidebar = two_sessions();
+        sidebar.went(&Place::Session(listed("newer", 20)));
+        let look = sidebar.rejoining("newer");
+        assert_eq!(look.session, "newer");
+        let clients = vec![Client { id: 2, pane: Some(1) }];
+        sidebar.looked(Looked { number: look.number, went: None, clients, before: Some(vec![]) });
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
     }
 
     /// The highlight goes to the best match as what is typed changes, and

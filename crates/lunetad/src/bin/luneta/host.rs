@@ -786,9 +786,8 @@ impl App {
         let (program, args) = zellij::rejoin(&to);
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, self.events.clone())?;
-        if let Some(look) = self.sidebar.rejoining(&to) {
-            zellij::arrive(look, before, &self.events);
-        }
+        let look = self.sidebar.rejoining(&to);
+        zellij::arrive(look, before, &self.events);
         Ok(())
     }
 
