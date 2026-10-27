@@ -2,8 +2,8 @@
 //! CLI needs to reach it.
 //!
 //! One daemon runs for each user on a host. It listens on a Unix socket in
-//! luneta's runtime folder, where the shell hook keeps its files too, and
-//! answers in the protocol that `proto/luneta/v1` defines.
+//! luneta's runtime folder, where the shell hook keeps its files too, which it
+//! reads, and answers in the protocol that `proto/luneta/v1` defines.
 
 mod agent;
 pub mod api;
@@ -17,6 +17,7 @@ mod git;
 mod panes;
 mod process;
 mod program;
+mod shells;
 mod watch;
 mod zellij;
 

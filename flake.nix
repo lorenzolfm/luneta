@@ -153,8 +153,13 @@
                 nativeBuildInputs = [ pkgs.protobuf ];
 
                 # The daemon asks git how each work tree stands, and the tests make
-                # work trees of their own for it to ask about.
-                nativeCheckInputs = [ pkgs.git ];
+                # work trees of their own for it to ask about. It asks `ps` which
+                # processes are in front of the terminal a command runs on, and the
+                # tests ask it too.
+                nativeCheckInputs = [
+                  pkgs.git
+                  pkgs.procps
+                ];
 
                 doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
 

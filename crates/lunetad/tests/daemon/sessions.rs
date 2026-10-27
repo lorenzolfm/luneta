@@ -21,14 +21,14 @@ use crate::host::{eventually, start, FakeZellij, Vars, LUNETA};
 
 /// The folders of a host of a test's own: the daemon's, and zellij's sockets,
 /// with a zellij that lists the panes the test gives it.
-struct Host {
-    runtime: TempDir,
-    sockets: TempDir,
-    zellij: FakeZellij,
+pub struct Host {
+    pub runtime: TempDir,
+    pub sockets: TempDir,
+    pub zellij: FakeZellij,
 }
 
 impl Host {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let host = Host {
             runtime: tempfile::tempdir().unwrap(),
             sockets: tempfile::tempdir().unwrap(),
@@ -38,7 +38,7 @@ impl Host {
         host
     }
 
-    fn vars(&self) -> Vars<'_> {
+    pub fn vars(&self) -> Vars<'_> {
         Vars {
             runtime: Some(self.runtime.path()),
             zellij: Some(self.sockets.path()),
@@ -48,17 +48,17 @@ impl Host {
     }
 
     /// The folder zellij 0.45 keeps its sessions' sockets in.
-    fn contract(&self) -> PathBuf {
+    pub fn contract(&self) -> PathBuf {
         self.sockets.path().join("contract_version_1")
     }
 
     /// A session's server, by the socket it listens on.
-    fn serve(&self, session: &str) -> UnixListener {
+    pub fn serve(&self, session: &str) -> UnixListener {
         UnixListener::bind(self.contract().join(session)).unwrap()
     }
 
     /// The host, as the daemon answers a first look.
-    fn host(&self) -> api::Host {
+    pub fn host(&self) -> api::Host {
         let socket = self.runtime.path().join(crate::host::SOCKET);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
@@ -83,13 +83,13 @@ impl Host {
     }
 }
 
-fn session<'a>(host: &'a api::Host, name: &str) -> Option<&'a api::Session> {
+pub fn session<'a>(host: &'a api::Host, name: &str) -> Option<&'a api::Session> {
     host.sessions.iter().find(|session| session.name == name)
 }
 
 /// A pane as zellij 0.45.1's `list-panes --json` spells it, cut down to what
 /// tells one apart.
-fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serde_json::Value {
+pub fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serde_json::Value {
     json!({
         "id": id,
         "is_plugin": false,
@@ -113,6 +113,7 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
         cwd: cwd.map(str::to_owned),
         command: cwd.map(|_| "fish".to_owned()),
         titled: None,
+        shell: None,
     }
 }
 

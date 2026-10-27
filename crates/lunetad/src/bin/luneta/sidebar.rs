@@ -1,6 +1,7 @@
 //! The sidebar: every session on the host, the panes in each, and what the
-//! agent in each pane is doing, as the daemon says, beside the zellij luneta
-//! runs. A row takes zellij's client there, and `▌` marks the pane it is on.
+//! agent in each pane is doing, or the command its shell runs, as the daemon
+//! says, beside the zellij luneta runs. A row takes zellij's client there, and
+//! `▌` marks the pane it is on.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant, SystemTime};
@@ -11,7 +12,8 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, Client, Host, NameSource, Pane, Session, Status, Zellij};
+use lunetad::api::shell::Doing;
+use lunetad::api::{Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, Zellij};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -49,6 +51,10 @@ const MARK: usize = 1;
 /// The column a pane's label starts at, and the branch under it: past the
 /// indent, the mark and the icon, and a space after each of those two.
 const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
+
+/// How long a command runs before its row says it runs, and says how it
+/// ended once it does: an `ls` is no news.
+const LONG: Duration = Duration::from_secs(1);
 
 /// A session as the sidebar tells it from another of its name: zellij
 /// versions with sockets of their own can each run one under it.
@@ -111,11 +117,14 @@ impl Place {
     }
 }
 
-/// What a pane's agent is doing, as its row marks it.
+/// What goes on in a pane, as its row marks it: what its agent is doing, or
+/// the command its shell runs, or ran last.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mark {
+    /// An agent that waits for you, or a command that waits for you to type.
     Waiting,
     Idle,
+    /// An agent at work, or a command.
     Busy,
     Shell,
     /// A word the daemon passed on as Claude Code wrote it, by its initial as
@@ -123,6 +132,13 @@ enum Mark {
     Other(char),
     /// An agent that says nothing, or nothing a mark can show in its column.
     Unreported,
+    /// A command that ended with an exit status of 0.
+    Passed,
+    /// A command that ended with any other.
+    Failed,
+    /// A command that ended, its shell not saying how, as fish does not after
+    /// `fg`.
+    Ran,
 }
 
 impl Mark {
@@ -147,11 +163,15 @@ impl Mark {
         let style = Style::new();
         match self {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Mark::Idle => ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Mark::Idle | Mark::Passed => {
+                ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD))
+            },
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
+            Mark::Failed => ("✗".to_owned(), style.fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Mark::Ran => ("$".to_owned(), style),
         }
     }
 }
@@ -164,17 +184,67 @@ fn initial(word: &str) -> Option<char> {
     (initial.width() == Some(MARK)).then_some(initial)
 }
 
-/// The agent in a pane, as its row shows it.
+/// What a pane's row marks, as it shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Seat {
+struct Marked {
     mark: Mark,
-    /// Since when it has been doing what it does.
+    /// Since when it has been doing what it does, or since it ended.
     since: Option<SystemTime>,
 }
 
-impl Seat {
+impl Marked {
     fn of(agent: &Agent) -> Self {
-        Seat { mark: Mark::of(agent), since: agent.status_since.and_then(|at| at.try_into().ok()) }
+        let since = agent.status_since.and_then(|at| at.try_into().ok());
+        Marked { mark: Mark::of(agent), since }
+    }
+
+    /// The mark of the command `shell` runs, or ran last, at `now`, and the
+    /// command. One that runs has the spinner, or the dot of an agent that
+    /// waits for you while it waits for you to type, once it has run for
+    /// `LONG`; and one that ended says how, if it ran that long. One that takes
+    /// the terminal over has none while you use it, nor has a job stopped.
+    fn of_shell(shell: &Shell, now: SystemTime) -> Option<(Self, &str)> {
+        let (mark, since, command) = match shell.doing.as_ref()? {
+            Doing::Going(going) => {
+                let since = told(going.since)?;
+                if now < since.checked_add(LONG)? {
+                    return None;
+                }
+                let mark = match Front::try_from(going.front) {
+                    Ok(Front::Working) => Mark::Busy,
+                    Ok(Front::Asking) => Mark::Waiting,
+                    Ok(Front::Interactive | Front::Unspecified) | Err(_) => return None,
+                };
+                (mark, since, going.command.as_str())
+            },
+            Doing::Ended(ended) => {
+                if Duration::try_from(ended.took?).ok()? < LONG {
+                    return None;
+                }
+                let mark = match ended.status {
+                    Some(0) => Mark::Passed,
+                    Some(_) => Mark::Failed,
+                    None => Mark::Ran,
+                };
+                (mark, told(ended.at)?, ended.command.as_str())
+            },
+            Doing::Stopped(_) => return None,
+        };
+        Some((Marked { mark, since: Some(since) }, command))
+    }
+}
+
+/// A moment the shell hook said, which it counts in whole seconds: the last
+/// moment of its second, so that a command never ran longer than it did.
+fn told(at: Option<impl TryInto<SystemTime>>) -> Option<SystemTime> {
+    at?.try_into().ok()?.checked_add(Duration::from_millis(999))
+}
+
+/// When the command going in `shell` will have run for `LONG`.
+fn long_at(shell: &Shell) -> Option<SystemTime> {
+    match shell.doing.as_ref()? {
+        Doing::Going(going) => told(going.since)?.checked_add(LONG),
+        Doing::Ended(_) | Doing::Stopped(_) => None,
     }
 }
 
@@ -195,7 +265,7 @@ enum Row {
         pane: u32,
         /// Whether luneta's zellij is on it.
         here: bool,
-        seat: Option<Seat>,
+        marked: Option<Marked>,
         /// The icon of what runs in it, if that has one.
         icon: Option<&'static str>,
         label: String,
@@ -313,6 +383,12 @@ pub struct Sidebar {
     notice: Option<String>,
     /// The search, while it is open.
     search: Option<Search>,
+    /// When the sidebar was last drawn: the rows are built for then, by which
+    /// a command has run long enough to show, or has yet to.
+    drawn: Option<SystemTime>,
+    /// The soonest a command that runs, and has yet to show, will have run
+    /// long enough to: the rows are built again once it has.
+    due: Option<SystemTime>,
 }
 
 /// The search, while it is open.
@@ -506,6 +582,8 @@ impl Sidebar {
             return;
         };
         let here = self.here().map(str::to_owned);
+        let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
+        let mut due: Option<SystemTime> = None;
         let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
@@ -538,9 +616,25 @@ impl Sidebar {
             let mut panes: Vec<_> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
             panes.sort_by_key(|pane| (pane.tab, pane.id));
             let agent = |pane: u32| agents.get(&(session.name.as_str(), pane)).copied();
-            let seats: Vec<Option<Seat>> =
-                panes.iter().map(|pane| agent(pane.id).map(Seat::of)).collect();
-            let marks = || seats.iter().flatten().map(|seat| &seat.mark);
+            // A pane's agent, or else the command its shell runs, by which
+            // its row is named.
+            let mut marked: Vec<Option<(Marked, Option<&str>)>> = Vec::with_capacity(panes.len());
+            for pane in &panes {
+                if let Some(agent) = agent(pane.id) {
+                    marked.push(Some((Marked::of(agent), None)));
+                    continue;
+                }
+                let Some(shell) = &pane.shell else {
+                    marked.push(None);
+                    continue;
+                };
+                if let Some(long) = long_at(shell).filter(|long| *long > now) {
+                    due = Some(due.map_or(long, |due| due.min(long)));
+                }
+                let shell = Marked::of_shell(shell, now);
+                marked.push(shell.map(|(shell, command)| (shell, Some(command))));
+            }
+            let marks = || marked.iter().flatten().map(|(marked, _)| &marked.mark);
             let waiting = marks().filter(|mark| **mark == Mark::Waiting).count();
             let busy = marks().filter(|mark| **mark == Mark::Busy).count();
             counts.waiting += waiting;
@@ -550,7 +644,7 @@ impl Sidebar {
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
             let mut shown: Vec<(Row, Option<Fit>)> = Vec::new();
-            for (pane, seat) in listing.into_iter().zip(seats) {
+            for (pane, marked) in listing.into_iter().zip(marked) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd
                     .and_then(|cwd| trees.get(cwd))
@@ -564,7 +658,12 @@ impl Sidebar {
                     Some(_) => Some(icons::AGENT),
                     None => command.and_then(icons::program),
                 };
-                let label = label(agent(pane.id), pane);
+                let (marked, ran) =
+                    marked.map_or((None, None), |(marked, ran)| (Some(marked), ran));
+                let label = match ran {
+                    Some(ran) => ran.to_owned(),
+                    None => label(agent(pane.id), pane),
+                };
                 let branch = checkout.as_ref().map(|(branch, _)| branch.as_str());
                 let found = finder.as_ref().and_then(|finder| finder.pane(&label, branch, pane));
                 if finder.is_some() && found.is_none() && named.is_none() {
@@ -575,7 +674,7 @@ impl Sidebar {
                     session: listed.clone(),
                     pane: pane.id,
                     here: here_pane.as_ref() == Some(&place),
-                    seat,
+                    marked,
                     icon: program.and_then(icons::of),
                     label,
                     checkout,
@@ -624,6 +723,7 @@ impl Sidebar {
         if !self.focused && self.here_row.is_some() {
             self.cursor.clone_from(&self.here_row);
         }
+        self.due = due;
         self.settle(best.map(|(at, _)| at), seek);
     }
 
@@ -874,6 +974,10 @@ impl Sidebar {
     /// pane changes. Its last column is left blank, to keep it off what is
     /// beside it.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
+        self.drawn = Some(now);
+        if self.due.is_some_and(|due| due <= now) {
+            self.rebuild();
+        }
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(now);
@@ -1254,13 +1358,13 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { here, seat, icon, label, checkout, .. } => {
-            let mark = seat.as_ref().map(|seat| &seat.mark);
-            let since = seat.as_ref().and_then(|seat| seat.since);
+        Row::Pane { here, marked, icon, label, checkout, .. } => {
+            let mark = marked.as_ref().map(|marked| &marked.mark);
+            let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
-            // A pane with no agent in it is dimmed, and its icon is drawn as
-            // its label is.
+            // A pane with no mark, of an agent or of a command, is dimmed,
+            // and its icon is drawn as its label is.
             let label_style = match mark {
                 Some(Mark::Waiting) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 Some(_) => Style::new(),
@@ -1397,6 +1501,7 @@ fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use luneta_protocol::said::Said;
+    use lunetad::api::shell::{Ended, Going, Stopped};
     use lunetad::api::{self, Pane, Panes, Version, Zellij};
     use prost_types::Timestamp;
 
@@ -1410,6 +1515,7 @@ mod tests {
             cwd: Some(cwd.to_owned()),
             command: Some(command.to_owned()),
             titled: None,
+            shell: None,
         }
     }
 
@@ -1460,9 +1566,20 @@ mod tests {
     /// The sidebar drawn `width` columns wide and `height` tall, with the
     /// focus or without.
     fn drawn(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Buffer {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        drawn_at(sidebar, focused, width, height, now)
+    }
+
+    /// The sidebar as `drawn` draws it, at `now`.
+    fn drawn_at(
+        sidebar: &mut Sidebar,
+        focused: bool,
+        width: u16,
+        height: u16,
+        now: SystemTime,
+    ) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
         sidebar.focus(focused);
         sidebar.draw(&mut buffer, area, now);
         buffer
@@ -1480,7 +1597,19 @@ mod tests {
         width: u16,
         height: u16,
     ) -> (Vec<String>, Vec<u16>) {
-        let buffer = drawn(sidebar, focused, width, height);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        seen_at(sidebar, focused, width, height, now)
+    }
+
+    /// The sidebar as `seen` draws it, at `now`.
+    fn seen_at(
+        sidebar: &mut Sidebar,
+        focused: bool,
+        width: u16,
+        height: u16,
+        now: SystemTime,
+    ) -> (Vec<String>, Vec<u16>) {
+        let buffer = drawn_at(sidebar, focused, width, height, now);
         let lines = (0..height)
             .map(|y| {
                 let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
@@ -1986,6 +2115,92 @@ mod tests {
                 .map(|name| name.text.as_str()),
             Some("prompt")
         );
+    }
+
+    /// A pane at its prompt, in `/w/luneta/main`, whose shell said `doing`.
+    fn in_shell(id: u32, doing: Doing) -> Pane {
+        Pane { shell: Some(Shell { doing: Some(doing) }), ..pane(id, 0, "/w/luneta/main", "fish") }
+    }
+
+    fn going(command: &str, since: i64, front: Front) -> Doing {
+        let since = Some(Timestamp { seconds: since, nanos: 0 });
+        Doing::Going(Going { command: command.to_owned(), since, front: front.into() })
+    }
+
+    fn ended(command: &str, status: Option<i32>, millis: i32) -> Doing {
+        let (seconds, nanos) = ((millis / 1000).into(), millis % 1000 * 1_000_000);
+        let took = Some(prost_types::Duration { seconds, nanos });
+        let at = Some(Timestamp { seconds: 130, nanos: 0 });
+        Doing::Ended(Ended { command: command.to_owned(), at, status, took })
+    }
+
+    /// A command in a shell has an agent's marks, its row named for it: the
+    /// spinner while it works, the dot of an agent that waits for you while
+    /// it waits for you to type, and once it ends, how it ended. The rule
+    /// along the top counts them with the agents. One that takes the terminal
+    /// over has no mark while you use it, nor has a job stopped, nor one that
+    /// ended within a second. The hook counts whole seconds, and a command is
+    /// dated to the last moment of its second. The icon goes by what zellij
+    /// says runs in the pane, as for any other: here a shell's, `\u{e795}`,
+    /// and neovim's, `\u{e6ae}`.
+    #[test]
+    fn a_command_has_an_agent_s_marks_and_its_row_is_named_for_it() {
+        let mut sidebar = Sidebar::default();
+        let stopped = Doing::Stopped(Stopped {
+            command: "make".to_owned(),
+            at: Some(Timestamp { seconds: 130, nanos: 0 }),
+        });
+        let nvim = in_shell(3, going("nvim notes", 100, Front::Interactive));
+        let nvim = Pane { command: Some("nvim notes".to_owned()), ..nvim };
+        sidebar.heard(host(
+            vec![session(
+                "s",
+                10,
+                vec![
+                    in_shell(1, going("cargo build --release", 100, Front::Working)),
+                    in_shell(2, going("sudo -k true", 100, Front::Asking)),
+                    nvim,
+                    in_shell(4, ended("cargo test", Some(0), 41_873)),
+                    in_shell(5, ended("cargo clippy", Some(101), 5_000)),
+                    in_shell(6, ended("cargo run", None, 7_000)),
+                    in_shell(7, ended("ls", Some(0), 20)),
+                    in_shell(8, stopped),
+                ],
+            )],
+            Vec::new(),
+        ));
+        assert_eq!(
+            screen(&mut sidebar, false, 32, 11),
+            [
+                "─ 1 session ─────────── ●1 ⠋1 ─",
+                "",
+                " ▾ s ────────────────────── ●1",
+                "   ⠋ \u{e795} cargo build --rele… 59s",
+                "   ● \u{e795} sudo -k true        59s",
+                "     \u{e6ae} nvim notes",
+                "   ✓ \u{e795} cargo test          29s",
+                "   ✗ \u{e795} cargo clippy        29s",
+                "   $ \u{e795} cargo run           29s",
+                "     \u{e795} luneta/main",
+                "     \u{e795} luneta/main",
+            ]
+        );
+        assert!(sidebar.turning());
+    }
+
+    /// A command shows once it has run for a second, with no word from the
+    /// daemon since it started.
+    #[test]
+    fn a_command_shows_once_it_has_run_a_second() {
+        let mut sidebar = Sidebar::default();
+        let make = in_shell(1, going("make", 159, Front::Working));
+        sidebar.heard(host(vec![session("s", 10, vec![make])], Vec::new()));
+        let at = |millis| SystemTime::UNIX_EPOCH + Duration::from_millis(millis);
+        let row = |sidebar: &mut Sidebar, now| seen_at(sidebar, false, 32, 4, now).0[3].clone();
+        assert_eq!(row(&mut sidebar, at(160_500)), "     \u{e795} luneta/main");
+        assert!(!sidebar.turning());
+        assert_eq!(row(&mut sidebar, at(161_000)), "   ⠋ \u{e795} make                 1s");
+        assert!(sidebar.turning());
     }
 
     /// Starship's `git_status`, with the defaults.

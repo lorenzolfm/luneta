@@ -41,8 +41,10 @@ notify = "8.2.0"
 prost = "0.14.4"
 # Draws luneta's frame, and puts on the terminal only what changed in it.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
-# For the uid the runtime folder must belong to: std has no safe getuid.
-rustix = { version = "1.1.4", features = ["process"] }
+# For the uid the runtime folder must belong to: std has no safe getuid. And
+# for how a terminal a command runs on takes keys, as `stty` reads it, opened
+# so that it never becomes the daemon's own.
+rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 # Claude Code's session files are JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -65,6 +67,9 @@ tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
 prost-types = "0.14.4"
+# Terminals of the tests' own, for a command going on one, set to take keys as
+# the test has them.
+rustix = { version = "1.1.4", features = ["fs", "pty", "termios"] }
 tempfile = "3.27.0"
 
 [lints]

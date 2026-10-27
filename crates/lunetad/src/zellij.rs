@@ -17,6 +17,8 @@
 //! started, it never saw: the name leads nowhere, or to the one session made
 //! under it since, if that one is older than the agent. Only an agent started
 //! after that, in a pane older than the rename, it puts in the wrong session.
+//! A shell, where more than one session could be its, goes to the one that has
+//! the name now, as `housing` says.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -207,12 +209,46 @@ impl Sessions {
     /// pane opened in. None when no session could be it, or more than one.
     #[must_use]
     pub fn lead(&self, named: &str, started: Option<SystemTime>) -> Option<&str> {
-        let before = |id: &&Id| started.is_none_or(|started| id.made <= started);
-        let mut could = self.held.get(named)?.iter().filter(before);
+        let id = self.led(named, started)?;
+        let now = self.names.get(&id).expect("a session that holds a name runs");
+        Some(now.as_str())
+    }
+
+    /// The session that `lead` leads to.
+    #[must_use]
+    pub fn led(&self, named: &str, started: Option<SystemTime>) -> Option<Id> {
+        let mut could = self.could_be(named, started);
         let (Some(id), None) = (could.next(), could.next()) else {
             return None;
         };
-        let now = self.names.get(id).expect("a session that holds a name runs");
-        Some(now.as_str())
+        Some(id)
+    }
+
+    /// The session of a shell that started at `started`, in a session called
+    /// `named` then: the one `led` leads to, or else, of those that could be
+    /// it, the one that has the name now. A session made under the name of one
+    /// renamed, while that one runs, so has the shells started in it, as the
+    /// plugin's sidebar has them; a shell started since in an old pane of the
+    /// one renamed, which says its old name too, goes there as well. An agent
+    /// goes by `lead` alone: where that gives up, the sidebar finds its pane
+    /// by where it works, which a shell does not say.
+    #[must_use]
+    pub fn housing(&self, named: &str, started: SystemTime) -> Option<Id> {
+        if let Some(id) = self.led(named, Some(started)) {
+            return Some(id);
+        }
+        let named_now = |id: &Id| self.names.get(id).is_some_and(|now| now == named);
+        let mut could = self.could_be(named, Some(started)).filter(named_now);
+        let (Some(id), None) = (could.next(), could.next()) else {
+            return None;
+        };
+        Some(id)
+    }
+
+    /// The sessions that have held `named`, but for those made after
+    /// `started`.
+    fn could_be(&self, named: &str, started: Option<SystemTime>) -> impl Iterator<Item = Id> {
+        let before = move |id: &Id| started.is_none_or(|started| id.made <= started);
+        self.held.get(named).into_iter().flatten().copied().filter(before)
     }
 }

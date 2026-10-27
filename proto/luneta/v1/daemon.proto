@@ -9,6 +9,7 @@ syntax = "proto3";
 
 package luneta.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 service Daemon {
@@ -16,10 +17,11 @@ service Daemon {
   rpc Info(InfoRequest) returns (InfoResponse);
   // The agents that run on the host, each as it stands now.
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
-  // The host as it stands: its zellij sessions, their panes and clients, how
-  // the work trees those panes are in stand, and its agents. It answers at once when
-  // the host is no longer as the client last saw it, and otherwise as soon as
-  // the host changes, or after four seconds with the host as it was.
+  // The host as it stands: its zellij sessions, their panes and clients, what
+  // the shell in each pane says through luneta's hook, how the work trees
+  // those panes are in stand, and its agents. It answers at once when the
+  // host is no longer as the client last saw it, and otherwise as soon as the
+  // host changes, or after four seconds with the host as it was.
   rpc Watch(WatchRequest) returns (Host);
 }
 
@@ -110,6 +112,9 @@ message Pane {
   // `Pane #1`: it is the glyph that tells an agent's. zellij keeps the last
   // title a program gave, so an agent's can outlast it.
   Titled titled = 6;
+  // What its shell says through luneta's hook. Absent for a shell without the
+  // hook, and for one that has said nothing yet.
+  Shell shell = 7;
 }
 
 // What an agent says in the title of its pane, without the glyph.
@@ -118,6 +123,64 @@ message Titled {
   // in the place of the `✳`. Absent for the bare `Claude Code` Claude Code
   // titles its pane with until it has a topic, which some never get.
   optional string topic = 1;
+}
+
+// What a shell with luneta's hook said last: the command it runs, or the one it
+// ran last and how that ended. The hook counts whole seconds, so each time
+// here is the second it said.
+message Shell {
+  // One of these, always: a client that finds none has a newer daemon's.
+  oneof doing {
+    Going going = 1;
+    Ended ended = 2;
+    Stopped stopped = 3;
+  }
+
+  // A command it runs.
+  message Going {
+    // The command line, on one line.
+    string command = 1;
+    // When it started. Always there.
+    google.protobuf.Timestamp since = 2;
+    // What the command in front of its terminal does. Never unspecified.
+    Front front = 3;
+  }
+
+  // The command it ran last, which ended.
+  message Ended {
+    string command = 1;
+    // When it ended. Always there.
+    google.protobuf.Timestamp at = 2;
+    // Its exit status. Absent where the shell cannot say it, as fish cannot
+    // after `fg`.
+    optional int32 status = 3;
+    // How long it ran, to the millisecond. Always there.
+    google.protobuf.Duration took = 4;
+  }
+
+  // A job it stopped, with `Ctrl z`, which waits to be brought back.
+  message Stopped {
+    string command = 1;
+    // When it stopped. Always there.
+    google.protobuf.Timestamp at = 2;
+  }
+}
+
+// What the command in front of a terminal does, by how the terminal takes keys
+// and whether a process in front of it reads it.
+enum Front {
+  // Never sent. A client that finds it, or a number it does not know, has the
+  // word of a newer daemon's.
+  FRONT_UNSPECIFIED = 0;
+  // It works, and reads nothing from the terminal.
+  FRONT_WORKING = 1;
+  // It waits for you to type: it reads the terminal a line at a time, or with
+  // the echo off, as a password prompt does. A blocking read of a socket looks
+  // the same to Linux, and is this too.
+  FRONT_ASKING = 2;
+  // It takes the terminal over a key at a time, as an editor, a pager or `ssh`
+  // does, for as long as you use it.
+  FRONT_INTERACTIVE = 3;
 }
 
 // How the work tree stands where a pane works, as `git status` says it.
