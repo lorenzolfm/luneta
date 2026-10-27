@@ -164,20 +164,80 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     }
 }
 
+/// A `gh` of a test's own, beside its `zellij`, that finds the pull request
+/// of the branch checked out where it runs as a test has it: what it wrote
+/// with `open` for the branch's name, whatever the repository. Of a branch it
+/// was given none for, it says there is none, as gh does. It knows no other
+/// command. It notes the branch of each pull request it is asked for, for
+/// `asked`.
+pub struct FakeGh {
+    pulls: PathBuf,
+}
+
+impl FakeGh {
+    /// Writes the `gh` in `bin`, where the test's `zellij` is.
+    fn new(bin: &Path) -> Self {
+        let gh = FakeGh { pulls: bin.join("pulls") };
+        fs::create_dir(&gh.pulls).unwrap();
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$*" != "pr view --json number,state,isDraft" ]; then
+    echo "this gh only views a pull request, and was asked: $*" >&2
+    exit 2
+fi
+branch=$(git symbolic-ref --short HEAD) || exit 1
+echo "$branch" >> "{pulls}/asked"
+if [ ! -f "{pulls}/$branch.json" ]; then
+    echo "no pull requests found for branch \"$branch\"" >&2
+    exit 1
+fi
+exec cat "{pulls}/$branch.json"
+"#,
+            pulls = gh.pulls.display()
+        );
+        let path = bin.join("gh");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        gh
+    }
+
+    /// The branches gh has been asked about, in the order it was asked.
+    pub fn asked(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("asked")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
+    }
+
+    /// Has gh find `said` for `branch` from now on, as `gh pr view --json`
+    /// writes it. The file is written whole before gh can read it.
+    pub fn open(&self, branch: &str, said: &serde_json::Value) {
+        let path = self.pulls.join(format!("{branch}.json"));
+        let writing = path.with_extension("writing");
+        fs::write(&writing, said.to_string()).unwrap();
+        fs::rename(writing, path).unwrap();
+    }
+}
+
 /// The folders of a host of a test's own: the daemon's, and zellij's sockets,
-/// with a zellij that lists the panes the test gives it.
+/// with a zellij that lists the panes the test gives it, and a gh that finds
+/// the pull requests it gives it.
 pub struct Host {
     pub runtime: TempDir,
     pub sockets: TempDir,
     pub zellij: FakeZellij,
+    pub gh: FakeGh,
 }
 
 impl Host {
     pub fn new() -> Self {
+        let zellij = FakeZellij::new();
         let host = Host {
             runtime: tempfile::tempdir().unwrap(),
             sockets: tempfile::tempdir().unwrap(),
-            zellij: FakeZellij::new(),
+            gh: FakeGh::new(zellij.bin()),
+            zellij,
         };
         fs::create_dir_all(host.contract()).unwrap();
         host

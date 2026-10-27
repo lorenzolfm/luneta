@@ -629,6 +629,18 @@ ended keeps its mark until the shell runs another: the `•` of what you have
 yet to see has not come over yet. A shell without the hook has no marks
 here, where the plugin's sidebar read its title.
 
+Under a pane's row is the branch checked out where it works, as in the
+plugin's sidebar, and after the branch, the number of its pull request on
+GitHub, as `fold #126`, in the colour `gh` lists it in: green while it is
+open, grey while it is a draft, and magenta once it is merged, which says the
+worktree can go. A closed one shows nothing, and neither does a branch with
+none, or one `gh` cannot ask about, as where it is not installed or not
+logged in. A branch too long for the line is cut short, and the number kept.
+lunetad runs `gh pr view` in the directory once for a branch of a repository,
+however many panes are on it, as a pane comes to the branch and then every
+minute: each ask counts against GitHub's hourly limit, which every other `gh`
+you run shares. A pull request opened or merged shows within a minute.
+
 The rule along the top counts the sessions, the agents and commands that wait
 for you, those at work, and the agents in `shell`, as `$2`, dimmed as their
 `$` is, a folded session's too. A count of none is left out. The plugin's rule
@@ -674,6 +686,7 @@ the session it is in.
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
+| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
 | `luneta` and [`lunetad`](#building-from-source), side by side | optional | the sidebar's agents, panes and branches as they change, without each sidebar asking claude-ps, zellij and git |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in the sidebar, and how it ended |
@@ -1262,8 +1275,9 @@ newer one they keep, so that two versions in use at once never take turns at
 it: after a rollback, the newer daemon runs on until zellij's last session ends.
 `luneta info` says which daemon runs, `luneta agents` lists the agents it
 finds, and `luneta sessions` the sessions, their panes and the branch each
-works on; none of the three starts one. The daemon asks `zellij` and `git` on
-its `PATH`, which is the zellij server's when the plugin started it.
+works on, with its pull request; none of the three starts one. The daemon asks
+`zellij`, `git` and `gh` on its `PATH`, which is the zellij server's when the
+plugin started it.
 
 ## License
 

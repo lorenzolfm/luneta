@@ -31,7 +31,7 @@ use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsR
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, git, panes, shells, watch, zellij};
+use crate::{claude, client, git, github, panes, shells, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
 /// that crashed, which leaves its file as it was. zellij is asked for each
@@ -47,6 +47,11 @@ const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 /// about it again. `git status` reads the whole tree, which takes a large one
 /// a while, and git rests from one for as long as it took over it.
 const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
+
+/// How long gh rests from a branch before it is asked about its pull request
+/// again. gh asks GitHub, and each ask counts against the hourly limit that
+/// GitHub puts on the user, and that each gh of theirs shares.
+const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(1);
 
 /// How long `Watch` waits for the host to change before it answers with the
 /// host as it was: within the time a client waits for an answer.
@@ -123,11 +128,13 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     // changes made it.
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
-    let core = core::start(Wakes { panes: wake_panes, git: wake_git })?;
+    let (wake_github, github_woken) = mpsc::sync_channel(1);
+    let core = core::start(Wakes { panes: wake_panes, git: wake_git, github: wake_github })?;
     let (end, ending) = oneshot::channel();
     follow(&core, &claim.folder, end)?;
     panes::follow(core.clone(), panes_woken, SWEEP)?;
     git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
+    github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
     let host = Host { started: SystemTime::now(), core };
     let socket = claim.socket.clone();

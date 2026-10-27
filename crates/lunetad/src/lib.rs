@@ -14,6 +14,7 @@ mod core;
 mod daemon;
 pub mod folder;
 mod git;
+mod github;
 mod panes;
 mod process;
 pub mod program;

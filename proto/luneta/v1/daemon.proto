@@ -19,7 +19,8 @@ service Daemon {
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
   // The host as it stands: its zellij sessions, their panes and clients, what
   // the shell in each pane says through luneta's hook, how the work trees
-  // those panes are in stand, and its agents. It answers at once when the
+  // those panes are in stand, the pull requests of the branches checked out
+  // there, and its agents. It answers at once when the
   // host is no longer as the client last saw it, and otherwise as soon as the
   // host changes, or after four seconds with the host as it was.
   rpc Watch(WatchRequest) returns (Host);
@@ -50,6 +51,9 @@ message Host {
   // `ListAgentsResponse` has them.
   repeated Agent agents = 4;
   uint32 unread = 5;
+  // The pull request of the branch checked out in each directory a pane works
+  // in, once gh has found one. In no order a client can count on.
+  repeated PullRequest pull_requests = 6;
 }
 
 // A zellij session that runs: its server listens on a socket named for it.
@@ -235,6 +239,31 @@ message Changes {
 message Upstream {
   uint32 ahead = 1;
   uint32 behind = 2;
+}
+
+// The pull request on GitHub of the branch checked out where a pane works, as
+// `gh pr view` finds it there: an open one before the rest. gh is asked again
+// about each branch every minute, and about one a pane has just come to at
+// once.
+message PullRequest {
+  // The directory, as `WorkTree` has it: the pull request is of the branch
+  // its work tree has checked out.
+  string dir = 1;
+  uint32 number = 2;
+  // Never unspecified.
+  PullRequestState state = 3;
+}
+
+enum PullRequestState {
+  // Never sent. A client that finds it, or a number it does not know, has the
+  // state of a newer daemon's.
+  PULL_REQUEST_STATE_UNSPECIFIED = 0;
+  PULL_REQUEST_STATE_OPEN = 1;
+  // Open, and a draft.
+  PULL_REQUEST_STATE_DRAFT = 2;
+  PULL_REQUEST_STATE_MERGED = 3;
+  // Closed, and not merged.
+  PULL_REQUEST_STATE_CLOSED = 4;
 }
 
 message InfoRequest {}

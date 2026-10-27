@@ -1,7 +1,7 @@
 //! The host as `Watch` gives it: zellij's sessions and their panes, how the
 //! work trees the panes work in stand, and when it answers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::{Detached, Head};
 use lunetad::api::work_tree::{Outside, Stands};
-use lunetad::api::{self, Branch, Changes, Checkout, Upstream, Version};
+use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
 use prost::Message as _;
 use serde_json::json;
 
@@ -382,6 +382,66 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
         let trees = host.host().work_trees;
         trees.iter().all(|tree| tree.dir != plain).then_some(())
     });
+}
+
+/// gh is asked for the pull request of the branch checked out where each pane
+/// works: once for a branch of a repository, however many of its directories
+/// panes work in, and at once as a pane comes to a branch. What gh found of a
+/// branch is no longer a directory's once another is checked out there, and
+/// a branch with no pull request has none, which is no trouble to the daemon.
+#[test]
+fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let (tree, other) = (dirs.path().join("tree"), dirs.path().join("other"));
+    fs::create_dir_all(tree.join("src")).unwrap();
+    fs::create_dir(&other).unwrap();
+    for dir in [&tree, &other] {
+        assert!(git(dir, &["init", "-q", "-b", "main"]));
+        commit(dir, "README", "start\n");
+    }
+    host.gh.open("main", &json!({ "number": 7, "state": "OPEN", "isDraft": false }));
+    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true }));
+    let spelled = |dir: &Path| dir.display().to_string();
+    let (top, src, beside) = (spelled(&tree), spelled(&tree.join("src")), spelled(&other));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    host.zellij.list("work", &json!([in_dir(1, &top), in_dir(2, &src), in_dir(3, &beside)]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    let found = || -> BTreeMap<String, (u32, PullRequestState)> {
+        let pull_requests = host.host().pull_requests.into_iter();
+        let found = |it: api::PullRequest| (it.number, it.state(), it.dir);
+        pull_requests.map(found).map(|(number, state, dir)| (dir, (number, state))).collect()
+    };
+
+    let open = (7, PullRequestState::Open);
+    let all = eventually("gh finds main's pull request in all three", || {
+        let found = found();
+        (found.len() == 3).then_some(found)
+    });
+    let wanted = [(top.clone(), open), (src.clone(), open), (beside.clone(), open)];
+    assert_eq!(all, BTreeMap::from(wanted));
+    assert_eq!(host.gh.asked(), ["main", "main"]);
+
+    assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
+    let draft = (8, PullRequestState::Draft);
+    eventually("gh finds fold's pull request in both of tree's", || {
+        let found = found();
+        (found.get(&top) == Some(&draft) && found.get(&src) == Some(&draft)).then_some(())
+    });
+    assert_eq!(found().get(&beside), Some(&open));
+    assert_eq!(host.gh.asked(), ["main", "main", "fold"]);
+
+    assert!(git(&other, &["switch", "-q", "-c", "bare"]));
+    eventually("main's pull request is no longer other's", || {
+        (!found().contains_key(&beside)).then_some(())
+    });
+    eventually("gh is asked about bare", || {
+        host.gh.asked().iter().any(|branch| branch == "bare").then_some(())
+    });
+    let said = daemon.said_after(Duration::from_secs(1));
+    assert!(!said.iter().any(|line| line.contains("gh pr view")), "{said:?}");
+    assert!(!found().contains_key(&beside));
 }
 
 /// `luneta watch` writes out the host at once. With the version it last
