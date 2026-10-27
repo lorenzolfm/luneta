@@ -1619,11 +1619,17 @@ impl Sidebar {
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
     /// to the room it has. Its last column is left blank, as the sidebar's is.
+    /// The rule is red while the daemon does not answer, as the note that
+    /// says so is, which the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
-        let dim = Style::new().add_modifier(Modifier::DIM);
-        let mut lines = vec![Line::styled(RULE.repeat(width), dim), Line::default()];
+        let rule = if self.away.is_some() {
+            Style::new().fg(Color::Red)
+        } else {
+            Style::new().add_modifier(Modifier::DIM)
+        };
+        let mut lines = vec![Line::styled(RULE.repeat(width), rule), Line::default()];
         for (count, (glyph, style)) in tallies(self.counts, frame(now)) {
             if count == 0 {
                 continue;
@@ -2414,6 +2420,27 @@ mod tests {
         };
         assert_eq!(strip(&mut sidebar, moment(160_500)), ["───", "", "•1", "$1…", "", ""]);
         assert_eq!(strip(&mut sidebar, moment(161_000)), ["───", "", "•1", "⠋1", "$1…", ""]);
+    }
+
+    /// Collapsed, the sidebar has no room for the note that says lunetad does
+    /// not answer, so its rule turns red, as the note is, until lunetad
+    /// answers again.
+    #[test]
+    fn collapsed_the_sidebar_reddens_its_rule_while_lunetad_does_not_answer() {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(idle_agent());
+        let rule = |sidebar: &mut Sidebar| {
+            let area = Rect::new(0, 0, COLLAPSED, 3);
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw_collapsed(&mut buffer, area, moment(160_000));
+            let cell = &buffer[(0, 0)];
+            (cell.fg, cell.modifier.contains(Modifier::DIM))
+        };
+        assert_eq!(rule(&mut sidebar), (Color::Reset, true));
+        sidebar.lost("gone".to_owned());
+        assert_eq!(rule(&mut sidebar), (Color::Red, false));
+        sidebar.heard(idle_agent());
+        assert_eq!(rule(&mut sidebar), (Color::Reset, true));
     }
 
     /// A daemon of another build can list a session with no start, or with

@@ -725,7 +725,9 @@ for you, the panes with a `•`, those at work, and the agents in `shell`, as
 `$2`, dimmed as their `$` is, a folded session's too. A count of none is left
 out. The plugin's rule does not count the agents in `shell`. Collapsed, the
 sidebar keeps three of those counts, one to a line under a short rule: the
-panes with a `•`, those at work, and the agents in `shell`.
+panes with a `•`, those at work, and the agents in `shell`. The short rule is
+red while lunetad does not answer, and the counts under it are the last it
+gave.
 
 A fold is the same in every luneta on the host, and lasts until you unfold it:
 each folded session is an empty file named for it in
