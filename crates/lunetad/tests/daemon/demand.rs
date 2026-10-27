@@ -293,6 +293,26 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     assert!(said.starts_with(&format!("lunetad {} ", env!("CARGO_PKG_VERSION"))), "{said}");
 }
 
+/// lunetas that find an older daemon in the same moment, as the sidebars of
+/// an upgrade do as the host changes, each answer from the one that takes its
+/// place. One that finds the older one gone since it answered, as another
+/// luneta stopped it, waits for the next, and does not ask the one that ended.
+#[test]
+fn lunetas_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
+    const LUNETAS: usize = 8;
+    let host = Host::new();
+    let mut older = stand_in(&host, OLDER, None);
+    let pids: Vec<u32> = thread::scope(|scope| {
+        let asking: Vec<_> = (0..LUNETAS)
+            .map(|_| scope.spawn(|| pid(&watch(&host, Path::new(LUNETA)))))
+            .collect();
+        asking.into_iter().map(|asked| asked.join().unwrap()).collect()
+    });
+    let _daemon = Detached { host: &host, pid: pids[0] };
+    assert!(older.ended_within(Duration::from_secs(5)).is_some(), "the older daemon runs on");
+    assert!(pids.iter().all(|pid| *pid == pids[0] && *pid != older.pid()), "{pids:?}");
+}
+
 /// A daemon newer than luneta, as a luneta from before an upgrade finds
 /// running, `luneta watch` keeps: were it to stop it, the newer luneta would
 /// stop the one it started in turn, and the two would take turns at it for

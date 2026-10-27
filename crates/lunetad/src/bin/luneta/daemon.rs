@@ -99,15 +99,27 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
                     let (version, pid) = (info.version, info.pid);
                     if stopped == Some(pid) {
                         format!("lunetad {version} (pid {pid}) was stopped, and has not ended")
-                    } else if !makes_way(&version, || *starting.get_or_init(release))
-                        || !listens(&folder, pid).await
-                    {
+                    } else if !makes_way(&version, || *starting.get_or_init(release)) {
                         reap(started);
                         return Ok(daemon);
                     } else {
-                        stop(pid)?;
-                        stopped = Some(pid);
-                        format!("lunetad {version} (pid {pid}) is older than luneta, and ends")
+                        match listener(&folder, pid).await {
+                            Listener::Other => {
+                                reap(started);
+                                return Ok(daemon);
+                            },
+                            // Another luneta stopped it, as the sidebars of an
+                            // upgrade do at once.
+                            Listener::Gone => {
+                                format!("lunetad {version} (pid {pid}) has ended since it answered")
+                            },
+                            Listener::It => {
+                                stop(pid)?;
+                                stopped = Some(pid);
+                                let older = format!("lunetad {version} (pid {pid})");
+                                format!("{older} is older than luneta, and ends")
+                            },
+                        }
                     }
                 },
                 Err(status) => format!("{}: {}", socket.display(), causes(&status)),
@@ -274,12 +286,27 @@ fn release() -> Option<Release> {
     Release::parse(said.trim().strip_prefix(LUNETAD)?.strip_prefix(' ')?)
 }
 
-/// Whether the process that listens in `folder` is `pid`, as the kernel says.
-/// luneta stops no process on a daemon's word alone: one in another namespace
-/// of pids says a pid that is another process's here. A daemon it cannot
-/// stop, it asks as it is.
-async fn listens(folder: &Folder, pid: u32) -> bool {
-    lunetad::listening(folder).await.is_ok_and(|listening| listening == Some(pid))
+/// Who listens in the folder, against the pid a daemon said is its own.
+enum Listener {
+    /// The daemon that said it.
+    It,
+    /// A process the kernel names otherwise, or not at all, as it does one in
+    /// another namespace of pids.
+    Other,
+    /// None that luneta reaches, as the daemon has ended since it answered.
+    Gone,
+}
+
+/// Who listens in `folder`, as the kernel says, against `pid`. luneta stops
+/// no process on a daemon's word alone: one in another namespace of pids says
+/// a pid that is another process's here. A daemon it cannot stop, it asks as
+/// it is, but not one that has ended, which would fail it.
+async fn listener(folder: &Folder, pid: u32) -> Listener {
+    match lunetad::listening(folder).await {
+        Ok(listening) if listening == Some(pid) => Listener::It,
+        Ok(_) => Listener::Other,
+        Err(_) => Listener::Gone,
+    }
 }
 
 /// Has the daemon `pid` end, which the kernel says listens in the folder.
