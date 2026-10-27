@@ -640,10 +640,11 @@ impl Sidebar {
         let row = &self.rows[at];
         let place = row.place();
         if matches!(row, Row::Session { .. }) {
-            // A search shows the panes it finds whatever the folds, so there
-            // the triangle is the name's.
+            // What is typed shows the panes it finds whatever the folds, so
+            // there the triangle is the name's. An empty search keeps them.
             let on_triangle = mouse.column.saturating_sub(area.x) <= 2;
-            if on_triangle && self.search.is_none() {
+            let typed = matches!(self.search, Some(Search::Typed { .. }));
+            if on_triangle && !typed {
                 self.cursor = Some(place);
                 self.toggle();
                 return Asked::Nothing;
@@ -1440,6 +1441,25 @@ mod tests {
         assert!(sidebar.folded.contains("older"));
         let older = Place::Session(listed("older", 10));
         assert_eq!(sidebar.mouse(click(10, 2), area), Asked::Go(older));
+    }
+
+    /// A search with nothing typed keeps the folds, and the triangle folds as
+    /// it does without one. Once something is typed, it is the name's.
+    #[test]
+    fn a_click_on_the_triangle_folds_until_a_search_is_typed() {
+        let mut sidebar = two_sessions();
+        let area = Rect::new(0, 0, 32, 10);
+        sidebar.key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        screen(&mut sidebar, true, area.width, area.height);
+        assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
+        assert!(sidebar.folded.contains("older"));
+        assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
+        assert!(!sidebar.folded.contains("older"));
+        assert!(sidebar.search.is_some());
+        type_in(&mut sidebar, "older");
+        screen(&mut sidebar, true, area.width, area.height);
+        assert_eq!(sidebar.mouse(click(1, 2), area), Asked::Nothing);
+        assert!(!sidebar.folded.contains("older"));
     }
 
     /// A session zellij has yet to list the panes of stands in for them, as a
