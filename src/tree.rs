@@ -111,9 +111,9 @@ pub fn in_order(branches: &[Branch]) -> Vec<&Branch> {
 /// was checked out where it worked, as it stood `before`, until git says what
 /// is checked out where it works now, so that a `cd` does not take its
 /// branch's line away and back. A session that leaves a pane out of one
-/// answer has not said it moved, and the pane keeps its directory too, for
-/// git to be asked about, and what it runs, unless it said what runs there
-/// now: zellij leaves that out of an answer it could not get in time.
+/// answer has not said it moved, and the pane keeps its directory too, and
+/// what it runs, unless it said what runs there now: zellij leaves that out
+/// of an answer it could not get in time.
 pub fn leaves(
     session: &str,
     tabs: &[TabInfo],
@@ -237,7 +237,7 @@ pub struct PaneNode {
 
 impl PaneNode {
     /// The program that runs in the pane, by its binary's name, for its icon:
-    /// Claude Code for an agent claude-ps finds there, whatever its terminal
+    /// Claude Code for an agent the daemon finds there, whatever its terminal
     /// has in front. A shell that finished a command is back at its prompt.
     pub fn program(&self) -> Option<&str> {
         match self.mark {
@@ -999,8 +999,11 @@ fn is_agent_glyph(glyph: char) -> bool {
 mod tests {
     use zellij_tile::prelude::PaneInfo;
 
+    use luneta_protocol::git::WorkTree;
+    use luneta_protocol::v1;
+
     use super::*;
-    use crate::agents::{Live, Seat};
+    use crate::agents::{given, Live, Seat};
     use crate::elapsed::Moment;
     use crate::shells::{Front, Said, Shells};
     use crate::places::Places;
@@ -1038,17 +1041,15 @@ mod tests {
         }
     }
 
-    /// claude-ps output for agents at `(session, pane, status)`, each sitting in
-    /// the cwd `/w/<session>`, and the places that hold them.
+    /// The daemon's agents at `(session, pane, status)`, each sitting in the
+    /// cwd `/w/<session>`, and the places that hold them. Each came to its
+    /// status at the epoch, and is heard 4 seconds on.
     fn agents(seated: &[(&str, u32, &str)]) -> AgentSet {
-        let json: Vec<String> = seated
-            .iter()
-            .enumerate()
-            .map(|(pid, (session, pane, status))| {
-                format!(
-                    r#"{{"status":"{status}","status_age":4,"pid":{pid},"cwd":"/w/{session}",
-                       "zellij":{{"session":"{session}","pane":"{pane}"}}}}"#
-                )
+        let listed: Vec<v1::Agent> = (0..)
+            .zip(seated)
+            .map(|(pid, (session, pane, status))| v1::Agent {
+                status_since: Some(given::at(0)),
+                ..given::agent(pid, session, *pane, &format!("/w/{session}"), status)
             })
             .collect();
         let mut sessions: Vec<(&str, Vec<(u32, String)>)> = Vec::new();
@@ -1070,9 +1071,9 @@ mod tests {
         let places = Places::of(&shaped);
 
         let mut set = AgentSet::default();
-        set.ingest(Some(0), format!("[{}]", json.join(",")).as_bytes(), b"", Moment::default());
+        set.heard(&listed, Moment::from_millis(4000));
         let live = Live::new(None, &[], &places, &[]);
-        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
+        set.rebuild("", &live, None, Moment::from_millis(4000), Selection::SnapToTop);
         set
     }
 
@@ -1140,13 +1141,16 @@ mod tests {
 
     #[test]
     fn a_name_someone_chose_beats_the_title_of_the_pane() {
-        let json = r#"[{"status":"busy","status_age":4,"pid":101,"cwd":"/w/s","name":"orca-copy",
-            "name_source":"user","zellij":{"session":"s","pane":"0"}}]"#;
+        let named = v1::Name {
+            text: "orca-copy".to_owned(),
+            source: Some(v1::NameSource::User.into()),
+        };
+        let orca = v1::Agent { name: Some(named), ..given::agent(101, "s", 0, "/w/s", "busy") };
         let mut set = AgentSet::default();
-        set.ingest(Some(0), json.as_bytes(), b"", Moment::default());
+        set.heard(&[orca], given::NOW);
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
         let live = Live::new(None, &[], &places, &[]);
-        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
+        set.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
 
         let mut tree = Tree::default();
         tree.rebuild(&[branch("s", 1, &[(0, "⠂ Building the sidebar")])], None, &set, None, true);
@@ -1155,16 +1159,22 @@ mod tests {
 
     #[test]
     fn agents_with_no_topic_and_no_tab_name_go_by_where_they_work() {
-        let json = r#"[
-            {"status":"busy","status_age":4,"pid":102,"name":"main-60","name_source":"derived",
-             "cwd":"/w/luneta/main","zellij":{"session":"luneta","pane":"1"}},
-            {"status":"idle","status_age":4,"pid":103,"name":"agents-tab-9a","name_source":"derived",
-             "cwd":"/w/luneta/agents-tab","zellij":{"session":"luneta","pane":"4"}}]"#;
+        let derived = |text: &str, agent: v1::Agent| v1::Agent {
+            name: Some(v1::Name {
+                text: text.to_owned(),
+                source: Some(v1::NameSource::Derived.into()),
+            }),
+            ..agent
+        };
+        let listed = [
+            derived("main-60", given::agent(102, "luneta", 1, "/w/luneta/main", "busy")),
+            derived("agents-tab-9a", given::agent(103, "luneta", 4, "/w/luneta/agents-tab", "idle")),
+        ];
         let mut set = AgentSet::default();
-        set.ingest(Some(0), json.as_bytes(), b"", Moment::default());
+        set.heard(&listed, given::NOW);
         let places = Places::of(&[("luneta", &[(1, "/w/luneta/main"), (4, "/w/luneta/agents-tab")])]);
         let live = Live::new(None, &[], &places, &[]);
-        set.rebuild("", &live, None, Age::from_secs(0), Selection::SnapToTop);
+        set.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
 
         let branches = [branch("luneta", 1, &[(1, "✳ Claude Code"), (4, "✳ Claude Code")])];
         let mut tree = Tree::default();
@@ -1303,9 +1313,7 @@ mod tests {
             ),
         ]);
         let places = Places::of(&[("s", &[(3, "/w/s"), (2, "/w/logs")]), ("t", &[(5, "/w/t")])]);
-        let mut checkouts = Checkouts::default();
-        checkouts.ingest("/w/s".to_owned(), Some(0), b"# branch.head main\n", b"");
-        checkouts.ingest("/w/t".to_owned(), Some(0), b"# branch.head fold\n", b"");
+        let checkouts = checked_out(&[("/w/s", Some("main")), ("/w/t", Some("fold"))]);
         let tabs = [tab(0, "code"), tab(1, "logs")];
         let leaves = leaves("s", &tabs, &manifest, &places, &checkouts, &[]);
         let seen: Vec<(u32, &str, &str, Option<&str>)> = leaves
@@ -1327,6 +1335,19 @@ mod tests {
             .map(|leaf| leaf.checkout.as_ref().map(|checkout| checkout.branch.as_str()))
             .collect();
         assert_eq!(branches, [Some("main"), None, None, None]);
+    }
+
+    /// What the daemon says is checked out in each directory: a branch, or
+    /// none for a directory in no repository.
+    fn checked_out(dirs: &[(&str, Option<&str>)]) -> Checkouts {
+        let tree = |(dir, branch): &(&str, Option<&str>)| {
+            let said = branch.map(|branch| format!("# branch.head {branch}\n"));
+            let tree = said.map_or(Ok(WorkTree::Outside), |said| WorkTree::parse(&said));
+            tree.expect("what git said reads").to_api(dir)
+        };
+        let mut checkouts = Checkouts::default();
+        checkouts.heard(&dirs.iter().map(tree).collect::<Vec<_>>());
+        checkouts
     }
 
     /// A pane says what closing it closes: itself beside another, its tab
@@ -1354,14 +1375,13 @@ mod tests {
     fn a_pane_keeps_its_branch_until_git_answers_for_where_it_works_now() {
         let manifest = manifest(&[(0, vec![pane(1, "fish"), pane(2, "fish"), pane(3, "fish")])]);
         let tabs = [tab(0, "code")];
-        let mut checkouts = Checkouts::default();
-        checkouts.ingest("/w/repo".to_owned(), Some(0), b"# branch.head main\n", b"");
+        let checkouts = checked_out(&[("/w/repo", Some("main"))]);
         let places = Places::of(&[("s", &[(1, "/w/repo"), (2, "/w/repo"), (3, "/w/repo")])]);
         let before = leaves("s", &tabs, &manifest, &places, &checkouts, &[]);
 
         // Pane 1 went down into `src`, pane 2 out of the repository, and pane
         // 3's directory is missing from the session's answer.
-        checkouts.ingest("/w/plain".to_owned(), Some(128), b"", b"");
+        let checkouts = checked_out(&[("/w/repo", Some("main")), ("/w/plain", None)]);
         let places = Places::of(&[("s", &[(1, "/w/repo/src"), (2, "/w/plain")])]);
         let after = leaves("s", &tabs, &manifest, &places, &checkouts, &before);
         let branches: Vec<Option<&str>> = after
@@ -1371,29 +1391,32 @@ mod tests {
         assert_eq!(branches, [Some("main"), None, Some("main")]);
 
         // The repository changes branch, and pane 3, still left out, shows it.
-        checkouts.ingest("/w/repo".to_owned(), Some(0), b"# branch.head fold\n", b"");
+        let checkouts = checked_out(&[("/w/repo", Some("fold")), ("/w/plain", None)]);
         let again = leaves("s", &tabs, &manifest, &places, &checkouts, &after);
         assert_eq!(again[2].cwd.as_deref(), Some("/w/repo"));
         assert_eq!(again[2].checkout.as_ref().map(|c| c.branch.as_str()), Some("fold"));
     }
 
-    /// The panes of session `s` as `zellij action list-panes` lists them, each
-    /// in `/w/s`, by its id and what its terminal runs in the foreground.
+    /// The panes of session `s` as the daemon lists them, each in `/w/s`, by
+    /// its id and what its terminal runs in the foreground.
     fn listed(panes: &[(u32, Option<&str>)]) -> Places {
-        let json: Vec<String> = panes
-            .iter()
-            .map(|(id, command)| {
-                let command = command.map_or("null".to_owned(), |command| format!("{command:?}"));
-                let pane = format!(r#""id":{id},"is_plugin":false,"pane_cwd":"/w/s""#);
-                format!(r#"{{{pane},"pane_command":{command}}}"#)
-            })
-            .collect();
+        let pane = |(id, command): &(u32, Option<&str>)| v1::Pane {
+            id: *id,
+            cwd: Some("/w/s".to_owned()),
+            command: command.map(str::to_owned),
+            ..v1::Pane::default()
+        };
+        let session = v1::Session {
+            name: "s".to_owned(),
+            panes: Some(v1::Panes { panes: panes.iter().map(pane).collect() }),
+            ..v1::Session::default()
+        };
         let mut places = Places::default();
-        places.ingest("s".to_owned(), Some(0), format!("[{}]", json.join(",")).as_bytes());
+        places.heard(&[session]);
         places
     }
 
-    /// A pane runs Claude Code while claude-ps finds an agent in it, whatever
+    /// A pane runs Claude Code while the daemon finds an agent in it, whatever
     /// its terminal has in front, and else the binary its terminal has in
     /// front, as its session says. A pane its session says nothing of runs
     /// nothing luneta knows.
@@ -1910,7 +1933,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             runs: None,
             checkout: branch
-                .map(|branch| Checkout { branch: branch.to_owned(), status: String::new() }),
+                .map(|branch| Checkout::on(branch, "")),
             closes: Closes::Pane,
         };
         let branches = [Branch {

@@ -2,8 +2,7 @@
 //!
 //! Claude Code keeps a file for each agent that runs, `sessions/<pid>.json` in
 //! its folder, and writes the agent's status into it as the status changes.
-//! These files are what the sidebar shows today, through claude-ps, and the
-//! adapter reads them the way claude-ps does.
+//! These files are what luneta shows of each agent.
 //!
 //! A file outlives its process when the process crashes, and a pid can come
 //! back as another process's. So a file stands for an agent only while a
@@ -51,23 +50,31 @@ pub fn folder() -> Option<PathBuf> {
 }
 
 /// A session file, as much of it as the adapter reads. A file without the
-/// first three does not read as one.
+/// first three does not read as one, nor does one that names no session or
+/// no directory.
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct File {
-    session_id: String,
-    cwd: PathBuf,
+    #[serde(deserialize_with = "said")]
+    session_id: Said,
+    #[serde(deserialize_with = "said")]
+    cwd: Said,
     proc_start: Start,
     /// The system and pid namespace the pid is from, as Claude Code spells
     /// them. A file from a container that shares the folder names another.
     pid_domain: Option<String>,
     status: Option<String>,
     status_updated_at: Option<u64>,
-    updated_at: Option<u64>,
     started_at: Option<u64>,
     name: Option<String>,
     name_source: Option<String>,
     entrypoint: Option<String>,
+}
+
+/// Text a session file holds where it must hold some, as `Said`: an empty
+/// string is none.
+fn said<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
+    Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
 }
 
 /// When the process started, in the words of the system it ran on: a number
@@ -256,8 +263,10 @@ fn torn(was: Option<Seen>, path: &Path, error: &impl fmt::Display) -> Seen {
     }
 }
 
+/// The agent a file stands for. Its status is dated where Claude Code dates
+/// the status, and by nothing else: when the file was written, or the session
+/// started, is not when the agent came to what it is doing.
 fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
-    let since = file.status_updated_at.or(file.updated_at).or(file.started_at);
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
@@ -266,7 +275,7 @@ fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
         session_id: file.session_id.clone(),
         cwd: file.cwd.clone(),
         status: Status::of(file.status.as_deref()),
-        status_since: since.map(moment),
+        status_since: file.status_updated_at.map(moment),
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),

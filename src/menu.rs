@@ -20,20 +20,21 @@ use std::path::PathBuf;
 use kdl::{KdlDocument, KdlNode};
 use zellij_tile::prelude::*;
 
-use crate::agents::{self, AgentSet, Live, Seat};
+use crate::agents::{AgentSet, Live, Seat};
 use crate::brief;
-use crate::checkouts::{Checkouts, DIR_KEY};
+use crate::checkouts::Checkouts;
 use crate::close::{self, Act, Leaving, Plan, Ran, Refuge, Scope};
+use crate::daemon;
 use crate::dirs::{self, WORKTREES};
 use crate::dock::TabId;
 use crate::elapsed::{Age, Moment};
 use crate::fetch::Fetch;
-use crate::places::{self, Places, SESSION_KEY};
+use crate::places::Places;
 use crate::render;
 use crate::sessions::{Selection, Session, Sessions, Taken};
 use crate::skills::{self, Search};
 use crate::tree::{self, origin};
-use crate::context::CONTEXT_KEY;
+use crate::context::{CONTEXT_KEY, DIR_KEY, SESSION_KEY};
 
 /// What holds the entries in the menu's configuration: a node with children,
 /// which zellij hands over as their KDL.
@@ -1029,18 +1030,30 @@ fn numbered(value: &str, menu: u64) -> BTreeMap<String, String> {
 impl Target {
     /// The pane a key starts an agent or opens a pane beside, and the
     /// directory it works in, where a tab or a session opens too, or why
-    /// there is none: a session's row has no pane, and a pane the sidebar
-    /// does not know the directory of yet opens nothing, rather than wherever
-    /// zellij runs.
+    /// there is none: a session's row has no pane. Where the daemon has not
+    /// said the directory, zellij says it of a pane of the sidebar's own
+    /// session, as it does for the key binding's menu, and a pane of another
+    /// session opens nothing, rather than wherever zellij runs.
     fn beside(&self) -> Result<Beside, String> {
         let Some(pane) = &self.pane else {
             return Err(NO_ROW_PANE.to_owned());
         };
-        let Some(cwd) = pane.cwd.clone() else {
-            return Err(format!(
-                "menu: the sidebar does not know yet where pane {} works; try again in a moment",
-                pane.id
-            ));
+        let cwd = match (&pane.cwd, &self.there) {
+            (Some(cwd), _) => cwd.clone(),
+            (None, None) => match get_pane_cwd(PaneId::Terminal(pane.id)) {
+                Ok(cwd) => cwd.to_string_lossy().into_owned(),
+                Err(error) => {
+                    let id = pane.id;
+                    return Err(format!("menu: zellij cannot say where pane {id} works: {error}"));
+                },
+            },
+            (None, Some(there)) => {
+                return Err(format!(
+                    "menu: the sidebar does not know yet where pane {} of \"{}\" works: lunetad \
+                     has yet to say",
+                    pane.id, there.session
+                ));
+            },
         };
         Ok(Beside { pane: pane.id, cwd })
     }
@@ -1667,15 +1680,11 @@ pub struct Menu {
     asked: Option<(String, Option<String>)>,
     /// Where the menu last asked zellij to stand it.
     placed: Option<Spot>,
-    /// The command the configuration names claude-ps by, if it names one.
-    agents_command: Option<String>,
     /// What the agents are doing, for a delete key to ask first before it ends
     /// one at work.
     agents: AgentSet,
-    /// Where the panes of the session work, by which an agent is placed in
-    /// one, and whether the session has said.
+    /// Where the panes work, by which an agent is placed in one.
     places: Places,
-    places_in: bool,
     /// The session the menu is in, and the one you would go to before it is
     /// killed, once the menu has asked zellij.
     session: Option<String>,
@@ -1699,10 +1708,8 @@ impl Menu {
             tabs: Vec::new(),
             asked: None,
             placed: None,
-            agents_command: agents::configured(configuration),
             agents: AgentSet::default(),
             places: Places::default(),
-            places_in: false,
             session: None,
             refuge: None,
         }
@@ -1804,8 +1811,8 @@ impl Menu {
     }
 
     /// What came of a command the menu ran: the branch checked out where an
-    /// agent starts, the skills the directory there can run, what the agents
-    /// are doing, where the panes of the session work, the clients of the
+    /// agent starts, the skills the directory there can run, what the daemon
+    /// says the agents are doing and where the panes work, the clients of the
     /// session while you leave it, and whether the directory a session starts
     /// in is a worktree. Says whether to draw.
     pub fn ran(
@@ -1818,18 +1825,7 @@ impl Menu {
         match context.get(CONTEXT_KEY).map(String::as_str) {
             Some(BRANCH_VALUE) => self.branched(exit_code, stdout, context),
             Some(skills::CONTEXT_VALUE) => return self.found(exit_code, stdout, stderr, context),
-            Some(agents::CONTEXT_VALUE) => {
-                self.agents.ingest(exit_code, stdout, stderr, Moment::now());
-                self.seat_agents();
-            },
-            Some(places::CONTEXT_VALUE) => {
-                let Some(session) = context.get(SESSION_KEY) else {
-                    return false;
-                };
-                self.places.ingest(session.clone(), exit_code, stdout);
-                self.places_in = true;
-                self.seat_agents();
-            },
+            Some(daemon::CONTEXT_VALUE) => self.heard(exit_code, stdout, stderr),
             Some(close::CLIENTS_VALUE) => self.clients(exit_code, stdout),
             Some(NAMING_VALUE) => return self.named(exit_code, stdout),
             _ => {},
@@ -1893,7 +1889,7 @@ impl Menu {
     /// Puts each agent in the pane of the session it sits in.
     fn seat_agents(&mut self) {
         let live = Live::new(self.session.as_deref(), &[], &self.places, &[]);
-        self.agents.rebuild("", &live, None, Age::from_secs(0), Selection::Hold);
+        self.agents.rebuild("", &live, None, Moment::now(), Selection::Hold);
     }
 
     /// Starts Claude Code on `prompt` in a pane of its own, beside the pane
@@ -2018,18 +2014,15 @@ impl Menu {
     }
 
     /// The pane `id` you came from, as a delete key deletes it or its
-    /// session: what the session holds, and its agents once claude-ps and the
-    /// session have said where they are. None until zellij has said which
-    /// session the menu is in.
+    /// session: what the session holds, and its agents once the daemon has
+    /// said where they are. None until zellij has said which session the
+    /// menu is in.
     fn subject(&self, id: u32) -> Option<close::Subject> {
         let session = self.session.as_deref()?;
         let manifest = self.panes.as_ref()?;
         let leaves =
             tree::leaves(session, &self.tabs, manifest, &self.places, &Checkouts::default(), &[]);
-        let agents = match (&self.agents.status, self.places_in) {
-            (Fetch::Ready(_), false) => Fetch::Waiting,
-            _ => close::agents_of(&self.agents, session, &leaves),
-        };
+        let agents = close::agents_of(&self.agents, session, &leaves);
         let seat = Seat::Here(session.to_owned());
         // You came from a pane, and go to the pane the session had you in.
         let refuge = self.refuge.clone().map(|session| Refuge { session, sidebar: None });
@@ -2129,10 +2122,10 @@ impl Menu {
         followed
     }
 
-    /// Asks once which session the menu is in, and then claude-ps what the
-    /// agents are doing and the session where its panes work: a delete key
-    /// asks first before it ends an agent at work. A menu over no terminal
-    /// has nothing to delete, and asks none of it.
+    /// Asks once which session the menu is in, and then the daemon what the
+    /// agents are doing and where the panes work: a delete key asks first
+    /// before it ends an agent at work. A menu over no terminal has nothing
+    /// to delete, and asks none of it.
     fn ask_agents(&mut self) {
         let over_a_pane = matches!(self.phase, Phase::Choosing(_, Fetch::Ready(_)));
         if self.session.is_some() || !over_a_pane {
@@ -2149,15 +2142,23 @@ impl Menu {
         let others =
             others.iter().map(|other| (other.name.as_str(), Age::new(other.creation_time)));
         self.refuge = close::refuge(others);
-        agents::ask(self.agents_command.as_deref());
-        run_command(
-            &places::query(&session),
-            BTreeMap::from([
-                (CONTEXT_KEY.to_owned(), places::CONTEXT_VALUE.to_owned()),
-                (SESSION_KEY.to_owned(), session.clone()),
-            ]),
-        );
+        let asking = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
+        run_command(&daemon::LOOK, BTreeMap::from([asking]));
         self.session = Some(session);
+    }
+
+    /// What the daemon answered: what the agents are doing and where the
+    /// panes work, or why it did not say, which a delete key says as it asks
+    /// first.
+    fn heard(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+        match daemon::looked(exit_code, stdout, stderr) {
+            Ok(host) => {
+                self.places.heard(&host.sessions);
+                self.agents.heard(&host.agents, Moment::now());
+            },
+            Err(why) => self.agents.fail(why),
+        }
+        self.seat_agents();
     }
 
     /// Keeps the terminal you came from as zellij says, and whether that is a
@@ -2290,8 +2291,12 @@ fn corner(columns: usize, rows: usize, width: usize, height: usize) -> Option<Sp
 mod tests {
     use std::collections::HashMap;
 
+    // zellij-tile's prelude has a prost of its own, of another version.
+    use ::prost::Message as _;
+    use luneta_protocol::v1;
+
     use super::*;
-    use crate::agents::Status;
+    use crate::agents::given;
 
     /// The menu as zellij hands it over: the children of `menu`, as KDL.
     const MENU: &str = r#"
@@ -2517,9 +2522,8 @@ mod tests {
         let agents = seated
             .iter()
             .map(|(pane, status)| close::Agent {
-                pane: *pane,
-                tab: Some(TabId(7)),
-                status: Status::parse(Some(status)),
+                sits: close::Sits::Pane { id: *pane, tab: Some(TabId(7)) },
+                status: given::status(status),
             })
             .collect();
         close::Subject {
@@ -2735,15 +2739,20 @@ mod tests {
         assert_eq!(said, Some("menu: the agent did not start: zellij opened no pane"));
     }
 
-    /// A row the sidebar does not know the directory of yet has no agent to
-    /// start, nor a pane, a tab or a session to open, and the menu says so
-    /// rather than open one wherever zellij runs. Nor has a session's row,
-    /// which has no pane. A menu that cannot be read says what is wrong with
-    /// it for any key it might have had. Any key closes what is wrong.
+    /// A row of another session that the daemon has yet to say the directory
+    /// of has no agent to start, nor a pane, a tab or a session to open, and
+    /// the menu says so rather than open one wherever zellij runs. Nor has a
+    /// session's row, which has no pane. A menu that cannot be read says what
+    /// is wrong with it for any key it might have had. Any key closes what is
+    /// wrong.
     #[test]
     fn a_menu_that_cannot_start_an_agent_beside_its_row_says_why() {
-        let unknown = || Row { pane: Some(RowPane { cwd: None, ..elo() }), ..row(None) };
-        let where_unknown = "menu: the sidebar does not know yet where pane 2 works";
+        let unknown = || Row {
+            pane: Some(RowPane { cwd: None, ..elo() }),
+            ..row(Some(There { session: "elo".to_owned(), tab: None }))
+        };
+        let where_unknown = "menu: the sidebar does not know yet where pane 2 of \"elo\" works: \
+                             lunetad has yet to say";
         for (entries, row, key, said) in [
             (Some(MENU), unknown(), Some('r'), Some(where_unknown)),
             (Some(MENU), unknown(), Some('x'), None),
@@ -3241,7 +3250,7 @@ mod tests {
 
     /// The key binding's menu, floating over pane 2 of session `luneta`,
     /// which shares tab 7 with pane 3, with `elo` to go to before `luneta`
-    /// ends, and claude-ps saying a busy agent sits in pane 3, once
+    /// ends, and the daemon saying a busy agent sits in pane 3, once
     /// `answered`.
     fn bound_for_two(answered: bool) -> Menu {
         let mut menu = bound();
@@ -3255,19 +3264,26 @@ mod tests {
         menu.session = Some("luneta".to_owned());
         menu.refuge = Some("elo".to_owned());
         if answered {
-            let context = |value: &str| {
-                BTreeMap::from([
-                    (CONTEXT_KEY.to_owned(), value.to_owned()),
-                    (SESSION_KEY.to_owned(), "luneta".to_owned()),
-                ])
-            };
-            let agents = br#"[{"status":"busy","status_age":4,"pid":100,"cwd":"/w/elo",
-                "zellij":{"session":"luneta","pane":"3"}}]"#;
-            menu.ran(Some(0), agents, b"", &context(agents::CONTEXT_VALUE));
-            let panes = br#"[{"id":2,"pane_cwd":"/w/elo"},{"id":3,"pane_cwd":"/w/elo"}]"#;
-            menu.ran(Some(0), panes, b"", &context(places::CONTEXT_VALUE));
+            let said = host(&[given::agent(100, "luneta", 3, "/w/elo", "busy")]);
+            let answered = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
+            menu.ran(Some(0), &said, b"", &BTreeMap::from([answered]));
         }
         menu
+    }
+
+    /// The host as `luneta watch` writes it out: session `luneta`, with panes
+    /// 2 and 3 in `/w/elo`, and `agents`.
+    fn host(agents: &[v1::Agent]) -> Vec<u8> {
+        let pane = |id| v1::Pane { id, cwd: Some("/w/elo".to_owned()), ..v1::Pane::default() };
+        let luneta = v1::Session {
+            name: "luneta".to_owned(),
+            panes: Some(v1::Panes { panes: vec![pane(2), pane(3)] }),
+            ..v1::Session::default()
+        };
+        let version = Some(v1::Version { pid: 7, seq: 0 });
+        let sessions = vec![luneta];
+        v1::Host { version, sessions, agents: agents.to_vec(), ..v1::Host::default() }
+            .encode_to_vec()
     }
 
     fn question(menu: &Menu) -> Option<&str> {
@@ -3279,8 +3295,8 @@ mod tests {
 
     /// The key binding's menu closes the pane you came from, or kills its
     /// session, as the sidebar's does: at once with no agent at work to end,
-    /// and asking first, until claude-ps and the session have said where the
-    /// agents sit.
+    /// and asking first until the daemon has said where the agents sit, and
+    /// saying why when it does not answer.
     #[test]
     fn the_key_binding_s_menu_deletes_the_pane_you_came_from() {
         let mut menu = bound_for_two(true);
@@ -3302,6 +3318,16 @@ mod tests {
         menu.key(&char('d'));
         assert!(menu.key(&char('d')));
         assert_eq!(question(&menu), Some("Close the pane? luneta does not know its agents yet"));
+
+        let mut menu = bound_for_two(false);
+        let refused = b"luneta: lunetad.sock: transport error: Connection refused (os error 111)";
+        let answered = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
+        menu.ran(Some(1), b"", refused, &BTreeMap::from([answered]));
+        menu.key(&char('d'));
+        assert!(menu.key(&char('d')));
+        let said = "Close the pane? luneta cannot tell which agents it ends: lunetad does not \
+                    answer: luneta: lunetad.sock: transport error: Connection refused (os error 111)";
+        assert_eq!(question(&menu), Some(said));
     }
 
     /// Going ahead plans the delete key again: a pane that opened in the tab

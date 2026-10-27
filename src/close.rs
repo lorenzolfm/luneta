@@ -100,17 +100,25 @@ pub struct Refuge {
     pub sidebar: Option<u32>,
 }
 
-/// An agent of a session: the pane it sits in, the tab that pane is in, and
-/// what it is doing.
+/// An agent of a session: where it sits, and what it is doing.
 #[derive(Debug)]
 pub struct Agent {
-    pub pane: u32,
-    pub tab: Option<TabId>,
+    pub sits: Sits,
     pub status: Status,
 }
 
-/// The agents of `session` among those `agents` placed, each with the tab of
-/// its pane among the session's `leaves`.
+/// Where an agent of a session sits.
+#[derive(Debug)]
+pub enum Sits {
+    /// In pane `id`, in the tab of that id once its session has said.
+    Pane { id: u32, tab: Option<TabId> },
+    /// In a pane luneta cannot find: its environment names the session, and
+    /// any of the session's panes may hold it.
+    Unplaced,
+}
+
+/// The agents of `session` among every agent `agents` counts, those its rows
+/// leave out too, each with the tab of its pane among the session's `leaves`.
 pub fn agents_of(agents: &AgentSet, session: &str, leaves: &[Leaf]) -> Fetch<Vec<Agent>> {
     match &agents.status {
         Fetch::Ready(_) => {},
@@ -118,10 +126,13 @@ pub fn agents_of(agents: &AgentSet, session: &str, leaves: &[Leaf]) -> Fetch<Vec
         Fetch::Failed(reason) => return Fetch::Failed(reason.clone()),
     }
     let tab = |pane: u32| leaves.iter().find(|leaf| leaf.id == pane).and_then(|leaf| leaf.tab_id);
-    let seated = agents.rows.iter().filter(|row| row.seat.session() == session);
+    let of_session = agents.counted().iter().filter(|counted| counted.session == session);
     Fetch::Ready(
-        seated
-            .map(|row| Agent { pane: row.pane, tab: tab(row.pane), status: row.status.clone() })
+        of_session
+            .map(|counted| Agent {
+                sits: counted.pane.map_or(Sits::Unplaced, |id| Sits::Pane { id, tab: tab(id) }),
+                status: counted.status.clone(),
+            })
             .collect(),
     )
 }
@@ -133,7 +144,7 @@ pub struct Subject {
     pub seat: Seat,
     /// The pane, or none for the session's row.
     pub pane: Option<Pane>,
-    /// The agents of its session, once claude-ps has said.
+    /// The agents of its session, once the daemon has said.
     pub agents: Fetch<Vec<Agent>>,
     /// Where the client goes before the session it is in is killed.
     pub refuge: Option<Refuge>,
@@ -209,17 +220,8 @@ impl Subject {
                 },
             },
         };
-        // The agents of the tab take in the pane's own: both have its tab from
-        // the session's leaves.
-        let takes = |agent: &&Agent| match &act {
-            Act::Pane(_, pane) => agent.pane == *pane,
-            Act::Tab(_, tab) => agent.tab == Some(*tab),
-            Act::Kill(_) | Act::Leave { .. } => true,
-        };
         let ending = match &self.agents {
-            Fetch::Ready(agents) => {
-                Fetch::Ready(Ending::of(agents.iter().filter(takes).map(|agent| &agent.status)))
-            },
+            Fetch::Ready(agents) => Fetch::Ready(Ending::of(agents, &act)),
             Fetch::Waiting => Fetch::Waiting,
             Fetch::Failed(reason) => Fetch::Failed(reason.clone()),
         };
@@ -233,39 +235,69 @@ struct Ending {
     agents: usize,
     busy: usize,
     waiting: usize,
-    /// Agents claude-ps said a word luneta does not know for, or nothing:
+    /// Agents Claude Code said a word luneta does not know for, or nothing:
     /// they may be at work.
     unknown: usize,
+    /// Agents that may be at work in a pane of the session luneta cannot
+    /// find, which may be the one that closes.
+    unplaced: usize,
 }
 
 impl Ending {
-    fn of<'a>(statuses: impl Iterator<Item = &'a Status>) -> Self {
+    /// The agents of a session that `act` ends: all of them as the session
+    /// ends, and otherwise those of the pane, or of the tab, which takes in
+    /// the pane's own, as both have its tab from the session's leaves. An
+    /// agent at work that luneta found in no pane may be in the one that
+    /// closes.
+    fn of(agents: &[Agent], act: &Act) -> Self {
         let mut ending = Ending::default();
-        for status in statuses {
-            match status {
-                Status::Shell => continue,
-                Status::Busy => ending.busy += 1,
-                Status::Waiting => ending.waiting += 1,
-                Status::Unknown(_) | Status::Unreported => ending.unknown += 1,
-                Status::Idle => {},
+        for agent in agents {
+            match (act, &agent.sits) {
+                (Act::Kill(_) | Act::Leave { .. }, _) => ending.count(&agent.status),
+                (Act::Pane(_, pane), Sits::Pane { id, .. }) if id == pane => {
+                    ending.count(&agent.status);
+                },
+                (Act::Tab(_, tab), Sits::Pane { tab: at, .. }) if *at == Some(*tab) => {
+                    ending.count(&agent.status);
+                },
+                (Act::Pane(..) | Act::Tab(..), Sits::Unplaced) => {
+                    if !matches!(agent.status, Status::Idle | Status::Shell) {
+                        ending.unplaced += 1;
+                    }
+                },
+                (Act::Pane(..) | Act::Tab(..), Sits::Pane { .. }) => {},
             }
-            ending.agents += 1;
         }
         ending
+    }
+
+    fn count(&mut self, status: &Status) {
+        match status {
+            Status::Shell => return,
+            Status::Busy => self.busy += 1,
+            Status::Waiting => self.waiting += 1,
+            Status::Unknown(_) | Status::Unreported => self.unknown += 1,
+            Status::Idle => {},
+        }
+        self.agents += 1;
     }
 
     /// Whether an agent that would end may be in the middle of something:
     /// busy, waiting on you, or doing what luneta cannot tell.
     fn at_work(self) -> bool {
-        self.busy + self.waiting + self.unknown > 0
+        self.busy + self.waiting + self.unknown + self.unplaced > 0
     }
 
-    /// As `2 agents, 1 busy`.
+    /// As `2 agents, 1 busy`, and `1 more at work in a pane luneta cannot
+    /// find`.
     fn says(self) -> String {
-        let mut said = vec![match self.agents {
-            1 => "1 agent".to_owned(),
-            agents => format!("{agents} agents"),
-        }];
+        let mut said = Vec::new();
+        if self.agents > 0 {
+            said.push(match self.agents {
+                1 => "1 agent".to_owned(),
+                agents => format!("{agents} agents"),
+            });
+        }
         if self.busy > 0 {
             said.push(format!("{} busy", self.busy));
         }
@@ -274,6 +306,16 @@ impl Ending {
         }
         if self.unknown > 0 {
             said.push(format!("{} unknown", self.unknown));
+        }
+        let more = match (self.agents, self.unplaced) {
+            (0, 1) => "agent",
+            (0, _) => "agents",
+            _ => "more",
+        };
+        match self.unplaced {
+            0 => {},
+            1 => said.push(format!("1 {more} at work in a pane luneta cannot find")),
+            unplaced => said.push(format!("{unplaced} {more} at work in panes luneta cannot find")),
         }
         said.join(", ")
     }
@@ -479,7 +521,12 @@ impl Leaving {
 
 #[cfg(test)]
 mod tests {
+    use luneta_protocol::v1;
+
     use super::*;
+    use crate::agents::{given, Live};
+    use crate::places::Places;
+    use crate::sessions::{Selection, Session};
 
     fn pane(id: u32) -> PaneInfo {
         PaneInfo { id, is_selectable: true, ..PaneInfo::default() }
@@ -522,7 +569,8 @@ mod tests {
     }
 
     fn agent(pane: u32, tab: usize, status: &str) -> Agent {
-        Agent { pane, tab: Some(TabId(tab)), status: Status::parse(Some(status)) }
+        let sits = Sits::Pane { id: pane, tab: Some(TabId(tab)) };
+        Agent { sits, status: given::status(status) }
     }
 
     /// Pane `id` of `seat`, or the session's row with none: pane 2 in tab 7
@@ -600,7 +648,7 @@ mod tests {
     /// A key asks first only when an agent it ends is busy or waiting on you,
     /// and says what goes. One that luneta cannot tell about asks too: an
     /// agent with a status luneta does not know or none, or every agent when
-    /// claude-ps has not said.
+    /// the daemon has not said.
     #[test]
     fn a_key_asks_first_only_when_an_agent_at_work_would_end() {
         let agents = || {
@@ -610,7 +658,7 @@ mod tests {
                 agent(5, 8, "waiting"),
                 agent(6, 9, "shell"),
                 agent(4, 10, "compacting"),
-                Agent { pane: 9, tab: Some(TabId(11)), status: Status::parse(None) },
+                Agent { status: Status::Unreported, ..agent(9, 11, "idle") },
             ])
         };
         let session = "Kill session luneta? 5 agents, 1 busy, 1 waiting, 2 unknown";
@@ -627,9 +675,50 @@ mod tests {
             let plan = of(here(), id, agents()).plan(scope).expect("a plan");
             assert_eq!(plan.question().as_deref(), asked, "{scope:?} of {id:?}");
         }
-        for agents in [Fetch::Waiting, Fetch::Failed("claude-ps is not available".to_owned())] {
+        for agents in [Fetch::Waiting, Fetch::Failed("lunetad does not answer".to_owned())] {
             let plan = of(here(), Some(2), agents).plan(Scope::Pane).expect("a plan");
             assert!(plan.question().is_some());
+        }
+    }
+
+    /// A key counts every agent the daemon gives, those the rows leave out
+    /// too. Pane 3 holds the agent you talk to, idle, and a busy `claude -p`
+    /// it runs, which the rows leave out for the pane holding one. A busy
+    /// agent that names `luneta` sits in no pane luneta can find, and may be
+    /// in any that closes. `elo`'s waiting agent is guessed into `luneta`'s
+    /// pane 2, whose own agent refutes the guess: it ends with `elo`.
+    #[test]
+    fn a_key_counts_the_agents_the_rows_leave_out() {
+        let entered = |entrypoint: &str, agent: v1::Agent| v1::Agent {
+            entrypoint: Some(entrypoint.to_owned()),
+            ..agent
+        };
+        let given = [
+            entered("cli", given::agent(101, "luneta", 3, "/w/luneta", "idle")),
+            entered("sdk-cli", given::agent(102, "luneta", 3, "/w/luneta", "busy")),
+            given::agent(103, "luneta", 2, "/w/luneta", "idle"),
+            given::unfollowed(given::agent(104, "luneta", 9, "/w/gone", "busy")),
+            given::unfollowed(given::agent(105, "elo", 2, "/w/luneta", "waiting")),
+        ];
+        let places = Places::of(&[("luneta", &[(2, "/w/luneta"), (3, "/w/luneta")])]);
+        let elo = [Session { name: "elo".to_owned(), age: Age::from_secs(1) }];
+        let mut agents = AgentSet::default();
+        agents.heard(&given, given::NOW);
+        let live = Live::new(Some("luneta"), &elo, &places, &[]);
+        agents.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
+        assert_eq!((agents.rows.len(), agents.doubled, agents.unplaced), (2, 1, 2));
+
+        let there = Seat::There("elo".to_owned());
+        let unplaced = "1 more at work in a pane luneta cannot find";
+        for (seat, id, scope, asked) in [
+            (here(), Some(3), Scope::Pane, format!("Close the pane? 2 agents, 1 busy, {unplaced}")),
+            (here(), Some(2), Scope::Pane, format!("Close the pane? 1 agent, {unplaced}")),
+            (here(), None, Scope::Session, "Kill session luneta? 4 agents, 2 busy".to_owned()),
+            (there, None, Scope::Session, "Kill session elo? 1 agent, 1 waiting".to_owned()),
+        ] {
+            let ends = agents_of(&agents, seat.session(), &[]);
+            let plan = of(seat.clone(), id, ends).plan(scope).expect("a plan");
+            assert_eq!(plan.question(), Some(asked), "{scope:?} of {id:?} in {seat:?}");
         }
     }
 

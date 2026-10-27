@@ -15,8 +15,8 @@
   MEDIA SLOT — hero.gif
   Record with `vhs docs/media/hero.tape` (nix shell nixpkgs#vhs), after a
   `dev install`. The tapes press real keys against the installed .wasm, so what
-  lands in a GIF is the plugin and not a mock: they assume zoxide, eza and
-  claude-ps on the PATH, a populated zoxide database, a running Claude Code
+  lands in a GIF is the plugin and not a mock: they assume zoxide, eza, luneta
+  and lunetad on the PATH, a populated zoxide database, a running Claude Code
   agent, and a Nerd Font.
   Then point the <img> below at docs/media/hero.gif.
 -->
@@ -76,10 +76,10 @@ its directory. Two agents named alike are told apart by their panes, as
 pane that tells it apart as well, or by its session's name.
 
 A pane holds one agent, as it does in the sidebar. A `claude -p` an agent runs
-has its pane's ids, and claude-ps puts it in that pane too: the list shows the
-agent you started at a prompt, or with an older claude-ps that does not say how
-an agent started, the one that started first, and says below it how many it
-left out. An agent only guessed into a pane gives way to the one whose session
+has its pane's ids, and luneta finds it in that pane too: the list shows the
+agent you started at a prompt, or with a Claude Code that does not say how an
+agent started, the one that started first, and says below it how many it left
+out. An agent only guessed into a pane gives way to the one whose session
 names that pane, and counts among those luneta cannot find.
 
 `Del` closes the pane the highlighted agent is in, and its tab with it when
@@ -89,14 +89,16 @@ is there to close the tab. When the pane is a guess, `Del` leaves it alone and
 says so: the agent names a session that is still running, but its pane turned
 up in another, matched by its id and directory alone.
 
-Needs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) on the server's
-`PATH`. Without it, the other two lists work exactly as before.
+Needs `luneta` and `lunetad` on the server's `PATH`
+([building from source](#building-from-source)): the list is what lunetad,
+luneta's daemon, finds. Without them, the list says why it has no agents, and
+the other two lists work exactly as before.
 
 Agent support, today:
 
 | agent | status |
 |---|---|
-| [Claude Code](https://claude.com/claude-code) | supported, through [`claude-ps`](https://github.com/lorenzolfm/claude-ps) |
+| [Claude Code](https://claude.com/claude-code) | supported, through the file it keeps for each agent in `~/.claude/sessions` |
 | anything else | not yet |
 
 ### Directories
@@ -200,19 +202,20 @@ every session, and outlasts zellij: the sidebars keep it in the plugin's cache,
 beside the folds. A session renamed takes it along, whether the picker or
 zellij renamed it, and a session gone for good takes it with it: one made
 later by the same name starts with none of it, as a pane closed for good does.
-Each session's sidebar asks claude-ps itself, which dates a status to the
-whole second, so they may date one finish two seconds apart: an agent that
-finishes within three seconds of your last time in its pane counts as one you
-saw.
+The daemon dates a status as Claude Code does, but one it cannot date, each
+session's sidebar dates as it hears it, so two may date one finish a moment
+apart: an agent that finishes within three seconds of your last time in its
+pane counts as one you saw.
 
 After the dot, an icon says what runs in the pane: Claude's for an agent, a
 terminal for a shell, neovim's for nvim. It has a column of its own, so every
 label still starts at the same column, and a program with no icon leaves the
-column blank. What runs is the agent claude-ps finds in the pane, or else
+column blank. What runs is the agent the daemon finds in the pane, or else
 what zellij says the pane's terminal has in front, by its binary's name: the
 program you started, or the shell itself at its prompt. `sudo`, `env` and
-`nix run` give way to what they run. zellij is asked every few seconds, so
-a program shows its icon a few seconds after it starts.
+`nix run` give way to what they run. lunetad asks zellij every few seconds, so
+a program shows its icon a few seconds after it starts, and without `luneta`
+and `lunetad`, no row has one.
 
 | icon | Nerd Fonts name | for |
 |---|---|---|
@@ -488,10 +491,17 @@ menu asks first, and says what goes:
 
 `y`, or the key again, goes ahead; `n` or `Backspace` goes back to the keys. An
 idle agent or a shell goes without asking. An agent whose status luneta does
-not know, or that reports none, may be at work, and asks. Without `claude-ps`,
-luneta cannot tell, and asks every time.
+not know, or that reports none, may be at work, and asks. The menu counts every
+agent of the session, those the list leaves out too: a `claude -p` in the pane
+of the agent it runs from, and one luneta cannot find a pane for, which may be
+in any pane of the session that names it, and asks while it is at work. While
+the daemon does not answer, luneta cannot tell, and asks every time, saying
+why.
 
-Needs `claude` on the server's `PATH`, and `git` for the branch.
+Needs `claude` on the server's `PATH`, and `git` for the branch. In the
+sidebar, a pane works where `luneta` and `lunetad` say. Until they say, zellij
+says where a pane of the sidebar's own session works; a pane of another
+session has no agent to start and nothing to open, and the menu says so.
 
 ### Brief
 
@@ -533,17 +543,17 @@ those records at most, shared among the agents it covers: one of many agents
 may tell fewer steps of each. It is asked to
 use those alone. The transcript is the one Claude Code keeps in
 `~/.claude/projects`, or under `CLAUDE_CONFIG_DIR`, by the session id
-claude-ps gives; the model is told when it was not found there. Two agents a
+Claude Code gives; the model is told when it was not found there. Two agents a
 session names alike are told apart by their panes, as `luneta/main:4`, and a
 brief tells of 32 agents at most, and says how many it leaves out.
 
 The model is `claude -p --model haiku`, on your Claude Code login, with no
 tools, and in `--safe-mode`, so that none of your hooks, `CLAUDE.md` or MCP
 servers come into it. A brief takes a few seconds. While it is asked, the
-`claude` it runs has no zellij in its environment, and claude-ps places it in
-no pane.
+`claude` it runs has no zellij in its environment, and luneta places it in no
+pane.
 
-Needs `claude` and `claude-ps` on the server's `PATH`.
+Needs `claude`, `luneta` and `lunetad` on the server's `PATH`.
 
 ### luneta in your terminal
 
@@ -741,7 +751,6 @@ the session it is in.
 | | | needed for |
 |---|---|---|
 | **zellij 0.45.0** | | everything |
-| [`claude-ps`](https://github.com/lorenzolfm/claude-ps) | optional | the agent list and the brief |
 | [`claude`](https://claude.com/claude-code) | optional | the menu and the brief |
 | `git` | optional | the branch in the name of an agent the menu starts |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
@@ -749,7 +758,7 @@ the session it is in.
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
-| `luneta` and [`lunetad`](#building-from-source), side by side | optional | the sidebar's agents, panes and branches as they change, without each sidebar asking claude-ps, zellij and git |
+| `luneta` and [`lunetad`](#building-from-source), side by side | optional | the agents, in the agent list, the sidebar, the menu and the brief, and where each pane in the sidebar works, what runs in it and its branch |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in the sidebar, and how it ended |
 
 The session list needs nothing but zellij. The optional tools are looked up by
@@ -769,7 +778,7 @@ plugins {
 
 Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
 `ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
-luneta reaches `zoxide`, `eza`, `claude-ps`, `git`, `zellij` and `luneta`, and how
+luneta reaches `zoxide`, `eza`, `git`, `zellij` and `luneta`, and how
 the [menu](#menu) starts `claude`; `OpenTerminalsOrPlugins` is how the
 [dock](#dock-the-sidebar) opens the sidebar.
 Every mode asks for all four, since zellij keeps one grant for a plugin.
@@ -1319,10 +1328,13 @@ knows of a host, and `luneta`: zellij beside a sidebar, as
 [luneta in your terminal](#luneta-in-your-terminal) has it, and with a command,
 the CLI that talks to the daemon
 ([#95](https://github.com/lorenzolfm/luneta/issues/95)). With `luneta` on the
-zellij server's `PATH`, the sidebar and the picker take the panes of each
-session, the branch each works on and the agents from the daemon, through
-`luneta watch`, as they change. Without it, each asks claude-ps, zellij and git
-itself, as before, and the daemon again every few seconds.
+zellij server's `PATH`, the sidebar, the picker and the menu take the panes of
+each session, the branch each works on and the agents from the daemon, through
+`luneta watch`, as they change. Without it, the sidebar has each session's
+panes as zellij lists them, with no agents, no icons and no branches, and the
+sidebar and the picker say why; they ask the daemon again every few seconds.
+The sidebar's menu then starts an agent, or opens a pane, a tab or a session,
+only beside a pane of its own session, which zellij says the directory of.
 
 Nothing has to start the daemon, or run it as a service: `luneta` and `luneta
 watch` start `lunetad` when none answers, as zellij and tmux start their

@@ -1,5 +1,5 @@
 # The agent screen: which one stopped and needs me.
-# Needs `claude-ps` on the PATH and at least one Claude Code agent running.
+# Needs `luneta` and `lunetad` on the PATH and at least one Claude Code agent running.
 # Run from the repo root: vhs docs/media/agents.tape
 
 Output docs/media/agents.gif

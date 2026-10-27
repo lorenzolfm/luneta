@@ -1,5 +1,5 @@
-//! Processes on macOS, through sysinfo, which asks the kernel what claude-ps
-//! asks it with `sysctl`, and without code of ours that is unsafe.
+//! Processes on macOS, through sysinfo, which asks the kernel with `sysctl`,
+//! and without code of ours that is unsafe.
 
 use std::ffi::OsString;
 

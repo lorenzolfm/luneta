@@ -19,7 +19,7 @@ impl Moment {
         Moment(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
     }
 
-    pub fn from_millis(millis: u64) -> Self {
+    pub const fn from_millis(millis: u64) -> Self {
         Moment(Duration::from_millis(millis))
     }
 
@@ -52,6 +52,7 @@ impl Age {
         Age(elapsed)
     }
 
+    #[cfg(test)]
     pub fn from_secs(secs: u64) -> Self {
         Age(Duration::from_secs(secs))
     }
@@ -75,10 +76,6 @@ impl Held {
 
     pub const fn from_millis(millis: u64) -> Self {
         Held(Duration::from_millis(millis))
-    }
-
-    pub fn grown_by(self, age: Age) -> Held {
-        Held(self.0 + age.0)
     }
 
     pub fn label(&self) -> String {
