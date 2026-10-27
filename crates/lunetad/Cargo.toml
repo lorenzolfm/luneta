@@ -46,6 +46,10 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # for how a terminal a command runs on takes keys, as `stty` reads it, opened
 # so that it never becomes the daemon's own.
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
+# Opens the pseudoterminal zellij's client runs on as alacritty_terminal does,
+# so that luneta sets its modes before zellij starts. Already in the tree by
+# way of alacritty_terminal.
+rustix-openpty = "0.2.0"
 # Tells luneta's terminal's reader of a resize, as crossterm's did. Already in
 # the tree by way of crossterm.
 signal-hook = "0.3.18"

@@ -20,11 +20,13 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode};
-use alacritty_terminal::tty;
+use alacritty_terminal::tty::{self, ToWinsize as _};
 use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, NamedColor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use rustix::termios::{self, LocalModes, OptionalActions};
+use rustix_openpty::openpty;
 
 use crate::host::Event;
 
@@ -149,7 +151,15 @@ impl Hosted {
             drain_on_exit: true,
             env: HashMap::new(),
         };
-        let pty = tty::new(&options, size.into(), 0)?;
+        // A pseudoterminal as alacritty's, but that echoes nothing it is sent.
+        // zellij's client puts back the modes it found as it ends, as where it
+        // gives up as it starts: luneta's answers to what it asked, that come
+        // after, would show on its screen, and in zellij's error.
+        let pty = openpty(None, Some(&WindowSize::from(size).to_winsize()))?;
+        let mut modes = termios::tcgetattr(&pty.user)?;
+        modes.local_modes.remove(LocalModes::ECHO);
+        termios::tcsetattr(&pty.user, OptionalActions::Now, &modes)?;
+        let pty = tty::from_fd(&options, 0, pty.controller, pty.user)?;
         let drew = Arc::new(AtomicBool::new(false));
         let listener = Listener { events, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
@@ -366,6 +376,8 @@ fn colour(colour: Colour) -> (Color, bool) {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
@@ -457,6 +469,40 @@ mod tests {
             })
             .collect();
         assert_eq!(answers, ["\x1b]11;rgb:1e1e/1e1e/2e2e\x07", "\x1b[?6c"]);
+    }
+
+    /// The terminal echoes nothing luneta writes to it, even in the modes it
+    /// starts in, which zellij's client puts back as it gives up. luneta's
+    /// answers to what it asked as it started, that come after, would show in
+    /// zellij's error, which luneta says again.
+    #[test]
+    fn what_luneta_writes_is_never_echoed() {
+        let (events, inbox) = mpsc::channel();
+        let size = Size {
+            columns: NonZeroU16::new(20).unwrap(),
+            lines: NonZeroU16::new(2).unwrap(),
+            cell_width: 0,
+            cell_height: 0,
+        };
+        // Reads a line in the modes it found, then prints, so that whatever
+        // was echoed of the line shows before `done`.
+        let program = "printf ready; read -r line; printf done";
+        let args = vec!["-c".to_owned(), program.to_owned()];
+        let hosted =
+            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, events).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hosted.text() != "ready" {
+            assert!(Instant::now() < deadline, "the program printed {:?}", hosted.text());
+            thread::sleep(Duration::from_millis(10));
+        }
+        hosted.send(&b"\x1b[?6c\n"[..]);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Event::Hosted(Said::Ended) = inbox.recv_timeout(left).unwrap() {
+                break;
+            }
+        }
+        assert_eq!(hosted.text(), "readydone");
     }
 
     #[test]
