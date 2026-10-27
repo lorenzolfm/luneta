@@ -523,8 +523,8 @@ pub struct Sidebar {
     /// sidebar took the focus, or a click to.
     cursor: Option<Place>,
     /// Whether the key before was `Top::First`'s, which moves the highlight
-    /// to the first row once pressed again. Any other key drops it, and so
-    /// does the focus going.
+    /// to the first row once pressed again. Any other key drops it, `Esc`
+    /// doing nothing else, and so does the focus going.
     first_pressed: bool,
     /// The `here_row` the view last scrolled to show while the sidebar did
     /// not have the focus, after which the wheel can scroll it out of sight.
@@ -1177,6 +1177,8 @@ impl Sidebar {
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
             KeyCode::Enter => return self.go(),
+            // As in vim, it only takes the `g` back.
+            KeyCode::Esc if first_pressed => {},
             KeyCode::Esc => return Asked::Leave,
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
@@ -2561,7 +2563,8 @@ mod tests {
 
     /// `G` and `End` take the highlight to the last row, and `gg` and `Home`
     /// to the first. A key between the two `g`s drops the first, and so does
-    /// the focus going.
+    /// the focus going. `Esc` after a `g` does nothing else, and leaves the
+    /// sidebar pressed again.
     #[test]
     fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
         let mut sidebar = two_sessions();
@@ -2591,6 +2594,9 @@ mod tests {
         sidebar.focus(true);
         sidebar.key(&g, moment(160_000));
         assert_eq!(sidebar.cursor, second);
+        let esc = key(KeyCode::Esc);
+        assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Nothing);
+        assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
     }
 
     /// zellij versions with sockets of their own can each run a session under

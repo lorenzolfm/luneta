@@ -113,7 +113,7 @@ pub enum Top {
     Move(isize),
     /// Moves the highlight to the first row once pressed twice, as vim's
     /// `gg`. Pressed once, the sidebar waits for the second, and any other
-    /// key drops the first.
+    /// key drops the first: `Esc` does only that, as in vim.
     First,
     /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     Fold(Option<bool>),
