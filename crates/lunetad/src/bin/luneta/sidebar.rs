@@ -66,6 +66,10 @@ pub const ACCENT: Color = gruvbox::PURPLE;
 pub const NAME: Color = gruvbox::AQUA;
 /// The colour of an agent at work, and of the search's `/`.
 pub const TAG: Color = gruvbox::YELLOW;
+/// The colour of what went wrong: the notes at the bottom that say so, and the
+/// rule of the sidebar collapsed, which has no room for them, while the daemon
+/// does not answer.
+const ERROR: Color = gruvbox::RED;
 /// The background of the highlight while the sidebar has the focus, on the
 /// row the keys took it to.
 pub const LIT: Color = gruvbox::BG2;
@@ -1619,13 +1623,13 @@ impl Sidebar {
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
     /// to the room it has. Its last column is left blank, as the sidebar's is.
-    /// The rule is red while the daemon does not answer, as the note that
-    /// says so is, which the strip has no room for.
+    /// The rule is in `ERROR` while the daemon does not answer, as the note
+    /// that says so is, which the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
-            Style::new().fg(Color::Red)
+            Style::new().fg(ERROR)
         } else {
             Style::new().add_modifier(Modifier::DIM)
         };
@@ -1694,7 +1698,7 @@ impl Sidebar {
     /// The menu and the legend leave the rows a line.
     fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
-        let error = Style::new().fg(gruvbox::RED);
+        let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
             notes.extend(wrapped(&format!("lunetad: {away}"), width, error));
         }
@@ -2423,24 +2427,33 @@ mod tests {
     }
 
     /// Collapsed, the sidebar has no room for the note that says lunetad does
-    /// not answer, so its rule turns red, as the note is, until lunetad
-    /// answers again.
+    /// not answer, so its rule turns the note's colour until lunetad answers
+    /// again, and is drawn as the open sidebar's rule is otherwise.
     #[test]
     fn collapsed_the_sidebar_reddens_its_rule_while_lunetad_does_not_answer() {
         let mut sidebar = Sidebar::default();
         sidebar.heard(idle_agent());
+        let look = |buffer: &Buffer, x: u16, y: u16| {
+            let cell = &buffer[(x, y)];
+            (cell.fg, cell.modifier.contains(Modifier::DIM))
+        };
         let rule = |sidebar: &mut Sidebar| {
             let area = Rect::new(0, 0, COLLAPSED, 3);
             let mut buffer = Buffer::empty(area);
             sidebar.draw_collapsed(&mut buffer, area, moment(160_000));
-            let cell = &buffer[(0, 0)];
-            (cell.fg, cell.modifier.contains(Modifier::DIM))
+            look(&buffer, 0, 0)
         };
-        assert_eq!(rule(&mut sidebar), (Color::Reset, true));
+        let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 0);
+        assert_eq!(rule(&mut sidebar), open);
         sidebar.lost("gone".to_owned());
-        assert_eq!(rule(&mut sidebar), (Color::Red, false));
+        // The note, ` lunetad: gone`, takes the last line.
+        let buffer = drawn(&mut sidebar, false, COLUMNS, 6);
+        assert_eq!(buffer[(1, 5)].symbol(), "l");
+        let note = look(&buffer, 1, 5);
+        assert_ne!(note, open);
+        assert_eq!(rule(&mut sidebar), note);
         sidebar.heard(idle_agent());
-        assert_eq!(rule(&mut sidebar), (Color::Reset, true));
+        assert_eq!(rule(&mut sidebar), open);
     }
 
     /// A daemon of another build can list a session with no start, or with
