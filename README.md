@@ -1103,6 +1103,13 @@ lunetad follows the session to its new name, as it does an agent, when it saw
 the rename: a session renamed before lunetad started leaves its shells
 unmarked until they start again.
 
+A shell killed with `kill -9`, or by the kernel when memory runs out, cannot
+take its file away, and the file stays until you log out. One that ran in a
+pane's shell stands in front of the pane's own, in both sidebars, until you
+take its file away with `rm`. lunetad drops a command going on a terminal that
+is gone, but only until another terminal is opened, which takes the gone
+one's number.
+
 ---
 
 ## Usage

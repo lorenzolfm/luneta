@@ -353,8 +353,10 @@ impl Shells {
     }
 
     /// What each shell says now, and for each command going, what its
-    /// terminal says it does. One going on a terminal that is gone is no
-    /// pane's: its shell went without a word.
+    /// terminal says it does. One going on a terminal that is gone is
+    /// dropped: its shell was killed, and could not take its file away. That
+    /// holds only until another terminal is opened, which takes the number
+    /// of the one gone: from then on the file is read as that one's.
     pub fn read(&mut self) -> Vec<Shell> {
         self.read_by(modes)
     }
