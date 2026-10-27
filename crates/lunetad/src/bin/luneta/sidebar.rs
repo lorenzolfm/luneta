@@ -27,6 +27,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject};
 use crate::folds::Folds;
+use crate::gruvbox;
 use crate::icons;
 use crate::ledger::{self, Key};
 use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
@@ -54,11 +55,17 @@ pub const SPIN: Duration = Duration::from_millis(100);
 
 /// The colour of what wants you: an agent that waits for you, and the session
 /// luneta's zellij is in.
-pub const ACCENT: Color = Color::Magenta;
+pub const ACCENT: Color = gruvbox::PURPLE;
 /// The colour of the session luneta's zellij is in.
-pub const NAME: Color = Color::Cyan;
+pub const NAME: Color = gruvbox::AQUA;
 /// The colour of an agent at work, and of the search's `/`.
-pub const TAG: Color = Color::Yellow;
+pub const TAG: Color = gruvbox::YELLOW;
+/// The background of the highlight while the sidebar has the focus, on the
+/// row the keys took it to.
+pub const LIT: Color = gruvbox::BG2;
+/// The background of the highlight while it rests on your pane, the sidebar
+/// without the focus: a step softer, as `▌` marks that row already.
+const RESTING: Color = gruvbox::BG1;
 
 /// How many columns a mark takes: one, as each glyph of `Mark` does. Each
 /// pane's row keeps that many for one, whether it has one or not.
@@ -225,13 +232,13 @@ impl Mark {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
             Mark::Idle => ("✓".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Finished | Mark::Passed => {
-                ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD))
+                ("✓".to_owned(), style.fg(gruvbox::GREEN).add_modifier(Modifier::BOLD))
             },
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
-            Mark::Failed => ("✗".to_owned(), style.fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Mark::Failed => ("✗".to_owned(), style.fg(gruvbox::RED).add_modifier(Modifier::BOLD)),
             Mark::Ran => ("$".to_owned(), style),
         }
     }
@@ -499,13 +506,14 @@ pub struct Sidebar {
     /// Whether the sidebar has the keys.
     focused: bool,
     /// The row of the pane luneta's zellij is on, or of its session, while
-    /// that one is folded.
+    /// that one is folded. The highlight rests on it while the sidebar does
+    /// not have the focus.
     here_row: Option<Place>,
-    /// The row the highlight is on: on `here_row` while the sidebar does not
-    /// have the focus, and where the keys take it while it does.
+    /// The row the keys took the highlight to, from `here_row` as the
+    /// sidebar took the focus, or a click to.
     cursor: Option<Place>,
-    /// The row the view last scrolled to show while the sidebar did not have
-    /// the focus, after which the wheel can scroll it out of sight.
+    /// The `here_row` the view last scrolled to show while the sidebar did
+    /// not have the focus, after which the wheel can scroll it out of sight.
     revealed: Option<Place>,
     /// The first line of the rows on screen.
     top: usize,
@@ -548,6 +556,19 @@ enum Search {
     /// What is typed narrows the rows, and `seek` until the highlight has gone
     /// to the row that matches it best.
     Typed { term: String, seek: bool },
+}
+
+/// Where the highlight is, as the sidebar is drawn, by the index of its row.
+#[derive(Clone, Copy)]
+enum Highlight {
+    /// On `LIT`, where the keys took it, while the sidebar has the focus.
+    /// None while there is no row to take it to.
+    Lit(Option<usize>),
+    /// On `RESTING`, on the row of the pane luneta's zellij is on, while the
+    /// sidebar does not have the focus.
+    Resting(usize),
+    /// Nowhere: the sidebar does not have the focus, and no row is the pane's.
+    Off,
 }
 
 impl Sidebar {
@@ -733,17 +754,21 @@ impl Sidebar {
         self.sending(place.session())
     }
 
-    /// The sidebar takes the keys, or gives them back. The highlight goes
-    /// back to where luneta's zellij is as it does. A search lasts while the
-    /// sidebar has them: one left open would keep the rows it hides out of
-    /// sight. So does the menu, but while it takes luneta's zellij out of the
-    /// session it kills.
+    /// The sidebar takes the keys, or gives them back. The keys take the
+    /// highlight on from where luneta's zellij is, and it goes back there as
+    /// they leave. A search lasts while the sidebar has them: one left open
+    /// would keep the rows it hides out of sight. So does the menu, but while
+    /// it takes luneta's zellij out of the session it kills.
     pub fn focus(&mut self, focused: bool) {
         if self.focused == focused {
             return;
         }
         self.focused = focused;
-        if !focused {
+        if focused {
+            if self.here_row.is_some() {
+                self.cursor.clone_from(&self.here_row);
+            }
+        } else {
             self.search = None;
             self.close_menu();
         }
@@ -1004,9 +1029,6 @@ impl Sidebar {
         self.here_key = here_key;
         self.finished = finished;
         self.here_row = here_pane.as_ref().and_then(|place| self.row_for(place));
-        if !self.focused && self.here_row.is_some() {
-            self.cursor.clone_from(&self.here_row);
-        }
         // The highlight goes past what a delete took away, once it is gone.
         if let Some(closing) = &self.closing
             && self.cursor.as_ref() == Some(&closing.gone)
@@ -1500,11 +1522,17 @@ impl Sidebar {
         None
     }
 
-    /// Scrolls so that the highlighted row shows on `room` lines.
-    fn reveal(&mut self, room: usize) {
-        let Some(at) = self.cursor_index() else {
-            return;
-        };
+    /// Where the highlight is, and which of its two it is.
+    fn highlight(&self) -> Highlight {
+        if self.focused {
+            return Highlight::Lit(self.cursor_index());
+        }
+        let row = |place: &Place| self.rows.iter().position(|row| row.place() == *place);
+        self.here_row.as_ref().and_then(row).map_or(Highlight::Off, Highlight::Resting)
+    }
+
+    /// Scrolls so that the row `at` shows on `room` lines.
+    fn reveal(&mut self, at: usize, room: usize) {
         let start: usize = self.rows[..at].iter().map(Row::height).sum();
         let end = start + self.rows[at].height();
         if start < self.top {
@@ -1521,9 +1549,9 @@ impl Sidebar {
 
     /// Draws the sidebar into `area`, the highlight on its row: where the keys
     /// took it while the sidebar has the focus, and on the pane luneta's
-    /// zellij is on while it does not, which the view scrolls to show as the
-    /// pane changes. Its last column is left blank, to keep it off what is
-    /// beside it.
+    /// zellij is on while it does not, softer, which the view scrolls to show
+    /// as the pane changes. Its last column is left blank, to keep it off what
+    /// is beside it.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawn = Some(now);
         if self.due.is_some_and(|due| due <= now) {
@@ -1538,13 +1566,19 @@ impl Sidebar {
         let notes = self.notes(width, height);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
-        let lit = self.focused || self.here_row.is_some();
-        if self.focused {
-            self.reveal(room);
-            self.revealed = None;
-        } else if lit && self.revealed != self.cursor {
-            self.reveal(room);
-            self.revealed.clone_from(&self.cursor);
+        let highlight = self.highlight();
+        match highlight {
+            Highlight::Lit(at) => {
+                if let Some(at) = at {
+                    self.reveal(at, room);
+                }
+                self.revealed = None;
+            },
+            Highlight::Resting(at) if self.revealed != self.here_row => {
+                self.reveal(at, room);
+                self.revealed.clone_from(&self.here_row);
+            },
+            Highlight::Resting(_) | Highlight::Off => {},
         }
         if self.host.is_none() {
             let waiting = if self.away.is_some() { "" } else { "asking lunetad…" };
@@ -1557,13 +1591,17 @@ impl Sidebar {
             let none = if typed { " no match" } else { " no sessions" };
             lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
-        let cursor = if lit { self.cursor_index() } else { None };
+        let lit = match highlight {
+            Highlight::Lit(at) => at.map(|at| (at, LIT)),
+            Highlight::Resting(at) => Some((at, RESTING)),
+            Highlight::Off => None,
+        };
         let mut drawn: Vec<Line<'static>> = Vec::new();
         for (at, row) in self.rows.iter().enumerate() {
-            let lit = cursor == Some(at);
+            let background = lit.filter(|(on, _)| *on == at).map(|(_, background)| background);
             for mut line in row_lines(row, width, frame, now) {
-                if lit {
-                    line = line.patch_style(Style::new().add_modifier(Modifier::REVERSED));
+                if let Some(background) = background {
+                    line = line.patch_style(Style::new().bg(background));
                 }
                 drawn.push(line);
             }
@@ -1573,7 +1611,7 @@ impl Sidebar {
         lines.resize(height.saturating_sub(notes.len()), Line::default());
         lines.extend(notes);
         for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
-            buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset());
+            buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset().fg(gruvbox::FG1));
             buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
         }
     }
@@ -1628,7 +1666,7 @@ impl Sidebar {
     /// The menu and the legend leave the rows a line.
     fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
-        let error = Style::new().fg(Color::Red);
+        let error = Style::new().fg(gruvbox::RED);
         if let Some(away) = &self.away {
             notes.extend(wrapped(&format!("lunetad: {away}"), width, error));
         }
@@ -1860,13 +1898,13 @@ fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checko
 }
 
 /// The number of a pull request and the colour of its state, which gh lists
-/// it in: green while it is open, grey while it is a draft, and magenta once
+/// it in: green while it is open, grey while it is a draft, and purple once
 /// it is merged. A closed one is none.
 fn numbered(pull_request: PullRequest) -> Option<(u32, Color)> {
     let colour = match pull_request.state {
-        State::Open => Color::Green,
-        State::Draft => Color::DarkGray,
-        State::Merged => Color::Magenta,
+        State::Open => gruvbox::GREEN,
+        State::Draft => gruvbox::GREY,
+        State::Merged => gruvbox::PURPLE,
         State::Closed => return None,
     };
     Some((pull_request.number.get(), colour))
@@ -2032,7 +2070,7 @@ fn checkout_line(here: bool, checkout: &Checkout, width: usize) -> Line<'static>
     let mut spans = vec![
         margin(here),
         Span::raw(" ".repeat(LABEL - 1)),
-        Span::styled(branch, Style::new().fg(Color::DarkGray)),
+        Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
     if let Some(number) = number {
         spans.push(Span::raw(" "));
@@ -2181,7 +2219,9 @@ mod tests {
         drawn_at(sidebar, focused, width, height, now)
     }
 
-    /// The sidebar as `drawn` draws it, at `now`.
+    /// The sidebar as `drawn` draws it, at `now`. Each cell is in gruvbox's
+    /// colours, on the terminal's background or, on the highlight, the one
+    /// that says whether the sidebar has the focus.
     fn drawn_at(
         sidebar: &mut Sidebar,
         focused: bool,
@@ -2193,6 +2233,11 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         sidebar.focus(focused);
         sidebar.draw(&mut buffer, area, now);
+        let lit = if focused { LIT } else { RESTING };
+        for cell in buffer.content() {
+            assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!([Color::Reset, lit].contains(&cell.bg), "{:?} on {:?}", cell.symbol(), cell.bg);
+        }
         buffer
     }
 
@@ -2228,7 +2273,7 @@ mod tests {
             })
             .collect();
         let lit = (0..height)
-            .filter(|y| buffer[(0, *y)].style().add_modifier.contains(Modifier::REVERSED))
+            .filter(|y| buffer[(0, *y)].bg != Color::Reset)
             .collect();
         (lines, lit)
     }
@@ -2323,7 +2368,8 @@ mod tests {
     /// too, with the focus or without. While the sidebar does not have the
     /// focus, the highlight rests on that pane; once it has, the highlight
     /// goes with the keys, and comes back as the sidebar gives the focus
-    /// back.
+    /// back. A click on another pane leaves it on yours, as `▌` is, until
+    /// luneta's zellij is there.
     #[test]
     fn the_highlight_rests_on_your_pane_until_the_sidebar_has_the_focus() {
         let mut sidebar = Sidebar::default();
@@ -2360,6 +2406,10 @@ mod tests {
         let (lines, lit) = seen(&mut sidebar, true, 32, 12);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
+        let (_, lit) = seen(&mut sidebar, false, 32, 12);
+        assert_eq!(lit, [4, 5]);
+        let fish = Place::Pane { session: listed("older", 10), pane: 1 };
+        assert_eq!(sidebar.mouse(click(10, 3), Rect::new(0, 0, 32, 12)), Asked::Go(fish));
         let (_, lit) = seen(&mut sidebar, false, 32, 12);
         assert_eq!(lit, [4, 5]);
     }
@@ -3223,9 +3273,9 @@ mod tests {
                 "       old",
             ]
         );
-        assert_eq!(colour(4), Some(Color::Green));
-        assert_eq!(colour(6), Some(Color::Magenta));
-        assert_eq!(colour(8), Some(Color::DarkGray));
+        assert_eq!(colour(4), Some(gruvbox::GREEN));
+        assert_eq!(colour(6), Some(gruvbox::PURPLE));
+        assert_eq!(colour(8), Some(gruvbox::GREY));
     }
 
     #[test]
