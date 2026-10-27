@@ -37,7 +37,7 @@ pub fn watch<T: 'static>(
     wanted: fn(&Path) -> bool,
     sweep: Duration,
     mut read: impl FnMut() -> T + Send + 'static,
-    tell: impl Fn(T) -> bool + Send + 'static,
+    mut tell: impl FnMut(T) -> bool + Send + 'static,
 ) -> io::Result<()> {
     if !tell(read()) {
         return Ok(());

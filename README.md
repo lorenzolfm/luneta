@@ -574,8 +574,9 @@ and the sidebar. A click goes to whichever you click.
 
 The sidebar lists every session, oldest first, the panes in each, in the order
 of their tabs, and what the agent in each pane is doing, with the branch under
-it, all as [`lunetad`](#building-from-source) says: it needs the daemon
-running, and says so at its bottom while it does not answer. `j` and `k` move,
+it, all as [`lunetad`](#building-from-source) says: luneta starts the daemon
+when none runs, and the sidebar says so at its bottom while it does not
+answer. `j` and `k` move,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, and `Esc` goes back to zellij. The session zellij is in has its rule in
 the accent, and `▌` marks the pane it is on. The highlight rests there while
@@ -650,7 +651,7 @@ the session it is in.
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
-| `luneta`, with [`lunetad`](#building-from-source) running | optional | the sidebar's agents, panes and branches as they change, without each sidebar asking claude-ps, zellij and git |
+| `luneta` and [`lunetad`](#building-from-source), side by side | optional | the sidebar's agents, panes and branches as they change, without each sidebar asking claude-ps, zellij and git |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in the sidebar, and how it ended |
 
 The session list needs nothing but zellij. The optional tools are looked up by
@@ -1220,13 +1221,25 @@ knows of a host, and `luneta`: zellij beside a sidebar, as
 [luneta in your terminal](#luneta-in-your-terminal) has it, and with a command,
 the CLI that talks to the daemon
 ([#95](https://github.com/lorenzolfm/luneta/issues/95)). With `luneta` on the
-zellij server's `PATH` and the daemon running, the sidebar and the picker take
-the panes of each session, the branch each works on and the agents from it,
-through `luneta watch`, as they change. Without it, each asks claude-ps, zellij
-and git itself, as before, and the daemon again every few seconds. Nothing
-starts the daemon for you yet: run `lunetad`. `luneta agents` lists the agents
-the daemon finds, and `luneta sessions` the sessions, their panes and the
-branch each works on. The daemon asks `zellij` and `git` on its `PATH`.
+zellij server's `PATH`, the sidebar and the picker take the panes of each
+session, the branch each works on and the agents from the daemon, through
+`luneta watch`, as they change. Without it, each asks claude-ps, zellij and git
+itself, as before, and the daemon again every few seconds.
+
+Nothing has to start the daemon, or run it as a service: `luneta` and `luneta
+watch` start `lunetad` when none answers, as zellij and tmux start their
+servers. They start the `lunetad` beside them, which the same build made, or
+else the first on the `PATH`, detached, with what it says in `lunetad.log`
+beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
+It lives as long as zellij does, not as long as a client is attached: once
+zellij has had no session for 30 seconds, it ends. A daemon older than them,
+as an upgrade leaves running, they stop, and start their own in its place. A
+newer one they keep, so that two versions in use at once never take turns at
+it: after a rollback, the newer daemon runs on until zellij's last session ends.
+`luneta info` says which daemon runs, `luneta agents` lists the agents it
+finds, and `luneta sessions` the sessions, their panes and the branch each
+works on; none of the three starts one. The daemon asks `zellij` and `git` on
+its `PATH`, which is the zellij server's when the plugin started it.
 
 ## License
 

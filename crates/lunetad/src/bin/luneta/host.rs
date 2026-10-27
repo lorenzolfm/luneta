@@ -166,8 +166,9 @@ struct App {
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
-/// it detaches, or its session does.
-pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> ExitCode {
+/// it detaches, or its session does. The sidebar is of what the daemon in
+/// `folder` says, which is started if none runs.
+pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let dir = match env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -226,7 +227,7 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
             let disambiguate = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
             execute!(io::stdout(), PushKeyboardEnhancementFlags(disambiguate))?;
         }
-        run_in(&mut terminal, session.as_ref(), socket, &dir, answers.colours, events, &mut inbox)
+        run_in(&mut terminal, session.as_ref(), folder, &dir, answers.colours, events, &mut inbox)
     });
     // Each mode is put back however the rest went, and the first error is the
     // one said.
@@ -261,7 +262,7 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
 fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
-    socket: Result<PathBuf, String>,
+    folder: Result<PathBuf, String>,
     dir: &std::path::Path,
     colours: Colours,
     events: Sender<Event>,
@@ -279,8 +280,8 @@ fn run_in(
     {
         zellij::arrive(look, before, &events);
     }
-    match socket {
-        Ok(socket) => crate::watch::start(socket, events.clone()),
+    match folder {
+        Ok(folder) => crate::watch::start(folder, events.clone()),
         Err(why) => sidebar.lost(why),
     }
     let mut app = App {

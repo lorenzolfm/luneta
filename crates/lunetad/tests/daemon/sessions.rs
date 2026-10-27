@@ -12,61 +12,13 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::{Detached, Head};
 use lunetad::api::work_tree::{Outside, Stands};
-use lunetad::api::{self, Branch, Changes, Checkout, Upstream, Version, WatchRequest};
+use lunetad::api::{self, Branch, Changes, Checkout, Upstream, Version};
 use prost::Message as _;
 use serde_json::json;
-use tempfile::TempDir;
 
-use crate::host::{eventually, start, FakeZellij, Vars, LUNETA};
-
-/// The folders of a host of a test's own: the daemon's, and zellij's sockets,
-/// with a zellij that lists the panes the test gives it.
-pub struct Host {
-    pub runtime: TempDir,
-    pub sockets: TempDir,
-    pub zellij: FakeZellij,
-}
+use crate::host::{eventually, start, Host, LUNETA};
 
 impl Host {
-    pub fn new() -> Self {
-        let host = Host {
-            runtime: tempfile::tempdir().unwrap(),
-            sockets: tempfile::tempdir().unwrap(),
-            zellij: FakeZellij::new(),
-        };
-        fs::create_dir_all(host.contract()).unwrap();
-        host
-    }
-
-    pub fn vars(&self) -> Vars<'_> {
-        Vars {
-            runtime: Some(self.runtime.path()),
-            zellij: Some(self.sockets.path()),
-            bin: Some(self.zellij.bin()),
-            ..Vars::default()
-        }
-    }
-
-    /// The folder zellij 0.45 keeps its sessions' sockets in.
-    pub fn contract(&self) -> PathBuf {
-        self.sockets.path().join("contract_version_1")
-    }
-
-    /// A session's server, by the socket it listens on.
-    pub fn serve(&self, session: &str) -> UnixListener {
-        UnixListener::bind(self.contract().join(session)).unwrap()
-    }
-
-    /// The host, as the daemon answers a first look.
-    pub fn host(&self) -> api::Host {
-        let socket = self.runtime.path().join(crate::host::SOCKET);
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(async {
-            let mut daemon = lunetad::connect(&socket).await.unwrap();
-            daemon.watch(WatchRequest { after: None }).await.unwrap().into_inner()
-        })
-    }
-
     /// `luneta watch`, with `--after` as `after` gives it, and how long it
     /// took to answer.
     fn watch(&self, after: Option<Version>) -> (api::Host, Duration) {

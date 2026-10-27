@@ -5,12 +5,15 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lunetad::api::{self, WatchRequest};
+use lunetad::folder::{self, Folder};
 use tempfile::TempDir;
 
 pub const LUNETAD: &str = env!("CARGO_BIN_EXE_lunetad");
@@ -161,6 +164,65 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     }
 }
 
+/// The folders of a host of a test's own: the daemon's, and zellij's sockets,
+/// with a zellij that lists the panes the test gives it.
+pub struct Host {
+    pub runtime: TempDir,
+    pub sockets: TempDir,
+    pub zellij: FakeZellij,
+}
+
+impl Host {
+    pub fn new() -> Self {
+        let host = Host {
+            runtime: tempfile::tempdir().unwrap(),
+            sockets: tempfile::tempdir().unwrap(),
+            zellij: FakeZellij::new(),
+        };
+        fs::create_dir_all(host.contract()).unwrap();
+        host
+    }
+
+    pub fn vars(&self) -> Vars<'_> {
+        Vars {
+            runtime: Some(self.runtime.path()),
+            zellij: Some(self.sockets.path()),
+            bin: Some(self.zellij.bin()),
+            ..Vars::default()
+        }
+    }
+
+    /// The daemon's folder.
+    pub fn folder(&self) -> PathBuf {
+        self.runtime.path().join("luneta")
+    }
+
+    /// The folder zellij 0.45 keeps its sessions' sockets in.
+    pub fn contract(&self) -> PathBuf {
+        self.sockets.path().join("contract_version_1")
+    }
+
+    /// A session's server, by the socket it listens on.
+    pub fn serve(&self, session: &str) -> UnixListener {
+        UnixListener::bind(self.contract().join(session)).unwrap()
+    }
+
+    /// The host, as the daemon answers a first look.
+    pub fn host(&self) -> api::Host {
+        let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            daemon.watch(WatchRequest { after: None }).await.unwrap().into_inner()
+        })
+    }
+}
+
+/// The folder in `runtime` that a daemon reaches, if one has made it.
+pub fn folder_in(runtime: &Path) -> Option<Folder> {
+    folder::open(&runtime.join("luneta")).unwrap()
+}
+
 /// A process of a test's, killed as it goes out of scope, as a crash would end
 /// it: with no chance to clear up after itself.
 pub struct Running {
@@ -174,6 +236,20 @@ impl Running {
 
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// How it ended, if it does within `limit`.
+    pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(ended) = self.child.try_wait().unwrap() {
+                return Some(ended);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -197,6 +273,11 @@ pub struct Daemon {
 impl Daemon {
     pub fn pid(&self) -> u32 {
         self.process.pid()
+    }
+
+    /// How it ended, if it does within `limit`.
+    pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
+        self.process.ended_within(limit)
     }
 
     /// All the daemon has said, once `wait` has passed.
@@ -233,6 +314,18 @@ pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
         said.push(line);
     }
     Err((process.child.wait().unwrap(), said.join("\n")))
+}
+
+/// How `command` ended and what it wrote, once it has ended and what it
+/// writes to has closed, as zellij reads what a plugin's command says: a
+/// process it left running that held either would keep it from ever
+/// answering.
+pub fn answered(command: &mut Command) -> Output {
+    let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let (tell, heard) = mpsc::channel();
+    thread::spawn(move || tell.send(child.wait_with_output()));
+    let output = heard.recv_timeout(Duration::from_secs(15));
+    output.expect("it never answered, or what it left running holds what it writes").unwrap()
 }
 
 /// What `luneta info` says, run with `vars`.

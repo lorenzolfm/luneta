@@ -74,10 +74,11 @@ impl Host {
 
     /// What the daemon answers.
     fn list(&self) -> ListAgentsResponse {
-        let socket = self.runtime.path().join(crate::host::SOCKET);
+        let folder =
+            crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let mut daemon = lunetad::connect(&socket).await.unwrap();
+            let mut daemon = lunetad::connect(&folder).await.unwrap();
             daemon.list_agents(ListAgentsRequest {}).await.unwrap().into_inner()
         })
     }
