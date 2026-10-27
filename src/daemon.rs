@@ -21,6 +21,10 @@ pub const CONTEXT_VALUE: &str = "daemon";
 /// The CLI that asks the daemon, as zellij finds it on its server's `PATH`.
 const CLI: &str = "luneta";
 
+/// The command that asks the daemon how the host stands now, which it answers
+/// at once, as it is told no version to wait on the next of.
+pub const LOOK: [&str; 2] = [CLI, "watch"];
+
 /// How long a daemon that did not answer is left before it is asked again:
 /// one that is not running costs no more than a command that fails at once.
 const RETRY: Held = Held::from_secs(5);
@@ -74,7 +78,7 @@ impl Daemon {
             Heard::Nothing | Heard::Silent(_) => None,
         };
         self.asking = true;
-        let mut command = vec![CLI.to_owned(), "watch".to_owned()];
+        let mut command: Vec<String> = LOOK.iter().map(|part| (*part).to_owned()).collect();
         if let Some(Version { pid, seq }) = after {
             command.extend(["--after".to_owned(), format!("{pid}:{seq}")]);
         }
@@ -98,12 +102,12 @@ impl Daemon {
                 if matches!(self.heard, Heard::Host(_)) {
                     eprintln!("luneta: lunetad stopped answering: {why}");
                 }
-                if unstarted(exit_code, stderr) {
-                    self.heard = Heard::Absent(now);
-                    return Answer::Silent(format!("{CLI} cannot be started: {why}"));
-                }
-                self.heard = Heard::Silent(now);
-                return Answer::Silent(format!("lunetad does not answer: {why}"));
+                self.heard = if unstarted(exit_code, stderr) {
+                    Heard::Absent(now)
+                } else {
+                    Heard::Silent(now)
+                };
+                return Answer::Silent(silence(exit_code, stderr, &why));
             },
         };
         let seen = matches!(self.heard, Heard::Host(was) if was == version);
@@ -121,6 +125,25 @@ impl Daemon {
         if let Heard::Absent(at) = self.heard {
             self.heard = Heard::Silent(at);
         }
+    }
+}
+
+/// What a `LOOK` answered: the host, or why it did not say, as the menu says
+/// it.
+pub fn looked(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Host, String> {
+    let (_, host) =
+        read(exit_code, stdout, stderr).map_err(|why| silence(exit_code, stderr, &why))?;
+    Ok(host)
+}
+
+/// Why `luneta watch` did not say how the host stands, as the sidebar, the
+/// picker and the menu say it: `luneta` could not be started, or lunetad did
+/// not answer, for `why`.
+fn silence(exit_code: Option<i32>, stderr: &[u8], why: &str) -> String {
+    if unstarted(exit_code, stderr) {
+        format!("{CLI} cannot be started: {why}")
+    } else {
+        format!("lunetad does not answer: {why}")
     }
 }
 

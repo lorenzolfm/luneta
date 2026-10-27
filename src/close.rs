@@ -480,6 +480,7 @@ impl Leaving {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::given;
 
     fn pane(id: u32) -> PaneInfo {
         PaneInfo { id, is_selectable: true, ..PaneInfo::default() }
@@ -522,7 +523,7 @@ mod tests {
     }
 
     fn agent(pane: u32, tab: usize, status: &str) -> Agent {
-        Agent { pane, tab: Some(TabId(tab)), status: Status::parse(Some(status)) }
+        Agent { pane, tab: Some(TabId(tab)), status: given::status(status) }
     }
 
     /// Pane `id` of `seat`, or the session's row with none: pane 2 in tab 7
@@ -610,7 +611,7 @@ mod tests {
                 agent(5, 8, "waiting"),
                 agent(6, 9, "shell"),
                 agent(4, 10, "compacting"),
-                Agent { pane: 9, tab: Some(TabId(11)), status: Status::parse(None) },
+                Agent { pane: 9, tab: Some(TabId(11)), status: Status::Unreported },
             ])
         };
         let session = "Kill session luneta? 5 agents, 1 busy, 1 waiting, 2 unknown";

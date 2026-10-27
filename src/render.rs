@@ -2714,7 +2714,7 @@ mod tests {
             "failed" => Mark::Ran { age, outcome: Outcome::Failed },
             "running" => Mark::Running { age },
             "asking" => Mark::Asking { age },
-            _ => Mark::Agent { status: Status::parse(Some(word)), age },
+            _ => Mark::Agent { status: given::status(word), age },
         }
     }
 
@@ -3196,7 +3196,7 @@ mod tests {
                 tab: None,
                 label: "misc".to_owned(),
                 mark: agent.map(|word| Mark::Agent {
-                    status: Status::parse(Some(word)),
+                    status: given::status(word),
                     age: Held::from_secs(4),
                 }),
                 runs: None,

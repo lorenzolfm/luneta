@@ -24,7 +24,7 @@ use crate::agents::{AgentSet, Live, Seat};
 use crate::brief;
 use crate::checkouts::Checkouts;
 use crate::close::{self, Act, Leaving, Plan, Ran, Refuge, Scope};
-use crate::daemon::{self, Daemon};
+use crate::daemon;
 use crate::dirs::{self, WORKTREES};
 use crate::dock::TabId;
 use crate::elapsed::{Age, Moment};
@@ -1668,9 +1668,6 @@ pub struct Menu {
     asked: Option<(String, Option<String>)>,
     /// Where the menu last asked zellij to stand it.
     placed: Option<Spot>,
-    /// The daemon, asked once what the agents are doing and where the panes
-    /// work.
-    daemon: Daemon,
     /// What the agents are doing, for a delete key to ask first before it ends
     /// one at work.
     agents: AgentSet,
@@ -1699,7 +1696,6 @@ impl Menu {
             tabs: Vec::new(),
             asked: None,
             placed: None,
-            daemon: Daemon::default(),
             agents: AgentSet::default(),
             places: Places::default(),
             session: None,
@@ -2134,11 +2130,8 @@ impl Menu {
         let others =
             others.iter().map(|other| (other.name.as_str(), Age::new(other.creation_time)));
         self.refuge = close::refuge(others);
-        if let Some(command) = self.daemon.ask(Moment::now()) {
-            let command: Vec<&str> = command.iter().map(String::as_str).collect();
-            let asking = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
-            run_command(&command, BTreeMap::from([asking]));
-        }
+        let asking = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
+        run_command(&daemon::LOOK, BTreeMap::from([asking]));
         self.session = Some(session);
     }
 
@@ -2146,14 +2139,12 @@ impl Menu {
     /// panes work, or why it did not say, which a delete key says as it asks
     /// first.
     fn heard(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
-        match self.daemon.answered(exit_code, stdout, stderr, Moment::now()) {
-            daemon::Answer::Changed(host) => {
+        match daemon::looked(exit_code, stdout, stderr) {
+            Ok(host) => {
                 self.places.heard(&host.sessions);
                 self.agents.heard(&host.agents, Moment::now());
             },
-            // Asked once, it never answers with the host as it was seen.
-            daemon::Answer::Same => return,
-            daemon::Answer::Silent(why) => self.agents.fail(why),
+            Err(why) => self.agents.fail(why),
         }
         self.seat_agents();
     }
@@ -2293,7 +2284,7 @@ mod tests {
     use luneta_protocol::v1;
 
     use super::*;
-    use crate::agents::{given, Status};
+    use crate::agents::given;
 
     /// The menu as zellij hands it over: the children of `menu`, as KDL.
     const MENU: &str = r#"
@@ -2521,7 +2512,7 @@ mod tests {
             .map(|(pane, status)| close::Agent {
                 pane: *pane,
                 tab: Some(TabId(7)),
-                status: Status::parse(Some(status)),
+                status: given::status(status),
             })
             .collect();
         close::Subject {
@@ -3257,7 +3248,6 @@ mod tests {
         menu.session = Some("luneta".to_owned());
         menu.refuge = Some("elo".to_owned());
         if answered {
-            menu.daemon.ask(Moment::now());
             let said = host(&[given::agent(100, "luneta", 3, "/w/elo", "busy")]);
             let answered = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
             menu.ran(Some(0), &said, b"", &BTreeMap::from([answered]));
@@ -3314,7 +3304,6 @@ mod tests {
         assert_eq!(question(&menu), Some("Close the pane? luneta does not know its agents yet"));
 
         let mut menu = bound_for_two(false);
-        menu.daemon.ask(Moment::now());
         let refused = b"luneta: lunetad.sock: transport error: Connection refused (os error 111)";
         let answered = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
         menu.ran(Some(1), b"", refused, &BTreeMap::from([answered]));

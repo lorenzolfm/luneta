@@ -102,13 +102,18 @@ impl<'a> Live<'a> {
         }
     }
 
+    /// The pane an agent sits in: the one the daemon followed it to, or else
+    /// one found by its id and where it works, which is a guess where the
+    /// name the agent holds is another running session's.
     fn place<'b>(&self, agent: &'b Agent) -> Option<Seated<'b>> {
-        let session = self.places.find(agent.pane, agent.cwd.as_deref()?, &agent.reported)?;
-        Some(Seated {
-            agent,
-            seat: self.seat(session),
-            guessed: agent.reported != session && self.knows(&agent.reported),
-        })
+        let (session, guessed) = match &agent.housed {
+            Housed::Followed(session) => (session.as_str(), false),
+            Housed::Named(named) => {
+                let session = self.places.find(agent.pane, agent.cwd.as_deref()?, named)?;
+                (session, named != session && self.knows(named))
+            },
+        };
+        Some(Seated { agent, seat: self.seat(session), guessed })
     }
 }
 
@@ -120,14 +125,27 @@ struct Seated<'a> {
     guessed: bool,
 }
 
+/// The session the daemon says an agent's pane is in.
+#[derive(Debug, PartialEq, Eq)]
+enum Housed {
+    /// The one it runs in now, which the daemon followed it to through any
+    /// rename: its pane is there, whatever the session has said of its panes.
+    Followed(String),
+    /// What its environment names, which the daemon cannot follow: a rename
+    /// leaves it behind, and another session can take it up. Its pane is
+    /// found by its id and where it works.
+    Named(String),
+}
+
 pub struct Agent {
-    reported: String,
+    housed: Housed,
     pid: Pid,
     name: Option<String>,
     pane: u32,
     status: Status,
     age: Held,
-    /// When it came to its status.
+    /// When it came to its status, as Claude Code dates it, or else when it
+    /// was first heard at it.
     came: Moment,
     /// Where the agent works, when Claude Code says.
     cwd: Option<String>,
@@ -298,21 +316,29 @@ pub enum Status {
     Idle,
     Busy,
     Shell,
-    Unknown(StatusWord),
+    /// A status luneta does not know: a newer Claude Code's, by the word it
+    /// wrote, or a newer daemon's, which has no word luneta can read.
+    Unknown(Option<StatusWord>),
+    /// Claude Code says none.
     Unreported,
 }
 
 impl Status {
-    pub fn parse(status: Option<&str>) -> Self {
-        let Some(word) = status.map(str::trim) else {
-            return Status::Unreported;
-        };
-        match word.to_ascii_lowercase().as_str() {
-            "waiting" => Status::Waiting,
-            "idle" => Status::Idle,
-            "busy" => Status::Busy,
-            "shell" => Status::Shell,
-            _ => StatusWord::new(word).map_or(Status::Unreported, Status::Unknown),
+    /// A status as the daemon says it: by its name where it knows the word,
+    /// as the word Claude Code wrote where it does not, and none where Claude
+    /// Code says none.
+    fn of(reported: Option<&Reported>) -> Self {
+        match reported {
+            Some(Reported::KnownStatus(known)) => match v1::Status::try_from(*known) {
+                Ok(v1::Status::Busy) => Status::Busy,
+                Ok(v1::Status::Idle) => Status::Idle,
+                Ok(v1::Status::Waiting) => Status::Waiting,
+                Ok(v1::Status::Shell) => Status::Shell,
+                // A daemon newer than this plugin's.
+                Ok(v1::Status::Unspecified) | Err(_) => Status::Unknown(None),
+            },
+            Some(Reported::OtherStatus(word)) => Status::Unknown(StatusWord::new(word)),
+            None => Status::Unreported,
         }
     }
 
@@ -322,7 +348,8 @@ impl Status {
             Status::Idle => "idle",
             Status::Busy => "busy",
             Status::Shell => "shell",
-            Status::Unknown(word) => word.as_str(),
+            Status::Unknown(Some(word)) => word.as_str(),
+            Status::Unknown(None) => "unknown",
             Status::Unreported => "unreported",
         }
     }
@@ -356,13 +383,11 @@ impl AgentSet {
     /// What the daemon says of the agents, as of `now`, in the place of what
     /// it said before.
     pub fn heard(&mut self, agents: &[v1::Agent], now: Moment) {
-        let mut agents: Vec<Agent> =
-            agents.iter().filter_map(|agent| Agent::of(agent, now)).collect();
-        if let Fetch::Ready(before) = &self.status {
-            for agent in &mut agents {
-                settle(agent, before);
-            }
-        }
+        let before = match &self.status {
+            Fetch::Ready(before) => before.as_slice(),
+            Fetch::Waiting | Fetch::Failed(_) => &[],
+        };
+        let agents = agents.iter().filter_map(|agent| Agent::of(agent, now, before)).collect();
         self.status = Fetch::Ready(agents);
         self.closing.clear();
     }
@@ -546,19 +571,6 @@ fn started_first(agent: &Agent, held: &Agent) -> bool {
     }
 }
 
-/// Keeps the moment the answer `before` said `agent` came to its status,
-/// while the status holds and the daemon cannot date it: such a status has
-/// been held for no time at all, in every answer.
-fn settle(agent: &mut Agent, before: &[Agent]) {
-    let Some(was) = before.iter().find(|was| was.pid == agent.pid && was.status == agent.status)
-    else {
-        return;
-    };
-    if agent.age == Held::from_secs(0) {
-        agent.came = was.came;
-    }
-}
-
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn glyph(status: &Status, frame: u64) -> &'static str {
@@ -581,8 +593,8 @@ pub fn dot(status: &Status, frame: u64) -> String {
         Status::Idle => "✓".to_owned(),
         Status::Busy => SPINNER[(frame as usize) % SPINNER.len()].to_owned(),
         Status::Shell => "$".to_owned(),
-        Status::Unknown(word) => word.initial().to_uppercase().collect(),
-        Status::Unreported => "?".to_owned(),
+        Status::Unknown(Some(word)) => word.initial().to_uppercase().collect(),
+        Status::Unknown(None) | Status::Unreported => "?".to_owned(),
     }
 }
 
@@ -592,7 +604,7 @@ pub fn full_tag(status: &Status, frame: u64) -> String {
 
 pub fn abbr_tag(status: &Status, frame: u64) -> String {
     match status {
-        Status::Unknown(word) => format!("[{}]", word.initial().to_uppercase()),
+        Status::Unknown(Some(word)) => format!("[{}]", word.initial().to_uppercase()),
         _ => glyph(status, frame).to_owned(),
     }
 }
@@ -608,28 +620,28 @@ fn chosen_name(name: Option<&str>, chosen: bool) -> Option<String> {
 impl Agent {
     /// An agent as the daemon gives it, as of `now`, in the session its pane
     /// is in now: the daemon follows a session through a rename. Where it
-    /// cannot tell, the session the agent's environment names stands. None
-    /// for one that runs outside zellij.
-    fn of(agent: &v1::Agent, now: Moment) -> Option<Self> {
+    /// cannot tell, the name the agent's environment holds is all there is to
+    /// go by. `before` is what the answer before said of the agents. None for
+    /// one that runs outside zellij.
+    fn of(agent: &v1::Agent, now: Moment, before: &[Agent]) -> Option<Self> {
         let zellij = agent.zellij.as_ref()?;
-        let reported = zellij.session.clone().unwrap_or_else(|| zellij.named.clone());
-        if reported.is_empty() {
+        let housed = match &zellij.session {
+            Some(session) => Housed::Followed(session.clone()),
+            None => Housed::Named(zellij.named.clone()),
+        };
+        let (Housed::Followed(session) | Housed::Named(session)) = &housed;
+        if session.is_empty() {
             return None;
         }
-        let status = match &agent.status {
-            Some(Reported::KnownStatus(known)) => match v1::Status::try_from(*known) {
-                Ok(v1::Status::Busy) => Status::Busy,
-                Ok(v1::Status::Idle) => Status::Idle,
-                Ok(v1::Status::Waiting) => Status::Waiting,
-                Ok(v1::Status::Shell) => Status::Shell,
-                // A daemon newer than this plugin's.
-                Ok(v1::Status::Unspecified) | Err(_) => Status::Unreported,
-            },
-            Some(Reported::OtherStatus(word)) => Status::parse(Some(word)),
-            None => Status::Unreported,
-        };
-        // A status the daemon cannot date has been held for no time at all.
-        let came = agent.status_since.and_then(|at| moment(at.seconds, at.nanos)).unwrap_or(now);
+        let pid = Pid(agent.pid);
+        let status = Status::of(agent.status.as_ref());
+        // A status Claude Code does not date came when it was first heard: as
+        // the answer before heard it, while it holds, or now.
+        let dated = agent.status_since.and_then(|at| moment(at.seconds, at.nanos));
+        let came = dated.unwrap_or_else(|| {
+            let held = before.iter().find(|was| was.pid == pid && was.status == status);
+            held.map_or(now, |was| was.came)
+        });
         let name = agent.name.as_ref().and_then(|name| {
             let source = name.source.map(NameSource::try_from);
             let chosen = matches!(source, None | Some(Ok(NameSource::User | NameSource::Peer)));
@@ -638,8 +650,8 @@ impl Agent {
         let started = agent.started_at.as_ref().and_then(|at| u64::try_from(at.seconds).ok());
         let entrypoint = agent.entrypoint.as_deref();
         Some(Agent {
-            reported,
-            pid: Pid(agent.pid),
+            housed,
+            pid,
             name,
             pane: zellij.pane,
             status,
@@ -668,6 +680,7 @@ pub mod given {
 
     use luneta_protocol::v1::{self, agent::Status as Reported};
 
+    use super::Status;
     use crate::elapsed::Moment;
 
     /// When the tests hear the daemon: long enough after the epoch for each
@@ -713,6 +726,11 @@ pub mod given {
         Reported::KnownStatus(known.into())
     }
 
+    /// `status` as an agent the daemon gives has it.
+    pub fn status(status: &str) -> Status {
+        Status::of(Some(&reported(status)))
+    }
+
     /// The moment `secs` before `NOW`, as the protocol spells a moment.
     pub fn ago<T: From<SystemTime>>(secs: u64) -> T {
         at(NOW.millis() - secs * 1000)
@@ -745,7 +763,7 @@ mod tests {
 
     /// The agent the daemon gives as `given`, as of `NOW`.
     fn read(given: &v1::Agent) -> Agent {
-        Agent::of(given, NOW).expect("an agent in zellij")
+        Agent::of(given, NOW, &[]).expect("an agent in zellij")
     }
 
     /// The session an agent's environment names is the one its pane opened
@@ -781,9 +799,9 @@ mod tests {
     }
 
     /// An agent reads as the daemon gives it: a status the daemon knows by
-    /// its name, a word it does not as the word, and none, or a number of a
-    /// newer daemon's, as unreported; held since the daemon says it came to
-    /// it; the name its session goes by only where someone chose it, or
+    /// its name, a word it does not as the word, a number of a newer daemon's
+    /// as unknown, and none as unreported; held since the daemon says it came
+    /// to it; the name its session goes by only where someone chose it, or
     /// Claude Code does not say who did; its transcript, and where it works.
     #[test]
     fn an_agent_reads_as_the_daemon_gives_it() {
@@ -793,9 +811,10 @@ mod tests {
             (known(v1::Status::Idle), Status::Idle),
             (known(v1::Status::Waiting), Status::Waiting),
             (known(v1::Status::Shell), Status::Shell),
-            (Some(given::reported("Compacting")), Status::parse(Some("Compacting"))),
-            (known(v1::Status::Unspecified), Status::Unreported),
-            (Some(Reported::KnownStatus(99)), Status::Unreported),
+            (Some(given::reported("Compacting")), Status::Unknown(StatusWord::new("Compacting"))),
+            (Some(Reported::OtherStatus(String::new())), Status::Unknown(None)),
+            (known(v1::Status::Unspecified), Status::Unknown(None)),
+            (Some(Reported::KnownStatus(99)), Status::Unknown(None)),
             (None, Status::Unreported),
         ];
         for (status, read_as) in statuses {
@@ -1034,8 +1053,9 @@ mod tests {
     }
 
     /// `a` and `b` each have an agent in their pane 0, in `/w/luneta`, and
-    /// `b` has not said what its panes are yet: its agent is guessed into
-    /// `a`'s pane 0, which `a`'s own agent sits in.
+    /// `b` has not said what its panes are yet: its agent, which the daemon
+    /// could not follow from `b`, is guessed into `a`'s pane 0, which `a`'s
+    /// own agent sits in.
     #[test]
     fn a_pane_holds_the_agent_its_session_names_over_one_guessed_into_it() {
         let started = |secs: u64, agent: v1::Agent| v1::Agent {
@@ -1044,7 +1064,7 @@ mod tests {
         };
         let given = [
             started(200, agent(1, "a", 0, "/w/luneta", "idle")),
-            started(100, agent(2, "b", 0, "/w/luneta", "waiting")),
+            started(100, unfollowed(agent(2, "b", 0, "/w/luneta", "waiting"))),
         ];
         let places = Places::of(&[("a", &[(0, "/w/luneta")])]);
         let sessions = [Session { name: "b".to_owned(), age: Age::ZERO }];
@@ -1156,7 +1176,7 @@ mod tests {
 
     #[test]
     fn a_reported_name_that_still_names_a_holder_breaks_the_tie() {
-        let given = agent(112, "ghostty", 0, "/w/misc", "idle");
+        let given = unfollowed(agent(112, "ghostty", 0, "/w/misc", "idle"));
         let places = Places::of(&[
             ("luneta", &[(0, "/w/misc")]),
             ("ghostty", &[(0, "/w/misc")]),
@@ -1196,11 +1216,17 @@ mod tests {
         assert_eq!(agents.unplaced, 1);
     }
 
+    /// The daemon can say where an agent is before it says what the panes of
+    /// its session are: an agent it followed sits where it says, and one it
+    /// could not follow waits for the panes.
     #[test]
-    fn before_the_daemon_lists_the_panes_nothing_is_placed() {
-        let given = agent(116, "ghostty", 0, "/w/misc", "idle");
-        let agents = rows(&[given], None, &Places::default());
-        assert!(agents.rows.is_empty());
+    fn before_the_daemon_lists_the_panes_only_the_agents_it_followed_are_placed() {
+        let given = [
+            agent(116, "ghostty", 0, "/w/misc", "busy"),
+            unfollowed(agent(117, "ghostty", 1, "/w/misc", "idle")),
+        ];
+        let agents = rows(&given, None, &Places::default());
+        assert_eq!(seats(&agents), [("ghostty", 0)]);
         assert_eq!(agents.unplaced, 1);
     }
 
@@ -1237,7 +1263,7 @@ mod tests {
         agents.heard(&[outside, nameless, agent(120, "s", 0, "/w/s", "idle")], NOW);
         let Fetch::Ready(read) = &agents.status else { panic!("the daemon said") };
         assert_eq!(read.len(), 1);
-        assert_eq!(read[0].reported, "s");
+        assert_eq!(read[0].housed, Housed::Followed("s".to_owned()));
     }
 
     /// The session id Claude Code gives names the agent's transcript, which
@@ -1252,34 +1278,26 @@ mod tests {
         }
     }
 
-    /// A word the daemon passes on as one it does not know is no status when
-    /// it is blank.
+    /// A status luneta does not know draws by the word Claude Code wrote, and
+    /// as unknown where the daemon has no word for it.
     #[test]
-    fn a_blank_status_is_unreported() {
-        assert_eq!(Status::parse(None), Status::Unreported);
-        assert_eq!(Status::parse(Some("")), Status::Unreported);
-        assert_eq!(Status::parse(Some(" \t ")), Status::Unreported);
-    }
-
-    #[test]
-    fn a_known_status_is_named_without_regard_to_case() {
-        assert_eq!(Status::parse(Some("waiting")), Status::Waiting);
-        assert_eq!(Status::parse(Some("IDLE")), Status::Idle);
-        assert_eq!(Status::parse(Some("Busy")), Status::Busy);
-        assert_eq!(Status::parse(Some("shell")), Status::Shell);
-    }
-
-    #[test]
-    fn an_unnamed_status_keeps_its_word() {
-        let status = Status::parse(Some(" Compacting "));
+    fn an_unknown_status_keeps_its_word_where_it_has_one() {
+        let status = given::status("Compacting");
         assert_eq!(status.word(), "Compacting");
         assert_eq!(full_tag(&status, 0), "🛸 COMPACTING");
         assert_eq!(abbr_tag(&status, 0), "[C]");
+        assert_eq!(dot(&status, 0), "C");
+
+        let wordless = Status::Unknown(None);
+        assert_eq!(full_tag(&wordless, 0), "🛸 UNKNOWN");
+        assert_eq!(abbr_tag(&wordless, 0), "🛸");
+        assert_ne!(full_tag(&wordless, 0), full_tag(&Status::Unreported, 0));
     }
 
     /// An agent came to its status when the daemon says it did, as Claude
     /// Code dates it. A status the daemon cannot date came when an answer
-    /// first said it, and the moment holds while the status does.
+    /// first said it, and the moment holds while the status does, and the
+    /// time it has been held with it.
     #[test]
     fn an_agent_came_to_its_status_when_the_daemon_says_or_else_first_said() {
         let places = Places::of(&[("s", &[(0, "/w/s")])]);
@@ -1292,14 +1310,15 @@ mod tests {
             agents.heard(&[given], Moment::from_millis(now));
             let live = Live::new(None, &[], &places, &[]);
             agents.rebuild("", &live, None, Age::ZERO, Selection::Hold);
-            agents.rows[0].came.millis()
+            (agents.rows[0].came.millis(), agents.rows[0].age)
         };
-        assert_eq!(came("idle", Some(9_000), 10_400), 9_000);
-        assert_eq!(came("idle", Some(9_000), 20_000), 9_000);
-        assert_eq!(came("busy", None, 21_000), 21_000);
-        assert_eq!(came("busy", None, 30_000), 21_000);
-        assert_eq!(came("idle", None, 31_000), 31_000);
-        assert_eq!(came("idle", Some(35_000), 40_000), 35_000);
+        let held = Held::from_millis;
+        assert_eq!(came("idle", Some(9_000), 10_400), (9_000, held(1_400)));
+        assert_eq!(came("idle", Some(9_000), 20_000), (9_000, held(11_000)));
+        assert_eq!(came("busy", None, 21_000), (21_000, held(0)));
+        assert_eq!(came("busy", None, 30_000), (21_000, held(9_000)));
+        assert_eq!(came("idle", None, 31_000), (31_000, held(0)));
+        assert_eq!(came("idle", Some(35_000), 40_000), (35_000, held(5_000)));
     }
 
     #[test]
@@ -1309,7 +1328,7 @@ mod tests {
         assert_eq!(abbr_tag(&Status::Unreported, 0), "❔");
         assert_ne!(
             full_tag(&Status::Unreported, 0),
-            full_tag(&Status::parse(Some("compacting")), 0)
+            full_tag(&given::status("compacting"), 0)
         );
         assert!(!Status::Unreported.is_waiting());
         assert!(!Status::Unreported.is_busy());
@@ -1376,12 +1395,13 @@ mod tests {
     }
 
     /// `foo` has not said what its panes are yet, and `notes` has a pane 2 in
-    /// the directory foo's agent works in. `misc-notes` is what `notes` was
-    /// called before a rename the daemon did not see.
+    /// the directory foo's agent works in, which the daemon could not follow
+    /// from `foo`. `misc-notes` is what `notes` was called before a rename the
+    /// daemon did not see.
     #[test]
     fn a_pane_found_for_an_agent_that_names_another_running_session_is_a_guess() {
         let given = [
-            agent(128, "foo", 2, "/w/foo", "idle"),
+            unfollowed(agent(128, "foo", 2, "/w/foo", "idle")),
             unfollowed(agent(129, "misc-notes", 5, "/w/notes", "idle")),
             agent(130, "notes", 7, "/w/notes", "idle"),
         ];
@@ -1422,9 +1442,9 @@ mod tests {
 
     #[test]
     fn only_two_statuses_are_asked_about_by_name() {
-        let busy = Status::parse(Some("busy"));
+        let busy = Status::Busy;
         assert!(busy.is_busy() && !busy.is_waiting());
-        let waiting = Status::parse(Some("waiting"));
+        let waiting = Status::Waiting;
         assert!(waiting.is_waiting() && !waiting.is_busy());
         assert_ne!(full_tag(&busy, 0), full_tag(&busy, 1));
     }
