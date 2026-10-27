@@ -443,8 +443,11 @@ fn kitty_key(parameters: &str) -> Parsed {
             Some('\t') if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
             Some('\t') => KeyCode::Tab,
             Some('\x7f') => KeyCode::Backspace,
+            // The rest of the keys kitty numbers where Unicode keeps no
+            // character of its own, as `Menu`, `F13` on and the media keys,
+            // which type none, and for which `keys` has nothing to send.
+            Some('\u{e000}'..='\u{f8ff}') | None => return Parsed::Unknown,
             Some(c) => KeyCode::Char(c),
-            None => return Parsed::Unknown,
         };
         (code, KeyEventState::NONE)
     };
@@ -462,8 +465,8 @@ fn kitty_key(parameters: &str) -> Parsed {
     ))))
 }
 
-/// The keys of the keypad, which kitty's protocol numbers past Unicode's. The
-/// rest it numbers there, as the media keys, luneta has no use for.
+/// The keys of the keypad, which kitty's protocol numbers among Unicode's
+/// private use characters, with the other keys that type no character.
 fn keypad(number: u32) -> Option<KeyCode> {
     Some(match number {
         57399..=57408 => KeyCode::Char(char::from_digit(number - 57399, 10)?),
@@ -747,6 +750,10 @@ mod tests {
             KeyEventState::KEYPAD,
         );
         assert_eq!(sent(&[b"\x1b[57399u"]), [Sent::Input(Input::Key(keypad))]);
+        // `Menu`, `F13` and `Play` type no private use character.
+        for bytes in [&b"\x1b[57363u"[..], b"\x1b[57376;5u", b"\x1b[57428u"] {
+            assert_eq!(sent(&[bytes]), [], "{bytes:?}");
+        }
         // An `Esc` that more came after is the start of what came.
         let mut parser = Parser::default();
         let mut all = Vec::new();

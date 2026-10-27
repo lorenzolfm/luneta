@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as Emitted, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::Dimensions as _;
+use alacritty_terminal::grid::{Dimensions as _, GridCell as _};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
@@ -223,6 +223,13 @@ impl Hosted {
     /// What the screen shows, as text.
     pub fn text(&self) -> String {
         text(&self.screen.lock())
+    }
+
+    /// Whether the screen shows nothing: each cell of it as blank as the
+    /// program found it.
+    pub fn blank(&self) -> bool {
+        let screen = self.screen.lock();
+        screen.renderable_content().display_iter.all(|indexed| indexed.cell.is_empty())
     }
 }
 

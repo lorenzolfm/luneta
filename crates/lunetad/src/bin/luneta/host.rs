@@ -65,11 +65,28 @@ const TICK: Duration = Duration::from_secs(1);
 /// fast they come.
 const FRAME_EVENTS_MAX: usize = 256;
 
+/// How long luneta holds the input for zellij at the most, for a zellij that
+/// shows nothing luneta can tell from the blank screen it starts on, as a
+/// pane with nothing in it and no frame or bar about it.
+const WAITING_MAX: Duration = Duration::from_secs(2);
+
+/// How often luneta looks at zellij's screen while it holds the input for
+/// zellij: what zellij draws as luneta draws brings no `Said::Drew` of its
+/// own.
+const WAITING_LOOK: Duration = Duration::from_millis(50);
+
 /// Which side has the keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     Zellij,
     Sidebar,
+}
+
+/// The input luneta holds for zellij until zellij can take it.
+struct Waiting {
+    input: Vec<Input>,
+    /// When zellij is handed it all the same.
+    until: Instant,
 }
 
 /// luneta's queue of events, with what came on it as luneta waited for its
@@ -141,8 +158,11 @@ struct App {
     /// The input that came before zellij was in its session, as keys typed as
     /// luneta starts: zellij 0.45 drops keys that reach it before it puts its
     /// client on its screen. None once zellij is in, which it says as it first
-    /// titles its terminal.
-    waiting: Option<Vec<Input>>,
+    /// draws for its client, as it draws only for one on its screen: once it
+    /// titles its terminal, or once anything shows there. zellij titles a tab
+    /// once for all its clients, so that a client that comes to a session
+    /// already titled gets none.
+    waiting: Option<Waiting>,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
@@ -276,7 +296,7 @@ fn run_in(
         events,
         exited: None,
         ended: false,
-        waiting: Some(Vec::new()),
+        waiting: Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX }),
     };
     run_loop(terminal, &mut app, inbox)?;
     Ok(app.failure())
@@ -290,7 +310,13 @@ fn run_loop(
     inbox: &mut Inbox,
 ) -> io::Result<()> {
     loop {
-        let wait = if app.sidebar.turning() { sidebar::SPIN } else { TICK };
+        let wait = if app.waiting.is_some() {
+            WAITING_LOOK
+        } else if app.sidebar.turning() {
+            sidebar::SPIN
+        } else {
+            TICK
+        };
         match inbox.next(wait) {
             Ok(event) => app.handle(event, terminal)?,
             Err(RecvTimeoutError::Timeout) => {},
@@ -309,6 +335,7 @@ fn run_loop(
         if app.ended {
             return Ok(());
         }
+        app.wait_on(Instant::now());
         app.sidebar.ticked();
         app.draw(terminal)?;
     }
@@ -342,7 +369,7 @@ impl App {
     fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match event {
             Event::Input(input) => match &mut self.waiting {
-                Some(waiting) => waiting.push(input),
+                Some(waiting) => waiting.input.push(input),
                 None => self.input(input),
             },
             Event::Answered(answer) => self.answered(answer, terminal)?,
@@ -361,6 +388,21 @@ impl App {
             Event::Notice(notice) => self.sidebar.notify(notice),
         }
         Ok(())
+    }
+
+    /// Hands zellij the input held for it once anything shows on its screen,
+    /// or once it waited long enough.
+    fn wait_on(&mut self, now: Instant) {
+        if self.waiting.as_ref().is_some_and(|waiting| now >= waiting.until || !self.hosted.blank()) {
+            self.waited();
+        }
+    }
+
+    /// Hands zellij the input held for it, if any is.
+    fn waited(&mut self) {
+        for input in self.waiting.take().into_iter().flat_map(|waiting| waiting.input) {
+            self.input(input);
+        }
     }
 
     fn input(&mut self, input: Input) {
@@ -501,9 +543,7 @@ impl App {
                 if !title.is_empty() {
                     let look = self.sidebar.titled(title);
                     self.look(look);
-                    for input in self.waiting.take().into_iter().flatten() {
-                        self.input(input);
-                    }
+                    self.waited();
                 }
             },
             Said::Copied(clipboard, text) => {
