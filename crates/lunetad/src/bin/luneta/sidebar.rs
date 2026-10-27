@@ -4,6 +4,8 @@
 //! `▌` marks the pane it is on. `•` dots a pane where something finished since
 //! you were last there, and one you marked unread, and `u` takes the dot away
 //! or gives it. The menu opens at its bottom, for the row highlighted.
+//! Collapsed, it keeps only what it counts of the dots, the agents at work and
+//! those in a shell.
 
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroU64;
@@ -39,6 +41,10 @@ use crate::zellij::{self, Closes, Open, SessionName};
 /// How many columns the sidebar takes, as the plugin's column did.
 pub const COLUMNS: u16 = 32;
 
+/// How many columns the sidebar takes collapsed: a count's glyph, two digits
+/// of it, and the blank column it keeps off what is beside it.
+pub const COLLAPSED: u16 = 4;
+
 /// What marks the pane luneta's zellij is on, in its first column, whether
 /// the sidebar has the focus or not.
 const HERE_MARK: &str = "▌";
@@ -60,6 +66,10 @@ pub const ACCENT: Color = gruvbox::PURPLE;
 pub const NAME: Color = gruvbox::AQUA;
 /// The colour of an agent at work, and of the search's `/`.
 pub const TAG: Color = gruvbox::YELLOW;
+/// The colour of what went wrong: the notes at the bottom that say so, and the
+/// rule of the sidebar collapsed, which has no room for them, while the daemon
+/// does not answer.
+const ERROR: Color = gruvbox::RED;
 /// The background of the highlight while the sidebar has the focus, on the
 /// row the keys took it to.
 pub const LIT: Color = gruvbox::BG2;
@@ -839,7 +849,7 @@ impl Sidebar {
     }
 
     /// Whether a spinner turns: the rule along the top has one while an agent
-    /// on the rows is at work.
+    /// on the rows is at work, and so does the sidebar collapsed.
     pub fn turning(&self) -> bool {
         self.counts.busy > 0
     }
@@ -1553,10 +1563,7 @@ impl Sidebar {
     /// as the pane changes. Its last column is left blank, to keep it off what
     /// is beside it.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
-        self.drawn = Some(now);
-        if self.due.is_some_and(|due| due <= now) {
-            self.rebuild();
-        }
+        self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(now);
@@ -1610,9 +1617,40 @@ impl Sidebar {
         lines.extend(drawn.into_iter().skip(self.top).take(room));
         lines.resize(height.saturating_sub(notes.len()), Line::default());
         lines.extend(notes);
-        for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
-            buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset().fg(gruvbox::FG1));
-            buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
+        put(buffer, area, &lines);
+    }
+
+    /// Draws the sidebar collapsed into `area`: a rule along the top, and
+    /// under it the counts of `tallies` that are not 0, one to a line, each cut
+    /// to the room it has. Its last column is left blank, as the sidebar's is.
+    /// The rule is in `ERROR` while the daemon does not answer, as the note
+    /// that says so is, which the strip has no room for.
+    pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
+        self.drawing(now);
+        let width = usize::from(area.width.saturating_sub(1));
+        let rule = if self.away.is_some() {
+            Style::new().fg(ERROR)
+        } else {
+            Style::new().add_modifier(Modifier::DIM)
+        };
+        let mut lines = vec![Line::styled(RULE.repeat(width), rule), Line::default()];
+        for (count, (glyph, style)) in tallies(self.counts, frame(now)) {
+            if count == 0 {
+                continue;
+            }
+            let count = cut(&count.to_string(), width.saturating_sub(glyph.width()));
+            lines.push(Line::from(vec![Span::styled(glyph, style), Span::styled(count, style)]));
+        }
+        lines.resize(usize::from(area.height), Line::default());
+        put(buffer, area, &lines);
+    }
+
+    /// Builds the rows again, as the sidebar is drawn at `now`, where a
+    /// command has run long enough by then to show.
+    fn drawing(&mut self, now: SystemTime) {
+        self.drawn = Some(now);
+        if self.due.is_some_and(|due| due <= now) {
+            self.rebuild();
         }
     }
 
@@ -1621,16 +1659,10 @@ impl Sidebar {
     /// agents are at work, and how many are in a shell.
     fn header(&self, width: usize, frame: usize) -> Line<'static> {
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let Counts { sessions, waiting, new, busy, shell } = self.counts;
+        let Counts { sessions, waiting, .. } = self.counts;
         let mut counts: Vec<Span<'static>> = Vec::new();
-        let dot = dot();
-        let glyphs = [
-            (waiting, Mark::Waiting.glyph(frame)),
-            (new, (dot.content.into_owned(), dot.style)),
-            (busy, Mark::Busy.glyph(frame)),
-            (shell, Mark::Shell.glyph(frame)),
-        ];
-        for (count, (glyph, style)) in glyphs {
+        let waits = (waiting, Mark::Waiting.glyph(frame));
+        for (count, (glyph, style)) in std::iter::once(waits).chain(tallies(self.counts, frame)) {
             if count == 0 {
                 continue;
             }
@@ -1666,7 +1698,7 @@ impl Sidebar {
     /// The menu and the legend leave the rows a line.
     fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
-        let error = Style::new().fg(gruvbox::RED);
+        let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
             notes.extend(wrapped(&format!("lunetad: {away}"), width, error));
         }
@@ -1695,6 +1727,27 @@ impl Sidebar {
             notes.extend(menu::legend(width, room));
         }
         notes
+    }
+}
+
+/// The counts the sidebar keeps collapsed, each by the glyph of what it
+/// counts, which the spinner shows at `frame`, and its style: how many panes
+/// have the dot, and how many agents are at work, and how many are in a shell.
+fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
+    let dot = dot();
+    [
+        (counts.new, (dot.content.into_owned(), dot.style)),
+        (counts.busy, Mark::Busy.glyph(frame)),
+        (counts.shell, Mark::Shell.glyph(frame)),
+    ]
+}
+
+/// Puts `lines` into `area` of `buffer`, one to each of its lines, with what
+/// was there before gone, and its last column left blank.
+fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
+    for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
+        buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset().fg(gruvbox::FG1));
+        buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
     }
 }
 
@@ -2234,11 +2287,28 @@ mod tests {
         sidebar.focus(focused);
         sidebar.draw(&mut buffer, area, now);
         let lit = if focused { LIT } else { RESTING };
+        in_gruvbox(&buffer, &[Color::Reset, lit]);
+        buffer
+    }
+
+    /// The sidebar collapsed, `height` tall, as it is drawn at `now`. Each
+    /// cell is in gruvbox's colours, on the terminal's background.
+    fn collapsed(sidebar: &mut Sidebar, height: u16, now: SystemTime) -> Buffer {
+        let area = Rect::new(0, 0, COLLAPSED, height);
+        let mut buffer = Buffer::empty(area);
+        sidebar.draw_collapsed(&mut buffer, area, now);
+        in_gruvbox(&buffer, &[Color::Reset]);
+        buffer
+    }
+
+    /// Holds each cell of `buffer` to gruvbox's colours, on one of
+    /// `backgrounds`: a colour named at a call site, as `Color::Red`, or a
+    /// line drawn without `fg1`, would be the terminal's.
+    fn in_gruvbox(buffer: &Buffer, backgrounds: &[Color]) {
         for cell in buffer.content() {
             assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
-            assert!([Color::Reset, lit].contains(&cell.bg), "{:?} on {:?}", cell.symbol(), cell.bg);
+            assert!(backgrounds.contains(&cell.bg), "{:?} on {:?}", cell.symbol(), cell.bg);
         }
-        buffer
     }
 
     /// The sidebar `width` columns wide and `height` tall, as text.
@@ -2346,6 +2416,54 @@ mod tests {
             [spinner, spinner + 1, dollar, dollar + 1].map(dim),
             [false, false, true, true]
         );
+    }
+
+    /// Collapsed, the sidebar keeps under its rule only the counts of the
+    /// panes with the dot, of the agents at work and of those in a shell, and
+    /// none of the agents that wait for you. A count is cut to the columns it
+    /// has, the last kept blank, and a command counts once it has run a
+    /// second, as on the rule along the top.
+    #[test]
+    fn collapsed_the_sidebar_keeps_the_dots_the_work_and_the_shells() {
+        let mut sidebar = Sidebar::default();
+        let mut panes: Vec<Pane> = (1..=103).map(|id| pane(id, 0, "/w/a", "claude")).collect();
+        panes.push(in_shell(104, going("make", 159, Front::Working)));
+        let mut agents =
+            vec![agent("s", 1, Status::Idle, None), agent("s", 2, Status::Waiting, None)];
+        agents.extend((3..=103).map(|id| agent("s", id, Status::Shell, None)));
+        sidebar.heard(host(vec![session("s", 10, panes)], agents));
+        let strip = |sidebar: &mut Sidebar, now| {
+            let buffer = collapsed(sidebar, 6, now);
+            let line = |y| (0..COLLAPSED).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            (0..6).map(|y| line(y).trim_end().to_owned()).collect::<Vec<_>>()
+        };
+        assert_eq!(strip(&mut sidebar, moment(160_500)), ["───", "", "•1", "$1…", "", ""]);
+        assert_eq!(strip(&mut sidebar, moment(161_000)), ["───", "", "•1", "⠋1", "$1…", ""]);
+    }
+
+    /// Collapsed, the sidebar has no room for the note that says lunetad does
+    /// not answer, so its rule turns the note's colour until lunetad answers
+    /// again, and is drawn as the open sidebar's rule is otherwise.
+    #[test]
+    fn collapsed_the_sidebar_reddens_its_rule_while_lunetad_does_not_answer() {
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(idle_agent());
+        let look = |buffer: &Buffer, x: u16, y: u16| {
+            let cell = &buffer[(x, y)];
+            (cell.fg, cell.modifier.contains(Modifier::DIM))
+        };
+        let rule = |sidebar: &mut Sidebar| look(&collapsed(sidebar, 3, moment(160_000)), 0, 0);
+        let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 0);
+        assert_eq!(rule(&mut sidebar), open);
+        sidebar.lost("gone".to_owned());
+        // The note, ` lunetad: gone`, takes the last line.
+        let buffer = drawn(&mut sidebar, false, COLUMNS, 6);
+        assert_eq!(buffer[(1, 5)].symbol(), "l");
+        let note = look(&buffer, 1, 5);
+        assert_ne!(note, open);
+        assert_eq!(rule(&mut sidebar), note);
+        sidebar.heard(idle_agent());
+        assert_eq!(rule(&mut sidebar), open);
     }
 
     /// A daemon of another build can list a session with no start, or with
