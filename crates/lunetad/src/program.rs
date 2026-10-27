@@ -2,7 +2,7 @@
 //! has, git how a work tree stands, gh what pull request a branch has; or that
 //! luneta does: lunetad its version.
 //! Each answers on its stdout, and has a time to answer in: one that takes
-//! longer is stuck, and is killed.
+//! longer is stuck, and is killed, as one is whose answer is no longer wanted.
 
 use std::io::{self, Read};
 use std::process::{Command, ExitStatus, Stdio};
@@ -51,6 +51,18 @@ impl Ran {
 /// longer than that. An error when it could not be started, or what it said
 /// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
+    let ran = run_while(command, limit, || true)?;
+    Ok(ran.expect("a program wanted all along is never given up"))
+}
+
+/// Runs `command` as `run` does, for as long as `wanted` says what it would
+/// say is still wanted, which it is asked each `LOOK` until it ends: none
+/// once it is not, as it is killed and waited for then, as one stuck is.
+pub fn run_while(
+    command: &mut Command,
+    limit: Duration,
+    wanted: impl Fn() -> bool,
+) -> io::Result<Option<Ran>> {
     let deadline = Instant::now() + limit;
     let mut child =
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -60,21 +72,22 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if Instant::now() >= deadline {
+        let stuck = Instant::now() >= deadline;
+        if stuck || !wanted() {
             // One that ended just now is not waited for yet, and takes the
             // signal all the same.
             child.kill()?;
             child.wait()?;
-            return Ok(Ran::Stuck);
+            return Ok(stuck.then_some(Ran::Stuck));
         }
         thread::sleep(LOOK);
     };
     let left = || deadline.saturating_duration_since(Instant::now());
     let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
     else {
-        return Ok(Ran::Stuck);
+        return Ok(Some(Ran::Stuck));
     };
-    Ok(Ran::Ended { status, stdout: stdout?, stderr: stderr? })
+    Ok(Some(Ran::Ended { status, stdout: stdout?, stderr: stderr? }))
 }
 
 /// What comes out of `pipe` until it closes, read in a thread of its own and
@@ -103,7 +116,7 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use super::{Ran, SAID_MAX, run};
+    use super::{Ran, SAID_MAX, run, run_while};
 
     /// A program that says more than the most has failed, rather than been
     /// read short.
@@ -124,6 +137,17 @@ mod tests {
         let asked = Instant::now();
         let ran = run(Command::new("sleep").arg("10"), Duration::from_millis(200)).unwrap();
         assert!(matches!(ran, Ran::Stuck));
+        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
+    }
+
+    /// A program whose answer is no longer wanted is killed and waited for
+    /// then, long before its time is up, and says nothing.
+    #[test]
+    fn a_program_no_longer_wanted_is_killed() {
+        let asked = Instant::now();
+        let wanted = || asked.elapsed() < Duration::from_millis(200);
+        let ran = run_while(Command::new("sleep").arg("10"), Duration::from_secs(10), wanted);
+        assert!(ran.unwrap().is_none());
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 }

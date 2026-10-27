@@ -14,7 +14,9 @@ use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -40,6 +42,11 @@ const WRITING: Duration = Duration::from_mins(2);
 
 /// How long `date` has to say the time.
 const CLOCK: Duration = Duration::from_secs(1);
+
+/// How long a brief given up waits for the thread it is asked on to end, and
+/// `claude` with it: the look at whether it is still wanted, which comes each
+/// few milliseconds, and its end once it is killed.
+const GIVING_UP: Duration = Duration::from_millis(100);
 
 /// Variables that the model must not have: with them, the daemon places it in
 /// the pane they name, as an agent of its own.
@@ -575,17 +582,51 @@ pub struct Written {
 /// Asks for `brief`, numbered `number`, on a thread of its own: reads the end
 /// of each transcript it covers in `claude_folder`, the folder the daemon
 /// reads Claude Code's sessions in, has the model write the brief, and hands
-/// back what it wrote, or why it wrote nothing.
-pub fn ask(number: u64, brief: Brief, claude_folder: Option<PathBuf>, events: &Sender<Event>) {
+/// back what it wrote, or why it wrote nothing. The briefing that shows it
+/// gives it up as it goes, the model with it.
+pub fn ask(
+    number: u64,
+    brief: Brief,
+    claude_folder: Option<PathBuf>,
+    events: &Sender<Event>,
+) -> Briefing {
     let events = events.clone();
+    let given_up = Arc::new(AtomicBool::new(false));
+    let (going, ended) = mpsc::channel();
+    let asking = Asking { given_up: Arc::clone(&given_up), ended };
+    let title = brief.title().to_owned();
     thread::spawn(move || {
+        // Dropped as the thread ends, which the briefing waits for as it goes.
+        let _going: Sender<()> = going;
         let at = clock();
         let projects = claude_folder.map(|folder| folder.join("projects"));
         let ends = projects.map(|projects| brief.ends(&projects)).unwrap_or_default();
-        let said = write(&brief.prompt(&ends, SystemTime::now()));
+        let wanted = || !given_up.load(Ordering::Relaxed);
+        let Some(said) = write(&brief.prompt(&ends, SystemTime::now()), wanted) else {
+            return;
+        };
         // luneta is on its way out.
         let _ = events.send(Event::Briefed { number, written: Written { at, said } });
     });
+    Briefing { number, title, written: None, _asking: asking }
+}
+
+/// The thread a brief is asked on, which gives it up once it is dropped:
+/// `claude` is killed, if it has yet to end, by the time the drop returns, or
+/// else soon after, so that a luneta on its way out leaves none behind it.
+#[derive(Debug)]
+struct Asking {
+    /// Whether the brief was given up, which the thread looks at.
+    given_up: Arc<AtomicBool>,
+    /// Closed as the thread ends.
+    ended: Receiver<()>,
+}
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        self.given_up.store(true, Ordering::Relaxed);
+        let _ = self.ended.recv_timeout(GIVING_UP);
+    }
 }
 
 /// The time as `date` says it, in hours and minutes.
@@ -597,18 +638,19 @@ fn clock() -> Option<String> {
     (!time.is_empty()).then_some(time)
 }
 
-/// What the model wrote on `prompt`, or why it wrote nothing. It runs with
-/// no tools, and in safe mode, so that none of your hooks, `CLAUDE.md` or MCP
-/// servers come into it, and with no zellij in its environment, so that the
-/// daemon places it in no pane.
-fn write(prompt: &str) -> Result<String, String> {
+/// What the model wrote on `prompt`, or why it wrote nothing, or none where
+/// it was killed as no longer `wanted`. It runs with no tools, and in safe
+/// mode, so that none of your hooks, `CLAUDE.md` or MCP servers come into it,
+/// and with no zellij in its environment, so that the daemon places it in no
+/// pane.
+fn write(prompt: &str, wanted: impl Fn() -> bool) -> Option<Result<String, String>> {
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", MODEL, "--tools", "", "--safe-mode"]);
     claude.args(["--no-session-persistence", "--system-prompt", SYSTEM, prompt]);
     for name in LEFT_OUT {
         claude.env_remove(name);
     }
-    wrote(program::run(&mut claude, WRITING))
+    program::run_while(&mut claude, WRITING, wanted).transpose().map(wrote)
 }
 
 /// What the model wrote, as `claude` `ran`, or why it wrote nothing: a brief
@@ -638,7 +680,8 @@ fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
     }
 }
 
-/// A brief over zellij, from when it is asked until a key closes it.
+/// A brief over zellij, from when it is asked until a key closes it, which
+/// gives it up.
 #[derive(Debug)]
 pub struct Briefing {
     /// Its number among the briefs luneta has asked for, which what comes of
@@ -647,14 +690,10 @@ pub struct Briefing {
     title: String,
     /// What came of it, once it has.
     written: Option<Written>,
+    _asking: Asking,
 }
 
 impl Briefing {
-    /// The brief numbered `number`, asked for, which says it is of `title`.
-    pub fn new(number: u64, title: String) -> Self {
-        Briefing { number, title, written: None }
-    }
-
     pub fn number(&self) -> u64 {
         self.number
     }
@@ -994,6 +1033,13 @@ Its transcript is unknown: Claude Code names none for it.
         assert_eq!(wrote(ended(" \n\n")), Err("brief: claude wrote nothing".to_owned()));
     }
 
+    /// The brief numbered `number`, of `title`, asked on a thread that has
+    /// already ended.
+    fn asked(number: u64, title: &str) -> Briefing {
+        let asking = Asking { given_up: Arc::default(), ended: mpsc::channel().1 };
+        Briefing { number, title: title.to_owned(), written: None, _asking: asking }
+    }
+
     /// The box over zellij's columns, `width` by `height`, as text.
     fn shown(briefing: &Briefing, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
@@ -1020,7 +1066,7 @@ Its transcript is unknown: Claude Code names none for it.
     /// and when it was asked, and any key or a click closes it.
     #[test]
     fn a_brief_shows_over_zellij_until_a_key_closes_it() {
-        let mut briefing = Briefing::new(1, "Brief of every session".to_owned());
+        let mut briefing = asked(1, "Brief of every session");
         assert_eq!(
             shown(&briefing, 66, 9),
             [
@@ -1062,7 +1108,7 @@ Its transcript is unknown: Claude Code names none for it.
     /// kept, and what went wrong is said in its place.
     #[test]
     fn a_brief_too_long_for_its_box_is_cut_and_one_that_failed_says_why() {
-        let mut briefing = Briefing::new(1, "Brief of luneta".to_owned());
+        let mut briefing = asked(1, "Brief of luneta");
         let said = (1..=9).map(|n| format!("- line {n}")).collect::<Vec<_>>().join("\n");
         briefing.written(Written { at: None, said: Ok(said) });
         assert_eq!(
@@ -1078,7 +1124,7 @@ Its transcript is unknown: Claude Code names none for it.
                 "└──────────────────────────────────────┘",
             ]
         );
-        let mut briefing = Briefing::new(2, "Brief of luneta".to_owned());
+        let mut briefing = asked(2, "Brief of luneta");
         let why = "brief: claude is not on the PATH".to_owned();
         briefing.written(Written { at: Some("18:42".to_owned()), said: Err(why) });
         assert_eq!(shown(&briefing, 40, 8)[2], "│ brief: claude is not on the PATH     │");

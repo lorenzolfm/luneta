@@ -138,7 +138,8 @@ enum Focus {
     Collapsed,
     /// A brief in a box over zellij, beside the sidebar, from when the
     /// sidebar asks for it: it has the keys and the mouse until it closes,
-    /// when the sidebar has them again.
+    /// when the sidebar has them again. One closed while it is asked is
+    /// given up, and the model with it.
     Brief(Briefing),
 }
 
@@ -153,7 +154,8 @@ impl Focus {
 }
 
 /// What a button held down holds, wherever the mouse goes, until it is let
-/// go: zellij, or the sidebar's edge, its last column, and never both.
+/// go: zellij, the sidebar's edge, its last column, or the brief it closed,
+/// and never two of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Held {
     /// Nothing: no button is down, or one went down on the sidebar's rows,
@@ -165,6 +167,9 @@ enum Held {
     /// it was dragged since. One let go undragged keeps no width, so that
     /// what another luneta dragged meanwhile stays.
     Edge { dragged: bool },
+    /// A brief, which the button closed as it went down: what it drags, and
+    /// its release, go nowhere, as zellij heard no press of it.
+    Brief,
 }
 
 /// The input luneta holds for zellij until zellij can take it.
@@ -669,9 +674,24 @@ impl App {
         // one written, and does nothing else.
         if let Focus::Brief(briefing) = &self.focus {
             if matches!(mouse.kind, MouseEventKind::Down(_)) && briefing.clicked() {
+                self.let_go();
+                self.held = Held::Brief;
                 self.give(Focus::Sidebar);
             }
             return;
+        }
+        // Anything but a drag lets the brief's button go: its release, or
+        // whatever comes after a release luneta never heard, which then does
+        // what it does besides.
+        if self.held == Held::Brief {
+            match mouse.kind {
+                MouseEventKind::Drag(_) => return,
+                MouseEventKind::Up(_) => {
+                    self.held = Held::Nothing;
+                    return;
+                },
+                _ => self.held = Held::Nothing,
+            }
         }
         let (sidebar, zellij) = self.areas;
         if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
@@ -788,8 +808,8 @@ impl App {
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
-                self.give(Focus::Brief(Briefing::new(self.briefs, brief.title().to_owned())));
-                brief::ask(self.briefs, brief, self.claude_folder.clone(), &self.events);
+                let folder = self.claude_folder.clone();
+                self.give(Focus::Brief(brief::ask(self.briefs, brief, folder, &self.events)));
             },
         }
     }

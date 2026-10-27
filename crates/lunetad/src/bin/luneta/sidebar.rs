@@ -1579,7 +1579,14 @@ impl Sidebar {
         let Some(host) = &self.host else {
             return Asked::Nothing;
         };
-        let (sessions, _) = oldest_first(&host.sessions);
+        // In the order of their rows, whatever orders them, and any without
+        // one after them.
+        let (mut sessions, _) = oldest_first(&host.sessions);
+        let row = |listed: &Listed| {
+            let of = |row: &Row| matches!(row, Row::Session { session, .. } if session == listed);
+            self.rows.iter().position(of).unwrap_or(usize::MAX)
+        };
+        sessions.sort_by_key(|(listed, _)| row(listed));
         let over = match (scope, place) {
             (brief::Scope::Every, _) => {
                 Over::Sessions(sessions.iter().map(|(listed, _)| listed.name.clone()).collect())
@@ -4183,10 +4190,11 @@ mod tests {
     }
 
     /// The Brief group's keys brief you by the row the menu was for: `b z` on
-    /// every session, in the rows' order, `b s` on the row's session, and
-    /// `b h` on the agent in the row's pane, or on a session's row, on its
-    /// session. An agent is told of by its row's name, its status and its
-    /// branch, a folded session's too. With none there, the sidebar says so.
+    /// every session, in the rows' order, as you moved them too, `b s` on the
+    /// row's session, and `b h` on the agent in the row's pane, or on a
+    /// session's row, on its session. An agent is told of by its row's name,
+    /// its status and its branch, a folded session's too. With none there,
+    /// the sidebar says so.
     #[test]
     fn the_brief_s_keys_brief_you_by_the_row_the_menu_was_for() {
         let mut sidebar = two_sessions();
@@ -4238,6 +4246,10 @@ mod tests {
         assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(older()));
         type_in(&mut sidebar, "b");
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(every()));
+        // The older session moved under the newer one.
+        type_in(&mut sidebar, "vJb");
+        let moved = Over::Sessions(vec!["newer".to_owned(), "older".to_owned()]);
+        assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(moved));
     }
 
     /// While lunetad does not answer, what it said last of the agents may be

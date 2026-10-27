@@ -669,13 +669,13 @@ the row after once what it took is gone.
 you on every session, `b s` on the highlighted row's session, and `b h` on the
 agent in its pane, or on a session's row, on its session. A folded session's
 agents are among them. The brief shows in a box over zellij, which has the
-keys and the mouse until it closes: while the model writes, `Esc` gives it up
-and any other key waits, and once it shows, any key or a click closes it,
-leaving the sidebar the keys and the highlight where it was. The rule along
-the box's top says when you asked. luneta reads the transcripts in the folder
-lunetad reads Claude Code's sessions in, where the agents it lists come from,
-whatever `CLAUDE_CONFIG_DIR` luneta has. It runs `claude` itself, so it needs
-`claude` on its own `PATH`.
+keys and the mouse until it closes: while the model writes, `Esc` gives it up,
+`claude` with it, and any other key waits, and once it shows, any key or a
+click closes it, leaving the sidebar the keys and the highlight where it was.
+The rule along the box's top says when you asked. luneta reads the transcripts
+in the folder lunetad reads Claude Code's sessions in, where the agents it
+lists come from, whatever `CLAUDE_CONFIG_DIR` luneta has. It runs `claude`
+itself, so it needs `claude` on its own `PATH`.
 
 ```text
 ┌─ Brief of every session ───────────── at 18:42 ─┐
