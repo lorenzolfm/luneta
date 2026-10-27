@@ -87,6 +87,11 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
     let mut started: Option<Started> = None;
     // The daemon luneta has stopped, by its pid, and waits to end.
     let mut stopped: Option<u32> = None;
+    // The daemon, by the pid it said, that the kernel said another listens in
+    // the place of: one in another namespace of pids, which says the same
+    // pid again, or one that has ended since it answered, and another
+    // listens in its place, which answers next.
+    let mut doubted: Option<u32> = None;
     // The release of the lunetad luneta starts, once asked.
     let starting = OnceCell::new();
     loop {
@@ -104,9 +109,13 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
                         return Ok(daemon);
                     } else {
                         match listener(&folder, pid).await {
-                            Listener::Other => {
+                            Listener::Other if doubted == Some(pid) => {
                                 reap(started);
                                 return Ok(daemon);
+                            },
+                            Listener::Other => {
+                                doubted = Some(pid);
+                                format!("lunetad {version} (pid {pid}) is not the one that listens")
                             },
                             // Another luneta stopped it, as the sidebars of an
                             // upgrade do at once.
@@ -300,7 +309,8 @@ enum Listener {
 /// Who listens in `folder`, as the kernel says, against `pid`. luneta stops
 /// no process on a daemon's word alone: one in another namespace of pids says
 /// a pid that is another process's here. A daemon it cannot stop, it asks as
-/// it is, but not one that has ended, which would fail it.
+/// it is, but not one that has ended, which would fail it: the kernel names
+/// none, or the one that listens in its place.
 async fn listener(folder: &Folder, pid: u32) -> Listener {
     match lunetad::listening(folder).await {
         Ok(listening) if listening == Some(pid) => Listener::It,
