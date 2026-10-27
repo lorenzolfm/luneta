@@ -1101,7 +1101,9 @@ name. In the plugin's sidebar, its commands have no marks until it starts
 again; nor does a session made later by that name take them for its own.
 lunetad follows the session to its new name, as it does an agent, when it saw
 the rename: a session renamed before lunetad started leaves its shells
-unmarked until they start again.
+unmarked until they start again. A session made later under the old name, in
+both sidebars, has the shells started in it since, and so does a shell started
+since in an old pane of the one renamed, which says the old name too.
 
 A shell killed with `kill -9`, or by the kernel when memory runs out, cannot
 take its file away, and the file stays until you log out. One that ran in a

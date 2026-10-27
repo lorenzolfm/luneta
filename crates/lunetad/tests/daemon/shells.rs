@@ -188,3 +188,40 @@ fn a_pane_s_shell_is_the_newest_that_started_in_its_session_by_any_name() {
         (commands("play")?[1].as_deref() == Some("cargo test")).then_some(())
     });
 }
+
+/// A session made under the name of one renamed, while that one runs, has the
+/// shells started in it since: they say the name it has, as the old panes of
+/// the one renamed do. The one renamed keeps the shells that started in it
+/// before.
+#[test]
+fn a_session_that_takes_a_renamed_one_s_name_has_the_shells_started_in_it() {
+    let host = Host::new();
+    let panes: Vec<_> = (1..=2).map(at_home).collect();
+    host.zellij.list("work", &json!(panes));
+    host.zellij.list("play", &json!(panes));
+    let _old = host.serve("work");
+    let made = fs::metadata(host.contract().join("work")).unwrap().modified().unwrap();
+    let made = made.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let _daemon = start(host.vars()).unwrap();
+    say(&host, "work", 1, made, &format!("ended {made} 0 2000 make"));
+    let commands = |name| -> Option<Vec<Option<String>>> {
+        let shells = shells(&host, name)?;
+        Some(shells.iter().map(|shell| shell.as_ref().map(|it| command(it).to_owned())).collect())
+    };
+    let old = [Some("make".to_owned()), None];
+    eventually("work's shell has said", || (commands("work")? == old).then_some(()));
+    fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
+    eventually("work is called play", || (commands("play")? == old).then_some(()));
+
+    // Past the second the old shell started in, as the hook counts it, so
+    // that it could not be the new session's.
+    while now() <= made + 1 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _new = host.serve("work");
+    let started = now();
+    say(&host, "work", 2, started, &format!("ended {started} 0 2000 cargo test"));
+    let new = [None, Some("cargo test".to_owned())];
+    eventually("the new work has its shell", || (commands("work")? == new).then_some(()));
+    assert_eq!(commands("play"), Some(old.to_vec()));
+}

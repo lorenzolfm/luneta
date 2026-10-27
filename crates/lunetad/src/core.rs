@@ -247,15 +247,16 @@ impl Known {
     /// The shell of each pane, by its session and its id: of the shells in
     /// it, the one that started last, as a shell started in another runs in
     /// front of it. A shell is in the session its session's name leads to, as
-    /// an agent is, and one that started before a session took that name is
-    /// none of that session's.
+    /// an agent is, or, of more than one, in the one that has that name now;
+    /// and one that started before a session took that name is none of that
+    /// session's.
     fn shells(&self) -> HashMap<(Id, u32), &Shell> {
         let mut shells: HashMap<(Id, u32), &Shell> = HashMap::new();
         for shell in &self.shells {
             // The hook counts whole seconds: the shell started by the end of
             // the one it says.
             let by = shell.started.checked_add(Duration::from_secs(1));
-            let Some(session) = by.and_then(|by| self.sessions.led(&shell.named, Some(by))) else {
+            let Some(session) = by.and_then(|by| self.sessions.housing(&shell.named, by)) else {
                 continue;
             };
             shells
