@@ -162,23 +162,24 @@ pub struct Refuge {
     pub before: Vec<Client>,
 }
 
-/// Where luneta's zellij goes on once its client ended in `left`: the newest
-/// session that answers for its clients, which the picker lists first, where
-/// `left` went with the client, as it does once zellij quits, its last pane
-/// exits, or it is killed. None where `left` runs still, as the client
-/// detached; where no other session answers; and where luneta cannot read
-/// all of zellij's folder, as either could be in what it cannot.
+/// Where luneta's zellij goes on once its client ended in one of `seats`,
+/// the sessions it may have been in: the newest session that answers for
+/// its clients, which the picker lists first, where the client's went with
+/// it, as a session does once zellij quits, its last pane exits, or it is
+/// killed. None where it runs still, as the client detached; where no other
+/// session answers; and where luneta cannot read all of zellij's folder, as
+/// either could be in what it cannot.
 ///
 /// A socket can outlive its server, as one that crashed, and a session can
 /// end as luneta looks. `attach` brings back a session that ended, where
 /// zellij kept it to resurrect, and otherwise zellij's client fails: only a
 /// session that answers is one to go on in.
-pub fn refuge(left: &str) -> Option<Refuge> {
+pub fn refuge(seats: &[&str]) -> Option<Refuge> {
     let folder = lunetad::zellij_folder();
     let deadline = Instant::now() + ENDING;
     loop {
         let running = lunetad::zellij_sessions(&folder)?;
-        if running.iter().all(|(name, _)| name != left) {
+        if went(seats, &running) {
             let seeking = Instant::now() + SEEKING;
             let sessions = newest_first(running).into_iter();
             return sessions.take_while(|_| Instant::now() < seeking).find_map(|session| {
@@ -191,6 +192,16 @@ pub fn refuge(left: &str) -> Option<Refuge> {
         }
         thread::sleep(ENDING_LOOK);
     }
+}
+
+/// Whether the session of a client that ended in one of `seats` went with
+/// it: whether any of them is not among `running`. A client on its way from
+/// one session to another may have ended in either, and one of the two gone
+/// is taken for the client's: one that detached as it went to a session
+/// that never came up goes on, rather than one whose session was killed as
+/// it left ending luneta.
+fn went(seats: &[&str], running: &[(String, SystemTime)]) -> bool {
+    seats.iter().any(|seat| running.iter().all(|(name, _)| name != seat))
 }
 
 /// The names of `running`, newest first, by when each started and then by
@@ -787,6 +798,20 @@ mod tests {
         let running = running.map(|(name, started)| (name.to_owned(), started)).to_vec();
         assert_eq!(newest_first(running), ["b", "a", "c"]);
         assert!(newest_first(Vec::new()).is_empty());
+    }
+
+    /// A client that ended on its way from one session to another may have
+    /// been in either: luneta goes on where either is gone, and takes the
+    /// client for one that detached only where both run.
+    #[test]
+    fn a_client_s_session_went_where_any_it_may_have_been_in_did() {
+        let running = |names: &[&str]| -> Vec<(String, SystemTime)> {
+            names.iter().map(|name| ((*name).to_owned(), SystemTime::UNIX_EPOCH)).collect()
+        };
+        assert!(!went(&["a", "b"], &running(&["a", "b", "c"])));
+        assert!(went(&["a", "b"], &running(&["b", "c"])));
+        assert!(went(&["a", "b"], &running(&["a", "c"])));
+        assert!(went(&["a"], &running(&[])));
     }
 
     #[test]

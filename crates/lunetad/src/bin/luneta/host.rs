@@ -777,15 +777,16 @@ impl App {
     /// luneta goes on. luneta ends where none does, and where the client
     /// detached, or failed, as where zellij cannot attach.
     fn client_ended(&mut self) -> io::Result<()> {
-        let left = self.client.exited.filter(ExitStatus::success).and(self.sidebar.here());
-        let Some(Refuge { session: to, before }) = left.and_then(zellij::refuge) else {
+        let seats = self.sidebar.seats();
+        let ended = self.client.exited.filter(ExitStatus::success).filter(|_| !seats.is_empty());
+        let Some(Refuge { session: to, before }) = ended.and_then(|_| zellij::refuge(&seats)) else {
             self.ended = true;
             return Ok(());
         };
         let (program, args) = zellij::rejoin(&to);
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, self.events.clone())?;
-        if let Some(look) = self.sidebar.sending(&to) {
+        if let Some(look) = self.sidebar.rejoining(&to) {
             zellij::arrive(look, before, &self.events);
         }
         Ok(())
