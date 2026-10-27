@@ -2,21 +2,21 @@
 //! which of the two has the keys. `Ctrl b` hands them from one to the other,
 //! and a click hands them to the one clicked.
 
+use std::collections::VecDeque;
 use std::env;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::term::ClipboardType;
 use alacritty_terminal::vte::ansi::CursorShape;
 use base64::Engine as _;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -27,8 +27,9 @@ use lunetad::api::Host;
 use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
-use crate::answers::{self, Colours};
+use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::hosted::{Hosted, Said, Size};
+use crate::input;
 use crate::keys;
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
@@ -38,6 +39,9 @@ use crate::zellij::{self, SessionName};
 pub enum Event {
     /// A key, the mouse, a paste or a resize of luneta's terminal.
     Input(Input),
+    /// An answer of luneta's terminal, or what it says of itself unasked,
+    /// which comes in among the input whenever it comes.
+    Answered(Answer),
     /// luneta's terminal cannot be read any more.
     InputEnded(io::Error),
     Hosted(Said),
@@ -68,6 +72,49 @@ enum Focus {
     Sidebar,
 }
 
+/// luneta's queue of events, with what came on it as luneta waited for its
+/// terminal's answers put aside, to come first.
+pub struct Inbox {
+    events: Receiver<Event>,
+    aside: VecDeque<Event>,
+}
+
+impl Inbox {
+    pub fn new(events: Receiver<Event>) -> Self {
+        Inbox { events, aside: VecDeque::new() }
+    }
+
+    /// The next answer of luneta's terminal by `deadline`, with what comes
+    /// before it put aside. None once `deadline` passes, or once the terminal
+    /// cannot be read.
+    pub fn answer(&mut self, deadline: Instant) -> Option<Answer> {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.events.recv_timeout(left).ok()? {
+                Event::Answered(answer) => return Some(answer),
+                ended @ Event::InputEnded(_) => {
+                    self.aside.push_back(ended);
+                    return None;
+                },
+                event => self.aside.push_back(event),
+            }
+        }
+    }
+
+    /// The next event, those put aside first, waiting `wait` at the most.
+    fn next(&mut self, wait: Duration) -> Result<Event, RecvTimeoutError> {
+        match self.aside.pop_front() {
+            Some(event) => Ok(event),
+            None => self.events.recv_timeout(wait),
+        }
+    }
+
+    /// The next event, where one has come.
+    pub fn try_next(&mut self) -> Option<Event> {
+        self.aside.pop_front().or_else(|| self.events.try_recv().ok())
+    }
+}
+
 struct App {
     hosted: Hosted,
     sidebar: Sidebar,
@@ -81,10 +128,21 @@ struct App {
     dragging: bool,
     /// The cursor as luneta's terminal was last told to draw it.
     cursor: Option<(CursorShape, bool)>,
+    /// luneta's terminal's colours as it said them last, which zellij's
+    /// terminal answers with.
+    colours: Colours,
+    /// What luneta's terminal turned to, until the colours it turned to are
+    /// in, when zellij is told.
+    turned: Option<Theme>,
     events: Sender<Event>,
     /// How zellij ended, once its terminal says.
     exited: Option<ExitStatus>,
     ended: bool,
+    /// The input that came before zellij was in its session, as keys typed as
+    /// luneta starts: zellij 0.45 drops keys that reach it before it puts its
+    /// client on its screen. None once zellij is in, which it says as it first
+    /// titles its terminal.
+    waiting: Option<Vec<Input>>,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
@@ -118,23 +176,38 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
             PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             DisableBracketedPaste,
-            DisableFocusChange
+            DisableFocusChange,
+            DisableThemeChange
         );
         restore(panic);
     }));
+    // Not a `sync_channel` of a bound: alacritty hands on what the program
+    // does with the screen locked, which the loop locks to draw, so that a
+    // full queue would hold each up for the other for good. What fills it are
+    // the keys and the mouse, the daemon's answers, zellij's actions and what
+    // zellij does with its terminal, of which `hosted` keeps one draw at most.
+    let (events, inbox) = mpsc::channel();
+    let mut inbox = Inbox::new(inbox);
+    input::read(events.clone());
     // The kitty keyboard protocol, where luneta's terminal speaks it, tells
     // apart keys that zellij's client can then tell apart too, as `Shift
     // Enter` from `Enter`. Its colours are what zellij asks its own terminal
     // for, as a program in a pane asks zellij.
-    let answers = answers::ask();
-    let ran = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)
-        .and_then(|()| {
-            if answers.kitty {
-                let disambiguate = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
-                execute!(io::stdout(), PushKeyboardEnhancementFlags(disambiguate))?;
-            }
-            run_in(&mut terminal, session.as_ref(), socket, &dir, answers.colours)
-        });
+    let answers = answers::ask(&mut inbox);
+    let ran = execute!(
+        io::stdout(),
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange,
+        EnableThemeChange
+    )
+    .and_then(|()| {
+        if answers.kitty {
+            let disambiguate = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+            execute!(io::stdout(), PushKeyboardEnhancementFlags(disambiguate))?;
+        }
+        run_in(&mut terminal, session.as_ref(), socket, &dir, answers.colours, events, &mut inbox)
+    });
     // Each mode is put back however the rest went, and the first error is the
     // one said.
     let popped =
@@ -144,6 +217,7 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
         DisableMouseCapture,
         DisableBracketedPaste,
         DisableFocusChange,
+        DisableThemeChange,
         SetCursorStyle::DefaultUserShape
     );
     let left = ratatui::try_restore();
@@ -162,26 +236,23 @@ pub fn run(session: Option<SessionName>, socket: Result<PathBuf, String>) -> Exi
 }
 
 /// Runs zellij beside the sidebar until it ends, and says what it said as it
-/// failed, if it did. zellij's terminal answers it with `colours`.
+/// failed, if it did. zellij's terminal answers it with `colours`, until
+/// luneta's terminal says others.
 fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
     socket: Result<PathBuf, String>,
     dir: &std::path::Path,
     colours: Colours,
+    events: Sender<Event>,
+    inbox: &mut Inbox,
 ) -> io::Result<Option<String>> {
-    // Not a `sync_channel` of a bound: alacritty hands on what the program
-    // does with the screen locked, which the loop locks to draw, so that a
-    // full queue would hold each up for the other for good. What fills it are
-    // the keys and the mouse, the daemon's answers, zellij's actions and what
-    // zellij does with its terminal, of which `hosted` keeps one draw at most.
-    let (events, inbox) = mpsc::channel();
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)));
     // The clients of the session before luneta's comes, of which none is
     // luneta's: none of a session zellij is to make.
     let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
     let (program, args) = zellij::client(session);
-    let hosted = Hosted::start(program, args, dir, window(areas.1), colours, events.clone())?;
+    let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
     let mut sidebar = Sidebar::default();
     if let (Some(session), Some(before)) = (session, before)
         && let Some(look) = sidebar.sending(&session.to_string())
@@ -192,7 +263,6 @@ fn run_in(
         Ok(socket) => crate::watch::start(socket, events.clone()),
         Err(why) => sidebar.lost(why),
     }
-    read_input(events.clone());
     let mut app = App {
         hosted,
         sidebar,
@@ -201,29 +271,15 @@ fn run_in(
         focused: true,
         dragging: false,
         cursor: None,
+        colours,
+        turned: None,
         events,
         exited: None,
         ended: false,
+        waiting: Some(Vec::new()),
     };
-    run_loop(terminal, &mut app, &inbox)?;
+    run_loop(terminal, &mut app, inbox)?;
     Ok(app.failure())
-}
-
-/// Reads luneta's terminal on a thread of its own, for as long as it can.
-fn read_input(events: Sender<Event>) {
-    thread::spawn(move || loop {
-        match event::read() {
-            Ok(input) => {
-                if events.send(Event::Input(input)).is_err() {
-                    return;
-                }
-            },
-            Err(error) => {
-                let _ = events.send(Event::InputEnded(error));
-                return;
-            },
-        }
-    });
 }
 
 /// Draws a frame for each batch of events, until zellij ends or luneta's
@@ -231,11 +287,11 @@ fn read_input(events: Sender<Event>) {
 fn run_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    inbox: &Receiver<Event>,
+    inbox: &mut Inbox,
 ) -> io::Result<()> {
     loop {
         let wait = if app.sidebar.turning() { sidebar::SPIN } else { TICK };
-        match inbox.recv_timeout(wait) {
+        match inbox.next(wait) {
             Ok(event) => app.handle(event, terminal)?,
             Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => {
@@ -245,7 +301,7 @@ fn run_loop(
         // What came while luneta drew goes into one frame, with the event it
         // waited for: `FRAME_EVENTS_MAX` in all.
         for _ in 1..FRAME_EVENTS_MAX {
-            let Ok(event) = inbox.try_recv() else {
+            let Some(event) = inbox.try_next() else {
                 break;
             };
             app.handle(event, terminal)?;
@@ -285,17 +341,11 @@ fn window(area: Rect) -> Size {
 impl App {
     fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match event {
-            Event::Input(Input::Key(key)) => self.key(&key),
-            Event::Input(Input::Mouse(mouse)) => self.mouse(mouse),
-            Event::Input(Input::Paste(text)) => {
-                if self.focus == Focus::Zellij {
-                    self.hosted.send(keys::paste(&text, self.hosted.mode()));
-                }
+            Event::Input(input) => match &mut self.waiting {
+                Some(waiting) => waiting.push(input),
+                None => self.input(input),
             },
-            Event::Input(Input::FocusGained) => self.focus_window(true),
-            Event::Input(Input::FocusLost) => self.focus_window(false),
-            // The next frame is of the new size, and zellij's terminal with it.
-            Event::Input(Input::Resize(..)) => {},
+            Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
             Event::Hosted(said) => self.hosted_said(said, terminal)?,
             Event::Daemon(Ok(host)) => {
@@ -311,6 +361,22 @@ impl App {
             Event::Notice(notice) => self.sidebar.notify(notice),
         }
         Ok(())
+    }
+
+    fn input(&mut self, input: Input) {
+        match input {
+            Input::Key(key) => self.key(&key),
+            Input::Mouse(mouse) => self.mouse(mouse),
+            Input::Paste(text) => {
+                if self.focus == Focus::Zellij {
+                    self.hosted.send(keys::paste(&text, self.hosted.mode()));
+                }
+            },
+            Input::FocusGained => self.focus_window(true),
+            Input::FocusLost => self.focus_window(false),
+            // The next frame is of the new size, and zellij's terminal with it.
+            Input::Resize(..) => {},
+        }
     }
 
     fn key(&mut self, key: &KeyEvent) {
@@ -435,6 +501,9 @@ impl App {
                 if !title.is_empty() {
                     let look = self.sidebar.titled(title);
                     self.look(look);
+                    for input in self.waiting.take().into_iter().flatten() {
+                        self.input(input);
+                    }
                 }
             },
             Said::Copied(clipboard, text) => {
@@ -451,6 +520,13 @@ impl App {
             Said::AskedSize(answer) => {
                 self.hosted.send(answer(self.hosted.size().into()).into_bytes());
             },
+            // A colour luneta's terminal did not say, or one of the rest, as
+            // the sixteen and the cursor's, goes without an answer.
+            Said::AskedColour(index, spell) => {
+                if let Some(answer) = self.colours.answer(index, &*spell) {
+                    self.hosted.send(answer.into_bytes());
+                }
+            },
             Said::Rang => {
                 let backend = terminal.backend_mut();
                 backend.write_all(b"\x07")?;
@@ -458,6 +534,32 @@ impl App {
             },
             Said::Exited(status) => self.exited = Some(status),
             Said::Ended => self.ended = true,
+        }
+        Ok(())
+    }
+
+    /// Takes in what luneta's terminal answered, or said of itself unasked.
+    fn answered(&mut self, answer: Answer, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        match answer {
+            Answer::Foreground(_) | Answer::Background(_) => self.colours.hear(answer),
+            // It turned dark or light: its colours are asked for again, and
+            // zellij is told once they are in, so that a program zellij tells
+            // that asks for them hears the new ones.
+            Answer::Turned(theme) => {
+                self.turned = Some(theme);
+                let backend = terminal.backend_mut();
+                backend.write_all(answers::TURNED)?;
+                backend.flush()?;
+            },
+            // What it is, the last of what it was asked: the colours it turned
+            // to, if it turned, are in.
+            Answer::Device => {
+                if let Some(theme) = self.turned.take() {
+                    self.hosted.send(theme.report());
+                }
+            },
+            // Too late to count, as luneta started.
+            Answer::Kitty => {},
         }
         Ok(())
     }

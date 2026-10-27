@@ -6,6 +6,7 @@ mod commands;
 mod host;
 mod hosted;
 mod icons;
+mod input;
 mod keys;
 mod own;
 mod sidebar;

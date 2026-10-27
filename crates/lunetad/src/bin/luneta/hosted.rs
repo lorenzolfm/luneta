@@ -21,12 +21,11 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, NamedColor};
+use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, NamedColor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::answers::Colours;
 use crate::host::Event;
 
 /// What the program in luneta's terminal does that luneta has to act on.
@@ -41,6 +40,10 @@ pub enum Said {
     Answer(String),
     /// It asked how big the terminal is, in pixels, and this writes the answer.
     AskedSize(Arc<dyn Fn(WindowSize) -> String + Sync + Send>),
+    /// It asked for the colour alacritty numbers this, and this writes the
+    /// answer: luneta's terminal's, which luneta draws the program's
+    /// foreground and background in, whatever the program sets them to.
+    AskedColour(usize, Arc<dyn Fn(Rgb) -> String + Sync + Send>),
     /// It rang the bell.
     Rang,
     /// It ended, with this status, where its terminal can tell. This comes
@@ -87,9 +90,6 @@ struct Listener {
     /// `Said::Drew` stands for all it drew until then, so that luneta's queue
     /// holds one at the most, however fast the program draws.
     drew: Arc<AtomicBool>,
-    /// luneta's terminal's, which luneta draws the program's foreground and
-    /// background in, whatever the program sets them to.
-    colours: Colours,
 }
 
 impl EventListener for Listener {
@@ -105,13 +105,9 @@ impl EventListener for Listener {
             Emitted::ClipboardStore(clipboard, text) => Said::Copied(clipboard, text),
             Emitted::PtyWrite(answer) => Said::Answer(answer),
             Emitted::TextAreaSizeRequest(answer) => Said::AskedSize(answer),
-            // A program that asks for a colour luneta's terminal did not say,
-            // or for one of the rest, as the sixteen and the cursor's, goes
-            // without an answer.
-            Emitted::ColorRequest(index, answer) => match self.colours.get(index) {
-                Some(colour) => Said::Answer(answer(colour)),
-                None => return,
-            },
+            // The loop answers it in its place, before what the program asked
+            // after it, with the colour as luneta's terminal said it last.
+            Emitted::ColorRequest(index, answer) => Said::AskedColour(index, answer),
             Emitted::Bell => Said::Rang,
             Emitted::ChildExit(status) => Said::Exited(status),
             Emitted::Exit => Said::Ended,
@@ -136,14 +132,12 @@ pub struct Hosted {
 }
 
 impl Hosted {
-    /// Starts `program` in a terminal of `size`, in `dir`, that answers it
-    /// with `colours` when it asks for them.
+    /// Starts `program` in a terminal of `size`, in `dir`.
     pub fn start(
         program: String,
         args: Vec<String>,
         dir: &Path,
         size: Size,
-        colours: Colours,
         events: Sender<Event>,
     ) -> io::Result<Self> {
         // What the program writes as it ends is read before its terminal says
@@ -157,7 +151,7 @@ impl Hosted {
         };
         let pty = tty::new(&options, size.into(), 0)?;
         let drew = Arc::new(AtomicBool::new(false));
-        let listener = Listener { events, drew: Arc::clone(&drew), colours };
+        let listener = Listener { events, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
         // each pane itself. It asks for the kitty keyboard protocol, which
         // `keys` speaks. Its cursor is the hollow block a program cannot ask
@@ -367,9 +361,10 @@ mod tests {
     use std::sync::mpsc;
 
     use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::vte::ansi::{Processor, Rgb, StdSyncHandler};
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
     use super::*;
+    use crate::answers::{Answer, Colours};
 
     /// A screen of `columns` by `lines` that has read `bytes`, drawn into a
     /// buffer two columns and a line in from its corner.
@@ -432,21 +427,24 @@ mod tests {
     }
 
     /// zellij hands on what a program in a pane asks of its terminal, and asks
-    /// what the terminal is after it, to know when the answers are all in.
+    /// what the terminal is after it, to know when the answers are all in: a
+    /// colour is asked for in its place in the loop's queue, and answered
+    /// there where luneta's terminal said it.
     #[test]
     fn a_colour_is_answered_where_lunetas_terminal_said_it_and_before_what_it_is() {
         let (events, inbox) = mpsc::channel();
-        let background = Rgb { r: 0x1e, g: 0x1e, b: 0x2e };
-        let colours = Colours { foreground: None, background: Some(background) };
-        let listener = Listener { events, drew: Arc::default(), colours };
+        let listener = Listener { events, drew: Arc::default() };
         let mut screen = Term::new(Config::default(), &TermSize::new(4, 1), listener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         // The background, the foreground, the second of the sixteen, and what
         // the terminal is.
         parser.advance(&mut screen, b"\x1b]11;?\x07\x1b]10;?\x1b\\\x1b]4;1;?\x1b\\\x1b[c");
+        let mut colours = Colours::default();
+        colours.hear(Answer::Background(Rgb { r: 0x1e, g: 0x1e, b: 0x2e }));
         let answers: Vec<String> = inbox
             .try_iter()
             .filter_map(|event| match event {
+                Event::Hosted(Said::AskedColour(index, spell)) => colours.answer(index, &*spell),
                 Event::Hosted(Said::Answer(answer)) => Some(answer),
                 _ => None,
             })

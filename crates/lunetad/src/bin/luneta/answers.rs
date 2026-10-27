@@ -1,32 +1,74 @@
-//! What luneta's own terminal answers of itself as luneta starts: whether it
-//! speaks the kitty keyboard protocol, and the colours it draws in where a
-//! program names none, which luneta answers zellij with when zellij asks its
-//! terminal for them. luneta reads the answers itself, before anything else
-//! reads the terminal: crossterm, which reads it from then on, would take them
-//! for keys.
+//! What luneta's own terminal answers of itself: whether it speaks the kitty
+//! keyboard protocol, which luneta asks as it starts, and the colours it draws
+//! in where a program names none, which luneta answers zellij with when zellij
+//! asks its terminal for them. luneta asks for the colours again each time its
+//! terminal says it turned dark or light. `input` hears the answers in among
+//! the keys, whenever they come.
 
-use std::fs::File;
-use std::io::{self, IsTerminal as _, Read as _, Write as _};
-use std::os::fd::{AsFd as _, AsRawFd as _};
+use std::fmt;
+use std::io::{self, Write as _};
 use std::str;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
-use alacritty_terminal::vte::{Params, Parser, Perform};
-use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token};
 
-/// What luneta asks: the foreground and background colours (OSC 10 and 11),
-/// the kitty keyboard protocol's flags, and last what the device is, which
-/// every terminal answers. A terminal answers in the order it is asked, so
-/// that once it says what it is, all it was going to answer has come.
+use crate::host::Inbox;
+
+/// What luneta asks as it starts: the foreground and background colours (OSC
+/// 10 and 11), the kitty keyboard protocol's flags, and last what the device
+/// is, which every terminal answers. A terminal answers in the order it is
+/// asked, so that once it says what it is, all it was going to answer has
+/// come.
 const QUESTIONS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c";
 
-/// The longest luneta waits for the answers, for a terminal that answers
-/// nothing, not even what it is.
+/// What luneta asks when its terminal turns dark or light: its colours, and
+/// what it is, to know when they are in.
+pub const TURNED: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c";
+
+/// The longest luneta waits for the answers as it starts, for a terminal that
+/// answers nothing, not even what it is. A colour that comes after is heard
+/// all the same, too late for zellij's first question; whether it speaks the
+/// kitty keyboard protocol, too late to count.
 const WAIT_MAX: Duration = Duration::from_secs(1);
 
-/// What luneta's terminal said of itself.
+/// An answer of luneta's terminal, or what it says of itself unasked once
+/// asked to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The colour it draws text in where a program names none (OSC 10).
+    Foreground(Rgb),
+    /// The colour it draws the background in where a program names none (OSC
+    /// 11).
+    Background(Rgb),
+    /// It speaks the kitty keyboard protocol: it said which of its flags are
+    /// on.
+    Kitty,
+    /// What it is, the last answer of those asked of it together.
+    Device,
+    /// It turned dark or light, as it says unasked while luneta asks it to
+    /// (mode 2031).
+    Turned(Theme),
+}
+
+/// Whether luneta's terminal draws dark or light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
+impl Theme {
+    /// How a terminal says it turned to this: `CSI ? 997 ; 1 n` for dark, `2`
+    /// for light, as zellij hears it from its own.
+    pub fn report(self) -> &'static [u8] {
+        match self {
+            Theme::Dark => b"\x1b[?997;1n",
+            Theme::Light => b"\x1b[?997;2n",
+        }
+    }
+}
+
+/// What luneta's terminal said of itself as luneta started.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Answers {
     /// Whether it speaks the kitty keyboard protocol.
@@ -38,117 +80,89 @@ pub struct Answers {
 /// where the program names none, those of them it said.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Colours {
-    pub foreground: Option<Rgb>,
-    pub background: Option<Rgb>,
+    foreground: Option<Rgb>,
+    background: Option<Rgb>,
 }
 
 impl Colours {
-    /// The colour alacritty numbers `index`, where it is one of these.
-    pub fn get(self, index: usize) -> Option<Rgb> {
-        if index == NamedColor::Foreground as usize {
+    /// Takes in what luneta's terminal said of one of them, where `answer` is
+    /// one.
+    pub fn hear(&mut self, answer: Answer) {
+        match answer {
+            Answer::Foreground(colour) => self.foreground = Some(colour),
+            Answer::Background(colour) => self.background = Some(colour),
+            Answer::Kitty | Answer::Device | Answer::Turned(_) => {},
+        }
+    }
+
+    /// The answer to a program that asks for the colour alacritty numbers
+    /// `index`, as `spell` spells it: none for one luneta's terminal did not
+    /// say, or for one of the rest, as the sixteen and the cursor's.
+    pub fn answer(self, index: usize, spell: &dyn Fn(Rgb) -> String) -> Option<String> {
+        let colour = if index == NamedColor::Foreground as usize {
             self.foreground
         } else if index == NamedColor::Background as usize {
             self.background
         } else {
             None
-        }
-    }
-}
-
-/// Asks luneta's terminal, which luneta has set raw, and waits `WAIT_MAX` at
-/// the most for the answers. What it did not answer by then, it does not
-/// speak or did not say, as for a terminal that cannot be asked.
-pub fn ask() -> Answers {
-    let mut heard = Heard::default();
-    // Whatever went wrong, what was heard until then stands.
-    let _ = listen(&mut heard);
-    heard.answers
-}
-
-/// What luneta heard its terminal answer so far.
-#[derive(Default)]
-struct Heard {
-    answers: Answers,
-    /// Whether it said what it is, the last answer.
-    done: bool,
-}
-
-impl Perform for Heard {
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        let [which, colour] = params else {
-            return;
         };
-        match *which {
-            b"10" => self.answers.colours.foreground = rgb(colour),
-            b"11" => self.answers.colours.background = rgb(colour),
-            _ => {},
-        }
-    }
-
-    fn csi_dispatch(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        match (intermediates, action) {
-            (b"?", 'u') => self.answers.kitty = true,
-            (b"?", 'c') => self.done = true,
-            _ => {},
-        }
+        colour.map(spell)
     }
 }
 
-/// Asks, and hears the answers until the last comes or `WAIT_MAX` is up.
-fn listen(heard: &mut Heard) -> io::Result<()> {
-    let mut terminal = input()?;
-    // Waited on as crossterm waits on it for keys: with kqueue on macOS, whose
-    // poll(2) says it does not support devices.
-    let mut waiting = Poll::new()?;
-    let fd = terminal.as_raw_fd();
-    waiting.registry().register(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-    let mut ready = Events::with_capacity(1);
+/// Asks luneta's terminal what it is, and waits `WAIT_MAX` at the most for the
+/// answers, which `inbox` brings in among what else comes, as keys typed as
+/// luneta starts: those wait in `inbox` for the loop, in the order they came.
+/// What the terminal did not answer by then, it does not speak or did not
+/// say, as for a terminal that cannot be asked.
+pub fn ask(inbox: &mut Inbox) -> Answers {
     let mut output = io::stdout().lock();
-    output.write_all(QUESTIONS)?;
-    output.flush()?;
-    let deadline = Instant::now() + WAIT_MAX;
-    let mut parser: Parser = Parser::new();
-    let mut bytes = [0; 1024];
-    while !heard.done {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(());
-        }
-        match waiting.poll(&mut ready, Some(left)) {
-            Ok(()) => {},
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-        if ready.is_empty() {
-            continue;
-        }
-        // mio tells of what the terminal sent once, and not again until it
-        // sends more, so all of it is read at once. Keys typed as the answers
-        // came go with them.
-        match terminal.read(&mut bytes) {
-            Ok(0) => return Ok(()),
-            Ok(read) => parser.advance(heard, &bytes[..read]),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
-            Err(error) => return Err(error),
-        }
+    if output.write_all(QUESTIONS).and_then(|()| output.flush()).is_err() {
+        return Answers::default();
     }
-    Ok(())
+    drop(output);
+    hear(inbox, Instant::now() + WAIT_MAX)
 }
 
-/// luneta's terminal, to read the answers from where crossterm reads keys: its
-/// standard input, where that is the terminal, and `/dev/tty` where not.
-fn input() -> io::Result<File> {
-    let stdin = io::stdin();
-    if stdin.is_terminal() {
-        return Ok(File::from(stdin.as_fd().try_clone_to_owned()?));
+/// The answers `inbox` brings until the terminal says what it is, or until
+/// `deadline`.
+fn hear(inbox: &mut Inbox, deadline: Instant) -> Answers {
+    let mut answers = Answers::default();
+    while let Some(answer) = inbox.answer(deadline) {
+        match answer {
+            Answer::Device => break,
+            Answer::Kitty => answers.kitty = true,
+            Answer::Foreground(_) | Answer::Background(_) => answers.colours.hear(answer),
+            // The colours it answers with are those it turned to.
+            Answer::Turned(_) => {},
+        }
     }
-    File::open("/dev/tty")
+    answers
+}
+
+/// Asks luneta's terminal to say when it turns dark or light (mode 2031), as
+/// `Answer::Turned`.
+pub struct EnableThemeChange;
+
+/// Asks luneta's terminal to stop saying when it turns dark or light.
+pub struct DisableThemeChange;
+
+impl crossterm::Command for EnableThemeChange {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?2031h")
+    }
+}
+
+impl crossterm::Command for DisableThemeChange {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?2031l")
+    }
 }
 
 /// The colour X11 spells `rgb:R/G/B`, as terminals answer with: each of red,
 /// green and blue in one to four hex digits, of which `f`, `ff`, `fff` and
 /// `ffff` are all the most there is.
-fn rgb(spelled: &[u8]) -> Option<Rgb> {
+pub fn rgb(spelled: &[u8]) -> Option<Rgb> {
     let channels = str::from_utf8(spelled).ok()?.strip_prefix("rgb:")?;
     let channels: Vec<u8> = channels.split('/').map(channel).collect::<Option<_>>()?;
     let [r, g, b] = channels[..] else {
@@ -170,40 +184,49 @@ fn channel(digits: &str) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use crossterm::event::{Event as Input, KeyCode, KeyEvent, KeyModifiers};
+
     use super::*;
+    use crate::host::Event;
 
-    /// What luneta hears of `bytes`, read a byte at a time as from the
-    /// terminal.
-    fn heard(bytes: &[u8]) -> Heard {
-        let mut heard = Heard::default();
-        let mut parser: Parser = Parser::new();
-        for byte in bytes {
-            parser.advance(&mut heard, std::slice::from_ref(byte));
+    fn typed(c: char) -> Event {
+        Event::Input(Input::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+    }
+
+    fn is_typed(event: Option<&Event>, c: char) -> bool {
+        matches!(event, Some(Event::Input(Input::Key(key))) if key.code == KeyCode::Char(c))
+    }
+
+    /// Keys typed as luneta starts wait for the loop, in the order they came,
+    /// around the answers, and what comes after the terminal says what it is
+    /// is the loop's too.
+    #[test]
+    fn the_answers_are_heard_until_what_the_terminal_is_and_the_keys_wait() {
+        let (events, inbox) = mpsc::channel();
+        let background = Rgb { r: 0x1e, g: 0x1e, b: 0x2e };
+        for event in [
+            typed('l'),
+            Event::Answered(Answer::Background(background)),
+            typed('s'),
+            Event::Answered(Answer::Kitty),
+            Event::Answered(Answer::Device),
+            Event::Answered(Answer::Foreground(background)),
+        ] {
+            events.send(event).unwrap();
         }
-        heard
-    }
-
-    #[test]
-    fn a_terminal_that_answers_all_says_its_colours_and_kitty() {
-        // A key typed before the answers came, the colours in four digits and
-        // two, ended in `ESC \` and in BEL, kitty's flags, and what it is.
-        let said = b"x\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:1e/1e/2e\x07\x1b[?1u\x1b[?62;22c";
-        let all = heard(said);
-        let colours = Colours {
-            foreground: Some(Rgb { r: 0xff, g: 0xff, b: 0xff }),
-            background: Some(Rgb { r: 0x1e, g: 0x1e, b: 0x2e }),
-        };
-        assert_eq!(all.answers, Answers { kitty: true, colours });
-        assert!(all.done);
-        // Not done before the last byte of what it is.
-        assert!(!heard(&said[..said.len() - 1]).done);
-    }
-
-    #[test]
-    fn a_terminal_that_only_says_what_it_is_is_done_with_nothing_more() {
-        let heard = heard(b"\x1b[?6c");
-        assert_eq!(heard.answers, Answers::default());
-        assert!(heard.done);
+        let mut inbox = Inbox::new(inbox);
+        let heard = hear(&mut inbox, Instant::now() + Duration::from_secs(10));
+        let mut colours = Colours::default();
+        colours.hear(Answer::Background(background));
+        assert_eq!(heard, Answers { kitty: true, colours });
+        assert!(is_typed(inbox.try_next().as_ref(), 'l'));
+        assert!(is_typed(inbox.try_next().as_ref(), 's'));
+        assert!(matches!(inbox.try_next(), Some(Event::Answered(Answer::Foreground(_)))));
+        assert!(inbox.try_next().is_none());
+        // A terminal that answers nothing is done with by the deadline.
+        assert_eq!(hear(&mut inbox, Instant::now()), Answers::default());
     }
 
     #[test]

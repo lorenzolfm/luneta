@@ -26,7 +26,8 @@ alacritty_terminal = "0.26.0"
 # the tree by way of alacritty_terminal.
 base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
-# Reads luneta's terminal as keys and the mouse, and sets its modes.
+# Sets luneta's terminal's modes. What `input` reads of it are crossterm's keys
+# and mouse, which `keys` and the sidebar take.
 crossterm = "0.29.0"
 # The sidebar's search scores its rows as the plugin's does: skim's scorer, at
 # the version the plugin pins.
@@ -35,9 +36,6 @@ fuzzy-matcher = { version = "0.3.7", default-features = false }
 # path and never has to survive being spelled as a URI.
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 luneta-protocol = { path = "../protocol" }
-# Waits on luneta's terminal for what it answers as luneta starts, for a time,
-# as crossterm waits on it for keys. Already in the tree by way of crossterm.
-mio = { version = "1.2.2", features = ["os-ext", "os-poll"] }
 # Watches Claude Code's session files and zellij's sockets: inotify on Linux,
 # FSEvents on macOS.
 notify = "8.2.0"
@@ -48,6 +46,9 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # for how a terminal a command runs on takes keys, as `stty` reads it, opened
 # so that it never becomes the daemon's own.
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
+# Tells luneta's terminal's reader of a resize, as crossterm's did. Already in
+# the tree by way of crossterm.
+signal-hook = "0.3.18"
 # Claude Code's session files are JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
