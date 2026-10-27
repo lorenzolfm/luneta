@@ -580,10 +580,10 @@ Run in a pane of zellij, luneta will not attach to the session that pane is
 in, as zellij will not: name another. When zellij detaches, luneta ends. When
 the session zellij is in ends, as zellij quits, its last pane exits, or it is
 killed, luneta attaches zellij to the newest session that runs, which the
-picker lists first, and ends with the last session. When zellij fails, luneta
-ends and says what zellij said. zellij's keys are yours as they were, but
-three, which luneta takes before zellij sees them, whichever of the two has
-the keys:
+picker lists first, but never to the one luneta's own pane is in, and ends
+where none is left. When zellij fails, luneta ends and says what zellij said.
+zellij's keys are yours as they were, but three, which luneta takes before
+zellij sees them, whichever of the two has the keys:
 
 - `Ctrl b` goes back and forth between zellij and the sidebar. A click goes to
   whichever you click.

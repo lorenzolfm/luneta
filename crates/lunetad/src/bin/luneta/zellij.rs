@@ -168,7 +168,8 @@ pub struct Refuge {
 /// it, as a session does once zellij quits, its last pane exits, or it is
 /// killed. None where it runs still, as the client detached; where no other
 /// session answers; and where luneta cannot read all of zellij's folder, as
-/// either could be in what it cannot.
+/// either could be in what it cannot. Never the session luneta's terminal is
+/// a pane of, as `refusal` says.
 ///
 /// A socket can outlive its server, as one that crashed, and a session can
 /// end as luneta looks. `attach` brings back a session that ended, where
@@ -176,12 +177,13 @@ pub struct Refuge {
 /// session that answers is one to go on in.
 pub fn refuge(seats: &[&str]) -> Option<Refuge> {
     let folder = lunetad::zellij_folder();
+    let current = env::var(SESSION_VAR).ok();
     let deadline = Instant::now() + ENDING;
     loop {
         let running = lunetad::zellij_sessions(&folder)?;
         if went(seats, &running) {
             let seeking = Instant::now() + SEEKING;
-            let sessions = newest_first(running).into_iter();
+            let sessions = refuges(running, current.as_deref()).into_iter();
             return sessions.take_while(|_| Instant::now() < seeking).find_map(|session| {
                 let before = clients(&session).ok()?;
                 Some(Refuge { session, before })
@@ -204,9 +206,11 @@ fn went(seats: &[&str], running: &[(String, SystemTime)]) -> bool {
     seats.iter().any(|seat| running.iter().all(|(name, _)| name != seat))
 }
 
-/// The names of `running`, newest first, by when each started and then by
-/// name, as the picker lists them.
-fn newest_first(mut running: Vec<(String, SystemTime)>) -> Vec<String> {
+/// The names of `running` that luneta's zellij can go on in, newest first,
+/// by when each started and then by name, as the picker lists them: all but
+/// `current`, the session luneta's terminal is a pane of, if it is one.
+fn refuges(mut running: Vec<(String, SystemTime)>, current: Option<&str>) -> Vec<String> {
+    running.retain(|(name, _)| current != Some(name.as_str()));
     running.sort_by(|(a, a_at), (b, b_at)| (b_at, b).cmp(&(a_at, a)));
     running.into_iter().map(|(name, _)| name).collect()
 }
@@ -790,14 +794,16 @@ mod tests {
 
     /// luneta tries the sessions for one to go on in as the picker lists
     /// them: the newest first, and of two that started at once, the one whose
-    /// name comes last, as the sidebar has them.
+    /// name comes last, as the sidebar has them. Never the one luneta's
+    /// terminal is a pane of, which zellij would show inside itself.
     #[test]
     fn the_refuge_is_sought_in_the_order_the_picker_lists_sessions() {
         let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
         let running = [("b", at(2)), ("c", at(1)), ("a", at(2))];
         let running = running.map(|(name, started)| (name.to_owned(), started)).to_vec();
-        assert_eq!(newest_first(running), ["b", "a", "c"]);
-        assert!(newest_first(Vec::new()).is_empty());
+        assert_eq!(refuges(running.clone(), None), ["b", "a", "c"]);
+        assert_eq!(refuges(running, Some("b")), ["a", "c"]);
+        assert!(refuges(Vec::new(), None).is_empty());
     }
 
     /// A client that ended on its way from one session to another may have
