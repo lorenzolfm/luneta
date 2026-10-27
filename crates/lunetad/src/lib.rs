@@ -25,4 +25,4 @@ mod zellij;
 pub use client::{connect, listening};
 pub use daemon::{serve, Claim};
 pub use folder::Refusal;
-pub use zellij::folder as zellij_folder;
+pub use zellij::{folder as zellij_folder, running as zellij_sessions};

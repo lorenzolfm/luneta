@@ -577,10 +577,13 @@ luneta's own, drawn by luneta and not by a plugin:
 picker's [directories](#directories) name it, `luneta-main` in a worktree of
 `luneta`, and makes it if none runs; `luneta <name>` attaches to that one.
 Run in a pane of zellij, luneta will not attach to the session that pane is
-in, as zellij will not: name another. When zellij ends, detached or quit, so
-does luneta, and when it fails, luneta says what zellij said. zellij's keys
-are yours as they were, but three, which luneta takes before zellij sees them,
-whichever of the two has the keys:
+in, as zellij will not: name another. When zellij detaches, luneta ends. When
+the session zellij is in ends, as zellij quits, its last pane exits, or it is
+killed, luneta attaches zellij to the newest session that runs, which the
+picker lists first, but never to the one luneta's own pane is in, and ends
+where none is left. When zellij fails, luneta ends and says what zellij said.
+zellij's keys are yours as they were, but three, which luneta takes before
+zellij sees them, whichever of the two has the keys:
 
 - `Ctrl b` goes back and forth between zellij and the sidebar. A click goes to
   whichever you click.
@@ -645,13 +648,13 @@ open, floating panes and all, and the column of the plugin's dock where the
 plugin's sidebar stands beside luneta's. `d s` kills its session. On the last
 pane that holds a session's only tab open, or on a session's row, `d d` kills
 the session too: zellij would leave an empty tab in a session with no client,
-and end the one zellij is in, and luneta with it. The session zellij is in is
-killed once zellij is in another, the newest, and with no other, the menu says
-so and kills nothing. When that would end an agent that is busy, waiting on
-you, or that says nothing luneta knows, the menu asks first, as the plugin's
-does, and so does every delete while lunetad does not answer, as what it said
-last of the agents may be out of date: `y`, or the key again, goes ahead, and
-`n` or `Backspace` goes back.
+and end the one zellij is in. The session zellij is in is killed once zellij
+is in another, the newest, so that zellij stays on screen throughout; with no
+other, it is killed with zellij in it, and luneta ends. When that would end an
+agent that is busy, waiting on you, or that says nothing luneta knows, the
+menu asks first, as the plugin's does, and so does every delete while lunetad
+does not answer, as what it said last of the agents may be out of date: `y`,
+or the key again, goes ahead, and `n` or `Backspace` goes back.
 luneta asks zellij what a pane takes along as you press the key, and again as
 you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
 and is not closed with it. A delete leaves you in the sidebar, the highlight on

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -39,7 +39,7 @@ use crate::news::{self, News};
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::skills::{self, Skill};
-use crate::zellij::{self, After, Closes, SessionName};
+use crate::zellij::{self, After, Closes, Refuge, SessionName};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -131,6 +131,42 @@ struct Waiting {
     until: Instant,
 }
 
+/// zellij's client, which luneta runs beside the sidebar, and what luneta
+/// knows of it. One that takes the place of a client that ended knows only
+/// what the first did as it started.
+struct Client {
+    hosted: Hosted,
+    /// How it ended, once its terminal says.
+    exited: Option<ExitStatus>,
+    /// Whether a button went down over zellij and is still held: what it
+    /// drags goes to zellij, wherever the mouse goes.
+    dragging: bool,
+    /// The input that came before zellij was in its session, as keys typed as
+    /// it starts: zellij 0.45 drops keys that reach it before it puts its
+    /// client on its screen. None once zellij is in, which it says as it first
+    /// draws for its client, as it draws only for one on its screen: once it
+    /// titles its terminal, or once anything shows there. zellij titles a tab
+    /// once for all its clients, so that a client that comes to a session
+    /// already titled gets none.
+    waiting: Option<Waiting>,
+}
+
+impl Client {
+    /// Starts `program`, zellij's client, in a terminal of `size`, in `dir`,
+    /// with the input held for it until zellij can take it.
+    fn start(
+        program: String,
+        args: Vec<String>,
+        dir: &Path,
+        size: Size,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
+        let hosted = Hosted::start(program, args, dir, size, events)?;
+        let waiting = Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX });
+        Ok(Client { hosted, exited: None, dragging: false, waiting })
+    }
+}
+
 /// luneta's queue of events, with what came on it as luneta waited for its
 /// terminal's answers put aside, to come first.
 pub struct Inbox {
@@ -175,7 +211,7 @@ impl Inbox {
 }
 
 struct App {
-    hosted: Hosted,
+    client: Client,
     sidebar: Sidebar,
     /// Where the sidebar and zellij were last drawn, which the mouse goes by.
     areas: (Rect, Rect),
@@ -183,9 +219,6 @@ struct App {
     /// Whether the window luneta's terminal is in has the focus. The sidebar
     /// sees you in a pane only while it does.
     focused: bool,
-    /// Whether a button went down over zellij and is still held: what it
-    /// drags goes to zellij, wherever the mouse goes.
-    dragging: bool,
     /// The cursor as luneta's terminal was last told to draw it.
     cursor: Option<(CursorShape, bool)>,
     /// luneta's terminal's colours as it said them last, which zellij's
@@ -198,22 +231,16 @@ struct App {
     /// What watches the folders the folds and the news are kept in, for as
     /// long as luneta runs.
     _watching: Vec<notify::RecommendedWatcher>,
-    /// How zellij ended, once its terminal says.
-    exited: Option<ExitStatus>,
+    /// The directory luneta started in, which zellij's client runs in.
+    dir: PathBuf,
     ended: bool,
-    /// The input that came before zellij was in its session, as keys typed as
-    /// luneta starts: zellij 0.45 drops keys that reach it before it puts its
-    /// client on its screen. None once zellij is in, which it says as it first
-    /// draws for its client, as it draws only for one on its screen: once it
-    /// titles its terminal, or once anything shows there. zellij titles a tab
-    /// once for all its clients, so that a client that comes to a session
-    /// already titled gets none.
-    waiting: Option<Waiting>,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
-/// it detaches, or its session does. The sidebar is of what the daemon in
-/// `folder` says, which is started if none runs.
+/// its client detaches or fails, or its session ends and no other runs. Where
+/// another does, a client of the newest takes the place of the one that
+/// ended. The sidebar is of what the daemon in `folder` says, which is
+/// started if none runs.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -309,7 +336,7 @@ fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
     folder: Result<PathBuf, String>,
-    dir: &std::path::Path,
+    dir: &Path,
     colours: Colours,
     events: Sender<Event>,
     inbox: &mut Inbox,
@@ -319,7 +346,7 @@ fn run_in(
     // luneta's: none of a session zellij is to make.
     let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
     let (program, args) = zellij::client(session);
-    let hosted = Hosted::start(program, args, dir, window(areas.1), events.clone())?;
+    let client = Client::start(program, args, dir, window(areas.1), events.clone())?;
     let folds = Folds::shared();
     // Kept beside the daemon, which lists the sessions it is kept of.
     let news = match &folder {
@@ -350,36 +377,34 @@ fn run_in(
         Err(why) => sidebar.lost(why),
     }
     let mut app = App {
-        hosted,
+        client,
         sidebar,
         areas,
         focus: Focus::Zellij,
         // Until the terminal says otherwise. One that never tells a program
         // of its window's focus has you in it all along.
         focused: true,
-        dragging: false,
         cursor: None,
         colours,
         turned: None,
         events,
         _watching: watching,
-        exited: None,
+        dir: dir.to_owned(),
         ended: false,
-        waiting: Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX }),
     };
     run_loop(terminal, &mut app, inbox)?;
     Ok(app.failure())
 }
 
-/// Draws a frame for each batch of events, until zellij ends or luneta's
-/// terminal can no longer be read.
+/// Draws a frame for each batch of events, until zellij ends with no client
+/// to take the place of its own, or luneta's terminal can no longer be read.
 fn run_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     inbox: &mut Inbox,
 ) -> io::Result<()> {
     loop {
-        let wait = if app.waiting.is_some() {
+        let wait = if app.client.waiting.is_some() {
             WAITING_LOOK
         } else if app.sidebar.turning() {
             sidebar::SPIN
@@ -438,7 +463,7 @@ fn window(area: Rect) -> Size {
 impl App {
     fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match event {
-            Event::Input(input) => match &mut self.waiting {
+            Event::Input(input) => match &mut self.client.waiting {
                 Some(waiting) => waiting.input.push(input),
                 None => self.input(input),
             },
@@ -474,14 +499,27 @@ impl App {
     /// Hands zellij the input held for it once anything shows on its screen,
     /// or once it waited long enough.
     fn wait_on(&mut self, now: Instant) {
-        if self.waiting.as_ref().is_some_and(|waiting| now >= waiting.until || !self.hosted.blank()) {
+        let client = &self.client;
+        let ready = |waiting: &Waiting| now >= waiting.until || !client.hosted.blank();
+        if client.waiting.as_ref().is_some_and(ready) {
             self.waited();
         }
     }
 
-    /// Hands zellij the input held for it, if any is.
+    /// Hands zellij the input held for it, if any is. A client that took the
+    /// place of one that ended heard nothing of where the keys are, and has
+    /// them as far as it knows: it hears first where it does not, as the
+    /// sidebar has them, or another window.
     fn waited(&mut self) {
-        for input in self.waiting.take().into_iter().flat_map(|waiting| waiting.input) {
+        let Some(waiting) = self.client.waiting.take() else {
+            return;
+        };
+        if !(self.focused && self.focus.zellij())
+            && let Some(bytes) = keys::focus(false, self.client.hosted.mode())
+        {
+            self.client.hosted.send(bytes);
+        }
+        for input in waiting.input {
             self.input(input);
         }
     }
@@ -492,7 +530,7 @@ impl App {
             Input::Mouse(mouse) => self.mouse(mouse),
             Input::Paste(text) => {
                 if self.focus.zellij() {
-                    self.hosted.send(keys::paste(&text, self.hosted.mode()));
+                    self.client.hosted.send(keys::paste(&text, self.client.hosted.mode()));
                 }
             },
             Input::FocusGained => self.focus_window(true),
@@ -523,8 +561,8 @@ impl App {
             return;
         }
         if self.focus.zellij() {
-            if let Some(bytes) = keys::key(key, self.hosted.mode()) {
-                self.hosted.send(bytes);
+            if let Some(bytes) = keys::key(key, self.client.hosted.mode()) {
+                self.client.hosted.send(bytes);
             }
         } else {
             let asked = self.sidebar.key(key, SystemTime::now());
@@ -535,19 +573,19 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent) {
         let (sidebar, zellij) = self.areas;
         let over_zellij = mouse.column >= zellij.x;
-        if self.dragging || over_zellij {
+        if self.client.dragging || over_zellij {
             match mouse.kind {
                 MouseEventKind::Down(_) => {
-                    self.dragging = true;
+                    self.client.dragging = true;
                     self.leave();
                 },
-                MouseEventKind::Up(_) => self.dragging = false,
+                MouseEventKind::Up(_) => self.client.dragging = false,
                 _ => {},
             }
             let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
             let row = mouse.row.saturating_sub(zellij.y);
-            if let Some(bytes) = keys::mouse(mouse, column, row, self.hosted.mode()) {
-                self.hosted.send(bytes);
+            if let Some(bytes) = keys::mouse(mouse, column, row, self.client.hosted.mode()) {
+                self.client.hosted.send(bytes);
             }
             return;
         }
@@ -620,7 +658,7 @@ impl App {
     /// and does `after` once it is there, in another session.
     fn go_from(&mut self, here: &str, place: &Place, after: Option<After>) {
         let then = self.sidebar.went(place);
-        self.hosted.send(zellij::NUDGE);
+        self.client.hosted.send(zellij::NUDGE);
         zellij::go(here, place.session(), place.pane(), then, after, &self.events);
     }
 
@@ -631,7 +669,7 @@ impl App {
             return;
         };
         let then = self.sidebar.sending(session.as_str());
-        self.hosted.send(zellij::NUDGE);
+        self.client.hosted.send(zellij::NUDGE);
         zellij::start(&here, session, cwd, then, &self.events);
     }
 
@@ -667,9 +705,9 @@ impl App {
         self.sidebar.focus(side == Focus::Sidebar);
         if self.focused
             && side.zellij() != had
-            && let Some(bytes) = keys::focus(side.zellij(), self.hosted.mode())
+            && let Some(bytes) = keys::focus(side.zellij(), self.client.hosted.mode())
         {
-            self.hosted.send(bytes);
+            self.client.hosted.send(bytes);
         }
     }
 
@@ -683,9 +721,9 @@ impl App {
     fn focus_window(&mut self, focused: bool) {
         self.focused = focused;
         if self.focus.zellij()
-            && let Some(bytes) = keys::focus(focused, self.hosted.mode())
+            && let Some(bytes) = keys::focus(focused, self.client.hosted.mode())
         {
-            self.hosted.send(bytes);
+            self.client.hosted.send(bytes);
         }
     }
 
@@ -711,15 +749,15 @@ impl App {
                 write!(backend, "\x1b]52;{which};{text}\x07")?;
                 backend.flush()?;
             },
-            Said::Answer(answer) => self.hosted.send(answer.into_bytes()),
+            Said::Answer(answer) => self.client.hosted.send(answer.into_bytes()),
             Said::AskedSize(answer) => {
-                self.hosted.send(answer(self.hosted.size().into()).into_bytes());
+                self.client.hosted.send(answer(self.client.hosted.size().into()).into_bytes());
             },
             // A colour luneta's terminal did not say, or one of the rest, as
             // the sixteen and the cursor's, goes without an answer.
             Said::AskedColour(index, spell) => {
                 if let Some(answer) = self.colours.answer(index, &*spell) {
-                    self.hosted.send(answer.into_bytes());
+                    self.client.hosted.send(answer.into_bytes());
                 }
             },
             Said::Rang => {
@@ -727,9 +765,29 @@ impl App {
                 backend.write_all(b"\x07")?;
                 backend.flush()?;
             },
-            Said::Exited(status) => self.exited = Some(status),
-            Said::Ended => self.ended = true,
+            Said::Exited(status) => self.client.exited = Some(status),
+            Said::Ended => self.client_ended()?,
         }
+        Ok(())
+    }
+
+    /// zellij's client ended. Where it ended well, and its session with it, as
+    /// zellij quits, the session's last pane exits, or the session is killed,
+    /// a client of the newest session that answers takes its place, and
+    /// luneta goes on. luneta ends where none does, and where the client
+    /// detached, or failed, as where zellij cannot attach.
+    fn client_ended(&mut self) -> io::Result<()> {
+        let seats = self.sidebar.seats();
+        let ended = self.client.exited.filter(ExitStatus::success).filter(|_| !seats.is_empty());
+        let Some(Refuge { session: to, before }) = ended.and_then(|_| zellij::refuge(&seats)) else {
+            self.ended = true;
+            return Ok(());
+        };
+        let (program, args) = zellij::rejoin(&to);
+        let size = window(self.areas.1);
+        self.client = Client::start(program, args, &self.dir, size, self.events.clone())?;
+        let look = self.sidebar.rejoining(&to);
+        zellij::arrive(look, before, &self.events);
         Ok(())
     }
 
@@ -750,7 +808,7 @@ impl App {
             // to, if it turned, are in.
             Answer::Device => {
                 if let Some(theme) = self.turned.take() {
-                    self.hosted.send(theme.report());
+                    self.client.hosted.send(theme.report());
                 }
             },
             // Too late to count, as luneta started.
@@ -763,9 +821,9 @@ impl App {
     /// gone: the text on its terminal, and how it ended. None for a zellij that
     /// detached or quit, or that ended in a way its terminal could not tell.
     fn failure(&self) -> Option<String> {
-        let status = self.exited.filter(|status| !status.success())?;
+        let status = self.client.exited.filter(|status| !status.success())?;
         let ended = format!("luneta: zellij ended ({status})");
-        let said = self.hosted.text();
+        let said = self.client.hosted.text();
         Some(if said.is_empty() { ended } else { format!("{said}\n{ended}") })
     }
 
@@ -775,22 +833,22 @@ impl App {
             let hidden = self.focus == Focus::Hidden;
             let (sidebar, zellij) = areas(frame.area(), hidden);
             self.areas = (sidebar, zellij);
-            let size = self.hosted.size();
+            let size = self.client.hosted.size();
             if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
-                self.hosted.resize(window(zellij));
+                self.client.hosted.resize(window(zellij));
             }
             let buffer = frame.buffer_mut();
             if !hidden {
                 self.sidebar.draw(buffer, sidebar, now);
             }
-            let cursor = self.hosted.draw(buffer, zellij);
+            let cursor = self.client.hosted.draw(buffer, zellij);
             if self.focus.zellij()
                 && let Some(cursor) = cursor
             {
                 frame.set_cursor_position(cursor);
             }
         })?;
-        let cursor = self.hosted.cursor_style();
+        let cursor = self.client.hosted.cursor_style();
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;

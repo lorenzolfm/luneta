@@ -2,12 +2,13 @@
 //! which agents end with it.
 //!
 //! zellij closes a tab with its last pane that holds it open, and a session
-//! with its last tab: luneta too, when that is the session luneta's zellij is
-//! in. In a session no client is attached to, it leaves the tab there with
-//! nothing in it instead, and a session with no pane. So a pane that is the
-//! last to hold its tab open closes the tab, and the last to hold a session's
-//! only tab open deletes the session. The session luneta's zellij is in goes
-//! once its client is in another.
+//! with its last tab: luneta's client too, when that is the session luneta's
+//! zellij is in. In a session no client is attached to, it leaves the tab
+//! there with nothing in it instead, and a session with no pane. So a pane
+//! that is the last to hold its tab open closes the tab, and the last to hold
+//! a session's only tab open deletes the session. The session luneta's zellij
+//! is in goes once its client is in another, which keeps the client on
+//! screen throughout, or with luneta, where it is the only one.
 
 use crate::sidebar::Place;
 use crate::zellij::Closes;
@@ -82,7 +83,8 @@ pub struct Subject<'a> {
     /// cannot tell them, as lunetad does not answer.
     pub agents: Option<Vec<(u32, Doing)>>,
     /// Where luneta's zellij goes before the session it is in is killed: the
-    /// newest of the others, which the picker lists first.
+    /// newest of the others, which the picker lists first. None for the only
+    /// session, which luneta ends with.
     pub refuge: Option<Place>,
 }
 
@@ -94,7 +96,8 @@ pub enum Act {
     /// Close a tab of a session, by its id, and the terminals in it, the
     /// floating ones too.
     Tab { session: String, tab: u32, panes: Vec<u32> },
-    /// Kill a session luneta's zellij is not in.
+    /// Kill a session luneta's zellij is not in, or the only one, which
+    /// luneta's zellij ends with, and luneta with it.
     Kill(String),
     /// Take luneta's zellij to `to`, and kill `session`, which it is in, once
     /// it has left.
@@ -125,8 +128,9 @@ pub struct Plan {
 /// pane closes, or its tab once nothing else holds the tab open. The last
 /// pane that holds a session's only tab open ends the session with it, and
 /// deletes the session: the session luneta's zellij is in goes once the
-/// client is in another, as it would for a key that kills it, and none goes
-/// while luneta cannot tell which session that is.
+/// client is in another, as it would for a key that kills it, or with luneta,
+/// where it is the only one; and none goes while luneta cannot tell which
+/// session that is.
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
     let session = subject.session.to_owned();
     let act = match &subject.deletes {
@@ -136,14 +140,9 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
         },
         Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
             Seat::Elsewhere => Act::Kill(session),
-            Seat::In => {
-                let Some(to) = subject.refuge.clone() else {
-                    return Err(format!(
-                        "menu: \"{session}\" is the only session; there is none to go to before \
-                         it ends"
-                    ));
-                };
-                Act::Leave { session, to }
+            Seat::In => match subject.refuge.clone() {
+                Some(to) => Act::Leave { session, to },
+                None => Act::Kill(session),
             },
             Seat::Moving => return Err(MOVING.to_owned()),
         },
@@ -269,11 +268,21 @@ mod tests {
         assert_eq!(planned(Seat::Elsewhere, Deletes::Session), Ok(kill));
     }
 
+    /// The only session has none to go to first: it is killed with luneta's
+    /// zellij in it, and luneta ends with it. It asks first as any session
+    /// does, by the agents it ends.
     #[test]
-    fn the_session_luneta_is_in_goes_only_where_there_is_another() {
-        let alone = Subject { refuge: None, ..subject(Seat::In, Deletes::Session, Vec::new()) };
-        let planned = plan(&alone).map(|plan| plan.act);
-        assert!(planned.is_err_and(|why| why.contains("only session")));
+    fn the_only_session_is_killed_with_luneta_in_it() {
+        for deletes in [Deletes::Session, pane(Closes::Session)] {
+            let agents = vec![(4, Doing::Busy)];
+            let alone = Subject { refuge: None, ..subject(Seat::In, deletes, agents) };
+            let Ok(planned) = plan(&alone) else {
+                panic!("the only session is killed");
+            };
+            assert_eq!(planned.act, Act::Kill("luneta".to_owned()));
+            let asks = Some("Kill session luneta? 1 agent, 1 busy".to_owned());
+            assert_eq!(planned.question(), asks);
+        }
     }
 
     /// While luneta's zellij is on its way to a session, either session may
