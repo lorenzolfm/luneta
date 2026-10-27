@@ -4,9 +4,10 @@
 //! `▌` marks the pane it is on. `•` dots a pane where something finished since
 //! you were last there, and one you marked unread, and `u` takes the dot away
 //! or gives it. The menu opens at its bottom, for the row highlighted, and
-//! its Brief group asks for a brief of the agents by that row.
-//! Collapsed, it keeps only what it counts of the dots, the agents at work and
-//! those in a shell.
+//! its Brief group asks for a brief of the agents by that row. Its title
+//! along the top is in the accent while it has the keys, and dim while
+//! zellij or a brief has them. Collapsed, it keeps only what it counts of the
+//! dots, the agents at work and those in a shell.
 //!
 //! The rows go oldest session first, until you move them, and each session's
 //! panes in the order of their tabs: `v` selects the highlighted row's
@@ -78,7 +79,7 @@ pub const SPIN: Duration = Duration::from_millis(100);
 pub const SCROLL: Duration = Duration::from_millis(60);
 
 /// The colour of what wants you: an agent that waits for you, and the session
-/// luneta's zellij is in.
+/// luneta's zellij is in; and of the sidebar's title while it has the keys.
 pub const ACCENT: Color = gruvbox::PURPLE;
 /// The colour of the session luneta's zellij is in.
 pub const NAME: Color = gruvbox::AQUA;
@@ -493,8 +494,30 @@ pub enum Asked {
     Brief(Brief),
 }
 
-/// The rows the top of the sidebar takes: its rule, and a blank line.
-const HEADER: usize = 2;
+/// The rows the top of the sidebar takes, as `top` draws them.
+const HEADER: usize = 3;
+
+/// Where the keys go, as the sidebar sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keys {
+    /// To zellij: the highlight rests on its pane.
+    #[default]
+    Zellij,
+    Sidebar,
+    /// To a brief the sidebar asked for, which gives them back as it closes:
+    /// the sidebar stays as it stands, highlight and all.
+    Lent,
+}
+
+impl Keys {
+    /// Whether the keys are the sidebar's, or come back to it.
+    fn held(self) -> bool {
+        match self {
+            Keys::Sidebar | Keys::Lent => true,
+            Keys::Zellij => false,
+        }
+    }
+}
 
 /// What the rule along the top counts, of the rows: the sessions, the agents
 /// in their panes that wait for you, the panes with the dot, and the agents
@@ -537,8 +560,7 @@ pub struct Sidebar {
     unlisted: usize,
     /// Which client of its session is luneta's zellij, and the pane it is on.
     own: OwnClient,
-    /// Whether the sidebar has the keys.
-    focused: bool,
+    keys: Keys,
     /// The row of the pane luneta's zellij is on, or of its session, while
     /// that one is folded. The highlight rests on it while the sidebar does
     /// not have the focus.
@@ -841,14 +863,16 @@ impl Sidebar {
     /// they leave. A search lasts while the sidebar has them: one left open
     /// would keep the rows it hides out of sight. So does the menu, but while
     /// it takes luneta's zellij out of the session it kills, and so do a
-    /// selection and a session lifted, which goes back.
-    pub fn focus(&mut self, focused: bool) {
-        if self.focused == focused {
+    /// selection and a session lifted, which goes back. A brief lent the keys
+    /// leaves all of it as it stands.
+    pub fn focus(&mut self, keys: Keys) {
+        let (had, holds) = (self.keys.held(), keys.held());
+        self.keys = keys;
+        if had == holds {
             return;
         }
-        self.focused = focused;
         self.first_pressed = false;
-        if focused {
+        if holds {
             if self.here_row.is_some() {
                 self.cursor.clone_from(&self.here_row);
             }
@@ -1935,8 +1959,8 @@ impl Sidebar {
     }
 
     /// The line of all the rows that the line `y` of luneta's terminal shows
-    /// of them, with the sidebar in `area`: none on the rule along the top,
-    /// nor on the notes at the bottom.
+    /// of them, with the sidebar in `area`: none on the title or the rule
+    /// along the top, nor on the notes at the bottom.
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
         let line = usize::from(y.saturating_sub(area.y));
         let shown = line.checked_sub(HEADER).filter(|line| *line < self.room)?;
@@ -2018,7 +2042,7 @@ impl Sidebar {
 
     /// Where the highlight is, and which of its two it is.
     fn highlight(&self) -> Highlight {
-        if self.focused {
+        if self.keys.held() {
             return Highlight::Lit(self.cursor_index());
         }
         let row = |place: &Place| self.rows.iter().position(|row| row.place() == *place);
@@ -2054,8 +2078,7 @@ impl Sidebar {
         let height = usize::from(area.height);
         let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
-        lines.push(self.header(width, frame));
-        lines.push(Line::default());
+        lines.extend(self.top(width, frame));
         let notes = self.notes(width, height);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
@@ -2159,7 +2182,36 @@ impl Sidebar {
         }
     }
 
-    /// The rule along the top: how many sessions the rows list, how many
+    /// The top of the sidebar, over the rows: its title, its rule, and a
+    /// blank line.
+    fn top(&self, width: usize, frame: usize) -> [Line<'static>; HEADER] {
+        [self.title(width), self.header(width, frame), Line::default()]
+    }
+
+    /// The first line: `menu::TITLE` on a rule out to the edge, in `ACCENT`,
+    /// the word bold, while the sidebar has the keys, and dim while zellij or
+    /// a brief has them, as zellij's frame was around the plugin's.
+    fn title(&self, width: usize) -> Line<'static> {
+        let (rule, name) = match self.keys {
+            Keys::Sidebar => {
+                let accent = Style::new().fg(ACCENT);
+                (accent, accent.add_modifier(Modifier::BOLD))
+            },
+            Keys::Zellij | Keys::Lent => {
+                let dim = Style::new().add_modifier(Modifier::DIM);
+                (dim, dim)
+            },
+        };
+        let word = format!(" {} ", menu::TITLE);
+        let rest = width.saturating_sub(RULE.width() + word.width());
+        Line::from(vec![
+            Span::styled(RULE, rule),
+            Span::styled(word, name),
+            Span::styled(RULE.repeat(rest), rule),
+        ])
+    }
+
+    /// The rule under the title: how many sessions the rows list, how many
     /// agents on them wait for you, how many panes have the dot, and how many
     /// agents are at work, and how many are in a shell.
     fn header(&self, width: usize, frame: usize) -> Line<'static> {
@@ -2234,7 +2286,7 @@ impl Sidebar {
             notes.extend(menu.lines(width, room));
         } else if let Some(term) = self.search() {
             notes.push(query(term, width));
-        } else if self.focused {
+        } else if self.keys == Keys::Sidebar {
             notes.extend(menu::legend(width, room));
         }
         notes
@@ -2819,7 +2871,7 @@ mod tests {
     ) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        sidebar.focus(focused);
+        sidebar.focus(if focused { Keys::Sidebar } else { Keys::Zellij });
         sidebar.draw(&mut buffer, area, now);
         let lit = if focused { LIT } else { RESTING };
         in_gruvbox(&buffer, &[Color::Reset, lit]);
@@ -2909,8 +2961,9 @@ mod tests {
     fn sessions_go_oldest_first_with_their_panes_in_tab_order() {
         let mut sidebar = two_sessions();
         assert_eq!(
-            screen(&mut sidebar, false, 32, 7),
+            screen(&mut sidebar, false, 32, 8),
             [
+                "─ luneta ──────────────────────",
                 "─ 2 sessions ───────────── ●1 ─",
                 "",
                 " ▾ older ────────────────── ●1",
@@ -2920,6 +2973,59 @@ mod tests {
                 "     \u{e795} w/b",
             ]
         );
+    }
+
+    /// The first line says `luneta`, in the accent, the word bold, while the
+    /// sidebar has the keys, and dim while zellij has them.
+    #[test]
+    fn the_title_is_in_the_accent_while_the_sidebar_has_the_keys() {
+        let mut sidebar = two_sessions();
+        let look = |buffer: &Buffer, x: u16| {
+            let cell = &buffer[(x, 0)];
+            let has = |modifier| cell.modifier.contains(modifier);
+            (cell.fg, has(Modifier::DIM), has(Modifier::BOLD))
+        };
+        let dim = (gruvbox::FG1, true, false);
+        let accent = |bold| (ACCENT, false, bold);
+        for (focused, rule, word) in
+            [(false, dim, dim), (true, accent(false), accent(true)), (false, dim, dim)]
+        {
+            assert_eq!(screen(&mut sidebar, focused, 32, 3)[0], "─ luneta ──────────────────────");
+            let buffer = drawn(&mut sidebar, focused, 32, 3);
+            // The first `─`, the word's `l` and the last `─`.
+            assert_eq!([0, 2, 30].map(|x| look(&buffer, x)), [rule, word, rule], "{focused}");
+        }
+    }
+
+    /// A brief the sidebar asked for has the keys until it closes: the title
+    /// is dim, and the legend gone, while the highlight stays where the keys
+    /// left it, for them to come back to.
+    #[test]
+    fn a_brief_lent_the_keys_dims_the_title_and_keeps_the_highlight() {
+        let mut sidebar = two_sessions();
+        let area = Rect::new(0, 0, 32, 12);
+        let draw = |sidebar: &mut Sidebar| {
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw(&mut buffer, area, moment(160_000));
+            in_gruvbox(&buffer, &[Color::Reset, LIT]);
+            let start = |y: u16| (0..9).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            let titled = (0..area.height).filter(|y| start(*y) == "─ luneta ").count();
+            let lit: Vec<u16> =
+                (0..area.height).filter(|y| buffer[(0, *y)].bg != Color::Reset).collect();
+            let word = &buffer[(2, 0)];
+            (titled, lit, word.fg, word.modifier.contains(Modifier::DIM))
+        };
+        sidebar.focus(Keys::Sidebar);
+        sidebar.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), moment(160_000));
+        let cursor = sidebar.cursor.clone();
+        let (titled, lit, fg, dim) = draw(&mut sidebar);
+        // The title and the legend's rule.
+        assert_eq!((titled, fg, dim, lit.is_empty()), (2, ACCENT, false, false));
+        sidebar.focus(Keys::Lent);
+        assert_eq!(draw(&mut sidebar), (1, lit.clone(), gruvbox::FG1, true));
+        sidebar.focus(Keys::Sidebar);
+        assert_eq!(draw(&mut sidebar), (2, lit, ACCENT, false));
+        assert_eq!(sidebar.cursor, cursor);
     }
 
     /// The rule along the top counts the agents on the rows, a folded
@@ -2941,11 +3047,11 @@ mod tests {
             ],
         ));
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
-        let rule = screen(&mut sidebar, false, 32, 3)[0].clone();
+        let rule = screen(&mut sidebar, false, 32, 4)[1].clone();
         assert_eq!((rule.as_str(), sidebar.turning()), ("─ 1 session ─────────── ⠋1 $2 ─", true));
-        let buffer = drawn(&mut sidebar, false, 32, 3);
+        let buffer = drawn(&mut sidebar, false, 32, 4);
         let at = |glyph: char| rule.chars().position(|c| c == glyph).expect("on the rule") as u16;
-        let dim = |x: u16| buffer[(x, 0)].modifier.contains(Modifier::DIM);
+        let dim = |x: u16| buffer[(x, 1)].modifier.contains(Modifier::DIM);
         let (spinner, dollar) = (at('⠋'), at('$'));
         assert_eq!(
             [spinner, spinner + 1, dollar, dollar + 1].map(dim),
@@ -2988,7 +3094,7 @@ mod tests {
             (cell.fg, cell.modifier.contains(Modifier::DIM))
         };
         let rule = |sidebar: &mut Sidebar| look(&collapsed(sidebar, 3, moment(160_000)), 0, 0);
-        let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 0);
+        let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 1);
         assert_eq!(rule(&mut sidebar), open);
         sidebar.lost("gone".to_owned());
         // The note, ` lunetad: gone`, takes the last line.
@@ -3012,8 +3118,8 @@ mod tests {
         unsocketed.socket = 0;
         sidebar.heard(host(vec![unstarted, session("y", 20, vec![]), unsocketed], Vec::new()));
         let lines = screen(&mut sidebar, false, 60, 5);
-        assert_eq!(lines[0], format!("─ 1 session {}", "─".repeat(47)));
-        assert_eq!(lines[2], format!(" ▾ y {}", "─".repeat(53)));
+        assert_eq!(lines[1], format!("─ 1 session {}", "─".repeat(47)));
+        assert_eq!(lines[3], format!(" ▾ y {}", "─".repeat(53)));
         assert_eq!(lines[4], " lunetad: 2 sessions with no start or socket, not listed");
     }
 
@@ -3051,20 +3157,20 @@ mod tests {
         sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
 
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
-        assert_eq!(lines[4..6], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
-        assert_eq!(lit, [4, 5]);
-        let (_, lit) = seen(&mut sidebar, true, 32, 13);
-        assert_eq!(lit, [4, 5]);
+        assert_eq!(lines[5..7], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
+        assert_eq!(lit, [5, 6]);
+        let (_, lit) = seen(&mut sidebar, true, 32, 14);
+        assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 13);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 14);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
-        assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
-        let (_, lit) = seen(&mut sidebar, false, 32, 13);
-        assert_eq!(lit, [4, 5]);
+        assert_eq!((lines[5].as_str(), lit.as_slice()), (nvim, &[4][..]));
+        let (_, lit) = seen(&mut sidebar, false, 32, 14);
+        assert_eq!(lit, [5, 6]);
         let fish = Place::Pane { session: listed("older", 10), pane: 1 };
-        assert_eq!(click(&mut sidebar, 10, 3, Rect::new(0, 0, 32, 13)), Asked::Go(fish));
-        let (_, lit) = seen(&mut sidebar, false, 32, 13);
-        assert_eq!(lit, [4, 5]);
+        assert_eq!(click(&mut sidebar, 10, 4, Rect::new(0, 0, 32, 14)), Asked::Go(fish));
+        let (_, lit) = seen(&mut sidebar, false, 32, 14);
+        assert_eq!(lit, [5, 6]);
     }
 
     #[test]
@@ -3090,7 +3196,7 @@ mod tests {
     #[test]
     fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
         let mut sidebar = two_sessions();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         let first = Some(Place::Pane { session: listed("older", 10), pane: 1 });
         let second = Some(Place::Pane { session: listed("older", 10), pane: 2 });
         let last = Some(Place::Pane { session: listed("newer", 20), pane: 1 });
@@ -3113,7 +3219,7 @@ mod tests {
             sidebar.key(&pressed, moment(160_000));
         }
         assert_eq!(sidebar.cursor, second);
-        let area = Rect::new(0, 0, 32, 13);
+        let area = Rect::new(0, 0, 32, 14);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -3124,12 +3230,12 @@ mod tests {
         assert_eq!(sidebar.cursor, first);
         // The triangle folds newer, and the highlight goes to its row.
         sidebar.key(&g, moment(160_000));
-        assert_eq!(click(&mut sidebar, 1, 5, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 6, area), Asked::Take);
         let folded = Some(Place::Session(listed("newer", 20)));
         sidebar.key(&g, moment(160_000));
         assert_eq!(sidebar.cursor, folded);
-        sidebar.focus(false);
-        sidebar.focus(true);
+        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Sidebar);
         sidebar.key(&g, moment(160_000));
         assert_eq!(sidebar.cursor, folded);
         let esc = key(KeyCode::Esc);
@@ -3169,8 +3275,8 @@ mod tests {
         assert_eq!(sidebar.cursor, Some(older.clone()));
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(older));
         let lines = screen(&mut sidebar, false, 32, 5);
-        assert!(lines[2].starts_with(" ▸ older"), "{lines:?}");
-        assert!(lines[3].starts_with(" ▾ newer"), "{lines:?}");
+        assert!(lines[3].starts_with(" ▸ older"), "{lines:?}");
+        assert!(lines[4].starts_with(" ▾ newer"), "{lines:?}");
         sidebar.key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), moment(160_000));
         assert_eq!(sidebar.rows.len(), 5);
     }
@@ -3242,9 +3348,9 @@ mod tests {
         let mut sidebar = two_sessions();
         let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
-        // Two lines, between the rule along the top and the legend at the
-        // bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 11)[2..4].to_vec();
+        // Two lines, between the title and the rule along the top and the
+        // legend at the bottom.
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 12)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -3278,13 +3384,13 @@ mod tests {
         let area = Rect::new(0, 0, 32, 10);
         screen(&mut sidebar, false, area.width, area.height);
         let pane = Place::Pane { session: listed("older", 10), pane: 2 };
-        assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Go(pane));
-        assert_eq!(click(&mut sidebar, 10, 2, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Go(pane));
+        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Take);
         assert!(!sidebar.folds.contains("older"));
-        assert_eq!(click(&mut sidebar, 1, 2, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
         assert!(sidebar.folds.contains("older"));
         let older = Place::Session(listed("older", 10));
-        assert_eq!(click(&mut sidebar, 10, 2, area), Asked::Go(older));
+        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Go(older));
     }
 
     /// A search with nothing typed keeps the folds, and the triangle folds as
@@ -3295,14 +3401,14 @@ mod tests {
         let area = Rect::new(0, 0, 32, 10);
         sidebar.key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), moment(160_000));
         screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(click(&mut sidebar, 1, 2, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
         assert!(sidebar.folds.contains("older"));
-        assert_eq!(click(&mut sidebar, 1, 2, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
         assert!(!sidebar.folds.contains("older"));
         assert!(sidebar.search.is_some());
         type_in(&mut sidebar, "older");
         screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(click(&mut sidebar, 1, 2, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
         assert!(!sidebar.folds.contains("older"));
     }
 
@@ -3317,7 +3423,7 @@ mod tests {
         let area = Rect::new(0, 0, 32, 5);
         screen(&mut sidebar, false, area.width, area.height);
         let x = Place::Session(listed("x", 10));
-        assert_eq!(click(&mut sidebar, 10, 2, area), Asked::Go(x.clone()));
+        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Go(x.clone()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(x));
     }
@@ -3327,12 +3433,12 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 11);
+        let area = Rect::new(0, 0, 32, 12);
         let lines = screen(&mut sidebar, true, area.width, area.height);
-        assert!(lines[4].starts_with("─ luneta ─"), "{lines:?}");
-        assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Take);
+        assert!(lines[5].starts_with("─ luneta ─"), "{lines:?}");
+        assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
         let fold = Place::Pane { session: listed("older", 10), pane: 1 };
-        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Go(fold));
+        assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Go(fold));
     }
 
     #[test]
@@ -3460,9 +3566,9 @@ mod tests {
             )],
             vec![agent("s", 1, Status::Idle, Some("fold"))],
         ));
-        let lines = screen(&mut sidebar, false, 32, 7);
+        let lines = screen(&mut sidebar, false, 32, 8);
         assert_eq!(
-            lines[3..],
+            lines[4..],
             [
                 "  •✓ \u{ec82} fold                 1m",
                 "     \u{e6ae} sudo -k nvim x",
@@ -3489,9 +3595,9 @@ mod tests {
         sidebar.heard(host(vec![session("s", 10, panes)], agents));
         // Up to the label's first letter, a character to a column.
         let start = |line: &String| line.chars().take(8).collect::<String>();
-        let lines = screen(&mut sidebar, false, 32, 7);
+        let lines = screen(&mut sidebar, false, 32, 8);
         assert_eq!(
-            lines[3..].iter().map(start).collect::<Vec<_>>(),
+            lines[4..].iter().map(start).collect::<Vec<_>>(),
             ["   C \u{ec82} x", "   S \u{ec82} x", "   ? \u{ec82} x", "   ? \u{ec82} x"]
         );
     }
@@ -3504,7 +3610,7 @@ mod tests {
         // The icon and the label's first letter, on the agent's row and on
         // nvim's under it.
         let dim = |y: u16| [5_u16, 7].map(|x| buffer[(x, y)].modifier.contains(Modifier::DIM));
-        assert_eq!((dim(3), dim(4)), ([false, false], [true, true]));
+        assert_eq!((dim(4), dim(5)), ([false, false], [true, true]));
     }
 
     /// The daemon cannot follow an agent to the session it is in when the
@@ -3524,8 +3630,8 @@ mod tests {
 
         let mut sidebar = Sidebar::default();
         sidebar.heard(host(sessions.to_vec(), agents.to_vec()));
-        let lines = screen(&mut sidebar, false, 32, 4);
-        assert_eq!(lines[3], "   ● \u{ec82} fold                 1m");
+        let lines = screen(&mut sidebar, false, 32, 5);
+        assert_eq!(lines[4], "   ● \u{ec82} fold                 1m");
 
         // Two sessions list a pane of its id where it works, and the agent
         // runs inside a shell: the one whose pane it titled holds it.
@@ -3612,8 +3718,9 @@ mod tests {
             Vec::new(),
         ));
         assert_eq!(
-            screen(&mut sidebar, false, 32, 11),
+            screen(&mut sidebar, false, 32, 12),
             [
+                "─ luneta ──────────────────────",
                 "─ 1 session ──────── ●1 •3 ⠋1 ─",
                 "",
                 " ▾ s ────────────────────── ●1",
@@ -3677,11 +3784,12 @@ mod tests {
         sidebar.titled("s | fish".to_owned());
         let lines = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, false, 32, 6, now).0
+            seen_at(sidebar, false, 32, 7, now).0
         };
         assert_eq!(
             lines(&mut sidebar, moment(160_000)),
             [
+                "─ luneta ──────────────────────",
                 "─ 1 session ────────────── •2 ─",
                 "",
                 " ▾ s ─────────────────────────",
@@ -3690,21 +3798,22 @@ mod tests {
                 "     \u{e795} w/a",
             ]
         );
-        assert!(!dimmed(&mut sidebar, 3, 3, moment(160_000)));
+        assert!(!dimmed(&mut sidebar, 3, 4, moment(160_000)));
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
-        assert!(lines(&mut sidebar, moment(160_000))[2].ends_with(" •"));
+        assert!(lines(&mut sidebar, moment(160_000))[3].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
 
         let s = |pane| Place::Pane { session: listed("s", 10), pane };
         sidebar.went(&s(2));
-        assert_eq!(lines(&mut sidebar, moment(160_000))[4], "▌    \u{e795} luneta/main");
+        assert_eq!(lines(&mut sidebar, moment(160_000))[5], "▌    \u{e795} luneta/main");
         sidebar.went(&s(1));
         lines(&mut sidebar, moment(160_500));
         lines(&mut sidebar, moment(161_500));
         sidebar.went(&s(3));
         assert_eq!(
-            lines(&mut sidebar, moment(162_000))[..5],
+            lines(&mut sidebar, moment(162_000))[..6],
             [
+                "─ luneta ──────────────────────",
                 "─ 1 session ────────────── •1 ─",
                 "",
                 " ▾ s ─────────────────────────",
@@ -3712,15 +3821,15 @@ mod tests {
                 "  •✓ \u{e795} cargo test          31s",
             ]
         );
-        assert!(dimmed(&mut sidebar, 3, 3, moment(162_000)));
+        assert!(dimmed(&mut sidebar, 3, 4, moment(162_000)));
 
         sidebar.went(&s(2));
         lines(&mut sidebar, moment(163_000));
         lines(&mut sidebar, moment(164_000));
         sidebar.went(&s(3));
         let seen = lines(&mut sidebar, moment(164_500));
-        assert_eq!(seen[0], format!("─ 1 session {}", "─".repeat(19)));
-        assert_eq!(seen[4], "     \u{e795} luneta/main");
+        assert_eq!(seen[1], format!("─ 1 session {}", "─".repeat(19)));
+        assert_eq!(seen[5], "     \u{e795} luneta/main");
     }
 
     /// `u` marks the highlighted pane unread, and gives its row the dot, with
@@ -3740,7 +3849,7 @@ mod tests {
         nvim(&mut sidebar, moment(160_000));
         sidebar.key(&u, moment(161_000));
         assert_eq!(nvim(&mut sidebar, moment(165_000)), "▌ •  \u{e6ae} nvim src/main.rs");
-        assert!(screen(&mut sidebar, true, 32, 7)[0].ends_with(" ●1 •1 ─"));
+        assert!(screen(&mut sidebar, true, 32, 7)[1].ends_with(" ●1 •1 ─"));
 
         sidebar.went(&older(1));
         nvim(&mut sidebar, moment(166_000));
@@ -3771,7 +3880,7 @@ mod tests {
     /// with luneta's window `watched`.
     fn agent_row(sidebar: &mut Sidebar, now: SystemTime, watched: bool) -> String {
         sidebar.ticked(now, steady(now), watched);
-        seen_at(sidebar, false, 32, 6, now).0[3].clone()
+        seen_at(sidebar, false, 32, 6, now).0[4].clone()
     }
 
     /// luneta's zellij on a pane while luneta's window does not have the
@@ -3811,7 +3920,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 12, now).0[3].clone()
+            seen_at(sidebar, true, 32, 13, now).0[4].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -3824,7 +3933,7 @@ mod tests {
         assert_eq!(row(&mut sidebar, moment(161_000)), new);
         sidebar.key(&key('u'), moment(161_000));
         assert_eq!(row(&mut sidebar, moment(161_000)), seen);
-        assert!(dimmed(&mut sidebar, 3, 3, moment(161_000)));
+        assert!(dimmed(&mut sidebar, 3, 4, moment(161_000)));
     }
 
     /// Two sessions whose servers made their sockets in one tick of the
@@ -3846,12 +3955,12 @@ mod tests {
         sidebar.went(&Place::Pane { session: listed("a", 10), pane: 1 });
         let lines = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, false, 32, 6, now).0
+            seen_at(sidebar, false, 32, 7, now).0
         };
         lines(&mut sidebar, moment(160_000));
         let lines = lines(&mut sidebar, moment(161_000));
         assert_eq!(
-            [&lines[3], &lines[5]],
+            [&lines[4], &lines[6]],
             ["▌  ✓ \u{ec82} fold                 1m", "  •✓ \u{ec82} fold                 1m"]
         );
     }
@@ -3925,7 +4034,7 @@ mod tests {
         let make = in_shell(1, going("make", 159, Front::Working));
         sidebar.heard(host(vec![session("s", 10, vec![make])], Vec::new()));
         let at = |millis| SystemTime::UNIX_EPOCH + Duration::from_millis(millis);
-        let row = |sidebar: &mut Sidebar, now| seen_at(sidebar, false, 32, 4, now).0[3].clone();
+        let row = |sidebar: &mut Sidebar, now| seen_at(sidebar, false, 32, 5, now).0[4].clone();
         assert_eq!(row(&mut sidebar, at(160_500)), "     \u{e795} luneta/main");
         assert!(!sidebar.turning());
         assert_eq!(row(&mut sidebar, at(161_000)), "   ⠋ \u{e795} make                 1s");
@@ -3975,7 +4084,7 @@ mod tests {
         };
         let number = |y: u16| (0..32).find(|x| buffer[(*x, y)].symbol() == "#");
         let colour = |y: u16| number(y).map(|x| buffer[(x, y)].fg);
-        let branches: Vec<String> = [4, 6, 8, 10].into_iter().map(line).collect();
+        let branches: Vec<String> = [5, 7, 9, 11].into_iter().map(line).collect();
         assert_eq!(
             branches,
             [
@@ -3985,9 +4094,9 @@ mod tests {
                 "       old",
             ]
         );
-        assert_eq!(colour(4), Some(gruvbox::GREEN));
-        assert_eq!(colour(6), Some(gruvbox::PURPLE));
-        assert_eq!(colour(8), Some(gruvbox::GREY));
+        assert_eq!(colour(5), Some(gruvbox::GREEN));
+        assert_eq!(colour(7), Some(gruvbox::PURPLE));
+        assert_eq!(colour(9), Some(gruvbox::GREY));
     }
 
     #[test]
@@ -4067,7 +4176,7 @@ mod tests {
             let mut sidebar = searched();
             type_in(&mut sidebar, &format!("/{typed}"));
             assert_eq!(rows_shown(&mut sidebar), rows, "{typed}");
-            let rule = screen(&mut sidebar, true, 32, 16)[0].clone();
+            let rule = screen(&mut sidebar, true, 32, 16)[1].clone();
             assert!(rule.starts_with("─ 3 sessions ─"), "{typed}: {rule}");
             let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(best), "{typed}");
@@ -4114,7 +4223,7 @@ mod tests {
             let asked = if let Some(code) = close {
                 sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE), moment(160_000))
             } else {
-                sidebar.focus(false);
+                sidebar.focus(Keys::Zellij);
                 Asked::Nothing
             };
             let pix = Place::Pane { session: listed("bipa", 10), pane: 3 };
@@ -4157,7 +4266,7 @@ mod tests {
     #[test]
     fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
         let mut sidebar = two_sessions();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[11..], [
@@ -4185,7 +4294,7 @@ mod tests {
         let tab = Open::Tab { session: "newer".to_owned(), cwd: "/w/b".to_owned() };
         let asked = Asked::OpenThere { menu: 2, place: newer, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
-        sidebar.focus(false);
+        sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
     }
 
@@ -4211,7 +4320,7 @@ mod tests {
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
         }];
         sidebar.heard(host);
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         let fold = Note {
             session: "older".to_owned(),
             pane: 1,
@@ -4257,7 +4366,7 @@ mod tests {
     #[test]
     fn a_delete_asks_first_while_lunetad_does_not_answer() {
         let mut sidebar = two_sessions();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         sidebar.lost("gone".to_owned());
         sidebar.step(2);
         type_in(&mut sidebar, "d");
@@ -4275,7 +4384,7 @@ mod tests {
     #[test]
     fn a_delete_goes_by_what_zellij_closes_and_the_highlight_past_it() {
         let mut sidebar = two_sessions();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         sidebar.step(1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let closes = Asked::Closes { menu: 1, session: "older".to_owned(), pane: 2 };
@@ -4299,7 +4408,7 @@ mod tests {
     #[test]
     fn a_delete_that_ends_an_agent_at_work_asks_and_looks_again() {
         let mut sidebar = two_sessions();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
         let closes = || Asked::Closes { menu: 1, session: "older".to_owned(), pane: 1 };
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
@@ -4321,7 +4430,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
         assert_eq!(sidebar.menu.as_ref().and_then(Menu::leaving), Some("newer"));
         // It says where it goes for as long as it takes, with the focus or not.
-        sidebar.focus(false);
+        sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_some());
     }
 
@@ -4332,7 +4441,7 @@ mod tests {
     #[test]
     fn no_session_goes_while_luneta_s_zellij_is_on_its_way_to_one() {
         let mut sidebar = two_sessions();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         sidebar.sending("newer");
         let moving = |sidebar: &Sidebar| {
             sidebar.menu.is_none()
@@ -4425,11 +4534,11 @@ mod tests {
     #[test]
     fn v_selects_sessions_that_shifted_j_and_k_move() {
         let mut sidebar = searched();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "vjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, (0..6).collect::<Vec<_>>());
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 3), Rect::new(0, 0, 32, 20));
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 20));
         // Shift and all, as a terminal sends it as text.
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         sidebar.key(&shifted('J'), moment(160_000));
@@ -4455,7 +4564,7 @@ mod tests {
     #[test]
     fn a_folded_session_is_selected_from_its_row() {
         let mut sidebar = searched();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "GhvkK");
         let (rows, _) = drawn_rows(&mut sidebar);
         assert_eq!(rows[..4], [" ▾ notes", "     \u{e795} me/Documents", " ▸ zed", " ▾ bipa"]);
@@ -4477,32 +4586,32 @@ mod tests {
         let (before, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
-        assert_eq!(act(MouseEventKind::Down(left), 10, 3), Asked::Nothing);
-        assert_eq!(act(MouseEventKind::Drag(left), 20, 3), Asked::Nothing);
+        assert_eq!(act(MouseEventKind::Down(left), 10, 4), Asked::Nothing);
+        assert_eq!(act(MouseEventKind::Drag(left), 20, 4), Asked::Nothing);
         let api = Place::Pane { session: listed("bipa", 10), pane: 1 };
-        assert_eq!(act(MouseEventKind::Up(left), 20, 3), Asked::Go(api));
+        assert_eq!(act(MouseEventKind::Up(left), 20, 4), Asked::Go(api));
 
-        assert_eq!(act(MouseEventKind::Down(left), 10, 3), Asked::Nothing);
-        assert_eq!(act(MouseEventKind::Drag(left), 10, 5), Asked::Nothing);
-        assert_eq!(act(MouseEventKind::Up(left), 10, 5), Asked::Nothing);
+        assert_eq!(act(MouseEventKind::Down(left), 10, 4), Asked::Nothing);
+        assert_eq!(act(MouseEventKind::Drag(left), 10, 6), Asked::Nothing);
+        assert_eq!(act(MouseEventKind::Up(left), 10, 6), Asked::Nothing);
         assert_eq!(drawn_rows(&mut sidebar).0, before);
 
         // notes's row, under bipa's, past zed's.
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 11), area), Asked::Take);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 7), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 12), area), Asked::Take);
         let last = [" ▾ zed", "     \u{eb31} htop", "       z-e-d", "       less logs", " ▾ notes"];
         let (rows, lit) = drawn_rows(&mut sidebar);
         assert_eq!(rows[4..9], last);
         assert_eq!(lit, [8, 9]);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 11), area), Asked::Nothing);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 12), area), Asked::Nothing);
         assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("notes", 20), pane: 1 }));
         sidebar.heard(searched().host.unwrap());
         assert_eq!(&drawn_rows(&mut sidebar).0[4..9], last);
 
         // zed's row, under bipa's, to the top.
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 2), area);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 2), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 7), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
         let (rows, _) = drawn_rows(&mut sidebar);
         assert_eq!(rows[..5], [" ▾ zed", "     \u{eb31} htop", "       z-e-d", "       less logs", " ▾ bipa"]);
     }
@@ -4518,14 +4627,14 @@ mod tests {
         let left = MouseButton::Left;
         // zed's row, to the top.
         let lift_zed = |sidebar: &mut Sidebar| {
-            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 8), area);
-            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 2), area);
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 9), area);
+            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
             assert_ne!(drawn_rows(sidebar).0, listed);
         };
         lift_zed(&mut sidebar);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 2), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 3), area);
         assert_eq!(drawn_rows(&mut sidebar), (listed.clone(), (6..10).collect()));
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 2), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 3), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_zed(&mut sidebar);
@@ -4534,8 +4643,8 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_zed(&mut sidebar);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 2), area);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 2), area);
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
@@ -4545,23 +4654,23 @@ mod tests {
     #[test]
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         let area = Rect::new(0, 0, 32, 20);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 8), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 9), area);
         type_in(&mut sidebar, "vn");
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 2), area);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 2), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
         let (rows, lit) = drawn_rows(&mut sidebar);
         assert_eq!(rows[0], " ▾ zed");
         assert_eq!(lit, [1]);
         assert!(sidebar.menu.is_none());
 
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area), Asked::Nothing);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area), Asked::Nothing);
     }
 
     /// What is typed in the search narrows the rows, and a press on a
@@ -4569,15 +4678,15 @@ mod tests {
     #[test]
     fn a_search_typed_lifts_no_session() {
         let mut sidebar = searched();
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "/z");
         let area = Rect::new(0, 0, 32, 20);
         let (listed, _) = drawn_rows(&mut sidebar);
         assert_eq!(listed[0], " ▾ zed");
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 2), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 5), area), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area), Asked::Nothing);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area), Asked::Nothing);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area), Asked::Nothing);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
@@ -4588,12 +4697,12 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 13);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 13)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 14);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 14)[HEADER].clone();
         assert_eq!(first(&mut sidebar), " ▾ bipa ──────────────────────");
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 2), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 5), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area);
         let start = steady(moment(160_000));
         let tick = |sidebar: &mut Sidebar, millis: u64| {
             let at = moment(160_000 + millis);
@@ -4610,7 +4719,7 @@ mod tests {
         // The last four rows: bipa's, as it lands last.
         assert_eq!(first(&mut sidebar), " ▾ bipa ──────────────────────");
         assert!(!sidebar.scrolling());
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 2), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
         assert_eq!(tick(&mut sidebar, 660), "       less logs");
     }
 
@@ -4636,7 +4745,7 @@ mod tests {
             let order = Order::within(file.clone());
             let mut sidebar = Sidebar::new(Folds::default(), News::default(), order);
             sidebar.heard(searched().host.unwrap());
-            sidebar.focus(true);
+            sidebar.focus(Keys::Sidebar);
             sidebar
         };
         let (mut here, mut there) = (deaf(), deaf());
@@ -4652,9 +4761,9 @@ mod tests {
         let area = Rect::new(0, 0, 32, 20);
         drawn_rows(&mut there);
         let left = MouseButton::Left;
-        there.mouse(mouse(MouseEventKind::Down(left), 10, 2), area);
-        there.mouse(mouse(MouseEventKind::Drag(left), 10, 11), area);
-        there.mouse(mouse(MouseEventKind::Up(left), 10, 11), area);
+        there.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
+        there.mouse(mouse(MouseEventKind::Drag(left), 10, 12), area);
+        there.mouse(mouse(MouseEventKind::Up(left), 10, 12), area);
         assert_eq!(names_listed(&there), ["notes", "bipa", "zed"]);
         assert_eq!(names_listed(&deaf()), ["notes", "bipa", "zed"]);
     }
@@ -4675,7 +4784,7 @@ mod tests {
             ],
             Vec::new(),
         ));
-        sidebar.focus(true);
+        sidebar.focus(Keys::Sidebar);
         // The later x, up beside the first, and down with it, both lit.
         type_in(&mut sidebar, "jjvK");
         assert_eq!(names_listed(&sidebar), ["x", "x", "y", "z"]);
@@ -4686,10 +4795,10 @@ mod tests {
         // The later x, by its row, under z, the first with it.
         let area = Rect::new(0, 0, 32, 20);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 5), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 7), area);
         assert_eq!(drawn_rows(&mut sidebar).1, [3, 4]);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 7), area);
         assert_eq!(names_listed(&sidebar), ["y", "z", "x", "x"]);
     }
 }
