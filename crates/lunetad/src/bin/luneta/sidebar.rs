@@ -524,7 +524,7 @@ pub struct Sidebar {
     cursor: Option<Place>,
     /// Whether the key before was `Top::First`'s, which moves the highlight
     /// to the first row once pressed again. Any other key drops it, `Esc`
-    /// doing nothing else, and so does the focus going.
+    /// doing nothing else, and so do a click, the wheel and the focus going.
     first_pressed: bool,
     /// The `here_row` the view last scrolled to show while the sidebar did
     /// not have the focus, after which the wheel can scroll it out of sight.
@@ -1490,6 +1490,14 @@ impl Sidebar {
     /// the notes goes nowhere, as the rows under them are not on screen. The
     /// wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
+        // A click or the wheel drops a `g` pressed before it, as a key does.
+        // The pointer moving does not: luneta hears every move.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) {
+            self.first_pressed = false;
+        }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 self.top = (self.top + 3).min(self.lines().saturating_sub(1));
@@ -2562,8 +2570,9 @@ mod tests {
     }
 
     /// `G` and `End` take the highlight to the last row, and `gg` and `Home`
-    /// to the first. A key between the two `g`s drops the first, and so does
-    /// the focus going. `Esc` after a `g` does nothing else, and leaves the
+    /// to the first. A key between the two `g`s drops the first, with `Ctrl`
+    /// too, and so do the wheel, a click and the focus going, but not the
+    /// pointer moving. `Esc` after a `g` does nothing else, and leaves the
     /// sidebar pressed again.
     #[test]
     fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
@@ -2586,14 +2595,30 @@ mod tests {
         assert_eq!(sidebar.cursor, last);
         sidebar.key(&key(KeyCode::Home), moment(160_000));
         assert_eq!(sidebar.cursor, first);
-        for pressed in [key(KeyCode::End), g, key(KeyCode::Char('k')), g] {
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        for pressed in [key(KeyCode::End), g, key(KeyCode::Char('k')), g, ctrl_x, g] {
             sidebar.key(&pressed, moment(160_000));
         }
         assert_eq!(sidebar.cursor, second);
+        let area = Rect::new(0, 0, 32, 12);
+        screen(&mut sidebar, true, area.width, area.height);
+        sidebar.mouse(MouseEvent { kind: MouseEventKind::ScrollUp, ..click(0, 0) }, area);
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.cursor, second);
+        // luneta hears every move of the pointer.
+        sidebar.mouse(MouseEvent { kind: MouseEventKind::Moved, ..click(0, 0) }, area);
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.cursor, first);
+        // The triangle folds newer, and the highlight goes to its row.
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.mouse(click(1, 5), area), Asked::Nothing);
+        let folded = Some(Place::Session(listed("newer", 20)));
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.cursor, folded);
         sidebar.focus(false);
         sidebar.focus(true);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(sidebar.cursor, second);
+        assert_eq!(sidebar.cursor, folded);
         let esc = key(KeyCode::Esc);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Nothing);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
