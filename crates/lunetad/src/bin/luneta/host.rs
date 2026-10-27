@@ -45,7 +45,7 @@ use crate::keys;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Look, Looked};
-use crate::sidebar::{self, Asked, Place, Sidebar};
+use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::width::Width;
 use crate::zellij::{self, After, Closes, Refuge, SessionName};
@@ -882,9 +882,13 @@ impl App {
     /// the sidebar when it loses them.
     fn give(&mut self, side: Focus) {
         let (had, has) = (self.focus.zellij(), side.zellij());
-        // A brief leaves the sidebar as it stands, highlight and all, for the
-        // keys to go back to as it closes.
-        self.sidebar.focus(matches!(side, Focus::Sidebar | Focus::Brief(_)));
+        self.sidebar.focus(match side {
+            Focus::Sidebar => Keys::Sidebar,
+            // A brief leaves the sidebar as it stands, highlight and all, for
+            // the keys to go back to as it closes.
+            Focus::Brief(_) => Keys::Lent,
+            Focus::Zellij | Focus::Collapsed => Keys::Zellij,
+        });
         self.focus = side;
         if self.focused
             && has != had

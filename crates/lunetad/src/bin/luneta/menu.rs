@@ -49,8 +49,9 @@ const BRIEF: char = 'b';
 const BRIEF_NAME: &str = "Brief";
 
 /// What the rule over the menu's first group, and over the legend, names
-/// them, and what it names the search box.
-const TITLE: &str = "luneta";
+/// them, and the sidebar's first line, as zellij's frame had it on the
+/// plugin's; and what it names the search box.
+pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
 
 /// What follows a group's name: it opens, as a folded session does.
