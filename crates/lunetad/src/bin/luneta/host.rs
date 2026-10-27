@@ -531,11 +531,13 @@ impl App {
     }
 
     /// Takes zellij's client to the pane the sidebar lists after the one it
-    /// is on.
+    /// is on. The sidebar gives the keys up first, which closes a search: the
+    /// pane after is the one after in every row, not in the rows a search
+    /// leaves, which pass over panes and open folded sessions.
     fn next(&mut self) {
+        self.leave();
         if let Some(place) = self.sidebar.next_pane() {
             self.go(&place);
-            self.leave();
         }
     }
 
