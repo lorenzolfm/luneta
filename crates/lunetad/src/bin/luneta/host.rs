@@ -733,8 +733,9 @@ impl App {
         }
         // A press on its edge drags it wider or narrower, and leaves the keys
         // where they are.
-        let edge = sidebar.right().checked_sub(1);
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && edge == Some(mouse.column) {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && sidebar::edge(sidebar) == Some(mouse.column)
+        {
             self.held = Held::Edge { dragged: false };
             return;
         }

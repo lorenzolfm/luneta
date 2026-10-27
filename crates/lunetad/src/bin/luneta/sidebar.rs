@@ -2149,7 +2149,6 @@ impl Sidebar {
             let count = cut(&count.to_string(), width.saturating_sub(glyph.width()));
             lines.push(Line::from(vec![Span::styled(glyph, style), Span::styled(count, style)]));
         }
-        lines.resize(usize::from(area.height), Line::default());
         put(buffer, area, &lines);
     }
 
@@ -2256,14 +2255,22 @@ fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
     ]
 }
 
+/// The column of the edge of a sidebar drawn into `area`, its last, where it
+/// has any: where it is drawn, and where a press takes it to drag.
+pub fn edge(area: Rect) -> Option<u16> {
+    area.width.checked_sub(1).map(|last| area.x + last)
+}
+
 /// Puts `lines` into `area` of `buffer`, one to each of its lines, with what
-/// was there before gone, and the edge down its last column.
+/// was there before gone, and the edge down its last column, on every line
+/// of it, however few `lines` there are.
 fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
-    let edge = area.width.checked_sub(1).map(|last| area.x + last);
+    buffer.set_style(area, Style::reset().fg(gruvbox::FG1));
     for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
-        buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset().fg(gruvbox::FG1));
         buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
-        if let Some(x) = edge {
+    }
+    if let Some(x) = edge(area) {
+        for y in area.top()..area.bottom() {
             buffer.set_string(x, y, EDGE, Style::new().add_modifier(Modifier::DIM));
         }
     }
