@@ -20,6 +20,7 @@ mod sidebar;
 mod skills;
 mod state;
 mod watch;
+mod width;
 mod zellij;
 
 use std::path::PathBuf;

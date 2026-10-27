@@ -38,8 +38,13 @@ use crate::own::{Look, Looked, OwnClient};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
 
-/// How many columns the sidebar takes, as the plugin's column did.
+/// How many columns the sidebar takes until its edge is dragged, as the
+/// plugin's column did.
 pub const COLUMNS: u16 = 32;
+
+/// The fewest columns the sidebar is dragged to, where the terminal has twice
+/// as many: enough for a session's name on its row.
+pub const NARROWEST: u16 = 16;
 
 /// How many columns the sidebar takes collapsed: a count's glyph, two digits
 /// of it, and the blank column it keeps off what is beside it.

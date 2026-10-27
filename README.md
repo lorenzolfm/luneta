@@ -735,6 +735,14 @@ each folded session is an empty file named for it in
 luneta watches. A fold keeps to the session's name, so a session started again
 under it comes back folded.
 
+The sidebar is 32 columns wide until you drag its edge, its last column, with
+the mouse: from 16 columns to half the terminal, zellij taking the rest. A
+press on the edge leaves the keys where they are. The width is kept as you let
+go, in `$XDG_STATE_HOME/luneta/width`, or `~/.local/state/luneta/width`, and
+every luneta opens that wide from its next start: one already running keeps
+its own. Collapsed, the strip stays four columns wide, and opens to the width
+you dragged.
+
 It is the first step, and the plugin's sidebar has more than this one does
 yet: your groups in its menu and the brief come over one at a time. Until
 then, run luneta without the plugin's sidebar, or the two stand side by side:

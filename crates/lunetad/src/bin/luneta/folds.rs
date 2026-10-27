@@ -35,7 +35,7 @@ pub struct Folds {
 impl Folds {
     /// The folds every luneta on the host shares, as they stand.
     pub fn shared() -> Self {
-        match state::folder("folded") {
+        match state::path("folded") {
             Some(dir) => Folds::within(dir),
             None => Folds {
                 lost: Some("neither XDG_STATE_HOME nor HOME is set, to keep them in".to_owned()),
