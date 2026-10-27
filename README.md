@@ -754,7 +754,8 @@ out. The plugin's rule does not count the agents in `shell`. Collapsed, the
 sidebar keeps three of those counts, one to a line under a short rule: the
 panes with a `•`, those at work, and the agents in `shell`. The short rule is
 red while lunetad does not answer, and the counts under it are the last it
-gave.
+gave. A dim `│` down the sidebar's last column, open or collapsed, parts it
+from zellij.
 
 A fold is the same in every luneta on the host, and lasts until you unfold it:
 each folded session is an empty file named for it in
@@ -762,8 +763,8 @@ each folded session is an empty file named for it in
 luneta watches. A fold keeps to the session's name, so a session started again
 under it comes back folded.
 
-The sidebar is 32 columns wide until you drag its edge, its last column, with
-the mouse: from 16 columns to half the terminal, zellij taking the rest. A
+The sidebar is 32 columns wide until you drag its edge, that `│`, with the
+mouse: from 16 columns to half the terminal, zellij taking the rest. A
 press on the edge leaves the keys where they are. The width is kept as you let
 go, in `$XDG_STATE_HOME/luneta/width`, or `~/.local/state/luneta/width`, and
 every luneta opens that wide from its next start: one already running keeps

@@ -58,7 +58,7 @@ pub const COLUMNS: u16 = 32;
 pub const NARROWEST: u16 = 16;
 
 /// How many columns the sidebar takes collapsed: a count's glyph, two digits
-/// of it, and the blank column it keeps off what is beside it.
+/// of it, and the edge.
 pub const COLLAPSED: u16 = 4;
 
 /// What marks the pane luneta's zellij is on, in its first column, whether
@@ -71,6 +71,9 @@ const NEW: &str = "•";
 const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
+/// What runs down the sidebar's last column, its edge, between it and zellij,
+/// open or collapsed.
+const EDGE: &str = "│";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -2070,8 +2073,8 @@ impl Sidebar {
     /// a selection holds, and on the pane luneta's zellij is on while it does
     /// not, softer, which the view scrolls to show as the pane changes. A
     /// session the mouse lifted has it, where it lands, the others making room
-    /// for it. Its last column is left blank, to keep it off what is beside
-    /// it.
+    /// for it. Its last column is the edge, dim, as the rule along the top
+    /// is.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
@@ -2150,7 +2153,7 @@ impl Sidebar {
 
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
-    /// to the room it has. Its last column is left blank, as the sidebar's is.
+    /// to the room it has. Its last column is the edge, as the sidebar's is.
     /// The rule is in `ERROR` while the daemon does not answer, as the note
     /// that says so is, which the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
@@ -2169,7 +2172,6 @@ impl Sidebar {
             let count = cut(&count.to_string(), width.saturating_sub(glyph.width()));
             lines.push(Line::from(vec![Span::styled(glyph, style), Span::styled(count, style)]));
         }
-        lines.resize(usize::from(area.height), Line::default());
         put(buffer, area, &lines);
     }
 
@@ -2305,12 +2307,24 @@ fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
     ]
 }
 
+/// The column of the edge of a sidebar drawn into `area`, its last, where it
+/// has any: where it is drawn, and where a press takes it to drag.
+pub fn edge(area: Rect) -> Option<u16> {
+    area.width.checked_sub(1).map(|last| area.x + last)
+}
+
 /// Puts `lines` into `area` of `buffer`, one to each of its lines, with what
-/// was there before gone, and its last column left blank.
+/// was there before gone, and the edge down its last column, on every line
+/// of it, however few `lines` there are.
 fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
+    buffer.set_style(area, Style::reset().fg(gruvbox::FG1));
     for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
-        buffer.set_style(Rect::new(area.x, y, area.width, 1), Style::reset().fg(gruvbox::FG1));
         buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
+    }
+    if let Some(x) = edge(area) {
+        for y in area.top()..area.bottom() {
+            buffer.set_string(x, y, EDGE, Style::new().add_modifier(Modifier::DIM));
+        }
     }
 }
 
@@ -2898,7 +2912,8 @@ mod tests {
         }
     }
 
-    /// The sidebar `width` columns wide and `height` tall, as text.
+    /// The sidebar `width` columns wide and `height` tall, as text, up to its
+    /// edge.
     fn screen(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Vec<String> {
         seen(sidebar, focused, width, height).0
     }
@@ -2925,7 +2940,7 @@ mod tests {
         let buffer = drawn_at(sidebar, focused, width, height, now);
         let lines = (0..height)
             .map(|y| {
-                let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                let line: String = (0..width - 1).map(|x| buffer[(x, y)].symbol()).collect();
                 line.trim_end().to_owned()
             })
             .collect();
@@ -3062,8 +3077,8 @@ mod tests {
     /// Collapsed, the sidebar keeps under its rule only the counts of the
     /// panes with the dot, of the agents at work and of those in a shell, and
     /// none of the agents that wait for you. A count is cut to the columns it
-    /// has, the last kept blank, and a command counts once it has run a
-    /// second, as on the rule along the top.
+    /// has before the edge, and a command counts once it has run a second, as
+    /// on the rule along the top.
     #[test]
     fn collapsed_the_sidebar_keeps_the_dots_the_work_and_the_shells() {
         let mut sidebar = Sidebar::default();
@@ -3075,7 +3090,7 @@ mod tests {
         sidebar.heard(host(vec![session("s", 10, panes)], agents));
         let strip = |sidebar: &mut Sidebar, now| {
             let buffer = collapsed(sidebar, 6, now);
-            let line = |y| (0..COLLAPSED).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            let line = |y| (0..COLLAPSED - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>();
             (0..6).map(|y| line(y).trim_end().to_owned()).collect::<Vec<_>>()
         };
         assert_eq!(strip(&mut sidebar, moment(160_500)), ["───", "", "•1", "$1…", "", ""]);
@@ -3105,6 +3120,29 @@ mod tests {
         assert_eq!(rule(&mut sidebar), note);
         sidebar.heard(idle_agent());
         assert_eq!(rule(&mut sidebar), open);
+    }
+
+    /// The sidebar's last column is its edge, open or collapsed: a `│` down
+    /// every line, drawn as the rule along the top is, dim, and on the
+    /// terminal's background beside the highlight too.
+    #[test]
+    fn the_sidebar_ends_in_an_edge_drawn_as_its_rule_is() {
+        let mut sidebar = two_sessions();
+        let look = |buffer: &Buffer, x: u16, y: u16| {
+            let cell = &buffer[(x, y)];
+            (cell.symbol().to_owned(), cell.fg, cell.bg, cell.modifier)
+        };
+        let edge = |buffer: &Buffer| {
+            let x = buffer.area.width - 1;
+            (0..buffer.area.height).map(|y| look(buffer, x, y)).collect::<Vec<_>>()
+        };
+        let open = drawn(&mut sidebar, true, COLUMNS, 10);
+        assert!((0..10).any(|y| open[(0, y)].bg == LIT), "a row is lit");
+        let (rule, fg, bg, modifier) = look(&open, 0, 0);
+        assert_eq!((rule.as_str(), modifier), ("─", Modifier::DIM));
+        let drawn = ("│".to_owned(), fg, bg, modifier);
+        assert_eq!(edge(&open), vec![drawn.clone(); 10]);
+        assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![drawn; 10]);
     }
 
     /// A daemon of another build can list a session with no start, or with
@@ -4079,7 +4117,7 @@ mod tests {
 
         let buffer = drawn(&mut sidebar, false, 32, 12);
         let line = |y: u16| {
-            let line: String = (0..32).map(|x| buffer[(x, y)].symbol()).collect();
+            let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
             line.trim_end().to_owned()
         };
         let number = |y: u16| (0..32).find(|x| buffer[(*x, y)].symbol() == "#");

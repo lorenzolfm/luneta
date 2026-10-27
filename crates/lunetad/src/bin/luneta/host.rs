@@ -644,12 +644,6 @@ impl App {
             return;
         }
         if chord == COLLAPSE {
-            // The strip has no edge nor rows to hold: what the mouse holds of
-            // either is let go, as a release would let it go. A press held on
-            // the rows would keep the mouse from zellij, and the strip never
-            // hears the release.
-            self.let_go();
-            self.sidebar.let_go();
             let collapsed = matches!(self.focus, Focus::Collapsed);
             let other = if collapsed { Focus::Zellij } else { Focus::Collapsed };
             self.give(other);
@@ -733,8 +727,9 @@ impl App {
         }
         // A press on its edge drags it wider or narrower, and leaves the keys
         // where they are.
-        let edge = sidebar.right().checked_sub(1);
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && edge == Some(mouse.column) {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && sidebar::edge(sidebar) == Some(mouse.column)
+        {
             self.held = Held::Edge { dragged: false };
             return;
         }
@@ -881,6 +876,14 @@ impl App {
     /// them, as a terminal tells a program in it of the window's focus, and
     /// the sidebar when it loses them.
     fn give(&mut self, side: Focus) {
+        if matches!(side, Focus::Collapsed) {
+            // The strip has no edge to drag nor rows to hold: what the mouse
+            // holds of either is let go, as a release would let it go. A press
+            // held on the rows would keep the mouse from zellij, and the strip
+            // never hears the release.
+            self.let_go();
+            self.sidebar.let_go();
+        }
         let (had, has) = (self.focus.zellij(), side.zellij());
         self.sidebar.focus(match side {
             Focus::Sidebar => Keys::Sidebar,
