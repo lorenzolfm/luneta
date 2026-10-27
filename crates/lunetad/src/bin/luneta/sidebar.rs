@@ -331,13 +331,14 @@ pub enum Asked {
 const HEADER: usize = 2;
 
 /// What the rule along the top counts, of the rows: the sessions, and the
-/// agents in their panes that wait for you and that are at work, a folded
-/// session's among them.
+/// agents in their panes that wait for you, that are at work and that are in
+/// a shell, a folded session's among them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Counts {
     sessions: usize,
     waiting: usize,
     busy: usize,
+    shell: usize,
 }
 
 #[derive(Default)]
@@ -650,6 +651,7 @@ impl Sidebar {
             let busy = marks().filter(|mark| **mark == Mark::Busy).count();
             counts.waiting += waiting;
             counts.busy += busy;
+            counts.shell += marks().filter(|mark| **mark == Mark::Shell).count();
             let folded = self.folds.contains(&listed.name);
             let named = finder.as_ref().and_then(|finder| finder.session(&listed.name));
             // A search looks inside a folded session too.
@@ -1057,12 +1059,13 @@ impl Sidebar {
     }
 
     /// The rule along the top: how many sessions the rows list, how many
-    /// agents on them wait for you, and how many are at work.
+    /// agents on them wait for you, how many are at work, and how many are in
+    /// a shell.
     fn header(&self, width: usize, frame: usize) -> Line<'static> {
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let Counts { sessions, waiting, busy } = self.counts;
+        let Counts { sessions, waiting, busy, shell } = self.counts;
         let mut counts: Vec<Span<'static>> = Vec::new();
-        for (count, mark) in [(waiting, Mark::Waiting), (busy, Mark::Busy)] {
+        for (count, mark) in [(waiting, Mark::Waiting), (busy, Mark::Busy), (shell, Mark::Shell)] {
             if count == 0 {
                 continue;
             }
@@ -1694,19 +1697,34 @@ mod tests {
     }
 
     /// The rule along the top counts the agents on the rows, a folded
-    /// session's among them, and none that no row holds.
+    /// session's among them, and none that no row holds. Those in a shell
+    /// are counted dim, as their mark is.
     #[test]
     fn the_top_rule_counts_the_agents_the_rows_hold() {
         let mut sidebar = Sidebar::default();
-        let mut outside = agent("s", 2, Status::Waiting, None);
+        let mut outside = agent("s", 4, Status::Waiting, None);
         outside.zellij = None;
+        let panes = (1..=3).map(|id| pane(id, 0, "/w/a", "claude")).collect();
         sidebar.heard(host(
-            vec![session("s", 10, vec![pane(1, 0, "/w/a", "claude")])],
-            vec![agent("s", 1, Status::Busy, None), outside],
+            vec![session("s", 10, panes)],
+            vec![
+                agent("s", 1, Status::Busy, None),
+                agent("s", 2, Status::Shell, None),
+                agent("s", 3, Status::Shell, None),
+                outside,
+            ],
         ));
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         let rule = screen(&mut sidebar, false, 32, 3)[0].clone();
-        assert_eq!((rule.as_str(), sidebar.turning()), ("─ 1 session ────────────── ⠋1 ─", true));
+        assert_eq!((rule.as_str(), sidebar.turning()), ("─ 1 session ─────────── ⠋1 $2 ─", true));
+        let buffer = drawn(&mut sidebar, false, 32, 3);
+        let at = |glyph: char| rule.chars().position(|c| c == glyph).expect("on the rule") as u16;
+        let dim = |x: u16| buffer[(x, 0)].modifier.contains(Modifier::DIM);
+        let (spinner, dollar) = (at('⠋'), at('$'));
+        assert_eq!(
+            [spinner, spinner + 1, dollar, dollar + 1].map(dim),
+            [false, false, true, true]
+        );
     }
 
     /// A daemon of another build can list a session with no start, which the

@@ -629,6 +629,11 @@ ended keeps its mark until the shell runs another: the `•` of what you have
 yet to see has not come over yet. A shell without the hook has no marks
 here, where the plugin's sidebar read its title.
 
+The rule along the top counts the sessions, the agents and commands that wait
+for you, those at work, and the agents in `shell`, as `$2`, dimmed as their
+`$` is, a folded session's too. A count of none is left out. The plugin's rule
+does not count the agents in `shell`.
+
 A fold is the same in every luneta on the host, and lasts until you unfold it:
 each folded session is an empty file named for it in
 `$XDG_STATE_HOME/luneta/folded`, or `~/.local/state/luneta/folded`, which every
