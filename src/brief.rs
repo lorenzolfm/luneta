@@ -77,7 +77,7 @@ for id do
 done"#;
 
 /// The brief's pane: what it is a brief of, `claude -p` on the notes with the
-/// zellij of the pane kept from it, so that claude-ps places no agent in the
+/// zellij of the pane kept from it, so that the daemon places no agent in the
 /// pane, and then any key closes the pane. `claude -p` with a stdin waits for
 /// it to end. Keys pressed while the model writes are not the one that closes
 /// the pane.
@@ -371,7 +371,7 @@ impl Note {
         }
         match told {
             Told::NoId => {
-                lines.push("Its transcript is unknown: claude-ps names none for it.".to_owned());
+                lines.push("Its transcript is unknown: Claude Code names none for it.".to_owned());
             },
             Told::NotFound => lines.push("Its transcript was not found.".to_owned()),
             Told::Read(digest) => lines.extend(digest.lines()),
@@ -382,7 +382,7 @@ impl Note {
 
 /// What the end of an agent's transcript told of it.
 enum Told {
-    /// claude-ps gave no id for its session, or one that names no
+    /// Claude Code gave no id for its session, or one that names no
     /// transcript.
     NoId,
     /// No transcript has its id where `TAILS` looks: one written under
@@ -571,7 +571,7 @@ mod tests {
     /// what Claude thought and what a tool answered are left out, and so is
     /// what Claude Code typed in tags of its own or in your place where you
     /// stopped it. A transcript not found says so, and so does an agent
-    /// claude-ps names none for. Two agents a session names alike are told
+    /// Claude Code names none for. Two agents a session names alike are told
     /// apart by their panes, and an agent of another session named alike is
     /// not.
     #[test]
@@ -657,7 +657,7 @@ Sessions, in order: a, b
 Agent \"fold\" in session a
 Status: idle, for 3m
 Works in /w/a
-Its transcript is unknown: claude-ps names none for it.
+Its transcript is unknown: Claude Code names none for it.
 
 Agent \"fold\" in session b
 Status: idle, for 3m
@@ -684,7 +684,7 @@ Its transcript was not found.
 Agent \"spare:7\" in session b
 Status: idle, for 3m
 Works in /w/b
-Its transcript is unknown: claude-ps names none for it.
+Its transcript is unknown: Claude Code names none for it.
 "
         );
     }

@@ -1,11 +1,9 @@
 //! What lunetad, the daemon of the host, says of it through `luneta watch`:
 //! the panes of each session, how the work tree stands where each pane works,
-//! and the agents.
-//!
-//! While the daemon answers, the sidebar and the picker ask zellij, git and
-//! claude-ps for none of it. While it does not, they ask them as they did
-//! before there was a daemon, and the daemon again every few seconds. Which
-//! sessions there are, and their tabs and titles, still come from zellij.
+//! and the agents. The sidebar, the picker and the menu take them from the
+//! daemon alone: while it does not answer, they say so, and ask it again
+//! every few seconds. Which sessions there are, and their tabs and titles,
+//! still come from zellij.
 //!
 //! Told the version of the host last seen, `luneta watch` waits for the next
 //! one, or four seconds at the most, before it answers: asked again as soon
@@ -58,8 +56,8 @@ pub enum Answer {
     Changed(Host),
     /// The host as it was last seen.
     Same,
-    /// Nothing that reads.
-    Silent,
+    /// Nothing that reads, and why, as the sidebar and the picker say it.
+    Silent(String),
 }
 
 impl Daemon {
@@ -98,17 +96,14 @@ impl Daemon {
                 // Once as it stops, and not at every ask after: one that was
                 // never there is not news, as it is before it is installed.
                 if matches!(self.heard, Heard::Host(_)) {
-                    eprintln!(
-                        "luneta: lunetad stopped answering, and zellij, git and claude-ps \
-                         are asked instead: {why}"
-                    );
+                    eprintln!("luneta: lunetad stopped answering: {why}");
                 }
-                self.heard = if unstarted(exit_code, stderr) {
-                    Heard::Absent(now)
-                } else {
-                    Heard::Silent(now)
-                };
-                return Answer::Silent;
+                if unstarted(exit_code, stderr) {
+                    self.heard = Heard::Absent(now);
+                    return Answer::Silent(format!("{CLI} cannot be started: {why}"));
+                }
+                self.heard = Heard::Silent(now);
+                return Answer::Silent(format!("lunetad does not answer: {why}"));
             },
         };
         let seen = matches!(self.heard, Heard::Host(was) if was == version);
@@ -118,13 +113,6 @@ impl Daemon {
         } else {
             Answer::Changed(host)
         }
-    }
-
-    /// Whether the daemon is what the host is taken from: it answered last,
-    /// or has yet to say anything. Asked for the first time, it answers at
-    /// once, and the sidebar waits for it rather than ask the rest as well.
-    pub fn answers(&self) -> bool {
-        !matches!(self.heard, Heard::Silent(_) | Heard::Absent(_))
     }
 
     /// `luneta` is looked for again if it could not be started, for a sidebar
@@ -182,39 +170,55 @@ mod tests {
         // A daemon that started again counts from 0, under another pid.
         assert!(matches!(daemon.answered(Some(0), &host(8, 0), b"", now), Answer::Changed(_)));
         assert_eq!(daemon.ask(now), Some(watch(&["--after", "8:0"])));
-        assert!(daemon.answers());
     }
 
-    /// A daemon that is not running, or answers what does not read, has the
-    /// rest asked instead, and is asked again a few seconds on, from the
+    /// A daemon that is not running, or answers what does not read, is said
+    /// not to answer, and why, and is asked again a few seconds on, from the
     /// start. A `luneta` that is not there at all is looked for again only
     /// as the sidebar wakes, as zellij logs each command it cannot start.
     #[test]
     fn a_daemon_that_does_not_answer_is_asked_again_a_while_on() {
+        /// How `luneta watch` ended, what it wrote out, and what the sidebar
+        /// says of it.
+        type Failure<'a> = (Option<i32>, &'a [u8], &'a [u8], &'a str);
+
         let at = |secs: u64| Moment::from_millis(1_000_000 + secs * 1000);
         let now = at(0);
         let unversioned = Host::default().encode_to_vec();
-        let failures: [(Option<i32>, &[u8], &[u8]); 4] = [
-            (Some(1), b"", REFUSED),
-            (Some(0), b"\xff\xff", b""),
-            (Some(0), &unversioned, b""),
-            (None, b"", b""),
+        let failures: [Failure; 4] = [
+            (
+                Some(1),
+                b"",
+                REFUSED,
+                "lunetad does not answer: luneta: /run/user/1000/luneta/lunetad.sock: transport \
+                 error: Connection refused (os error 111)",
+            ),
+            (
+                Some(0),
+                b"\xff\xff",
+                b"",
+                "lunetad does not answer: luneta watch: failed to decode Protobuf message: \
+                 invalid varint",
+            ),
+            (Some(0), &unversioned, b"", "lunetad does not answer: luneta watch: an answer with no version"),
+            (None, b"", b"", "lunetad does not answer: luneta watch failed"),
         ];
-        for (exit_code, stdout, stderr) in failures {
+        for (exit_code, stdout, stderr, said) in failures {
             let mut daemon = Daemon::default();
             daemon.ask(now);
             daemon.answered(Some(0), &host(7, 3), b"", now);
             daemon.ask(now);
             let answer = daemon.answered(exit_code, stdout, stderr, now);
-            assert!(matches!(answer, Answer::Silent), "{exit_code:?} {stdout:?}");
-            assert!(!daemon.answers());
+            assert!(matches!(&answer, Answer::Silent(why) if why == said), "{answer:?}");
             assert_eq!(daemon.ask(at(4)), None);
             assert_eq!(daemon.ask(at(5)), Some(watch(&[])));
         }
 
         let mut daemon = Daemon::default();
         daemon.ask(now);
-        daemon.answered(Some(2), b"", b"No such file or directory (os error 2)", now);
+        let answer = daemon.answered(Some(2), b"", b"No such file or directory (os error 2)", now);
+        let said = "luneta cannot be started: No such file or directory (os error 2)";
+        assert!(matches!(&answer, Answer::Silent(why) if why == said), "{answer:?}");
         assert_eq!(daemon.ask(at(60)), None);
         daemon.wake();
         assert_eq!(daemon.ask(at(60)), Some(watch(&[])));

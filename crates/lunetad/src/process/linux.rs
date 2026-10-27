@@ -1,4 +1,4 @@
-//! Processes on Linux, through `/proc`, as claude-ps reads them.
+//! Processes on Linux, through `/proc`.
 
 use std::ffi::OsString;
 use std::fs;

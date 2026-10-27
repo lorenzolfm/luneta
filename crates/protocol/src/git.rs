@@ -1,6 +1,5 @@
 //! How a work tree stands, as `git status` says it: what the daemon asks git
-//! in each directory a pane works in, and the plugin too while the daemon does
-//! not answer. Both read it here, so that the two say the same of it.
+//! in each directory a pane works in, and how it says that to the plugin.
 
 use crate::said::Said;
 use crate::v1;

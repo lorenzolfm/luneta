@@ -1914,13 +1914,16 @@ fn search_help_line(width: usize) -> Painted {
 
 #[cfg(test)]
 mod tests {
+    use luneta_protocol::v1;
+
     use super::*;
+    use crate::agents::given::{self, agent};
     use crate::cursor::Cursor;
     use crate::icons;
     use crate::places::Places;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Session, Sessions};
-    use crate::elapsed::{Held, Moment};
+    use crate::elapsed::Held;
 
     fn picture<R: Into<PreviewRow>>(
         rect: &Rect,
@@ -2492,13 +2495,13 @@ mod tests {
 
     #[test]
     fn an_agent_luneta_cannot_place_is_left_out_and_counted() {
-        let json = r#"[{"status":"waiting","status_age":60,"pid":100,"cwd":"/home/lorenzo/Projects/misc",
-            "zellij":{"session":"bipa.git","pane":"4"}},
-            {"status":"idle","status_age":60,"pid":101,"cwd":"/home/lorenzo/Projects/misc/luneta",
-             "zellij":{"session":"luneta","pane":"0"}}]"#;
+        let listed = [
+            given::unfollowed(agent(100, "bipa.git", 4, "/home/lorenzo/Projects/misc", "waiting")),
+            agent(101, "luneta", 0, "/home/lorenzo/Projects/misc/luneta", "idle"),
+        ];
         let places = Places::of(&[("luneta", &[(0, "/home/lorenzo/Projects/misc/luneta")])]);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
+        agents.heard(&listed, given::NOW);
         let live = agents::Live::new(Some("luneta"), &[], &places, &[]);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
 
@@ -2512,15 +2515,19 @@ mod tests {
 
     #[test]
     fn the_agent_you_are_in_is_pinned_above_the_list() {
-        let json = r#"[{"status":"idle","status_age":60,"pid":102,"cwd":"/w/notes",
-            "name":"handoff","name_source":"user","zellij":{"session":"notes","pane":"1"}},
-            {"status":"busy","status_age":60,"pid":103,"cwd":"/w/luneta",
-             "zellij":{"session":"luneta","pane":"4"}}]"#;
+        let handoff = v1::Name {
+            text: "handoff".to_owned(),
+            source: Some(v1::NameSource::User.into()),
+        };
+        let listed = [
+            v1::Agent { name: Some(handoff), ..agent(102, "notes", 1, "/w/notes", "idle") },
+            agent(103, "luneta", 4, "/w/luneta", "busy"),
+        ];
         let places = Places::of(&[("notes", &[(1, "/w/notes")]), ("luneta", &[(4, "/w/luneta")])]);
         let rect = Rect { x: 0, y: 0, width: 42, height: 5 };
         let body = |origin: Option<u32>, term: &str| -> Vec<String> {
             let mut agents = AgentSet::default();
-            agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
+            agents.heard(&listed, given::NOW);
             let live = agents::Live::new(Some("notes"), &[], &places, &[]);
             agents.rebuild(term, &live, origin, Age::ZERO, Selection::SnapToTop);
             agent_body(&agents, term, &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect()
@@ -2538,17 +2545,33 @@ mod tests {
 
     #[test]
     fn the_agent_you_are_in_alone_is_no_other_agent() {
-        let json = r#"[{"status":"idle","status_age":60,"pid":104,"cwd":"/w/notes",
-            "zellij":{"session":"notes","pane":"1"}}]"#;
         let places = Places::of(&[("notes", &[(1, "/w/notes")])]);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"", Moment::default());
+        agents.heard(&[agent(104, "notes", 1, "/w/notes", "idle")], given::NOW);
         let live = agents::Live::new(Some("notes"), &[], &places, &[]);
         agents.rebuild("", &live, Some(1), Age::ZERO, Selection::SnapToTop);
         let rect = Rect { x: 0, y: 0, width: 30, height: 5 };
         let body: Vec<String> =
             agent_body(&agents, "", &rect, 0, 0).iter().map(|l| l.content().to_owned()).collect();
         assert_eq!(body, ["   notes ─────── 🏠 Current ", " no other agents            "]);
+    }
+
+    /// The Agents screen looks for agents until the daemon first answers, and
+    /// says why it has none when the daemon does not answer.
+    #[test]
+    fn the_agents_screen_says_why_the_daemon_does_not_answer() {
+        let rect = Rect { x: 0, y: 0, width: 46, height: 5 };
+        let shown = |agents: &AgentSet| {
+            let notes: Vec<String> =
+                agent_note_texts(agents, 44).into_iter().map(|note| note.text).collect();
+            let body = agent_body(agents, "", &rect, notes.len(), 0);
+            (notes, body.iter().map(|line| line.content().trim().to_owned()).collect::<Vec<_>>())
+        };
+        let mut agents = AgentSet::default();
+        assert_eq!(shown(&agents), (vec![], vec!["looking for agents…".to_owned()]));
+        agents.fail("lunetad does not answer: luneta watch failed");
+        let why = "lunetad does not answer: luneta watch failed".to_owned();
+        assert_eq!(shown(&agents), (vec![why], vec!["no agents".to_owned()]));
     }
 
     #[test]
@@ -2583,7 +2606,7 @@ mod tests {
         );
 
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), AGENTS.as_bytes(), b"", Moment::default());
+        agents.heard(&workday_agents(), given::NOW);
         let places = Places::of(&[
             ("misc", &[(12, "/home/lorenzo/Projects/misc/luneta")]),
             ("bipa", &[(3, "/home/lorenzo/Projects/Work/bipa")]),
@@ -2644,15 +2667,18 @@ mod tests {
         println!("  {}\n", help.content());
     }
 
-    const AGENTS: &str = r#"[
-        {"status": "waiting", "status_age": 1080, "pid": 105, "cwd": "/home/lorenzo/Projects/misc/luneta",
-         "name": "luneta", "name_source": "user", "zellij": {"session": "misc", "pane": "12"}},
-        {"status": "busy", "status_age": 1860, "pid": 106, "cwd": "/home/lorenzo/Projects/Work/bipa",
-         "zellij": {"session": "bipa", "pane": "3"}},
-        {"status": "idle", "status_age": 300, "pid": 107, "cwd": "/home/lorenzo/Documents",
-         "zellij": {"session": "notes", "pane": "7"}},
-        {"status": "idle", "status_age": 60, "pid": 108, "cwd": "/home/lorenzo"}
-    ]"#;
+    /// The agents of the picture of the Agents screen, each held for a while.
+    fn workday_agents() -> [v1::Agent; 4] {
+        let held = |secs, agent: v1::Agent| v1::Agent { status_since: Some(given::ago(secs)), ..agent };
+        let luneta = v1::Name { text: "luneta".to_owned(), source: Some(v1::NameSource::User.into()) };
+        let misc = agent(105, "misc", 12, "/home/lorenzo/Projects/misc/luneta", "waiting");
+        [
+            held(1080, v1::Agent { name: Some(luneta), ..misc }),
+            held(1860, agent(106, "bipa", 3, "/home/lorenzo/Projects/Work/bipa", "busy")),
+            held(300, agent(107, "notes", 7, "/home/lorenzo/Documents", "idle")),
+            held(60, v1::Agent { zellij: None, ..agent(108, "", 0, "/home/lorenzo", "idle") }),
+        ]
+    }
 
     fn snapshot() -> Sessions {
         let named =
@@ -2888,7 +2914,7 @@ mod tests {
         let mut tree = sidebar_tree(worktrees(), 0);
         (tree.icons, tree.icons_wrong) = icons::configured(Some("nvim"));
         let mut agents = AgentSet::default();
-        agents.fail("claude-ps: gone");
+        agents.fail("lunetad does not answer");
         let notes: Vec<(String, bool)> = sidebar_notes(&tree, &agents, 30)
             .into_iter()
             .map(|note| (note.text, note.error))
@@ -2897,7 +2923,7 @@ mod tests {
             notes,
             [
                 (r#"icons: "nvim" takes one strin…"#.to_owned(), true),
-                ("claude-ps: gone".to_owned(), true),
+                ("lunetad does not answer".to_owned(), true),
             ]
         );
         let shelf = sidebar_shelf(&tree, &agents, false, 11, 32);
@@ -3050,10 +3076,10 @@ mod tests {
     fn the_legend_shows_at_the_bottom_while_the_sidebar_has_the_focus() {
         let mut tree = workday_tree(6);
         tree.legend = Some(Legend::new(Some(MENU_KDL)));
-        let notes = [Note::error("claude-ps: gone")];
+        let notes = [Note::error("lunetad does not answer")];
         let unfocused = sidebar_picture(&tree, &notes, false, 6, 32);
         assert_eq!(unfocused.len(), 6);
-        assert_eq!(unfocused[5], " claude-ps: gone                ");
+        assert_eq!(unfocused[5], " lunetad does not answer        ");
         let agents = AgentSet::default();
         assert_eq!(sidebar_shelf(&tree, &agents, false, 13, 30).bottom_y, None);
 

@@ -37,9 +37,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use agents::{AgentSet, Live};
+use luneta_protocol::v1;
 use dirs::DirSet;
 use elapsed::{Age, Moment};
 use paint::Colour;
@@ -117,38 +118,49 @@ fn zoxide(n: usize) -> Vec<u8> {
     out.into_bytes()
 }
 
-fn claude_ps(n: usize) -> Vec<u8> {
-    let rows: Vec<String> = (0..n)
-        .map(|i| {
-            format!(
-                r#"{{"status":"{}","status_age":{},"pid":{},"cwd":"/home/you/Projects/group-{}/repo-{:04}-name","name":"agent-{:03}","name_source":"user","zellij":{{"session":"session-{:03}-work","pane":"{}"}}}}"#,
-                ["waiting", "idle", "busy", "shell"][i % 4],
-                i * 13,
-                1000 + i,
-                i % 12,
-                i,
-                i,
-                i % 24,
-                i
-            )
+/// When the agents are heard, in milliseconds since the epoch.
+const HEARD: u64 = 1_000_000_000_000;
+
+fn daemon_agents(n: u32) -> Vec<v1::Agent> {
+    let known = [v1::Status::Waiting, v1::Status::Idle, v1::Status::Busy, v1::Status::Shell];
+    (0..n)
+        .map(|i| v1::Agent {
+            pid: 1000 + i,
+            cwd: format!("/home/you/Projects/group-{}/repo-{i:04}-name", i % 12),
+            status: Some(v1::agent::Status::KnownStatus(known[(i % 4) as usize].into())),
+            status_since: Some(
+                (SystemTime::UNIX_EPOCH + Duration::from_millis(HEARD - u64::from(i) * 13_000))
+                    .into(),
+            ),
+            name: Some(v1::Name {
+                text: format!("agent-{i:03}"),
+                source: Some(v1::NameSource::User.into()),
+            }),
+            zellij: Some(v1::Zellij {
+                named: format!("session-{:03}-work", i % 24),
+                session: Some(format!("session-{:03}-work", i % 24)),
+                pane: i,
+            }),
+            ..v1::Agent::default()
         })
-        .collect();
-    format!("[{}]", rows.join(",")).into_bytes()
+        .collect()
 }
 
-fn list_panes(session: usize, panes: usize) -> Vec<u8> {
-    let rows: Vec<String> = (0..panes)
-        .map(|i| {
-            format!(
-                r#"{{"id":{},"is_plugin":false,"is_suppressed":false,"pane_cwd":"/home/you/Projects/group-{}/repo-{:04}-name","pane_command":"claude","title":"✳ working"}}"#,
-                i,
-                i % 12,
-                i
-            )
+fn daemon_sessions(sessions: usize, panes: u32) -> Vec<v1::Session> {
+    let pane = |i: u32| v1::Pane {
+        id: i,
+        cwd: Some(format!("/home/you/Projects/group-{}/repo-{i:04}-name", i % 12)),
+        command: Some("claude".to_owned()),
+        titled: Some(v1::Titled { topic: Some("working".to_owned()) }),
+        ..v1::Pane::default()
+    };
+    (0..sessions)
+        .map(|s| v1::Session {
+            name: format!("session-{s:03}-work"),
+            panes: Some(v1::Panes { panes: (0..panes).map(pane).collect() }),
+            ..v1::Session::default()
         })
-        .collect();
-    let _ = session;
-    format!("[{}]", rows.join(",")).into_bytes()
+        .collect()
 }
 
 /// A realistic 64-line pane dump: box drawing, SGR colour, wide glyphs.
@@ -244,13 +256,7 @@ fn main() {
 
     // --- fixtures ---
     let mut places = Places::default();
-    for s in 0..n_live {
-        places.ingest(
-            format!("session-{s:03}-work"),
-            Some(0),
-            &list_panes(s, 24),
-        );
-    }
+    places.heard(&daemon_sessions(n_live, 24));
 
     let mut peeks = Peeks::default();
     peeks.ingest(
@@ -261,7 +267,7 @@ fn main() {
     );
 
     let zox = zoxide(n_dirs);
-    let ps = claude_ps(n_agents);
+    let listed = daemon_agents(u32::try_from(n_agents).expect("a few agents"));
 
     // --- session matching ---
     let mut stats = Vec::new();
@@ -302,12 +308,12 @@ fn main() {
 
     // --- agents ---
     let mut agents = AgentSet::default();
-    stats.push(bench("AgentSet::ingest (claude-ps json)", 2000, || {
+    stats.push(bench("AgentSet::heard (the daemon's agents)", 2000, || {
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), &ps, b"", Moment::default());
+        agents.heard(&listed, Moment::from_millis(HEARD));
         std::hint::black_box(&agents);
     }));
-    agents.ingest(Some(0), &ps, b"", Moment::default());
+    agents.heard(&listed, Moment::from_millis(HEARD));
 
     stats.push(bench("AgentSet::rebuild (empty term)", 2000, || {
         let live = Live::new(Some("session-000-work"), &sess.live, &places, &[]);
@@ -316,9 +322,10 @@ fn main() {
     }));
 
     // --- places ---
-    stats.push(bench("Places::ingest (list-panes json)", 2000, || {
+    let one = daemon_sessions(1, 24);
+    stats.push(bench("Places::heard (the daemon's panes)", 2000, || {
         let mut built = Places::default();
-        built.ingest("s".to_owned(), Some(0), &list_panes(0, 24));
+        built.heard(&one);
         std::hint::black_box(&built);
     }));
 
@@ -351,7 +358,7 @@ fn main() {
 
     // --- render (stdout should be redirected) ---
     let mut ag = AgentSet::default();
-    ag.ingest(Some(0), &ps, b"", Moment::default());
+    ag.heard(&listed, Moment::from_millis(HEARD));
     ag.rebuild(
         "",
         &Live::new(Some("session-000-work"), &sess.live, &places, &[]),

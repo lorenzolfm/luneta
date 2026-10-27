@@ -8,7 +8,7 @@
 //! session's sidebar, each of which sees you only in its own session's panes,
 //! and the shells only while its session has a client.
 //!
-//! An agent finished when claude-ps says it came to `idle`. A shell with
+//! An agent finished when the daemon says it came to `idle`. A shell with
 //! luneta's hook says what it runs, and how it ended, in `Shells`, and only a
 //! command that ran a while, `LONG`, counts: an `ls` is no news. A shell
 //! without it says what it is doing in its title, as fish titles its pane:
@@ -58,9 +58,9 @@ const GONE: u32 = 5;
 const MADE: Held = Held::from_secs(3);
 
 /// How much later than another a sidebar may date the moment an agent
-/// finished. Each dates it from its own answer of claude-ps, which counts
-/// whole seconds from a whole second: one may put it two seconds after
-/// another, and so after the visit the other wrote as you watched the agent
+/// finished. The daemon dates it as Claude Code does, but a status it cannot
+/// date each sidebar dates as it hears it, and one may hear it a moment
+/// after another: after the visit the other wrote as you watched the agent
 /// finish.
 const SKEW: Held = Held::from_secs(3);
 
@@ -523,8 +523,10 @@ fn step(run: Option<&Run>, doing: &Doing, now: Moment) -> Option<Run> {
 
 #[cfg(test)]
 mod tests {
+    use luneta_protocol::v1;
+
     use super::*;
-    use crate::agents::Live;
+    use crate::agents::{given, Live};
     use crate::close::Closes;
     use crate::elapsed::Age;
     use crate::places::Places;
@@ -600,12 +602,10 @@ mod tests {
             age: Age::from_secs(now.millis() / 1000),
             panes: vec![leaf(1, title), leaf(2, "✳ Claude Code")],
         }];
-        let json = format!(
-            r#"[{{"status":"{agent}","status_age":{age},"pid":7,"cwd":"/home/you/w/s",
-                 "zellij":{{"session":"s","pane":"2"}}}}]"#
-        );
+        let since = Some(given::at(now.millis() - age * 1000));
+        let seated = given::agent(7, "s", 2, "/home/you/w/s", agent);
         let mut agents = AgentSet::default();
-        agents.ingest(Some(0), json.as_bytes(), b"", now);
+        agents.heard(&[v1::Agent { status_since: since, ..seated }], now);
         let places = Places::of(&[("s", &[(1, "/home/you/w/s"), (2, "/home/you/w/s")])]);
         let live = Live::new(Some("s"), &[], &places, &branches);
         agents.rebuild("", &live, None, Age::ZERO, Selection::SnapToTop);
@@ -765,11 +765,11 @@ mod tests {
         assert_eq!(news_of(&news, &agents), (Some(ran("make", 0)), false));
     }
 
-    /// Each session's sidebar dates an agent's finish from its own answer of
-    /// claude-ps, in whole seconds from a whole second. You watch the agent
-    /// in pane 2 finish at 100.1s: this sidebar hears at 100.35s, and writes
-    /// your visit at 100.5s; another hears at 401s, and dates it at 102s.
-    /// Both have seen it. One that finishes once you have gone is new.
+    /// Two sessions' sidebars may date an agent's finish seconds apart. You
+    /// watch the agent in pane 2 finish at 100.1s: this sidebar dates it at
+    /// 100.35s, and writes your visit at 100.5s; another hears at 401s, and
+    /// dates it at 102s. Both have seen it. One that finishes once you have
+    /// gone is new.
     #[test]
     fn an_agent_you_saw_finish_is_seen_however_a_sidebar_dates_it() {
         let ms = Moment::from_millis;

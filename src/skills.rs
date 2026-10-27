@@ -17,8 +17,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use serde::Deserialize;
 use zellij_tile::prelude::*;
 
-use crate::checkouts::DIR_KEY;
-use crate::context::CONTEXT_KEY;
+use crate::context::{CONTEXT_KEY, DIR_KEY};
 use crate::cursor::{Cursor, Stops};
 use crate::fetch::Fetch;
 
@@ -750,7 +749,7 @@ mod tests {
 
         /// The slash commands of the `init` of `claude -p` in `dir`, with
         /// `args`, on a model that is none, so that nothing reaches one. Out
-        /// of the panes claude-ps places agents in, and of a Claude Code
+        /// of the panes luneta places agents in, and of a Claude Code
         /// session this may run in, but for where yours keeps its config.
         fn commands(dir: &Path, args: &[&str]) -> BTreeSet<String> {
             let mut claude = Command::new("claude");

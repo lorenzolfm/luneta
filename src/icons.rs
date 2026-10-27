@@ -1,7 +1,7 @@
 //! The icon on a pane's row in the sidebar, for the program that runs in the
 //! pane: Claude's for an agent, a terminal for a shell, neovim's for nvim.
 //!
-//! The program is the agent claude-ps finds in the pane, or else what zellij
+//! The program is the agent the daemon finds in the pane, or else what zellij
 //! says the pane's terminal runs in the foreground: the process group in
 //! front, or the shell itself at its prompt. The icons are Nerd Fonts', which
 //! only a Nerd Font draws, so a configuration can turn them off, and give a
@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 /// children each give a program an icon, which zellij hands over as their KDL.
 pub const KEY: &str = "icons";
 
-/// The program an agent claude-ps finds runs, by its binary's name.
+/// The program an agent the daemon finds runs, by its binary's name.
 pub const AGENT: &str = "claude";
 
 /// `dev-terminal`, for a shell.

@@ -133,7 +133,7 @@ pub struct Subject {
     pub seat: Seat,
     /// The pane, or none for the session's row.
     pub pane: Option<Pane>,
-    /// The agents of its session, once claude-ps has said.
+    /// The agents of its session, once the daemon has said.
     pub agents: Fetch<Vec<Agent>>,
     /// Where the client goes before the session it is in is killed.
     pub refuge: Option<Refuge>,
@@ -233,7 +233,7 @@ struct Ending {
     agents: usize,
     busy: usize,
     waiting: usize,
-    /// Agents claude-ps said a word luneta does not know for, or nothing:
+    /// Agents Claude Code said a word luneta does not know for, or nothing:
     /// they may be at work.
     unknown: usize,
 }
@@ -600,7 +600,7 @@ mod tests {
     /// A key asks first only when an agent it ends is busy or waiting on you,
     /// and says what goes. One that luneta cannot tell about asks too: an
     /// agent with a status luneta does not know or none, or every agent when
-    /// claude-ps has not said.
+    /// the daemon has not said.
     #[test]
     fn a_key_asks_first_only_when_an_agent_at_work_would_end() {
         let agents = || {
@@ -627,7 +627,7 @@ mod tests {
             let plan = of(here(), id, agents()).plan(scope).expect("a plan");
             assert_eq!(plan.question().as_deref(), asked, "{scope:?} of {id:?}");
         }
-        for agents in [Fetch::Waiting, Fetch::Failed("claude-ps is not available".to_owned())] {
+        for agents in [Fetch::Waiting, Fetch::Failed("lunetad does not answer".to_owned())] {
             let plan = of(here(), Some(2), agents).plan(Scope::Pane).expect("a plan");
             assert!(plan.question().is_some());
         }

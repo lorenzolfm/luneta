@@ -2,8 +2,7 @@
 //!
 //! Claude Code keeps a file for each agent that runs, `sessions/<pid>.json` in
 //! its folder, and writes the agent's status into it as the status changes.
-//! These files are what the sidebar shows today, through claude-ps, and the
-//! adapter reads them the way claude-ps does.
+//! These files are what luneta shows of each agent.
 //!
 //! A file outlives its process when the process crashes, and a pid can come
 //! back as another process's. So a file stands for an agent only while a

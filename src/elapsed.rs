@@ -19,7 +19,7 @@ impl Moment {
         Moment(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
     }
 
-    pub fn from_millis(millis: u64) -> Self {
+    pub const fn from_millis(millis: u64) -> Self {
         Moment(Duration::from_millis(millis))
     }
 
