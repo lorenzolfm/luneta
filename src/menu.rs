@@ -1030,18 +1030,30 @@ fn numbered(value: &str, menu: u64) -> BTreeMap<String, String> {
 impl Target {
     /// The pane a key starts an agent or opens a pane beside, and the
     /// directory it works in, where a tab or a session opens too, or why
-    /// there is none: a session's row has no pane, and a pane the sidebar
-    /// does not know the directory of yet opens nothing, rather than wherever
-    /// zellij runs.
+    /// there is none: a session's row has no pane. Where the daemon has not
+    /// said the directory, zellij says it of a pane of the sidebar's own
+    /// session, as it does for the key binding's menu, and a pane of another
+    /// session opens nothing, rather than wherever zellij runs.
     fn beside(&self) -> Result<Beside, String> {
         let Some(pane) = &self.pane else {
             return Err(NO_ROW_PANE.to_owned());
         };
-        let Some(cwd) = pane.cwd.clone() else {
-            return Err(format!(
-                "menu: the sidebar does not know yet where pane {} works; try again in a moment",
-                pane.id
-            ));
+        let cwd = match (&pane.cwd, &self.there) {
+            (Some(cwd), _) => cwd.clone(),
+            (None, None) => match get_pane_cwd(PaneId::Terminal(pane.id)) {
+                Ok(cwd) => cwd.to_string_lossy().into_owned(),
+                Err(error) => {
+                    let id = pane.id;
+                    return Err(format!("menu: zellij cannot say where pane {id} works: {error}"));
+                },
+            },
+            (None, Some(there)) => {
+                return Err(format!(
+                    "menu: the sidebar does not know yet where pane {} of \"{}\" works: lunetad \
+                     has yet to say",
+                    pane.id, there.session
+                ));
+            },
         };
         Ok(Beside { pane: pane.id, cwd })
     }
@@ -2727,15 +2739,20 @@ mod tests {
         assert_eq!(said, Some("menu: the agent did not start: zellij opened no pane"));
     }
 
-    /// A row the sidebar does not know the directory of yet has no agent to
-    /// start, nor a pane, a tab or a session to open, and the menu says so
-    /// rather than open one wherever zellij runs. Nor has a session's row,
-    /// which has no pane. A menu that cannot be read says what is wrong with
-    /// it for any key it might have had. Any key closes what is wrong.
+    /// A row of another session that the daemon has yet to say the directory
+    /// of has no agent to start, nor a pane, a tab or a session to open, and
+    /// the menu says so rather than open one wherever zellij runs. Nor has a
+    /// session's row, which has no pane. A menu that cannot be read says what
+    /// is wrong with it for any key it might have had. Any key closes what is
+    /// wrong.
     #[test]
     fn a_menu_that_cannot_start_an_agent_beside_its_row_says_why() {
-        let unknown = || Row { pane: Some(RowPane { cwd: None, ..elo() }), ..row(None) };
-        let where_unknown = "menu: the sidebar does not know yet where pane 2 works";
+        let unknown = || Row {
+            pane: Some(RowPane { cwd: None, ..elo() }),
+            ..row(Some(There { session: "elo".to_owned(), tab: None }))
+        };
+        let where_unknown = "menu: the sidebar does not know yet where pane 2 of \"elo\" works: \
+                             lunetad has yet to say";
         for (entries, row, key, said) in [
             (Some(MENU), unknown(), Some('r'), Some(where_unknown)),
             (Some(MENU), unknown(), Some('x'), None),

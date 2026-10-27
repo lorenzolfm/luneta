@@ -213,8 +213,9 @@ label still starts at the same column, and a program with no icon leaves the
 column blank. What runs is the agent the daemon finds in the pane, or else
 what zellij says the pane's terminal has in front, by its binary's name: the
 program you started, or the shell itself at its prompt. `sudo`, `env` and
-`nix run` give way to what they run. zellij is asked every few seconds, so
-a program shows its icon a few seconds after it starts.
+`nix run` give way to what they run. lunetad asks zellij every few seconds, so
+a program shows its icon a few seconds after it starts, and without `luneta`
+and `lunetad`, no row has one.
 
 | icon | Nerd Fonts name | for |
 |---|---|---|
@@ -497,7 +498,10 @@ in any pane of the session that names it, and asks while it is at work. While
 the daemon does not answer, luneta cannot tell, and asks every time, saying
 why.
 
-Needs `claude` on the server's `PATH`, and `git` for the branch.
+Needs `claude` on the server's `PATH`, and `git` for the branch. In the
+sidebar, a pane works where `luneta` and `lunetad` say. Until they say, zellij
+says where a pane of the sidebar's own session works; a pane of another
+session has no agent to start and nothing to open, and the menu says so.
 
 ### Brief
 
@@ -754,7 +758,7 @@ the session it is in.
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in the sidebar, which `icons false` turns off |
-| `luneta` and [`lunetad`](#building-from-source), side by side | optional | the agents, in the agent list, the sidebar, the menu and the brief, and where each pane in the sidebar works and its branch |
+| `luneta` and [`lunetad`](#building-from-source), side by side | optional | the agents, in the agent list, the sidebar, the menu and the brief, and where each pane in the sidebar works, what runs in it and its branch |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in the sidebar, and how it ended |
 
 The session list needs nothing but zellij. The optional tools are looked up by
@@ -1327,8 +1331,10 @@ the CLI that talks to the daemon
 zellij server's `PATH`, the sidebar, the picker and the menu take the panes of
 each session, the branch each works on and the agents from the daemon, through
 `luneta watch`, as they change. Without it, the sidebar has each session's
-panes as zellij lists them, with no agents and no branches, and the sidebar and
-the picker say why; they ask the daemon again every few seconds.
+panes as zellij lists them, with no agents, no icons and no branches, and the
+sidebar and the picker say why; they ask the daemon again every few seconds.
+The sidebar's menu then starts an agent, or opens a pane, a tab or a session,
+only beside a pane of its own session, which zellij says the directory of.
 
 Nothing has to start the daemon, or run it as a service: `luneta` and `luneta
 watch` start `lunetad` when none answers, as zellij and tmux start their
