@@ -843,15 +843,15 @@ impl App {
                 write!(backend, "\x1b]52;{which};{text}\x07")?;
                 backend.flush()?;
             },
-            Said::Answer(answer) => self.client.hosted.send(answer.into_bytes()),
+            Said::Answer(answer) => self.client.hosted.answer(answer.into_bytes()),
             Said::AskedSize(answer) => {
-                self.client.hosted.send(answer(self.client.hosted.size().into()).into_bytes());
+                self.client.hosted.answer(answer(self.client.hosted.size().into()).into_bytes());
             },
             // A colour luneta's terminal did not say, or one of the rest, as
             // the sixteen and the cursor's, goes without an answer.
             Said::AskedColour(index, spell) => {
                 if let Some(answer) = self.colours.answer(index, &*spell) {
-                    self.client.hosted.send(answer.into_bytes());
+                    self.client.hosted.answer(answer.into_bytes());
                 }
             },
             Said::Rang => {
