@@ -522,6 +522,10 @@ pub struct Sidebar {
     /// The row the keys took the highlight to, from `here_row` as the
     /// sidebar took the focus, or a click to.
     cursor: Option<Place>,
+    /// Whether the key before was `Top::First`'s, which moves the highlight
+    /// to the first row once pressed again. Any other key drops it, and so
+    /// does the focus going.
+    first_pressed: bool,
     /// The `here_row` the view last scrolled to show while the sidebar did
     /// not have the focus, after which the wheel can scroll it out of sight.
     revealed: Option<Place>,
@@ -774,6 +778,7 @@ impl Sidebar {
             return;
         }
         self.focused = focused;
+        self.first_pressed = false;
         if focused {
             if self.here_row.is_some() {
                 self.cursor.clone_from(&self.here_row);
@@ -1153,6 +1158,7 @@ impl Sidebar {
     /// is the menu's.
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
         self.notice = None;
+        let first_pressed = std::mem::take(&mut self.first_pressed);
         if let Some(menu) = self.menu.take() {
             return self.menu_did(menu.key(key));
         }
@@ -1166,12 +1172,16 @@ impl Sidebar {
         match key.code {
             KeyCode::Down => self.step(1),
             KeyCode::Up => self.step(-1),
+            KeyCode::Home => self.step(isize::MIN),
+            KeyCode::End => self.step(isize::MAX),
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
             KeyCode::Enter => return self.go(),
             KeyCode::Esc => return Asked::Leave,
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
+                Some(Top::First) if first_pressed => self.step(isize::MIN),
+                Some(Top::First) => self.first_pressed = true,
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
@@ -1418,6 +1428,8 @@ impl Sidebar {
         match key.code {
             KeyCode::Down => self.step(1),
             KeyCode::Up => self.step(-1),
+            KeyCode::Home => self.step(isize::MIN),
+            KeyCode::End => self.step(isize::MAX),
             KeyCode::Enter => return self.go(),
             KeyCode::Esc => self.close_search(),
             KeyCode::Backspace if term.is_empty() => self.close_search(),
@@ -2545,6 +2557,40 @@ mod tests {
         assert_eq!(sidebar.cursor, newer);
         sidebar.step(-5);
         assert_eq!(sidebar.cursor, older);
+    }
+
+    /// `G` and `End` take the highlight to the last row, and `gg` and `Home`
+    /// to the first. A key between the two `g`s drops the first, and so does
+    /// the focus going.
+    #[test]
+    fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(true);
+        let first = Some(Place::Pane { session: listed("older", 10), pane: 1 });
+        let second = Some(Place::Pane { session: listed("older", 10), pane: 2 });
+        let last = Some(Place::Pane { session: listed("newer", 20), pane: 1 });
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        // Shift and all, as a terminal sends it as text.
+        let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        let g = key(KeyCode::Char('g'));
+        sidebar.key(&shift_g, moment(160_000));
+        assert_eq!(sidebar.cursor, last);
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.cursor, last);
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.cursor, first);
+        sidebar.key(&key(KeyCode::End), moment(160_000));
+        assert_eq!(sidebar.cursor, last);
+        sidebar.key(&key(KeyCode::Home), moment(160_000));
+        assert_eq!(sidebar.cursor, first);
+        for pressed in [key(KeyCode::End), g, key(KeyCode::Char('k')), g] {
+            sidebar.key(&pressed, moment(160_000));
+        }
+        assert_eq!(sidebar.cursor, second);
+        sidebar.focus(false);
+        sidebar.focus(true);
+        sidebar.key(&g, moment(160_000));
+        assert_eq!(sidebar.cursor, second);
     }
 
     /// zellij versions with sockets of their own can each run a session under
