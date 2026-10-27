@@ -3050,20 +3050,20 @@ mod tests {
         let clients = vec![Client { id: 1, pane: Some(2) }];
         sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
 
-        let (lines, lit) = seen(&mut sidebar, false, 32, 12);
+        let (lines, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lines[4..6], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
         assert_eq!(lit, [4, 5]);
-        let (_, lit) = seen(&mut sidebar, true, 32, 12);
+        let (_, lit) = seen(&mut sidebar, true, 32, 13);
         assert_eq!(lit, [4, 5]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 12);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 13);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[4].as_str(), lit.as_slice()), (nvim, &[3][..]));
-        let (_, lit) = seen(&mut sidebar, false, 32, 12);
+        let (_, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lit, [4, 5]);
         let fish = Place::Pane { session: listed("older", 10), pane: 1 };
-        assert_eq!(click(&mut sidebar, 10, 3, Rect::new(0, 0, 32, 12)), Asked::Go(fish));
-        let (_, lit) = seen(&mut sidebar, false, 32, 12);
+        assert_eq!(click(&mut sidebar, 10, 3, Rect::new(0, 0, 32, 13)), Asked::Go(fish));
+        let (_, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lit, [4, 5]);
     }
 
@@ -3113,7 +3113,7 @@ mod tests {
             sidebar.key(&pressed, moment(160_000));
         }
         assert_eq!(sidebar.cursor, second);
-        let area = Rect::new(0, 0, 32, 12);
+        let area = Rect::new(0, 0, 32, 13);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -3244,7 +3244,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the rule along the top and the legend at the
         // bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 10)[2..4].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 11)[2..4].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -3327,7 +3327,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 10);
+        let area = Rect::new(0, 0, 32, 11);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[4].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Take);
@@ -4588,8 +4588,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 12);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 12)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 13);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 13)[HEADER].clone();
         assert_eq!(first(&mut sidebar), " ▾ bipa ──────────────────────");
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 2), area);
