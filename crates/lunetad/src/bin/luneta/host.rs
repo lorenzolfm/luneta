@@ -107,6 +107,10 @@ const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CON
 /// is on.
 const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
 
+/// How soon a second click on the cell of a first makes a double click of the
+/// two, as desktops have it by default.
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
 /// Which side has the keys, and whether the sidebar is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -223,6 +227,9 @@ struct App {
     /// Whether the window luneta's terminal is in has the focus. The sidebar
     /// sees you in a pane only while it does.
     focused: bool,
+    /// When and where a click on the sidebar collapsed opened it, where the
+    /// second click of a double click comes, onto the row opened there.
+    opener: Option<(Instant, Position)>,
     /// The cursor as luneta's terminal was last told to draw it.
     cursor: Option<(CursorShape, bool)>,
     /// luneta's terminal's colours as it said them last, which zellij's
@@ -388,6 +395,7 @@ fn run_in(
         // Until the terminal says otherwise. One that never tells a program
         // of its window's focus has you in it all along.
         focused: true,
+        opener: None,
         cursor: None,
         colours,
         turned: None,
@@ -596,14 +604,24 @@ impl App {
             return;
         }
         // A click on the sidebar collapsed opens it, as `COLLAPSE` does.
+        let at = Position::new(mouse.column, mouse.row);
+        let down = matches!(mouse.kind, MouseEventKind::Down(_));
         if self.focus == Focus::Collapsed {
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            if down {
                 self.give(Focus::Zellij);
+                self.opener = Some((Instant::now(), at));
             }
             return;
         }
+        // The second click of a double click that opened it is no click on
+        // the row it opened under that click: it would fold a session there,
+        // or take zellij to a pane.
+        let opener = if down { self.opener.take() } else { None };
+        if opener.is_some_and(|(when, was)| was == at && when.elapsed() < DOUBLE_CLICK) {
+            return;
+        }
         let asked = self.sidebar.mouse(mouse, sidebar);
-        if asked == Asked::Nothing && matches!(mouse.kind, MouseEventKind::Down(_)) {
+        if asked == Asked::Nothing && down {
             self.give(Focus::Sidebar);
         }
         self.follow(asked);
