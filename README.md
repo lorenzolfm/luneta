@@ -603,7 +603,8 @@ The sidebar lists every session, oldest first, the panes in each, in the order
 of their tabs, and what the agent in each pane is doing, with the branch under
 it, all as [`lunetad`](#building-from-source) says: luneta starts the daemon
 when none runs, and the sidebar says so at its bottom while it does not
-answer. `j` and `k` move,
+answer. `j` and `k` move, `gg` and `Home` go to the first row, `G` and `End`
+to the last,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, `u` marks a pane read or unread, and `Esc` goes back to zellij. The session
 zellij is in has its rule in

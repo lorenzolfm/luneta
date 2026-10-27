@@ -110,6 +110,12 @@ impl Command {
 pub enum Top {
     /// Moves the highlight so many rows down, or up.
     Move(isize),
+    /// Moves the highlight to the last row, as vim's `G`.
+    Last,
+    /// Moves the highlight to the first row once pressed twice, as vim's
+    /// `gg`. Pressed once, the sidebar waits for the second, and any other
+    /// key drops the first: `Esc` does only that, as in vim.
+    First,
     /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     Fold(Option<bool>),
     /// Opens the menu on its first group, where every key is the menu's.
@@ -125,6 +131,8 @@ impl Top {
         match key {
             'j' => Some(Top::Move(1)),
             'k' => Some(Top::Move(-1)),
+            'g' => Some(Top::First),
+            'G' => Some(Top::Last),
             'h' => Some(Top::Fold(Some(true))),
             'l' => Some(Top::Fold(Some(false))),
             ' ' => Some(Top::Fold(None)),
