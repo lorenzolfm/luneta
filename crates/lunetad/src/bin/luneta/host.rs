@@ -360,12 +360,16 @@ impl App {
     }
 
     /// Hands the keys to `side`, and tells zellij when it takes them or loses
-    /// them, as a terminal tells a program in it of the window's focus.
+    /// them, as a terminal tells a program in it of the window's focus, and
+    /// the sidebar when it loses them.
     fn give(&mut self, side: Focus) {
         if self.focus == side {
             return;
         }
         self.focus = side;
+        if side == Focus::Zellij {
+            self.sidebar.unfocused();
+        }
         if self.focused {
             let gained = side == Focus::Zellij;
             if let Some(bytes) = keys::focus(gained, self.hosted.mode()) {

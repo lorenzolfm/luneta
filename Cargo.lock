@@ -1599,6 +1599,7 @@ dependencies = [
  "base64",
  "clap",
  "crossterm",
+ "fuzzy-matcher",
  "hyper-util",
  "luneta-protocol",
  "notify",

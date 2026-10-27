@@ -581,11 +581,14 @@ too, and `Esc` goes back to zellij. The session zellij is in has its rule in
 the accent. A pane with no agent in it is dimmed, and an icon says what runs
 in each, as in the plugin's [sidebar](#sidebar), with the plugin's icons and a
 terminal for `dash` and `elvish` too: `icons` does not change them here, as
-luneta has no configuration of its own yet.
+luneta has no configuration of its own yet. `/` searches the rows, as the
+plugin's sidebar does, with what you type at the bottom where the keys were;
+there `Enter` goes to the highlighted row, and `Esc` clears the search. Giving
+zellij the keys clears it too.
 
 It is the first step, and the plugin's sidebar has more than this one does
-yet: its menu, its search, the brief, the `•` of what finished, a command's
-marks and the mark of the pane you are in come over one at a time.
+yet: its menu, the brief, the `•` of what finished, a command's marks and the
+mark of the pane you are in come over one at a time.
 Until then, run luneta without the plugin's sidebar, or the two stand side by
 side: leave the dock out of `load_plugins`, and `default_layout` back at
 zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker,
