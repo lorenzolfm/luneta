@@ -991,7 +991,8 @@ fn bare_title(title: &str) -> &str {
 }
 
 fn is_agent_glyph(glyph: char) -> bool {
-    matches!(glyph, '✳' | '✢' | '✶' | '✻' | '✽' | '·') || ('\u{2800}'..='\u{28ff}').contains(&glyph)
+    matches!(glyph, '✳' | '◐' | '◑' | '✢' | '✶' | '✻' | '✽' | '·')
+        || ('\u{2800}'..='\u{28ff}').contains(&glyph)
 }
 
 #[cfg(test)]
@@ -1175,6 +1176,7 @@ mod tests {
     fn a_title_loses_the_glyph_its_agent_leads_it_with() {
         assert_eq!(bare_title("✳ Floresta issue 1326"), "Floresta issue 1326");
         assert_eq!(bare_title("⠐ Floresta issue 1326"), "Floresta issue 1326");
+        assert_eq!(bare_title("◑ Floresta issue 1326"), "Floresta issue 1326");
         assert_eq!(bare_title("✻Thinking"), "Thinking");
         assert_eq!(bare_title("  ~/P/m/floresta "), "~/P/m/floresta");
         assert_eq!(bare_title("nvim ✳"), "nvim ✳");

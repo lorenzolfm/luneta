@@ -118,12 +118,13 @@ const GENERIC_TITLE: &str = "Claude Code";
 
 /// What an agent says in a pane's title, without the glyph it leads the title
 /// with: Claude Code's `✳` at rest, and the frame it turns in its place while
-/// it works, so that the host changes only as the agent's topic does. None for
-/// a title that leads with no such glyph, which no agent gave.
+/// it works, `◐` and `◑` as 2.1.310 turns them, so that the host changes only
+/// as the agent's topic does. None for a title that leads with no such glyph,
+/// which no agent gave.
 fn titled(title: &str) -> Option<Titled> {
     let mut chars = title.trim().chars();
     let glyph = chars.next()?;
-    let agent = matches!(glyph, '✳' | '✢' | '✶' | '✻' | '✽' | '·')
+    let agent = matches!(glyph, '✳' | '◐' | '◑' | '✢' | '✶' | '✻' | '✽' | '·')
         || ('\u{2800}'..='\u{28ff}').contains(&glyph);
     let topic = Some(chars.as_str().trim_start()).filter(|topic| *topic != GENERIC_TITLE);
     agent.then(|| Titled { topic: topic.map(str::to_owned).and_then(Said::new) })

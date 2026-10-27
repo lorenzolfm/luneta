@@ -212,7 +212,7 @@ fn a_session_has_its_clients_once_zellij_lists_them() {
 fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
     let host = Host::new();
     let titled = |title: &str| json!([listed(1, title, (0, "Tab #1"), None)]);
-    host.zellij.list("work", &titled("⠂ Fix the fold"));
+    host.zellij.list("work", &titled("◐ Fix the fold"));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
     let said = |host: &api::Host| {
@@ -230,7 +230,7 @@ fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
     };
 
     let busy = topic_is("the agent's topic is on the host", Some("Fix the fold"));
-    host.zellij.list("work", &titled("⠐ Fix the fold"));
+    host.zellij.list("work", &titled("◑ Fix the fold"));
     let asked = host.zellij.asked().len();
     eventually("zellij lists the next frame", || {
         (host.zellij.asked().len() >= asked + 2).then_some(())
