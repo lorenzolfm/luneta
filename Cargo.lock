@@ -1609,6 +1609,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "signal-hook 0.3.18",
  "sysinfo",
  "tempfile",
  "tokio",

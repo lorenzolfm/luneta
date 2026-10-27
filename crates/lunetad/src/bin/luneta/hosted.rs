@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as Emitted, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::Dimensions as _;
+use alacritty_terminal::grid::{Dimensions as _, GridCell as _};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, NamedColor};
+use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, NamedColor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -40,6 +40,10 @@ pub enum Said {
     Answer(String),
     /// It asked how big the terminal is, in pixels, and this writes the answer.
     AskedSize(Arc<dyn Fn(WindowSize) -> String + Sync + Send>),
+    /// It asked for the colour alacritty numbers this, and this writes the
+    /// answer: luneta's terminal's, which luneta draws the program's
+    /// foreground and background in, whatever the program sets them to.
+    AskedColour(usize, Arc<dyn Fn(Rgb) -> String + Sync + Send>),
     /// It rang the bell.
     Rang,
     /// It ended, with this status, where its terminal can tell. This comes
@@ -101,14 +105,14 @@ impl EventListener for Listener {
             Emitted::ClipboardStore(clipboard, text) => Said::Copied(clipboard, text),
             Emitted::PtyWrite(answer) => Said::Answer(answer),
             Emitted::TextAreaSizeRequest(answer) => Said::AskedSize(answer),
+            // The loop answers it in its place, before what the program asked
+            // after it, with the colour as luneta's terminal said it last.
+            Emitted::ColorRequest(index, answer) => Said::AskedColour(index, answer),
             Emitted::Bell => Said::Rang,
             Emitted::ChildExit(status) => Said::Exited(status),
             Emitted::Exit => Said::Ended,
-            // The terminal's colours are luneta's terminal's, which luneta
-            // does not know; a program that asks goes without an answer. The
-            // rest is of the window a terminal emulator draws in.
-            Emitted::ColorRequest(..)
-            | Emitted::ClipboardLoad(..)
+            // The rest is of the window a terminal emulator draws in.
+            Emitted::ClipboardLoad(..)
             | Emitted::ResetTitle
             | Emitted::CursorBlinkingChange
             | Emitted::MouseCursorDirty => return,
@@ -219,6 +223,13 @@ impl Hosted {
     /// What the screen shows, as text.
     pub fn text(&self) -> String {
         text(&self.screen.lock())
+    }
+
+    /// Whether the screen shows nothing: each cell of it as blank as the
+    /// program found it.
+    pub fn blank(&self) -> bool {
+        let screen = self.screen.lock();
+        screen.renderable_content().display_iter.all(|indexed| indexed.cell.is_empty())
     }
 }
 
@@ -354,10 +365,13 @@ fn colour(colour: Colour) -> (Color, bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
     use super::*;
+    use crate::answers::{Answer, Colours};
 
     /// A screen of `columns` by `lines` that has read `bytes`, drawn into a
     /// buffer two columns and a line in from its corner.
@@ -417,6 +431,32 @@ mod tests {
         assert_eq!(text(&screen), "  × bad\n日本");
         let blank = Term::new(Config::default(), &dimensions, VoidListener);
         assert_eq!(text(&blank), "");
+    }
+
+    /// zellij hands on what a program in a pane asks of its terminal, and asks
+    /// what the terminal is after it, to know when the answers are all in: a
+    /// colour is asked for in its place in the loop's queue, and answered
+    /// there where luneta's terminal said it.
+    #[test]
+    fn a_colour_is_answered_where_lunetas_terminal_said_it_and_before_what_it_is() {
+        let (events, inbox) = mpsc::channel();
+        let listener = Listener { events, drew: Arc::default() };
+        let mut screen = Term::new(Config::default(), &TermSize::new(4, 1), listener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        // The background, the foreground, the second of the sixteen, and what
+        // the terminal is.
+        parser.advance(&mut screen, b"\x1b]11;?\x07\x1b]10;?\x1b\\\x1b]4;1;?\x1b\\\x1b[c");
+        let mut colours = Colours::default();
+        colours.hear(Answer::Background(Rgb { r: 0x1e, g: 0x1e, b: 0x2e }));
+        let answers: Vec<String> = inbox
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Hosted(Said::AskedColour(index, spell)) => colours.answer(index, &*spell),
+                Event::Hosted(Said::Answer(answer)) => Some(answer),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, ["\x1b]11;rgb:1e1e/1e1e/2e2e\x07", "\x1b[?6c"]);
     }
 
     #[test]
