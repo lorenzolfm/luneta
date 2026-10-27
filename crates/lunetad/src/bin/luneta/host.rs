@@ -242,7 +242,8 @@ struct App {
     /// What watches the folders the folds and the news are kept in, for as
     /// long as luneta runs.
     _watching: Vec<notify::RecommendedWatcher>,
-    /// The directory luneta started in, which zellij's client runs in.
+    /// The directory zellij's client runs in: the one luneta started in, or
+    /// where `z` would take you for the name of the session luneta made.
     dir: PathBuf,
     ended: bool,
 }
@@ -253,18 +254,22 @@ struct App {
 /// ended. The sidebar is of what the daemon in `folder` says, which is
 /// started if none runs.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
-    let dir = match env::current_dir() {
-        Ok(dir) => dir,
+    let here = match env::current_dir() {
+        Ok(here) => here,
         Err(error) => {
             eprintln!("luneta: no directory to start in: {error}");
             return ExitCode::FAILURE;
         },
     };
-    let session = session.or_else(|| zellij::session_for(&dir));
+    let session = session.or_else(|| zellij::session_for(&here));
     if let Some(refusal) = session.as_ref().and_then(zellij::refusal) {
         eprintln!("luneta: {refusal}");
         return ExitCode::FAILURE;
     }
+    let dir = match &session {
+        Some(session) => zellij::dir_for(session, &here),
+        None => here,
+    };
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => {

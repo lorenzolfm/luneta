@@ -21,6 +21,7 @@ mod skills;
 mod state;
 mod watch;
 mod zellij;
+mod zoxide;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -37,8 +38,10 @@ use crate::zellij::SessionName;
 #[derive(Parser)]
 #[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {
-    /// The session to attach to, made if none runs by that name. Without
-    /// one, the session named for this directory, as the picker names it.
+    /// The session to attach to, made if none runs by that name, in the
+    /// directory `z` would take you to for it, unless this directory is for
+    /// it already. Without one, the session named for this directory, as the
+    /// picker names it.
     session: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,

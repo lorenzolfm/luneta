@@ -575,7 +575,12 @@ luneta's own, drawn by luneta and not by a plugin:
 
 `luneta` attaches to the session named for the directory you are in, as the
 picker's [directories](#directories) name it, `luneta-main` in a worktree of
-`luneta`, and makes it if none runs; `luneta <name>` attaches to that one.
+`luneta`, and makes it if none runs; `luneta <name>` attaches to that one. A
+session `luneta <name>` makes starts in the directory `z <name>` would take you
+to, as [`zoxide`](https://github.com/ajeetdsouza/zoxide) ranks them, unless
+the directory you are in is for it already, as a worktree `main` is for `main`
+and for `luneta-main`. Without zoxide, or a directory it knows for the name,
+the session starts where you are.
 Run in a pane of zellij, luneta will not attach to the session that pane is
 in, as zellij will not: name another. When zellij detaches, luneta ends. When
 the session zellij is in ends, as zellij quits, its last pane exits, or it is
@@ -766,7 +771,7 @@ the session it is in.
 | **zellij 0.45.0** | | everything |
 | [`claude`](https://claude.com/claude-code) | optional | the menu and the brief |
 | `git` | optional | the branch in the name of an agent the menu starts |
-| [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
+| [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the directory a session [`luneta <name>`](#luneta-in-your-terminal) makes starts in |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in the sidebar |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |

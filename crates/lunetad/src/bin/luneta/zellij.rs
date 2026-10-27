@@ -226,6 +226,30 @@ pub fn session_for(dir: &Path) -> Option<SessionName> {
         .or_else(|| SessionName::parse(path.split('/').rfind(|part| !part.is_empty())?).ok())
 }
 
+/// The directory zellij's client starts in for `session`, from `here`, the
+/// one luneta started in: where `z` would take you for its name, so that a
+/// session luneta makes of a directory's name starts in that directory.
+/// `here` where it is for `session` already, as a worktree `main` is for
+/// `main` and for `luneta-main`, where the session runs, as an attach keeps
+/// its directories, and where zoxide knows no directory for the name.
+pub fn dir_for(session: &SessionName, here: &Path) -> PathBuf {
+    let runs = || {
+        let running = lunetad::zellij_sessions(&lunetad::zellij_folder());
+        running.is_some_and(|running| running.iter().any(|(name, _)| *name == session.0))
+    };
+    if is_for(here, session) || runs() {
+        return here.to_owned();
+    }
+    crate::zoxide::query(&session.0).unwrap_or_else(|| here.to_owned())
+}
+
+/// Whether `dir` is for `session` already: its last part is the name, or the
+/// session it is for is.
+fn is_for(dir: &Path, session: &SessionName) -> bool {
+    dir.file_name().is_some_and(|base| base == session.as_str())
+        || session_for(dir).as_ref() == Some(session)
+}
+
 /// The repository a linked worktree is of: its git directory, which every
 /// worktree of it shares. A worktree's `.git` is a file that names its own git
 /// directory, and that names the shared one in `commondir`. None for a
@@ -754,13 +778,9 @@ mod tests {
         assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
     }
 
-    /// A worktree made by git is found one, by the files git leaves in it.
-    #[test]
-    fn a_linked_worktree_is_found_by_its_git_files() {
-        let Ok(scratch) = tempfile::tempdir() else {
-            panic!("no scratch directory");
-        };
-        let root = scratch.path();
+    /// A worktree `main` of a repository `luneta` in `root`, made by the files
+    /// git leaves in it.
+    fn linked_worktree(root: &Path) -> PathBuf {
         let common = root.join("luneta").join(".bare");
         let own = common.join("worktrees").join("main");
         let tree = root.join("luneta").join("main");
@@ -772,9 +792,36 @@ mod tests {
             fs::write(own.join("commondir"), "../..\n"),
         ];
         assert!(wrote.iter().all(Result::is_ok));
+        tree
+    }
+
+    /// A worktree made by git is found one, by the files git leaves in it.
+    #[test]
+    fn a_linked_worktree_is_found_by_its_git_files() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let tree = linked_worktree(scratch.path());
         assert_eq!(session_for(&tree).map(|name| name.0), Some("luneta-main".to_owned()));
-        let repository = root.join("luneta");
+        let repository = scratch.path().join("luneta");
         assert_eq!(session_for(&repository).map(|name| name.0), Some("luneta".to_owned()));
+    }
+
+    /// A session luneta makes starts where it started when that directory is
+    /// for it already, by its last part or by the name it gives a session,
+    /// and only otherwise where zoxide says.
+    #[test]
+    fn a_directory_is_for_the_sessions_named_after_it() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let tree = linked_worktree(scratch.path());
+        for (name, is) in [("main", true), ("luneta-main", true), ("luneta", false), ("elo", false)] {
+            let Ok(session) = SessionName::parse(name) else {
+                panic!("a name zellij takes");
+            };
+            assert_eq!(is_for(&tree, &session), is, "{name}");
+        }
     }
 
     #[test]
