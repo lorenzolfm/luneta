@@ -578,11 +578,14 @@ it, all as [`lunetad`](#building-from-source) says: it needs the daemon
 running, and says so at its bottom while it does not answer. `j` and `k` move,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, and `Esc` goes back to zellij. The session zellij is in has its rule in
-the accent.
+the accent. A pane with no agent in it is dimmed, and an icon says what runs
+in each, as in the plugin's [sidebar](#sidebar), with the plugin's icons and a
+terminal for `dash` and `elvish` too: `icons` does not change them here, as
+luneta has no configuration of its own yet.
 
 It is the first step, and the plugin's sidebar has more than this one does
 yet: its menu, its search, the brief, the `•` of what finished, a command's
-marks, the icons and the mark of the pane you are in come over one at a time.
+marks and the mark of the pane you are in come over one at a time.
 Until then, run luneta without the plugin's sidebar, or the two stand side by
 side: leave the dock out of `load_plugins`, and `default_layout` back at
 zellij's own, as [Dock the sidebar](#dock-the-sidebar) has them. The picker,

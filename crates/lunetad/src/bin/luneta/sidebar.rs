@@ -7,7 +7,6 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
-use luneta_protocol::said::Said;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Host, NameSource, Pane, Session, Status, Zellij};
 use ratatui::buffer::Buffer;
@@ -15,6 +14,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::icons;
 
 /// How many columns the sidebar takes, as the plugin's column did.
 pub const COLUMNS: u16 = 32;
@@ -33,6 +34,14 @@ const ACCENT: Color = Color::Magenta;
 const NAME: Color = Color::Cyan;
 /// The colour of an agent at work.
 const TAG: Color = Color::Yellow;
+
+/// How many columns a mark takes: one, as each glyph of `Mark` does. Each
+/// pane's row keeps that many for one, whether it has one or not.
+const MARK: usize = 1;
+
+/// The column a pane's label starts at, and the branch under it: past the
+/// indent, the mark and the icon, and a space after each of those two.
+const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 
 /// A session as the sidebar tells it from another of its name: zellij
 /// versions with sockets of their own can each run one under it.
@@ -86,9 +95,10 @@ enum Mark {
     Idle,
     Busy,
     Shell,
-    /// A word the daemon passed on as Claude Code wrote it, by its initial.
-    Other(Said),
-    /// An agent that says nothing.
+    /// A word the daemon passed on as Claude Code wrote it, by its initial as
+    /// a capital, which takes the one column a mark does.
+    Other(char),
+    /// An agent that says nothing, or nothing a mark can show in its column.
     Unreported,
 }
 
@@ -103,7 +113,7 @@ impl Mark {
                 Ok(Status::Unspecified) | Err(_) => Mark::Unreported,
             },
             Some(Reported::OtherStatus(word)) => {
-                Said::new(word.clone()).map_or(Mark::Unreported, Mark::Other)
+                initial(word).map_or(Mark::Unreported, Mark::Other)
             },
             None => Mark::Unreported,
         }
@@ -117,13 +127,18 @@ impl Mark {
             Mark::Idle => ("✓".to_owned(), style.fg(Color::Green).add_modifier(Modifier::BOLD)),
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
-            Mark::Other(word) => {
-                let initial = word.as_str().chars().take(1).flat_map(char::to_uppercase);
-                (initial.collect(), style.fg(TAG))
-            },
+            Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
         }
     }
+}
+
+/// The initial of `word` as a capital, if it takes one column: the first
+/// letter of a capital of two, as `ß`'s `SS`. A letter two wide, or a mark
+/// that sits on the letter before it, would put the label off its column.
+fn initial(word: &str) -> Option<char> {
+    let initial = word.chars().next()?.to_uppercase().next()?;
+    (initial.width() == Some(MARK)).then_some(initial)
 }
 
 /// The agent in a pane, as its row shows it.
@@ -158,6 +173,8 @@ enum Row {
         session: Listed,
         pane: u32,
         seat: Option<Seat>,
+        /// The icon of what runs in it, if that has one.
+        icon: Option<&'static str>,
         label: String,
         /// The branch checked out where it works, and how its work tree
         /// stands, as starship shows it.
@@ -336,11 +353,20 @@ impl Sidebar {
                     .and_then(|cwd| trees.get(cwd))
                     .and_then(|tree| WorkTree::of_api(tree))
                     .and_then(|tree| checkout(&tree));
+                let command = pane.command.as_deref();
+                // An agent's pane runs Claude Code, whatever its terminal has
+                // in front. It goes by the agent, as the label does, and not
+                // by the mark: a mark need not be an agent's.
+                let program = match agent(pane.id) {
+                    Some(_) => Some(icons::AGENT),
+                    None => command.and_then(icons::program),
+                };
                 rows.push(Row::Pane {
                     session: listed.clone(),
                     pane: pane.id,
                     seat,
-                    label: label(agent(pane.id), pane.command.as_deref(), cwd, pane.id),
+                    icon: program.and_then(icons::of),
+                    label: label(agent(pane.id), command, cwd, pane.id),
                     checkout,
                 });
             }
@@ -703,9 +729,6 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
-/// The shells, whose name says only that a pane is at its prompt.
-const SHELLS: [&str; 7] = ["bash", "dash", "fish", "nu", "sh", "zsh", "elvish"];
-
 /// What a pane's row is named: its agent by the name someone gave it, or else
 /// by where it works; a program by its command line, the program by its
 /// binary's name; a shell at its prompt by its directory's last two parts.
@@ -722,7 +745,7 @@ fn label(agent: Option<&Agent>, command: Option<&str>, cwd: Option<&str>, id: u3
         program.strip_prefix('-').unwrap_or(program)
     });
     match program {
-        Some(program) if !SHELLS.contains(&program) => {
+        Some(program) if !icons::SHELLS.contains(&program) => {
             [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
         },
         _ => cwd.map_or_else(|| format!("pane {id}"), short_cwd),
@@ -834,11 +857,13 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { seat, label, checkout, .. } => {
+        Row::Pane { seat, icon, label, checkout, .. } => {
             let mark = seat.as_ref().map(|seat| &seat.mark);
             let since = seat.as_ref().and_then(|seat| seat.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
+            // A pane with no agent in it is dimmed, and its icon is drawn as
+            // its label is.
             let label_style = match mark {
                 Some(Mark::Waiting) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 Some(_) => Style::new(),
@@ -850,11 +875,16 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                     let (glyph, style) = mark.glyph(frame);
                     spans.push(Span::styled(glyph, style));
                 },
-                None => spans.push(Span::raw(" ")),
+                None => spans.push(Span::raw(" ".repeat(MARK))),
             }
             spans.push(Span::raw(" "));
-            let label = cut(label, width.saturating_sub(5 + reserve + 1));
-            let gap = width.saturating_sub(5 + label.width() + age.width() + 1);
+            match icon {
+                Some(icon) => spans.push(Span::styled(*icon, label_style)),
+                None => spans.push(Span::raw(" ".repeat(icons::WIDTH))),
+            }
+            spans.push(Span::raw(" "));
+            let label = cut(label, width.saturating_sub(LABEL + reserve + 1));
+            let gap = width.saturating_sub(LABEL + label.width() + age.width() + 1);
             spans.push(Span::styled(label, label_style));
             spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(age, dim));
@@ -885,10 +915,10 @@ fn badge(waiting: usize, spinning: bool, frame: usize) -> Option<Span<'static>> 
 /// works, under its label, and how its work tree stands.
 fn checkout_line(branch: &str, status: &str, width: usize) -> Line<'static> {
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-    let branch = cut(branch, width.saturating_sub(5 + reserve + 1));
-    let gap = width.saturating_sub(5 + branch.width() + status.width() + 1);
+    let branch = cut(branch, width.saturating_sub(LABEL + reserve + 1));
+    let gap = width.saturating_sub(LABEL + branch.width() + status.width() + 1);
     Line::from(vec![
-        Span::raw("     "),
+        Span::raw(" ".repeat(LABEL)),
         Span::styled(branch, Style::new().fg(Color::DarkGray)),
         Span::raw(" ".repeat(gap)),
         Span::raw(status.to_owned()),
@@ -994,12 +1024,18 @@ mod tests {
         }
     }
 
-    /// The sidebar `width` columns wide and `height` tall, as text.
-    fn screen(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Vec<String> {
+    /// The sidebar drawn `width` columns wide and `height` tall.
+    fn drawn(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
         sidebar.draw(&mut buffer, area, focused, now);
+        buffer
+    }
+
+    /// The sidebar `width` columns wide and `height` tall, as text.
+    fn screen(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Vec<String> {
+        let buffer = drawn(sidebar, focused, width, height);
         (0..height)
             .map(|y| {
                 let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
@@ -1008,6 +1044,8 @@ mod tests {
             .collect()
     }
 
+    /// Two sessions, whose rows have Claude's icon, `\u{ec82}`, neovim's,
+    /// `\u{e6ae}`, and a terminal's, `\u{e795}`.
     fn two_sessions() -> Sidebar {
         let mut sidebar = Sidebar::default();
         sidebar.heard(host(
@@ -1037,10 +1075,10 @@ mod tests {
                 "─ 2 sessions ───────────── ●1 ─",
                 "",
                 " ▾ older ────────────────── ●1",
-                "   ● fold                   1m",
-                "     nvim src/main.rs",
+                "   ● \u{ec82} fold                 1m",
+                "     \u{e6ae} nvim src/main.rs",
                 " ▾ newer ─────────────────────",
-                "     w/b",
+                "     \u{e795} w/b",
             ]
         );
     }
@@ -1149,15 +1187,15 @@ mod tests {
         let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 5)[2..4].to_vec();
         assert_eq!(
             shown(&mut sidebar),
-            [" ▾ older ────────────────── ●1", "   ● fold                   1m"]
+            [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
         );
         sidebar.key(&down);
         sidebar.key(&down);
-        assert_eq!(shown(&mut sidebar), [" ▾ newer ─────────────────────", "     w/b"]);
+        assert_eq!(shown(&mut sidebar), [" ▾ newer ─────────────────────", "     \u{e795} w/b"]);
         sidebar.key(&up);
         assert_eq!(
             shown(&mut sidebar),
-            ["     nvim src/main.rs", " ▾ newer ─────────────────────"]
+            ["     \u{e6ae} nvim src/main.rs", " ▾ newer ─────────────────────"]
         );
     }
 
@@ -1231,6 +1269,75 @@ mod tests {
         assert_eq!(label(Some(&derived), Some("claude"), Some("/w/x"), 1), "luneta/main");
     }
 
+    /// The icon of what runs in a pane has a column of its own, so that every
+    /// label starts at the same column, and a program with none leaves it
+    /// blank. An agent's is Claude's, whatever its terminal has in front, and
+    /// `sudo` gives way to what it runs, though the row goes by its command.
+    /// A shell the row is named for the directory of has a terminal's.
+    #[test]
+    fn a_pane_s_icon_says_what_runs_in_it_in_a_column_of_its_own() {
+        let mut sidebar = Sidebar::default();
+        let sudo = "/nix/store/fdsygnh4wvr7g860ba3cwlcksn8v1pc5-sudo-1.9.17p2/bin/sudo -k nvim x";
+        sidebar.heard(host(
+            vec![session(
+                "s",
+                10,
+                vec![
+                    pane(1, 0, "/w/a", "cargo test"),
+                    pane(2, 0, "/w/b", sudo),
+                    pane(3, 0, "/w/c", "make"),
+                    pane(4, 0, "/w/d", "dash"),
+                ],
+            )],
+            vec![agent("s", 1, Status::Idle, Some("fold"))],
+        ));
+        let lines = screen(&mut sidebar, false, 32, 7);
+        assert_eq!(
+            lines[3..],
+            [
+                "   ✓ \u{ec82} fold                 1m",
+                "     \u{e6ae} sudo -k nvim x",
+                "       make",
+                "     \u{e795} w/d",
+            ]
+        );
+    }
+
+    /// A word an agent says that luneta does not know is marked by its
+    /// initial, as a capital, in the one column a mark takes, so that its
+    /// label starts where every other does. An initial that takes another
+    /// number of columns marks it as one that says nothing.
+    #[test]
+    fn a_word_an_agent_says_is_marked_in_the_one_column_a_mark_takes() {
+        let words = ["compacting", "ßa", "日本", "\u{301}a"];
+        let says = |pane: u32, word: &str| Agent {
+            status: Some(Reported::OtherStatus(word.to_owned())),
+            ..agent("s", pane, Status::Idle, Some("x"))
+        };
+        let mut sidebar = Sidebar::default();
+        let panes = (1..=4).map(|id| pane(id, 0, "/w/a", "claude")).collect();
+        let agents = words.into_iter().zip(1..).map(|(word, id)| says(id, word)).collect();
+        sidebar.heard(host(vec![session("s", 10, panes)], agents));
+        // Up to the label's first letter, a character to a column.
+        let start = |line: &String| line.chars().take(8).collect::<String>();
+        let lines = screen(&mut sidebar, false, 32, 7);
+        assert_eq!(
+            lines[3..].iter().map(start).collect::<Vec<_>>(),
+            ["   C \u{ec82} x", "   S \u{ec82} x", "   ? \u{ec82} x", "   ? \u{ec82} x"]
+        );
+    }
+
+    /// A pane with no agent in it is dimmed, its icon with its label.
+    #[test]
+    fn a_pane_with_no_agent_in_it_is_dimmed() {
+        let mut sidebar = two_sessions();
+        let buffer = drawn(&mut sidebar, false, 32, 7);
+        // The icon and the label's first letter, on the agent's row and on
+        // nvim's under it.
+        let dim = |y: u16| [5_u16, 7].map(|x| buffer[(x, y)].modifier.contains(Modifier::DIM));
+        assert_eq!((dim(3), dim(4)), ([false, false], [true, true]));
+    }
+
     /// The daemon cannot follow an agent to the session it is in when the
     /// session was renamed before the daemon started. Its row is the pane of
     /// its id that works where it does, in the one session that lists one.
@@ -1249,7 +1356,7 @@ mod tests {
         let mut sidebar = Sidebar::default();
         sidebar.heard(host(sessions.to_vec(), agents.to_vec()));
         let lines = screen(&mut sidebar, false, 32, 4);
-        assert_eq!(lines[3], "   ● fold                   1m");
+        assert_eq!(lines[3], "   ● \u{ec82} fold                 1m");
     }
 
     #[test]
