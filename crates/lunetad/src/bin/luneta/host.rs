@@ -5,6 +5,9 @@
 //! again, as a click on it does, and `Alt Tab` takes zellij to the next pane
 //! the sidebar lists, whichever has the keys. The sidebar's edge, its last
 //! column, drags it wider or narrower, zellij taking the columns it leaves.
+//! What the mouse drags on the sidebar's rows stays with the sidebar until it
+//! lets go, wherever the mouse goes, as what it drags on zellij stays with
+//! zellij.
 
 use std::collections::VecDeque;
 use std::env;
@@ -38,6 +41,7 @@ use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
 use crate::news::{self, News};
+use crate::order::{self, Order};
 use crate::own::{Look, Looked};
 use crate::sidebar::{self, Asked, Place, Sidebar};
 use crate::skills::{self, Skill};
@@ -78,6 +82,9 @@ pub enum Event {
     /// Something was kept of what you saw or marked unread: by another
     /// luneta, or by this one.
     News,
+    /// The order of the sidebar's rows was kept: by another luneta, or by
+    /// this one.
+    Order,
 }
 
 /// How often the sidebar is drawn again with nothing else to draw it: every
@@ -138,7 +145,8 @@ impl Focus {
 /// go: zellij, or the sidebar's edge, its last column, and never both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Held {
-    /// Nothing: no button is down, or one went down on the sidebar's rows.
+    /// Nothing: no button is down, or one went down on the sidebar's rows,
+    /// which the sidebar holds itself.
     Nothing,
     /// zellij, as a button went down over it: what it drags goes to zellij.
     Zellij,
@@ -255,7 +263,7 @@ struct App {
     /// in, when zellij is told.
     turned: Option<Theme>,
     events: Sender<Event>,
-    /// What watches the folders the folds and the news are kept in, for as
+    /// What watches where the folds, the news and the order are kept, for as
     /// long as luneta runs.
     _watching: Vec<notify::RecommendedWatcher>,
     /// The directory luneta started in, which zellij's client runs in.
@@ -381,9 +389,11 @@ fn run_in(
         Ok(runtime) => News::within(runtime),
         Err(why) => News::unshared(why),
     };
+    let order = Order::shared();
     let folds_watched = folds.dir().map(|dir| folds::watch(dir, events.clone())).transpose();
     let news_watched = news::watch(&news, events.clone());
-    let mut sidebar = Sidebar::new(folds, news);
+    let order_watched = order.file().map(|file| order::watch(file, events.clone())).transpose();
+    let mut sidebar = Sidebar::new(folds, news, order);
     let mut watching = Vec::new();
     match folds_watched {
         Ok(watcher) => watching.extend(watcher),
@@ -394,6 +404,11 @@ fn run_in(
         Ok(watcher) => watching.push(watcher),
         Err(error) => sidebar
             .notify(format!("dots of other lunetas show from luneta's next start: {error}")),
+    }
+    match order_watched {
+        Ok(watcher) => watching.extend(watcher),
+        Err(error) => sidebar
+            .notify(format!("rows moved elsewhere show from luneta's next start: {error}")),
     }
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
@@ -440,6 +455,8 @@ fn run_loop(
     loop {
         let wait = if app.client.waiting.is_some() {
             WAITING_LOOK
+        } else if app.sidebar.scrolling() {
+            sidebar::SCROLL
         } else if app.sidebar.turning() {
             sidebar::SPIN
         } else {
@@ -526,6 +543,7 @@ impl App {
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
             Event::News => self.sidebar.reread(),
+            Event::Order => self.sidebar.reorder(),
         }
         Ok(())
     }
@@ -586,9 +604,12 @@ impl App {
             return;
         }
         if chord == COLLAPSE {
-            // The strip has no edge to hold: one held is let go, as a
-            // release would let it go.
+            // The strip has no edge nor rows to hold: what the mouse holds of
+            // either is let go, as a release would let it go. A press held on
+            // the rows would keep the mouse from zellij, and the strip never
+            // hears the release.
             self.let_go();
+            self.sidebar.let_go();
             let other =
                 if self.focus == Focus::Collapsed { Focus::Zellij } else { Focus::Collapsed };
             self.give(other);
@@ -614,7 +635,7 @@ impl App {
             return;
         }
         let over_zellij = mouse.column >= zellij.x;
-        if self.held == Held::Zellij || over_zellij {
+        if self.held == Held::Zellij || (over_zellij && !self.sidebar.pressed()) {
             match mouse.kind {
                 MouseEventKind::Down(_) => {
                     self.held = Held::Zellij;
@@ -655,9 +676,6 @@ impl App {
             return;
         }
         let asked = self.sidebar.mouse(mouse, sidebar);
-        if asked == Asked::Nothing && down {
-            self.give(Focus::Sidebar);
-        }
         self.follow(asked);
     }
 
@@ -695,6 +713,7 @@ impl App {
     fn follow(&mut self, asked: Asked) {
         match asked {
             Asked::Nothing => {},
+            Asked::Take => self.give(Focus::Sidebar),
             Asked::Leave => self.leave(),
             Asked::Go(place) => {
                 self.go(&place, None);
