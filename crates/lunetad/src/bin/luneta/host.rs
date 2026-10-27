@@ -7,7 +7,8 @@
 //! column, drags it wider or narrower, zellij taking the columns it leaves.
 //! What the mouse drags on the sidebar's rows stays with the sidebar until it
 //! lets go, wherever the mouse goes, as what it drags on zellij stays with
-//! zellij.
+//! zellij. A brief the sidebar asks for shows in a box over zellij, which has
+//! the keys and the mouse until it closes.
 
 use std::collections::VecDeque;
 use std::env;
@@ -35,6 +36,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
+use crate::brief::{self, Briefing, Written};
 use crate::close::Act;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
@@ -76,6 +78,8 @@ pub enum Event {
     /// The skills the directory of the menu numbered `menu` can run, or why
     /// the finder found none.
     Skills { menu: u64, skills: Result<Vec<Skill>, String> },
+    /// What came of the brief numbered `number`.
+    Briefed { number: u64, written: Written },
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -262,6 +266,12 @@ struct App {
     /// What luneta's terminal turned to, until the colours it turned to are
     /// in, when zellij is told.
     turned: Option<Theme>,
+    /// The brief over zellij, from when the sidebar asks for it until it
+    /// closes.
+    briefing: Option<Briefing>,
+    /// How many briefs luneta has asked for. A brief takes the next number
+    /// as it is asked, which what comes of it carries.
+    briefs: u64,
     events: Sender<Event>,
     /// What watches where the folds, the news and the order are kept, for as
     /// long as luneta runs.
@@ -436,6 +446,8 @@ fn run_in(
         cursor: None,
         colours,
         turned: None,
+        briefing: None,
+        briefs: 0,
         events,
         _watching: watching,
         dir: dir.to_owned(),
@@ -542,6 +554,11 @@ impl App {
                 self.follow(asked);
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
+            Event::Briefed { number, written } => {
+                if let Some(briefing) = self.briefing.as_mut().filter(|it| it.number() == number) {
+                    briefing.written(written);
+                }
+            },
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
         }
@@ -596,6 +613,13 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        // A brief takes every key, which does nothing else.
+        if let Some(briefing) = &self.briefing {
+            if briefing.closes(key) {
+                self.briefing = None;
+            }
+            return;
+        }
         let chord = (key.code, key.modifiers);
         if chord == SWAP {
             // A collapsed sidebar opens to take the keys.
@@ -630,6 +654,14 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) {
+        // A brief takes the mouse too, and a click, wherever it is, closes
+        // one written, and does nothing else.
+        if let Some(briefing) = &self.briefing {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) && briefing.clicked() {
+                self.briefing = None;
+            }
+            return;
+        }
         let (sidebar, zellij) = self.areas;
         if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
             return;
@@ -743,6 +775,11 @@ impl App {
                 self.leave();
             },
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
+            Asked::Brief(brief) => {
+                self.briefs += 1;
+                self.briefing = Some(Briefing::new(self.briefs, brief.title()));
+                brief::ask(self.briefs, brief, &self.events);
+            },
         }
     }
 
@@ -962,7 +999,9 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now);
             }
             let cursor = self.client.hosted.draw(buffer, zellij);
-            if self.focus.zellij()
+            if let Some(briefing) = &self.briefing {
+                briefing.draw(buffer, zellij);
+            } else if self.focus.zellij()
                 && let Some(cursor) = cursor
             {
                 frame.set_cursor_position(cursor);
