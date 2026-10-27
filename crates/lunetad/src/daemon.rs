@@ -236,7 +236,7 @@ fn follow(core: &SyncSender<Command>, folder: &Path, end: oneshot::Sender<()>) -
             // The server has ended already, if no one waits for the word.
             let _ = end.send(());
         }
-        core.send(Command::Sockets(scan.sockets)).is_ok()
+        core.send(Command::Sockets { sockets: scan.sockets, unread: scan.unread }).is_ok()
     };
     let wanted = zellij::of_sessions;
     watch::watch("zellij", folder, RecursiveMode::Recursive, wanted, SWEEP, read, tell)

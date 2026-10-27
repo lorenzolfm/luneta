@@ -79,32 +79,30 @@ const LONG: Duration = Duration::from_secs(1);
 pub struct Listed {
     name: String,
     started: SystemTime,
-    socket: NonZeroU64,
+    /// The session, as the news keeps it.
+    kept: ledger::Session,
 }
 
 impl Listed {
-    /// `session`, or none for one with no start or no socket: a daemon of
-    /// another build's.
+    /// `session`, or none for one with no start or no socket, as a daemon of
+    /// another build's lists, or with a start no file of the news can be
+    /// named for, before 1970.
     fn of(session: &Session) -> Option<Self> {
         let started = SystemTime::try_from(session.started_at?).ok()?;
-        let socket = NonZeroU64::new(session.socket)?;
-        Some(Listed { name: session.name.clone(), started, socket })
-    }
-
-    /// The session, as the news keeps it.
-    fn kept(&self) -> ledger::Session {
-        ledger::Session { started: self.started, socket: self.socket }
+        let kept = ledger::Session::new(started, NonZeroU64::new(session.socket)?)?;
+        Some(Listed { name: session.name.clone(), started, kept })
     }
 
     /// Its pane `pane`, as the news keeps it.
     fn key(&self, pane: u32) -> Key {
-        Key { session: self.kept(), pane }
+        Key { session: self.kept, pane }
     }
 
     /// A session of the tests', whose socket is the first there is.
     #[cfg(test)]
     pub fn new(name: &str, started: SystemTime) -> Self {
-        Listed { name: name.to_owned(), started, socket: NonZeroU64::MIN }
+        let kept = ledger::Session::new(started, NonZeroU64::MIN).unwrap();
+        Listed { name: name.to_owned(), started, kept }
     }
 }
 
@@ -588,36 +586,43 @@ impl Sidebar {
         look
     }
 
-    /// Time went by, to `now`, with luneta's window `watched`, as it has the
-    /// focus. What luneta saw of its zellij's client may have stood long
-    /// enough against the daemon's list for that list to be the newer. The
-    /// client may have stayed on its pane long enough for you to have been
-    /// there, whether the sidebar shows or not: it has been on the pane, and
-    /// the window has had the focus, since the first tick that found both.
-    /// And the daemon may have left a session out of its lists for long
-    /// enough for what was kept of it to go.
-    pub fn ticked(&mut self, now: SystemTime, watched: bool) {
+    /// Time went by, to `now` by the host's clock and `at` by luneta's own,
+    /// with luneta's window `watched`, as it has the focus. What luneta saw
+    /// of its zellij's client may have stood long enough against the
+    /// daemon's list for that list to be the newer. The client may have
+    /// stayed on its pane long enough for you to have been there, whether the
+    /// sidebar shows or not: it has been on the pane, and the window has had
+    /// the focus, since the first tick that found both. And the daemon may
+    /// have left a session out of its lists for long enough for what was kept
+    /// of it to go.
+    pub fn ticked(&mut self, now: SystemTime, at: Instant, watched: bool) {
         if let Some(session) = self.own.session() {
             let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
             let pane = self.own.pane();
-            self.own.heard(listed.as_deref(), Instant::now());
+            self.own.heard(listed.as_deref(), at);
             if self.own.pane() != pane {
                 self.rebuild();
             }
         }
         let here = self.here_key.filter(|_| watched);
         let finished = &self.finished;
-        if self.news.dwell(here, |key| finished.get(&key).copied(), now) {
+        if self.news.dwell(here, |key| finished.get(&key).copied(), now, at) {
             self.rebuild();
         }
-        if let Some(host) = &self.host {
-            let live: Option<BTreeSet<ledger::Session>> = host
-                .sessions
-                .iter()
-                .map(|session| Listed::of(session).map(|listed| listed.kept()))
-                .collect();
-            self.news.listed(live.as_ref(), now);
+        let live = self.live();
+        self.news.listed(live.as_ref(), at);
+    }
+
+    /// The sessions that run, as the daemon lists them now, or none where its
+    /// list may leave out one that does: it does not answer, and what it said
+    /// last stands; or it could not read all of zellij's folder; or it lists
+    /// one the news cannot tell from another.
+    fn live(&self) -> Option<BTreeSet<ledger::Session>> {
+        let host = self.host.as_ref()?;
+        if self.away.is_some() || host.unread_sockets > 0 {
+            return None;
         }
+        host.sessions.iter().map(|session| Some(Listed::of(session)?.kept)).collect()
     }
 
     /// The daemon does not answer, for `why`. What it said last stands.
@@ -2058,6 +2063,7 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::sync::LazyLock;
 
     use luneta_protocol::said::Said;
     use lunetad::api::shell::{Ended, Going, Stopped};
@@ -2090,11 +2096,9 @@ mod tests {
     }
 
     fn listed(name: &str, started: u64) -> Listed {
-        Listed {
-            name: name.to_owned(),
-            started: SystemTime::UNIX_EPOCH + Duration::from_secs(started),
-            socket: NonZeroU64::new(started).unwrap(),
-        }
+        let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(started);
+        let kept = ledger::Session::new(started_at, NonZeroU64::new(started).unwrap()).unwrap();
+        Listed { name: name.to_owned(), started: started_at, kept }
     }
 
     fn agent(session: &str, pane: u32, status: Status, name: Option<&str>) -> Agent {
@@ -2123,6 +2127,7 @@ mod tests {
             agents,
             unread: 0,
             pull_requests: Vec::new(),
+            unread_sockets: 0,
         }
     }
 
@@ -2824,6 +2829,19 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
     }
 
+    /// luneta's own clock as the host's says `now`: as long after one moment
+    /// of it as `now` is after the epoch.
+    fn steady(now: SystemTime) -> Instant {
+        static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+        *START + now.duration_since(SystemTime::UNIX_EPOCH).unwrap()
+    }
+
+    /// Time went by, to `moment(millis)` by both clocks, with luneta's window
+    /// focused.
+    fn tick(sidebar: &mut Sidebar, millis: u64) {
+        sidebar.ticked(moment(millis), steady(moment(millis)), true);
+    }
+
     /// Whether the cell on line `y` at column `x` is dimmed, drawn at `now`.
     fn dimmed(sidebar: &mut Sidebar, x: u16, y: u16, now: SystemTime) -> bool {
         drawn_at(sidebar, false, 32, 7, now)[(x, y)].modifier.contains(Modifier::DIM)
@@ -2853,7 +2871,7 @@ mod tests {
         ));
         sidebar.titled("s | fish".to_owned());
         let lines = |sidebar: &mut Sidebar, now| {
-            sidebar.ticked(now, true);
+            sidebar.ticked(now, steady(now), true);
             seen_at(sidebar, false, 32, 6, now).0
         };
         assert_eq!(
@@ -2909,7 +2927,7 @@ mod tests {
         let older = |pane| Place::Pane { session: listed("older", 10), pane };
         let u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
         let nvim = |sidebar: &mut Sidebar, now| {
-            sidebar.ticked(now, true);
+            sidebar.ticked(now, steady(now), true);
             let lines = seen_at(sidebar, true, 32, 12, now).0;
             lines.into_iter().find(|line| line.contains("nvim")).expect("nvim's row")
         };
@@ -2947,7 +2965,7 @@ mod tests {
     /// The row of the agent of `idle_agent`, once the sidebar ticks at `now`
     /// with luneta's window `watched`.
     fn agent_row(sidebar: &mut Sidebar, now: SystemTime, watched: bool) -> String {
-        sidebar.ticked(now, watched);
+        sidebar.ticked(now, steady(now), watched);
         seen_at(sidebar, false, 32, 6, now).0[3].clone()
     }
 
@@ -2994,7 +3012,7 @@ mod tests {
         sidebar.titled("a | claude".to_owned());
         sidebar.went(&Place::Pane { session: listed("a", 10), pane: 1 });
         let lines = |sidebar: &mut Sidebar, now| {
-            sidebar.ticked(now, true);
+            sidebar.ticked(now, steady(now), true);
             seen_at(sidebar, false, 32, 6, now).0
         };
         lines(&mut sidebar, moment(160_000));
@@ -3015,17 +3033,50 @@ mod tests {
         sidebar.titled("s | fish".to_owned());
         let s = |pane| Place::Pane { session: listed("s", 10), pane };
         sidebar.went(&s(1));
-        sidebar.ticked(moment(160_000), true);
-        sidebar.ticked(moment(161_000), true);
+        tick(&mut sidebar, 160_000);
+        tick(&mut sidebar, 161_000);
         sidebar.went(&s(3));
         let seen = "   ✓ \u{ec82} fold                 1m";
         let new = "  •✓ \u{ec82} fold                 1m";
         for (left, back, row) in [(163_000, 172_000, seen), (173_000, 183_000, new)] {
             sidebar.heard(host(Vec::new(), Vec::new()));
-            sidebar.ticked(moment(left), true);
-            sidebar.ticked(moment(back), true);
+            tick(&mut sidebar, left);
+            tick(&mut sidebar, back);
             sidebar.heard(idle_agent());
             assert_eq!(agent_row(&mut sidebar, moment(back + 500), true), row);
+        }
+    }
+
+    /// A list the daemon may have left a session out of takes nothing of
+    /// what you saw in it, however long it stands: what it said last, while
+    /// it does not answer, as a session may have started since, and one it
+    /// could not read all of zellij's folder for.
+    #[test]
+    fn a_session_a_list_falls_short_of_keeps_what_you_saw() {
+        let short: [fn(&mut Sidebar); 2] = [
+            |sidebar| {
+                sidebar.heard(host(Vec::new(), Vec::new()));
+                sidebar.lost("lunetad does not answer".to_owned());
+            },
+            |sidebar| {
+                sidebar.heard(Host { unread_sockets: 1, ..host(Vec::new(), Vec::new()) });
+            },
+        ];
+        for short in short {
+            let mut sidebar = Sidebar::default();
+            sidebar.heard(idle_agent());
+            sidebar.titled("s | fish".to_owned());
+            let s = |pane| Place::Pane { session: listed("s", 10), pane };
+            sidebar.went(&s(1));
+            tick(&mut sidebar, 160_000);
+            tick(&mut sidebar, 161_000);
+            sidebar.went(&s(3));
+            short(&mut sidebar);
+            tick(&mut sidebar, 163_000);
+            tick(&mut sidebar, 183_000);
+            sidebar.heard(idle_agent());
+            let seen = "   ✓ \u{ec82} fold                 1m";
+            assert_eq!(agent_row(&mut sidebar, moment(183_500), true), seen);
         }
     }
 

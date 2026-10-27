@@ -23,8 +23,9 @@ use crate::zellij::{Id, Sessions, Socket};
 pub enum Command {
     /// What Claude Code's files say now.
     Agents(Scan),
-    /// The zellij sessions that run now.
-    Sockets(Vec<Socket>),
+    /// The zellij sessions that run now, and how many of zellij's folders and
+    /// sockets could not be read, any of which could be another's.
+    Sockets { sockets: Vec<Socket>, unread: u32 },
     /// What zellij listed of the panes of `session`, asked for by `name`.
     Panes { session: Id, name: String, panes: Vec<Pane> },
     /// What zellij listed of the clients of `session`, asked for by `name`.
@@ -96,6 +97,8 @@ pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
 struct Known {
     found: Scan,
     sessions: Sessions,
+    /// How many of zellij's folders and sockets the last scan could not read.
+    unread_sockets: u32,
     /// What zellij last listed of each session's panes.
     panes: HashMap<Id, Vec<Pane>>,
     /// What zellij last listed of each session's clients, by their ids.
@@ -119,6 +122,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     let mut known = Known {
         found: Scan { agents: Vec::new(), unread: 0 },
         sessions: Sessions::default(),
+        unread_sockets: 0,
         panes: HashMap::new(),
         clients: HashMap::new(),
         trees: BTreeMap::new(),
@@ -137,8 +141,9 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 assert_eq!(pids.len(), now.agents.len(), "an agent's pid comes twice");
                 known.found = now;
             },
-            Command::Sockets(now) => {
-                if known.saw(now) {
+            Command::Sockets { sockets, unread } => {
+                known.unread_sockets = unread;
+                if known.saw(sockets) {
                     wake(&wakes.panes);
                 }
             },
@@ -361,6 +366,7 @@ impl Known {
             agents,
             unread: self.found.unread,
             pull_requests,
+            unread_sockets: self.unread_sockets,
         }
     }
 
