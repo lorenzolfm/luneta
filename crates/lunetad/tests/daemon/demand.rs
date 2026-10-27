@@ -38,7 +38,12 @@ const STAND_IN_VERSION: &str = "LUNETA_TEST_STAND_IN_VERSION";
 
 /// `luneta watch`, run as `luneta`, and the host it wrote out.
 fn watch(host: &Host, luneta: &Path) -> api::Host {
-    let output = answered(host.vars().command(&luneta.display().to_string()).arg("watch"));
+    written(host.vars().command(&luneta.display().to_string()).arg("watch"))
+}
+
+/// The host that `command`, a `luneta watch`, wrote out.
+fn written(command: &mut Command) -> api::Host {
+    let output = answered(command);
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "luneta watch failed: {said}");
     api::Host::decode(output.stdout.as_slice()).unwrap()
@@ -120,12 +125,16 @@ impl Drop for Detached<'_> {
 /// `luneta watch` starts lunetad where none runs, and answers once it does.
 /// The daemon holds nothing of luneta's: it leads a session of its own, and
 /// what it says goes to a log in its folder, so that whoever reads what
-/// luneta writes to its end, as zellij does, has its answer. The next
-/// `luneta watch` reaches the same daemon.
+/// luneta writes to its end, as zellij does, has its answer. Nor does it
+/// hold what luneta was handed open past its stdio, as zellij hands it each
+/// pane's terminal: here a second end of luneta's stdout, which would keep
+/// that open too. The next `luneta watch` reaches the same daemon.
 #[test]
 fn luneta_watch_starts_a_detached_daemon_where_none_runs() {
     let host = Host::new();
-    let first = watch(&host, Path::new(LUNETA));
+    let mut handed = host.vars().command("sh");
+    handed.args(["-c", "exec \"$0\" watch 7>&1", LUNETA]);
+    let first = written(&mut handed);
     let daemon = Detached { host: &host, pid: pid(&first) };
 
     let leader = Pid::from_raw(i32::try_from(daemon.pid).unwrap());
