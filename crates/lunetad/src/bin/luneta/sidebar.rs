@@ -2447,7 +2447,8 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
 /// else by its topic, as the daemon reads it in the title Claude Code gives
 /// its pane; or else by its tab, if someone named it, or else by where it
 /// works. A program goes by its command line, the program by its binary's
-/// name, and a shell at its prompt by its directory's last two parts.
+/// name, and a shell at its prompt by its tab, if someone named it, as an
+/// agent does, or else by its directory's last two parts.
 fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
         let topic = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
@@ -2463,7 +2464,11 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
         Some(program) if !icons::SHELLS.contains(&program) => {
             [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
         },
-        _ => pane.cwd.as_deref().map_or_else(|| format!("pane {}", pane.id), short_cwd),
+        _ => match (tab::named(&pane.tab_name), pane.cwd.as_deref()) {
+            (Some(tab), _) => tab.to_owned(),
+            (None, Some(cwd)) => short_cwd(cwd),
+            (None, None) => format!("pane {}", pane.id),
+        },
     }
 }
 
@@ -3550,6 +3555,9 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
+    /// A shell at its prompt goes by its tab, if someone named it, as an agent
+    /// does, and else by its directory; a program by its command, whatever the
+    /// tab.
     #[test]
     fn a_pane_is_named_for_what_runs_in_it() {
         let named = |command: &str| label(None, &pane(3, 0, "/w/luneta/main", command));
@@ -3559,6 +3567,10 @@ mod tests {
         assert_eq!(named("/nix/store/a1p5-neovim/bin/nvim --clean"), "nvim --clean");
         let unsaid = Pane { cwd: None, command: None, ..pane(3, 0, "", "") };
         assert_eq!(label(None, &unsaid), "pane 3");
+        let tabbed = |pane: Pane| label(None, &Pane { tab_name: "review".to_owned(), ..pane });
+        assert_eq!(tabbed(pane(3, 0, "/w/luneta/main", "-fish")), "review");
+        assert_eq!(tabbed(pane(3, 0, "/w/luneta/main", "cargo test")), "cargo test");
+        assert_eq!(tabbed(unsaid), "review");
     }
 
     /// An agent goes by the name someone gave it, then by its topic, the title
