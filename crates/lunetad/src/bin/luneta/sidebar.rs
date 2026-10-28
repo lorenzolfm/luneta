@@ -992,16 +992,15 @@ impl Sidebar {
             .or_else(|| Some(title.split_once(" | ").map_or(title, |(session, _)| session)))
     }
 
-    /// The pane luneta's zellij is on, as the CLI names one, `<session>:<pane>`,
-    /// while it is in a session, on its way to none, and on a pane, not a
-    /// plugin's.
-    pub fn here_pane(&self) -> Option<String> {
+    /// The pane luneta's zellij is on, by its session's name now, while it
+    /// is in a session, on its way to none, and on a pane, not a plugin's.
+    pub fn here_pane(&self) -> Option<zellij::Pane> {
         if self.going().is_some() {
             return None;
         }
         let session = self.here()?;
         let pane = self.own.pane().filter(|_| self.own.session() == Some(session))?;
-        Some(format!("{session}:{pane}"))
+        Some(zellij::Pane { session: session.to_owned(), pane })
     }
 
     /// The sessions zellij's client may be in: the one luneta sent it to,

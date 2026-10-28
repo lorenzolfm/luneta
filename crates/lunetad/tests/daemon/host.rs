@@ -30,7 +30,7 @@ pub const SOCKET: &str = "luneta/lunetad.sock";
 /// first on the `PATH`, for a test's own programs to stand in for those of
 /// whoever runs the tests, and git reads no config of theirs either. Nothing
 /// runs in a pane of theirs: zellij's names of one are left out, and the
-/// one luneta's ask box gives its agent.
+/// one luneta's ask box gives its agent, with the turn it is at.
 #[derive(Clone, Copy, Default)]
 pub struct Vars<'a> {
     pub runtime: Option<&'a Path>,
@@ -49,7 +49,8 @@ impl<'a> Vars<'a> {
         let mut command = Command::new(program);
         let names = ["XDG_RUNTIME_DIR", "TMPDIR", "HOME", "CLAUDE_CONFIG_DIR", "ZELLIJ_SOCKET_DIR"];
         let panes = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "LUNETA_PANE"];
-        for name in names.into_iter().chain(panes) {
+        let turns = ["LUNETA_TURN", "LUNETA_TURN_BEFORE"];
+        for name in names.into_iter().chain(panes).chain(turns) {
             command.env_remove(name);
         }
         let set = [

@@ -950,7 +950,7 @@ impl App {
         if here.is_some() {
             self.client.hosted.send(zellij::NUDGE);
         }
-        ask.send(here.as_deref(), &self.events);
+        ask.send(here.as_ref(), &self.events);
     }
 
     /// Takes zellij's client to the pane the sidebar lists after the one it
