@@ -37,9 +37,8 @@ pub enum Command {
     PullRequests(BTreeMap<String, Found>),
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
-    /// Asks for the sessions zellij can be asked about, and the name to ask
-    /// by, for their panes.
-    Sessions(oneshot::Sender<Vec<(Id, String)>>),
+    /// Asks for the sessions zellij can be asked about, for their panes.
+    Sessions(oneshot::Sender<Vec<Addressed>>),
     /// Asks for the directories the panes work in, for git to be asked about.
     Dirs(oneshot::Sender<BTreeSet<String>>),
     /// Asks for the branch checked out in each directory a pane works in, by
@@ -52,11 +51,25 @@ pub enum Command {
     Watch { after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>> },
 }
 
+/// A session zellij can be asked about, for its panes.
+pub struct Addressed {
+    pub id: Id,
+    /// The name to ask by.
+    pub name: String,
+    /// The last word said of it, as the core counts the words said of every
+    /// session: one as zellij could first be asked about it by its name, and
+    /// one each time a shell in it runs a command, which can change where its
+    /// pane works and what runs in it.
+    pub told: u64,
+    /// Whether the host has its panes, as zellij last listed them.
+    pub listed: bool,
+}
+
 /// Who the core wakes, as the host changes in a way that has them ask
 /// something at once rather than on their next sweep.
 pub struct Wakes {
     /// The thread that asks zellij for panes, as it can be asked about a
-    /// session it could not be before.
+    /// session it could not be before, or a shell in one says a word.
     pub panes: SyncSender<()>,
     /// The thread that asks git about work trees, as a pane works in a
     /// directory it has not asked about.
@@ -110,6 +123,12 @@ struct Known {
     /// What the shells with the hook last said, each in the session it
     /// started in.
     shells: Vec<Shell>,
+    /// How many words have been said of the sessions: one as zellij could
+    /// first be asked about each by its name, and one each time a shell in one
+    /// says a new line, or goes.
+    words: u64,
+    /// The last word said of each session that zellij can be asked about.
+    told: HashMap<Id, u64>,
     /// The host as the API gives it, its version with it.
     host: api::Host,
     /// How many times the host has changed.
@@ -128,6 +147,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         trees: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
         shells: Vec::new(),
+        words: 0,
+        told: HashMap::new(),
         host: api::Host::default(),
         seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
@@ -177,10 +198,20 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 }
             },
             Command::PullRequests(now) => known.pull_requests = now,
-            Command::Shells(now) => known.shells = now,
+            Command::Shells(now) => {
+                if known.heard(now) {
+                    wake(&wakes.panes);
+                }
+            },
             Command::Sessions(answer) => {
+                let sessions = known.addressed().into_iter().map(|(id, name)| Addressed {
+                    id,
+                    name,
+                    told: *known.told.get(&id).expect("a word is said of each as it comes"),
+                    listed: known.panes.contains_key(&id),
+                });
                 // One who stopped waiting has no use for the answer.
-                let _ = answer.send(known.addressed().into_iter().collect());
+                let _ = answer.send(sessions.collect());
                 continue;
             },
             Command::Dirs(answer) => {
@@ -229,6 +260,8 @@ impl Known {
     /// only go stale. One renamed to a name of its own keeps them. True when
     /// zellij can be asked about a session it could not be before: one that
     /// started, or took a name, or has one another session no longer shares.
+    /// A word is said of each, so that the panes thread asks about it however
+    /// lately it did under another name, or before it came to share one.
     fn saw(&mut self, sockets: Vec<Socket>) -> bool {
         let before = self.addressed();
         self.sessions.saw(sockets);
@@ -236,7 +269,43 @@ impl Known {
         let addressed = |session: &Id| now.iter().any(|(id, _)| id == session);
         self.panes.retain(|session, _| addressed(session));
         self.clients.retain(|session, _| addressed(session));
-        !now.is_subset(&before)
+        self.told.retain(|session, _| addressed(session));
+        let came: Vec<Id> = now.difference(&before).map(|(id, _)| *id).collect();
+        for session in &came {
+            self.say(*session);
+        }
+        !came.is_empty()
+    }
+
+    /// Takes in what the shells say now. A shell that says what it did not,
+    /// or has gone, says a word in the session it is in, if zellij can be
+    /// asked about that one. True when one did.
+    fn heard(&mut self, now: Vec<Shell>) -> bool {
+        let unsaid = |shell: &&Shell, among: &[Shell]| !among.iter().any(|was| was.says_as(shell));
+        let new = now.iter().filter(|shell| unsaid(shell, &self.shells));
+        let gone = self.shells.iter().filter(|shell| unsaid(shell, &now));
+        // A word was said of each session as zellij could be asked about it.
+        let can_ask = |session: &Id| self.told.contains_key(session);
+        let told: HashSet<Id> =
+            new.chain(gone).filter_map(|shell| self.house(shell)).filter(can_ask).collect();
+        for session in &told {
+            self.say(*session);
+        }
+        self.shells = now;
+        !told.is_empty()
+    }
+
+    /// Says a word of `session`, which zellij can be asked about.
+    fn say(&mut self, session: Id) {
+        self.words = self.words.checked_add(1).expect("fewer than 2^64 words are said");
+        self.told.insert(session, self.words);
+    }
+
+    /// The session `shell` is in, as `Sessions::housing` has it. The hook
+    /// counts whole seconds: the shell started by the end of the one it says.
+    fn house(&self, shell: &Shell) -> Option<Id> {
+        let by = shell.started.checked_add(Duration::from_secs(1))?;
+        self.sessions.housing(&shell.named, by)
     }
 
     /// Takes in what zellij listed of the panes of `session`, which runs, and
@@ -307,10 +376,7 @@ impl Known {
     fn shells(&self) -> HashMap<(Id, u32), &Shell> {
         let mut shells: HashMap<(Id, u32), &Shell> = HashMap::new();
         for shell in &self.shells {
-            // The hook counts whole seconds: the shell started by the end of
-            // the one it says.
-            let by = shell.started.checked_add(Duration::from_secs(1));
-            let Some(session) = by.and_then(|by| self.sessions.housing(&shell.named, by)) else {
+            let Some(session) = self.house(shell) else {
                 continue;
             };
             shells
@@ -338,6 +404,11 @@ impl Known {
             let name = sessions.name_of(*session).expect("a session zellij listed runs");
             assert_eq!(sessions.addressed(name), Some(*session));
         }
+        // `saw` says a word of each session as zellij can be asked about it,
+        // and lets the word go as it no longer can be.
+        let addressed = self.addressed();
+        assert_eq!(self.told.len(), addressed.len());
+        assert!(addressed.iter().all(|(id, _)| self.told.contains_key(id)));
         // By name, and those that share one, as sessions of zellij versions
         // with contracts of their own can, by when each started.
         let mut running: Vec<(Id, &str)> = self.sessions.running().collect();

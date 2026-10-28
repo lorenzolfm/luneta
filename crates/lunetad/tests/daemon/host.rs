@@ -25,7 +25,8 @@ pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
 pub const SOCKET: &str = "luneta/lunetad.sock";
 
 /// The variables that the daemon and the CLI find their folders by: their
-/// own, Claude Code's and zellij's. `None` leaves one unset, so that nothing a
+/// own, Claude Code's and zellij's, its cache among them. `None` leaves one
+/// unset, so that nothing a
 /// test runs ever reads the folders of whoever runs the tests. `bin` comes
 /// first on the `PATH`, for a test's own programs to stand in for those of
 /// whoever runs the tests, and git reads no config of theirs either. Nothing
@@ -47,7 +48,14 @@ impl<'a> Vars<'a> {
 
     pub fn command(self, program: &str) -> Command {
         let mut command = Command::new(program);
-        let names = ["XDG_RUNTIME_DIR", "TMPDIR", "HOME", "CLAUDE_CONFIG_DIR", "ZELLIJ_SOCKET_DIR"];
+        let names = [
+            "XDG_RUNTIME_DIR",
+            "XDG_CACHE_HOME",
+            "TMPDIR",
+            "HOME",
+            "CLAUDE_CONFIG_DIR",
+            "ZELLIJ_SOCKET_DIR",
+        ];
         let panes = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "LUNETA_PANE"];
         let turns = ["LUNETA_TURN", "LUNETA_TURN_BEFORE"];
         for name in names.into_iter().chain(panes).chain(turns) {
@@ -81,7 +89,8 @@ impl<'a> Vars<'a> {
 /// there is no such session, as zellij does. It notes each session the daemon
 /// asks it for the panes of, for `asked`, and each pane, tab and session it is
 /// asked to close, for `closed`, and closes nothing; in a session a test had
-/// it `refuse`, it fails to, as zellij can. It knows no other command.
+/// it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
+/// lists nothing, and answers nothing. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -115,6 +124,9 @@ esac
 if [ "$asking" = panes ]; then
     echo "$session" >> "{panes}/asked"
 fi
+if [ -f "{panes}/$session.hung" ]; then
+    exec sleep 5
+fi
 if [ ! -f "{panes}/$session.json" ]; then
     echo "Session '$session' not found." >&2
     exit 1
@@ -147,6 +159,19 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// The sessions zellij has been asked about, in the order it was asked.
     pub fn asked(&self) -> Vec<String> {
         self.lines("asked")
+    }
+
+    /// Waits for zellij to be asked about the panes of `session` once more,
+    /// and returns as soon as it is: the daemon asks again a sweep later at
+    /// the soonest, with no word that anything changed.
+    pub fn asked_again(&self, session: &str) {
+        let times = || self.asked().iter().filter(|asked| *asked == session).count();
+        let before = times();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while times() == before {
+            assert!(Instant::now() < deadline, "zellij was never asked about {session} again");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// What zellij has been asked to close, each as its arguments were, in
@@ -186,6 +211,13 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
+    }
+
+    /// Has zellij answer nothing from now on of what it is asked to list of
+    /// the session `session`, for longer than the daemon waits, as the
+    /// server of one that hangs does.
+    pub fn hang(&self, session: &str) {
+        self.write(&format!("{session}.hung"), "");
     }
 
     /// Writes `text` to the file `name`, whole before zellij can read it.
@@ -265,12 +297,13 @@ exec cat "{pulls}/$branch.json"
     }
 }
 
-/// The folders of a host of a test's own: the daemon's, and zellij's sockets,
-/// with a zellij that lists the panes the test gives it, and a gh that finds
-/// the pull requests it gives it.
+/// The folders of a host of a test's own: the daemon's, zellij's sockets,
+/// and a home with zellij's cache in it, with a zellij that lists the panes
+/// the test gives it, and a gh that finds the pull requests it gives it.
 pub struct Host {
     pub runtime: TempDir,
     pub sockets: TempDir,
+    pub home: TempDir,
     pub zellij: FakeZellij,
     pub gh: FakeGh,
 }
@@ -281,20 +314,42 @@ impl Host {
         let host = Host {
             runtime: tempfile::tempdir().unwrap(),
             sockets: tempfile::tempdir().unwrap(),
+            home: tempfile::tempdir().unwrap(),
             gh: FakeGh::new(zellij.bin()),
             zellij,
         };
         fs::create_dir_all(host.contract()).unwrap();
+        fs::create_dir_all(host.metadata()).unwrap();
         host
     }
 
     pub fn vars(&self) -> Vars<'_> {
         Vars {
             runtime: Some(self.runtime.path()),
+            home: Some(self.home.path()),
             zellij: Some(self.sockets.path()),
             bin: Some(self.zellij.bin()),
             ..Vars::default()
         }
+    }
+
+    /// The folder zellij 0.45 writes what it keeps of each session in, in
+    /// its cache in the home.
+    fn metadata(&self) -> PathBuf {
+        let cache = if cfg!(target_os = "macos") {
+            "Library/Caches/org.Zellij-Contributors.Zellij"
+        } else {
+            ".cache/zellij"
+        };
+        self.home.path().join(cache).join("contract_version_1/session_info")
+    }
+
+    /// Has zellij write `text` as what it keeps of `session`, in place, as
+    /// zellij does.
+    pub fn write_metadata(&self, session: &str, text: &str) {
+        let dir = self.metadata().join(session);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("session-metadata.kdl"), text).unwrap();
     }
 
     /// The daemon's folder.
