@@ -1416,8 +1416,9 @@ mod tests {
     /// What closing pane 4 of `luneta` does, as zellij says what it closes,
     /// with `agents` at work there.
     fn plan(closes: Closes, agents: Vec<(u32, Doing)>) -> Result<Plan, String> {
+        let session = listed();
         let subject = Subject {
-            session: "luneta",
+            session: &session,
             seat: Seat::Elsewhere,
             deletes: Deletes::Pane { pane: 4, closes },
             agents: Ok(agents),
@@ -1492,14 +1493,16 @@ mod tests {
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('s')));
         let elo = Place::Session(Listed::new("elo", SystemTime::UNIX_EPOCH));
+        let session = listed();
         let subject = Subject {
-            session: "luneta",
+            session: &session,
             seat: Seat::In,
             deletes: Deletes::Session,
             agents: Ok(Vec::new()),
             refuge: Some(elo.clone()),
         };
-        let leave = Act::Leave { session: "luneta".to_owned(), to: elo };
+        let started = session.started();
+        let leave = Act::Leave { session: "luneta".to_owned(), started, to: elo };
         assert_eq!(closed(menu.planned(close::plan(&subject))), Done::Act(leave));
     }
 

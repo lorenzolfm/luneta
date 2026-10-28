@@ -35,7 +35,7 @@ use crate::gruvbox;
 use crate::host::Event;
 use crate::hosted;
 use crate::menu;
-use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, LIT, Mark, NAME, Place};
+use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, LIT, Listed, Mark, NAME, Place};
 use crate::zellij::{self, Closes, Exited, SessionName};
 
 /// What the rule over the box, and the rule over the list, name it.
@@ -162,7 +162,7 @@ pub enum Picked {
     Start(SessionName),
     /// Plan deleting what `deletes` deletes of `session`, and hand the plan
     /// to `planned`.
-    Plan { session: String, deletes: Deletes },
+    Plan { session: Listed, deletes: Deletes },
     /// Have zellij do what a delete planned.
     Delete(Act),
 }
@@ -456,7 +456,7 @@ impl Picker {
                 };
                 return match closes {
                     Ok(closes) => Picked::Plan {
-                        session: place.session().to_owned(),
+                        session: place.listed().clone(),
                         deletes: Deletes::Pane { pane, closes },
                     },
                     Err(why) => {
@@ -734,9 +734,8 @@ impl Picker {
     /// closing it closes.
     fn plan(&mut self, target: Key, agreed: Option<Plan>) -> Picked {
         let picked = match &target {
-            Key::Live(place) => Picked::Plan {
-                session: place.session().to_owned(),
-                deletes: Deletes::Session,
+            Key::Live(place) => {
+                Picked::Plan { session: place.listed().clone(), deletes: Deletes::Session }
             },
             Key::Agent(place) => {
                 self.asking.push(Ask::Closes(place.clone()));
@@ -1420,7 +1419,6 @@ mod tests {
 
     use super::*;
     use crate::close::Doing;
-    use crate::sidebar::Listed;
 
     const NOW: Duration = Duration::from_secs(1000);
 
@@ -1614,8 +1612,9 @@ mod tests {
     #[test]
     fn del_asks_before_ending_an_agent_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
         let mut picker = three();
-        let planning = Picked::Plan { session: "c".to_owned(), deletes: Deletes::Session };
-        let plan = |doing: Doing| Plan::of(Act::Kill("c".to_owned()), Ok(&[(0, doing)]));
+        let planning = Picked::Plan { session: listed("c", 30), deletes: Deletes::Session };
+        let kill = || Act::Kill { session: "c".to_owned(), started: listed("c", 30).started() };
+        let plan = |doing: Doing| Plan::of(kill(), Ok(&[(0, doing)]));
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
         let asks = |picker: &Picker| {
@@ -1632,7 +1631,7 @@ mod tests {
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), Picked::Nothing);
         assert!(asks(&picker));
         assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
-        let killed = Picked::Delete(Act::Kill("c".to_owned()));
+        let killed = Picked::Delete(kill());
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), killed);
 
         // An idle agent ends without a question.
@@ -1658,7 +1657,7 @@ mod tests {
         assert_eq!(picker.heard(heard), Picked::Nothing);
         let heard = Heard::Closes { place, closes: Ok(Closes::Pane) };
         let deletes = Deletes::Pane { pane: 4, closes: Closes::Pane };
-        assert_eq!(picker.heard(heard), Picked::Plan { session: "c".to_owned(), deletes });
+        assert_eq!(picker.heard(heard), Picked::Plan { session: listed("c", 30), deletes });
     }
 
     /// `Del` on a session that ended lets go of it at once, as nothing runs

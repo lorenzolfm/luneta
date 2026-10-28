@@ -504,3 +504,43 @@ fn a_close_deletes_a_session_zellij_kills_though_it_kept_nothing_of_it() {
     assert!(why.contains("did not close pane work:2"), "{why}");
     assert_eq!(host.lists.closed(), ["delete-session --force play"]);
 }
+
+/// zellij takes away what it keeps of a session before the session's server
+/// has ended, and the server's writer can write it anew meanwhile, which
+/// zellij would bring the session back with: the close lets go of it again
+/// once the server has ended.
+#[test]
+fn a_close_lets_go_again_of_what_the_server_of_a_session_it_deletes_writes_anew() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    host.lists.rewrites("play");
+
+    let close = |yes: &[&str]| luneta(&host, ("work", 2), &[&["close", "play"][..], yes].concat());
+    let (_, agreed) = planned(&close(&[]));
+    let told = close(&["--yes", &agreed]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    assert_eq!(host.lists.closed(), ["delete-session --force play", "delete-session play"]);
+}
+
+/// A session made by the name of one a close deletes, as the close goes, is
+/// another than the one it was told yes to, which zellij would kill all the
+/// same: it stays.
+#[test]
+fn a_close_leaves_a_session_made_by_the_name_of_one_it_deletes_as_it_goes() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _away = UnixListener::bind(host.contract().join("away")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    // A close deletes the sessions it is given in the order of their names.
+    host.lists.renews("away", "play");
+
+    let given = ["close", "away", "play"];
+    let close = |yes: &[&str]| luneta(&host, ("work", 2), &[&given[..], yes].concat());
+    let (_, agreed) = planned(&close(&[]));
+    let told = close(&["--yes", &agreed]);
+    let why = String::from_utf8_lossy(&told.stderr);
+    assert_eq!(told.status.code(), Some(1), "{why}");
+    assert!(why.contains(r#""play" is a session made since, which stays"#), "{why}");
+    assert_eq!(host.lists.closed(), ["delete-session --force away"]);
+}

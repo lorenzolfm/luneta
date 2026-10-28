@@ -146,7 +146,7 @@ fn listed(folder: &Path) -> Option<Vec<Agent>> {
 
 /// Says where this runs, as `seat` tells it.
 pub fn here(folder: &Path) -> ExitCode {
-    let seat = running().and_then(|running| seat(listed(folder).as_deref(), &running));
+    let seat = zellij::running().and_then(|running| seat(listed(folder).as_deref(), &running));
     said(seat.and_then(|seat| Ok(seat.ok_or("this runs in no pane of zellij")?.to_string())))
 }
 
@@ -217,7 +217,7 @@ pub fn open(what: &Opening, folder: &Path) -> ExitCode {
 /// The pane this runs in, as `seat` tells it, where there is no other: none
 /// outside zellij.
 fn seat_here(folder: &Path) -> Result<Option<Pane>, String> {
-    seat(listed(folder).as_deref(), &running()?)
+    seat(listed(folder).as_deref(), &zellij::running()?)
 }
 
 /// Whether a pane this opens may run `command`, as `runs` says: in luneta's
@@ -290,7 +290,7 @@ fn tab(
         Some(session) => session.to_owned(),
         None => seat_here(folder)?.ok_or(UNNAMED)?.session,
     };
-    started(&session, &running()?)?;
+    started(&session, &zellij::running()?)?;
     if zellij::clients(&session)?.is_empty() {
         return Err(format!(
             "no client is in {session}, and zellij makes a tab with no room for its panes in a \
@@ -311,7 +311,7 @@ fn session(
     cwd: Option<&Path>,
     folder: &Path,
 ) -> Result<String, String> {
-    let running = running()?;
+    let running = zellij::running()?;
     let at = seated(listed(folder).as_deref(), &running)?;
     let cwd = directory(cwd)?;
     let names: Vec<&str> = running.iter().map(|(name, _)| name.as_str()).collect();
@@ -342,7 +342,7 @@ fn seated(agents: Option<&[Agent]>, running: &[(String, SystemTime)]) -> Result<
 /// Takes the client that last typed in the session this runs in to `to`.
 /// What runs in the pane this runs in, lunetad in `folder` says.
 pub fn go(to: &Address, folder: &Path) -> ExitCode {
-    let went = running().and_then(|running| {
+    let went = zellij::running().and_then(|running| {
         let at = seated(listed(folder).as_deref(), &running)?;
         started(to.session(), &running)?;
         let pane = match to {
@@ -487,7 +487,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    let running = match running() {
+    let running = match zellij::running() {
         Ok(running) => running,
         Err(why) => {
             eprintln!("luneta: {why}");
@@ -525,8 +525,9 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     }
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
-        let planned = started(session, &running)
-            .and_then(|started| Ok((started, plans_in(session, &wanted, known.as_ref())?)));
+        let planned = started(session, &running).and_then(|started| {
+            Ok((started, plans_in(session, started, &wanted, known.as_ref())?))
+        });
         match planned {
             Ok((started, planned)) => {
                 sessions.push((session, started));
@@ -614,19 +615,21 @@ struct Told<'a> {
     unread: Vec<(&'a str, u32)>,
 }
 
-/// What closing what is `wanted` of `session` does, an act at a time, and
-/// the agents each ends among those lunetad `told` of, or why luneta cannot
-/// tell them. Its panes close together, as zellij says closing them closes.
+/// What closing what is `wanted` of `session`, the one that started at
+/// `started`, does, an act at a time, and the agents each ends among those
+/// lunetad `told` of, or why luneta cannot tell them. Its panes close
+/// together, as zellij says closing them closes.
 fn plans_in(
     session: &str,
+    started: SystemTime,
     wanted: &Wanted,
     told: Result<&Told, &Untold>,
 ) -> Result<Vec<Plan>, String> {
     let owned = || session.to_owned();
     let acts = match wanted {
-        Wanted::Session => vec![Act::Kill(owned())],
+        Wanted::Session => vec![Act::Kill { session: owned(), started }],
         Wanted::Panes(panes) => match zellij::closes_together(session, panes)? {
-            Closing::Session => vec![Act::Kill(owned())],
+            Closing::Session => vec![Act::Kill { session: owned(), started }],
             Closing::Parts { tabs, panes } => {
                 let tabs = tabs.into_iter().map(|(tab, panes)| Act::Tab { session: owned(), tab, panes });
                 let panes = panes.into_iter().map(|pane| Act::Pane { session: owned(), pane });
@@ -654,7 +657,7 @@ fn session_of(act: &Act) -> &str {
     match act {
         Act::Pane { session, .. }
         | Act::Tab { session, .. }
-        | Act::Kill(session)
+        | Act::Kill { session, .. }
         | Act::Leave { session, .. } => session,
     }
 }
@@ -667,7 +670,9 @@ fn says(act: &Act) -> String {
             let panes: Vec<String> = panes.iter().map(|pane| format!("{session}:{pane}")).collect();
             format!("close the tab of {}", panes.join(", "))
         },
-        Act::Kill(session) | Act::Leave { session, .. } => format!("delete session {session}"),
+        Act::Kill { session, .. } | Act::Leave { session, .. } => {
+            format!("delete session {session}")
+        },
     }
 }
 
@@ -716,19 +721,10 @@ fn act(act: &Act) -> Result<(), String> {
     match act {
         Act::Pane { session, pane } => zellij::pane_closed(session, *pane),
         Act::Tab { session, tab, .. } => zellij::tab_closed(session, *tab),
-        Act::Kill(session) | Act::Leave { session, .. } => zellij::killed(session),
+        Act::Kill { session, started } | Act::Leave { session, started, .. } => {
+            zellij::killed(session, *started)
+        },
     }
-}
-
-/// The sessions that run, by their sockets, each with when it started; or
-/// why luneta cannot tell them: a session's socket could be in what it cannot
-/// read.
-fn running() -> Result<Vec<(String, SystemTime)>, String> {
-    let folder = lunetad::zellij_folder();
-    lunetad::zellij_sessions(&folder).ok_or_else(|| {
-        let folder = folder.display();
-        format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")
-    })
 }
 
 /// When `session` started, of the sessions `running`, or that none runs by
