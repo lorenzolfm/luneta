@@ -1128,7 +1128,7 @@ impl Sidebar {
                     mark: marked.mark,
                     status: status_word(agent),
                     since: marked.since,
-                    dir: short_cwd(pane.cwd.as_deref().unwrap_or(&agent.cwd)),
+                    dir: short_cwd(agent_dir(agent, pane)),
                 });
             }
             panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -1295,7 +1295,12 @@ impl Sidebar {
                     None => label(agent(pane.id), pane),
                 };
                 let branch = checkout.as_ref().map(|checkout| checkout.branch.as_str());
-                let found = finder.as_ref().and_then(|finder| finder.pane(&label, branch, pane));
+                // An agent's pane is found by where the agent works, as its
+                // row and the picker say it.
+                let dir = agent(pane.id).map_or(cwd, |agent| Some(agent_dir(agent, pane)));
+                let tab = &pane.tab_name;
+                let found =
+                    finder.as_ref().and_then(|finder| finder.pane(&label, branch, tab, dir));
                 if finder.is_some() && found.is_none() && named.is_none() {
                     continue;
                 }
@@ -1897,7 +1902,7 @@ impl Sidebar {
                 let Some(agent) = agents.get(&(session.name.as_str(), pane.id)) else {
                     continue;
                 };
-                let cwd = pane.cwd.as_deref().unwrap_or(agent.cwd.as_str());
+                let cwd = agent_dir(agent, pane);
                 let branch = trees.get(cwd).and_then(|tree| {
                     checkout(&WorkTree::of_api(tree)?, None).map(|checkout| checkout.branch)
                 });
@@ -2711,6 +2716,13 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
+/// Where an agent works, as its row, the picker and a search say it: where
+/// zellij says its pane works, which its branch is found by, or else, while
+/// zellij has not said, where Claude Code says.
+fn agent_dir<'a>(agent: &'a Agent, pane: &'a Pane) -> &'a str {
+    pane.cwd.as_deref().unwrap_or(&agent.cwd)
+}
+
 /// What a pane's row is named. Its agent goes by the name someone gave it, or
 /// else by its topic, as the daemon reads it in the title Claude Code gives
 /// its pane; or else by its tab, if someone named it, or else by where it
@@ -2721,7 +2733,7 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
         let topic = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
         let name = given_name(agent).or(topic).or(tab::named(&pane.tab_name));
-        return name.map_or_else(|| short_cwd(&agent.cwd), str::to_owned);
+        return name.map_or_else(|| short_cwd(agent_dir(agent, pane)), str::to_owned);
     }
     let mut words = pane.command.iter().flat_map(|command| command.split_whitespace());
     let program = words.next().map(|program| {
@@ -2809,14 +2821,19 @@ impl<'a> Finder<'a> {
         self.find(name, &[]).map(|(fit, _)| fit)
     }
 
-    /// A pane by its row, its branch, its tab and its directory. A tab zellij
-    /// named `Tab #N` is no name to find, and a directory is its last two
-    /// parts, as a shell's row shows it: a whole path has the letters for a
-    /// few typed ones to land on nearly any of it.
-    fn pane(&self, label: &str, branch: Option<&str>, pane: &Pane) -> Option<Fit> {
-        let tab = tab::named(&pane.tab_name);
-        let cwd = pane.cwd.as_deref().map(short_cwd);
-        self.find(label, &[branch, tab, cwd.as_deref()]).map(|(fit, _)| fit)
+    /// A pane by its row, its branch, its tab and the directory it, or its
+    /// agent, works in. A tab zellij named `Tab #N` is no name to find, and a
+    /// directory is its last two parts, as a shell's row shows it: a whole
+    /// path has the letters for a few typed ones to land on nearly any of it.
+    fn pane(
+        &self,
+        label: &str,
+        branch: Option<&str>,
+        tab_name: &str,
+        cwd: Option<&str>,
+    ) -> Option<Fit> {
+        let cwd = cwd.map(short_cwd);
+        self.find(label, &[branch, tab::named(tab_name), cwd.as_deref()]).map(|(fit, _)| fit)
     }
 
     /// What is typed against what a row shows, and against what else the row
@@ -4034,7 +4051,8 @@ mod tests {
 
     /// An agent goes by the name someone gave it, then by its topic, the title
     /// Claude Code gives its pane, then by its tab if someone named it, then
-    /// by where it works. An agent's title with no topic, as a bare
+    /// by where it works: where its pane works, or else, while zellij has not
+    /// said, where Claude Code says. An agent's title with no topic, as a bare
     /// `Claude Code`, is passed over, and so is zellij's `Tab #N`.
     #[test]
     fn an_agent_goes_by_its_name_then_its_topic_then_its_tab_then_its_directory() {
@@ -4051,8 +4069,10 @@ mod tests {
         assert_eq!(label(Some(&unnamed), &topic), "Fix the fold");
         assert_eq!(label(Some(&unnamed), &titled(None, "review")), "review");
         assert_eq!(label(Some(&unnamed), &untitled("review")), "review");
-        assert_eq!(label(Some(&unnamed), &titled(None, "Tab #12")), "luneta/main");
-        assert_eq!(label(Some(&unnamed), &untitled(" ")), "luneta/main");
+        assert_eq!(label(Some(&unnamed), &titled(None, "Tab #12")), "w/x");
+        assert_eq!(label(Some(&unnamed), &untitled(" ")), "w/x");
+        let unsaid = Pane { cwd: None, ..untitled("Tab #1") };
+        assert_eq!(label(Some(&unnamed), &unsaid), "luneta/main");
         // A name Claude Code gave the session itself is none a row goes by.
         let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
         let source = Some(NameSource::Derived.into());
@@ -4719,14 +4739,23 @@ mod tests {
     }
 
     /// A tab zellij named, and the parts of a directory a row leaves out,
-    /// find nothing.
+    /// find nothing. An agent's pane zellij has not said the directory of is
+    /// found by where the agent works.
     #[test]
     fn a_pane_is_found_by_its_branch_its_named_tab_and_its_directory() {
         let mut notes = pane(1, 0, "/w/a", "nvim a");
         notes.tab_name = "notes".to_owned();
         let deep = pane(2, 1, "/home/lorenzo/Projects/misc/luneta", "nvim b");
         let branched = pane(3, 2, "/w/c", "nvim c");
-        let mut host = host(vec![session("s", 10, vec![notes, deep, branched])], Vec::new());
+        let unsaid = Pane {
+            cwd: None,
+            titled: Some(api::Titled { topic: Some("Rename the rows".to_owned()) }),
+            ..pane(4, 3, "", "claude")
+        };
+        let elsewhere = "/w/fold/review".to_owned();
+        let seated = Agent { cwd: elsewhere, ..agent("s", 4, Status::Idle, None) };
+        let panes = vec![notes, deep, branched, unsaid];
+        let mut host = host(vec![session("s", 10, panes)], vec![seated]);
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None };
         let tree = WorkTree::Checkout { head, changes: Changes::default(), stashes: 0 };
@@ -4740,6 +4769,8 @@ mod tests {
         assert_eq!(found("notes"), [" ▾ s", "     \u{e6ae} nvim a"]);
         assert_eq!(found("luneta"), [" ▾ s", "     \u{e6ae} nvim b"]);
         assert_eq!(found("sidebar"), [" ▾ s", "     \u{e6ae} nvim c", "       feature/sidebar"]);
+        let seated = found("fold/review");
+        assert!(seated.len() == 2 && seated[1].contains("Rename the rows"), "{seated:?}");
         assert_eq!(found("tab"), [" no match"]);
         assert_eq!(found("loren"), [" no match"]);
     }
