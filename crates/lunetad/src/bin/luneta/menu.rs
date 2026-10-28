@@ -4,7 +4,8 @@
 //!
 //! Its keys are luneta's own. `/` searches every skill the directory of the
 //! row's pane can run, for an agent to start on the one you pick, beside that
-//! pane. `c` opens the Claude group, a key for each of a few skills, which
+//! pane. `a` opens the ask box, for an agent to do what you say in words, as
+//! the menu would. `c` opens the Claude group, a key for each of a few skills, which
 //! starts an agent on it there. `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in. `d`
 //! opens the Delete group, which closes the pane or kills its session, and
@@ -33,6 +34,11 @@ use crate::skills::{Search, Skills};
 /// what the menu says it does.
 const SEARCH: char = '/';
 const SEARCH_DOES: &str = "Search skills";
+
+/// The key that opens the ask box, at the top of the menu, and what the menu
+/// says it does.
+const ASK: char = 'a';
+const ASK_DOES: &str = "Ask";
 
 /// The key of the Claude group, its name, and its keys, each with the skill
 /// it starts an agent on: the skills the plugin's menu has keys for in the
@@ -177,19 +183,21 @@ impl Top {
     }
 }
 
-/// No command takes the key of luneta's Claude, New, Delete or Brief group,
-/// which would be out of reach at the top of the sidebar, and gone from the
-/// legend; nor a key the sidebar moves, folds or opens the menu with, which
-/// `Top::of` finds first.
+/// No command takes the key of the ask box, or of luneta's Claude, New,
+/// Delete or Brief group, which would be out of reach at the top of the
+/// sidebar, and gone from the legend; nor a key the sidebar moves, folds or
+/// opens the menu with, which `Top::of` finds first. Nor does the sidebar
+/// move with the ask box's.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
         let key = Command::ALL[at].key();
-        let group = key == SKILLS || key == NEW || key == DELETE || key == BRIEF;
+        let group = key == ASK || key == SKILLS || key == NEW || key == DELETE || key == BRIEF;
         assert!(!group, "a command on a key of luneta's groups");
         assert!(Top::moves(key).is_none(), "a command on a key the sidebar moves with");
         at += 1;
     }
+    assert!(Top::moves(ASK).is_none(), "the ask box on a key the sidebar moves with");
 };
 
 /// What a key of the New group opens, for the pane the menu is for, in the
@@ -245,6 +253,8 @@ enum Entry {
     Command(Command),
     /// The key that opens the search over the skills.
     Search,
+    /// The key that opens the ask box.
+    Ask,
 }
 
 impl Entry {
@@ -255,6 +265,7 @@ impl Entry {
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
             Entry::Search => SEARCH,
+            Entry::Ask => ASK,
         }
     }
 }
@@ -275,6 +286,8 @@ enum Pressed {
     Delete { key: char, scope: Scope },
     /// Asks for a brief of what the scope covers.
     Brief(brief::Scope),
+    /// Opens the ask box.
+    Ask,
     /// Closes the menu.
     Close,
     /// Nothing: the group open has no such key.
@@ -291,8 +304,8 @@ struct Keys {
 }
 
 impl Keys {
-    /// The menu's keys: `/`, which opens the search over the skills, and the
-    /// Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
+    /// The menu's keys: `/`, which opens the search over the skills, `a`,
+    /// which opens the ask box, and the Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `n p`, `n t` and `n s` open a pane, a tab and a
     /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
     /// kills its session, and `b z`, `b s` and `b h` brief you on every
@@ -301,6 +314,7 @@ impl Keys {
         let start = |(key, prompt)| Entry::Start { key, prompt };
         let root = vec![
             Entry::Search,
+            Entry::Ask,
             Entry::Group {
                 key: SKILLS,
                 name: SKILLS_NAME,
@@ -397,6 +411,7 @@ impl Keys {
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
+            Entry::Ask => return Pressed::Ask,
             // The legend only shows, and runs nothing.
             Entry::Command(_) => return Pressed::Nothing,
             Entry::Group { .. } => {},
@@ -596,6 +611,8 @@ pub enum Done {
     /// Brief you on what the agents `scope` covers are doing, by `place`, the
     /// row the menu was for.
     Brief { scope: brief::Scope, place: Place },
+    /// Open the ask box, for the row the menu was for.
+    Ask(Target),
 }
 
 /// The menu at the bottom of the sidebar, for the row highlighted when it
@@ -724,6 +741,7 @@ impl Menu {
                 Pressed::Brief(scope) => {
                     Did::Closed(Done::Brief { scope, place: target.place.clone() })
                 },
+                Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
             Stage::Planning { .. } | Stage::Opening(_) if closes(key) => {
                 Did::Closed(Done::Nothing)
@@ -928,6 +946,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
         Entry::Search => spans.push(does(SEARCH_DOES)),
+        Entry::Ask => spans.push(does(ASK_DOES)),
     }
     Line::from(spans)
 }
@@ -1126,6 +1145,7 @@ mod tests {
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
+                " a  Ask",
                 " c  Claude ▸",
                 " n  New ▸",
                 " d  Delete ▸",
@@ -1150,6 +1170,7 @@ mod tests {
                 " /  Search",
                 " u  Unread",
                 " v  Reorder",
+                " a  Ask",
                 " c  Claude ▸",
                 " n  New ▸",
                 " d  Delete ▸",
@@ -1161,6 +1182,7 @@ mod tests {
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
+        assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);
         assert_eq!(Top::of('n'), None);
         assert_eq!(Top::of('d'), None);
@@ -1190,6 +1212,19 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command: command.to_vec() };
         assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
         assert!(menu.opening());
+    }
+
+    /// `a` closes the menu for the sidebar to open the ask box, for the row
+    /// the menu was for, a session's row too: at the top of the sidebar, and
+    /// in the menu's first group.
+    #[test]
+    fn a_opens_the_ask_box_for_the_row_the_menu_is_for() {
+        for row in [pane_row(), session_row()] {
+            let did = Menu::open(1, row.clone(), Some('a')).expect("the menu has `a`");
+            assert_eq!(closed(did), Done::Ask(row.clone()));
+            let (menu, _) = stays(opened(row.clone(), None));
+            assert_eq!(closed(menu.key(&char('a'))), Done::Ask(row));
+        }
     }
 
     /// `b` opens the Brief group, on any row, and a key in it closes the menu

@@ -243,6 +243,42 @@ fn what_goes_by_the_session_it_runs_in_refuses_where_none_runs_by_its_name() {
     assert!(host.lists.closed().is_empty());
 }
 
+/// The agent luneta's ask box runs is in no pane, and goes by the pane you
+/// asked from, as the box names it, ahead of what zellij's variables say: it
+/// is where `here` says it runs, and what holds it is what a close takes
+/// last.
+#[test]
+fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    let tab = (0, "Tab #1");
+    let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
+    host.lists.list("work", &work);
+    let asked = |zellij: Option<(&str, u32)>, args: &[&str]| {
+        let mut command = host.vars().command(LUNETA);
+        if let Some((session, pane)) = zellij {
+            command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", pane.to_string());
+        }
+        answered(command.env("LUNETA_PANE", "work:2").args(args))
+    };
+
+    for zellij in [None, Some(("gone", 7))] {
+        let seat = asked(zellij, &["here"]);
+        assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
+        assert_eq!(String::from_utf8(seat.stdout).unwrap(), "work:2\n");
+    }
+    let (said, agreed) = planned(&asked(None, &["close", "work:2", "play"]));
+    assert_eq!(
+        said,
+        format!("kill session play: {UNTOLD}\nclose pane work:2: {UNTOLD}\n")
+    );
+    let told = asked(None, &["close", "work:2", "play", "--yes", &agreed]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    let closed = ["kill-session play", "--session work action close-pane --pane-id terminal_2"];
+    assert_eq!(host.lists.closed(), closed);
+}
+
 /// zellij's variables keep the name a session had as the pane opened, and
 /// lunetad follows a rename. So in an agent's pane whose session was renamed,
 /// and another made by its old name since, the CLI says it runs in the one

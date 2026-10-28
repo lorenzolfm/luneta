@@ -10,6 +10,8 @@
 //! where you just asked an agent there for something. zellij moves nobody
 //! where none has typed in it since it came, and says nothing of it: `go`
 //! looks for the client where it sent it, and says so when it is not there.
+//! The agent of luneta's ask box runs in no pane, and goes by the one you
+//! asked from, where luneta's zellij is, which typed there last.
 //!
 //! A close says what it would close, and which agents it would end, and
 //! closes nothing until it is told yes to that plan, by the word it prints

@@ -42,13 +42,15 @@
           # The source is filtered to what cargo reads, so editing the README or a tape
           # is a cache hit rather than a rebuild. The daemon's crate and the protocol are
           # in it for the plugin too: cargo loads every member of the workspace,
-          # whichever package it builds.
+          # whichever package it builds. luneta's skill is in it for the ask box, which
+          # tells its agent the skill.
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
               ./src
               ./crates
               ./proto
+              ./skills/luneta/SKILL.md
               ./Cargo.toml
               ./Cargo.lock
             ];

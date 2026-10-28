@@ -39,6 +39,11 @@ const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
 /// zellij opens a pane beside.
 const PANE_VAR: &str = "ZELLIJ_PANE_ID";
 
+/// What names the pane you asked luneta's ask box from, in the variables of
+/// the agent it runs, which runs in no pane: the pane luneta's zellij was on
+/// then, as `<session>:<pane>`, by the name its session had then.
+pub const ASKED_VAR: &str = "LUNETA_PANE";
+
 /// Variables that zellij's client must not have. With `ZELLIJ` set, it takes
 /// itself for one started in a pane of that session, and will not attach, as
 /// when luneta itself runs in a pane: `refusal` makes the one check it skips
@@ -117,11 +122,27 @@ impl fmt::Display for SessionName {
 
 /// The session and the pane this runs in, as zellij names them in the
 /// variables of what runs in its panes: none outside zellij. A session
-/// renamed since the pane opened goes by the name it had then.
+/// renamed since the pane opened goes by the name it had then. The agent of
+/// luneta's ask box runs in none, and goes by the pane you asked from.
 pub fn here() -> Option<(String, u32)> {
-    let session = env::var(SESSION_VAR).ok().filter(|session| !session.is_empty())?;
-    let pane = env::var(PANE_VAR).ok()?.parse().ok()?;
-    Some((session, pane))
+    let var = |name| env::var(name).ok();
+    seat_in(var(ASKED_VAR).as_deref(), var(SESSION_VAR).as_deref(), var(PANE_VAR).as_deref())
+}
+
+/// The pane `asked` names, as `ASKED_VAR` does, or else the one zellij's
+/// `session` and `pane` do. One `asked` misspells is none: what it names is
+/// not where zellij's say.
+fn seat_in(
+    asked: Option<&str>,
+    session: Option<&str>,
+    pane: Option<&str>,
+) -> Option<(String, u32)> {
+    let (session, pane) = match asked.filter(|asked| !asked.is_empty()) {
+        Some(asked) => asked.rsplit_once(':')?,
+        None => (session?, pane?),
+    };
+    let pane = pane.parse().ok()?;
+    (!session.is_empty()).then(|| (session.to_owned(), pane))
 }
 
 /// Why zellij's client must not attach to `session` from the terminal luneta
@@ -985,6 +1006,26 @@ fn unrun(error: &io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command runs in the pane zellij's variables name, and the agent of
+    /// luneta's ask box in the pane it names, whatever zellij's say. One that
+    /// names none runs in none.
+    #[test]
+    fn a_command_runs_in_the_pane_the_ask_box_names_or_else_zellij_s() {
+        let seat = |session: &str, pane| Some((session.to_owned(), pane));
+        assert_eq!(seat_in(None, Some("work"), Some("2")), seat("work", 2));
+        assert_eq!(seat_in(Some("a:b:4"), Some("work"), Some("2")), seat("a:b", 4));
+        assert_eq!(seat_in(Some(""), Some("work"), Some("2")), seat("work", 2));
+        for (asked, session, pane) in [
+            (Some("work"), Some("work"), Some("2")),
+            (Some(":4"), None, None),
+            (None, Some(""), Some("2")),
+            (None, Some("work"), Some("terminal_2")),
+            (None, Some("work"), None),
+        ] {
+            assert_eq!(seat_in(asked, session, pane), None, "{asked:?} {session:?} {pane:?}");
+        }
+    }
 
     #[test]
     fn a_name_is_the_directory_itself() {

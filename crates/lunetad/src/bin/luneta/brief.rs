@@ -591,17 +591,11 @@ pub fn ask(
     events: &Sender<Event>,
 ) -> Briefing {
     let events = events.clone();
-    let given_up = Arc::new(AtomicBool::new(false));
-    let (going, ended) = mpsc::channel();
-    let asking = Asking { given_up: Arc::clone(&given_up), ended };
     let title = brief.title().to_owned();
-    thread::spawn(move || {
-        // Dropped as the thread ends, which the briefing waits for as it goes.
-        let _going: Sender<()> = going;
+    let asking = Asking::on_thread(move |wanted| {
         let at = clock();
         let projects = claude_folder.map(|folder| folder.join("projects"));
         let ends = projects.map(|projects| brief.ends(&projects)).unwrap_or_default();
-        let wanted = || !given_up.load(Ordering::Relaxed);
         let Some(said) = write(&brief.prompt(&ends, SystemTime::now()), wanted) else {
             return;
         };
@@ -611,15 +605,33 @@ pub fn ask(
     Briefing { number, title, written: None, _asking: asking }
 }
 
-/// The thread a brief is asked on, which gives it up once it is dropped:
-/// `claude` is killed, if it has yet to end, by the time the drop returns, or
-/// else soon after, so that a luneta on its way out leaves none behind it.
+/// The thread something is asked of `claude` on, which gives it up once it
+/// is dropped: `claude` is killed, if it has yet to end, by the time the drop
+/// returns, or else soon after, so that a luneta on its way out leaves none
+/// behind it.
 #[derive(Debug)]
-struct Asking {
-    /// Whether the brief was given up, which the thread looks at.
+pub struct Asking {
+    /// Whether it was given up, which the thread looks at.
     given_up: Arc<AtomicBool>,
     /// Closed as the thread ends.
     ended: Receiver<()>,
+}
+
+impl Asking {
+    /// Runs `ask` on a thread of its own, which it hands whether what it
+    /// asks is still wanted, to look at as it goes: until the asking is
+    /// dropped.
+    pub fn on_thread(ask: impl FnOnce(&dyn Fn() -> bool) + Send + 'static) -> Self {
+        let given_up = Arc::new(AtomicBool::new(false));
+        let (going, ended) = mpsc::channel();
+        let looked_at = Arc::clone(&given_up);
+        thread::spawn(move || {
+            // Dropped as the thread ends, which the drop waits for.
+            let _going: Sender<()> = going;
+            ask(&|| !looked_at.load(Ordering::Relaxed));
+        });
+        Asking { given_up, ended }
+    }
 }
 
 impl Drop for Asking {
@@ -643,7 +655,7 @@ fn clock() -> Option<String> {
 /// mode, so that none of your hooks, `CLAUDE.md` or MCP servers come into it,
 /// and with no zellij in its environment, so that the daemon places it in no
 /// pane.
-fn write(prompt: &str, wanted: impl Fn() -> bool) -> Option<Result<String, String>> {
+fn write(prompt: &str, wanted: &dyn Fn() -> bool) -> Option<Result<String, String>> {
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", MODEL, "--tools", "", "--safe-mode"]);
     claude.args(["--no-session-persistence", "--system-prompt", SYSTEM, prompt]);
@@ -720,19 +732,15 @@ impl Briefing {
         self.written.is_some()
     }
 
-    /// Draws it in a box over `over`, zellij's columns: across most of them,
-    /// in their middle, and as tall as what it says, with what was there
-    /// gone. The rule along its top says what it is a brief of, and once it
-    /// is written, when it was asked. Under it, what the model wrote, or why
-    /// it wrote nothing, or that it is asked, and then the keys that close
-    /// it. What the box has no room for is cut, its last line a `…`.
+    /// Draws it in a box over `over`, zellij's columns, as `boxed` does. The
+    /// rule along its top says what it is a brief of, and once it is written,
+    /// when it was asked. Under it, what the model wrote, or why it wrote
+    /// nothing, or that it is asked, and then the keys that close it. What
+    /// the box has no room for is cut, its last line a `…`.
     pub fn draw(&self, buffer: &mut Buffer, over: Rect) {
-        let share = u16::try_from(u32::from(over.width) * 7 / 10).unwrap_or(over.width);
-        let width = share.max(WIDTH_MIN).min(over.width);
-        let (Some(inner), Some(room)) = (width.checked_sub(2), over.height.checked_sub(2)) else {
+        let Some((inner, room)) = room(over) else {
             return;
         };
-        let (inner, room) = (usize::from(inner), usize::from(room));
         let dim = Style::new().add_modifier(Modifier::DIM);
         let (mut lines, keys, at) = match &self.written {
             None => {
@@ -754,34 +762,61 @@ impl Briefing {
             lines.extend((lines_room > 0).then(|| Line::styled(" …", dim)));
         }
         lines.extend(footer);
-        lines.truncate(room);
-        let height = u16::try_from(lines.len() + 2).map_or(over.height, |tall| tall.min(over.height));
-        let x = over.x + (over.width - width) / 2;
-        let y = over.y + (over.height - height) / 2;
-        let area = Rect::new(x, y, width, height);
-        let plain = Style::reset().fg(gruvbox::FG1);
-        for row in area.rows() {
-            buffer.set_string(row.x, row.y, " ".repeat(usize::from(row.width)), plain);
-        }
-        let mut top = vec![Span::styled("┌", dim)];
-        top.extend(menu::rule(&self.title, at.as_deref().unwrap_or(""), inner).spans);
-        top.push(Span::styled("┐", dim));
-        buffer.set_line(area.x, area.y, &Line::from(top), area.width);
-        let last = area.bottom() - 1;
-        for (line, y) in lines.iter().zip(area.y + 1..last) {
-            buffer.set_string(area.x, y, "│", dim);
-            buffer.set_line(area.x + 1, y, line, area.width - 2);
-            buffer.set_string(area.right() - 1, y, "│", dim);
-        }
-        buffer.set_string(area.x, last, format!("└{}┘", "─".repeat(inner)), dim);
+        boxed(buffer, over, &self.title, at.as_deref().unwrap_or(""), &lines);
     }
+}
+
+/// The columns inside a box over `over`, zellij's, and the lines it has room
+/// for, inside its edges: across most of zellij's columns, and no fewer than
+/// `WIDTH_MIN` where zellij has as many. None where it has no room for one.
+pub fn room(over: Rect) -> Option<(usize, usize)> {
+    let (inner, room) = (width(over).checked_sub(2)?, over.height.checked_sub(2)?);
+    Some((usize::from(inner), usize::from(room)))
+}
+
+/// How wide a box over `over` is, edges and all.
+fn width(over: Rect) -> u16 {
+    let share = u16::try_from(u32::from(over.width) * 7 / 10).unwrap_or(over.width);
+    share.max(WIDTH_MIN).min(over.width)
+}
+
+/// Draws `lines` in a box over `over`, zellij's columns, as wide as `room`
+/// says, in their middle, and as tall as the lines, as many as it has room
+/// for, with what was there gone. The rule along its top says `title`, and
+/// `right` at its end where it has room.
+pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &[Line<'_>]) {
+    let Some((inner, room)) = room(over) else {
+        return;
+    };
+    let lines = &lines[..lines.len().min(room)];
+    let width = width(over);
+    let height = u16::try_from(lines.len() + 2).map_or(over.height, |tall| tall.min(over.height));
+    let x = over.x + (over.width - width) / 2;
+    let y = over.y + (over.height - height) / 2;
+    let area = Rect::new(x, y, width, height);
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let plain = Style::reset().fg(gruvbox::FG1);
+    for row in area.rows() {
+        buffer.set_string(row.x, row.y, " ".repeat(usize::from(row.width)), plain);
+    }
+    let mut top = vec![Span::styled("┌", dim)];
+    top.extend(menu::rule(title, right, inner).spans);
+    top.push(Span::styled("┐", dim));
+    buffer.set_line(area.x, area.y, &Line::from(top), area.width);
+    let last = area.bottom() - 1;
+    for (line, y) in lines.iter().zip(area.y + 1..last) {
+        buffer.set_string(area.x, y, "│", dim);
+        buffer.set_line(area.x + 1, y, line, area.width - 2);
+        buffer.set_string(area.right() - 1, y, "│", dim);
+    }
+    buffer.set_string(area.x, last, format!("└{}┘", "─".repeat(inner)), dim);
 }
 
 /// `text` on lines `width` wide, a space in from the edge: each of its lines
 /// broken between words where it is too long, and its blank ones kept. A
 /// character that would move the cursor, or tell the terminal anything, is a
 /// space.
-fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for line in text.lines() {
         let line: String = line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
