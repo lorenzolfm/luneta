@@ -696,8 +696,9 @@ title without the `✳` Claude Code leads it with, or the frame it turns there
 while it works, so the title changes only as the topic does. A pane you
 renamed in zellij has your name for its title, and no topic: its row goes by
 its tab or its directory, where the plugin's goes by that name. A pane with no
-agent in it goes by what runs in it, and a shell at its prompt by its
-directory's last two parts.
+agent in it goes by what runs in it, and a shell at its prompt by its tab, if
+you named it, as an agent does, or else by its directory's last two parts,
+where the plugin's goes by its directory.
 
 A command in a shell with the [hook](#hook-the-shell) has the marks an agent
 has, once it has run for a second, as in the plugin's sidebar: the spinner
