@@ -7,6 +7,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -139,6 +140,49 @@ fn a_session_is_asked_about_again_as_zellij_writes_that_it_changed() {
         (panes.panes.len() == 2).then_some(())
     });
     assert!(wrote.elapsed() < Duration::from_secs(1), "{:?}", wrote.elapsed());
+}
+
+/// A session whose server hangs holds the daemon up for as long as it waits
+/// on zellij, and no longer, however often zellij writes what it keeps of
+/// another: that one is asked about before the hung one is due again, though
+/// the hung one, never listed, goes first.
+#[test]
+fn a_session_that_hangs_holds_the_others_up_no_longer_than_it_is_asked_about() {
+    let host = Host::new();
+    let home = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
+    host.zellij.list("work", &json!([home]));
+    host.zellij.hang("stuck");
+    let _work = host.serve("work");
+    let _stuck = host.serve("stuck");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("zellij lists the panes of work", || session(&host.host(), "work")?.panes.clone());
+    let stuck = || host.zellij.asked().iter().any(|asked| asked == "stuck");
+    eventually("zellij is asked about stuck", || stuck().then_some(()));
+
+    let opened = listed(2, "~/work", (1, "Tab #2"), Some("/home/you/work"));
+    host.zellij.list("work", &json!([home, opened]));
+    let opening = Instant::now();
+    let done = AtomicBool::new(false);
+    thread::scope(|scope| {
+        // As the pane opens, and as zellij is asked about work anew after,
+        // for as long as `eventually` waits at the most.
+        scope.spawn(|| {
+            for age in 2..80 {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                host.write_metadata("work", &kept(&[(1, 0), (2, 1)], age));
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        eventually("work has the pane opened", || {
+            let panes = session(&host.host(), "work")?.panes.clone()?;
+            (panes.panes.len() == 2).then_some(())
+        });
+        done.store(true, Ordering::Relaxed);
+    });
+    // zellij is given 2s for the panes of stuck, and as long for its clients.
+    assert!(opening.elapsed() < Duration::from_secs(7), "{:?}", opening.elapsed());
 }
 
 /// What zellij 0.45 keeps of a session `age` seconds after it began, cut

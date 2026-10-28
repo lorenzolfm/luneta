@@ -184,6 +184,12 @@ struct Signs {
 
 /// When the daemon last asked zellij about a session, and its signs then.
 struct Asked {
+    /// When it was done asking, rather than when it began: the daemon gives
+    /// zellij up to `LIMIT` for a session's panes and as long for its
+    /// clients, before it gives up on a server that hangs, longer than a
+    /// sweep. Due again as soon as it was given up on, a session never listed
+    /// would go first in every round a wake begins anew, and no other would
+    /// be asked about while the wakes kept coming.
     at: Instant,
     signs: Signs,
 }
@@ -244,12 +250,12 @@ pub fn follow(
                 .collect();
             asking.sort_by_key(|(session, _)| session.listed);
             for (session, signs) in asking {
-                asked.insert(session.id, Asked { at: Instant::now(), signs });
                 let troubles = troubles.entry(session.id).or_default();
                 if ask(&core, &session, troubles).is_none() {
                     return;
                 }
                 troubles.done();
+                asked.insert(session.id, Asked { at: Instant::now(), signs });
                 if woken.try_recv().is_ok() {
                     watch::settle(&woken);
                     continue 'round;

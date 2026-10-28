@@ -89,7 +89,8 @@ impl<'a> Vars<'a> {
 /// there is no such session, as zellij does. It notes each session the daemon
 /// asks it for the panes of, for `asked`, and each pane, tab and session it is
 /// asked to close, for `closed`, and closes nothing; in a session a test had
-/// it `refuse`, it fails to, as zellij can. It knows no other command.
+/// it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
+/// lists nothing, and answers nothing. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -122,6 +123,9 @@ case "$*" in
 esac
 if [ "$asking" = panes ]; then
     echo "$session" >> "{panes}/asked"
+fi
+if [ -f "{panes}/$session.hung" ]; then
+    exec sleep 5
 fi
 if [ ! -f "{panes}/$session.json" ]; then
     echo "Session '$session' not found." >&2
@@ -207,6 +211,13 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
+    }
+
+    /// Has zellij answer nothing from now on of what it is asked to list of
+    /// the session `session`, for longer than the daemon waits, as the
+    /// server of one that hangs does.
+    pub fn hang(&self, session: &str) {
+        self.write(&format!("{session}.hung"), "");
     }
 
     /// Writes `text` to the file `name`, whole before zellij can read it.
