@@ -396,7 +396,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let listed = commands::listed_agents(folder);
     let agents = listed.as_ref().ok().map(|listed| listed.agents.as_slice());
     let unread = listed.as_ref().map_or(&[][..], |listed| listed.unread_files.as_slice());
-    let told = match &listed {
+    let known = match &listed {
         Err(_) => Err(Untold::Away),
         Ok(listed) => {
             let seats = listed.unread_seats().map_err(Untold::Unplaced);
@@ -416,7 +416,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
         let planned = started(session, &running)
-            .and_then(|started| Ok((started, plans_in(session, &wanted, told.as_ref())?)));
+            .and_then(|started| Ok((started, plans_in(session, &wanted, known.as_ref())?)));
         match planned {
             Ok((started, planned)) => {
                 sessions.push((session, started));
