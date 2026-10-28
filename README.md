@@ -460,9 +460,10 @@ has the keys and no menu is open, its bottom lists what you can press there:
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
 tab and in the directory it works in, `n t` a tab of its session there, and
 `n s` a session there, named as the picker's directories name the directory,
-with a `-2` when a session runs by that name. Each takes zellij there, and
-gives it the keys. A tab of another session opens once zellij is there: zellij
-makes a tab as big as a client of its session, and most have none attached.
+with a `-2` when a session that runs, or one that ended, has that name. Each
+takes zellij there, and gives it the keys. A tab of another session opens once
+zellij is there: zellij makes a tab as big as a client of its session, and
+most have none attached.
 `c t` starts Claude Code on `/thermo-nuclear-review` in a pane of its own
 beside the highlighted pane, in its tab and in the directory it works in, named
 for the skill and the branch; `c m` on `/make-illegal-states-unrepresentable`,

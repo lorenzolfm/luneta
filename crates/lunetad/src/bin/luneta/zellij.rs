@@ -31,6 +31,11 @@ const NAME_BYTES_MAX: usize = 60;
 // bytes a name must be shorter than.
 const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 
+/// The file zellij keeps how a session is laid out in, in the session's
+/// folder in its cache, to bring it back from once it ends: zellij lists a
+/// session that ended to bring back where it has this file and no socket.
+const LAYOUT: &str = "session-layout.kdl";
+
 /// What names the session of a zellij pane, in the variables of what runs in
 /// it.
 const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
@@ -441,8 +446,9 @@ pub fn go(
 /// starts in `cwd`, or where the client started, and then takes the look
 /// `then`, if any, for the client's arrival there. A session that runs under
 /// that name is where it goes, and `cwd` goes unused; one that ended, which
-/// zellij kept to bring back, comes back as it was. The client must have
-/// been sent `NUDGE` first.
+/// zellij kept to bring back, comes back as it was: `makes` says first
+/// whether zellij would make it. The client must have been sent `NUDGE`
+/// first.
 ///
 /// Unless zellij's sockets say one runs by that name, as they do not of one
 /// the sidebar names, zellij makes it, and must take the client there before
@@ -1037,6 +1043,56 @@ pub fn before(session: &str) -> Before {
 fn runs(session: &str) -> Option<bool> {
     let running = lunetad::zellij_sessions(&lunetad::zellij_folder())?;
     Some(running.iter().any(|(name, _)| name == session))
+}
+
+/// Why zellij would make no session called `to` now, if it would not: it
+/// would take the client to one that has the name instead, one that runs or
+/// one that ended, which it brings back, the directory it was to make it in
+/// unused. zellij makes a session only by `switch-session`, which does
+/// either, so luneta asks just before.
+pub fn makes(to: &SessionName) -> Result<(), String> {
+    let cannot = || format!("no session made: luneta cannot tell whether one is called {to}");
+    if runs(&to.0).ok_or_else(cannot)? {
+        return Err(format!("no session made: {to} runs already"));
+    }
+    if kept().ok_or_else(cannot)?.contains(&to.0) {
+        return Err(format!("no session made: zellij keeps {to}, which ended, to bring back"));
+    }
+    Ok(())
+}
+
+/// The names `switch-session` takes the client to a session of, rather
+/// than make one: of the sessions that run, by zellij's sockets, and of those
+/// that ended, which zellij keeps to bring back. None where luneta cannot
+/// read where zellij keeps either.
+pub fn named() -> Option<Vec<String>> {
+    let running = lunetad::zellij_sessions(&lunetad::zellij_folder())?;
+    let mut named: Vec<String> = running.into_iter().map(|(name, _)| name).collect();
+    named.extend(kept()?);
+    Some(named)
+}
+
+/// The sessions zellij keeps how they were laid out of, in its cache, to
+/// bring them back from: those that ended, and those that run. None where
+/// luneta cannot read the folder they are in. A zellij of another contract
+/// keeps them elsewhere, and none is kept here.
+fn kept() -> Option<Vec<String>> {
+    let entries = match fs::read_dir(lunetad::zellij_session_info()?) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut kept = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        // A name that is no UTF-8 is of no session luneta names.
+        if let Ok(name) = entry.file_name().into_string()
+            && entry.path().join(LAYOUT).is_file()
+        {
+            kept.push(name);
+        }
+    }
+    Some(kept)
 }
 
 /// The clients of `session`, as zellij lists them now, by their ids, or why

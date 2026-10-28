@@ -148,9 +148,13 @@ impl List {
         }
     }
 
-    /// The list before, which `Shift Tab` goes to.
+    /// The list before, which `Shift Tab` goes to, from the first to the last.
     fn back(self) -> List {
-        self.next().next()
+        match self {
+            List::Sessions => List::Dirs,
+            List::Agents => List::Sessions,
+            List::Dirs => List::Agents,
+        }
     }
 
     fn title(self) -> &'static str {
@@ -170,10 +174,12 @@ pub enum Picked {
     Close,
     /// Take zellij's client there, and close the picker.
     Go(Place),
-    /// Take zellij's client to the session `session`, which zellij makes, in
-    /// `cwd` where there is one, or brings back where it kept one that ended,
-    /// and close the picker.
-    Start { session: SessionName, cwd: Option<String> },
+    /// Take zellij's client to the session of this name, which zellij makes,
+    /// or brings back where it kept one that ended, and close the picker.
+    Start(SessionName),
+    /// Take zellij's client to a session zellij makes, `session`, that starts
+    /// in `cwd`, and close the picker; or say why zellij would make none.
+    Make { session: SessionName, cwd: String },
     /// Plan deleting what `deletes` deletes of `session`, and hand the plan
     /// to `planned`.
     Plan { session: String, deletes: Deletes },
@@ -269,8 +275,9 @@ enum Key {
     Exited(SessionName),
     /// The pane of an agent.
     Agent(Place),
-    /// A directory zoxide knows, by its path.
-    Dir(String),
+    /// A directory zoxide knows, by its path, and the session `Enter` makes
+    /// there, or why it makes none yet.
+    Dir { path: String, session: Result<SessionName, &'static str> },
 }
 
 /// A row of a list: what it stands for, the name it shows, and the
@@ -806,29 +813,23 @@ impl Picker {
 
     /// What `Enter` does: takes zellij to the row highlighted, or makes the
     /// session typed, where no session is highlighted, or one in the
-    /// directory highlighted. Where no agent or directory is, it does
-    /// nothing: what is typed there names none.
+    /// directory highlighted, as its row names it. Where no agent or
+    /// directory is, it does nothing: what is typed there names none.
     fn enter(&mut self) -> Picked {
         let Some(row) = self.rows().selected() else {
             return match self.new_name() {
-                Ok(Some(session)) if self.list == List::Sessions => {
-                    Picked::Start { session, cwd: None }
-                },
+                Ok(Some(name)) if self.list == List::Sessions => Picked::Start(name),
                 Ok(_) | Err(_) => Picked::Nothing,
             };
         };
         match &row.key {
             Key::Live(place) if self.is_here(place) => Picked::Close,
             Key::Live(place) | Key::Agent(place) => Picked::Go(place.clone()),
-            Key::Exited(name) => Picked::Start { session: name.clone(), cwd: None },
-            Key::Dir(path) => {
-                let dir = self.visited_list().iter().find(|dir| dir.path == *path);
-                let Some(dir) = dir else {
-                    return Picked::Nothing;
-                };
-                let session = dir.name.free(&self.taken());
-                Picked::Start { session, cwd: Some(path.clone()) }
+            Key::Exited(name) => Picked::Start(name.clone()),
+            Key::Dir { path, session: Ok(session) } => {
+                Picked::Make { session: session.clone(), cwd: path.clone() }
             },
+            Key::Dir { session: Err(_), .. } => Picked::Nothing,
         }
     }
 
@@ -860,7 +861,7 @@ impl Picker {
                 self.rebuild(false);
                 Picked::Nothing
             },
-            Key::Dir(_) => Picked::Nothing,
+            Key::Dir { .. } => Picked::Nothing,
             target => self.plan(target, None),
         }
     }
@@ -878,7 +879,7 @@ impl Picker {
                 self.asking.push(Ask::Closes(place.clone()));
                 Picked::Nothing
             },
-            Key::Exited(_) | Key::Dir(_) => return Picked::Nothing,
+            Key::Exited(_) | Key::Dir { .. } => return Picked::Nothing,
         };
         self.stage = Stage::Planning { target, agreed };
         picked
@@ -909,7 +910,7 @@ impl Picker {
                      it back"
                 ));
             },
-            Some(Key::Agent(_) | Key::Dir(_)) | None => {},
+            Some(Key::Agent(_) | Key::Dir { .. }) | None => {},
         }
     }
 
@@ -946,18 +947,23 @@ impl Picker {
         if name.as_str() == session {
             return Err("already called that");
         }
-        if self.taken().contains(&name.as_str()) {
+        if self.taken()?.contains(&name.as_str()) {
             return Err("a session by that name already exists");
         }
         Ok(name)
     }
 
     /// The names of the sessions that run and of those that ended, which no
-    /// other session can take.
-    fn taken(&self) -> Vec<&str> {
+    /// other session can take; or why they are not known yet. A name zellij
+    /// has yet to say ended is one `switch-session` would bring back.
+    fn taken(&self) -> Result<Vec<&str>, &'static str> {
+        let exited = match &self.exited {
+            Some(Ok(exited)) => exited,
+            None => return Err("zellij has yet to say which sessions ended"),
+            Some(Err(_)) => return Err("zellij did not say which sessions ended"),
+        };
         let live = self.listing.sessions.iter().map(|live| live.place.session());
-        let exited = self.exited_list().iter().map(|exited| exited.name.as_str());
-        live.chain(exited).collect()
+        Ok(live.chain(exited.iter().map(|exited| exited.name.as_str())).collect())
     }
 
     /// The sessions zellij keeps to bring back, as far as it said.
@@ -1009,7 +1015,10 @@ impl Picker {
             .collect();
         let agents = matched(&matcher, &self.term, agents.into_iter());
         let taken = self.taken();
-        let dirs = self.visited_list().iter().map(|dir| (dir, dir.name.free(&taken)));
+        let dirs = self.visited_list().iter().map(|dir| {
+            let session = taken.as_deref().map(|taken| dir.name.free(taken));
+            (dir, session.map_err(|why| *why))
+        });
         let dirs = dir_rows(&matcher, &self.term, dirs);
         let start = |rows: &[Row]| {
             let first = rows.first().map(|row| &row.key);
@@ -1051,7 +1060,7 @@ impl Picker {
             Some(Key::Agent(place)) => {
                 Some(Preview::Screen((place.session().to_owned(), place.pane())))
             },
-            Some(Key::Dir(path)) => Some(Preview::Dir(path.clone())),
+            Some(Key::Dir { path, .. }) => Some(Preview::Dir(path.clone())),
             Some(Key::Exited(_)) | None => None,
         };
         match (preview, &self.wanted) {
@@ -1202,7 +1211,7 @@ impl Picker {
                 right.push(Span::styled(age, dim));
                 (Some(Span::styled(glyph, style)), name_style, right)
             },
-            Key::Dir(path) => return dir_line(row, path, width),
+            Key::Dir { path, .. } => return dir_line(row, path, width),
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
@@ -1270,7 +1279,7 @@ impl Picker {
                 framed(buffer, area, &row.name, "", lines);
                 return;
             },
-            Key::Dir(path) => {
+            Key::Dir { path, .. } => {
                 self.draw_contents(buffer, area, &row.name, path);
                 return;
             },
@@ -1380,7 +1389,8 @@ impl Picker {
                 Key::Live(_) => Ok("Attach".to_owned()),
                 Key::Exited(_) => Ok("Bring back".to_owned()),
                 Key::Agent(_) => Ok("Go to agent".to_owned()),
-                Key::Dir(_) => Ok(format!("Make \"{}\"", row.name)),
+                Key::Dir { session: Ok(session), .. } => Ok(format!("Make \"{session}\"")),
+                Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
             },
             None if self.list == List::Sessions => match self.new_name() {
                 Ok(Some(name)) => Ok(format!("Make \"{name}\"")),
@@ -1481,30 +1491,33 @@ fn matched(
     found.into_iter().map(|(.., row)| row).collect()
 }
 
-/// The rows of `dirs`, each with the name of the session `Enter` makes there,
-/// that match `term`: all of them, in zoxide's order, for no term; or else
-/// those whose path matches it, or that name, one named `term` first, or
-/// whose own name is, then the best matches. A row's hits are of its path,
-/// as the plugin lit them: what you type of a directory is mostly its path.
+/// The rows of `dirs`, each with the session `Enter` makes there, or why it
+/// makes none yet, that match `term`: all of them, in zoxide's order, for no
+/// term; or else those whose path matches it, or the name the row shows, one
+/// named `term` first, or whose own name is, then the best matches. A row
+/// shows the session's name, or the directory's own while there is none. Its
+/// hits are of its path, as the plugin lit them: what you type of a
+/// directory is mostly its path.
 fn dir_rows<'a>(
     matcher: &SkimMatcherV2,
     term: &str,
-    dirs: impl Iterator<Item = (&'a Dir, SessionName)>,
+    dirs: impl Iterator<Item = (&'a Dir, Result<SessionName, &'static str>)>,
 ) -> Vec<Row> {
     let mut found: Vec<(bool, i64, usize, Row)> = Vec::new();
-    for (at, (dir, name)) in dirs.enumerate() {
+    for (at, (dir, session)) in dirs.enumerate() {
+        let name = session.as_ref().unwrap_or(&dir.name).to_string();
         let hit = if term.is_empty() {
             Some((0, Vec::new()))
         } else {
             matcher.fuzzy_indices(&dir.path, term).or_else(|| {
-                let score = matcher.fuzzy_match(name.as_str(), term)?;
+                let score = matcher.fuzzy_match(&name, term)?;
                 Some((score, Vec::new()))
             })
         };
         if let Some((score, hits)) = hit {
-            let exact = name.as_str() == term || dir.name.as_str() == term;
-            let row = Row { key: Key::Dir(dir.path.clone()), name: name.to_string(), hits };
-            found.push((exact, score, at, row));
+            let exact = name == term || dir.name.as_str() == term;
+            let key = Key::Dir { path: dir.path.clone(), session };
+            found.push((exact, score, at, Row { key, name, hits }));
         }
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
@@ -1832,13 +1845,14 @@ mod tests {
         }
         assert_eq!(lit(&picker), "y");
         let y = SessionName::running("y").unwrap();
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start { session: y, cwd: None });
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(y));
     }
 
     /// What is typed narrows the list, a name that is what is typed first,
     /// and `Enter` makes a session of a name no row has, but of one zellij
     /// refuses, or of yours, or on the agents or the directories, which `Tab`
-    /// goes to one after the other, and back to the sessions.
+    /// goes to one after the other, and back to the sessions, and `Shift Tab`
+    /// the other way round.
     #[test]
     fn what_is_typed_narrows_the_list_and_enter_makes_a_session_no_row_has() {
         let listing = Listing {
@@ -1856,14 +1870,20 @@ mod tests {
         typed(&mut picker, "-new");
         assert_eq!(list(&picker).0, [r#"no match for "luneta-new""#]);
         let new = SessionName::parse("luneta-new").unwrap();
-        let start = Picked::Start { session: new, cwd: None };
-        assert_eq!(press(&mut picker, KeyCode::Enter), start);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(new));
+        let titled = |picker: &Picker, title: &str| {
+            let buffer = drawn(picker);
+            let rule = format!("─ {title} ─");
+            text(&buffer, buffer.area).iter().any(|line| line.contains(&rule))
+        };
         for title in ["Agents", "Directories"] {
             press(&mut picker, KeyCode::Tab);
-            let buffer = drawn(&picker);
-            let rule = format!("─ {title} ─");
-            assert!(text(&buffer, buffer.area).iter().any(|line| line.contains(&rule)), "{title}");
+            assert!(titled(&picker, title), "{title}");
             assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        }
+        for title in ["Agents", "Sessions", "Directories"] {
+            press(&mut picker, KeyCode::BackTab);
+            assert!(titled(&picker, title), "{title}");
         }
         press(&mut picker, KeyCode::Tab);
         for (term, why) in [("a/b", "name cannot contain '/'"), ("elo", "you are in it")] {
@@ -2109,11 +2129,44 @@ mod tests {
         let said = text(&buffer, buffer.area).join(" ");
         assert!(said.contains(r#"<ENTER> Make "luneta-2""#), "{said}");
         let session = SessionName::parse("luneta-2").unwrap();
-        let cwd = Some("/home/you/luneta".to_owned());
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start { session, cwd });
+        let cwd = "/home/you/luneta".to_owned();
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Make { session, cwd });
         picker.asks();
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert!(picker.asks().is_empty());
+    }
+
+    /// Where zoxide answers before zellij says which sessions ended, or
+    /// zellij does not say, a directory shows its own name, and `Enter`
+    /// makes nothing there, saying why: `switch-session` would bring back a
+    /// session of that name that ended. Once zellij says, the name has its
+    /// postfix, and the highlight stays on the row.
+    #[test]
+    fn a_directory_makes_no_session_until_zellij_says_which_ended() {
+        let said = |picker: &Picker| {
+            let buffer = drawn(picker);
+            text(&buffer, buffer.area).join(" ")
+        };
+        let dirs = || vec![visited("/home/you/notes", "notes"), visited("/home/you/bipa", "bipa")];
+        let mut picker = Picker::open(1, List::Dirs, Listing::default());
+        picker.heard(Heard::Dirs(Ok(dirs())));
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(lit(&picker), "bipa");
+        let why = "zellij has yet to say which sessions ended";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        picker.heard(Heard::Exited(Ok(vec![ended("bipa", 100)])));
+        assert_eq!(lit(&picker), "bipa-2");
+        let session = SessionName::parse("bipa-2").unwrap();
+        let cwd = "/home/you/bipa".to_owned();
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Make { session, cwd });
+
+        let mut picker = Picker::open(1, List::Dirs, Listing::default());
+        picker.heard(Heard::Exited(Err("zellij: it did not answer in time".to_owned())));
+        picker.heard(Heard::Dirs(Ok(dirs())));
+        let why = "zellij did not say which sessions ended";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
     }
 
     /// A search finds a directory by its path, which it lights, or else by

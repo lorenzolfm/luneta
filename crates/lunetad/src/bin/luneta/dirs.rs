@@ -44,21 +44,25 @@ pub fn visited() -> Result<Vec<Dir>, String> {
     zoxide.args(["query", "--list"]);
     let ran = program::run(&mut zoxide, ANSWER).map_err(|error| unrun("zoxide", &error))?;
     let listed = ran.answer().map_err(|why| format!("zoxide: {why}"))?;
-    Ok(dirs_in(&String::from_utf8_lossy(&listed)))
+    Ok(dirs_in(&listed))
 }
 
 /// The directories of what `zoxide query --list` printed, a path a line. A
 /// line that is no absolute path is no directory of zoxide's, and would be
-/// read from luneta's own.
-fn dirs_in(listed: &str) -> Vec<Dir> {
-    let dir = |path: &str| {
+/// read from luneta's own. One that is no UTF-8 is of a directory no session
+/// can be named for, as `session_for` has it, and made UTF-8 it would name
+/// another. A path with a newline in it reads as two: zoxide lists no other
+/// way.
+fn dirs_in(listed: &[u8]) -> Vec<Dir> {
+    let dir = |line: &[u8]| {
+        let path = std::str::from_utf8(line).ok()?;
         if !path.starts_with('/') {
             return None;
         }
         let name = zellij::session_for(Path::new(path))?;
         Some(Dir { path: path.to_owned(), name })
     };
-    listed.lines().filter_map(dir).collect()
+    listed.split(|byte| *byte == b'\n').filter_map(dir).collect()
 }
 
 /// What is in the directory `path`, as eza lists it, an entry a line, in
@@ -109,15 +113,15 @@ mod tests {
     use super::*;
 
     /// A line of zoxide's that is no absolute path, or the path of a
-    /// directory no session can be named for, as `/`, is no directory of the
-    /// list.
+    /// directory no session can be named for, as `/`, or as one that is no
+    /// UTF-8, is no directory of the list.
     #[test]
     fn a_line_that_names_no_directory_a_session_can_be_made_in_is_left_out() {
         let dir = |path: &str, name: &str| Dir {
             path: path.to_owned(),
             name: SessionName::parse(name).unwrap(),
         };
-        let listed = "/home/you/luneta\n/\n\nluneta\n/home/you/notes/\n";
+        let listed = b"/home/you/luneta\n/\n\nluneta\n/home/you/caf\xe9\n/home/you/notes/\n";
         let dirs = [dir("/home/you/luneta", "luneta"), dir("/home/you/notes/", "notes")];
         assert_eq!(dirs_in(listed), dirs);
     }

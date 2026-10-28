@@ -1906,14 +1906,18 @@ impl Sidebar {
 
     /// Takes luneta's zellij to a session that starts in `cwd`, named for it
     /// as the picker's directories name it, with a `-2` where a session has
-    /// that name.
+    /// that name: one that runs, or one that ended, which zellij keeps to
+    /// bring back, as zellij says now. The daemon lists none that ended.
     fn start(&mut self, cwd: &str) -> Asked {
         let Some(name) = zellij::session_for(Path::new(cwd)) else {
             self.say(format!("menu: no session can be named for {cwd}"));
             return Asked::Nothing;
         };
-        let sessions = self.host.iter().flat_map(|host| &host.sessions);
-        let names: Vec<&str> = sessions.map(|session| session.name.as_str()).collect();
+        let Some(sessions) = zellij::named() else {
+            self.say("menu: luneta cannot tell which sessions zellij has".to_owned());
+            return Asked::Nothing;
+        };
+        let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
         Asked::Start { session: name.free(&names), cwd: cwd.to_owned() }
     }
 

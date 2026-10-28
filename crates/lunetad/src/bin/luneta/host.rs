@@ -1174,7 +1174,7 @@ impl App {
                 }
             },
             Asked::Start { session, cwd } => {
-                self.start(&session, Some(&cwd));
+                self.make(&session, &cwd);
                 self.leave();
             },
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
@@ -1203,8 +1203,12 @@ impl App {
                 self.go(&place, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Start { session, cwd } => {
-                self.start(&session, cwd.as_deref());
+            Picked::Start(session) => {
+                self.start(&session, None);
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
+            Picked::Make { session, cwd } => {
+                self.make(&session, &cwd);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { session, deletes } => {
@@ -1285,6 +1289,17 @@ impl App {
         let made = zellij::start(&here, session, cwd, then, &self.events);
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
+    }
+
+    /// Takes zellij's client to a session zellij makes, `session`, that
+    /// starts in `cwd`; or says why zellij would make none, but take it to
+    /// one that has the name, before the sidebar takes the client for one on
+    /// its way there.
+    fn make(&mut self, session: &SessionName, cwd: &str) {
+        match zellij::makes(session) {
+            Ok(()) => self.start(session, Some(cwd)),
+            Err(why) => self.sidebar.notify(why),
+        }
     }
 
     /// The session zellij's client is in, for an action to take it from, or
