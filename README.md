@@ -545,8 +545,10 @@ gave. A `│` down the sidebar's last column, open or collapsed, parts it from
 zellij: in the accent while the sidebar has the keys, and dim while it does
 not.
 
-A fold is the same in every luneta on the host, and lasts until you unfold it:
-each folded session is an empty file named for it in
+A fold is the same in every luneta on the host, and lasts until you unfold the
+session or go to it, by the sidebar, the menu or zellij, or luneta starts in
+it: you go to a session for its panes. `h` on the session you are in folds it
+until you next go to it. Each folded session is an empty file named for it in
 `$XDG_STATE_HOME/luneta/folded`, or `~/.local/state/luneta/folded`, which every
 luneta watches. A fold keeps to the session's name, so a session started again
 under it comes back folded.

@@ -783,8 +783,7 @@ impl Sidebar {
     /// it is there. luneta has yet to find it there, in the session it
     /// followed the one before to as well, as one on its way that ended.
     pub fn rejoining(&mut self, session: &str) -> Look {
-        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
-        let look = self.own.came(session, listed.as_deref(), Instant::now());
+        let look = self.came(session);
         let number = Some(look.number);
         self.sent = Some(Sent { session: session.to_owned(), from: None, landed: false, look: number });
         self.rebuild();
@@ -840,6 +839,10 @@ impl Sidebar {
         let now = Instant::now();
         let look = self.own.went(place.session(), place.pane(), listed.as_deref(), now);
         if self.here() == Some(place.session()) {
+            // A search goes to the panes of a folded session too.
+            if place.pane().is_some() {
+                self.unfold(place.session());
+            }
             self.rebuild();
             return look;
         }
@@ -897,8 +900,23 @@ impl Sidebar {
         if self.own.session() == Some(here.as_str()) {
             return None;
         }
-        let listed = clients(self.host.as_ref(), &here).map(<[Client]>::to_vec);
-        Some(self.own.came(&here, listed.as_deref(), Instant::now()))
+        Some(self.came(&here))
+    }
+
+    /// luneta's zellij came to `session`, which unfolds: you go to a session
+    /// for its panes. A look for zellij to answer once it is there.
+    fn came(&mut self, session: &str) -> Look {
+        self.unfold(session);
+        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+        self.own.came(session, listed.as_deref(), Instant::now())
+    }
+
+    /// Unfolds `session`, as luneta's zellij goes to it. One not folded leaves
+    /// the folder where the folds are kept alone.
+    fn unfold(&mut self, session: &str) {
+        if self.folds.contains(session) {
+            self.folds.set(session, false);
+        }
     }
 
     /// The session zellij's client is in: the one luneta sent it to, until
@@ -3361,6 +3379,35 @@ mod tests {
         assert_eq!(sidebar.next_pane(), None);
     }
 
+    /// Going to a folded session unfolds it, whichever way luneta's zellij
+    /// goes: from the sidebar or the menu, by zellij's own switch, which the
+    /// title follows, or as a client takes the place of one that ended. Its
+    /// panes are listed, so `Alt Tab` goes on to the next of them, and not to
+    /// the next session's.
+    #[test]
+    fn going_to_a_folded_session_unfolds_it() {
+        let older = |pane| Place::Pane { session: listed("older", 10), pane };
+        // luneta's zellij in newer, and older folded.
+        let away = || {
+            let mut sidebar = two_sessions();
+            sidebar.titled("newer | fish".to_owned());
+            sidebar.folds.set("older", true);
+            sidebar
+        };
+        let mut sidebar = away();
+        sidebar.went(&older(1));
+        assert!(!sidebar.folds.contains("older"));
+        assert_eq!(sidebar.next_pane(), Some(older(2)));
+        let mut sidebar = away();
+        sidebar.titled("older | ~/w/luneta".to_owned());
+        assert!(!sidebar.folds.contains("older"));
+        assert_eq!(sidebar.next_pane(), Some(older(1)));
+        let mut sidebar = away();
+        sidebar.rejoining("older");
+        assert!(!sidebar.folds.contains("older"));
+        assert_eq!(sidebar.next_pane(), Some(older(1)));
+    }
+
     #[test]
     fn a_gone_pane_leaves_the_highlight_in_its_session() {
         let mut sidebar = two_sessions();
@@ -4271,6 +4318,24 @@ mod tests {
             assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"], "{close:?}");
             assert_eq!(bottom(&mut sidebar), keys, "{close:?}");
         }
+    }
+
+    /// A search goes to a pane of the folded session luneta's zellij is in,
+    /// which unfolds as it goes. Folded there, the session stays so while
+    /// luneta's zellij does.
+    #[test]
+    fn going_to_a_pane_found_in_luneta_s_folded_session_unfolds_it() {
+        let mut sidebar = searched();
+        sidebar.titled("bipa | a-p-i-x".to_owned());
+        sidebar.key(&char('h'), moment(160_000));
+        sidebar.titled("bipa | dda-bank-slip".to_owned());
+        assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"]);
+        type_in(&mut sidebar, "/pix");
+        let pix = Place::Pane { session: listed("bipa", 10), pane: 3 };
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Go(pix.clone()));
+        sidebar.went(&pix);
+        assert_eq!(rows_shown(&mut sidebar)[..2], [" ▾ bipa", "       a-p-i-x"]);
     }
 
     /// Every character types, `j` and `h` too, where the keys were. A long
