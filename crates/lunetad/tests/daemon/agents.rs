@@ -272,12 +272,14 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
 
 /// The daemon follows the files as Claude Code writes them, with no one asking
 /// it to look. A file read in the middle of a write says what it said before,
-/// so that its agent does not blink out of the list. A file taken away takes
-/// its agent, and so does a process that crashes and leaves its file.
+/// so that its agent does not blink out of the list, and one read in the
+/// middle of the write that makes it is not yet counted as one the daemon
+/// cannot read. A file taken away takes its agent, and so does a process that
+/// crashes and leaves its file.
 #[test]
 fn the_daemon_follows_the_files_as_they_change() {
     let host = Host::new();
-    let (one, two) = (process(None), process(None));
+    let (one, two, three) = (process(None), process(None), process(None));
     let (one_start, two_start) = (started(one.pid()), started(two.pid()));
     host.write(one.pid(), &file("one", one.pid(), &one_start, "busy"));
     host.write(two.pid(), &file("two", two.pid(), &two_start, "idle"));
@@ -288,13 +290,17 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("one waits", || host.agent("one").filter(|agent| agent.status == waits));
 
     // `two`'s new status shows once the daemon has read the folder again, and
-    // that read finds `one` half written.
+    // that read finds `one` half written, and `three` half made.
     let whole = file("one", one.pid(), &one_start, "idle").to_string();
     fs::write(host.file_of(one.pid()), &whole[..whole.len() / 2]).unwrap();
+    let made = file_for("three", &three, "busy").to_string();
+    fs::write(host.file_of(three.pid()), &made[..made.len() / 2]).unwrap();
     host.write(two.pid(), &file("two", two.pid(), &two_start, "busy"));
     let works = Some(known(Status::Busy));
     eventually("two works", || host.agent("two").filter(|agent| agent.status == works));
-    assert_eq!(host.agent("one").map(|agent| agent.status), Some(waits));
+    let listed = host.list();
+    let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one");
+    assert_eq!((one_does.map(|agent| agent.status), listed.unread), (Some(waits), 0));
 
     fs::remove_file(host.file_of(one.pid())).unwrap();
     eventually("one is gone", || host.agent("one").is_none().then_some(()));
