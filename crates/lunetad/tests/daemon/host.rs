@@ -78,8 +78,8 @@ impl<'a> Vars<'a> {
 /// and none until it has. Of a session it was given no panes for, it says
 /// there is no such session, as zellij does. It notes each session the daemon
 /// asks it for the panes of, for `asked`, and each pane, tab and session it is
-/// asked to close, for `closed`, and closes nothing. It knows no other
-/// command.
+/// asked to close, for `closed`, and closes nothing; in a session a test had
+/// it `refuse`, it fails to, as zellij can. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -98,6 +98,10 @@ case "$*" in
     "action list-panes --json") asking=laid ;;
     "action list-clients") asking=clients ;;
     "action close-pane --pane-id "* | "action close-tab-by-id "* | "kill-session "*)
+        if [ -f "{panes}/$session.refused" ]; then
+            echo "zellij refused to close anything of $session" >&2
+            exit 1
+        fi
         echo "$asked" >> "{panes}/closed"
         exit 0
         ;;
@@ -174,6 +178,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
             writeln!(said, "{id:<9} {pane:<14} {:<15}", "fish").unwrap();
         }
         self.write(&format!("{session}.clients"), &said);
+    }
+
+    /// Has zellij fail from now on to close any pane, tab or session of the
+    /// session `session`, and note none of them.
+    pub fn refuse(&self, session: &str) {
+        self.write(&format!("{session}.refused"), "");
     }
 
     /// Writes `text` to the file `name`, whole before zellij can read it.

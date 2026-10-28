@@ -89,7 +89,7 @@ impl Host {
     }
 
     /// The agent the daemon lists for the session `id`.
-    fn agent(&self, id: &str) -> Option<Agent> {
+    pub fn agent(&self, id: &str) -> Option<Agent> {
         self.agents().into_iter().find(|agent| agent.session_id == id)
     }
 }

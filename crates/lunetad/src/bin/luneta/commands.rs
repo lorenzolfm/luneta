@@ -46,6 +46,10 @@ pub enum Command {
         #[arg(long, value_parser = version)]
         after: Option<Version>,
     },
+    /// Say which pane this runs in, as `<session>:<pane>`, by the name its
+    /// session has now: zellij's variables keep the name it had as the pane
+    /// opened, and lunetad follows a rename.
+    Here,
     /// Open a pane, a tab or a session, as the menu's New group does.
     Open {
         #[command(subcommand)]
@@ -88,8 +92,9 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Agents => ask(folder, Reach::Running, agents),
         Command::Sessions => ask(folder, Reach::Running, sessions),
         Command::Watch { after } => ask(folder, Reach::Current, |daemon| watch(daemon, *after)),
-        Command::Open { what } => drive::open(what),
-        Command::Go { to } => drive::go(to),
+        Command::Here => drive::here(folder),
+        Command::Open { what } => drive::open(what, folder),
+        Command::Go { to } => drive::go(to, folder),
         Command::Close { what, yes } => drive::close(what, *yes, folder),
     }
 }

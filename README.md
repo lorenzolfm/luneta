@@ -626,6 +626,7 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta open session [--cwd D] [--name N]` | makes a session and takes you there |
 | `luneta go S[:P]` | takes you to a session, or to a pane of one |
 | `luneta close S[:P]… [--yes PLAN]` | closes panes and kills sessions |
+| `luneta here` | says which pane it runs in, as `S:P` |
 
 They are for a pane of zellij, where an agent runs, and take what it runs in
 for the pane, the session and the directory you leave out. A pane or a tab
@@ -635,6 +636,14 @@ tab opens only in a session someone is in: zellij makes a tab as big as a
 client of its session, and one with no room for its panes in a session with
 none. A session is named as the picker names its directory, with a `-2` when
 a session runs by that name.
+
+zellij names a pane's session to what runs in it by the name the session had
+as the pane opened, and a rename leaves that behind. lunetad follows the
+rename, so the commands go by the name the session has now, which `luneta
+here` says. Where luneta can't tell it, as without lunetad once no session
+runs by the old name, they do nothing and say why. Where lunetad lists no
+agent in the pane, as without lunetad, a session made by the old name since
+is taken for the pane's own.
 
 `go` and `open session` move the client that last typed in the session they
 run in, which is you, where you just asked an agent there for something:
@@ -664,8 +673,9 @@ made again by the same name, it closes nothing, and says what it would close
 now, and its plan.
 
 What holds the pane it runs in goes last, and its agent's line says `(this
-runs here)`: the agent ends with it. It kills only sessions that run, not
-those zellij keeps to resurrect.
+runs here)`: the agent ends with it. Where anything before it failed to
+close, it stays, so that the agent can tell you. It kills only sessions that
+run, not those zellij keeps to resurrect.
 
 ## Getting started
 

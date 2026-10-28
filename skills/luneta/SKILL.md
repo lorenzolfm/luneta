@@ -8,13 +8,16 @@ description: Drive luneta and zellij for the user with the `luneta` CLI - open a
 luneta runs zellij beside a sidebar of every session on the host, and what
 the agent in each pane is doing. Its CLI reads what lunetad, its daemon, knows,
 and has zellij open, move and close things. You run in a pane of zellij:
-`$ZELLIJ_SESSION_NAME` and `$ZELLIJ_PANE_ID` say which.
+`luneta here` says which, as `<session>:<pane>`. Don't read it from
+`$ZELLIJ_SESSION_NAME`: that keeps the name the session had when your pane
+opened, and a rename leaves it behind.
 
 A pane is named `<session>:<pane>`, as `luneta:11`; a session by its name alone.
 
 ## Find what the words point at
 
 ```sh
+luneta here       # the pane you run in, as <session>:<pane>, by its session's name now
 luneta sessions   # each session, its panes as <tab>:<pane>, their directory, branch, changes and PR
 luneta agents     # each agent: <session>:<pane>, status (busy/idle/waiting/shell), pid, name
 zoxide query -l   # the directories the user works in, most used first; `zoxide query <words>` picks one
@@ -24,11 +27,16 @@ zoxide query -l   # the directories the user works in, most used first; `zoxide 
   list and the session names. Ask when two fit.
 - "that PR", "this branch": the pane you run in, or the PR you were just
   talking about. `luneta sessions` shows which pane has which branch and PR.
-- "here", "this session": `$ZELLIJ_SESSION_NAME`.
+- "here", "this session": the session `luneta here` names.
 
 `sessions` and `agents` need lunetad, which luneta starts. The verbs below ask
 zellij themselves and work without it. Only `close` then can't tell which
 agents end.
+
+`here`, `go`, `open session`, `close`, and `open pane`/`open tab` without
+`--beside`/`--session` need to know which session you run in. If your session
+was renamed and luneta can't tell which it is now (no lunetad, or one that
+can't say), they fail and say so. Tell the user. Don't guess a session.
 
 ## Verbs
 
@@ -57,7 +65,9 @@ luneta close <session>[:<pane>]... [--yes <plan>]
 - `close` takes a pane's tab along when nothing else holds the tab open, and
   the session when that was its only tab. The panes of a session given
   together close together: give every pane of a tab and the tab closes. It
-  kills a session given by name. It closes running sessions only.
+  kills a session given by name. It closes running sessions only. What holds
+  your pane goes last, and not at all if anything before it failed to close,
+  so that you're still there to tell the user.
 
 ## Start an agent
 
@@ -124,7 +134,8 @@ new plan and ask again. Exit 1 means something failed.
 
 - Name busy and waiting agents in the question. Their work is lost.
 - "All sessions" means the running ones in `luneta sessions`. Leave out the
-  session you run in unless the user says so. Killing it ends you too:
-  `(this runs here)` marks your own line in the plan, and luneta closes it last.
+  session `luneta here` names unless the user says so. Killing it ends you
+  too: `(this runs here)` marks your own line in the plan, and luneta closes
+  it last.
 - Close only what the user named or plainly meant. Never sweep up "idle"
   sessions on your own.
