@@ -438,9 +438,11 @@ pub fn go(
 }
 
 /// Takes the client from the session `at` to a session it makes, `to`, that
-/// starts in `cwd`, and then takes the look `then`, if any, for the client's
-/// arrival there. A session that runs under that name is where it goes, and
-/// `cwd` goes unused. The client must have been sent `NUDGE` first.
+/// starts in `cwd`, or where the client started, and then takes the look
+/// `then`, if any, for the client's arrival there. A session that runs under
+/// that name is where it goes, and `cwd` goes unused; one that ended, which
+/// zellij kept to bring back, comes back as it was. The client must have
+/// been sent `NUDGE` first.
 ///
 /// Unless zellij's sockets say one runs by that name, as they do not of one
 /// the sidebar names, zellij makes it, and must take the client there before
@@ -450,12 +452,13 @@ pub fn go(
 pub fn start(
     at: &str,
     to: &SessionName,
-    cwd: &str,
+    cwd: Option<&str>,
     then: Option<Look>,
     events: &Sender<Event>,
 ) -> Option<Arrival> {
     let mut command = Command::new("zellij");
-    command.args(["--session", at, "action", "switch-session", &to.0, "--cwd", cwd]);
+    command.args(["--session", at, "action", "switch-session", &to.0]);
+    command.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
     match then {
         Some(look) if runs(&to.0) != Some(true) => {
             run(command, Some(Then::Made(look.number)), events);
@@ -695,7 +698,7 @@ pub enum Closes {
 }
 
 /// A pane as `zellij action list-panes --json` lists it, as much of it as
-/// says what it holds open.
+/// says what it holds open, and whether a client coming there is on it.
 #[derive(Clone, Deserialize)]
 #[expect(clippy::struct_excessive_bools, reason = "zellij lists each as a bool of its own")]
 struct Laid {
@@ -704,7 +707,15 @@ struct Laid {
     is_selectable: bool,
     is_suppressed: bool,
     is_floating: bool,
+    /// Whether a client has the focus on it in its tab, or the last one had.
+    /// Only the preview of a session goes by it, and by `tab_position`: a
+    /// list without them still says what closing a pane closes.
+    #[serde(default)]
+    is_focused: bool,
     tab_id: u32,
+    /// Where its tab stands among the session's, from the first.
+    #[serde(default)]
+    tab_position: u32,
 }
 
 impl Laid {
@@ -839,6 +850,121 @@ pub fn tab_closed(session: &str, tab: u32) -> Result<(), String> {
 /// ends with it: luneta's own takes it to another session.
 pub fn killed(session: &str) -> Result<(), String> {
     done(killer(session))
+}
+
+/// What `list-sessions` says where no session runs, nor ended to be brought
+/// back, as it fails.
+const NO_SESSIONS: &str = "No active zellij sessions found.";
+
+/// What follows the name of a session `list-sessions` lists that ended, and
+/// that zellij keeps to bring back.
+const EXITED: &str = "(EXITED - attach to resurrect)";
+
+/// A session that ended, which zellij keeps to bring back: `switch-session`
+/// brings it back, and `delete-session` lets it go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exited {
+    pub name: SessionName,
+    /// How long before zellij listed it it was made, as zellij says: to the
+    /// second.
+    pub ago: Duration,
+}
+
+/// The sessions zellij keeps to bring back, as `list-sessions` lists them
+/// now, or why it did not list them.
+pub fn exited() -> Result<Vec<Exited>, String> {
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.args(["list-sessions", "--no-formatting"]);
+    let ran = command.output().map_err(|error| unrun(&error))?;
+    if !ran.status.success() {
+        return if String::from_utf8_lossy(&ran.stderr).contains(NO_SESSIONS) {
+            Ok(Vec::new())
+        } else {
+            Err(failure(&ran))
+        };
+    }
+    Ok(exited_in(&String::from_utf8_lossy(&ran.stdout)))
+}
+
+/// The sessions that ended among those `listed` lists, a line each, as
+/// `list-sessions --no-formatting` lists them: `<name> [Created 1day 2h 3m
+/// 4s ago] (EXITED - attach to resurrect)`. A line that does not read so,
+/// or of a name zellij would not take, is left out.
+fn exited_in(listed: &str) -> Vec<Exited> {
+    let exited = |line: &str| {
+        let line = line.trim_end().strip_suffix(EXITED)?.trim_end();
+        let (name, created) = line.rsplit_once(" [Created ")?;
+        let ago = created.strip_suffix(" ago]").and_then(spelled_ago)?;
+        Some(Exited { name: SessionName::running(name).ok()?, ago })
+    };
+    listed.lines().filter_map(exited).collect()
+}
+
+/// A time as zellij spells one, `1day 2h 3m 4s`, in whole seconds: what it
+/// says under a second goes, and a unit it has no word for, nothing.
+fn spelled_ago(spelled: &str) -> Option<Duration> {
+    let mut secs: u64 = 0;
+    for word in spelled.split_whitespace() {
+        let digits = word.find(|c: char| !c.is_ascii_digit())?;
+        let (count, unit) = word.split_at(digits);
+        let each = match unit {
+            "years" | "year" => 31_557_600,
+            "months" | "month" => 2_630_016,
+            "weeks" | "week" | "w" => 604_800,
+            "days" | "day" | "d" => 86_400,
+            "h" => 3600,
+            "m" => 60,
+            "s" => 1,
+            "ms" | "us" | "ns" => 0,
+            _ => return None,
+        };
+        secs = secs.checked_add(count.parse::<u64>().ok()?.checked_mul(each)?)?;
+    }
+    Some(Duration::from_secs(secs))
+}
+
+/// Renames `session` to `to`, or says why zellij did not. A session with no
+/// client takes the name as well as one with.
+pub fn renamed(session: &str, to: &SessionName) -> Result<(), String> {
+    let mut command = Command::new("zellij");
+    command.args(["--session", session, "action", "rename-session", &to.0]);
+    done(command)
+}
+
+/// Has zellij let go of `session`, one that ended, which then cannot be
+/// brought back, or says why it did not. zellij keeps one that runs.
+pub fn deleted(session: &str) -> Result<(), String> {
+    let mut command = Command::new("zellij");
+    command.args(["delete-session", session]);
+    done(command)
+}
+
+/// The terminal of `session` a client coming there would be on, as zellij
+/// lists its panes now: in its first tab, the one focused there, or else the
+/// first, a tiled one before one floating. zellij says which tab a session
+/// is on only while a client is on it.
+pub fn focused(session: &str) -> Result<u32, String> {
+    let laid = laid(session)?;
+    shown(&laid).ok_or_else(|| format!("{session} has no terminal to show"))
+}
+
+/// The terminal among `laid`, the panes of a session, that a client coming
+/// there would be on, as `focused` says.
+fn shown(laid: &[Laid]) -> Option<u32> {
+    let terminal = |laid: &&Laid| !laid.is_plugin && laid.is_selectable && !laid.is_suppressed;
+    let rank = |laid: &&Laid| (laid.tab_position, laid.is_floating, !laid.is_focused);
+    laid.iter().filter(terminal).min_by_key(rank).map(|laid| laid.id)
+}
+
+/// What the terminal `pane` of `session` shows, as zellij dumps it: its
+/// lines, in the colours it shows them in.
+pub fn dumped(session: &str, pane: u32) -> Result<String, String> {
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    let pane = format!("terminal_{pane}");
+    command.args(["--session", session, "action", "dump-screen", "--pane-id", &pane, "--ansi"]);
+    answered(&mut command)
 }
 
 /// zellij, to close the terminal `pane` of `session`.
@@ -1085,6 +1211,23 @@ mod tests {
         assert!(seat_in(Some("work:4"), Some("work"), Some("2")).is_err());
     }
 
+    /// The sessions that ended are read from what `list-sessions` lists,
+    /// with how long ago each was made, to the second; the rest are left
+    /// out: those that run, yours, and a line that does not read.
+    #[test]
+    fn the_sessions_that_ended_are_read_from_what_zellij_lists() {
+        let listed = "bipa [Created 1day 5h 24m 9s ago] \n\
+                      luneta [Created 1day 5h 20m 52s ago] (current)\n\
+                      nixos [Created 1day 11m 50s ago] (EXITED - attach to resurrect)\n\
+                      a b [Created 3s ago] (EXITED - attach to resurrect)\n\
+                      odd [Created 2fortnights ago] (EXITED - attach to resurrect)\n\
+                      (EXITED - attach to resurrect)\n";
+        let exited = exited_in(listed);
+        let read: Vec<(&str, u64)> =
+            exited.iter().map(|exited| (exited.name.as_str(), exited.ago.as_secs())).collect();
+        assert_eq!(read, [("nixos", 86_400 + 11 * 60 + 50), ("a b", 3)]);
+    }
+
     #[test]
     fn a_name_is_the_directory_itself() {
         let named = |dir: &str| session_for(Path::new(dir)).map(|name| name.0);
@@ -1203,8 +1346,25 @@ mod tests {
             is_selectable: true,
             is_suppressed: false,
             is_floating: false,
+            is_focused: false,
             tab_id,
+            tab_position: tab_id,
         }
+    }
+
+    /// A session with no client shows the terminal focused in its first tab,
+    /// a tiled one over one floating, or else the first there: no other tab
+    /// is the one zellij says it is on.
+    #[test]
+    fn a_session_with_no_client_shows_the_pane_focused_in_its_first_tab() {
+        let focused = |laid: Laid| Laid { is_focused: true, ..laid };
+        let floating = |laid: Laid| Laid { is_floating: true, ..laid };
+        let plugin = |laid: Laid| Laid { is_plugin: true, ..laid };
+        let tabs = [laid(1, 1), focused(laid(2, 1)), focused(laid(3, 0)), laid(4, 0)];
+        assert_eq!(shown(&tabs), Some(3));
+        let first = [focused(floating(laid(5, 0))), laid(6, 0), laid(7, 0)];
+        assert_eq!(shown(&first), Some(6));
+        assert_eq!(shown(&[plugin(laid(8, 0))]), None);
     }
 
     /// zellij closes a tab with its last pane that holds it open, its

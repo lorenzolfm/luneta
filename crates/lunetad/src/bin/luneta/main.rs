@@ -22,6 +22,7 @@ mod menu;
 mod news;
 mod order;
 mod own;
+mod picker;
 mod sidebar;
 mod skills;
 mod state;

@@ -49,6 +49,7 @@ use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
 use crate::news::News;
 use crate::order::Order;
 use crate::own::{Look, Looked, OwnClient, Unplaced};
+use crate::picker::{Listing, Live, Seated, Shown};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
 
@@ -231,7 +232,7 @@ impl Place {
 /// What goes on in a pane, as its row marks it: what its agent is doing, or
 /// the command its shell runs, or ran last.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Mark {
+pub enum Mark {
     /// An agent that waits for you, or a command that waits for you to type.
     Waiting,
     /// An agent done, which you have seen since it finished, or see: it is
@@ -280,7 +281,7 @@ impl Mark {
     }
 
     /// Its glyph, which the spinner shows at `frame`, and its style.
-    fn glyph(&self, frame: usize) -> (String, Style) {
+    pub fn glyph(&self, frame: usize) -> (String, Style) {
         let style = Style::new();
         match self {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
@@ -1075,6 +1076,65 @@ impl Sidebar {
         }
     }
 
+    /// What the picker lists, as the sidebar knows the host now: every
+    /// session newest first, each with its panes in the order of their tabs,
+    /// and the agents in them, those of the session luneta's zellij is in
+    /// first, then those of the others newest first, each session's in the
+    /// order their panes opened.
+    pub fn listing(&self) -> Listing {
+        let here = self.here().map(str::to_owned);
+        let mut listing = Listing {
+            here_pane: self.here_place().ok(),
+            away: self.away.clone(),
+            ..Listing::default()
+        };
+        let Some(host) = &self.host else {
+            listing.here = here;
+            return listing;
+        };
+        let seated = seated(&host.agents, &host.sessions);
+        let (sessions, _) = oldest_first(&host.sessions);
+        for (listed, session) in sessions.into_iter().rev() {
+            let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
+            panes.sort_by_key(|pane| pane.id);
+            let mut waiting = 0;
+            for pane in &panes {
+                let Some(agent) = seated.get(&(session.name.as_str(), pane.id)) else {
+                    continue;
+                };
+                let mark = Mark::of(agent);
+                waiting += usize::from(mark == Mark::Waiting);
+                listing.agents.push(Seated {
+                    place: Place::Pane { session: listed.clone(), pane: pane.id },
+                    label: label(Some(agent), pane),
+                    mark,
+                    status: status_word(agent),
+                    since: agent.status_since.and_then(|at| at.try_into().ok()),
+                    cwd: pane.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
+                });
+            }
+            panes.sort_by_key(|pane| (pane.tab, pane.id));
+            let shown = |pane: &&Pane| Shown {
+                id: pane.id,
+                tab: pane.tab_name.clone(),
+                label: label(seated.get(&(session.name.as_str(), pane.id)).copied(), pane),
+            };
+            let mut clients = session.clients.iter().flat_map(|clients| &clients.clients);
+            listing.sessions.push(Live {
+                started: listed.kept.started(),
+                panes: panes.iter().map(shown).collect(),
+                on: clients.find_map(|client| client.pane),
+                waiting,
+                place: Place::Session(listed),
+            });
+        }
+        // Those of the session luneta's zellij is in first, and the rest as
+        // they are.
+        listing.agents.sort_by_key(|seated| here.as_deref() != Some(seated.place.session()));
+        listing.here = here;
+        listing
+    }
+
     pub fn notify(&mut self, notice: String) {
         self.notice = Some(notice);
     }
@@ -1729,7 +1789,7 @@ impl Sidebar {
             },
             Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
             Wants::Plan(Scope::Session) => {
-                let plan = close::plan(&self.subject(&target, Deletes::Session));
+                let plan = self.plan(target.place.session(), Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -1744,10 +1804,15 @@ impl Sidebar {
         self.menu_did(menu.planned(plan))
     }
 
-    /// What the delete is for, as the sidebar knows it: the menu's row, in
-    /// its session, where luneta's zellij is, and what it `deletes`.
-    fn subject<'a>(&'a self, target: &'a Target, deletes: Deletes) -> Subject<'a> {
-        let session = target.place.session();
+    /// What deleting what `deletes` deletes of `session` does, as the
+    /// sidebar knows the host now: for the menu, and for the picker.
+    pub fn plan(&self, session: &str, deletes: Deletes) -> Result<Plan, String> {
+        close::plan(&self.subject(session, deletes))
+    }
+
+    /// What the delete is for, as the sidebar knows it: `session`, where
+    /// luneta's zellij is, and what it `deletes`.
+    fn subject<'a>(&'a self, session: &'a str, deletes: Deletes) -> Subject<'a> {
         let seat = match (self.going(), self.here()) {
             (None, Some(here)) if here == session => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
@@ -1906,7 +1971,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let plan = match closes {
-            Ok(closes) => close::plan(&self.subject(&target, Deletes::Pane { pane, closes })),
+            Ok(closes) => self.plan(target.place.session(), Deletes::Pane { pane, closes }),
             Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
@@ -2794,7 +2859,7 @@ pub fn age(since: SystemTime, now: SystemTime) -> String {
 
 /// The frame the spinner shows at `now`: the same on every row, and the next
 /// one each `SPIN`.
-fn frame(now: SystemTime) -> usize {
+pub fn frame(now: SystemTime) -> usize {
     let since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let turns = since.as_millis() / SPIN.as_millis();
     let frames = u128::try_from(SPINNER.len()).expect("a spinner of ten frames");

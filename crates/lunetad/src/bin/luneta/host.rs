@@ -11,8 +11,9 @@
 //! is on, and a brief or the ask box the menu asks for shows in a box there
 //! too, as does what went wrong with what the menu did there: each has the
 //! keys and the mouse until it closes, when the side that had them before has
-//! them again. What the mouse drags on zellij stays with zellij under a box
-//! too.
+//! them again. `Ctrl j` opens the picker in a box there too, on the
+//! sessions, and `Ctrl a` on the agents. What the mouse drags on zellij stays
+//! with zellij under a box too.
 
 use std::collections::VecDeque;
 use std::env;
@@ -51,6 +52,7 @@ use crate::menu;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
+use crate::picker::{self, List, Picked, Picker};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::width::Width;
@@ -91,6 +93,8 @@ pub enum Event {
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
     Heard { number: u64, heard: Heard },
+    /// What zellij answered the picker numbered `number`.
+    Picker { number: u64, heard: picker::Heard },
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -134,6 +138,12 @@ const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
 /// The key that opens the menu over zellij, for the pane zellij is on, and
 /// closes it.
 const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
+
+/// The key that opens the picker over zellij, on the sessions.
+const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
+
+/// The key that opens the picker over zellij, on the agents.
+const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
 
 /// How soon a second click on the cell of a first makes a double click of the
 /// two, as desktops have it by default.
@@ -201,6 +211,9 @@ enum Over {
     /// The ask box, from when the menu asks for it until it closes, which
     /// gives up the turn its agent is at.
     Ask(Ask),
+    /// The picker, from `SESSIONS` or `AGENTS` until it closes, or takes
+    /// zellij somewhere.
+    Picker(Box<Picker>),
 }
 
 /// What a button held down holds, wherever the mouse goes, until it is let
@@ -373,6 +386,8 @@ struct App {
     /// How many ask boxes luneta has opened, which are numbered as briefs
     /// are.
     asks: u64,
+    /// How many pickers luneta has opened, which are numbered as briefs are.
+    pickers: u64,
     /// The folder the daemon reads Claude Code's sessions in, where a brief
     /// reads the transcripts of the agents it lists: none until luneta has
     /// reached one.
@@ -558,6 +573,7 @@ fn run_in(
         turned: None,
         briefs: 0,
         asks: 0,
+        pickers: 0,
         claude_folder: None,
         daemon,
         events,
@@ -586,6 +602,9 @@ fn run_loop(
         } else {
             TICK
         };
+        // Or until the picker's preview asks zellij for a screen.
+        let due = app.due().map(|due| due.saturating_duration_since(Instant::now()));
+        let wait = due.map_or(wait, |due| wait.min(due));
         match inbox.next(wait) {
             Ok(event) => app.handle(event, terminal)?,
             Err(RecvTimeoutError::Timeout) => {},
@@ -605,6 +624,7 @@ fn run_loop(
             return Ok(());
         }
         app.wait_on(Instant::now());
+        app.ticked(Instant::now());
         app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
         app.draw(terminal)?;
     }
@@ -637,6 +657,12 @@ fn window(area: Rect) -> Size {
 
 impl App {
     fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        // What changes where zellij is, or what the daemon says, changes what
+        // the picker lists.
+        let relists = matches!(
+            event,
+            Event::Daemon(_) | Event::Looked(_) | Event::Stayed(_) | Event::Hosted(Said::Titled(_))
+        );
         match event {
             Event::Input(input) => match &mut self.client.coming {
                 Some(Coming::Held(waiting)) => waiting.input.push(input),
@@ -685,17 +711,69 @@ impl App {
                     ask.heard(heard);
                 }
             },
+            Event::Picker { number, heard } => {
+                if let Some(Over::Picker(picker)) = &mut self.focus.over
+                    && picker.number() == number
+                {
+                    let did = picker.heard(heard);
+                    self.picked(did);
+                }
+            },
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
+        }
+        if relists {
+            self.relist();
         }
         self.settle();
         Ok(())
     }
 
-    /// Gives the keys back to the side the menu over zellij took them from,
-    /// once it closed: as a key or a click closed it, or as zellij said why
-    /// what a key asked for went wrong, which a box says in its place.
+    /// Hands the picker, while it is open, what the sidebar knows now.
+    fn relist(&mut self) {
+        if !matches!(self.focus.over, Some(Over::Picker(_))) {
+            return;
+        }
+        let listing = self.sidebar.listing();
+        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+            picker.listed(listing);
+        }
+    }
+
+    /// When the picker asks zellij for what its preview shows, while it is
+    /// open and is to ask.
+    fn due(&self) -> Option<Instant> {
+        match &self.focus.over {
+            Some(Over::Picker(picker)) => picker.due(),
+            _ => None,
+        }
+    }
+
+    /// Lets the picker ask zellij for what its preview shows, once it is
+    /// due.
+    fn ticked(&mut self, now: Instant) {
+        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+            picker.ticked(now);
+        }
+        self.ask_zellij();
+    }
+
+    /// Asks zellij what the picker has yet to ask, while it is open.
+    fn ask_zellij(&mut self) {
+        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+            let number = picker.number();
+            for ask in picker.asks() {
+                picker::ask(number, ask, &self.events);
+            }
+        }
+    }
+
+    /// Asks zellij what the picker has yet to ask, and gives the keys back
+    /// to the side the menu over zellij took them from, once it closed: as a
+    /// key or a click closed it, or as zellij said why what a key asked for
+    /// went wrong, which a box says in its place.
     fn settle(&mut self) {
+        self.ask_zellij();
         if matches!(self.focus.over, Some(Over::Menu)) && self.sidebar.floating().is_none() {
             let over = self.sidebar.said().map(Over::Note);
             self.give(Focus { side: self.focus.side, over });
@@ -780,6 +858,8 @@ impl App {
             Input::Paste(text) => {
                 if let Some(Over::Ask(ask)) = &mut self.focus.over {
                     ask.paste(&text);
+                } else if let Some(Over::Picker(picker)) = &mut self.focus.over {
+                    picker.paste(&text);
                 } else if self.focus.zellij() {
                     self.client.hosted.send(keys::paste(&text, self.client.hosted.mode()));
                 }
@@ -807,6 +887,12 @@ impl App {
                     Keyed::Send => self.converse(),
                     Keyed::Close => self.give(Focus::on(self.focus.side)),
                 }
+                return;
+            },
+            // So does the picker.
+            Some(Over::Picker(picker)) => {
+                let did = picker.key(key);
+                self.picked(did);
                 return;
             },
             // So does a brief, which does nothing else with them.
@@ -845,6 +931,13 @@ impl App {
             self.give(Focus { side: self.focus.side, over: Some(over) });
             return;
         }
+        if chord == SESSIONS || chord == AGENTS {
+            let list = if chord == SESSIONS { List::Sessions } else { List::Agents };
+            self.pickers += 1;
+            let picker = Box::new(Picker::open(self.pickers, list, self.sidebar.listing()));
+            self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
+            return;
+        }
         if chord == SWAP {
             // A collapsed sidebar opens to take the keys.
             let other = if self.focus.zellij() { Side::Sidebar } else { Side::Zellij };
@@ -881,12 +974,30 @@ impl App {
             self.zellij_mouse(mouse);
             return;
         }
+        // The picker takes the mouse: the wheel moves its highlight, and a
+        // click off its box closes it, and does nothing else.
+        let (_, zellij) = self.areas;
+        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => picker.scroll(1),
+                MouseEventKind::ScrollUp => picker.scroll(-1),
+                MouseEventKind::Down(_)
+                    if !Picker::area(zellij).contains(Position::new(mouse.column, mouse.row)) =>
+                {
+                    self.let_go();
+                    self.held = Held::Closed;
+                    self.give(Focus::on(self.focus.side));
+                },
+                _ => {},
+            }
+            return;
+        }
         // A brief takes the mouse too, and a click, wherever it is, closes
         // one written, and does nothing else; and so do the menu over zellij
         // and a note, which any click closes. The ask box takes it and does
         // nothing with it: a click would end the talk.
         match &self.focus.over {
-            Some(Over::Ask(_)) => return,
+            Some(Over::Ask(_) | Over::Picker(_)) => return,
             Some(Over::Brief(briefing)) => {
                 if down && briefing.clicked() {
                     self.let_go();
@@ -1043,7 +1154,7 @@ impl App {
                 }
             },
             Asked::Start { session, cwd } => {
-                self.start(&session, &cwd);
+                self.start(&session, Some(&cwd));
                 self.leave();
             },
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
@@ -1058,6 +1169,36 @@ impl App {
                 let ask = Ask::new(self.asks, &target, &self.dir);
                 self.give(Focus { side: self.focus.side, over: Some(Over::Ask(ask)) });
             },
+        }
+    }
+
+    /// Does what the picker asked. Where it takes zellij somewhere, it
+    /// closes, and zellij has the keys; a delete leaves it open, but for one
+    /// of the session luneta's zellij is in, which takes zellij to another.
+    fn picked(&mut self, picked: Picked) {
+        match picked {
+            Picked::Nothing => {},
+            Picked::Close => self.give(Focus::on(self.focus.side)),
+            Picked::Go(place) => {
+                self.go(&place, None);
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
+            Picked::Start(session) => {
+                self.start(&session, None);
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
+            Picked::Plan { session, deletes } => {
+                let plan = self.sidebar.plan(&session, deletes);
+                if let Some(Over::Picker(picker)) = &mut self.focus.over {
+                    let did = picker.planned(plan);
+                    self.picked(did);
+                }
+            },
+            Picked::Delete(Act::Leave { session, to }) => {
+                self.go_from(&session, &to, Some(After::Kill(session.clone())));
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
+            Picked::Delete(act) => self.follow(Asked::Delete(act)),
         }
     }
 
@@ -1111,10 +1252,11 @@ impl App {
     }
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
-    /// `cwd`. Where zellij makes it, its server cannot bear being asked
-    /// anything before it takes the client: luneta asks for the client's
-    /// arrival there once zellij titles its terminal in it.
-    fn start(&mut self, session: &SessionName, cwd: &str) {
+    /// `cwd`, or where the client started, or brings back, where zellij kept
+    /// one that ended. Where zellij makes it, its server cannot bear being
+    /// asked anything before it takes the client: luneta asks for the
+    /// client's arrival there once zellij titles its terminal in it.
+    fn start(&mut self, session: &SessionName, cwd: Option<&str>) {
         let Some(here) = self.here() else {
             return;
         };
@@ -1167,9 +1309,12 @@ impl App {
             (Some(Over::Menu), side) => Keys::Menu { lent: side == Side::Sidebar },
             // A brief, the ask box or a note leaves the sidebar as it stands,
             // highlight and all, for the keys to go back to as it closes.
-            (Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_)), Side::Sidebar) => Keys::Lent,
             (
-                None | Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_)),
+                Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_) | Over::Picker(_)),
+                Side::Sidebar,
+            ) => Keys::Lent,
+            (
+                None | Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_) | Over::Picker(_)),
                 Side::Zellij | Side::Collapsed,
             ) => Keys::Zellij,
         });
@@ -1188,7 +1333,7 @@ impl App {
         let leaves = match &self.focus.over {
             None => self.focus.side == Side::Sidebar,
             Some(Over::Menu) => true,
-            Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_)) => false,
+            Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_) | Over::Picker(_)) => false,
         };
         if leaves {
             self.give(Focus::on(self.focus.side.zellij()));
@@ -1336,6 +1481,7 @@ impl App {
             match &self.focus.over {
                 Some(Over::Brief(briefing)) => briefing.draw(buffer, zellij),
                 Some(Over::Ask(ask)) => ask.draw(buffer, zellij),
+                Some(Over::Picker(picker)) => picker.draw(buffer, zellij, now),
                 Some(Over::Note(note)) => menu::draw_note(buffer, zellij, note),
                 Some(Over::Menu) => {
                     if let Some(menu) = self.sidebar.floating() {

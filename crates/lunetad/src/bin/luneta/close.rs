@@ -47,7 +47,7 @@ impl Scope {
 
 /// What a delete deletes, as it is planned: a pane, and what closing it
 /// closes, as zellij listed the session's panes just before; or a session.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: u32, closes: Closes },
     Session,
