@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,7 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, Zellij};
+use lunetad::api::{
+    Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, UnreadFile, Zellij,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -102,6 +104,17 @@ pub fn process(pane: Option<(&str, u32)>) -> Running {
         command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", id.to_string());
     }
     Running::spawn(&mut command)
+}
+
+/// Makes the socket at `path` a minute older, as zellij's of a session made a
+/// minute ago is: older than a process started since by more than the second
+/// macOS dates a process's start in.
+pub fn aged(path: &Path) {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let ago = since.checked_sub(Duration::from_mins(1)).unwrap();
+    let at = rustix::fs::Timespec { tv_sec: i64::try_from(ago.as_secs()).unwrap(), tv_nsec: 0 };
+    let times = rustix::fs::Timestamps { last_access: at, last_modification: at };
+    rustix::fs::utimensat(rustix::fs::CWD, path, &times, rustix::fs::AtFlags::empty()).unwrap();
 }
 
 /// When `pid` started, as Claude Code records it on Linux: field 22 of its
@@ -347,6 +360,39 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     drop(newer);
     assert!(left.exists());
     eventually("five files are unread", || (host.list().unread == 5).then_some(()));
+}
+
+/// A file that does not read as the daemon starts is counted in its first
+/// answer, as what the daemon knows is whole before it answers anyone. Each
+/// is listed by where its process runs: in the session its environment
+/// names, which the daemon follows through a rename as it does an agent's, by
+/// when the process started, or outside zellij.
+#[test]
+fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
+    let host = Host::new();
+    let work = host.contract().join("work");
+    let _server = UnixListener::bind(&work).unwrap();
+    aged(&work);
+    let (inside, outside) = (process(Some(("work", 3))), process(None));
+    for running in [&inside, &outside] {
+        let mut shape = file_for("newer", running, "busy");
+        shape["procStart"] = json!({ "ticks": started(running.pid()) });
+        host.write(running.pid(), &shape);
+    }
+    let _daemon = start(host.vars()).unwrap();
+    let listed = host.list();
+    let in_work = UnreadFile { pid: inside.pid(), zellij: Some(zellij("work", Some("work"), 3)) };
+    let mut files = vec![in_work, UnreadFile { pid: outside.pid(), zellij: None }];
+    files.sort_by_key(|file| file.pid);
+    assert_eq!((listed.unread, listed.unread_files), (2, files));
+
+    fs::rename(&work, host.contract().join("play")).unwrap();
+    let moved = eventually("the file's process is in play", || {
+        let files = host.list().unread_files;
+        let file = files.into_iter().find(|file| file.pid == inside.pid())?;
+        file.zellij.filter(|zellij| zellij.session.as_deref() == Some("play"))
+    });
+    assert_eq!(moved, zellij("work", Some("play"), 3));
 }
 
 /// A folder that never stops changing is read anyway: the daemon waits for a

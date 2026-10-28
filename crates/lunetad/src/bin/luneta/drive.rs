@@ -23,15 +23,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
 
 use clap::Subcommand;
-use lunetad::api::{Agent, Zellij};
+use lunetad::api::{Agent, UnreadFile, Zellij};
 
-use crate::close::{Act, Doing, Plan, Untold};
+use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
 use crate::zellij::{self, Closing, Open, SessionName};
 
@@ -396,11 +395,12 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     };
     let listed = commands::listed_agents(folder);
     let agents = listed.as_ref().ok().map(|listed| listed.agents.as_slice());
+    let unread = listed.as_ref().map_or(&[][..], |listed| listed.unread_files.as_slice());
     let told = match &listed {
         Err(_) => Err(Untold::Away),
-        Ok(listed) => match Untold::unread(listed.unread) {
-            Some(untold) => Err(untold),
-            None => Ok(listed.agents.as_slice()),
+        Ok(listed) => {
+            let seats = listed.unread_seats().map_err(Untold::Unplaced);
+            seats.map(|unread| Told { agents: &listed.agents, unread })
         },
     };
     let here = match seat(agents, &running) {
@@ -416,7 +416,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
         let planned = started(session, &running)
-            .and_then(|started| Ok((started, plans_in(session, &wanted, told)?)));
+            .and_then(|started| Ok((started, plans_in(session, &wanted, told.as_ref())?)));
         match planned {
             Ok((started, planned)) => {
                 sessions.push((session, started));
@@ -431,7 +431,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     match &listed {
         Err(why) => eprintln!("luneta: {why}"),
         Ok(listed) => {
-            if let Some(count) = NonZeroU32::new(listed.unread) {
+            if let Some(count) = listed.unread_count() {
                 eprintln!("luneta: {}", commands::unread(count));
             }
         },
@@ -446,7 +446,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let mut failed = false;
     for plan in &plans {
         println!("{}: {}", says(&plan.act), plan.ends());
-        for line in ending(&plan.act, agents.unwrap_or_default(), here.as_ref()) {
+        for line in ending(&plan.act, agents.unwrap_or_default(), unread, here.as_ref()) {
             println!("  {line}");
         }
         if !told {
@@ -482,13 +482,20 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     }
 }
 
+/// The agents lunetad tells of: those it lists, and where the agents of the
+/// session files it cannot read run, as `unread_seats` gives them.
+struct Told<'a> {
+    agents: &'a [Agent],
+    unread: Vec<(&'a str, u32)>,
+}
+
 /// What closing what is `wanted` of `session` does, an act at a time, and
-/// the agents each ends among `agents`, or why luneta cannot tell them. Its
-/// panes close together, as zellij says closing them closes.
+/// the agents each ends among those lunetad `told` of, or why luneta cannot
+/// tell them. Its panes close together, as zellij says closing them closes.
 fn plans_in(
     session: &str,
     wanted: &Wanted,
-    agents: Result<&[Agent], Untold>,
+    told: Result<&Told, &Untold>,
 ) -> Result<Vec<Plan>, String> {
     let owned = || session.to_owned();
     let acts = match wanted {
@@ -506,8 +513,13 @@ fn plans_in(
         let zellij = agent.zellij.as_ref()?;
         (zellij.session.as_deref() == Some(session)).then(|| (zellij.pane, Doing::from(agent)))
     };
-    let agents: Result<Vec<_>, _> =
-        agents.map(|agents| agents.iter().filter_map(in_session).collect());
+    let agents: Result<Vec<_>, Untold> = match told {
+        Ok(Told { agents, unread }) => {
+            let agents = agents.iter().filter_map(in_session);
+            Ok(agents.chain(close::unread_in(unread, session)).collect())
+        },
+        Err(untold) => Err(*untold),
+    };
     let agents = agents.as_deref().map_err(|untold| *untold);
     Ok(acts.into_iter().map(|act| Plan::of(act, agents)).collect())
 }
@@ -534,31 +546,44 @@ fn says(act: &Act) -> String {
     }
 }
 
-/// The agents among `agents` that `act` ends, a line to each, as `luneta
+/// The agents among `agents` that `act` ends, and those of the session files
+/// among `unread` that lunetad cannot read, a line to each, as `luneta
 /// agents` writes them: the one in the pane this runs in, `here`, says so.
-fn ending(act: &Act, agents: &[Agent], here: Option<&Pane>) -> Vec<String> {
+fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane>) -> Vec<String> {
     let session = session_of(act);
-    let ends = |agent: &&Agent| {
-        let zellij = agent.zellij.as_ref();
+    let ends = |zellij: Option<&Zellij>| {
         zellij.is_some_and(|zellij| {
             zellij.session.as_deref() == Some(session) && act.takes(zellij.pane)
         })
     };
-    let mut ended: Vec<(String, &Agent)> =
-        agents.iter().filter(ends).map(|agent| (commands::seat(agent), agent)).collect();
-    ended.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let width = ended.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
-    let is_here = |agent: &Agent| {
-        let zellij = agent.zellij.as_ref();
+    let seated = |zellij: Option<&Zellij>| ends(zellij).then(|| commands::seat(zellij));
+    let agents: Vec<(String, &Agent)> = agents
+        .iter()
+        .filter_map(|agent| Some((seated(agent.zellij.as_ref())?, agent)))
+        .collect();
+    let unread: Vec<(String, &UnreadFile)> =
+        unread.iter().filter_map(|file| Some((seated(file.zellij.as_ref())?, file))).collect();
+    let seats = agents.iter().map(|(seat, _)| seat).chain(unread.iter().map(|(seat, _)| seat));
+    let width = seats.map(String::len).max().unwrap_or(0);
+    let is_here = |zellij: Option<&Zellij>| {
         here.zip(zellij).is_some_and(|(here, zellij)| {
             zellij.session.as_deref() == Some(here.session.as_str()) && zellij.pane == here.pane
         })
     };
-    let line = |(seat, agent): (String, &Agent)| {
-        let line = commands::line(&seat, width, agent);
-        if is_here(agent) { format!("{line}  (this runs here)") } else { line }
+    let mark = |line: String, zellij: Option<&Zellij>| {
+        if is_here(zellij) { format!("{line}  (this runs here)") } else { line }
     };
-    ended.into_iter().map(line).collect()
+    let agents = agents.into_iter().map(|(seat, agent)| {
+        let line = mark(commands::line(&seat, width, agent), agent.zellij.as_ref());
+        (seat, line)
+    });
+    let unread = unread.into_iter().map(|(seat, file)| {
+        let line = mark(commands::unread_line(&seat, width, file), file.zellij.as_ref());
+        (seat, line)
+    });
+    let mut ended: Vec<(String, String)> = agents.chain(unread).collect();
+    ended.sort_by(|(a, _), (b, _)| a.cmp(b));
+    ended.into_iter().map(|(_, line)| line).collect()
 }
 
 /// Has zellij do `act`.

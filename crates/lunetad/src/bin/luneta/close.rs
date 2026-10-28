@@ -11,8 +11,8 @@
 //! screen throughout, or with luneta, where it is the only one.
 
 use std::fmt;
-use std::num::NonZeroU32;
 
+use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 
@@ -101,30 +101,30 @@ pub enum Untold {
     /// lunetad does not answer: what it said last of the agents may be out of
     /// date.
     Away,
-    /// lunetad cannot read this many of Claude Code's session files. A file
-    /// that does not read names no session, so its agent may be in any pane
-    /// of any session.
-    Unread(NonZeroU32),
-}
-
-impl Untold {
-    /// Why luneta cannot tell the agents lunetad lists, where it lists them
-    /// with `unread` session files it cannot read: none while it reads them
-    /// all.
-    pub fn unread(unread: u32) -> Option<Self> {
-        NonZeroU32::new(unread).map(Untold::Unread)
-    }
+    /// lunetad cannot read some of Claude Code's session files, nor tell
+    /// which session the process of each runs in, so their agents may be in
+    /// any pane of any session.
+    Unplaced(Unplaced),
 }
 
 impl fmt::Display for Untold {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Untold::Away => f.write_str("lunetad does not answer"),
-            Untold::Unread(unread) => {
-                write!(f, "lunetad cannot read {unread} of Claude Code's session files")
-            },
+            Untold::Unplaced(unplaced) => unplaced.fmt(f),
         }
     }
+}
+
+/// What the agents of `session` among `unread` are doing, each by its pane:
+/// those of the session files lunetad cannot read, by where their processes
+/// run, as `unread_seats` gives them. What each is doing no one can tell, so
+/// each may be at work.
+pub fn unread_in<'a>(
+    unread: &'a [(&str, u32)],
+    session: &'a str,
+) -> impl Iterator<Item = (u32, Doing)> + 'a {
+    unread.iter().filter(move |(at, _)| *at == session).map(|(_, pane)| (*pane, Doing::Unknown))
 }
 
 /// What a delete is for, and what it takes along, as the sidebar knows it.

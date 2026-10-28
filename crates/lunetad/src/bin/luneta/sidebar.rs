@@ -1609,13 +1609,13 @@ impl Sidebar {
             // What lunetad said last of its agents may be out of date while it
             // does not answer: one may have gone to work, or started since.
             if self.away.is_none() {
-                let seated = seated(&host.agents, &host.sessions);
-                let doing = seated.iter().filter(|((at, _), _)| *at == session);
-                let doing = doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
-                agents = match Untold::unread(host.unread) {
-                    Some(untold) => Err(untold),
-                    None => Ok(doing.collect()),
-                };
+                agents = host.unread_seats().map_err(Untold::Unplaced).map(|unread| {
+                    let seated = seated(&host.agents, &host.sessions);
+                    let doing = seated.iter().filter(|((at, _), _)| *at == session);
+                    let doing =
+                        doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
+                    doing.chain(close::unread_in(&unread, session)).collect()
+                });
             }
             // The newest of the other sessions, which the picker lists first.
             let (sessions, _) = oldest_first(&host.sessions);
@@ -2294,7 +2294,7 @@ impl Sidebar {
             );
             notes.extend(wrapped(&unlisted, width, error));
         }
-        if let Some(unread) = self.host.as_ref().and_then(|host| Untold::unread(host.unread)) {
+        if let Some(unread) = self.host.as_ref().and_then(Host::unread_count) {
             notes.extend(wrapped(&unread.to_string(), width, error));
         }
         if let Some(lost) = self.folds.lost() {
@@ -2836,7 +2836,7 @@ mod tests {
 
     use luneta_protocol::said::Said;
     use lunetad::api::shell::{Ended, Going, Stopped};
-    use lunetad::api::{self, Clients, Pane, Panes, Version, Zellij};
+    use lunetad::api::{self, Clients, Pane, Panes, UnreadFile, Version, Zellij};
     use prost_types::Timestamp;
 
     use super::*;
@@ -2902,6 +2902,7 @@ mod tests {
             unread: 0,
             pull_requests: Vec::new(),
             unread_sockets: Some(0),
+            unread_files: Vec::new(),
         }
     }
 
@@ -4539,20 +4540,21 @@ mod tests {
 
     /// While lunetad does not answer, what it said last of the agents may be
     /// out of date; and while it cannot read one of Claude Code's session
-    /// files, the file's agent may be in any pane. The sidebar says so at
-    /// its bottom, and a delete asks first, whatever it ends, saying why, and
-    /// `y` goes ahead.
+    /// files, nor tell where its process runs, the file's agent may be in any
+    /// pane. The sidebar says so at its bottom, and a delete asks first,
+    /// whatever it ends, saying why, and `y` goes ahead.
     #[test]
     fn a_delete_asks_first_while_luneta_cannot_tell_the_agents() {
         let unread = "lunetad cannot read 1 of Claude Code's session files";
+        let unplaced = format!("{unread}, nor tell where its agent runs");
         let away: fn(&mut Sidebar) = |sidebar| sidebar.lost("gone".to_owned());
+        // As a daemon older than its list of the files says it.
         let unreadable: fn(&mut Sidebar) = |sidebar| {
             let host = sidebar.host.clone().expect("the sidebar has heard the host");
             sidebar.heard(Host { unread: 1, ..host });
         };
-        for (untold, note, why) in
-            [(away, "lunetad: gone", "lunetad does not answer"), (unreadable, unread, unread)]
-        {
+        let away = (away, "lunetad: gone", "lunetad does not answer");
+        for (untold, note, why) in [away, (unreadable, unread, unplaced.as_str())] {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
             untold(&mut sidebar);
@@ -4561,7 +4563,7 @@ mod tests {
             let closes = || Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
-            let lines = screen(&mut sidebar, true, 120, 16);
+            let lines = screen(&mut sidebar, true, 160, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
             let asks = format!("Close the pane? luneta cannot tell which agents it ends: {why}");
             assert!(lines.contains(&note), "{lines:#?}");
@@ -4569,6 +4571,35 @@ mod tests {
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
             let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+        }
+    }
+
+    /// The agent of a session file lunetad cannot read is in the pane its
+    /// process runs in, as lunetad says: what it is doing no one can tell,
+    /// so a delete that ends it asks first, and one that does not goes at
+    /// once. The sidebar says at its bottom that a file does not read.
+    #[test]
+    fn a_delete_asks_first_where_an_agent_s_session_file_does_not_read() {
+        for (pane, asks) in [(1, true), (7, false)] {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            let host = sidebar.host.clone().expect("the sidebar has heard the host");
+            let session = Some("newer".to_owned());
+            let zellij = Zellij { named: "newer".to_owned(), session, pane };
+            let unread_files = vec![UnreadFile { pid: 200, zellij: Some(zellij) }];
+            sidebar.heard(Host { unread: 1, unread_files, ..host });
+            sidebar.step(2);
+            type_in(&mut sidebar, "d");
+            let closes = Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
+            assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
+            let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
+            let went = sidebar.closes(1, Ok(Closes::Pane));
+            let lines = screen(&mut sidebar, true, 120, 16);
+            let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+            let note = "lunetad cannot read 1 of Claude Code's session files";
+            assert!(lines.contains(&note), "{lines:#?}");
+            let asked = lines.contains(&"Close the pane? 1 agent, 1 unknown");
+            assert_eq!((went == Asked::Delete(act), asked), (!asks, asks), "pane {pane}");
         }
     }
 

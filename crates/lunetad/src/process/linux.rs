@@ -4,6 +4,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+
+use rustix::time::{clock_gettime, ClockId};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -17,6 +20,25 @@ pub fn start(pid: u32) -> Option<String> {
     let stat = fs::read_to_string(proc(pid, "stat")).ok()?;
     let close = stat.rfind(')')?;
     stat[close + 1..].split_whitespace().nth(19).map(str::to_owned)
+}
+
+/// When `pid` started, or less than a clock tick before, and never after: as
+/// long before now as the time since the boot, less the ticks after the boot
+/// that `start` reads, whole ones.
+#[must_use]
+pub fn started(pid: u32) -> Option<SystemTime> {
+    let ticks: u64 = start(pid)?.parse().ok()?;
+    let per_second = rustix::param::clock_ticks_per_second();
+    let secs = ticks.checked_div(per_second)?;
+    let nanos = ticks % per_second * 1_000_000_000 / per_second;
+    let after_boot = Duration::from_secs(secs) + Duration::from_nanos(nanos);
+    // Now ahead of the time since the boot, so that what goes by between the
+    // two makes the start earlier, and never later.
+    let now = SystemTime::now();
+    let since_boot = clock_gettime(ClockId::Boottime);
+    let secs = u64::try_from(since_boot.tv_sec).ok()?;
+    let nanos = u32::try_from(since_boot.tv_nsec).ok()?;
+    now.checked_sub(Duration::new(secs, nanos).checked_sub(after_boot)?)
 }
 
 /// The environment `pid` started with, an entry to a string.
@@ -64,5 +86,18 @@ impl Domain {
             ours.as_ref().is_none_or(|ours| ours == theirs)
         };
         agrees(&self.machine, machine) && agrees(&self.namespace, namespace)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This test's own process started a moment ago, and not after now.
+    #[test]
+    fn a_process_started_a_moment_ago() {
+        let started = started(std::process::id()).unwrap();
+        let ago = SystemTime::now().duration_since(started).unwrap();
+        assert!(ago < Duration::from_mins(10), "{ago:?}");
     }
 }

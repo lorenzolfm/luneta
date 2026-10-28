@@ -96,6 +96,20 @@ impl Source {
     }
 }
 
+/// A session file of an agent that does not read, by the process that runs by
+/// the pid it is named for: the agent's, or another that came by the pid
+/// since, as the file cannot say. What the agent is doing, no one can tell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unread {
+    pub pid: u32,
+    /// When the process started, or a moment before, and never after: less
+    /// than a clock tick on Linux, less than a second on macOS. None where
+    /// the system does not say.
+    pub started: Option<SystemTime>,
+    /// The pane its environment names, when it runs in zellij.
+    pub pane: Option<Named>,
+}
+
 /// A pane as an agent's environment names it: by the name its session had when
 /// the pane opened, and the pane's id there.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +161,26 @@ impl Agent {
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
+                pane: named.pane,
+            }),
+        }
+    }
+}
+
+impl Unread {
+    /// The file as the API gives it, in the session `sessions` say its pane is
+    /// in now. Where the system does not say when the process started, no
+    /// session made since can be ruled out, and so its session is not told.
+    #[must_use]
+    pub fn to_api(&self, sessions: &Sessions) -> api::UnreadFile {
+        assert!(self.pid > 1);
+        api::UnreadFile {
+            pid: self.pid,
+            zellij: self.pane.as_ref().map(|named| api::Zellij {
+                named: named.session.clone(),
+                session: self.started.and_then(|started| {
+                    sessions.lead(&named.session, Some(started)).map(str::to_owned)
+                }),
                 pane: named.pane,
             }),
         }

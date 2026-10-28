@@ -10,7 +10,7 @@ use std::process::Output;
 
 use serde_json::json;
 
-use crate::agents::{file_for, now_in, process, Host};
+use crate::agents::{aged, file_for, now_in, process, Host};
 use crate::host::{answered, eventually, start, LUNETA};
 use crate::sessions::listed;
 
@@ -81,31 +81,54 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     assert_eq!(host.lists.closed(), closed);
 }
 
-/// A session file lunetad cannot read names no session, and its agent may be
-/// in any pane: a close says it cannot tell which agents it ends, and why,
-/// and lists those it can tell.
+/// The agent of a session file lunetad cannot read is in the pane its
+/// process runs in, doing what no one can tell: a close of that pane says it
+/// ends it, and lists it by its pid, and a close of another does not. One
+/// whose session lunetad cannot tell may be in any pane: a close says it
+/// cannot tell which agents it ends, and why, and lists those it can tell.
 #[test]
-fn a_close_cannot_tell_the_agents_while_lunetad_cannot_read_a_session_file() {
+fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
     let host = Host::new();
-    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let work = host.contract().join("work");
+    let _work = UnixListener::bind(&work).unwrap();
+    aged(&work);
     let tab = (0, "Tab #1");
-    let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "claude", tab, Some("/w"))]);
-    host.lists.list("work", &work);
+    let panes = json!([listed(2, "claude", tab, Some("/w")), listed(3, "claude", tab, Some("/w"))]);
+    host.lists.list("work", &panes);
     let here = process(Some(("work", 2)));
     host.write(here.pid(), &file_for("here", &here, "busy"));
     let unread = process(Some(("work", 3)));
-    let mut unnamed = file_for("unread", &unread, "busy");
-    unnamed["sessionId"] = json!("");
-    host.write(unread.pid(), &unnamed);
+    let unnamed = |running| {
+        let mut file = file_for("unread", running, "busy");
+        file["sessionId"] = json!("");
+        file
+    };
+    host.write(unread.pid(), &unnamed(&unread));
     let _daemon = start(host.vars()).unwrap();
-    eventually("the daemon cannot read one file", || (host.list().unread == 1).then_some(()));
+    let (here, unread) = (here.pid(), unread.pid());
 
     let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:2"]));
     let plan = format!(
+        "close pane work:2: 1 agent, 1 busy\n  \
+         work:2  busy     {here:>7}  here-name  (this runs here)\n"
+    );
+    assert_eq!(said, plan);
+    let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:3"]));
+    let plan = format!(
+        "close pane work:3: 1 agent, 1 unknown\n  \
+         work:3  ?        {unread:>7}  its session file does not read\n"
+    );
+    assert_eq!(said, plan);
+
+    // In a session no socket is for, which lunetad cannot follow it to.
+    let lost = process(Some(("gone", 4)));
+    host.write(lost.pid(), &unnamed(&lost));
+    eventually("the daemon cannot read two files", || (host.list().unread == 2).then_some(()));
+    let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:2"]));
+    let plan = format!(
         "close pane work:2: luneta cannot tell which agents it ends: lunetad cannot read 1 of \
-         Claude Code's session files\n  \
-         work:2  busy     {:>7}  here-name  (this runs here)\n",
-        here.pid()
+         Claude Code's session files, nor tell where its agent runs\n  \
+         work:2  busy     {here:>7}  here-name  (this runs here)\n"
     );
     assert_eq!(said, plan);
 }

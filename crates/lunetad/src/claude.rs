@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use luneta_protocol::said::Said;
 use serde::Deserialize;
 
-use crate::agent::{Agent, Name, Named, Source, Status};
+use crate::agent::{Agent, Name, Named, Source, Status, Unread};
 use crate::process;
 use crate::watch::{self, Troubles};
 
@@ -112,7 +112,7 @@ pub struct Scan {
     pub agents: Vec<Agent>,
     /// The files it cannot read, of those named for a pid that a process
     /// runs by.
-    pub unread: u32,
+    pub unread: Vec<Unread>,
 }
 
 /// The session files of a Claude Code folder, read again on every scan.
@@ -176,24 +176,34 @@ impl SessionFiles {
         self.seen = seen;
 
         let mut panes = HashMap::with_capacity(self.seen.len());
+        // The pane of each process, read from its environment once.
+        let mut pane = |pid: u32, start: String| {
+            let key = (pid, start);
+            let pane = self.panes.remove(&key).unwrap_or_else(|| pane_of(pid));
+            panes.insert(key, pane.clone());
+            pane
+        };
         let mut agents = Vec::with_capacity(self.seen.len());
-        let mut unread = 0;
+        let mut unread = Vec::new();
         for (&pid, found) in &self.seen {
             let file = match found {
                 Seen::Whole(file) | Seen::Torn { before: Some(file), .. } => file,
-                Seen::Torn { before: None, .. } => continue,
-                // One that a crashed process left behind stands for no
-                // agent, whatever it holds. A pid that came back as another
+                // One that does not read, whether it has not since the daemon
+                // started or not for longer than a write takes, may be an
+                // agent's while a process runs by its pid, in the pane that
+                // one runs in. One a crashed process left behind stands for
+                // no agent, whatever it holds. A pid that came back as another
                 // process's still counts, as the file cannot say.
-                Seen::Unread => {
-                    if process::start(pid).is_some() {
-                        unread += 1;
+                Seen::Torn { before: None, .. } | Seen::Unread => {
+                    if let Some(start) = process::start(pid) {
+                        let started = process::started(pid);
+                        unread.push(Unread { pid, started, pane: pane(pid, start) });
                     }
                     continue;
                 },
             };
             // A file of another system's pids names no process here.
-            if !self.local(file) {
+            if !local(&self.domain, file) {
                 continue;
             }
             // A pid that came back as another process's names that one now.
@@ -201,25 +211,18 @@ impl SessionFiles {
             if process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            let key = (pid, start);
-            let pane = match self.panes.remove(&key) {
-                Some(pane) => pane,
-                None => pane_of(pid),
-            };
-            agents.push(agent(pid, file, pane.clone()));
-            panes.insert(key, pane);
+            agents.push(agent(pid, file, pane(pid, start)));
         }
         self.panes = panes;
-        assert!(agents.len() + unread <= self.seen.len());
-        let unread = u32::try_from(unread).expect("a folder listed in memory has under 2^32 files");
+        assert!(agents.len() + unread.len() <= self.seen.len());
         Scan { agents, unread }
     }
+}
 
-    /// Whether the file's pid is one of this system's. A file that does not
-    /// say is taken to be.
-    fn local(&self, file: &File) -> bool {
-        file.pid_domain.as_deref().is_none_or(|recorded| self.domain.admits(recorded))
-    }
+/// Whether the file's pid is one of the system's whose pids are `domain`. A
+/// file that does not say is taken to be.
+fn local(domain: &process::Domain, file: &File) -> bool {
+    file.pid_domain.as_deref().is_none_or(|recorded| domain.admits(recorded))
 }
 
 /// The pid a session file is named for: `<pid>.json`, spelled as Claude Code

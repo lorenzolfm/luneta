@@ -239,13 +239,14 @@ menu asks first, and says what goes:
 
 `y`, or the key again, goes ahead; `n` or `Backspace` goes back to the keys. An
 idle agent or a shell goes without asking. An agent whose status luneta does
-not know, or that reports none, may be at work, and asks. The menu counts every
-agent of the session, those the list leaves out too: a `claude -p` in the pane
-of the agent it runs from, and one luneta cannot find a pane for, which may be
-in any pane of the session that names it, and asks while it is at work. While
-the daemon does not answer, or cannot read one of Claude Code's session files,
-whose agent may be in any pane of any session, luneta cannot tell, and asks
-every time, saying why.
+not know, or that reports none, may be at work, and asks, and so does one whose
+session file the daemon cannot read, in the pane its process runs in. The menu
+counts every agent of the session, those the list leaves out too: a `claude -p`
+in the pane of the agent it runs from, and one luneta cannot find a pane for,
+which may be in any pane of the session that names it, and asks while it is at
+work. While the daemon does not answer, or cannot tell which session the
+process of a file it cannot read runs in, luneta cannot tell, and asks every
+time, saying why.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 
@@ -440,11 +441,12 @@ and end the one zellij is in. The session zellij is in is killed once zellij
 is in another, the newest, so that zellij stays on screen throughout; with no
 other, it is killed with zellij in it, and luneta ends. When that would end an
 agent that is busy, waiting on you, or that says nothing luneta knows, the
-menu asks first, and so does every delete while lunetad
-does not answer, as what it said last of the agents may be out of date, and
-while it cannot read one of Claude Code's session files, whose agent may be in
-any pane, which the sidebar says at its bottom: `y`, or the key again, goes
-ahead, and `n` or `Backspace` goes back.
+menu asks first, as it does for one whose session file lunetad cannot read, in
+the pane its process runs in, which the sidebar says at its bottom. So does
+every delete while lunetad does not answer, as what it said last of the agents
+may be out of date, and while it cannot tell which session the process of such
+a file runs in, which may be any: `y`, or the key again, goes ahead, and `n` or
+`Backspace` goes back.
 luneta asks zellij what a pane takes along as you press the key, and again as
 you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
 and is not closed with it. A delete leaves you in the sidebar, the highlight on

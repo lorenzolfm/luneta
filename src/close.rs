@@ -99,8 +99,16 @@ pub enum Sits {
 }
 
 /// The agents of `session` among every agent `agents` counts, those its rows
-/// leave out too, each with the tab of its pane among the session's `leaves`.
-pub fn agents_of(agents: &AgentSet, session: &str, leaves: &[Leaf]) -> Fetch<Vec<Agent>> {
+/// leave out too, and among `unread`, those of the session files lunetad
+/// cannot read, by the session and the pane each runs in: what each of those
+/// is doing, no one can tell. Each with the tab of its pane among the
+/// session's `leaves`.
+pub fn agents_of(
+    agents: &AgentSet,
+    unread: &[(String, u32)],
+    session: &str,
+    leaves: &[Leaf],
+) -> Fetch<Vec<Agent>> {
     match &agents.status {
         Fetch::Ready(_) => {},
         Fetch::Waiting => return Fetch::Waiting,
@@ -108,12 +116,17 @@ pub fn agents_of(agents: &AgentSet, session: &str, leaves: &[Leaf]) -> Fetch<Vec
     }
     let tab = |pane: u32| leaves.iter().find(|leaf| leaf.id == pane).and_then(|leaf| leaf.tab_id);
     let of_session = agents.counted().iter().filter(|counted| counted.session == session);
+    let unread = unread.iter().filter(|(at, _)| at == session).map(|(_, id)| Agent {
+        sits: Sits::Pane { id: *id, tab: tab(*id) },
+        status: Status::Unknown(None),
+    });
     Fetch::Ready(
         of_session
             .map(|counted| Agent {
                 sits: counted.pane.map_or(Sits::Unplaced, |id| Sits::Pane { id, tab: tab(id) }),
                 status: counted.status.clone(),
             })
+            .chain(unread)
             .collect(),
     )
 }
@@ -651,12 +664,12 @@ mod tests {
             (2, Scope::Pane, format!("Close the pane? 1 agent, {unplaced}")),
             (2, Scope::Session, "Kill session luneta? 4 agents, 2 busy".to_owned()),
         ] {
-            let plan = of(id, agents_of(&agents, "luneta", &[])).plan(scope).expect("a plan");
+            let plan = of(id, agents_of(&agents, &[], "luneta", &[])).plan(scope).expect("a plan");
             assert_eq!(plan.question(), Some(asked), "{scope:?} of {id}");
         }
 
         // The menu in `elo`, with `luneta` to go to.
-        let ends = agents_of(&agents, "elo", &[]);
+        let ends = agents_of(&agents, &[], "elo", &[]);
         let refuge = Some("luneta".to_owned());
         let elo = Subject { session: "elo".to_owned(), refuge, ..of(2, ends) };
         let asked = elo.plan(Scope::Session).expect("a plan").question();
