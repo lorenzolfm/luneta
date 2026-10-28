@@ -10,6 +10,9 @@
 //! is in goes once its client is in another, which keeps the client on
 //! screen throughout, or with luneta, where it is the only one.
 
+use lunetad::api::agent::Status as Reported;
+use lunetad::api::{Agent, Status};
+
 use crate::sidebar::Place;
 use crate::zellij::Closes;
 
@@ -72,6 +75,23 @@ pub enum Doing {
     Shell,
 }
 
+impl From<&Agent> for Doing {
+    /// What an agent is doing, as lunetad says it.
+    fn from(agent: &Agent) -> Self {
+        match &agent.status {
+            Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
+                Ok(Status::Busy) => Doing::Busy,
+                Ok(Status::Idle) => Doing::Idle,
+                Ok(Status::Waiting) => Doing::Waiting,
+                Ok(Status::Shell) => Doing::Shell,
+                // A daemon newer than this luneta's.
+                Ok(Status::Unspecified) | Err(_) => Doing::Unknown,
+            },
+            Some(Reported::OtherStatus(_)) | None => Doing::Unknown,
+        }
+    }
+}
+
 /// What a delete is for, and what it takes along, as the sidebar knows it.
 #[derive(Debug)]
 pub struct Subject<'a> {
@@ -113,6 +133,15 @@ impl Act {
             Act::Kill(session) | Act::Leave { session, .. } => format!("Kill session {session}"),
         }
     }
+
+    /// Whether the terminal `pane` of its session goes with it.
+    pub fn takes(&self, pane: u32) -> bool {
+        match self {
+            Act::Pane { pane: closed, .. } => pane == *closed,
+            Act::Tab { panes, .. } => panes.contains(&pane),
+            Act::Kill(_) | Act::Leave { .. } => true,
+        }
+    }
 }
 
 /// What a delete key does, and the agents it would end, while luneta can tell
@@ -147,15 +176,7 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
             Seat::Moving => return Err(MOVING.to_owned()),
         },
     };
-    let takes = |pane: u32| match &act {
-        Act::Pane { pane: closed, .. } => pane == *closed,
-        Act::Tab { panes, .. } => panes.contains(&pane),
-        Act::Kill(_) | Act::Leave { .. } => true,
-    };
-    let ending = subject.agents.as_ref().map(|agents| {
-        Ending::of(agents.iter().filter(|(pane, _)| takes(*pane)).map(|(_, doing)| *doing))
-    });
-    Ok(Plan { act, ending })
+    Ok(Plan::of(act, subject.agents.as_deref()))
 }
 
 /// The agents a delete would end, by what they are doing.
@@ -192,6 +213,7 @@ impl Ending {
     /// As `2 agents, 1 busy`.
     fn says(self) -> String {
         let mut said = vec![match self.agents {
+            0 => "no agent".to_owned(),
             1 => "1 agent".to_owned(),
             agents => format!("{agents} agents"),
         }];
@@ -209,6 +231,15 @@ impl Ending {
 }
 
 impl Plan {
+    /// What doing `act` does, and the agents it ends among `agents`, those of
+    /// its session by their panes, or none while luneta cannot tell them.
+    pub fn of(act: Act, agents: Option<&[(u32, Doing)]>) -> Self {
+        let ending = agents.map(|agents| {
+            Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
+        });
+        Plan { act, ending }
+    }
+
     /// What to ask before going ahead, as `Kill session elo? 2 agents, 1
     /// busy`. Nothing when luneta knows that no agent busy or waiting on you
     /// would end: an idle agent or a shell goes without asking, and one whose
@@ -220,6 +251,16 @@ impl Plan {
             Some(ending) if !ending.at_work() => None,
             Some(ending) => Some(format!("{what}? {}", ending.says())),
             None => Some(format!("{what}? luneta cannot tell which agents it ends: {UNTOLD}")),
+        }
+    }
+
+    /// The agents it ends, as `2 agents, 1 busy`, or that luneta cannot tell
+    /// them, whether or not the menu would ask: for the CLI, which says what
+    /// a close ends before it closes anything.
+    pub fn ends(&self) -> String {
+        match self.ending {
+            Some(ending) => ending.says(),
+            None => "luneta cannot tell which agents it ends".to_owned(),
         }
     }
 }

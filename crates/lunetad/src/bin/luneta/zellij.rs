@@ -4,7 +4,7 @@
 //! finds luneta's client among those, so that a multiplexer of luneta's own
 //! can take zellij's place behind it.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -81,6 +81,17 @@ impl SessionName {
         SessionName(format!("{}{postfix}", &self.0[..end]))
     }
 
+    /// The name, where no session of `names` has it, or else the first with
+    /// a postfix from `-2` up that none has.
+    pub fn free(&self, names: &[&str]) -> Self {
+        let taken = |name: &SessionName| names.contains(&name.as_str());
+        // Of more names than there are sessions, one is free.
+        std::iter::once(self.clone())
+            .chain((2..names.len() + 3).map(|n| self.with_postfix(n)))
+            .find(|name| !taken(name))
+            .expect("one of more names than there are sessions is free")
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -90,6 +101,15 @@ impl fmt::Display for SessionName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// The session and the pane this runs in, as zellij names them in the
+/// variables of what runs in its panes: none outside zellij. A session
+/// renamed since the pane opened goes by the name it had then.
+pub fn here() -> Option<(String, u32)> {
+    let session = env::var(SESSION_VAR).ok().filter(|session| !session.is_empty())?;
+    let pane = env::var(PANE_VAR).ok()?.parse().ok()?;
+    Some((session, pane))
 }
 
 /// Why zellij's client must not attach to `session` from the terminal luneta
@@ -339,6 +359,102 @@ pub fn start(at: &str, to: &SessionName, cwd: &str, then: Option<Look>, events: 
     run(command, then.map(|look| Then::Arrive(look, None)), events);
 }
 
+/// What the CLI hears of a client it sent somewhere, where nothing typed in
+/// the session it sent it from: zellij takes such an action as done, and
+/// moves nobody.
+const UNMOVED: &str = "zellij moved nobody: it moves the client that last typed in the session \
+                       it is asked from, and none has typed there since it came";
+
+/// Takes the client that last typed in the session `at` to the pane `pane`
+/// of `to`, or to `to` alone, on the pane it last had the focus on, as the
+/// CLI does. Waits for the client to be there, and says why it is not: as
+/// `UNMOVED` says, or as zellij said.
+pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
+    let mut command = Command::new("zellij");
+    let pane_id = pane.map(|id| format!("terminal_{id}"));
+    if at == to {
+        let (Some(pane), Some(pane_id)) = (pane, pane_id) else {
+            return Ok(());
+        };
+        command.args(["--session", at, "action", "focus-pane-id", &pane_id]);
+        match done(command) {
+            Err(said) if !said.contains("is already focused") => return Err(said),
+            _ => {},
+        }
+        let on = |clients: Vec<Client>| clients.iter().any(|client| client.pane == Some(pane));
+        return seen(at, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned());
+    }
+    let before = clients(to)?;
+    command.args(["--session", at, "action", "switch-session", to]);
+    command.args(pane_id.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
+    done(command)?;
+    let new = |client: &Client| before.iter().all(|was| was.id != client.id);
+    let came = seen(to, |clients| clients.into_iter().find(new)).ok_or_else(|| UNMOVED.to_owned())?;
+    match pane {
+        Some(pane) if came.pane != Some(pane) => {
+            Err(format!("zellij took the client to {to}, but not to pane {pane}"))
+        },
+        _ => Ok(()),
+    }
+}
+
+/// Makes the session `to`, starting in `cwd`, and takes the client that last
+/// typed in the session `at` there. zellij's client makes it, so that it has
+/// the client's environment, not the CLI's. zellij takes the client to a
+/// session that runs by that name instead, and makes none: one whose socket
+/// is older than the asking ran already. A socket's time is of the kernel's
+/// coarse clock, a tick behind at most, and zellij takes far longer than a
+/// tick to make a session.
+///
+/// A session made so is there once its socket is: no client but the one sent
+/// would make it, and zellij's server, asked anything before its first client
+/// is on, can fail.
+pub fn made(at: &str, to: &SessionName, cwd: &str) -> Result<(), String> {
+    let mut command = Command::new("zellij");
+    command.args(["--session", at, "action", "switch-session", &to.0, "--cwd", cwd]);
+    let asked = SystemTime::now();
+    done(command)?;
+    match started(&to.0, START) {
+        Some(started) if started >= asked => Ok(()),
+        Some(_) => Err(format!("{to} ran already, so zellij made none")),
+        None => Err(UNMOVED.to_owned()),
+    }
+}
+
+/// What `seen` makes of the clients of `session`, once it makes anything of
+/// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
+/// takes an action a moment after it answers it.
+fn seen<T>(session: &str, seen: impl Fn(Vec<Client>) -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + ARRIVAL;
+    loop {
+        if let Some(seen) = clients(session).ok().and_then(&seen) {
+            return Some(seen);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(ARRIVING);
+    }
+}
+
+/// When the session named `session` started, by its socket, once one runs
+/// within `patience`. A folder it cannot read yet is one it has yet to see the
+/// socket in.
+fn started(session: &str, patience: Duration) -> Option<SystemTime> {
+    let folder = lunetad::zellij_folder();
+    let deadline = Instant::now() + patience;
+    loop {
+        let running = lunetad::zellij_sessions(&folder).unwrap_or_default();
+        if let Some((_, started)) = running.into_iter().find(|(name, _)| name == session) {
+            return Some(started);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(ARRIVING);
+    }
+}
+
 /// What luneta has zellij do once its client has come to the session a go
 /// takes it to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -383,17 +499,18 @@ impl After {
     }
 }
 
-/// What a key of the menu opens in a session.
+/// What a key of the menu, or the CLI, opens in a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Open {
     /// `command`, or your shell where there is none, in a pane of its own
     /// beside the pane `beside` of `session`, in its tab, and in `cwd`.
     Pane { session: String, beside: u32, cwd: String, command: Vec<String> },
-    /// A tab of `session`, in `cwd`. zellij makes a tab as big as a client of
-    /// its session, and one it opens in a session with none has no room for
-    /// its panes: in another session than luneta's client's, it opens once
-    /// that client has come.
-    Tab { session: String, cwd: String },
+    /// A tab of `session`, in `cwd`, named `name` or as zellij numbers it,
+    /// with `command` in it, or your shell where there is none. zellij makes
+    /// a tab as big as a client of its session, and one it opens in a session
+    /// with none has no room for its panes: in another session than luneta's
+    /// client's, it opens once that client has come.
+    Tab { session: String, cwd: String, name: Option<String>, command: Vec<String> },
 }
 
 /// Opens `open`, on a thread of its own, for the menu numbered `menu`, with
@@ -417,7 +534,7 @@ const ANSWER: Duration = Duration::from_secs(2);
 /// `PANE_VAR`, whatever tab that is in and whether a client is on it, and
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
 /// the one it lists in that tab.
-fn opening(open: &Open) -> Result<u32, String> {
+pub fn opening(open: &Open) -> Result<u32, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
     match open {
@@ -431,8 +548,12 @@ fn opening(open: &Open) -> Result<u32, String> {
             let pane = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
             pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
         },
-        Open::Tab { session, cwd } => {
+        Open::Tab { session, cwd, name, command: runs } => {
             command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
+            command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
+            if !runs.is_empty() {
+                command.arg("--").args(runs);
+            }
             let said = answered(&mut command)?;
             let Ok(tab) = said.trim().parse::<u32>() else {
                 return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
@@ -501,10 +622,16 @@ fn terminal_of(laid: &[Laid], tab: u32) -> Option<u32> {
 pub fn closes(menu: u64, session: &str, pane: u32, events: &Sender<Event>) {
     let (session, events) = (session.to_owned(), events.clone());
     thread::spawn(move || {
-        let closes = laid(&session).and_then(|laid| closing(&laid, pane));
+        let closes = closes_now(&session, pane);
         // luneta is on its way out.
         let _ = events.send(Event::Closes { menu, closes });
     });
+}
+
+/// What closing the terminal `pane` of `session` closes, as zellij lists the
+/// session's panes now, or why it closes nothing.
+pub fn closes_now(session: &str, pane: u32) -> Result<Closes, String> {
+    laid(session).and_then(|laid| closing(&laid, pane))
 }
 
 /// The panes of `session` as zellij lists them now, the plugins' you can go
@@ -521,43 +648,117 @@ fn laid(session: &str) -> Result<Vec<Laid>, String> {
 /// What closing the terminal `pane` closes among `laid`, the panes of its
 /// session, or why it closes nothing: it is gone.
 fn closing(laid: &[Laid], pane: u32) -> Result<Closes, String> {
-    let terminal = |laid: &&Laid| !laid.is_plugin && laid.id == pane;
-    let Some(tab) = laid.iter().find(terminal).map(|laid| laid.tab_id) else {
-        return Err(format!("pane {pane} is gone"));
-    };
-    let in_tab = || laid.iter().filter(|laid| laid.tab_id == tab);
-    if in_tab().any(|other| (other.is_plugin || other.id != pane) && other.holds_tab()) {
-        return Ok(Closes::Pane);
+    match together(laid, &BTreeSet::from([pane]))? {
+        Closing::Session => Ok(Closes::Session),
+        Closing::Parts { mut tabs, .. } => {
+            Ok(tabs.pop().map_or(Closes::Pane, |(id, panes)| Closes::Tab { id, panes }))
+        },
     }
-    let tabs: HashSet<u32> = laid.iter().map(|laid| laid.tab_id).collect();
-    if tabs.len() == 1 {
-        return Ok(Closes::Session);
+}
+
+/// What closing some terminals of a session closes, together, as zellij
+/// closes them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Closing {
+    /// Each tab that nothing left in it holds open, by its id, with its
+    /// terminals, the floating ones too; and each terminal whose tab
+    /// something else holds open, alone.
+    Parts { tabs: Vec<(u32, Vec<u32>)>, panes: Vec<u32> },
+    /// Every tab of the session, and the session with them.
+    Session,
+}
+
+/// What closing the terminals `panes` of `session` closes, together, as
+/// zellij lists the session's panes now, or why it closes nothing.
+pub fn closes_together(session: &str, panes: &BTreeSet<u32>) -> Result<Closing, String> {
+    laid(session).and_then(|laid| together(&laid, panes))
+}
+
+/// What closing the terminals `panes` closes among `laid`, the panes of their
+/// session, together: a tab goes once nothing left in it holds it open, and
+/// the session once all its tabs do. Or why it closes nothing: one is gone.
+fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
+    let given = |laid: &Laid| !laid.is_plugin && panes.contains(&laid.id);
+    let listed = |pane: u32| laid.iter().any(|laid| given(laid) && laid.id == pane);
+    if let Some(gone) = panes.iter().find(|pane| !listed(**pane)) {
+        return Err(format!("pane {gone} is gone"));
     }
-    let panes = in_tab().filter(|laid| !laid.is_plugin).map(|laid| laid.id).collect();
-    Ok(Closes::Tab { id: tab, panes })
+    let tabs: BTreeSet<u32> = laid.iter().map(|laid| laid.tab_id).collect();
+    let in_tab = |tab: u32| laid.iter().filter(move |laid| laid.tab_id == tab);
+    let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(given));
+    let held = |tab: &u32| in_tab(*tab).any(|laid| !given(laid) && laid.holds_tab());
+    let (held, closed): (Vec<u32>, Vec<u32>) = touched.partition(held);
+    if closed.len() == tabs.len() {
+        return Ok(Closing::Session);
+    }
+    let terminals = |tab| in_tab(tab).filter(|laid| !laid.is_plugin).map(|laid| laid.id).collect();
+    let tabs = closed.into_iter().map(|tab| (tab, terminals(tab))).collect();
+    let alone = |tab| in_tab(tab).filter(|laid| given(laid)).map(|laid| laid.id);
+    let panes = held.into_iter().flat_map(alone).collect();
+    Ok(Closing::Parts { tabs, panes })
 }
 
 /// Closes the terminal `pane` of `session`, on a thread of its own.
 pub fn close_pane(session: &str, pane: u32, events: &Sender<Event>) {
-    let mut command = Command::new("zellij");
-    let pane = format!("terminal_{pane}");
-    command.args(["--session", session, "action", "close-pane", "--pane-id", &pane]);
-    run(command, None, events);
+    run(pane_closer(session, pane), None, events);
 }
 
 /// Closes the tab of `session` whose id is `tab`, its panes and all, on a
 /// thread of its own.
 pub fn close_tab(session: &str, tab: u32, events: &Sender<Event>) {
-    let mut command = Command::new("zellij");
-    command.args(["--session", session, "action", "close-tab-by-id", &tab.to_string()]);
-    run(command, None, events);
+    run(tab_closer(session, tab), None, events);
 }
 
 /// Kills `session`, which luneta's client is not in, on a thread of its own.
 pub fn kill(session: &str, events: &Sender<Event>) {
+    run(killer(session), None, events);
+}
+
+/// Closes the terminal `pane` of `session`, and says why not when zellij
+/// did not.
+pub fn pane_closed(session: &str, pane: u32) -> Result<(), String> {
+    done(pane_closer(session, pane))
+}
+
+/// Closes the tab of `session` whose id is `tab`, its panes and all, and
+/// says why not when zellij did not.
+pub fn tab_closed(session: &str, tab: u32) -> Result<(), String> {
+    done(tab_closer(session, tab))
+}
+
+/// Kills `session`, and says why not when zellij did not. A client in it
+/// ends with it: luneta's own takes it to another session.
+pub fn killed(session: &str) -> Result<(), String> {
+    done(killer(session))
+}
+
+/// zellij, to close the terminal `pane` of `session`.
+fn pane_closer(session: &str, pane: u32) -> Command {
+    let mut command = Command::new("zellij");
+    let pane = format!("terminal_{pane}");
+    command.args(["--session", session, "action", "close-pane", "--pane-id", &pane]);
+    command
+}
+
+/// zellij, to close the tab of `session` whose id is `tab`.
+fn tab_closer(session: &str, tab: u32) -> Command {
+    let mut command = Command::new("zellij");
+    command.args(["--session", session, "action", "close-tab-by-id", &tab.to_string()]);
+    command
+}
+
+/// zellij, to kill `session`.
+fn killer(session: &str) -> Command {
     let mut command = Command::new("zellij");
     command.args(["kill-session", session]);
-    run(command, None, events);
+    command
+}
+
+/// Has `command`, a zellij, do what it was asked, and says why not when it
+/// did not.
+fn done(mut command: Command) -> Result<(), String> {
+    quiet(&mut command);
+    answered(&mut command).map(drop)
 }
 
 /// Asks zellij for the clients of the session `look` is of, on a thread of
@@ -839,6 +1040,26 @@ mod tests {
             (vec![other_tab], 4, Err("pane 4 is gone".to_owned())),
         ] {
             assert_eq!(closing(&panes, id), closes, "pane {id}");
+        }
+    }
+
+    /// Panes closed together close a tab once nothing left in it holds it
+    /// open, as the last of them would close it, and the session once all its
+    /// tabs go; a pane whose tab something else holds open closes alone.
+    #[test]
+    fn panes_closed_together_close_the_tab_none_left_holds_open() {
+        let floating = Laid { is_floating: true, ..laid(5, 0) };
+        let tab = vec![laid(4, 0), laid(6, 0), floating, laid(7, 1), laid(8, 1)];
+        let parts = |tabs: Vec<(u32, Vec<u32>)>, panes: Vec<u32>| Ok(Closing::Parts { tabs, panes });
+        for (given, closes) in [
+            (vec![4, 6], parts(vec![(0, vec![4, 6, 5])], vec![])),
+            (vec![4, 7], parts(vec![], vec![4, 7])),
+            (vec![4, 6, 7], parts(vec![(0, vec![4, 6, 5])], vec![7])),
+            (vec![4, 6, 7, 8], Ok(Closing::Session)),
+            (vec![4, 9], Err("pane 9 is gone".to_owned())),
+        ] {
+            let given: BTreeSet<u32> = given.iter().copied().collect();
+            assert_eq!(together(&tab, &given), closes, "panes {given:?}");
         }
     }
 

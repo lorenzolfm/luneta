@@ -1,11 +1,13 @@
 //! luneta: zellij, beside a sidebar of every session on this host and what
-//! runs in each, and the CLI that asks lunetad, the daemon of this host.
+//! runs in each, and the CLI that asks lunetad, the daemon of this host, and
+//! has zellij open, move and close what the sidebar's menu does.
 
 mod answers;
 mod brief;
 mod close;
 mod commands;
 mod daemon;
+mod drive;
 mod folds;
 mod gruvbox;
 mod host;
@@ -36,7 +38,7 @@ use crate::zellij::SessionName;
 
 /// zellij, beside a sidebar of every session on this host and what the agent
 /// in each pane is doing. With a command, ask lunetad, the daemon of this
-/// host, instead.
+/// host, instead, or have zellij open, move or close something.
 #[derive(Parser)]
 #[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {

@@ -9,6 +9,8 @@ mod agents;
 #[cfg(test)]
 mod demand;
 #[cfg(test)]
+mod drive;
+#[cfg(test)]
 mod folder;
 #[cfg(test)]
 mod host;

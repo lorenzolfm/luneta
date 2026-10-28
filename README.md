@@ -35,6 +35,8 @@ A replacement for zellij's default session picker, with sessions, agents and dir
 * Start an agent on a skill with a few keys, from a [menu](#menu) of your own, and
   open a pane, a tab or a session, or close a pane or kill a session, with two
 * Come back from a break to a [brief](#brief) of what your agents are doing
+* [Tell an agent](#tell-an-agent) what you want in words: a session to work on
+  something, an agent on each of four issues, every session closed
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -602,6 +604,79 @@ last typed in it. With
 read that key, and the sidebar takes it somewhere only once you have typed in
 the session it is in.
 
+### Tell an agent
+
+`luneta`'s commands open, move and close what the menu does, so the agent you
+are talking to can do it for you when you ask in words: "make me a session to
+work on floresta", "tackle these four issues in parallel", "run
+`/thermo-nuclear-review` on that PR", "close every session but this one". The
+skill in [`skills/luneta`](skills/luneta/SKILL.md) tells Claude Code, or any
+agent that reads skills, how it goes about it: what it reads to work out what
+your words point at, a worktree for each agent it starts side by side, and
+asking you before it closes anything.
+
+```sh
+npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/skills/
+```
+
+| command | does |
+|---|---|
+| `luneta open pane [--beside S:P] [--cwd D] [-- CMD…]` | opens a pane beside the one it runs in, or beside pane `P` of session `S`, in its tab |
+| `luneta open tab [--session S] [--cwd D] [--name N] [-- CMD…]` | opens a tab of the session it runs in, or of `S` |
+| `luneta open session [--cwd D] [--name N]` | makes a session and takes you there |
+| `luneta go S[:P]` | takes you to a session, or to a pane of one |
+| `luneta close S[:P]… [--yes PLAN]` | closes panes and kills sessions |
+| `luneta here` | says which pane it runs in, as `S:P` |
+
+They are for a pane of zellij, where an agent runs, and take what it runs in
+for the pane, the session and the directory you leave out. A pane or a tab
+opens with `CMD` running in it, or your shell, and nobody moved, and `open`
+says which it is, as `luneta:12`, as `luneta agents` names an agent's pane. A
+tab opens only in a session someone is in: zellij makes a tab as big as a
+client of its session, and one with no room for its panes in a session with
+none. A session is named as the picker names its directory, with a `-2` when
+a session runs by that name.
+
+zellij names a pane's session to what runs in it by the name the session had
+as the pane opened, and a rename leaves that behind. lunetad follows the
+rename, so the commands go by the name the session has now, which `luneta
+here` says. Where luneta can't tell it, as without lunetad once no session
+runs by the old name, they do nothing and say why. Where lunetad lists no
+agent in the pane, as without lunetad, a session made by the old name since
+is taken for the pane's own.
+
+`go` and `open session` move the client that last typed in the session they
+run in, which is you, where you just asked an agent there for something:
+zellij moves no other, as it does for luneta's own sidebar. They wait to see
+you there, and say that zellij moved nobody where you have left that session
+since. zellij's client makes the session, so what runs in it has your
+environment, not the agent's.
+
+`close` takes a pane's tab along once nothing else holds the tab open, and the
+session where that is its only tab, as `d d` does. What it is given in a
+session closes together, so the panes that are all that holds a tab open close
+the tab. Without `--yes`, it says what each would close and which agents would
+end with it, as lunetad lists them, and the plan to tell `--yes`, closes
+nothing, and exits 3, so that an agent shows you that and asks before it goes
+ahead:
+
+```text
+kill session bipa: 1 agent, 1 busy
+  bipa:0  busy     3602051  cipher-6d
+close pane luneta:12: no agent
+luneta: closed nothing; run it again with --yes 9c41d07e3b2a5f18 to close what it says
+```
+
+`--yes` closes only that plan, as the menu's `y` does only what it asked about:
+where an agent has gone to work since, a pane has closed, or a session was
+made again by the same name, it closes nothing, and says what it would close
+now, and its plan.
+
+What holds the pane it runs in goes last, and its agent's line says `(this
+runs here)`: the agent ends with it. Where anything before it failed to
+close, it stays, so that the agent can tell you. It kills only sessions that
+run, not those zellij keeps to resurrect.
+
 ## Getting started
 
 ### Requirements
@@ -961,7 +1036,10 @@ ask nor stop, and say so: one of theirs in its place would leave out the
 sessions of every luneta that reaches it.
 `luneta info` says which daemon runs, `luneta agents` lists the agents it
 finds, and `luneta sessions` the sessions, their panes and the branch each
-works on, with its pull request; none of the three starts one. The daemon asks
+works on, with its pull request; none of the three starts one, and nor does
+`luneta close`, which says it cannot tell the agents it would end while none
+runs. The commands an agent [drives luneta](#tell-an-agent) with ask zellij
+itself. The daemon asks
 `zellij`, `git` and `gh` on its `PATH`, which is the zellij server's when the
 plugin started it.
 
