@@ -411,7 +411,8 @@ row, and `Esc` clears the search. Giving zellij the keys clears it too.
 
 The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read
-your groups from yet. While the sidebar has the keys and no menu is open, its
+your groups from yet. In their place, its Claude group has keys for a few
+skills, built in. While the sidebar has the keys and no menu is open, its
 bottom lists what you can press there:
 
 ```text
@@ -419,6 +420,7 @@ bottom lists what you can press there:
  /  Search
  u  Unread
  v  Reorder
+ c  Claude ▸
  n  New ▸
  d  Delete ▸
  b  Brief ▸
@@ -430,9 +432,13 @@ tab and in the directory it works in, `n t` a tab of its session there, and
 with a `-2` when a session runs by that name. Each takes zellij there, and
 gives it the keys. A tab of another session opens once zellij is there: zellij
 makes a tab as big as a client of its session, and most have none attached.
-`m` opens the menu on its first group, where `/` searches the skills the pane's
-directory can run, and `Enter` starts Claude Code on the one highlighted,
-beside the pane, named for the skill and the branch.
+`c t` starts Claude Code on `/thermo-nuclear-review` in a pane of its own
+beside the highlighted pane, in its tab and in the directory it works in, named
+for the skill and the branch; `c m` on `/make-illegal-states-unrepresentable`,
+and `c s` on `/tigerstyle`. For any other skill, `m` opens the menu on its
+first group, where `/` searches the skills the pane's directory can run, and
+`Enter` starts Claude Code on the one highlighted, beside the pane, as `c`'s
+keys do.
 
 `d d` closes the highlighted pane, or its tab once nothing else holds the tab
 open, floating panes and all. `d s` kills its session. On the last

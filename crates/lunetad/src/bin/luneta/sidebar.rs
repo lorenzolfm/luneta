@@ -3351,10 +3351,10 @@ mod tests {
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lines[5..7], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
         assert_eq!(lit, [5, 6]);
-        let (_, lit) = seen(&mut sidebar, true, 32, 14);
+        let (_, lit) = seen(&mut sidebar, true, 32, 15);
         assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 14);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 15);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[5].as_str(), lit.as_slice()), (nvim, &[4][..]));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
@@ -3411,7 +3411,7 @@ mod tests {
             sidebar.key(&pressed, moment(160_000));
         }
         assert_eq!(sidebar.cursor, second);
-        let area = Rect::new(0, 0, 32, 14);
+        let area = Rect::new(0, 0, 32, 15);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -3600,7 +3600,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the title and the rule along the top and the
         // legend at the bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 12)[3..5].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 13)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -3683,7 +3683,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 12);
+        let area = Rect::new(0, 0, 32, 13);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[5].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
@@ -4179,7 +4179,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 13, now).0[4].clone()
+            seen_at(sidebar, true, 32, 14, now).0[4].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -4844,7 +4844,7 @@ mod tests {
     /// The rows the sidebar draws, focused, with no rule after a session's
     /// name, and which of them the highlight is on.
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
-        let (lines, lit) = seen(sidebar, true, 32, 20);
+        let (lines, lit) = seen(sidebar, true, 32, 21);
         let rows = lines[HEADER..].iter().take_while(|line| !line.is_empty());
         let rows = rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect();
         (rows, lit.iter().map(|y| usize::from(*y) - HEADER).collect())
@@ -4864,7 +4864,7 @@ mod tests {
         type_in(&mut sidebar, "vjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, (0..6).collect::<Vec<_>>());
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 20));
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 21));
         // Shift and all, as a terminal sends it as text.
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         sidebar.key(&shifted('J'), moment(160_000));
@@ -4908,7 +4908,7 @@ mod tests {
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         let (before, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
@@ -4948,7 +4948,7 @@ mod tests {
     #[test]
     fn a_session_lifted_goes_back_off_the_sidebar_or_on_esc() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
@@ -4981,7 +4981,7 @@ mod tests {
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
@@ -5006,7 +5006,7 @@ mod tests {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "/z");
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         let (listed, _) = drawn_rows(&mut sidebar);
         assert_eq!(listed[0], " ▾ zed");
         let left = MouseButton::Left;
@@ -5023,8 +5023,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 14);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 14)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 15);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 15)[HEADER].clone();
         assert_eq!(first(&mut sidebar), " ▾ bipa ──────────────────────");
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
@@ -5084,7 +5084,7 @@ mod tests {
 
         // zed to the bottom, there, by its row, as it lists bipa over notes
         // still.
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         drawn_rows(&mut there);
         let left = MouseButton::Left;
         there.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
@@ -5119,7 +5119,7 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).1, [2, 3]);
 
         // The later x, by its row, under z, the first with it.
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 7), area);
