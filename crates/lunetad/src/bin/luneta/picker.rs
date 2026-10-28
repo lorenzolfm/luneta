@@ -846,14 +846,17 @@ impl Picker {
         // Yours first, then those that run, then those that ended, each
         // newest first, as they are listed.
         sessions.sort_by_key(|(rank, ..)| *rank);
-        let sessions = sessions.into_iter().map(|(_, name, key)| (name, String::new(), key));
+        let sessions = sessions.into_iter().map(|(_, name, key)| (name, Vec::new(), key));
         let sessions = matched(&matcher, &self.term, sessions);
         let yours = self.listing.here_pane.as_ref();
         let agents = self.listing.agents.iter().filter(|seated| Some(&seated.place) != yours);
-        let agents: Vec<(String, String, Key)> = agents
+        // An agent is found by its session's name, and by its directory as
+        // its preview shows it, its last two parts: a whole path has the
+        // letters for a few typed ones to land on nearly any of it.
+        let agents: Vec<(String, Vec<String>, Key)> = agents
             .map(|seated| {
-                let session = seated.place.session().to_owned();
-                (self.agent_name(seated), session, Key::Agent(seated.place.clone()))
+                let also = vec![seated.place.session().to_owned(), sidebar::short_cwd(&seated.cwd)];
+                (self.agent_name(seated), also, Key::Agent(seated.place.clone()))
             })
             .collect();
         let agents = matched(&matcher, &self.term, agents.into_iter());
@@ -1245,12 +1248,12 @@ fn plain(key: &KeyEvent) -> bool {
 
 /// The rows of `candidates`, each a name, what else a search finds it by,
 /// and what it stands for, that match `term`: all of them, in their order,
-/// for no term; or else those whose name matches it, or what else it is
-/// found by, a name that is `term` itself first, then the best matches.
+/// for no term; or else those whose name matches it, or any of what else it
+/// is found by, a name that is `term` itself first, then the best matches.
 fn matched(
     matcher: &SkimMatcherV2,
     term: &str,
-    candidates: impl Iterator<Item = (String, String, Key)>,
+    candidates: impl Iterator<Item = (String, Vec<String>, Key)>,
 ) -> Vec<Row> {
     if term.is_empty() {
         return candidates.map(|(name, _, key)| Row { key, name, hits: Vec::new() }).collect();
@@ -1258,7 +1261,7 @@ fn matched(
     let mut found: Vec<(bool, i64, usize, Row)> = Vec::new();
     for (at, (name, also, key)) in candidates.enumerate() {
         let hit = matcher.fuzzy_indices(&name, term).or_else(|| {
-            let score = matcher.fuzzy_match(&also, term)?;
+            let score = also.iter().filter_map(|text| matcher.fuzzy_match(text, term)).max()?;
             Some((score, Vec::new()))
         });
         if let Some((score, hits)) = hit {
@@ -1747,6 +1750,35 @@ mod tests {
         let (lines, _) = list(&picker);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[1].contains("docs (review:4)"));
+    }
+
+    /// A search finds an agent by its directory as its preview shows it, the
+    /// last two parts, and not by the rest of the path.
+    #[test]
+    fn a_search_finds_an_agent_by_the_last_two_parts_of_its_directory() {
+        let at = |pane, label, cwd: &str| Seated {
+            cwd: cwd.to_owned(),
+            ..seated("work", 20, pane, label, Mark::Idle)
+        };
+        let listing = Listing {
+            agents: vec![
+                at(1, "fix", "/home/me/src/luneta/pr-12"),
+                at(2, "docs", "/home/me/src/zellij/main"),
+            ],
+            ..Listing::default()
+        };
+        let mut picker = Picker::open(1, List::Agents, listing);
+        typed(&mut picker, "luneta/pr");
+        let (lines, _) = list(&picker);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("fix"), "{lines:?}");
+        for _ in "luneta/pr".chars() {
+            press(&mut picker, KeyCode::Backspace);
+        }
+        typed(&mut picker, "src");
+        let (lines, _) = list(&picker);
+        let shows = |label: &str| lines.iter().any(|line| line.contains(label));
+        assert!(!shows("fix") && !shows("docs"), "{lines:?}");
     }
 
     /// The preview asks zellij for the screen it shows only once the
