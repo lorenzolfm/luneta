@@ -13,10 +13,11 @@
 //!
 //! The rows go oldest session first, until you move them, and each session's
 //! panes in the order of their tabs, a bracket down the left joining those of
-//! a tab that holds more than one: `v` selects the highlighted row's
-//! session, `j` and `k` grow the selection, and `J` and `K` move the sessions
-//! it holds, as a visual selection does in vim; and the mouse drags a session
-//! by its row. The order is kept for every luneta, and the next.
+//! a tab that holds more than one, in a colour of the tab's own: `v` selects
+//! the highlighted row's session, `j` and `k` grow the selection, and `J` and
+//! `K` move the sessions it holds, as a visual selection does in vim; and the
+//! mouse drags a session by its row. The order is kept for every luneta, and
+//! the next.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU64;
@@ -83,6 +84,19 @@ const EDGE: &str = "│";
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
+/// The colours of the brackets, a tab's by its id, as a browser colours its
+/// groups of tabs: zellij keeps a tab's id as it moves and as tabs before it
+/// close, so the tab keeps its colour, and two tabs opened one after the other
+/// never share one. No bracket is red, which says what went wrong. No two
+/// neighbours here are alike either, for tabs that go round them.
+const TABS: [Color; 6] = [
+    gruvbox::BLUE,
+    gruvbox::YELLOW,
+    gruvbox::PURPLE,
+    gruvbox::AQUA,
+    gruvbox::ORANGE,
+    gruvbox::GREEN,
+];
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -434,8 +448,9 @@ enum Row {
         label: String,
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
-        /// Where it sits among the panes listed of its tab, if it shares it.
-        bracket: Option<Bracket>,
+        /// Where it sits among the panes listed of its tab, if it shares it,
+        /// and the colour of that tab's bracket.
+        bracket: Option<(Bracket, Color)>,
     },
 }
 
@@ -1257,10 +1272,10 @@ impl Sidebar {
             let named = finder.as_ref().and_then(|finder| finder.session(listed.name.as_str()));
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
-            // The rows of the panes listed, by their tab, each made once its
-            // bracket is known: it joins the panes listed of a tab, as a
-            // search can leave some of them out.
-            let mut shown: BTreeMap<u32, Vec<_>> = BTreeMap::new();
+            // The rows of the panes listed, by their tab, its position and its
+            // id, each made once its bracket is known: it joins the panes
+            // listed of a tab, as a search can leave some of them out.
+            let mut shown: BTreeMap<(u32, Option<u32>), Vec<_>> = BTreeMap::new();
             for (pane, Shows { marked, ran, unread }) in listing.into_iter().zip(by_pane) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
@@ -1299,7 +1314,7 @@ impl Sidebar {
                     checkout,
                     bracket,
                 };
-                shown.entry(pane.tab).or_default().push((row, found));
+                shown.entry((pane.tab, pane.tab_id)).or_default().push((row, found));
             }
             if finder.is_some() && named.is_none() && shown.is_empty() {
                 continue;
@@ -1324,16 +1339,19 @@ impl Sidebar {
             // by its name hands the highlight on to. With none, its row hands it
             // on to its first pane.
             let mut lead: Option<(usize, Fit)> = None;
-            for tab in shown.into_values() {
-                let count = tab.len();
-                for (at, (row, found)) in tab.into_iter().enumerate() {
+            for ((_, id), of_tab) in shown {
+                let count = of_tab.len();
+                // A daemon older than `tab_id` does not say which tab it is:
+                // its bracket stays grey, as every bracket was.
+                let colour = id.map_or(gruvbox::GREY, |id| TABS[id as usize % TABS.len()]);
+                for (at, (row, found)) in of_tab.into_iter().enumerate() {
                     if let Some(found) = found {
                         weigh(rows.len(), found);
                         if lead.is_none_or(|(_, top)| found > top) {
                             lead = Some((rows.len(), found));
                         }
                     }
-                    rows.push(row(Bracket::of(at, count)));
+                    rows.push(row(Bracket::of(at, count).map(|sits| (sits, colour))));
                 }
             }
             if let Some(named) = named {
@@ -2980,15 +2998,17 @@ fn margin(here: bool) -> Span<'static> {
 
 /// The column after a pane's mark, on its line `at` of the `height` it
 /// takes: the bracket that joins it to the panes of its tab, where it sits
-/// among them as it `sits`, or else blank.
-fn gutter(sits: Option<Bracket>, at: usize, height: usize) -> Span<'static> {
-    let glyph = match sits {
-        None => return Span::raw(" "),
-        Some(Bracket::First) if at == 0 => BRACKET_TOP,
-        Some(Bracket::Last) if at + 1 == height => BRACKET_FOOT,
-        Some(Bracket::First | Bracket::Inner | Bracket::Last) => BRACKET_SIDE,
+/// among them as it `sits`, in its tab's colour, or else blank.
+fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'static> {
+    let Some((sits, colour)) = bracket else {
+        return Span::raw(" ");
     };
-    Span::styled(glyph, Style::new().fg(gruvbox::GREY))
+    let glyph = match sits {
+        Bracket::First if at == 0 => BRACKET_TOP,
+        Bracket::Last if at + 1 == height => BRACKET_FOOT,
+        Bracket::First | Bracket::Inner | Bracket::Last => BRACKET_SIDE,
+    };
+    Span::styled(glyph, Style::new().fg(colour))
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
@@ -3107,6 +3127,7 @@ mod tests {
             command: Some(command.to_owned()),
             titled: None,
             shell: None,
+            tab_id: Some(tab),
         }
     }
 
@@ -3322,6 +3343,36 @@ mod tests {
         );
         type_in(&mut sidebar, "/c");
         assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
+    }
+
+    /// A tab's bracket is in a colour of the tab's own, by the id zellij gave
+    /// it, which the tab keeps as a tab before it closes and its position goes
+    /// down. A daemon older than the id does not say it, and the brackets it
+    /// lists stay grey, rather than all in the first tab's colour.
+    #[test]
+    fn a_tab_keeps_its_colour_as_a_tab_before_it_closes() {
+        let colours = |sidebar: &mut Sidebar, lines: usize| {
+            let buffer = drawn(sidebar, true, 32, 24);
+            (1..=lines).map(|line| buffer[(1, (HEADER + line) as u16)].fg).collect::<Vec<_>>()
+        };
+        let three = (0..6).map(|id| pane(id + 1, id / 2, "/w/a", "less")).collect();
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(vec![session("s", 10, three)], Vec::new()));
+        let (b, y, p) = (gruvbox::BLUE, gruvbox::YELLOW, gruvbox::PURPLE);
+        assert_eq!(colours(&mut sidebar, 6), [b, b, y, y, p, p]);
+
+        // The first tab closed: the other two are at 0 and 1 now.
+        let closed = |tab_id: fn(u32) -> Option<u32>| {
+            let in_tab = |id: u32| Pane {
+                tab_id: tab_id(id / 2),
+                ..pane(id + 1, id / 2 - 1, "/w/a", "less")
+            };
+            host(vec![session("s", 10, (2..6).map(in_tab).collect())], Vec::new())
+        };
+        sidebar.heard(closed(Some));
+        assert_eq!(colours(&mut sidebar, 4), [y, y, p, p]);
+        sidebar.heard(closed(|_| None));
+        assert_eq!(colours(&mut sidebar, 4), [gruvbox::GREY; 4]);
     }
 
     /// The first line says `luneta`, in the accent, the word bold, while the
