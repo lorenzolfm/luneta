@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -104,17 +104,6 @@ pub fn process(pane: Option<(&str, u32)>) -> Running {
         command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", id.to_string());
     }
     Running::spawn(&mut command)
-}
-
-/// Makes the socket at `path` a minute older, as zellij's of a session made a
-/// minute ago is: older than a process started since by more than the second
-/// macOS dates a process's start in.
-pub fn aged(path: &Path) {
-    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let ago = since.checked_sub(Duration::from_mins(1)).unwrap();
-    let at = rustix::fs::Timespec { tv_sec: i64::try_from(ago.as_secs()).unwrap(), tv_nsec: 0 };
-    let times = rustix::fs::Timestamps { last_access: at, last_modification: at };
-    rustix::fs::utimensat(rustix::fs::CWD, path, &times, rustix::fs::AtFlags::empty()).unwrap();
 }
 
 /// When `pid` started, as Claude Code records it on Linux: field 22 of its
@@ -372,7 +361,6 @@ fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     let host = Host::new();
     let work = host.contract().join("work");
     let _server = UnixListener::bind(&work).unwrap();
-    aged(&work);
     let (inside, outside) = (process(Some(("work", 3))), process(None));
     for running in [&inside, &outside] {
         let mut shape = file_for("newer", running, "busy");

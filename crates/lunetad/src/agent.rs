@@ -102,9 +102,11 @@ impl Source {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unread {
     pub pid: u32,
-    /// When the process started, or a moment before, and never after: less
-    /// than a clock tick on Linux, less than a second on macOS. None where
-    /// the system does not say.
+    /// When the process started, or a moment after, and never before: less
+    /// than a clock tick on Linux, less than a second on macOS. So a session
+    /// made a moment before it is not ruled out, and one made a moment after
+    /// may not be, which only leaves its session untold. None where the
+    /// system does not say.
     pub started: Option<SystemTime>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,

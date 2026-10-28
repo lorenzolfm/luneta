@@ -16,3 +16,28 @@ use macos as os;
 compile_error!("lunetad reads processes on Linux and macOS, and on nothing else yet");
 
 pub use os::{environ, start, started, Domain};
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+
+    /// A process is dated no earlier than it started, wherever in a clock
+    /// tick or a second it starts, so that the session it started in is not
+    /// ruled out for being made a moment before; and less than a second
+    /// later.
+    #[test]
+    fn a_process_is_dated_no_earlier_than_it_started() {
+        for _ in 0..10 {
+            let before = SystemTime::now();
+            let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+            let started = super::started(child.id());
+            let after = SystemTime::now();
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let started = started.expect("a process that runs is dated");
+            assert!(before <= started, "dated {started:?}, started after {before:?}");
+            assert!(started <= after + Duration::from_secs(1), "dated {started:?}, by {after:?}");
+        }
+    }
+}

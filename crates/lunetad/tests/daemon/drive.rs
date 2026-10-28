@@ -10,7 +10,7 @@ use std::process::Output;
 
 use serde_json::json;
 
-use crate::agents::{aged, file_for, now_in, process, Host};
+use crate::agents::{file_for, now_in, process, Host};
 use crate::host::{answered, eventually, start, LUNETA};
 use crate::sessions::listed;
 
@@ -91,7 +91,6 @@ fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
     let host = Host::new();
     let work = host.contract().join("work");
     let _work = UnixListener::bind(&work).unwrap();
-    aged(&work);
     let tab = (0, "Tab #1");
     let panes = json!([listed(2, "claude", tab, Some("/w")), listed(3, "claude", tab, Some("/w"))]);
     host.lists.list("work", &panes);
