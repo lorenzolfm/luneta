@@ -45,6 +45,7 @@ pub fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serd
     json!({
         "id": id,
         "is_plugin": false,
+        "is_selectable": true,
         "is_suppressed": false,
         "is_floating": false,
         "title": title,

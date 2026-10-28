@@ -22,15 +22,15 @@ use crate::host::{eventually, start, FakeZellij, Running, Vars, LUNETA};
 /// The folders of a host of a test's own: the daemon's, a home with Claude
 /// Code's session files in it, and zellij's sockets, with a zellij that lists
 /// no panes.
-struct Host {
+pub struct Host {
     runtime: TempDir,
     home: TempDir,
     zellij: TempDir,
-    lists: FakeZellij,
+    pub lists: FakeZellij,
 }
 
 impl Host {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let host = Host {
             runtime: tempfile::tempdir().unwrap(),
             home: tempfile::tempdir().unwrap(),
@@ -42,7 +42,7 @@ impl Host {
         host
     }
 
-    fn vars(&self) -> Vars<'_> {
+    pub fn vars(&self) -> Vars<'_> {
         Vars {
             runtime: Some(self.runtime.path()),
             home: Some(self.home.path()),
@@ -57,7 +57,7 @@ impl Host {
     }
 
     /// The folder zellij 0.45 keeps its sessions' sockets in.
-    fn contract(&self) -> PathBuf {
+    pub fn contract(&self) -> PathBuf {
         self.zellij.path().join("contract_version_1")
     }
 
@@ -68,7 +68,7 @@ impl Host {
 
     /// Writes a session file as Claude Code does, for the agent whose pid is
     /// `pid`.
-    fn write(&self, pid: u32, file: &serde_json::Value) {
+    pub fn write(&self, pid: u32, file: &serde_json::Value) {
         fs::write(self.file_of(pid), file.to_string()).unwrap();
     }
 
@@ -84,7 +84,7 @@ impl Host {
     }
 
     /// What the daemon lists.
-    fn agents(&self) -> Vec<Agent> {
+    pub fn agents(&self) -> Vec<Agent> {
         self.list().agents
     }
 
@@ -95,7 +95,7 @@ impl Host {
 }
 
 /// A process to stand for an agent, in the pane `pane` names, if any.
-fn process(pane: Option<(&str, u32)>) -> Running {
+pub fn process(pane: Option<(&str, u32)>) -> Running {
     let mut command = Command::new("sleep");
     command.arg("600").env_remove("ZELLIJ_SESSION_NAME").env_remove("ZELLIJ_PANE_ID");
     if let Some((session, id)) = pane {
@@ -153,7 +153,7 @@ fn file(id: &str, pid: u32, start: &str, status: &str) -> serde_json::Value {
 }
 
 /// The file of a process that runs, as it starts.
-fn file_for(id: &str, process: &Running, status: &str) -> serde_json::Value {
+pub fn file_for(id: &str, process: &Running, status: &str) -> serde_json::Value {
     file(id, process.pid(), &started(process.pid()), status)
 }
 
@@ -162,7 +162,7 @@ fn zellij(named: &str, session: Option<&str>, pane: u32) -> Zellij {
 }
 
 /// The session the daemon says an agent's pane is in now, if it says one.
-fn now_in(agent: &Agent) -> Option<&str> {
+pub fn now_in(agent: &Agent) -> Option<&str> {
     agent.zellij.as_ref().and_then(|zellij| zellij.session.as_deref())
 }
 

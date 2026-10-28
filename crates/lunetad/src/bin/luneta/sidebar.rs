@@ -1542,7 +1542,8 @@ impl Sidebar {
             // luneta's zellij is there: its last client may have left since
             // lunetad listed them.
             Wants::Open { cwd, opens: Opens::Tab } => {
-                let open = Open::Tab { session: session.clone(), cwd };
+                let (name, command) = (None, Vec::new());
+                let open = Open::Tab { session: session.clone(), cwd, name, command };
                 if self.going().is_none() && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, open }
                 } else {
@@ -1670,13 +1671,7 @@ impl Sidebar {
         };
         let sessions = self.host.iter().flat_map(|host| &host.sessions);
         let names: Vec<&str> = sessions.map(|session| session.name.as_str()).collect();
-        let taken = |name: &SessionName| names.contains(&name.as_str());
-        // Of more names than there are sessions, one is free.
-        let session = std::iter::once(name.clone())
-            .chain((2..names.len() + 3).map(|n| name.with_postfix(n)))
-            .find(|name| !taken(name))
-            .expect("one of more names than there are sessions is free");
-        Asked::Start { session, cwd: cwd.to_owned() }
+        Asked::Start { session: name.free(&names), cwd: cwd.to_owned() }
     }
 
     /// Has zellij do what a delete key planned, and the highlight go past the
@@ -4332,7 +4327,7 @@ mod tests {
             " <BS> - Back, <ESC> - Close",
         ]);
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
-        let tab = Open::Tab { session: older, cwd };
+        let tab = Open::Tab { session: older, cwd, name: None, command: Vec::new() };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Open { menu: 1, open: tab });
         let opened = Place::Pane { session: listed("older", 10), pane: 7 };
         assert_eq!(sidebar.opened(1, Ok(7)), Asked::Go(opened));
@@ -4346,7 +4341,8 @@ mod tests {
         sidebar.step(2);
         type_in(&mut sidebar, "n");
         let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
-        let tab = Open::Tab { session: "newer".to_owned(), cwd: "/w/b".to_owned() };
+        let (session, cwd) = ("newer".to_owned(), "/w/b".to_owned());
+        let tab = Open::Tab { session, cwd, name: None, command: Vec::new() };
         let asked = Asked::OpenThere { menu: 2, place: newer, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);

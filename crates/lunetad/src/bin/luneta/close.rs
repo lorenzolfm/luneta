@@ -113,6 +113,15 @@ impl Act {
             Act::Kill(session) | Act::Leave { session, .. } => format!("Kill session {session}"),
         }
     }
+
+    /// Whether the terminal `pane` of its session goes with it.
+    pub fn takes(&self, pane: u32) -> bool {
+        match self {
+            Act::Pane { pane: closed, .. } => pane == *closed,
+            Act::Tab { panes, .. } => panes.contains(&pane),
+            Act::Kill(_) | Act::Leave { .. } => true,
+        }
+    }
 }
 
 /// What a delete key does, and the agents it would end, while luneta can tell
@@ -147,13 +156,8 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
             Seat::Moving => return Err(MOVING.to_owned()),
         },
     };
-    let takes = |pane: u32| match &act {
-        Act::Pane { pane: closed, .. } => pane == *closed,
-        Act::Tab { panes, .. } => panes.contains(&pane),
-        Act::Kill(_) | Act::Leave { .. } => true,
-    };
     let ending = subject.agents.as_ref().map(|agents| {
-        Ending::of(agents.iter().filter(|(pane, _)| takes(*pane)).map(|(_, doing)| *doing))
+        Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
     });
     Ok(Plan { act, ending })
 }
@@ -192,6 +196,7 @@ impl Ending {
     /// As `2 agents, 1 busy`.
     fn says(self) -> String {
         let mut said = vec![match self.agents {
+            0 => "no agent".to_owned(),
             1 => "1 agent".to_owned(),
             agents => format!("{agents} agents"),
         }];
@@ -220,6 +225,16 @@ impl Plan {
             Some(ending) if !ending.at_work() => None,
             Some(ending) => Some(format!("{what}? {}", ending.says())),
             None => Some(format!("{what}? luneta cannot tell which agents it ends: {UNTOLD}")),
+        }
+    }
+
+    /// The agents it ends, as `2 agents, 1 busy`, or that luneta cannot tell
+    /// them, whether or not the menu would ask: for the CLI, which says what
+    /// a close ends before it closes anything.
+    pub fn ends(&self) -> String {
+        match self.ending {
+            Some(ending) => ending.says(),
+            None => "luneta cannot tell which agents it ends".to_owned(),
         }
     }
 }

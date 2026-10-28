@@ -28,7 +28,8 @@ pub const SOCKET: &str = "luneta/lunetad.sock";
 /// own, Claude Code's and zellij's. `None` leaves one unset, so that nothing a
 /// test runs ever reads the folders of whoever runs the tests. `bin` comes
 /// first on the `PATH`, for a test's own programs to stand in for those of
-/// whoever runs the tests, and git reads no config of theirs either.
+/// whoever runs the tests, and git reads no config of theirs either. Nothing
+/// runs in a pane of theirs: zellij's names of one are left out.
 #[derive(Clone, Copy, Default)]
 pub struct Vars<'a> {
     pub runtime: Option<&'a Path>,
@@ -46,7 +47,8 @@ impl<'a> Vars<'a> {
     pub fn command(self, program: &str) -> Command {
         let mut command = Command::new(program);
         let names = ["XDG_RUNTIME_DIR", "TMPDIR", "HOME", "CLAUDE_CONFIG_DIR", "ZELLIJ_SOCKET_DIR"];
-        for name in names {
+        let panes = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
+        for name in names.into_iter().chain(panes) {
             command.env_remove(name);
         }
         let set = [
@@ -73,9 +75,11 @@ impl<'a> Vars<'a> {
 /// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
 /// lists the panes of a session as a test has it: what it wrote with `list`.
 /// It lists the session's clients too, as the test wrote them with `clients`,
-/// and none until it has. It knows no other command, and of a session it was
-/// given no panes for, it says there is no such session, as zellij does. It
-/// notes each session it is asked for the panes of, for `asked`.
+/// and none until it has. Of a session it was given no panes for, it says
+/// there is no such session, as zellij does. It notes each session the daemon
+/// asks it for the panes of, for `asked`, and each pane, tab and session it is
+/// asked to close, for `closed`, and closes nothing. It knows no other
+/// command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -86,13 +90,19 @@ impl FakeZellij {
         fs::create_dir(zellij.panes()).unwrap();
         let script = format!(
             r#"#!/bin/sh
+asked="$*"
 session="$2"
 [ "$1" = --session ] && shift 2
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
+    "action list-panes --json") asking=laid ;;
     "action list-clients") asking=clients ;;
+    "action close-pane --pane-id "* | "action close-tab-by-id "* | "kill-session "*)
+        echo "$asked" >> "{panes}/closed"
+        exit 0
+        ;;
     *)
-        echo "this zellij only lists panes and clients, and was asked: $*" >&2
+        echo "this zellij only lists and closes, and was asked: $*" >&2
         exit 2
         ;;
 esac
@@ -103,7 +113,7 @@ if [ ! -f "{panes}/$session.json" ]; then
     echo "Session '$session' not found." >&2
     exit 1
 fi
-if [ "$asking" = panes ]; then
+if [ "$asking" != clients ]; then
     exec cat "{panes}/$session.json"
 fi
 if [ -f "{panes}/$session.clients" ]; then
@@ -130,8 +140,19 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 
     /// The sessions zellij has been asked about, in the order it was asked.
     pub fn asked(&self) -> Vec<String> {
-        match fs::read_to_string(self.panes().join("asked")) {
-            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+        self.lines("asked")
+    }
+
+    /// What zellij has been asked to close, each as its arguments were, in
+    /// the order it was asked.
+    pub fn closed(&self) -> Vec<String> {
+        self.lines("closed")
+    }
+
+    /// The lines of the file `name`, none while there is none.
+    fn lines(&self, name: &str) -> Vec<String> {
+        match fs::read_to_string(self.panes().join(name)) {
+            Ok(said) => said.lines().map(str::to_owned).collect(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("what zellij was asked does not read: {error}"),
         }

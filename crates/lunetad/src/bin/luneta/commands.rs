@@ -1,6 +1,8 @@
-//! What the CLI asks lunetad, the daemon of this host.
+//! What the CLI asks lunetad, the daemon of this host, and what it has zellij
+//! do, as `drive` does it.
 
 use std::error::Error;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
@@ -13,16 +15,19 @@ use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, PullRequest, Status, Version, WatchRequest, WorkTree,
+    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Status, Version,
+    WatchRequest, WorkTree,
 };
 use lunetad::folder::SOCKET;
 use prost::Message as _;
 use tonic::transport::Channel;
 
 use crate::daemon::{self, Reach};
+use crate::drive::{self, Address, Opening};
 
-/// What the CLI asks lunetad. Only `watch` starts one where none runs, as it
-/// is what luneta's zellij plugin asks: the rest say that none does.
+/// What the CLI asks lunetad, and what it has zellij do. Only `watch` starts
+/// a lunetad where none runs, as it is what luneta's zellij plugin asks: the
+/// rest say that none does, or, for `close`, that it cannot tell the agents.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -41,6 +46,30 @@ pub enum Command {
         #[arg(long, value_parser = version)]
         after: Option<Version>,
     },
+    /// Open a pane, a tab or a session, as the menu's New group does.
+    Open {
+        #[command(subcommand)]
+        what: Opening,
+    },
+    /// Take you to a session, or to a pane of one: the client that last typed
+    /// in the session this runs in, which zellij moves.
+    Go {
+        /// `<session>` or `<session>:<pane>`, as `luneta agents` names them.
+        #[arg(value_parser = drive::address)]
+        to: Address,
+    },
+    /// Close panes and kill sessions, as the menu's Delete group does. A pane
+    /// takes its tab along once nothing else holds the tab open, and the
+    /// session where that is its only tab. Without `--yes`, say what would go
+    /// and which agents with it, and close nothing.
+    Close {
+        /// Each `<session>` to kill, or `<session>:<pane>` to close.
+        #[arg(required = true, value_parser = drive::address)]
+        what: Vec<Address>,
+        /// Close them.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// A version as `--after` spells it: `<pid>:<seq>`.
@@ -51,18 +80,31 @@ fn version(spelled: &str) -> Result<Version, String> {
     Ok(Version { pid, seq })
 }
 
-/// Asks the daemon in `folder` what `command` asks.
+/// Asks the daemon in `folder` what `command` asks, or has zellij do it.
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    match command {
+        Command::Info => ask(folder, Reach::Running, info),
+        Command::Agents => ask(folder, Reach::Running, agents),
+        Command::Sessions => ask(folder, Reach::Running, sessions),
+        Command::Watch { after } => ask(folder, Reach::Current, |daemon| watch(daemon, *after)),
+        Command::Open { what } => drive::open(what),
+        Command::Go { to } => drive::go(to),
+        Command::Close { what, yes } => drive::close(what, *yes, folder),
+    }
+}
+
+/// Reaches the daemon in `folder` as `wanted`, and has `asking` ask it.
+fn ask<F, Asked>(folder: &Path, wanted: Reach, asking: F) -> ExitCode
+where
+    F: FnOnce(DaemonClient<Channel>) -> Asked,
+    Asked: Future<Output = Result<(), Box<dyn Error>>>,
+{
+    let runtime = match runtime() {
         Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("luneta: no runtime: {error}");
+        Err(why) => {
+            eprintln!("luneta: {why}");
             return ExitCode::FAILURE;
         },
-    };
-    let wanted = match command {
-        Command::Info | Command::Agents | Command::Sessions => Reach::Running,
-        Command::Watch { .. } => Reach::Current,
     };
     let daemon = match runtime.block_on(daemon::reach(folder, wanted)) {
         Ok(daemon) => daemon,
@@ -71,17 +113,29 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    let done = match command {
-        Command::Info => runtime.block_on(info(daemon)),
-        Command::Agents => runtime.block_on(agents(daemon)),
-        Command::Sessions => runtime.block_on(sessions(daemon)),
-        Command::Watch { after } => runtime.block_on(watch(daemon, *after)),
-    };
-    if let Err(error) = done {
+    if let Err(error) = runtime.block_on(asking(daemon)) {
         eprintln!("luneta: {}: {}", folder.join(SOCKET).display(), causes(&*error));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// A runtime for the CLI's one thread, or why there is none.
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    let built = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    built.map_err(|error| format!("no runtime: {error}"))
+}
+
+/// The agents lunetad lists, for the CLI to say which a close ends, or why
+/// it does not list them: none runs, or it does not answer. It starts none,
+/// as `agents` does not.
+pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
+    let runtime = runtime()?;
+    runtime.block_on(async {
+        let mut daemon = daemon::reach(folder, Reach::Running).await?;
+        let listed = daemon.list_agents(ListAgentsRequest {}).await;
+        listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
+    })
 }
 
 async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
@@ -96,14 +150,27 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// One line to an agent, by its session and pane: the pane, its status, its pid,
-/// and its name or else where it works. An agent outside zellij has `-` for a
-/// pane. One whose session was renamed says what it was named, and one whose
-/// session the daemon cannot tell has `?` for one. A status the CLI does not
-/// know is the word Claude Code wrote, and none at all is `?`.
+/// One line to an agent, by its session and pane, as `line` writes it.
 async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(ListAgentsRequest {}).await?.into_inner();
-    let pane = |agent: &Agent| match &agent.zellij {
+    let mut rows: Vec<(String, &Agent)> =
+        listed.agents.iter().map(|agent| (seat(agent), agent)).collect();
+    rows.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
+    for (seat, agent) in rows {
+        println!("{}", line(&seat, width, agent));
+    }
+    if listed.unread > 0 {
+        eprintln!("luneta: {}", unread(listed.unread));
+    }
+    Ok(())
+}
+
+/// Where an agent runs, as `<session>:<pane>`: `-` outside zellij. One whose
+/// session was renamed says what it was named, and one whose session the
+/// daemon cannot tell has `?` for one.
+pub fn seat(agent: &Agent) -> String {
+    match &agent.zellij {
         None => "-".to_owned(),
         Some(zellij) => match zellij.session.as_deref() {
             None => format!("?:{} (named {})", zellij.pane, zellij.named),
@@ -112,34 +179,33 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
             },
             Some(now) => format!("{now}:{}", zellij.pane),
         },
+    }
+}
+
+/// An agent on a line: `seat`, as wide as `width`, its status, its pid, and
+/// its name or else where it works. A status the CLI does not know is the
+/// word Claude Code wrote, and none at all is `?`.
+pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
+    let status = match &agent.status {
+        Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
+            Ok(Status::Busy) => "busy",
+            Ok(Status::Idle) => "idle",
+            Ok(Status::Waiting) => "waiting",
+            Ok(Status::Shell) => "shell",
+            // A daemon newer than this CLI's.
+            Ok(Status::Unspecified) | Err(_) => "?",
+        },
+        Some(Reported::OtherStatus(word)) => word.as_str(),
+        None => "?",
     };
-    let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (pane(agent), agent)).collect();
-    rows.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let width = rows.iter().map(|(pane, _)| pane.len()).max().unwrap_or(0);
-    for (pane, agent) in rows {
-        let status = match &agent.status {
-            Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
-                Ok(Status::Busy) => "busy",
-                Ok(Status::Idle) => "idle",
-                Ok(Status::Waiting) => "waiting",
-                Ok(Status::Shell) => "shell",
-                // A daemon newer than this CLI's.
-                Ok(Status::Unspecified) | Err(_) => "?",
-            },
-            Some(Reported::OtherStatus(word)) => word.as_str(),
-            None => "?",
-        };
-        let label = agent.name.as_ref().map_or(agent.cwd.as_str(), |name| name.text.as_str());
-        println!("{pane:<width$}  {status:<7}  {:>7}  {label}", agent.pid);
-    }
-    if listed.unread > 0 {
-        eprintln!(
-            "luneta: lunetad cannot read {} of Claude Code's session files, and its log says which",
-            listed.unread
-        );
-    }
-    Ok(())
+    let label = agent.name.as_ref().map_or(agent.cwd.as_str(), |name| name.text.as_str());
+    format!("{seat:<width$}  {status:<7}  {:>7}  {label}", agent.pid)
+}
+
+/// What the CLI says of the session files lunetad cannot read, `unread` of
+/// them, whose agents it does not list.
+pub fn unread(unread: u32) -> String {
+    format!("lunetad cannot read {unread} of Claude Code's session files, and its log says which")
 }
 
 /// A session to a line, with its panes under it, each by its tab and its id:
