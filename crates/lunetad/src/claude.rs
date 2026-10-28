@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use luneta_protocol::said::Said;
 use serde::Deserialize;
 
-use crate::agent::{Agent, Name, Named, Source, Status};
+use crate::agent::{Agent, Name, Named, Source, Status, Unread};
 use crate::process;
 use crate::watch::{self, Troubles};
 
@@ -103,15 +103,17 @@ enum Seen {
     /// It does not read, and has not since `since`: halfway written, and what
     /// it said `before`, if it said anything, stands.
     Torn { since: Instant, before: Option<File> },
-    /// It has not read for longer than a write takes.
+    /// It has not read for longer than a write takes, or did not in the
+    /// daemon's first read.
     Unread,
 }
 
 /// What a scan of the folder finds.
 pub struct Scan {
     pub agents: Vec<Agent>,
-    /// The files it cannot read.
-    pub unread: u32,
+    /// The files it cannot read, of those named for a pid that a process
+    /// runs by.
+    pub unread: Vec<Unread>,
 }
 
 /// The session files of a Claude Code folder, read again on every scan.
@@ -126,6 +128,9 @@ pub struct SessionFiles {
     panes: HashMap<(u32, String), Option<Named>>,
     /// What went wrong in listing the folder.
     troubles: Troubles,
+    /// Whether the folder has been read: a file that does not read in the
+    /// first read was there before the daemon, which saw no write of it begin.
+    scanned: bool,
 }
 
 impl SessionFiles {
@@ -137,6 +142,7 @@ impl SessionFiles {
             seen: HashMap::new(),
             panes: HashMap::new(),
             troubles: Troubles::default(),
+            scanned: false,
         }
     }
 
@@ -155,6 +161,8 @@ impl SessionFiles {
             },
         };
         self.troubles.done();
+        let first = !self.scanned;
+        self.scanned = true;
         let mut seen = HashMap::new();
         for path in paths {
             let Some(pid) = named(&path) else {
@@ -164,30 +172,45 @@ impl SessionFiles {
             let now = match text_of(&path) {
                 Ok(text) => match serde_json::from_slice::<File>(&text) {
                     Ok(file) => Seen::Whole(file),
-                    Err(error) => torn(was, &path, &error),
+                    Err(error) => torn(was, first, &path, &error),
                 },
                 // A file gone since the folder was listed is gone.
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => torn(was, &path, &error),
+                Err(error) => torn(was, first, &path, &error),
             };
             seen.insert(pid, now);
         }
         self.seen = seen;
 
         let mut panes = HashMap::with_capacity(self.seen.len());
+        // The pane of each process, read from its environment once.
+        let mut pane = |pid: u32, start: String| {
+            let key = (pid, start);
+            let pane = self.panes.remove(&key).unwrap_or_else(|| pane_of(pid));
+            panes.insert(key, pane.clone());
+            pane
+        };
         let mut agents = Vec::with_capacity(self.seen.len());
-        let mut unread = 0;
+        let mut unread = Vec::new();
         for (&pid, found) in &self.seen {
             let file = match found {
                 Seen::Whole(file) | Seen::Torn { before: Some(file), .. } => file,
                 Seen::Torn { before: None, .. } => continue,
+                // One that does not read may be an agent's while a process
+                // runs by its pid, in the pane that one runs in. One a crashed
+                // process left behind stands for no agent, whatever it holds.
+                // A pid that came back as another process's still counts, as
+                // the file cannot say.
                 Seen::Unread => {
-                    unread += 1;
+                    if let Some(start) = process::start(pid) {
+                        let started = process::started(pid);
+                        unread.push(Unread { pid, started, pane: pane(pid, start) });
+                    }
                     continue;
                 },
             };
             // A file of another system's pids names no process here.
-            if !self.local(file) {
+            if !local(&self.domain, file) {
                 continue;
             }
             // A pid that came back as another process's names that one now.
@@ -195,25 +218,18 @@ impl SessionFiles {
             if process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            let key = (pid, start);
-            let pane = match self.panes.remove(&key) {
-                Some(pane) => pane,
-                None => pane_of(pid),
-            };
-            agents.push(agent(pid, file, pane.clone()));
-            panes.insert(key, pane);
+            agents.push(agent(pid, file, pane(pid, start)));
         }
         self.panes = panes;
-        assert!(agents.len() + unread <= self.seen.len());
-        let unread = u32::try_from(unread).expect("a folder listed in memory has under 2^32 files");
+        assert!(agents.len() + unread.len() <= self.seen.len());
         Scan { agents, unread }
     }
+}
 
-    /// Whether the file's pid is one of this system's. A file that does not
-    /// say is taken to be.
-    fn local(&self, file: &File) -> bool {
-        file.pid_domain.as_deref().is_none_or(|recorded| self.domain.admits(recorded))
-    }
+/// Whether the file's pid is one of the system's whose pids are `domain`. A
+/// file that does not say is taken to be.
+fn local(domain: &process::Domain, file: &File) -> bool {
+    file.pid_domain.as_deref().is_none_or(|recorded| domain.admits(recorded))
 }
 
 /// The pid a session file is named for: `<pid>.json`, spelled as Claude Code
@@ -247,18 +263,22 @@ fn text_of(path: &Path) -> io::Result<Vec<u8>> {
 
 /// What a file that does not read is now, by what it `was`. One may be
 /// halfway written for a while, and says what it said before. One that does
-/// not read for longer is unread, which the daemon says once.
-fn torn(was: Option<Seen>, path: &Path, error: &impl fmt::Display) -> Seen {
+/// not read for longer is unread, which the daemon says once. So is one that
+/// does not read in the `first` read, which the daemon cannot tell from one
+/// halfway written, so that its first answer counts it.
+fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) -> Seen {
+    let unread = || {
+        eprintln!("lunetad: {} does not read as a session file: {error}", path.display());
+        Seen::Unread
+    };
     match was {
         Some(Seen::Whole(file)) => Seen::Torn { since: Instant::now(), before: Some(file) },
+        None if first => unread(),
         None => Seen::Torn { since: Instant::now(), before: None },
         Some(Seen::Torn { since, before }) if since.elapsed() < TORN => {
             Seen::Torn { since, before }
         },
-        Some(Seen::Torn { .. }) => {
-            eprintln!("lunetad: {} does not read as a session file: {error}", path.display());
-            Seen::Unread
-        },
+        Some(Seen::Torn { .. }) => unread(),
         Some(Seen::Unread) => Seen::Unread,
     }
 }

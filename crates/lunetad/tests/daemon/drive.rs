@@ -35,7 +35,7 @@ fn planned(said: &Output) -> (String, String) {
 }
 
 /// What a close says of the agents it ends while no lunetad runs.
-const UNTOLD: &str = "luneta cannot tell which agents it ends";
+const UNTOLD: &str = "luneta cannot tell which agents it ends: lunetad does not answer";
 
 /// A close says what each pane and session it is given takes along, and the
 /// agents that end with it, and closes nothing until it is told `--yes`. Then
@@ -79,6 +79,59 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     assert_eq!(String::from_utf8(told.stdout).unwrap(), plan);
     let closed = ["kill-session play", "--session work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
+}
+
+/// The agent of a session file lunetad cannot read is in the pane its
+/// process runs in, doing what no one can tell: a close of that pane says it
+/// ends it, and lists it by its pid, and a close of another does not. One
+/// whose session lunetad cannot tell may be in any pane: a close says it
+/// cannot tell which agents it ends, and why, and lists those it can tell.
+#[test]
+fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
+    let host = Host::new();
+    let work = host.contract().join("work");
+    let _work = UnixListener::bind(&work).unwrap();
+    let tab = (0, "Tab #1");
+    let panes = json!([listed(2, "claude", tab, Some("/w")), listed(3, "claude", tab, Some("/w"))]);
+    host.lists.list("work", &panes);
+    let here = process(Some(("work", 2)));
+    host.write(here.pid(), &file_for("here", &here, "busy"));
+    let unread = process(Some(("work", 3)));
+    let unnamed = |running| {
+        let mut file = file_for("unread", running, "busy");
+        file["sessionId"] = json!("");
+        file
+    };
+    host.write(unread.pid(), &unnamed(&unread));
+    let _daemon = start(host.vars()).unwrap();
+    let (here, unread) = (here.pid(), unread.pid());
+
+    let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:2"]));
+    let plan = format!(
+        "close pane work:2: 1 agent, 1 busy\n  \
+         work:2  busy     {here:>7}  here-name  (this runs here)\n"
+    );
+    assert_eq!(said, plan);
+    let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:3"]));
+    let plan = format!(
+        "close pane work:3: 1 agent, 1 unknown\n  \
+         work:3  ?        {unread:>7}  its session file does not read\n"
+    );
+    assert_eq!(said, plan);
+
+    // In a session no socket is for, which lunetad cannot follow it to. The
+    // close says it cannot read both files, as its stderr does, and cannot
+    // place one of them.
+    let lost = process(Some(("gone", 4)));
+    host.write(lost.pid(), &unnamed(&lost));
+    eventually("the daemon cannot read two files", || (host.list().unread == 2).then_some(()));
+    let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:2"]));
+    let plan = format!(
+        "close pane work:2: luneta cannot tell which agents it ends: lunetad cannot read 2 of \
+         Claude Code's session files, nor tell where 1 of their agents runs\n  \
+         work:2  busy     {here:>7}  here-name  (this runs here)\n"
+    );
+    assert_eq!(said, plan);
 }
 
 /// What a close is given in a session closes together: the panes that are

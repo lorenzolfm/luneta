@@ -2,6 +2,7 @@
 //! and without code of ours that is unsafe.
 
 use std::ffi::OsString;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -18,6 +19,14 @@ fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) ->
 pub fn start(pid: u32) -> Option<String> {
     let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
     Some(lstart(i64::try_from(secs).ok()?))
+}
+
+/// When `pid` started, or less than a second after, and never before: the
+/// whole seconds the kernel says, and the one it started in.
+#[must_use]
+pub fn started(pid: u32) -> Option<SystemTime> {
+    let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
 /// The environment `pid` started with, an entry to a string.

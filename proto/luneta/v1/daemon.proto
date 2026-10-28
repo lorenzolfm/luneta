@@ -60,6 +60,8 @@ message Host {
   // this field, which could not say, and whose `sessions` may leave one out
   // too.
   optional uint32 unread_sockets = 7;
+  // The session files `unread` counts, as `ListAgentsResponse` has them.
+  repeated UnreadFile unread_files = 8;
 }
 
 // A zellij session that runs: its server listens on a socket named for it.
@@ -306,9 +308,27 @@ message ListAgentsResponse {
   // In no order a client can count on.
   repeated Agent agents = 1;
   // Claude Code's session files that the daemon cannot read, and so lists no
-  // agent for: cut short for good, or in a shape of a newer Claude Code's. The
-  // daemon's log says which.
+  // agent for: cut short for good, or in a shape of a newer Claude Code's. One
+  // counts once it has not read for longer than a write takes, or at once if
+  // it did not read as the daemon started. Only those named for a pid that a
+  // process runs by count: one a crashed Claude Code left behind does not.
+  // The daemon's log says which.
   uint32 unread = 2;
+  // The files `unread` counts, each by where its process runs: as many as it
+  // counts. Empty from a daemon older than this field, which counts them all
+  // the same.
+  repeated UnreadFile unread_files = 3;
+}
+
+// A session file of Claude Code's that the daemon cannot read, by the process
+// named for it: an agent, whose status no one can tell, or another process
+// that came by its pid since, as the file cannot say.
+message UnreadFile {
+  uint32 pid = 1;
+  // Where it runs in zellij, as its environment names it, absent when it runs
+  // outside zellij. The daemon follows its session as it does an agent's, by
+  // when the process started.
+  Zellij zellij = 2;
 }
 
 // A Claude Code agent: the one process of it that runs, and its session.

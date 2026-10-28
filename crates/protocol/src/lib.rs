@@ -2,12 +2,14 @@
 //! daemon answers in, as `proto/luneta/v1` defines it, and what `git status`
 //! says of a work tree, which the daemon asks git and the plugin reads back
 //! from the protocol. The pull request gh finds of a branch is here too,
-//! which only the daemon asks gh.
+//! which only the daemon asks gh. So are Claude Code's session files the
+//! daemon cannot read, as a delete counts them in either.
 
 pub mod git;
 pub mod github;
 pub mod said;
 pub mod tab;
+pub mod unread;
 
 /// The protocol's messages, as prost-build writes them out. The service that
 /// answers with them is the daemon's, and so is the code for it.

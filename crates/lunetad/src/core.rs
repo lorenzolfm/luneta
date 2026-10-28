@@ -120,7 +120,7 @@ struct Known {
 
 fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     let mut known = Known {
-        found: Scan { agents: Vec::new(), unread: 0 },
+        found: Scan { agents: Vec::new(), unread: Vec::new() },
         sessions: Sessions::default(),
         unread_sockets: 0,
         panes: HashMap::new(),
@@ -192,8 +192,9 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 continue;
             },
             Command::List(answer) => {
+                let (unread, unread_files) = known.unread();
                 let agents = known.agents();
-                let _ = answer.send(api::ListAgentsResponse { agents, unread: known.found.unread });
+                let _ = answer.send(api::ListAgentsResponse { agents, unread, unread_files });
                 continue;
             },
             Command::Watch { after, answer } => {
@@ -286,6 +287,17 @@ impl Known {
         self.found.agents.iter().map(|agent| agent.to_api(&self.sessions)).collect()
     }
 
+    /// How many session files do not read, and each, as the API gives them:
+    /// as many of one as of the other, in the order of their pids.
+    fn unread(&self) -> (u32, Vec<api::UnreadFile>) {
+        let mut files: Vec<api::UnreadFile> =
+            self.found.unread.iter().map(|file| file.to_api(&self.sessions)).collect();
+        files.sort_by_key(|file| file.pid);
+        let count =
+            u32::try_from(files.len()).expect("a folder listed in memory has under 2^32 files");
+        (count, files)
+    }
+
     /// The shell of each pane, by its session and its id: of the shells in
     /// it, the one that started last, as a shell started in another runs in
     /// front of it. A shell is in the session its session's name leads to, as
@@ -350,6 +362,7 @@ impl Known {
             .collect();
         let mut agents = self.agents();
         agents.sort_by_key(|agent| agent.pid);
+        let (unread, unread_files) = self.unread();
         // What gh found of a branch that is no longer checked out where it
         // was asked about is not that directory's, until gh has said of the
         // one that is.
@@ -364,9 +377,10 @@ impl Known {
             sessions,
             work_trees: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
             agents,
-            unread: self.found.unread,
+            unread,
             pull_requests,
             unread_sockets: Some(self.unread_sockets),
+            unread_files,
         }
     }
 

@@ -4,6 +4,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+
+use rustix::time::{clock_gettime, ClockId};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -17,6 +20,28 @@ pub fn start(pid: u32) -> Option<String> {
     let stat = fs::read_to_string(proc(pid, "stat")).ok()?;
     let close = stat.rfind(')')?;
     stat[close + 1..].split_whitespace().nth(19).map(str::to_owned)
+}
+
+/// When `pid` started, or less than a clock tick after, but never before it,
+/// nor after now: as long before now as the time since the boot, less the
+/// ticks after the boot that `start` reads, the one it started in counted
+/// whole.
+#[must_use]
+pub fn started(pid: u32) -> Option<SystemTime> {
+    // The kernel counts the whole ticks gone by before the start.
+    let ticks = start(pid)?.parse::<u64>().ok()?.checked_add(1)?;
+    let per_second = rustix::param::clock_ticks_per_second();
+    let secs = ticks.checked_div(per_second)?;
+    let nanos = (ticks % per_second * 1_000_000_000).div_ceil(per_second);
+    let after_boot = Duration::from_secs(secs) + Duration::from_nanos(nanos);
+    // The time since the boot ahead of now, so that what goes by between the
+    // two makes the start later, and never earlier.
+    let since_boot = clock_gettime(ClockId::Boottime);
+    let now = SystemTime::now();
+    let secs = u64::try_from(since_boot.tv_sec).ok()?;
+    let nanos = u32::try_from(since_boot.tv_nsec).ok()?;
+    // One that started in this tick started by now.
+    now.checked_sub(Duration::new(secs, nanos).saturating_sub(after_boot))
 }
 
 /// The environment `pid` started with, an entry to a string.

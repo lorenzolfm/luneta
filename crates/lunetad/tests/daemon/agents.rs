@@ -13,7 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, Zellij};
+use lunetad::api::{
+    Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, UnreadFile, Zellij,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -73,7 +75,7 @@ impl Host {
     }
 
     /// What the daemon answers.
-    fn list(&self) -> ListAgentsResponse {
+    pub fn list(&self) -> ListAgentsResponse {
         let folder =
             crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -270,12 +272,14 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
 
 /// The daemon follows the files as Claude Code writes them, with no one asking
 /// it to look. A file read in the middle of a write says what it said before,
-/// so that its agent does not blink out of the list. A file taken away takes
-/// its agent, and so does a process that crashes and leaves its file.
+/// so that its agent does not blink out of the list, and one read in the
+/// middle of the write that makes it is not yet counted as one the daemon
+/// cannot read. A file taken away takes its agent, and so does a process that
+/// crashes and leaves its file.
 #[test]
 fn the_daemon_follows_the_files_as_they_change() {
     let host = Host::new();
-    let (one, two) = (process(None), process(None));
+    let (one, two, three) = (process(None), process(None), process(None));
     let (one_start, two_start) = (started(one.pid()), started(two.pid()));
     host.write(one.pid(), &file("one", one.pid(), &one_start, "busy"));
     host.write(two.pid(), &file("two", two.pid(), &two_start, "idle"));
@@ -286,13 +290,17 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("one waits", || host.agent("one").filter(|agent| agent.status == waits));
 
     // `two`'s new status shows once the daemon has read the folder again, and
-    // that read finds `one` half written.
+    // that read finds `one` half written, and `three` half made.
     let whole = file("one", one.pid(), &one_start, "idle").to_string();
     fs::write(host.file_of(one.pid()), &whole[..whole.len() / 2]).unwrap();
+    let made = file_for("three", &three, "busy").to_string();
+    fs::write(host.file_of(three.pid()), &made[..made.len() / 2]).unwrap();
     host.write(two.pid(), &file("two", two.pid(), &two_start, "busy"));
     let works = Some(known(Status::Busy));
     eventually("two works", || host.agent("two").filter(|agent| agent.status == works));
-    assert_eq!(host.agent("one").map(|agent| agent.status), Some(waits));
+    let listed = host.list();
+    let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one");
+    assert_eq!((one_does.map(|agent| agent.status), listed.unread), (Some(waits), 0));
 
     fs::remove_file(host.file_of(one.pid())).unwrap();
     eventually("one is gone", || host.agent("one").is_none().then_some(()));
@@ -308,7 +316,9 @@ fn the_daemon_follows_the_files_as_they_change() {
 /// folder by a session file's name, one too long to be one, or one that
 /// names no session or no directory. Its agent leaves the list, rather than
 /// stay in it as it was, and the daemon counts the file as one it cannot
-/// read, so that an empty list is not taken for no agents.
+/// read, so that an empty list is not taken for no agents. It counts it while
+/// a process runs by the file's pid, and not once that one has crashed and
+/// left the file behind.
 #[test]
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
@@ -340,6 +350,43 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let output = host.vars().command(LUNETA).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(said.contains("cannot read 6 of Claude Code's session files"), "{said}");
+
+    let left = host.file_of(newer.pid());
+    drop(newer);
+    assert!(left.exists());
+    eventually("five files are unread", || (host.list().unread == 5).then_some(()));
+}
+
+/// A file that does not read as the daemon starts is counted in its first
+/// answer, as what the daemon knows is whole before it answers anyone. Each
+/// is listed by where its process runs: in the session its environment
+/// names, which the daemon follows through a rename as it does an agent's, by
+/// when the process started, or outside zellij.
+#[test]
+fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
+    let host = Host::new();
+    let work = host.contract().join("work");
+    let _server = UnixListener::bind(&work).unwrap();
+    let (inside, outside) = (process(Some(("work", 3))), process(None));
+    for running in [&inside, &outside] {
+        let mut shape = file_for("newer", running, "busy");
+        shape["procStart"] = json!({ "ticks": started(running.pid()) });
+        host.write(running.pid(), &shape);
+    }
+    let _daemon = start(host.vars()).unwrap();
+    let listed = host.list();
+    let in_work = UnreadFile { pid: inside.pid(), zellij: Some(zellij("work", Some("work"), 3)) };
+    let mut files = vec![in_work, UnreadFile { pid: outside.pid(), zellij: None }];
+    files.sort_by_key(|file| file.pid);
+    assert_eq!((listed.unread, listed.unread_files), (2, files));
+
+    fs::rename(&work, host.contract().join("play")).unwrap();
+    let moved = eventually("the file's process is in play", || {
+        let files = host.list().unread_files;
+        let file = files.into_iter().find(|file| file.pid == inside.pid())?;
+        file.zellij.filter(|zellij| zellij.session.as_deref() == Some("play"))
+    });
+    assert_eq!(moved, zellij("work", Some("play"), 3));
 }
 
 /// A folder that never stops changing is read anyway: the daemon waits for a

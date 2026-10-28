@@ -10,13 +10,14 @@ use std::time::SystemTime;
 
 use clap::Subcommand;
 use luneta_protocol::github::{self, State};
+use luneta_protocol::unread::Unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Status, Version,
-    WatchRequest, WorkTree,
+    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Status, UnreadFile,
+    Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::folder::SOCKET;
 use prost::Message as _;
@@ -160,23 +161,23 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
 async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(ListAgentsRequest {}).await?.into_inner();
     let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (seat(agent), agent)).collect();
+        listed.agents.iter().map(|agent| (seat(agent.zellij.as_ref()), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     for (seat, agent) in rows {
         println!("{}", line(&seat, width, agent));
     }
-    if listed.unread > 0 {
-        eprintln!("luneta: {}", unread(listed.unread));
+    if let Some(count) = listed.unread_count() {
+        eprintln!("luneta: {}", unread(count));
     }
     Ok(())
 }
 
-/// Where an agent runs, as `<session>:<pane>`: `-` outside zellij. One whose
-/// session was renamed says what it was named, and one whose session the
-/// daemon cannot tell has `?` for one.
-pub fn seat(agent: &Agent) -> String {
-    match &agent.zellij {
+/// Where an agent runs in `zellij`, as `<session>:<pane>`: `-` outside
+/// zellij. One whose session was renamed says what it was named, and one whose
+/// session the daemon cannot tell has `?` for one.
+pub fn seat(zellij: Option<&Zellij>) -> String {
+    match zellij {
         None => "-".to_owned(),
         Some(zellij) => match zellij.session.as_deref() {
             None => format!("?:{} (named {})", zellij.pane, zellij.named),
@@ -208,10 +209,16 @@ pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
     format!("{seat:<width$}  {status:<7}  {:>7}  {label}", agent.pid)
 }
 
+/// The agent of a session file lunetad cannot read on a line, as `line` has
+/// an agent: by its pid alone, as what it is doing no one can tell.
+pub fn unread_line(seat: &str, width: usize, file: &UnreadFile) -> String {
+    format!("{seat:<width$}  {:<7}  {:>7}  its session file does not read", "?", file.pid)
+}
+
 /// What the CLI says of the session files lunetad cannot read, `unread` of
 /// them, whose agents it does not list.
-pub fn unread(unread: u32) -> String {
-    format!("lunetad cannot read {unread} of Claude Code's session files, and its log says which")
+pub fn unread(unread: Unread) -> String {
+    format!("{unread}, and its log says which")
 }
 
 /// A session to a line, with its panes under it, each by its tab and its id:

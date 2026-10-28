@@ -132,7 +132,11 @@ since, say an agent went busy or a pane closed, it closes nothing, prints
 what it would close now and a new plan, and exits 3 again: show the user the
 new plan and ask again. Exit 1 means something failed.
 
-- Name busy and waiting agents in the question. Their work is lost.
+- Name busy, waiting and unknown agents in the question. Their work is lost.
+  An unknown agent may be at work: luneta can't tell what it is doing. A `?`
+  line is one whose session file lunetad can't read, named by its pid.
+- If the plan says `luneta cannot tell which agents it ends`, tell the user
+  that and why, as it says: any agent could end with it.
 - "All sessions" means the running ones in `luneta sessions`. Leave out the
   session `luneta here` names unless the user says so. Killing it ends you
   too: `(this runs here)` marks your own line in the plan, and luneta closes

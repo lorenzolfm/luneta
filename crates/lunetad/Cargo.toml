@@ -44,8 +44,9 @@ prost = "0.14.4"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 # For the uid the runtime folder must belong to: std has no safe getuid. And
 # for how a terminal a command runs on takes keys, as `stty` reads it, opened
-# so that it never becomes the daemon's own.
-rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
+# so that it never becomes the daemon's own. And the ticks of a second, and
+# the time since the boot, which a process's start on Linux is counted in.
+rustix = { version = "1.1.4", features = ["fs", "param", "process", "termios", "time"] }
 # Tells luneta's terminal's reader of a resize, as crossterm's did. Already in
 # the tree by way of crossterm.
 signal-hook = "0.3.18"

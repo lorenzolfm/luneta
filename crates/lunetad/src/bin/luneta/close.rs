@@ -10,6 +10,9 @@
 //! is in goes once its client is in another, which keeps the client on
 //! screen throughout, or with luneta, where it is the only one.
 
+use std::fmt;
+
+use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 
@@ -20,10 +23,9 @@ use crate::zellij::Closes;
 /// way to one: it may be the session luneta is in, or not.
 const MOVING: &str = "menu: zellij has yet to say which session it is in; try again in a moment";
 
-/// Why the menu cannot tell which agents a delete ends, as its question says
-/// it: what lunetad said last may be out of date. It is the same each time it
-/// asks, so that `y` goes ahead with what it asked about.
-const UNTOLD: &str = "lunetad does not answer";
+/// What a delete says where luneta cannot tell which agents it ends, before
+/// why.
+const UNTOLD: &str = "luneta cannot tell which agents it ends";
 
 /// What a key of the menu's Delete group deletes: the terminal of this id,
 /// or the session.
@@ -92,6 +94,39 @@ impl From<&Agent> for Doing {
     }
 }
 
+/// Why luneta cannot tell which agents a delete ends. A question says it
+/// alike each time it asks, so that `y` goes ahead with what it asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Untold {
+    /// lunetad does not answer: what it said last of the agents may be out of
+    /// date.
+    Away,
+    /// lunetad cannot read some of Claude Code's session files, nor tell
+    /// which session the process of each runs in, so their agents may be in
+    /// any pane of any session.
+    Unplaced(Unplaced),
+}
+
+impl fmt::Display for Untold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Untold::Away => f.write_str("lunetad does not answer"),
+            Untold::Unplaced(unplaced) => unplaced.fmt(f),
+        }
+    }
+}
+
+/// What the agents of `session` among `unread` are doing, each by its pane:
+/// those of the session files lunetad cannot read, by where their processes
+/// run, as `unread_seats` gives them. What each is doing no one can tell, so
+/// each may be at work.
+pub fn unread_in<'a>(
+    unread: &'a [(&str, u32)],
+    session: &'a str,
+) -> impl Iterator<Item = (u32, Doing)> + 'a {
+    unread.iter().filter(move |(at, _)| *at == session).map(|(_, pane)| (*pane, Doing::Unknown))
+}
+
 /// What a delete is for, and what it takes along, as the sidebar knows it.
 #[derive(Debug)]
 pub struct Subject<'a> {
@@ -99,9 +134,9 @@ pub struct Subject<'a> {
     /// Where luneta's zellij is.
     pub seat: Seat,
     pub deletes: Deletes,
-    /// The agents of the session, each by its pane, or none while luneta
-    /// cannot tell them, as lunetad does not answer.
-    pub agents: Option<Vec<(u32, Doing)>>,
+    /// The agents of the session, each by its pane, or why luneta cannot
+    /// tell them.
+    pub agents: Result<Vec<(u32, Doing)>, Untold>,
     /// Where luneta's zellij goes before the session it is in is killed: the
     /// newest of the others, which the picker lists first. None for the only
     /// session, which luneta ends with.
@@ -150,7 +185,7 @@ impl Act {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Plan {
     pub act: Act,
-    ending: Option<Ending>,
+    ending: Result<Ending, Untold>,
 }
 
 /// What deleting what `subject` deletes does, or why it does nothing. The
@@ -176,7 +211,7 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
             Seat::Moving => return Err(MOVING.to_owned()),
         },
     };
-    Ok(Plan::of(act, subject.agents.as_deref()))
+    Ok(Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold)))
 }
 
 /// The agents a delete would end, by what they are doing.
@@ -232,8 +267,8 @@ impl Ending {
 
 impl Plan {
     /// What doing `act` does, and the agents it ends among `agents`, those of
-    /// its session by their panes, or none while luneta cannot tell them.
-    pub fn of(act: Act, agents: Option<&[(u32, Doing)]>) -> Self {
+    /// its session by their panes, or why luneta cannot tell them.
+    pub fn of(act: Act, agents: Result<&[(u32, Doing)], Untold>) -> Self {
         let ending = agents.map(|agents| {
             Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
         });
@@ -244,23 +279,21 @@ impl Plan {
     /// busy`. Nothing when luneta knows that no agent busy or waiting on you
     /// would end: an idle agent or a shell goes without asking, and one whose
     /// status luneta cannot read asks, as does any delete while luneta cannot
-    /// tell the agents.
+    /// tell the agents, saying why.
     pub fn question(&self) -> Option<String> {
-        let what = self.act.what();
         match self.ending {
-            Some(ending) if !ending.at_work() => None,
-            Some(ending) => Some(format!("{what}? {}", ending.says())),
-            None => Some(format!("{what}? luneta cannot tell which agents it ends: {UNTOLD}")),
+            Ok(ending) if !ending.at_work() => None,
+            Ok(_) | Err(_) => Some(format!("{}? {}", self.act.what(), self.ends())),
         }
     }
 
     /// The agents it ends, as `2 agents, 1 busy`, or that luneta cannot tell
-    /// them, whether or not the menu would ask: for the CLI, which says what
-    /// a close ends before it closes anything.
+    /// them, and why, whether or not the menu would ask: for the CLI too,
+    /// which says what a close ends before it closes anything.
     pub fn ends(&self) -> String {
         match self.ending {
-            Some(ending) => ending.says(),
-            None => "luneta cannot tell which agents it ends".to_owned(),
+            Ok(ending) => ending.says(),
+            Err(untold) => format!("{UNTOLD}: {untold}"),
         }
     }
 }
@@ -277,7 +310,7 @@ mod tests {
     }
 
     fn subject(seat: Seat, deletes: Deletes, agents: Vec<(u32, Doing)>) -> Subject<'static> {
-        let agents = Some(agents);
+        let agents = Ok(agents);
         Subject { session: "luneta", seat, deletes, agents, refuge: Some(elsewhere()) }
     }
 
