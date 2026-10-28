@@ -115,6 +115,21 @@ struct Others {
     by_zellij: bool,
 }
 
+/// Why luneta does not know the pane its client has the focus on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unplaced {
+    /// luneta has yet to follow its client to a session, or zellij has yet
+    /// to answer the look for it there.
+    Waiting,
+    /// zellij answered, and luneta cannot tell its client from the others of
+    /// the session: until the daemon lists them again, or luneta sends it to
+    /// a pane, which it is then on.
+    Unsure,
+    /// It has the focus on a plugin's pane, which zellij lists no terminal
+    /// for.
+    Plugin,
+}
+
 /// luneta's client, as it was in the session luneta sent it from to another:
 /// where it still is, if zellij does not take it.
 #[derive(Debug)]
@@ -173,6 +188,21 @@ impl OwnClient {
     /// it is on a plugin's pane.
     pub fn pane(&self) -> Option<u32> {
         self.pane
+    }
+
+    /// The session luneta's client is in and the pane it has the focus on
+    /// there, while luneta knows both: the pane's id is that session's. Or
+    /// else why luneta does not know the pane.
+    pub fn place(&self) -> Result<(&str, u32), Unplaced> {
+        let Some(session) = self.session.as_deref() else {
+            return Err(Unplaced::Waiting);
+        };
+        match (self.pane, self.id, &self.looked) {
+            (Some(pane), ..) => Ok((session, pane)),
+            (None, Some(_), _) => Err(Unplaced::Plugin),
+            (None, None, Some(_)) => Err(Unplaced::Unsure),
+            (None, None, None) => Err(Unplaced::Waiting),
+        }
     }
 
     /// luneta's client came to `session`, whose clients the daemon `listed`
@@ -525,6 +555,26 @@ mod tests {
         assert_eq!(own.went("play", Some(7), None, now), None);
         let look = own.came("play", Some(&[client(1, 2)]), now);
         assert_eq!((own.pane(), look.went), (Some(7), Some(7)));
+    }
+
+    /// luneta says why it does not know the pane its client is on: it waits
+    /// on zellij, or cannot tell its client from another that came with it
+    /// until it sends it to a pane, or the client is on a plugin's pane.
+    #[test]
+    fn luneta_says_why_it_does_not_know_the_pane() {
+        let now = Instant::now();
+        let mut own = OwnClient::default();
+        assert_eq!(own.place(), Err(Unplaced::Waiting));
+        let look = own.came("work", None, now);
+        assert_eq!(own.place(), Err(Unplaced::Waiting));
+        own.looked(answer(&look, &[client(1, 3), client(2, 4)]), None, now);
+        assert_eq!(own.place(), Err(Unplaced::Unsure));
+        let went = own.went("work", Some(4), None, now).unwrap();
+        assert_eq!(own.place(), Ok(("work", 4)));
+        own.looked(answer(&went, &[client(1, 3), client(2, 4)]), None, now);
+        assert_eq!(own.place(), Ok(("work", 4)));
+        own.heard(Some(&[client(1, 3), Client { id: 2, pane: None }]), now + TRUSTED);
+        assert_eq!(own.place(), Err(Unplaced::Plugin));
     }
 
     /// luneta knows its client among two, and sends it to another session,

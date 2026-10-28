@@ -25,7 +25,7 @@ use lunetad::program::{self, Ran};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use serde_json::Value;
 
 use crate::gruvbox;
@@ -794,22 +794,7 @@ pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &
     let x = over.x + (over.width - width) / 2;
     let y = over.y + (over.height - height) / 2;
     let area = Rect::new(x, y, width, height);
-    let dim = Style::new().add_modifier(Modifier::DIM);
-    let plain = Style::reset().fg(gruvbox::FG1);
-    for row in area.rows() {
-        buffer.set_string(row.x, row.y, " ".repeat(usize::from(row.width)), plain);
-    }
-    let mut top = vec![Span::styled("┌", dim)];
-    top.extend(menu::rule(title, right, inner).spans);
-    top.push(Span::styled("┐", dim));
-    buffer.set_line(area.x, area.y, &Line::from(top), area.width);
-    let last = area.bottom() - 1;
-    for (line, y) in lines.iter().zip(area.y + 1..last) {
-        buffer.set_string(area.x, y, "│", dim);
-        buffer.set_line(area.x + 1, y, line, area.width - 2);
-        buffer.set_string(area.right() - 1, y, "│", dim);
-    }
-    buffer.set_string(area.x, last, format!("└{}┘", "─".repeat(inner)), dim);
+    menu::boxed(buffer, area, &menu::rule(title, right, inner), lines);
 }
 
 /// `text` on lines `width` wide, a space in from the edge: each of its lines
