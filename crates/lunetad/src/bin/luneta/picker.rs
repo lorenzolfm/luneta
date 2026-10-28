@@ -260,11 +260,14 @@ struct Rows {
 
 impl Rows {
     /// `rows` in the place of these, the highlight on the row of `held`
-    /// where one is, or else on the row `start`, or the last.
+    /// where one is; or else, where that row went, on the row that took its
+    /// place, as the one after a row deleted; or else on the row `start`. No
+    /// further than the last.
     fn replace(&mut self, rows: Vec<Row>, held: Option<&Key>, start: usize) {
         let at = held.and_then(|held| rows.iter().position(|row| row.key == *held));
+        let was = self.at.filter(|_| held.is_some()).unwrap_or(start);
         let last = rows.len().checked_sub(1);
-        self.at = at.or_else(|| last.map(|last| start.min(last)));
+        self.at = at.or_else(|| last.map(|last| was.min(last)));
         self.rows = rows;
     }
 
@@ -548,8 +551,6 @@ impl Picker {
             self.stage = Stage::Asking { target, plan, asks };
             return Picked::Nothing;
         }
-        self.term.clear();
-        self.rebuild(true);
         Picked::Delete(plan.act)
     }
 
@@ -679,12 +680,13 @@ impl Picker {
     }
 
     /// What `Enter` does: takes zellij to the row highlighted, or makes the
-    /// session typed, where no row is highlighted.
+    /// session typed, where no session is highlighted. Where no agent is, it
+    /// does nothing: what is typed there names none.
     fn enter(&mut self) -> Picked {
         let Some(row) = self.rows().selected() else {
             return match self.new_name() {
-                Ok(Some(name)) => Picked::Start(name),
-                Ok(None) | Err(_) => Picked::Nothing,
+                Ok(Some(name)) if self.list == List::Sessions => Picked::Start(name),
+                Ok(_) | Err(_) => Picked::Nothing,
             };
         };
         match &row.key {
@@ -708,7 +710,9 @@ impl Picker {
 
     /// What `Del` does: plans killing the session highlighted, or closing the
     /// pane of the agent highlighted, or lets go of the session highlighted
-    /// that ended.
+    /// that ended. What is typed stays, and the highlight goes on to the row
+    /// after once the row goes: `Del` again deletes the row it shows, not
+    /// one off the top of the list.
     fn delete(&mut self) -> Picked {
         let Some(key) = self.rows().selected().map(|row| row.key.clone()) else {
             return Picked::Nothing;
@@ -717,8 +721,7 @@ impl Picker {
             Key::Exited(session) => {
                 self.forget_exited(&session);
                 self.asking.push(Ask::Delete(session));
-                self.term.clear();
-                self.rebuild(true);
+                self.rebuild(false);
                 Picked::Nothing
             },
             target => self.plan(target, None),
@@ -823,8 +826,9 @@ impl Picker {
     }
 
     /// Builds both lists again, of what is typed: the highlight on the row
-    /// it was on, or else, `snap`, as what is typed changed, on the best
-    /// match, or the first session after yours.
+    /// it was on, or the one that took its place where that went; or else,
+    /// `snap`, as what is typed changed, on the best match, or the first
+    /// session after yours.
     fn rebuild(&mut self, snap: bool) {
         let matcher = SkimMatcherV2::default();
         let here = self.listing.here.clone();
@@ -1555,7 +1559,7 @@ mod tests {
 
     /// What is typed narrows the list, a name that is what is typed first,
     /// and `Enter` makes a session of a name no row has, but of one zellij
-    /// refuses, or of yours.
+    /// refuses, or of yours, or on the agents.
     #[test]
     fn what_is_typed_narrows_the_list_and_enter_makes_a_session_no_row_has() {
         let listing = Listing {
@@ -1574,6 +1578,9 @@ mod tests {
         assert_eq!(list(&picker).0, [r#"no match for "luneta-new""#]);
         let new = SessionName::parse("luneta-new").unwrap();
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(new));
+        press(&mut picker, KeyCode::Tab);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        press(&mut picker, KeyCode::Tab);
         for (term, why) in [("a/b", "name cannot contain '/'"), ("elo", "you are in it")] {
             for _ in 0..20 {
                 press(&mut picker, KeyCode::Backspace);
@@ -1646,19 +1653,31 @@ mod tests {
 
     /// `Del` on a session that ended lets go of it at once, as nothing runs
     /// in it to end, and asks zellij again for those it keeps once it did.
+    /// The highlight goes on to the row after, and what is typed stays, so
+    /// that `Del` again deletes no row off the top of the list.
     #[test]
     fn del_lets_go_of_a_session_that_ended_at_once() {
         let mut picker = three();
         picker.asks();
-        typed(&mut picker, "y");
+        press(&mut picker, KeyCode::Down);
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(lit(&picker), "y");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert_eq!(picker.asks(), vec![Ask::Delete(SessionName::running("y").unwrap())]);
         assert!(!names(&picker).contains(&"y".to_owned()));
+        assert_eq!(lit(&picker), "x");
         let session = SessionName::running("y").unwrap();
         picker.heard(Heard::Deleted { session, deleted: Err("zellij: no".to_owned()) });
         assert_eq!(picker.asks(), vec![Ask::Exited]);
         let (lines, _) = list(&picker);
         assert!(lines.iter().any(|line| line.contains("y stays: zellij: no")), "{lines:?}");
+
+        typed(&mut picker, "x");
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        assert_eq!(picker.asks(), vec![Ask::Delete(SessionName::running("x").unwrap())]);
+        assert_eq!(list(&picker).0, [r#"no match for "x""#]);
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        assert!(picker.asks().is_empty());
     }
 
     /// `Ctrl r` renames the session highlighted, yours or another, to a name

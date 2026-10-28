@@ -638,7 +638,7 @@ pub fn open(menu: u64, open: Open, events: &Sender<Event>) {
 }
 
 /// How long zellij has to open a pane or a tab, or to list a session's
-/// panes: a server that runs answers at once.
+/// panes, or the sessions: a server that runs answers at once.
 const ANSWER: Duration = Duration::from_secs(2);
 
 /// Opens `open`, and says which terminal it opened. zellij opens a pane
@@ -871,20 +871,20 @@ pub struct Exited {
 }
 
 /// The sessions zellij keeps to bring back, as `list-sessions` lists them
-/// now, or why it did not list them.
+/// now, or why it did not list them, as in time: zellij's CLI waits on every
+/// session's server, and one that hangs would hold it up for good.
 pub fn exited() -> Result<Vec<Exited>, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
     command.args(["list-sessions", "--no-formatting"]);
-    let ran = command.output().map_err(|error| unrun(&error))?;
-    if !ran.status.success() {
-        return if String::from_utf8_lossy(&ran.stderr).contains(NO_SESSIONS) {
-            Ok(Vec::new())
-        } else {
-            Err(failure(&ran))
-        };
+    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
+    if let program::Ran::Ended { stderr, .. } = &ran
+        && String::from_utf8_lossy(stderr).contains(NO_SESSIONS)
+    {
+        return Ok(Vec::new());
     }
-    Ok(exited_in(&String::from_utf8_lossy(&ran.stdout)))
+    let listed = ran.answer().map_err(|why| format!("zellij: {why}"))?;
+    Ok(exited_in(&String::from_utf8_lossy(&listed)))
 }
 
 /// The sessions that ended among those `listed` lists, a line each, as

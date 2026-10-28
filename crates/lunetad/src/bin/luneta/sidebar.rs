@@ -1093,6 +1093,8 @@ impl Sidebar {
             return listing;
         };
         let seated = seated(&host.agents, &host.sessions);
+        let here_key =
+            listing.here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
         let (sessions, _) = oldest_first(&host.sessions);
         for (listed, session) in sessions.into_iter().rev() {
             let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
@@ -1102,14 +1104,15 @@ impl Sidebar {
                 let Some(agent) = seated.get(&(session.name.as_str(), pane.id)) else {
                     continue;
                 };
-                let mark = Mark::of(agent);
-                waiting += usize::from(mark == Mark::Waiting);
+                let key = listed.key(pane.id);
+                let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
+                waiting += usize::from(marked.mark == Mark::Waiting);
                 listing.agents.push(Seated {
                     place: Place::Pane { session: listed.clone(), pane: pane.id },
                     label: label(Some(agent), pane),
-                    mark,
+                    mark: marked.mark,
                     status: status_word(agent),
-                    since: agent.status_since.and_then(|at| at.try_into().ok()),
+                    since: marked.since,
                     cwd: pane.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
                 });
             }
@@ -1217,13 +1220,9 @@ impl Sidebar {
                 let here = here_key == Some(key);
                 let unread = self.news.is_unread(key);
                 if let Some(agent) = agent(pane.id) {
-                    let mut agent = Marked::of(agent);
-                    let done = agent.since.filter(|_| agent.mark == Mark::Idle);
+                    let (agent, done) = agent_marked(&self.news, agent, key, here);
                     if let Some(done) = done {
                         finished.insert(key, done);
-                    }
-                    if !here && self.news.is_new(key, done) {
-                        agent.mark = Mark::Finished;
                     }
                     by_pane.push(Shows { marked: Some(agent), ran: None, unread });
                     continue;
@@ -2723,6 +2722,19 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     }
 }
 
+/// The mark of `agent`, in the pane of `key`, as its row shows it, and when
+/// it finished, where it is done: what it is doing, or that it finished since
+/// you were last in its pane, but in the pane luneta's zellij is on, `here`,
+/// where you see it.
+fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Option<SystemTime>) {
+    let mut marked = Marked::of(agent);
+    let done = marked.since.filter(|_| marked.mark == Mark::Idle);
+    if !here && news.is_new(key, done) {
+        marked.mark = Mark::Finished;
+    }
+    (marked, done)
+}
+
 /// What an agent is doing, in the word Claude Code says it in, for the brief.
 fn status_word(agent: &Agent) -> String {
     match &agent.status {
@@ -4204,9 +4216,9 @@ mod tests {
     /// luneta's zellij stays on their panes for a second, a folded session
     /// the dot of one of its panes, and the rule along the top counts them.
     /// Seen, the agent's `✓` is dimmed, and the command's row goes back to
-    /// its shell. On the pane luneta's zellij is on,
-    /// an end is no news: you see it. A pane it only passed through keeps the
-    /// dot.
+    /// its shell; the picker marks the agent as its row does. On the pane
+    /// luneta's zellij is on, an end is no news: you see it. A pane it only
+    /// passed through keeps the dot.
     #[test]
     fn what_finished_has_the_dot_until_you_stay_in_its_pane() {
         let mut sidebar = Sidebar::default();
@@ -4240,6 +4252,7 @@ mod tests {
             ]
         );
         assert!(!dimmed(&mut sidebar, 3, 4, moment(160_000)));
+        assert_eq!(sidebar.listing().agents[0].mark, Mark::Finished);
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         assert!(lines(&mut sidebar, moment(160_000))[3].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
@@ -4263,6 +4276,7 @@ mod tests {
             ]
         );
         assert!(dimmed(&mut sidebar, 3, 4, moment(162_000)));
+        assert_eq!(sidebar.listing().agents[0].mark, Mark::Idle);
 
         sidebar.went(&s(2));
         lines(&mut sidebar, moment(163_000));

@@ -312,6 +312,14 @@ impl Client {
         let coming = Some(Coming::Held(Waiting { input: Vec::new(), arrival, until }));
         Ok(Client { hosted, exited: None, coming, making: None })
     }
+
+    /// Whether it may be on its way into a server zellij makes, which has yet
+    /// to take it, its first client: as it starts, or goes to a session
+    /// zellij makes. A zellij call then kills that server, as every one asks
+    /// every session's server how it is.
+    fn arriving(&self) -> bool {
+        self.coming.is_some() || self.making.is_some()
+    }
 }
 
 /// luneta's queue of events, with what came on it as luneta waited for its
@@ -758,8 +766,12 @@ impl App {
         self.ask_zellij();
     }
 
-    /// Asks zellij what the picker has yet to ask, while it is open.
+    /// Asks zellij what the picker has yet to ask, while it is open, once
+    /// zellij's client is in: until then, what it asks waits.
     fn ask_zellij(&mut self) {
+        if self.client.arriving() {
+            return;
+        }
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
             let number = picker.number();
             for ask in picker.asks() {

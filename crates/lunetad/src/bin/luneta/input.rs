@@ -8,8 +8,10 @@
 //! and the sidebar take, after its parser, `src/event/sys/unix/parse.rs`. What
 //! differs: an `ESC ]` that goes on as a colour is that colour's answer, not
 //! `Alt ]` and keys; an `ESC [ ?` that is no answer luneta knows goes whole,
-//! and does not take the keys after it with it; and an introducer that comes
-//! last of what was read is the key it is, with `Alt`, as `Esc` alone is `Esc`.
+//! and does not take the keys after it with it; an introducer that comes last
+//! of what was read is the key it is, with `Alt`, as `Esc` alone is `Esc`; and
+//! a line feed in the first read is `Enter`, as typed before luneta took the
+//! terminal raw.
 
 use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _};
@@ -133,13 +135,31 @@ enum Parsed {
 struct Parser {
     /// The bytes of what is yet to be read whole.
     pending: Vec<u8>,
+    /// Whether it has read the terminal yet.
+    read: bool,
 }
 
 impl Parser {
-    /// Reads `bytes`, as they came, and hands each thing they say to `sent`.
-    /// `more` is whether more came with them, which tells an `Esc` key from
-    /// the start of what follows it.
+    /// Reads `bytes`, a read of the terminal as it came, and hands each thing
+    /// they say to `sent`. `more` is whether more came with them, which tells
+    /// an `Esc` key from the start of what follows it.
+    ///
+    /// The first read holds what was typed before luneta took the terminal
+    /// raw, which the terminal held as lines, each `Enter` turned to a line
+    /// feed (`ICRNL`): an `Enter` still, not the `Ctrl j` a line feed is
+    /// after, which would open the picker.
     fn advance(&mut self, bytes: &[u8], more: bool, sent: &mut impl FnMut(Sent)) {
+        if std::mem::replace(&mut self.read, true) {
+            self.take(bytes, more, sent);
+            return;
+        }
+        let typed: Vec<u8> =
+            bytes.iter().map(|&byte| if byte == b'\n' { b'\r' } else { byte }).collect();
+        self.take(&typed, more, sent);
+    }
+
+    /// Reads `bytes`, as `advance` does, as they are.
+    fn take(&mut self, bytes: &[u8], more: bool, sent: &mut impl FnMut(Sent)) {
         for (index, &byte) in bytes.iter().enumerate() {
             self.push(byte, more || index + 1 < bytes.len(), sent);
         }
@@ -160,7 +180,7 @@ impl Parser {
                 sent(said);
                 // The rest is read again, as it came: the last of it is the
                 // byte just read.
-                self.advance(&rest, more, sent);
+                self.take(&rest, more, sent);
             },
         }
     }
@@ -665,6 +685,16 @@ mod tests {
             Sent::Answer(Answer::Background(background)),
             typed('x'),
         ]);
+    }
+
+    /// What was typed before luneta took the terminal raw comes in the first
+    /// read, each `Enter` of it a line feed: an `Enter` still. A line feed
+    /// read after it is `Ctrl j`.
+    #[test]
+    fn an_enter_typed_before_luneta_took_the_terminal_raw_is_an_enter() {
+        let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
+        let control_j = pressed(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(sent(&[b"ls\n", b"\n"]), [typed('l'), typed('s'), enter, control_j]);
     }
 
     /// An answer can come in two reads, as over a slow link.
