@@ -264,17 +264,33 @@ impl Drop for Hosted {
 /// Draws `screen` into `area` of `buffer`, and says where its cursor is on
 /// it, if it shows.
 fn paint<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect) -> Option<Position> {
+    show(screen, buffer, area, 0);
+    let cursor = screen.renderable_content().cursor;
+    if cursor.shape == CursorShape::Hidden {
+        return None;
+    }
+    within(area, cursor.point.line.0, cursor.point.column.0)
+}
+
+/// The cell of `area` at `line` and `column` of a screen drawn into it from
+/// its top left, if `area` holds it.
+fn within(area: Rect, line: i32, column: usize) -> Option<Position> {
+    let row = u16::try_from(line).ok().filter(|row| *row < area.height)?;
+    let column = u16::try_from(column).ok().filter(|column| *column < area.width)?;
+    Some(Position::new(area.x + column, area.y + row))
+}
+
+/// Draws the lines of `screen` from its line `top` on into `area` of
+/// `buffer`, as many of them, and as much of each, as `area` holds.
+pub fn show<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect, top: usize) {
     let content = screen.renderable_content();
     // luneta never scrolls the screen back, and keeps no scrollback for it to
     // go back into, as zellij keeps each pane's: its lines count from 0.
     assert_eq!(content.display_offset, 0);
-    let at = |line: i32, column: usize| {
-        let row = u16::try_from(line).ok().filter(|row| *row < area.height)?;
-        let column = u16::try_from(column).ok().filter(|column| *column < area.width)?;
-        Some(Position::new(area.x + column, area.y + row))
-    };
+    let top = i32::try_from(top).unwrap_or(i32::MAX);
     for indexed in content.display_iter {
-        let Some(position) = at(indexed.point.line.0, indexed.point.column.0) else {
+        let line = indexed.point.line.0.saturating_sub(top);
+        let Some(position) = within(area, line, indexed.point.column.0) else {
             continue;
         };
         let Some(drawn) = buffer.cell_mut(position) else {
@@ -292,10 +308,6 @@ fn paint<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect) ->
         drawn.set_symbol(&symbol);
         drawn.set_style(style(cell.fg, cell.bg, cell.flags, cell.underline_color()));
     }
-    if content.cursor.shape == CursorShape::Hidden {
-        return None;
-    }
-    at(content.cursor.point.line.0, content.cursor.point.column.0)
 }
 
 /// What `screen` shows, as text: each of its lines, less the blanks it ends

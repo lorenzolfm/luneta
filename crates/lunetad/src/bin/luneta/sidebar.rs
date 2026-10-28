@@ -49,6 +49,7 @@ use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
 use crate::news::News;
 use crate::order::Order;
 use crate::own::{Look, Looked, OwnClient, Unplaced};
+use crate::picker::{Listing, Live, Seated, Shown};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
 
@@ -231,7 +232,7 @@ impl Place {
 /// What goes on in a pane, as its row marks it: what its agent is doing, or
 /// the command its shell runs, or ran last.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Mark {
+pub enum Mark {
     /// An agent that waits for you, or a command that waits for you to type.
     Waiting,
     /// An agent done, which you have seen since it finished, or see: it is
@@ -280,7 +281,7 @@ impl Mark {
     }
 
     /// Its glyph, which the spinner shows at `frame`, and its style.
-    fn glyph(&self, frame: usize) -> (String, Style) {
+    pub fn glyph(&self, frame: usize) -> (String, Style) {
         let style = Style::new();
         match self {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
@@ -1075,6 +1076,68 @@ impl Sidebar {
         }
     }
 
+    /// What the picker lists, as the sidebar knows the host now: every
+    /// session newest first, each with its panes in the order of their tabs,
+    /// and the agents in them, those of the session luneta's zellij is in
+    /// first, then those of the others newest first, each session's in the
+    /// order their panes opened.
+    pub fn listing(&self) -> Listing {
+        let here = self.here().map(str::to_owned);
+        let mut listing = Listing {
+            here_pane: self.here_place().ok(),
+            away: self.away.clone(),
+            ..Listing::default()
+        };
+        let Some(host) = &self.host else {
+            listing.here = here;
+            return listing;
+        };
+        let seated = seated(&host.agents, &host.sessions);
+        let here_key =
+            listing.here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
+        let (sessions, _) = oldest_first(&host.sessions);
+        for (listed, session) in sessions.into_iter().rev() {
+            let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
+            panes.sort_by_key(|pane| pane.id);
+            let mut waiting = 0;
+            for pane in &panes {
+                let Some(agent) = seated.get(&(session.name.as_str(), pane.id)) else {
+                    continue;
+                };
+                let key = listed.key(pane.id);
+                let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
+                waiting += usize::from(marked.mark == Mark::Waiting);
+                listing.agents.push(Seated {
+                    place: Place::Pane { session: listed.clone(), pane: pane.id },
+                    label: label(Some(agent), pane),
+                    mark: marked.mark,
+                    status: status_word(agent),
+                    since: marked.since,
+                    cwd: pane.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
+                });
+            }
+            panes.sort_by_key(|pane| (pane.tab, pane.id));
+            let shown = |pane: &&Pane| Shown {
+                id: pane.id,
+                tab: pane.tab_name.clone(),
+                label: label(seated.get(&(session.name.as_str(), pane.id)).copied(), pane),
+            };
+            let mut clients = session.clients.iter().flat_map(|clients| &clients.clients);
+            listing.sessions.push(Live {
+                started: listed.kept.started(),
+                panes: panes.iter().map(shown).collect(),
+                on: clients.find_map(|client| client.pane),
+                waiting,
+                place: Place::Session(listed),
+            });
+        }
+        // Those of the session luneta's zellij is in first, and the rest as
+        // they are.
+        listing.agents.sort_by_key(|seated| here.as_deref() != Some(seated.place.session()));
+        listing.here = here;
+        listing
+    }
+
     pub fn notify(&mut self, notice: String) {
         self.notice = Some(notice);
     }
@@ -1157,13 +1220,9 @@ impl Sidebar {
                 let here = here_key == Some(key);
                 let unread = self.news.is_unread(key);
                 if let Some(agent) = agent(pane.id) {
-                    let mut agent = Marked::of(agent);
-                    let done = agent.since.filter(|_| agent.mark == Mark::Idle);
+                    let (agent, done) = agent_marked(&self.news, agent, key, here);
                     if let Some(done) = done {
                         finished.insert(key, done);
-                    }
-                    if !here && self.news.is_new(key, done) {
-                        agent.mark = Mark::Finished;
                     }
                     by_pane.push(Shows { marked: Some(agent), ran: None, unread });
                     continue;
@@ -1729,7 +1788,7 @@ impl Sidebar {
             },
             Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
             Wants::Plan(Scope::Session) => {
-                let plan = close::plan(&self.subject(&target, Deletes::Session));
+                let plan = self.plan(target.place.session(), Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -1744,10 +1803,15 @@ impl Sidebar {
         self.menu_did(menu.planned(plan))
     }
 
-    /// What the delete is for, as the sidebar knows it: the menu's row, in
-    /// its session, where luneta's zellij is, and what it `deletes`.
-    fn subject<'a>(&'a self, target: &'a Target, deletes: Deletes) -> Subject<'a> {
-        let session = target.place.session();
+    /// What deleting what `deletes` deletes of `session` does, as the
+    /// sidebar knows the host now: for the menu, and for the picker.
+    pub fn plan(&self, session: &str, deletes: Deletes) -> Result<Plan, String> {
+        close::plan(&self.subject(session, deletes))
+    }
+
+    /// What the delete is for, as the sidebar knows it: `session`, where
+    /// luneta's zellij is, and what it `deletes`.
+    fn subject<'a>(&'a self, session: &'a str, deletes: Deletes) -> Subject<'a> {
         let seat = match (self.going(), self.here()) {
             (None, Some(here)) if here == session => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
@@ -1906,7 +1970,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let plan = match closes {
-            Ok(closes) => close::plan(&self.subject(&target, Deletes::Pane { pane, closes })),
+            Ok(closes) => self.plan(target.place.session(), Deletes::Pane { pane, closes }),
             Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
@@ -2658,6 +2722,19 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     }
 }
 
+/// The mark of `agent`, in the pane of `key`, as its row shows it, and when
+/// it finished, where it is done: what it is doing, or that it finished since
+/// you were last in its pane, but in the pane luneta's zellij is on, `here`,
+/// where you see it.
+fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Option<SystemTime>) {
+    let mut marked = Marked::of(agent);
+    let done = marked.since.filter(|_| marked.mark == Mark::Idle);
+    if !here && news.is_new(key, done) {
+        marked.mark = Mark::Finished;
+    }
+    (marked, done)
+}
+
 /// What an agent is doing, in the word Claude Code says it in, for the brief.
 fn status_word(agent: &Agent) -> String {
     match &agent.status {
@@ -2794,7 +2871,7 @@ pub fn age(since: SystemTime, now: SystemTime) -> String {
 
 /// The frame the spinner shows at `now`: the same on every row, and the next
 /// one each `SPIN`.
-fn frame(now: SystemTime) -> usize {
+pub fn frame(now: SystemTime) -> usize {
     let since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let turns = since.as_millis() / SPIN.as_millis();
     let frames = u128::try_from(SPINNER.len()).expect("a spinner of ten frames");
@@ -4139,9 +4216,9 @@ mod tests {
     /// luneta's zellij stays on their panes for a second, a folded session
     /// the dot of one of its panes, and the rule along the top counts them.
     /// Seen, the agent's `✓` is dimmed, and the command's row goes back to
-    /// its shell. On the pane luneta's zellij is on,
-    /// an end is no news: you see it. A pane it only passed through keeps the
-    /// dot.
+    /// its shell; the picker marks the agent as its row does. On the pane
+    /// luneta's zellij is on, an end is no news: you see it. A pane it only
+    /// passed through keeps the dot.
     #[test]
     fn what_finished_has_the_dot_until_you_stay_in_its_pane() {
         let mut sidebar = Sidebar::default();
@@ -4175,6 +4252,7 @@ mod tests {
             ]
         );
         assert!(!dimmed(&mut sidebar, 3, 4, moment(160_000)));
+        assert_eq!(sidebar.listing().agents[0].mark, Mark::Finished);
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         assert!(lines(&mut sidebar, moment(160_000))[3].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
@@ -4198,6 +4276,7 @@ mod tests {
             ]
         );
         assert!(dimmed(&mut sidebar, 3, 4, moment(162_000)));
+        assert_eq!(sidebar.listing().agents[0].mark, Mark::Idle);
 
         sidebar.went(&s(2));
         lines(&mut sidebar, moment(163_000));
