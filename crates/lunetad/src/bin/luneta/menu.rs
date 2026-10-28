@@ -4,13 +4,14 @@
 //!
 //! Its keys are luneta's own. `/` searches every skill the directory of the
 //! row's pane can run, for an agent to start on the one you pick, beside that
-//! pane. `n` opens the New group: your shell beside the pane, a tab of its
-//! session, or a session, in the directory it works in. `d` opens the Delete
-//! group, which closes the pane or kills its session, and asks first when
-//! that would end an agent at work. `b` opens the Brief group, which briefs
-//! you on every session, the row's session, or the agent in its pane. The
-//! plugin's menu takes keys of yours besides, from its configuration, which
-//! luneta has none of yet.
+//! pane. `c` opens the Claude group, a key for each of a few skills, which
+//! starts an agent on it there. `n` opens the New group: your shell beside the
+//! pane, a tab of its session, or a session, in the directory it works in. `d`
+//! opens the Delete group, which closes the pane or kills its session, and
+//! asks first when that would end an agent at work. `b` opens the Brief group,
+//! which briefs you on every session, the row's session, or the agent in its
+//! pane. The plugin's menu reads its keys for skills from its configuration;
+//! luneta has none, and the Claude group's are its own.
 //!
 //! At the top of the sidebar, a key the sidebar has no use of its own for
 //! opens the menu on the group it opens, and `m` opens it on its first group,
@@ -32,6 +33,17 @@ use crate::skills::{Search, Skills};
 /// what the menu says it does.
 const SEARCH: char = '/';
 const SEARCH_DOES: &str = "Search skills";
+
+/// The key of the Claude group, its name, and its keys, each with the skill
+/// it starts an agent on: the skills the plugin's menu has keys for in the
+/// author's configuration. luneta has no configuration to read yours from.
+const SKILLS: char = 'c';
+const SKILLS_NAME: &str = "Claude";
+const SKILL_KEYS: [(char, &str); 3] = [
+    ('t', "/thermo-nuclear-review"),
+    ('m', "/make-illegal-states-unrepresentable"),
+    ('s', "/tigerstyle"),
+];
 
 /// The key of luneta's own New group, and its name.
 const NEW: char = 'n';
@@ -165,15 +177,15 @@ impl Top {
     }
 }
 
-/// No command takes the key of luneta's New, Delete or Brief group, which
-/// would be out of reach at the top of the sidebar, and gone from the legend;
-/// nor a key the sidebar moves, folds or opens the menu with, which `Top::of`
-/// finds first.
+/// No command takes the key of luneta's Claude, New, Delete or Brief group,
+/// which would be out of reach at the top of the sidebar, and gone from the
+/// legend; nor a key the sidebar moves, folds or opens the menu with, which
+/// `Top::of` finds first.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
         let key = Command::ALL[at].key();
-        let group = key == NEW || key == DELETE || key == BRIEF;
+        let group = key == SKILLS || key == NEW || key == DELETE || key == BRIEF;
         assert!(!group, "a command on a key of luneta's groups");
         assert!(Top::moves(key).is_none(), "a command on a key the sidebar moves with");
         at += 1;
@@ -218,6 +230,8 @@ enum Entry {
     /// A key that opens a group, the name the menu shows for it, and the keys
     /// in it.
     Group { key: char, name: &'static str, entries: Vec<Entry> },
+    /// A key of the Claude group: starts an agent on the prompt, a skill.
+    Start { key: char, prompt: &'static str },
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
     /// A key of the Delete group: closes the pane the menu is for, or kills
@@ -236,7 +250,7 @@ enum Entry {
 impl Entry {
     fn key(&self) -> char {
         match self {
-            Entry::Group { key, .. } | Entry::Close { key, .. } => *key,
+            Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
             Entry::New(new) => new.key(),
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
@@ -278,13 +292,20 @@ struct Keys {
 
 impl Keys {
     /// The menu's keys: `/`, which opens the search over the skills, and the
-    /// New, Delete and Brief groups: `n p`, `n t` and `n s` open a pane, a
-    /// tab and a session, `d d` deletes what the menu is for, as `row` says,
-    /// and `d s` kills its session, and `b z`, `b s` and `b h` brief you on
-    /// every session, its session and what the menu is for.
+    /// Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
+    /// agent on a skill, `n p`, `n t` and `n s` open a pane, a tab and a
+    /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
+    /// kills its session, and `b z`, `b s` and `b h` brief you on every
+    /// session, its session and what the menu is for.
     fn new(row: Scope) -> Self {
+        let start = |(key, prompt)| Entry::Start { key, prompt };
         let root = vec![
             Entry::Search,
+            Entry::Group {
+                key: SKILLS,
+                name: SKILLS_NAME,
+                entries: SKILL_KEYS.into_iter().map(start).collect(),
+            },
             Entry::Group {
                 key: NEW,
                 name: NEW_NAME,
@@ -371,6 +392,7 @@ impl Keys {
             return Pressed::Nothing;
         };
         match &entries[at] {
+            Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
             Entry::Brief(scope) => return Pressed::Brief(*scope),
@@ -900,6 +922,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(GROUP, Style::new().fg(TAG)));
         },
+        Entry::Start { prompt, .. } => spans.push(does(prompt)),
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
         Entry::Brief(scope) => spans.push(does(scope.does())),
@@ -1103,6 +1126,7 @@ mod tests {
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
+                " c  Claude ▸",
                 " n  New ▸",
                 " d  Delete ▸",
                 " b  Brief ▸",
@@ -1126,6 +1150,7 @@ mod tests {
                 " /  Search",
                 " u  Unread",
                 " v  Reorder",
+                " c  Claude ▸",
                 " n  New ▸",
                 " d  Delete ▸",
                 " b  Brief ▸",
@@ -1136,9 +1161,35 @@ mod tests {
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
+        assert_eq!(Top::of('c'), None);
         assert_eq!(Top::of('n'), None);
         assert_eq!(Top::of('d'), None);
         assert_eq!(Top::of('b'), None);
+    }
+
+    /// `c` opens the Claude group, and a key in it starts an agent on its
+    /// skill beside the row's pane, in its directory, named for the skill
+    /// and the branch, as the search's `Enter` does.
+    #[test]
+    fn a_key_of_the_claude_group_starts_an_agent_on_its_skill() {
+        let (menu, wants) = stays(opened(pane_row(), Some('c')));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ Claude ──────── luneta/main ─",
+                " t  /thermo-nuclear-review",
+                " m  /make-illegal-states-unrep…",
+                " s  /tigerstyle",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        let (menu, wants) = stays(menu.key(&char('t')));
+        let named = "thermo-nuclear-review: feat/menu";
+        let command = ["claude", "--name", named, "/thermo-nuclear-review"].map(str::to_owned);
+        let opens = Opens::Pane { beside: 4, command: command.to_vec() };
+        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
+        assert!(menu.opening());
     }
 
     /// `b` opens the Brief group, on any row, and a key in it closes the menu
