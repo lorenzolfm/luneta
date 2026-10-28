@@ -1234,7 +1234,7 @@ mod tests {
             session: "luneta",
             seat: Seat::Elsewhere,
             deletes: Deletes::Pane { pane: 4, closes },
-            agents: Some(agents),
+            agents: Ok(agents),
             refuge: None,
         };
         close::plan(&subject)
@@ -1308,7 +1308,7 @@ mod tests {
             session: "luneta",
             seat: Seat::In,
             deletes: Deletes::Session,
-            agents: Some(Vec::new()),
+            agents: Ok(Vec::new()),
             refuge: Some(elo.clone()),
         };
         let (menu, wants) = stays(menu.planned(close::plan(&subject)));

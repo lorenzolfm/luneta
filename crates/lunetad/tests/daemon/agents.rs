@@ -73,7 +73,7 @@ impl Host {
     }
 
     /// What the daemon answers.
-    fn list(&self) -> ListAgentsResponse {
+    pub fn list(&self) -> ListAgentsResponse {
         let folder =
             crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -308,7 +308,9 @@ fn the_daemon_follows_the_files_as_they_change() {
 /// folder by a session file's name, one too long to be one, or one that
 /// names no session or no directory. Its agent leaves the list, rather than
 /// stay in it as it was, and the daemon counts the file as one it cannot
-/// read, so that an empty list is not taken for no agents.
+/// read, so that an empty list is not taken for no agents. It counts it while
+/// a process runs by the file's pid, and not once that one has crashed and
+/// left the file behind.
 #[test]
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
@@ -340,6 +342,11 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let output = host.vars().command(LUNETA).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(said.contains("cannot read 6 of Claude Code's session files"), "{said}");
+
+    let left = host.file_of(newer.pid());
+    drop(newer);
+    assert!(left.exists());
+    eventually("five files are unread", || (host.list().unread == 5).then_some(()));
 }
 
 /// A folder that never stops changing is read anyway: the daemon waits for a

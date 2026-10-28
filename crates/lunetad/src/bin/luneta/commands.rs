@@ -4,6 +4,7 @@
 use std::error::Error;
 use std::future::Future;
 use std::io::Write as _;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::SystemTime;
@@ -22,6 +23,7 @@ use lunetad::folder::SOCKET;
 use prost::Message as _;
 use tonic::transport::Channel;
 
+use crate::close::Untold;
 use crate::daemon::{self, Reach};
 use crate::drive::{self, Address, Agreed, Opening};
 
@@ -166,8 +168,8 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
     for (seat, agent) in rows {
         println!("{}", line(&seat, width, agent));
     }
-    if listed.unread > 0 {
-        eprintln!("luneta: {}", unread(listed.unread));
+    if let Some(count) = NonZeroU32::new(listed.unread) {
+        eprintln!("luneta: {}", unread(count));
     }
     Ok(())
 }
@@ -210,8 +212,8 @@ pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
 
 /// What the CLI says of the session files lunetad cannot read, `unread` of
 /// them, whose agents it does not list.
-pub fn unread(unread: u32) -> String {
-    format!("lunetad cannot read {unread} of Claude Code's session files, and its log says which")
+pub fn unread(unread: NonZeroU32) -> String {
+    format!("{}, and its log says which", Untold::Unread(unread))
 }
 
 /// A session to a line, with its panes under it, each by its tab and its id:

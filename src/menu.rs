@@ -1091,13 +1091,22 @@ impl Menu {
     }
 
     /// What the daemon answered: what the agents are doing and where the
-    /// panes work, or why it did not say, which a delete key says as it asks
-    /// first.
+    /// panes work, or why it did not say, or why what it says of the agents
+    /// does not tell which a delete ends, which a delete key says as it asks
+    /// first. A session file that does not read names no session: its agent
+    /// may be in any pane of any session.
     fn heard(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         match daemon::looked(exit_code, stdout, stderr) {
             Ok(host) => {
                 self.places.heard(&host.sessions);
-                self.agents.heard(&host.agents, Moment::now());
+                if host.unread > 0 {
+                    let unread = host.unread;
+                    self.agents.fail(format!(
+                        "lunetad cannot read {unread} of Claude Code's session files"
+                    ));
+                } else {
+                    self.agents.heard(&host.agents, Moment::now());
+                }
             },
             Err(why) => self.agents.fail(why),
         }
@@ -1568,7 +1577,7 @@ mod tests {
         menu.session = Some("luneta".to_owned());
         menu.refuge = Some("elo".to_owned());
         if answered {
-            let said = host(&[given::agent(100, "luneta", 3, "/w/elo", "busy")]);
+            let said = host(&[given::agent(100, "luneta", 3, "/w/elo", "busy")], 0);
             let answered = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
             menu.ran(Some(0), &said, b"", &BTreeMap::from([answered]));
         }
@@ -1576,8 +1585,8 @@ mod tests {
     }
 
     /// The host as `luneta watch` writes it out: session `luneta`, with panes
-    /// 2 and 3 in `/w/elo`, and `agents`.
-    fn host(agents: &[v1::Agent]) -> Vec<u8> {
+    /// 2 and 3 in `/w/elo`, and `agents`, with `unread` session files.
+    fn host(agents: &[v1::Agent], unread: u32) -> Vec<u8> {
         let pane = |id| v1::Pane { id, cwd: Some("/w/elo".to_owned()), ..v1::Pane::default() };
         let luneta = v1::Session {
             name: "luneta".to_owned(),
@@ -1586,7 +1595,7 @@ mod tests {
         };
         let version = Some(v1::Version { pid: 7, seq: 0 });
         let sessions = vec![luneta];
-        v1::Host { version, sessions, agents: agents.to_vec(), ..v1::Host::default() }
+        v1::Host { version, sessions, agents: agents.to_vec(), unread, ..v1::Host::default() }
             .encode_to_vec()
     }
 
@@ -1600,7 +1609,8 @@ mod tests {
     /// The key binding's menu closes the pane you came from, or kills its
     /// session: at once with no agent at work to end, and asking first until
     /// the daemon has said where the agents sit, and saying why when it does
-    /// not answer.
+    /// not answer, or cannot read a session file, whose agent may be in any
+    /// pane.
     #[test]
     fn the_key_binding_s_menu_deletes_the_pane_you_came_from() {
         let mut menu = bound_for_two(true);
@@ -1631,6 +1641,16 @@ mod tests {
         assert!(menu.key(&char('d')));
         let said = "Close the pane? luneta cannot tell which agents it ends: lunetad does not \
                     answer: luneta: lunetad.sock: transport error: Connection refused (os error 111)";
+        assert_eq!(question(&menu), Some(said));
+
+        let mut menu = bound_for_two(false);
+        let unread = host(&[given::agent(100, "luneta", 3, "/w/elo", "busy")], 1);
+        let answered = (CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned());
+        menu.ran(Some(0), &unread, b"", &BTreeMap::from([answered]));
+        menu.key(&char('d'));
+        assert!(menu.key(&char('d')));
+        let said = "Close the pane? luneta cannot tell which agents it ends: lunetad cannot read 1 \
+                    of Claude Code's session files";
         assert_eq!(question(&menu), Some(said));
     }
 

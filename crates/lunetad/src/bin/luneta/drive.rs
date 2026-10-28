@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
@@ -30,7 +31,7 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::{Agent, Zellij};
 
-use crate::close::{Act, Doing, Plan};
+use crate::close::{Act, Doing, Plan, Untold};
 use crate::commands;
 use crate::zellij::{self, Closing, Open, SessionName};
 
@@ -395,6 +396,13 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     };
     let listed = commands::listed_agents(folder);
     let agents = listed.as_ref().ok().map(|listed| listed.agents.as_slice());
+    let told = match &listed {
+        Err(_) => Err(Untold::Away),
+        Ok(listed) => match Untold::unread(listed.unread) {
+            Some(untold) => Err(untold),
+            None => Ok(listed.agents.as_slice()),
+        },
+    };
     let here = match seat(agents, &running) {
         Ok(here) => here,
         Err(why) => {
@@ -408,7 +416,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
         let planned = started(session, &running)
-            .and_then(|started| Ok((started, plans_in(session, &wanted, agents)?)));
+            .and_then(|started| Ok((started, plans_in(session, &wanted, told)?)));
         match planned {
             Ok((started, planned)) => {
                 sessions.push((session, started));
@@ -422,8 +430,11 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     }
     match &listed {
         Err(why) => eprintln!("luneta: {why}"),
-        Ok(listed) if listed.unread > 0 => eprintln!("luneta: {}", commands::unread(listed.unread)),
-        Ok(_) => {},
+        Ok(listed) => {
+            if let Some(count) = NonZeroU32::new(listed.unread) {
+                eprintln!("luneta: {}", commands::unread(count));
+            }
+        },
     }
     let holds_here = |plan: &Plan| {
         let holds = |here: &Pane| session_of(&plan.act) == here.session && plan.act.takes(here.pane);
@@ -472,10 +483,13 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
 }
 
 /// What closing what is `wanted` of `session` does, an act at a time, and
-/// the agents each ends among `agents`, as far as luneta can tell them: none
-/// while lunetad does not list them. Its panes close together, as zellij
-/// says closing them closes.
-fn plans_in(session: &str, wanted: &Wanted, agents: Option<&[Agent]>) -> Result<Vec<Plan>, String> {
+/// the agents each ends among `agents`, or why luneta cannot tell them. Its
+/// panes close together, as zellij says closing them closes.
+fn plans_in(
+    session: &str,
+    wanted: &Wanted,
+    agents: Result<&[Agent], Untold>,
+) -> Result<Vec<Plan>, String> {
     let owned = || session.to_owned();
     let acts = match wanted {
         Wanted::Session => vec![Act::Kill(owned())],
@@ -492,8 +506,10 @@ fn plans_in(session: &str, wanted: &Wanted, agents: Option<&[Agent]>) -> Result<
         let zellij = agent.zellij.as_ref()?;
         (zellij.session.as_deref() == Some(session)).then(|| (zellij.pane, Doing::from(agent)))
     };
-    let agents: Option<Vec<_>> = agents.map(|agents| agents.iter().filter_map(in_session).collect());
-    Ok(acts.into_iter().map(|act| Plan::of(act, agents.as_deref())).collect())
+    let agents: Result<Vec<_>, _> =
+        agents.map(|agents| agents.iter().filter_map(in_session).collect());
+    let agents = agents.as_deref().map_err(|untold| *untold);
+    Ok(acts.into_iter().map(|act| Plan::of(act, agents)).collect())
 }
 
 /// The session `act` closes in.

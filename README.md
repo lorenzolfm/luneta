@@ -243,8 +243,9 @@ not know, or that reports none, may be at work, and asks. The menu counts every
 agent of the session, those the list leaves out too: a `claude -p` in the pane
 of the agent it runs from, and one luneta cannot find a pane for, which may be
 in any pane of the session that names it, and asks while it is at work. While
-the daemon does not answer, luneta cannot tell, and asks every time, saying
-why.
+the daemon does not answer, or cannot read one of Claude Code's session files,
+whose agent may be in any pane of any session, luneta cannot tell, and asks
+every time, saying why.
 
 Needs `claude` on the server's `PATH`, and `git` for the branch.
 
@@ -440,8 +441,10 @@ is in another, the newest, so that zellij stays on screen throughout; with no
 other, it is killed with zellij in it, and luneta ends. When that would end an
 agent that is busy, waiting on you, or that says nothing luneta knows, the
 menu asks first, and so does every delete while lunetad
-does not answer, as what it said last of the agents may be out of date: `y`,
-or the key again, goes ahead, and `n` or `Backspace` goes back.
+does not answer, as what it said last of the agents may be out of date, and
+while it cannot read one of Claude Code's session files, whose agent may be in
+any pane, which the sidebar says at its bottom: `y`, or the key again, goes
+ahead, and `n` or `Backspace` goes back.
 luneta asks zellij what a pane takes along as you press the key, and again as
 you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
 and is not closed with it. A delete leaves you in the sidebar, the highlight on

@@ -37,7 +37,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::brief::{self, Brief, Note, Over, SessionId};
-use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject};
+use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::Folds;
 use crate::gruvbox;
 use crate::icons;
@@ -1603,7 +1603,7 @@ impl Sidebar {
             (None, Some(_)) => Seat::Elsewhere,
             (Some(_), _) | (None, None) => Seat::Moving,
         };
-        let mut agents = None;
+        let mut agents = Err(Untold::Away);
         let mut refuge: Option<Listed> = None;
         if let Some(host) = &self.host {
             // What lunetad said last of its agents may be out of date while it
@@ -1612,7 +1612,10 @@ impl Sidebar {
                 let seated = seated(&host.agents, &host.sessions);
                 let doing = seated.iter().filter(|((at, _), _)| *at == session);
                 let doing = doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
-                agents = Some(doing.collect());
+                agents = match Untold::unread(host.unread) {
+                    Some(untold) => Err(untold),
+                    None => Ok(doing.collect()),
+                };
             }
             // The newest of the other sessions, which the picker lists first.
             let (sessions, _) = oldest_first(&host.sessions);
@@ -2271,9 +2274,10 @@ impl Sidebar {
     }
 
     /// What goes at the bottom of a sidebar `height` tall: why the daemon
-    /// does not answer, the sessions it lists that the rows leave out, what
-    /// went wrong last, and the menu while it is open, or else the search
-    /// while that is, or else the legend while the sidebar has the focus.
+    /// does not answer, the sessions it lists that the rows leave out, the
+    /// session files of Claude Code's it cannot read, what went wrong last,
+    /// and the menu while it is open, or else the search while that is, or
+    /// else the legend while the sidebar has the focus.
     /// The menu and the legend leave the rows a line.
     fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let mut notes = Vec::new();
@@ -2289,6 +2293,9 @@ impl Sidebar {
                  not listed"
             );
             notes.extend(wrapped(&unlisted, width, error));
+        }
+        if let Some(unread) = self.host.as_ref().and_then(|host| Untold::unread(host.unread)) {
+            notes.extend(wrapped(&unread.to_string(), width, error));
         }
         if let Some(lost) = self.folds.lost() {
             notes.extend(wrapped(&format!("folds stay in this luneta: {lost}"), width, error));
@@ -4531,21 +4538,38 @@ mod tests {
     }
 
     /// While lunetad does not answer, what it said last of the agents may be
-    /// out of date: a delete asks first, whatever it ends, and `y` goes ahead.
+    /// out of date; and while it cannot read one of Claude Code's session
+    /// files, the file's agent may be in any pane. The sidebar says so at
+    /// its bottom, and a delete asks first, whatever it ends, saying why, and
+    /// `y` goes ahead.
     #[test]
-    fn a_delete_asks_first_while_lunetad_does_not_answer() {
-        let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
-        sidebar.lost("gone".to_owned());
-        sidebar.step(2);
-        type_in(&mut sidebar, "d");
-        let closes = || Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
-        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
-        assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
-        let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
-        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+    fn a_delete_asks_first_while_luneta_cannot_tell_the_agents() {
+        let unread = "lunetad cannot read 1 of Claude Code's session files";
+        let away: fn(&mut Sidebar) = |sidebar| sidebar.lost("gone".to_owned());
+        let unreadable: fn(&mut Sidebar) = |sidebar| {
+            let host = sidebar.host.clone().expect("the sidebar has heard the host");
+            sidebar.heard(Host { unread: 1, ..host });
+        };
+        for (untold, note, why) in
+            [(away, "lunetad: gone", "lunetad does not answer"), (unreadable, unread, unread)]
+        {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            untold(&mut sidebar);
+            sidebar.step(2);
+            type_in(&mut sidebar, "d");
+            let closes = || Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
+            assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
+            assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
+            let lines = screen(&mut sidebar, true, 120, 16);
+            let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+            let asks = format!("Close the pane? luneta cannot tell which agents it ends: {why}");
+            assert!(lines.contains(&note), "{lines:#?}");
+            assert!(lines.contains(&asks.as_str()), "{lines:#?}");
+            assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
+            let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
+            assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+        }
     }
 
     /// `d d` plans by what zellij says closing the pane closes, and the

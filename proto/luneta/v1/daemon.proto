@@ -306,8 +306,9 @@ message ListAgentsResponse {
   // In no order a client can count on.
   repeated Agent agents = 1;
   // Claude Code's session files that the daemon cannot read, and so lists no
-  // agent for: cut short for good, or in a shape of a newer Claude Code's. The
-  // daemon's log says which.
+  // agent for: cut short for good, or in a shape of a newer Claude Code's.
+  // Only those named for a pid that a process runs by count: one a crashed
+  // Claude Code left behind does not. The daemon's log says which.
   uint32 unread = 2;
 }
 

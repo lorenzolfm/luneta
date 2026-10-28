@@ -110,7 +110,8 @@ enum Seen {
 /// What a scan of the folder finds.
 pub struct Scan {
     pub agents: Vec<Agent>,
-    /// The files it cannot read.
+    /// The files it cannot read, of those named for a pid that a process
+    /// runs by.
     pub unread: u32,
 }
 
@@ -181,8 +182,13 @@ impl SessionFiles {
             let file = match found {
                 Seen::Whole(file) | Seen::Torn { before: Some(file), .. } => file,
                 Seen::Torn { before: None, .. } => continue,
+                // One that a crashed process left behind stands for no
+                // agent, whatever it holds. A pid that came back as another
+                // process's still counts, as the file cannot say.
                 Seen::Unread => {
-                    unread += 1;
+                    if process::start(pid).is_some() {
+                        unread += 1;
+                    }
                     continue;
                 },
             };
