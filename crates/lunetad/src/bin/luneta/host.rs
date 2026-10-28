@@ -172,11 +172,25 @@ enum Held {
     Brief,
 }
 
-/// The input luneta holds for zellij until zellij can take it.
+/// What luneta holds for zellij until zellij can take it: the input, and the
+/// look for its client's arrival.
 struct Waiting {
     input: Vec<Input>,
+    /// Asked for only once zellij is in. Every call of zellij's CLI asks the
+    /// server of every session whether it runs, and zellij-server 0.45.1
+    /// panics where such a call hangs up before the server took its first
+    /// client (`lib.rs:1462`, fixed after 0.45.1 in zellij's 81f56e1): the
+    /// session luneta's client makes would end with it.
+    arrival: Option<Arrival>,
     /// When zellij is handed it all the same.
     until: Instant,
+}
+
+/// luneta's client on its way to the session of `look`, which zellij lists
+/// once it is there: as a client of it that `before` does not list.
+struct Arrival {
+    look: Look,
+    before: Vec<lunetad::api::Client>,
 }
 
 /// zellij's client, which luneta runs beside the sidebar, and what luneta
@@ -188,26 +202,29 @@ struct Client {
     exited: Option<ExitStatus>,
     /// The input that came before zellij was in its session, as keys typed as
     /// it starts: zellij 0.45 drops keys that reach it before it puts its
-    /// client on its screen. None once zellij is in, which it says as it first
-    /// draws for its client, as it draws only for one on its screen: once it
-    /// titles its terminal, or once anything shows there. zellij titles a tab
-    /// once for all its clients, so that a client that comes to a session
-    /// already titled gets none.
+    /// client on its screen. And the look for its arrival there. None once
+    /// zellij is in, which it says as it first draws for its client, as it
+    /// draws only for one on its screen: once it titles its terminal, or once
+    /// anything shows there. zellij titles a tab once for all its clients, so
+    /// that a client that comes to a session already titled gets none.
     waiting: Option<Waiting>,
 }
 
 impl Client {
     /// Starts `program`, zellij's client, in a terminal of `size`, in `dir`,
-    /// with the input held for it until zellij can take it.
+    /// with the input held for it, and the look for its `arrival` if any,
+    /// until zellij can take it.
     fn start(
         program: String,
         args: Vec<String>,
         dir: &Path,
         size: Size,
+        arrival: Option<Arrival>,
         events: Sender<Event>,
     ) -> io::Result<Self> {
         let hosted = Hosted::start(program, args, dir, size, events)?;
-        let waiting = Some(Waiting { input: Vec::new(), until: Instant::now() + WAITING_MAX });
+        let until = Instant::now() + WAITING_MAX;
+        let waiting = Some(Waiting { input: Vec::new(), arrival, until });
         Ok(Client { hosted, exited: None, waiting })
     }
 }
@@ -285,6 +302,11 @@ struct App {
     /// reads the transcripts of the agents it lists: none until luneta has
     /// reached one.
     claude_folder: Option<PathBuf>,
+    /// The folder of the daemon luneta watches once zellij is in its session,
+    /// until then: a daemon that luneta starts asks zellij about every
+    /// session at once, which a server that has yet to take its first client
+    /// cannot bear, as `Waiting::arrival` says.
+    daemon: Option<PathBuf>,
     events: Sender<Event>,
     /// What watches where the folds, the news and the order are kept, for as
     /// long as luneta runs.
@@ -404,8 +426,6 @@ fn run_in(
     // The clients of the session before luneta's comes, of which none is
     // luneta's: none of a session zellij is to make.
     let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
-    let (program, args) = zellij::client(session);
-    let client = Client::start(program, args, dir, window(areas.1), events.clone())?;
     let folds = Folds::shared();
     // Kept beside the daemon, which lists the sessions it is kept of.
     let news = match &folder {
@@ -436,15 +456,19 @@ fn run_in(
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
     }
-    if let (Some(session), Some(before)) = (session, before)
-        && let Some(look) = sidebar.sending(&session.to_string())
-    {
-        zellij::arrive(look, before, &events);
-    }
-    match folder {
-        Ok(folder) => crate::watch::start(folder, events.clone()),
-        Err(why) => sidebar.lost(why),
-    }
+    let arrival = session.zip(before).and_then(|(session, before)| {
+        let look = sidebar.sending(&session.to_string())?;
+        Some(Arrival { look, before })
+    });
+    let (program, args) = zellij::client(session);
+    let client = Client::start(program, args, dir, window(areas.1), arrival, events.clone())?;
+    let daemon = match folder {
+        Ok(folder) => Some(folder),
+        Err(why) => {
+            sidebar.lost(why);
+            None
+        },
+    };
     let mut app = App {
         client,
         sidebar,
@@ -461,6 +485,7 @@ fn run_in(
         turned: None,
         briefs: 0,
         claude_folder: None,
+        daemon,
         events,
         _watching: watching,
         dir: dir.to_owned(),
@@ -591,14 +616,21 @@ impl App {
         }
     }
 
-    /// Hands zellij the input held for it, if any is. A client that took the
-    /// place of one that ended heard nothing of where the keys are, and has
-    /// them as far as it knows: it hears first where it does not, as the
-    /// sidebar has them, or another window.
+    /// Hands zellij the input held for it, if any is, asks it for its
+    /// client's arrival, and watches the daemon, if luneta does not yet. A
+    /// client that took the place of one that ended heard nothing of where
+    /// the keys are, and has them as far as it knows: it hears first where it
+    /// does not, as the sidebar has them, or another window.
     fn waited(&mut self) {
         let Some(waiting) = self.client.waiting.take() else {
             return;
         };
+        if let Some(Arrival { look, before }) = waiting.arrival {
+            zellij::arrive(look, before, &self.events);
+        }
+        if let Some(folder) = self.daemon.take() {
+            crate::watch::start(folder, self.events.clone());
+        }
         if !(self.focused && self.focus.zellij())
             && let Some(bytes) = keys::focus(false, self.client.hosted.mode())
         {
@@ -973,15 +1005,15 @@ impl App {
             self.ended = true;
             return Ok(());
         };
+        let look = self.sidebar.rejoining(&to);
+        let arrival = Some(Arrival { look, before });
         let (program, args) = zellij::rejoin(&to);
         let size = window(self.areas.1);
-        self.client = Client::start(program, args, &self.dir, size, self.events.clone())?;
+        self.client = Client::start(program, args, &self.dir, size, arrival, self.events.clone())?;
         // The client that takes its place heard no button go down over it.
         if self.held == Held::Zellij {
             self.held = Held::Nothing;
         }
-        let look = self.sidebar.rejoining(&to);
-        zellij::arrive(look, before, &self.events);
         Ok(())
     }
 

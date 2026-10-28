@@ -770,7 +770,9 @@ pub fn look(look: Look, events: &Sender<Event>) {
 
 /// Asks zellij for the clients of the session `look` is of, on a thread of
 /// its own, until it lists one that `before` does not, which is luneta's own
-/// client as it attaches, and hands back what it answers then.
+/// client as it attaches, and hands back what it answers then. Only once
+/// zellij draws for that client: asked sooner, zellij can end the session
+/// the client makes, as `Waiting::arrival` in host.rs says.
 pub fn arrive(look: Look, before: Vec<Client>, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || arriving(&look, before, START, &events));
