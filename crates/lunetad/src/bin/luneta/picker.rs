@@ -11,6 +11,7 @@
 //! preview shows the pane highlighted, or the one a client coming to the
 //! session highlighted is on, as zellij dumps its screen.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::mpsc::Sender;
@@ -23,8 +24,6 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -36,7 +35,7 @@ use crate::gruvbox;
 use crate::host::Event;
 use crate::hosted;
 use crate::menu;
-use crate::sidebar::{self, ACCENT, ERROR, LIT, Mark, NAME, Place};
+use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, LIT, Mark, NAME, Place};
 use crate::zellij::{self, Closes, Exited, SessionName};
 
 /// What the rule over the box, and the rule over the list, name it.
@@ -120,8 +119,10 @@ pub struct Seated {
     pub status: String,
     /// Since when it has been doing it.
     pub since: Option<SystemTime>,
-    /// Where it works.
-    pub cwd: String,
+    /// Where it works, as its row and its preview show it, and a search finds
+    /// it: its directory's last two parts, as a whole path has the letters for
+    /// a few typed ones to land on nearly any of it.
+    pub dir: String,
 }
 
 /// A list of the picker's.
@@ -830,7 +831,7 @@ impl Picker {
     /// `snap`, as what is typed changed, on the best match, or the first
     /// session after yours.
     fn rebuild(&mut self, snap: bool) {
-        let matcher = SkimMatcherV2::default();
+        let finder = (!self.term.is_empty()).then(|| Finder::new(&self.term));
         let here = self.listing.here.clone();
         let mut sessions = Vec::new();
         for live in &self.listing.sessions {
@@ -847,19 +848,17 @@ impl Picker {
         // newest first, as they are listed.
         sessions.sort_by_key(|(rank, ..)| *rank);
         let sessions = sessions.into_iter().map(|(_, name, key)| (name, Vec::new(), key));
-        let sessions = matched(&matcher, &self.term, sessions);
+        let sessions = matched(finder.as_ref(), sessions);
         let yours = self.listing.here_pane.as_ref();
         let agents = self.listing.agents.iter().filter(|seated| Some(&seated.place) != yours);
-        // An agent is found by its session's name, and by its directory as
-        // its preview shows it, its last two parts: a whole path has the
-        // letters for a few typed ones to land on nearly any of it.
-        let agents: Vec<(String, Vec<String>, Key)> = agents
+        // An agent is found by its session's name, and by its directory.
+        let agents: Vec<(String, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
-                let also = vec![seated.place.session().to_owned(), sidebar::short_cwd(&seated.cwd)];
+                let also = vec![Some(seated.place.session()), Some(seated.dir.as_str())];
                 (self.agent_name(seated), also, Key::Agent(seated.place.clone()))
             })
             .collect();
-        let agents = matched(&matcher, &self.term, agents.into_iter());
+        let agents = matched(finder.as_ref(), agents.into_iter());
         let start = |rows: &[Row]| {
             let first = rows.first().map(|row| &row.key);
             let yours = matches!(first, Some(Key::Live(place)) if self.is_here(place));
@@ -1032,9 +1031,8 @@ impl Picker {
                 let age = seated.since.map(|since| sidebar::age(since, now)).unwrap_or_default();
                 let mut right = Vec::new();
                 // The directory goes first, where the row is short of room.
-                let cwd = sidebar::short_cwd(&seated.cwd);
-                if width >= row.name.width() + cwd.width() + age.width() + 10 {
-                    right.push(Span::styled(cwd, Style::new().fg(gruvbox::GREY)));
+                if width >= row.name.width() + seated.dir.width() + age.width() + 10 {
+                    right.push(Span::styled(seated.dir.clone(), Style::new().fg(gruvbox::GREY)));
                     right.push(Span::raw("  "));
                 }
                 right.push(Span::styled(age, dim));
@@ -1124,7 +1122,7 @@ impl Picker {
                         Span::styled(" · ", dim),
                         Span::styled(age.unwrap_or_default(), dim),
                         Span::styled(" · ", dim),
-                        Span::styled(sidebar::short_cwd(&seated.cwd), grey),
+                        Span::styled(seated.dir.clone(), grey),
                     ])
                 });
                 (String::new(), caption, (place.session().to_owned(), place.pane()))
@@ -1247,29 +1245,25 @@ fn plain(key: &KeyEvent) -> bool {
 }
 
 /// The rows of `candidates`, each a name, what else a search finds it by,
-/// and what it stands for, that match `term`: all of them, in their order,
-/// for no term; or else those whose name matches it, or any of what else it
-/// is found by, a name that is `term` itself first, then the best matches.
-fn matched(
-    matcher: &SkimMatcherV2,
-    term: &str,
-    candidates: impl Iterator<Item = (String, Vec<String>, Key)>,
+/// and what it stands for, that `finder` finds: all of them, in their order,
+/// for no search; or else as the sidebar's search weighs them, the best
+/// first, and those that fit alike in their order.
+fn matched<'a>(
+    finder: Option<&Finder<'_>>,
+    candidates: impl Iterator<Item = (String, Vec<Option<&'a str>>, Key)>,
 ) -> Vec<Row> {
-    if term.is_empty() {
+    let Some(finder) = finder else {
         return candidates.map(|(name, _, key)| Row { key, name, hits: Vec::new() }).collect();
-    }
-    let mut found: Vec<(bool, i64, usize, Row)> = Vec::new();
-    for (at, (name, also, key)) in candidates.enumerate() {
-        let hit = matcher.fuzzy_indices(&name, term).or_else(|| {
-            let score = also.iter().filter_map(|text| matcher.fuzzy_match(text, term)).max()?;
-            Some((score, Vec::new()))
-        });
-        if let Some((score, hits)) = hit {
-            found.push((name == term, score, at, Row { key, name, hits }));
+    };
+    let mut found: Vec<(Fit, Row)> = Vec::new();
+    for (name, also, key) in candidates {
+        if let Some((fit, hits)) = finder.find(&name, &also) {
+            found.push((fit, Row { key, name, hits }));
         }
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    found.into_iter().map(|(.., row)| row).collect()
+    // A stable sort, which keeps those that fit alike in their order.
+    found.sort_by_key(|(fit, _)| Reverse(*fit));
+    found.into_iter().map(|(_, row)| row).collect()
 }
 
 /// `name` in `style`, the characters at `hits` in the accent, as a search
@@ -1459,7 +1453,7 @@ mod tests {
             mark,
             status: "idle".to_owned(),
             since: Some(now() - Duration::from_mins(1)),
-            cwd: "/w/luneta/main".to_owned(),
+            dir: "luneta/main".to_owned(),
         }
     }
 
@@ -1752,33 +1746,41 @@ mod tests {
         assert!(lines[1].contains("docs (review:4)"));
     }
 
-    /// A search finds an agent by its directory as its preview shows it, the
-    /// last two parts, and not by the rest of the path.
+    /// A search finds an agent by its directory as its row and its preview
+    /// show it, and weighs it by what fits best, its name or another: its
+    /// name lights up only where it fits best. `zellij` lands on `zellij
+    /// panics` whole, on `src/zellij` after its `/`, and on `Zero-length lines
+    /// in jobs` letter by letter.
     #[test]
-    fn a_search_finds_an_agent_by_the_last_two_parts_of_its_directory() {
-        let at = |pane, label, cwd: &str| Seated {
-            cwd: cwd.to_owned(),
+    fn a_search_weighs_an_agent_by_its_name_or_its_directory_whichever_fits_best() {
+        let at = |pane, label, dir: &str| Seated {
+            dir: dir.to_owned(),
             ..seated("work", 20, pane, label, Mark::Idle)
         };
         let listing = Listing {
             agents: vec![
-                at(1, "fix", "/home/me/src/luneta/pr-12"),
-                at(2, "docs", "/home/me/src/zellij/main"),
+                at(1, "Zero-length lines in jobs", "src/zellij"),
+                at(2, "fix", "src/zellij"),
+                at(3, "zellij panics", "misc/luneta"),
+                at(4, "docs", "luneta/main"),
             ],
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Agents, listing);
-        typed(&mut picker, "luneta/pr");
-        let (lines, _) = list(&picker);
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("fix"), "{lines:?}");
-        for _ in "luneta/pr".chars() {
-            press(&mut picker, KeyCode::Backspace);
+        typed(&mut picker, "zellij");
+        let buffer = drawn(&picker);
+        let (results, _) = parts();
+        let lit = |y| (results.x..results.right()).any(|x| buffer[(x, y)].fg == ACCENT);
+        let rows: Vec<(String, bool)> = (results.y..results.bottom())
+            .zip(text(&buffer, results))
+            .map(|(y, line)| (line, lit(y)))
+            .filter(|(line, _)| !line.is_empty())
+            .collect();
+        let shown = [("zellij panics", true), ("Zero-length lines in jobs", false), ("fix", false)];
+        assert_eq!(rows.len(), shown.len(), "{rows:?}");
+        for ((line, lit), (label, lights)) in rows.iter().zip(shown) {
+            assert!(line.contains(label) && *lit == lights, "{rows:?}");
         }
-        typed(&mut picker, "src");
-        let (lines, _) = list(&picker);
-        let shows = |label: &str| lines.iter().any(|line| line.contains(label));
-        assert!(!shows("fix") && !shows("docs"), "{lines:?}");
     }
 
     /// The preview asks zellij for the screen it shows only once the

@@ -1128,7 +1128,7 @@ impl Sidebar {
                     mark: marked.mark,
                     status: status_word(agent),
                     since: marked.since,
-                    cwd: pane.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
+                    dir: short_cwd(pane.cwd.as_deref().unwrap_or(&agent.cwd)),
                 });
             }
             panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -1209,7 +1209,7 @@ impl Sidebar {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
             Some(Search::Empty) | None => (None, false),
         };
-        let finder = term.map(|term| Finder { matcher: SkimMatcherV2::default(), term });
+        let finder = term.map(Finder::new);
         let here_key =
             here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
@@ -2791,17 +2791,22 @@ pub fn short_cwd(path: &str) -> String {
 
 /// How well a row matches a search: a row that shows what is typed itself
 /// beats any other, and then the higher score wins.
-type Fit = (bool, i64);
+pub type Fit = (bool, i64);
 
-/// What is typed in the search, and the matcher the picker uses.
-struct Finder<'a> {
+/// What is typed in a search, and the matcher the sidebar and the picker
+/// find their rows with.
+pub struct Finder<'a> {
     matcher: SkimMatcherV2,
     term: &'a str,
 }
 
-impl Finder<'_> {
+impl<'a> Finder<'a> {
+    pub fn new(term: &'a str) -> Self {
+        Finder { matcher: SkimMatcherV2::default(), term }
+    }
+
     fn session(&self, name: &str) -> Option<Fit> {
-        self.find(name, &[])
+        self.find(name, &[]).map(|(fit, _)| fit)
     }
 
     /// A pane by its row, its branch, its tab and its directory. A tab zellij
@@ -2811,15 +2816,23 @@ impl Finder<'_> {
     fn pane(&self, label: &str, branch: Option<&str>, pane: &Pane) -> Option<Fit> {
         let tab = tab::named(&pane.tab_name);
         let cwd = pane.cwd.as_deref().map(short_cwd);
-        self.find(label, &[branch, tab, cwd.as_deref()])
+        self.find(label, &[branch, tab, cwd.as_deref()]).map(|(fit, _)| fit)
     }
 
     /// What is typed against what a row shows, and against what else the row
-    /// goes by, of which it need not have each.
-    fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<Fit> {
-        let texts = also.iter().flatten().copied().chain([shown]);
-        let score = texts.filter_map(|text| self.matcher.fuzzy_match(text, self.term)).max()?;
-        Some((shown == self.term, score))
+    /// goes by, of which it need not have each: how well the best of them
+    /// fits, and the characters of what the row shows that the search found,
+    /// none where something else fits better.
+    pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
+        let exact = shown == self.term;
+        let also = also.iter().flatten();
+        let other = also.filter_map(|text| self.matcher.fuzzy_match(text, self.term)).max();
+        match self.matcher.fuzzy_indices(shown, self.term) {
+            Some((score, hits)) if other.is_none_or(|other| score >= other) => {
+                Some(((exact, score), hits))
+            },
+            _ => Some(((exact, other?), Vec::new())),
+        }
     }
 }
 
@@ -4261,6 +4274,22 @@ mod tests {
     /// Whether the cell on line `y` at column `x` is dimmed, drawn at `now`.
     fn dimmed(sidebar: &mut Sidebar, x: u16, y: u16, now: SystemTime) -> bool {
         drawn_at(sidebar, false, 32, 7, now)[(x, y)].modifier.contains(Modifier::DIM)
+    }
+
+    /// The picker gets an agent's directory as luneta shows one, its last two
+    /// parts: its pane's, or else, while zellij has not said where the pane
+    /// works, the agent's own.
+    #[test]
+    fn the_picker_gets_an_agents_directory_as_its_last_two_parts() {
+        let mut sidebar = Sidebar::default();
+        let unsaid = Pane { cwd: None, ..pane(2, 0, "", "claude") };
+        sidebar.heard(host(
+            vec![session("s", 10, vec![pane(1, 0, "/home/me/src/luneta/pr-12", "claude"), unsaid])],
+            vec![agent("s", 1, Status::Idle, None), agent("s", 2, Status::Idle, None)],
+        ));
+        let agents = sidebar.listing().agents;
+        let dirs: Vec<&str> = agents.iter().map(|seated| seated.dir.as_str()).collect();
+        assert_eq!(dirs, ["luneta/pr-12", "luneta/main"]);
     }
 
     /// An agent that finished, and a command that ended, have the dot until
