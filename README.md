@@ -75,7 +75,8 @@ An agent goes by the name you gave it with `/rename`, or else the title Claude
 Code gives its pane, its tab or its directory. Two agents named alike are told apart by their panes, as
 `luneta/main:4`, and by their sessions too when they sit in two, as
 `luneta/main (review:4)`. A search finds an agent by what its row shows, the
-pane that tells it apart as well, or by its session's name.
+pane that tells it apart as well, by its session's name, or by the last two
+parts of its directory, as its preview shows them.
 
 A pane holds one agent. A `claude -p` an agent runs
 has its pane's ids, and luneta finds it in that pane too: the list shows the
