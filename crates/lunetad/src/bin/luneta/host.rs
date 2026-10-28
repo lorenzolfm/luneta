@@ -44,11 +44,11 @@ use crate::input;
 use crate::keys;
 use crate::news::{self, News};
 use crate::order::{self, Order};
-use crate::own::{Look, Looked};
+use crate::own::{Before, Look, Looked};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::width::Width;
-use crate::zellij::{self, After, Closes, Refuge, SessionName};
+use crate::zellij::{self, After, Arrival, Closes, Refuge, SessionName};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -176,21 +176,45 @@ enum Held {
 /// look for its client's arrival.
 struct Waiting {
     input: Vec<Input>,
-    /// Asked for only once zellij is in. Every call of zellij's CLI asks the
-    /// server of every session whether it runs, and zellij-server 0.45.1
-    /// panics where such a call hangs up before the server took its first
-    /// client (`lib.rs:1462`, fixed after 0.45.1 in zellij's 81f56e1): the
-    /// session luneta's client makes would end with it.
+    /// Asked for only once zellij is in, where its server may have yet to
+    /// take its first client, as `Before::Made` says.
     arrival: Option<Arrival>,
-    /// When zellij is handed it all the same.
+    /// When zellij is handed the input all the same.
     until: Instant,
 }
 
-/// luneta's client on its way to the session of `look`, which zellij lists
-/// once it is there: as a client of it that `before` does not list.
-struct Arrival {
-    look: Look,
-    before: Vec<lunetad::api::Client>,
+impl Waiting {
+    /// Whether zellij's server may have yet to take its first client as
+    /// luneta's comes: in a session zellij makes, one of a name it makes up,
+    /// as of a client started with none, or one it did not list the clients
+    /// of.
+    fn fresh(&self) -> bool {
+        self.arrival.as_ref().is_none_or(|arrival| arrival.before.fresh())
+    }
+}
+
+/// How far zellij's client is into its session, until it is in, which zellij
+/// says as it first draws for it, as it draws only for one on its screen:
+/// once it titles its terminal, or once anything shows there. zellij titles a
+/// tab once for all its clients, so that a client that comes to a session
+/// already titled gets none.
+enum Coming {
+    /// zellij has yet to draw, and luneta holds the input for it, as keys
+    /// typed as it starts: zellij 0.45 drops keys that reach it before it
+    /// puts its client on its screen.
+    Held(Waiting),
+    /// zellij drew nothing in the time luneta holds the input, and has it,
+    /// but luneta asks it for its client's arrival, and starts the daemon,
+    /// only once it draws: its server may have yet to take its first client.
+    Overdue(Option<Arrival>),
+}
+
+/// luneta's client on its way to a session zellij makes for it, from the one
+/// it is in, until zellij titles luneta's terminal there.
+struct Making {
+    arrival: Arrival,
+    /// When luneta takes the client for one zellij did not take there.
+    until: Instant,
 }
 
 /// zellij's client, which luneta runs beside the sidebar, and what luneta
@@ -200,14 +224,11 @@ struct Client {
     hosted: Hosted,
     /// How it ended, once its terminal says.
     exited: Option<ExitStatus>,
-    /// The input that came before zellij was in its session, as keys typed as
-    /// it starts: zellij 0.45 drops keys that reach it before it puts its
-    /// client on its screen. And the look for its arrival there. None once
-    /// zellij is in, which it says as it first draws for its client, as it
-    /// draws only for one on its screen: once it titles its terminal, or once
-    /// anything shows there. zellij titles a tab once for all its clients, so
-    /// that a client that comes to a session already titled gets none.
-    waiting: Option<Waiting>,
+    /// None once zellij is in its session.
+    coming: Option<Coming>,
+    /// Where luneta sent the client to a session zellij makes for it, while
+    /// zellij has yet to title luneta's terminal there.
+    making: Option<Making>,
 }
 
 impl Client {
@@ -224,8 +245,8 @@ impl Client {
     ) -> io::Result<Self> {
         let hosted = Hosted::start(program, args, dir, size, events)?;
         let until = Instant::now() + WAITING_MAX;
-        let waiting = Some(Waiting { input: Vec::new(), arrival, until });
-        Ok(Client { hosted, exited: None, waiting })
+        let coming = Some(Coming::Held(Waiting { input: Vec::new(), arrival, until }));
+        Ok(Client { hosted, exited: None, coming, making: None })
     }
 }
 
@@ -305,7 +326,7 @@ struct App {
     /// The folder of the daemon luneta watches once zellij is in its session,
     /// until then: a daemon that luneta starts asks zellij about every
     /// session at once, which a server that has yet to take its first client
-    /// cannot bear, as `Waiting::arrival` says.
+    /// cannot bear, as `Before::Made` says.
     daemon: Option<PathBuf>,
     events: Sender<Event>,
     /// What watches where the folds, the news and the order are kept, for as
@@ -423,9 +444,6 @@ fn run_in(
 ) -> io::Result<Option<String>> {
     let (width, width_unread) = Width::kept();
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
-    // The clients of the session before luneta's comes, of which none is
-    // luneta's: none of a session zellij is to make.
-    let before = session.map(|session| zellij::clients(&session.to_string()).unwrap_or_default());
     let folds = Folds::shared();
     // Kept beside the daemon, which lists the sessions it is kept of.
     let news = match &folder {
@@ -456,8 +474,9 @@ fn run_in(
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
     }
-    let arrival = session.zip(before).and_then(|(session, before)| {
-        let look = sidebar.sending(&session.to_string())?;
+    let arrival = session.and_then(|session| {
+        let before = zellij::before(session.as_str());
+        let look = sidebar.sending(session.as_str())?;
         Some(Arrival { look, before })
     });
     let (program, args) = zellij::client(session);
@@ -503,7 +522,7 @@ fn run_loop(
     inbox: &mut Inbox,
 ) -> io::Result<()> {
     loop {
-        let wait = if app.client.waiting.is_some() {
+        let wait = if matches!(app.client.coming, Some(Coming::Held(_))) {
             WAITING_LOOK
         } else if app.sidebar.scrolling() {
             sidebar::SCROLL
@@ -564,9 +583,9 @@ fn window(area: Rect) -> Size {
 impl App {
     fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match event {
-            Event::Input(input) => match &mut self.client.waiting {
-                Some(waiting) => waiting.input.push(input),
-                None => self.input(input),
+            Event::Input(input) => match &mut self.client.coming {
+                Some(Coming::Held(waiting)) => waiting.input.push(input),
+                _ => self.input(input),
             },
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
@@ -579,6 +598,10 @@ impl App {
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => self.sidebar.looked(looked),
             Event::Stayed(look) => {
+                let making = self.client.making.as_ref();
+                if making.is_some_and(|making| making.arrival.look.number == look) {
+                    self.client.making = None;
+                }
                 let look = self.sidebar.stayed(look);
                 self.look(look);
             },
@@ -606,37 +629,73 @@ impl App {
         Ok(())
     }
 
-    /// Hands zellij the input held for it once anything shows on its screen,
-    /// or once it waited long enough.
+    /// Hands zellij what luneta holds for it once anything shows on its
+    /// screen, and the input once it waited long enough. A client on its way
+    /// to a session zellij makes for it is taken for one that stayed, once
+    /// luneta waited long enough for zellij to title its terminal there.
     fn wait_on(&mut self, now: Instant) {
-        let client = &self.client;
-        let ready = |waiting: &Waiting| now >= waiting.until || !client.hosted.blank();
-        if client.waiting.as_ref().is_some_and(ready) {
-            self.waited();
+        match self.client.coming.take() {
+            coming @ Some(_) if !self.client.hosted.blank() => self.came_in(coming),
+            Some(Coming::Held(waiting)) if now >= waiting.until => self.overdue(waiting),
+            coming => self.client.coming = coming,
+        }
+        if let Some(making) = self.client.making.take_if(|making| now >= making.until) {
+            self.sidebar.notify("zellij did not take its client there".to_owned());
+            let look = self.sidebar.stayed(making.arrival.look.number);
+            self.look(look);
         }
     }
 
-    /// Hands zellij the input held for it, if any is, asks it for its
-    /// client's arrival, and watches the daemon, if luneta does not yet. A
-    /// client that took the place of one that ended heard nothing of where
-    /// the keys are, and has them as far as it knows: it hears first where it
-    /// does not, as the sidebar has them, or another window.
-    fn waited(&mut self) {
-        let Some(waiting) = self.client.waiting.take() else {
-            return;
-        };
-        if let Some(Arrival { look, before }) = waiting.arrival {
-            zellij::arrive(look, before, &self.events);
+    /// zellij is in its session, as it drew or titled for its client,
+    /// `coming` there until then: it is handed the input held for it, if any
+    /// is, and asked what waited on that.
+    fn came_in(&mut self, coming: Option<Coming>) {
+        match coming {
+            Some(Coming::Held(Waiting { input, arrival, .. })) => {
+                self.ask(arrival);
+                self.hand(input);
+            },
+            Some(Coming::Overdue(arrival)) => self.ask(arrival),
+            None => self.ask(None),
+        }
+    }
+
+    /// zellij drew nothing in the time luneta holds the input for it: it has
+    /// the input all the same, and is asked what waited on it at once where
+    /// its server took its first client long before, or else once it draws.
+    fn overdue(&mut self, waiting: Waiting) {
+        let fresh = waiting.fresh();
+        self.hand(waiting.input);
+        if fresh {
+            self.client.coming = Some(Coming::Overdue(waiting.arrival));
+        } else {
+            self.ask(waiting.arrival);
+        }
+    }
+
+    /// Asks zellij for its client's `arrival` in its session, if luneta looks
+    /// for it, and watches the daemon, if luneta does not yet: a daemon that
+    /// luneta starts asks zellij about every session at once.
+    fn ask(&mut self, arrival: Option<Arrival>) {
+        if let Some(arrival) = arrival {
+            zellij::arrive(arrival, &self.events);
         }
         if let Some(folder) = self.daemon.take() {
             crate::watch::start(folder, self.events.clone());
         }
+    }
+
+    /// Hands zellij the `input` held for it. A client that took the place of
+    /// one that ended heard nothing of where the keys are, and has them as far
+    /// as it knows: it hears first where it does not, as the sidebar has them,
+    /// or another window.
+    fn hand(&mut self, input: Vec<Input>) {
         if !(self.focused && self.focus.zellij())
             && let Some(bytes) = keys::focus(false, self.client.hosted.mode())
         {
             self.client.hosted.send(bytes);
         }
-        for input in waiting.input {
+        for input in input {
             self.input(input);
         }
     }
@@ -871,14 +930,18 @@ impl App {
     }
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
-    /// `cwd`.
+    /// `cwd`. Where zellij makes it, its server cannot bear being asked
+    /// anything before it takes the client: luneta asks for the client's
+    /// arrival there once zellij titles its terminal in it.
     fn start(&mut self, session: &SessionName, cwd: &str) {
         let Some(here) = self.here() else {
             return;
         };
         let then = self.sidebar.sending(session.as_str());
         self.client.hosted.send(zellij::NUDGE);
-        zellij::start(&here, session, cwd, then, &self.events);
+        let made = zellij::start(&here, session, cwd, then, &self.events);
+        let until = Instant::now() + zellij::START;
+        self.client.making = made.map(|arrival| Making { arrival, until });
     }
 
     /// The session zellij's client is in, for an action to take it from, or
@@ -956,9 +1019,16 @@ impl App {
             Said::Titled(title) => {
                 execute!(terminal.backend_mut(), SetTitle(&title))?;
                 if !title.is_empty() {
+                    let there = |making: &mut Making| {
+                        sidebar::in_session(&title, &making.arrival.look.session)
+                    };
+                    if let Some(making) = self.client.making.take_if(there) {
+                        zellij::arrive(making.arrival, &self.events);
+                    }
                     let look = self.sidebar.titled(title);
                     self.look(look);
-                    self.waited();
+                    let coming = self.client.coming.take();
+                    self.came_in(coming);
                 }
             },
             Said::Copied(clipboard, text) => {
@@ -1006,7 +1076,7 @@ impl App {
             return Ok(());
         };
         let look = self.sidebar.rejoining(&to);
-        let arrival = Some(Arrival { look, before });
+        let arrival = Some(Arrival { look, before: Before::Listed(before) });
         let (program, args) = zellij::rejoin(&to);
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, arrival, self.events.clone())?;

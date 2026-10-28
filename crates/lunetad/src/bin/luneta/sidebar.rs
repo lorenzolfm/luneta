@@ -2322,7 +2322,7 @@ pub fn query(term: &str, width: usize) -> Line<'static> {
 
 /// Whether zellij's `title` for a terminal can be of the session `name`: it is
 /// the name, or starts with it before a ` | `.
-fn in_session(title: &str, name: &str) -> bool {
+pub fn in_session(title: &str, name: &str) -> bool {
     title.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with(" | "))
 }
 
@@ -2792,6 +2792,7 @@ mod tests {
     use prost_types::Timestamp;
 
     use super::*;
+    use crate::own::Before;
 
     fn pane(id: u32, tab: u32, cwd: &str, command: &str) -> Pane {
         Pane {
@@ -3500,7 +3501,8 @@ mod tests {
         sidebar.titled("older | ~/w/luneta/main".to_owned());
         assert_eq!(sidebar.here(), Some("newer"));
         let clients = vec![Client { id: 1, pane: Some(1) }];
-        sidebar.looked(Looked { number: look.number, went: Some(1), clients, before: Some(vec![]) });
+        let before = Some(Before::Listed(vec![]));
+        sidebar.looked(Looked { number: look.number, went: Some(1), clients, before });
         assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
         sidebar.titled("older".to_owned());
         assert_eq!(sidebar.here(), Some("older"));
@@ -3526,7 +3528,7 @@ mod tests {
             number: look.number,
             went: look.went,
             clients: clients.clone(),
-            before: Some(vec![]),
+            before: Some(Before::Listed(vec![])),
         };
         sidebar.looked(came(&first));
         assert_eq!(sidebar.stayed(first.number), None);
@@ -4534,7 +4536,8 @@ mod tests {
         let look = sidebar.rejoining("newer");
         assert_eq!(look.session, "newer");
         let clients = vec![Client { id: 2, pane: Some(1) }];
-        sidebar.looked(Looked { number: look.number, went: None, clients, before: Some(vec![]) });
+        let before = Some(Before::Listed(vec![]));
+        sidebar.looked(Looked { number: look.number, went: None, clients, before });
         assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
     }
 
