@@ -2,9 +2,10 @@
 //! agents end with it, and asking zellij for it.
 //!
 //! zellij closes a tab with its last tiled pane, and the floating panes go
-//! with it: closing the last pane that holds a tab open closes the tab. A
-//! session's only tab takes the session with it, and the menu deletes the
-//! session for it.
+//! with it, but in a session no client is on it keeps the tab, listed with
+//! no panes: closing the last pane that holds a tab open closes the tab
+//! instead, by its id. A session's only tab takes the session with it, and
+//! the menu deletes the session for it.
 
 use std::collections::BTreeMap;
 
@@ -117,13 +118,13 @@ pub fn agents_of(agents: &AgentSet, session: &str, leaves: &[Leaf]) -> Fetch<Vec
     )
 }
 
-/// What a menu is for, a pane of a session or the session's own row, and what
-/// deleting it takes along, as far as whoever opened the menu knows.
+/// What a menu is for, the pane you came from in the session the menu is in,
+/// and what deleting it takes along, as far as the menu knows.
 #[derive(Debug)]
 pub struct Subject {
-    pub seat: Seat,
-    /// The pane, or none for the session's row.
-    pub pane: Option<Pane>,
+    /// The session the menu is in.
+    pub session: String,
+    pub pane: Pane,
     /// The agents of its session, once the daemon has said.
     pub agents: Fetch<Vec<Agent>>,
     /// The session the client goes to before the session it is in is
@@ -162,43 +163,37 @@ impl Pane {
 }
 
 impl Subject {
-    /// Pane `id` of the session `seat` names, among the session's `leaves`,
-    /// or the session's row with no `id`.
+    /// Pane `id` of `session`, the session the menu is in, among the
+    /// session's `leaves`.
     pub fn new(
-        seat: Seat,
-        id: Option<u32>,
+        session: String,
+        id: u32,
         leaves: &[Leaf],
         agents: Fetch<Vec<Agent>>,
         refuge: Option<String>,
     ) -> Self {
-        let pane = id.map(|id| Pane::of(id, leaves));
-        Subject { seat, pane, agents, refuge }
+        Subject { session, pane: Pane::of(id, leaves), agents, refuge }
     }
 
     /// What the key that deletes `scope` does here, or why it does nothing.
-    /// The pane closes, or its tab once nothing else holds the tab open; a
-    /// session's row has only its session to delete, by a key that says so.
-    /// The last pane that holds a session's only tab open ends the session
-    /// with it, and deletes the session: the session you are in goes once
-    /// you are in another, as it would for a key that kills it.
+    /// The pane closes, or its tab once nothing else holds the tab open. The
+    /// last pane that holds the session's only tab open ends the session with
+    /// it, and deletes the session: it goes once you are in another, as it
+    /// would for a key that kills it.
     pub fn plan(&self, scope: Scope) -> Result<Plan, String> {
-        let seat = self.seat.clone();
-        let act = match (scope, &self.pane) {
-            (Scope::Pane, None) => {
-                return Err(format!("menu: \"{}\" has no pane here to close", seat.session()));
+        let session = self.session.clone();
+        let act = match scope {
+            Scope::Pane if self.pane.closes != Closes::Session => {
+                self.pane.act(Seat::Here(session))
             },
-            (Scope::Pane, Some(pane)) if pane.closes != Closes::Session => pane.act(seat),
-            (Scope::Pane, Some(_)) | (Scope::Session, _) => match seat {
-                Seat::There(session) => Act::Kill(session),
-                Seat::Here(session) => {
-                    let Some(to) = self.refuge.clone() else {
-                        return Err(format!(
-                            "menu: \"{session}\" is the only session; there is none to go to \
-                             before it ends"
-                        ));
-                    };
-                    Act::Leave { session, to }
-                },
+            Scope::Pane | Scope::Session => {
+                let Some(to) = self.refuge.clone() else {
+                    return Err(format!(
+                        "menu: \"{session}\" is the only session; there is none to go to before \
+                         it ends"
+                    ));
+                };
+                Act::Leave { session, to }
             },
         };
         let ending = match &self.agents {
@@ -234,7 +229,7 @@ impl Ending {
         let mut ending = Ending::default();
         for agent in agents {
             match (act, &agent.sits) {
-                (Act::Kill(_) | Act::Leave { .. }, _) => ending.count(&agent.status),
+                (Act::Leave { .. }, _) => ending.count(&agent.status),
                 (Act::Pane(_, pane), Sits::Pane { id, .. }) if id == pane => {
                     ending.count(&agent.status);
                 },
@@ -334,8 +329,6 @@ pub enum Act {
     Pane(Seat, u32),
     /// Close a tab of the session the seat names, by its id.
     Tab(Seat, TabId),
-    /// Kill another session.
-    Kill(String),
     /// Go to the session `to`, and kill the session you are in once you have
     /// left it.
     Leave { session: String, to: String },
@@ -343,12 +336,9 @@ pub enum Act {
 
 /// What came of asking.
 pub enum Ran {
-    /// Asked of the plugin's own session, which does it at once.
+    /// Asked of zellij: the plugin's own session does it at once, and another
+    /// says how it went to the command run with the context given.
     Done,
-    /// Asked of another session, which says how it went to a command run with
-    /// the context given.
-    Asked,
-    Failed(String),
     /// On the way to another session, for the one you leave to end once you
     /// are gone.
     Leaving(Leaving),
@@ -360,7 +350,7 @@ impl Act {
         match self {
             Act::Pane(..) => "Close the pane".to_owned(),
             Act::Tab(..) => "Close its tab".to_owned(),
-            Act::Kill(session) | Act::Leave { session, .. } => format!("Kill session {session}"),
+            Act::Leave { session, .. } => format!("Kill session {session}"),
         }
     }
 
@@ -369,19 +359,12 @@ impl Act {
     pub fn run(&self, context: BTreeMap<String, String>) -> Ran {
         match self {
             Act::Pane(Seat::Here(_), pane) => close_terminal_pane(*pane),
-            Act::Tab(Seat::Here(_), tab) => close_tab_with_id(tab.0 as u64),
+            Act::Tab(Seat::Here(_), tab) => close_tab_with_id(tab.id() as u64),
             Act::Pane(Seat::There(session), pane) => {
                 run_command(&close_pane(session, &panes::pane_id(*pane)), context);
-                return Ran::Asked;
             },
             Act::Tab(Seat::There(session), tab) => {
-                run_command(&close_tab(session, &tab.0.to_string()), context);
-                return Ran::Asked;
-            },
-            Act::Kill(session) => {
-                if let Err(error) = kill_sessions(&[session.as_str()]) {
-                    return Ran::Failed(format!("menu: kill \"{session}\": {error}"));
-                }
+                run_command(&close_tab(session, &tab.id().to_string()), context);
             },
             Act::Leave { session, to } => return Ran::Leaving(Leaving::go(session, to)),
         }
@@ -535,24 +518,27 @@ mod tests {
         }
     }
 
+    /// The tab whose id is `id`.
+    fn tab_id(id: usize) -> TabId {
+        TabId::of(&TabInfo { tab_id: id, ..TabInfo::default() })
+    }
+
     fn agent(pane: u32, tab: usize, status: &str) -> Agent {
-        let sits = Sits::Pane { id: pane, tab: Some(TabId(tab)) };
+        let sits = Sits::Pane { id: pane, tab: Some(tab_id(tab)) };
         Agent { sits, status: given::status(status) }
     }
 
-    /// Pane `id` of `seat`, or the session's row with none: pane 2 in tab 7
+    /// Pane `id` of session `luneta`, with `elo` to go to: pane 2 in tab 7
     /// beside pane 3, pane 5 alone in tab 8, and pane 6 alone in tab 9, as
     /// though that were the session's only tab.
-    fn of(seat: Seat, id: Option<u32>, agents: Fetch<Vec<Agent>>) -> Subject {
-        let pane = id.map(|id| {
-            let (tab, closes) = match id {
-                5 => (8, Closes::Tab),
-                6 => (9, Closes::Session),
-                _ => (7, Closes::Pane),
-            };
-            Pane { id, tab: Some(TabId(tab)), closes }
-        });
-        Subject { seat, pane, agents, refuge: Some("elo".to_owned()) }
+    fn of(id: u32, agents: Fetch<Vec<Agent>>) -> Subject {
+        let (tab, closes) = match id {
+            5 => (8, Closes::Tab),
+            6 => (9, Closes::Session),
+            _ => (7, Closes::Pane),
+        };
+        let pane = Pane { id, tab: Some(tab_id(tab)), closes };
+        Subject { session: "luneta".to_owned(), pane, agents, refuge: Some("elo".to_owned()) }
     }
 
     fn here() -> Seat {
@@ -560,48 +546,38 @@ mod tests {
     }
 
     /// A pane closes alone, or its tab with it once nothing else holds the
-    /// tab open. Another session's goes by a command. A session other than
-    /// yours is killed, and yours once you have gone to another; a session's
-    /// row deletes its session, and so does the last pane that holds its only
-    /// tab open, which would end it.
+    /// tab open, and the picker closes another session's by the same rule.
+    /// The session you are in goes once you have gone to another, by its key
+    /// and by the last pane that holds its only tab open, which would end it.
     #[test]
     fn each_key_deletes_what_it_names_and_what_goes_with_it() {
-        let elo = Seat::There("elo".to_owned());
         let leave = || Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() };
-        for (seat, id, scope, act) in [
-            (here(), Some(2), Scope::Pane, Act::Pane(here(), 2)),
-            (here(), Some(5), Scope::Pane, Act::Tab(here(), TabId(8))),
-            (here(), Some(6), Scope::Pane, leave()),
-            (elo.clone(), Some(6), Scope::Pane, Act::Kill("elo".to_owned())),
-            (elo.clone(), Some(2), Scope::Pane, Act::Pane(elo.clone(), 2)),
-            (elo.clone(), Some(2), Scope::Session, Act::Kill("elo".to_owned())),
-            (here(), Some(2), Scope::Session, leave()),
-            (elo.clone(), None, Scope::Session, Act::Kill("elo".to_owned())),
-            (here(), None, Scope::Session, leave()),
+        for (id, scope, act) in [
+            (2, Scope::Pane, Act::Pane(here(), 2)),
+            (5, Scope::Pane, Act::Tab(here(), tab_id(8))),
+            (6, Scope::Pane, leave()),
+            (2, Scope::Session, leave()),
         ] {
-            let plan = of(seat.clone(), id, Fetch::Ready(Vec::new())).plan(scope);
-            assert_eq!(plan.map(|plan| plan.act), Ok(act), "{scope:?} of {id:?} in {seat:?}");
+            let plan = of(id, Fetch::Ready(Vec::new())).plan(scope);
+            assert_eq!(plan.map(|plan| plan.act), Ok(act), "{scope:?} of {id}");
         }
+        let elo = Seat::There("elo".to_owned());
+        assert_eq!(of(5, Fetch::Waiting).pane.act(elo.clone()), Act::Tab(elo, tab_id(8)));
     }
 
     /// With nowhere to go, the session you are in stays: killed, it would
     /// take you out of zellij, and so would closing the last pane that holds
-    /// its only tab open. A session's row has no pane for a key that closes
-    /// one, and kills no session for it. A pane in a tab no one has named yet
-    /// closes alone.
+    /// its only tab open. A pane in a tab no one has named yet closes alone.
     #[test]
     fn a_key_with_nothing_it_can_delete_says_why() {
-        for (id, scope) in [(Some(2), Scope::Session), (Some(6), Scope::Pane)] {
-            let alone = Subject { refuge: None, ..of(here(), id, Fetch::Ready(Vec::new())) };
+        for (id, scope) in [(2, Scope::Session), (6, Scope::Pane)] {
+            let alone = Subject { refuge: None, ..of(id, Fetch::Ready(Vec::new())) };
             let said = alone.plan(scope).err();
             assert!(said.as_deref().is_some_and(|said| said.contains("only session")), "{said:?}");
         }
-        let row = of(Seat::There("elo".to_owned()), None, Fetch::Ready(Vec::new()));
-        let said = row.plan(Scope::Pane).err();
-        assert!(said.as_deref().is_some_and(|said| said.contains("no pane")), "{said:?}");
         let untold = Subject {
-            pane: Some(Pane { id: 5, tab: None, closes: Closes::Tab }),
-            ..of(here(), None, Fetch::Ready(Vec::new()))
+            pane: Pane { id: 5, tab: None, closes: Closes::Tab },
+            ..of(5, Fetch::Ready(Vec::new()))
         };
         let act = untold.plan(Scope::Pane).map(|plan| plan.act);
         assert_eq!(act, Ok(Act::Pane(here(), 5)));
@@ -625,20 +601,19 @@ mod tests {
         };
         let session = "Kill session luneta? 5 agents, 1 busy, 1 waiting, 2 unknown";
         for (id, scope, asked) in [
-            (Some(2), Scope::Pane, None),
-            (Some(3), Scope::Pane, Some("Close the pane? 1 agent, 1 busy")),
-            (Some(5), Scope::Pane, Some("Close its tab? 1 agent, 1 waiting")),
-            (Some(4), Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
-            (Some(9), Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
-            (Some(6), Scope::Pane, Some(session)),
-            (Some(2), Scope::Session, Some(session)),
-            (None, Scope::Session, Some(session)),
+            (2, Scope::Pane, None),
+            (3, Scope::Pane, Some("Close the pane? 1 agent, 1 busy")),
+            (5, Scope::Pane, Some("Close its tab? 1 agent, 1 waiting")),
+            (4, Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
+            (9, Scope::Pane, Some("Close the pane? 1 agent, 1 unknown")),
+            (6, Scope::Pane, Some(session)),
+            (2, Scope::Session, Some(session)),
         ] {
-            let plan = of(here(), id, agents()).plan(scope).expect("a plan");
-            assert_eq!(plan.question().as_deref(), asked, "{scope:?} of {id:?}");
+            let plan = of(id, agents()).plan(scope).expect("a plan");
+            assert_eq!(plan.question().as_deref(), asked, "{scope:?} of {id}");
         }
         for agents in [Fetch::Waiting, Fetch::Failed("lunetad does not answer".to_owned())] {
-            let plan = of(here(), Some(2), agents).plan(Scope::Pane).expect("a plan");
+            let plan = of(2, agents).plan(Scope::Pane).expect("a plan");
             assert!(plan.question().is_some());
         }
     }
@@ -670,18 +645,22 @@ mod tests {
         agents.rebuild("", &live, None, given::NOW, Selection::SnapToTop);
         assert_eq!((agents.rows.len(), agents.doubled, agents.unplaced), (2, 1, 2));
 
-        let there = Seat::There("elo".to_owned());
         let unplaced = "1 more at work in a pane luneta cannot find";
-        for (seat, id, scope, asked) in [
-            (here(), Some(3), Scope::Pane, format!("Close the pane? 2 agents, 1 busy, {unplaced}")),
-            (here(), Some(2), Scope::Pane, format!("Close the pane? 1 agent, {unplaced}")),
-            (here(), None, Scope::Session, "Kill session luneta? 4 agents, 2 busy".to_owned()),
-            (there, None, Scope::Session, "Kill session elo? 1 agent, 1 waiting".to_owned()),
+        for (id, scope, asked) in [
+            (3, Scope::Pane, format!("Close the pane? 2 agents, 1 busy, {unplaced}")),
+            (2, Scope::Pane, format!("Close the pane? 1 agent, {unplaced}")),
+            (2, Scope::Session, "Kill session luneta? 4 agents, 2 busy".to_owned()),
         ] {
-            let ends = agents_of(&agents, seat.session(), &[]);
-            let plan = of(seat.clone(), id, ends).plan(scope).expect("a plan");
-            assert_eq!(plan.question(), Some(asked), "{scope:?} of {id:?} in {seat:?}");
+            let plan = of(id, agents_of(&agents, "luneta", &[])).plan(scope).expect("a plan");
+            assert_eq!(plan.question(), Some(asked), "{scope:?} of {id}");
         }
+
+        // The menu in `elo`, with `luneta` to go to.
+        let ends = agents_of(&agents, "elo", &[]);
+        let refuge = Some("luneta".to_owned());
+        let elo = Subject { session: "elo".to_owned(), refuge, ..of(2, ends) };
+        let asked = elo.plan(Scope::Session).expect("a plan").question();
+        assert_eq!(asked.as_deref(), Some("Kill session elo? 1 agent, 1 waiting"));
     }
 
     /// The session you leave is killed once zellij lists its clients without

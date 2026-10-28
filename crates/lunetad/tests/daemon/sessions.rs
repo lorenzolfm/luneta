@@ -72,7 +72,7 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
 /// A session is on the host as soon as its socket is, before zellij has said
 /// what panes it has, which takes zellij's own list of sessions about a
 /// second. Its panes are its terminals on screen: a plugin's pane is none,
-/// and the column the sidebar stands in the place of is off the screen. What
+/// and a terminal another stands in the place of is off the screen. What
 /// zellij leaves empty, the daemon says nothing of, but what it said before
 /// stands when it says nothing for being busy.
 #[test]
@@ -85,14 +85,14 @@ fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them(
     assert!(work.started_at.is_some());
     assert_eq!(work.panes, None);
 
-    let mut column = listed(0, "tail -f /dev/null", (0, "Tab #1"), Some("/home/you"));
-    column["is_suppressed"] = json!(true);
-    let mut sidebar = listed(2, "luneta", (0, "Tab #1"), None);
-    sidebar["is_plugin"] = json!(true);
+    let mut suppressed = listed(0, "tail -f /dev/null", (0, "Tab #1"), Some("/home/you"));
+    suppressed["is_suppressed"] = json!(true);
+    let mut plugin = listed(2, "luneta", (0, "Tab #1"), None);
+    plugin["is_plugin"] = json!(true);
     let mut unsaid = listed(4, "Pane #2", (1, "review"), None);
     unsaid["pane_command"] = json!("");
     let shell = listed(3, "~/work", (0, "Tab #1"), Some("/home/you/work"));
-    host.zellij.list("work", &json!([column, sidebar, shell, unsaid]));
+    host.zellij.list("work", &json!([suppressed, plugin, shell, unsaid]));
 
     let panes = eventually("zellij lists the panes of work", || {
         session(&host.host(), "work")?.panes.clone()
@@ -221,9 +221,9 @@ fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
         });
     }
 
-    let mut sidebar = listed(2, "luneta", (0, "Tab #1"), None);
-    sidebar.as_object_mut().unwrap().remove("is_plugin");
-    host.zellij.list("work", &json!([shell, sidebar]));
+    let mut plugin = listed(2, "luneta", (0, "Tab #1"), None);
+    plugin.as_object_mut().unwrap().remove("is_plugin");
+    host.zellij.list("work", &json!([shell, plugin]));
     host.zellij.list("play", &json!([shell, shell]));
     let said = daemon.said_after(Duration::from_secs(5)).to_vec();
     let unread = |name: &str, why: &str| {

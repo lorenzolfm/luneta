@@ -7,15 +7,21 @@ use crate::close::{self, Closes};
 use crate::places::Places;
 
 /// A tab, by the id zellij keeps for it while it lives. Its position changes
-/// as the tabs before it close; the id does not.
+/// as the tabs before it close; the id does not. Only `of` makes one, so a
+/// position never passes for an id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TabId(pub usize);
+pub struct TabId(usize);
 
 impl TabId {
     /// The id of `tab`, and not its position, which zellij hands over beside
     /// it as a number of the same kind.
     pub fn of(tab: &TabInfo) -> Self {
         TabId(tab.tab_id)
+    }
+
+    /// The id, as zellij takes a tab by it.
+    pub fn id(self) -> usize {
+        self.0
     }
 }
 

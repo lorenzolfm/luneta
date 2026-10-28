@@ -39,17 +39,25 @@ const MODE: &str = "mode";
 /// that start an agent.
 const MENU: &str = "menu";
 
-/// What a load of the plugin is, by its `mode`.
-#[derive(Default)]
+/// What a load of the plugin is, by its `mode`, with what it keeps. The
+/// picker and the menu are boxed: each keeps far more than the name of a mode
+/// luneta does not know.
 enum Role {
     /// No `mode`: the picker, floating over the tab.
-    #[default]
-    Picker,
-    /// Boxed: the menu keeps what the daemon says, for a delete key to ask
-    /// first, and is larger than every other role.
+    Picker(Box<Picker>),
+    /// The menu, which keeps what the daemon says, for a delete key to ask
+    /// first.
     Menu(Box<menu::Menu>),
     /// A `mode` luneta does not know. It says so, and does nothing else.
     Unknown(String),
+}
+
+/// What zellij makes before it loads the plugin, and so before the plugin
+/// has its `mode`: the picker, as a load with none is.
+impl Default for Role {
+    fn default() -> Self {
+        Role::Picker(Box::default())
+    }
 }
 
 /// What a load with a `mode` luneta does not know says, in its pane if it has
@@ -132,8 +140,10 @@ enum Target {
     Pane(String, u32),
 }
 
+/// The picker: the sessions, the directories and the agents it lists, and
+/// what it keeps of zellij and of the daemon to list them.
 #[derive(Default)]
-struct State {
+struct Picker {
     mode: Mode,
     screen: Screen,
     matches: MatchSet,
@@ -154,27 +164,36 @@ struct State {
     frame: u64,
     peeks: Peeks,
     preview_at: Option<(Target, u64)>,
-    role: Role,
     plugin_id: u32,
     branches: Vec<Branch>,
 }
 
-register_plugin!(State);
+register_plugin!(Role);
 
-impl ZellijPlugin for State {
+impl ZellijPlugin for Role {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         let ids = get_plugin_ids();
-        self.plugin_id = ids.plugin_id;
         request_permission(&PERMISSIONS);
-        self.role = match configuration.get(MODE).map(|value| value.trim()) {
-            None => Role::Picker,
+        *self = match configuration.get(MODE).map(|value| value.trim()) {
+            None => Role::Picker(Box::new(Picker::new(ids.plugin_id))),
             Some(MENU) => {
-                Role::Menu(Box::new(menu::Menu::new(self.plugin_id, ids.client_id, &configuration)))
+                Role::Menu(Box::new(menu::Menu::new(ids.plugin_id, ids.client_id, &configuration)))
             },
             Some(mode) => Role::Unknown(mode.to_owned()),
         };
-        match &self.role {
-            Role::Picker => {},
+        match &*self {
+            Role::Picker(_) => {
+                subscribe(&[
+                    EventType::PermissionRequestResult,
+                    EventType::Timer,
+                    EventType::Key,
+                    EventType::RunCommandResult,
+                    EventType::Visible,
+                    EventType::PaneUpdate,
+                    EventType::TabUpdate,
+                ]);
+                set_timeout(0.0);
+            },
             Role::Menu(_) => {
                 subscribe(&[
                     EventType::Key,
@@ -183,42 +202,50 @@ impl ZellijPlugin for State {
                     EventType::RunCommandResult,
                     EventType::Timer,
                 ]);
-                return;
             },
-            Role::Unknown(mode) => {
-                eprintln!("{}", unknown_mode(mode));
-                return;
-            },
+            Role::Unknown(mode) => eprintln!("{}", unknown_mode(mode)),
         }
-        subscribe(&[
-            EventType::PermissionRequestResult,
-            EventType::Timer,
-            EventType::Key,
-            EventType::RunCommandResult,
-            EventType::Visible,
-            EventType::PaneUpdate,
-            EventType::TabUpdate,
-        ]);
-        set_timeout(0.0);
     }
 
     fn update(&mut self, event: Event) -> bool {
-        match self.role {
-            Role::Picker => {},
-            Role::Menu(ref mut menu) => {
-                return match event {
-                    Event::Key(key) => menu.key(&key),
-                    Event::TabUpdate(tabs) => menu.tabs(tabs),
-                    Event::PaneUpdate(panes) => menu.panes(panes),
-                    Event::Timer(_) => menu.tick(),
-                    Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                        menu.ran(exit_code, &stdout, &stderr, &context)
-                    },
-                    _ => false,
-                };
+        match self {
+            Role::Picker(picker) => picker.update(event),
+            Role::Menu(menu) => match event {
+                Event::Key(key) => menu.key(&key),
+                Event::TabUpdate(tabs) => menu.tabs(tabs),
+                Event::PaneUpdate(panes) => menu.panes(panes),
+                Event::Timer(_) => menu.tick(),
+                Event::RunCommandResult(exit_code, stdout, stderr, context) => {
+                    menu.ran(exit_code, &stdout, &stderr, &context)
+                },
+                _ => false,
             },
-            Role::Unknown(_) => return false,
+            Role::Unknown(_) => false,
         }
+    }
+
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        match self {
+            Role::Picker(picker) => picker.pipe(&message),
+            Role::Menu(_) | Role::Unknown(_) => false,
+        }
+    }
+
+    fn render(&mut self, rows: usize, cols: usize) {
+        match &*self {
+            Role::Picker(picker) => picker.render(rows, cols),
+            Role::Menu(menu) => render::render_menu(menu, rows, cols),
+            Role::Unknown(mode) => render::render_notice(&unknown_mode(mode), rows, cols),
+        }
+    }
+}
+
+impl Picker {
+    fn new(plugin_id: u32) -> Self {
+        Picker { plugin_id, ..Picker::default() }
+    }
+
+    fn update(&mut self, event: Event) -> bool {
         match event {
             Event::PermissionRequestResult(status) => {
                 if matches!(status, PermissionStatus::Granted) {
@@ -325,8 +352,8 @@ impl ZellijPlugin for State {
         }
     }
 
-    fn pipe(&mut self, message: PipeMessage) -> bool {
-        if !matches!(self.role, Role::Picker) || message.name != SCREEN_PIPE {
+    fn pipe(&mut self, message: &PipeMessage) -> bool {
+        if message.name != SCREEN_PIPE {
             return false;
         }
         let Some(screen) = message.payload.as_deref().and_then(Screen::from_name) else {
@@ -336,18 +363,7 @@ impl ZellijPlugin for State {
         true
     }
 
-    fn render(&mut self, rows: usize, cols: usize) {
-        match &self.role {
-            Role::Picker => {},
-            Role::Menu(menu) => {
-                render::render_menu(menu, rows, cols);
-                return;
-            },
-            Role::Unknown(mode) => {
-                render::render_notice(&unknown_mode(mode), rows, cols);
-                return;
-            },
-        }
+    fn render(&self, rows: usize, cols: usize) {
         match &self.mode {
             Mode::Search => match self.screen {
                 Screen::Sessions => {
@@ -381,9 +397,7 @@ impl ZellijPlugin for State {
             ),
         }
     }
-}
 
-impl State {
     fn poll(&mut self) {
         let Ok(snapshot) = get_session_list() else {
             return;
@@ -953,20 +967,21 @@ mod tests {
     /// why. What it said of the panes stands until it answers again.
     #[test]
     fn a_daemon_that_does_not_answer_takes_the_agents_and_says_why() {
-        let mut state =
-            State { places: Places::of(&[("b", &[(4, "/w/b")])]), ..State::default() };
-        state.agents.heard(&[given::agent(4, "b", 4, "/w/b", "idle")], given::NOW);
-        state.rebuild_agents(Selection::Hold);
-        assert_eq!(state.agents.rows.len(), 1);
-        state.daemon.ask(Moment::now());
+        let mut picker =
+            Picker { places: Places::of(&[("b", &[(4, "/w/b")])]), ..Picker::default() };
+        picker.agents.heard(&[given::agent(4, "b", 4, "/w/b", "idle")], given::NOW);
+        picker.rebuild_agents(Selection::Hold);
+        assert_eq!(picker.agents.rows.len(), 1);
+        picker.daemon.ask(Moment::now());
         let refused = b"luneta: lunetad.sock: transport error: Connection refused (os error 111)";
         let context = BTreeMap::from([(CONTEXT_KEY.to_owned(), daemon::CONTEXT_VALUE.to_owned())]);
-        assert!(state.update(Event::RunCommandResult(Some(1), Vec::new(), refused.to_vec(), context)));
+        let refusal = Event::RunCommandResult(Some(1), Vec::new(), refused.to_vec(), context);
+        assert!(picker.update(refusal));
 
         let said = "lunetad does not answer: luneta: lunetad.sock: transport error: Connection \
                     refused (os error 111)";
-        assert!(matches!(&state.agents.status, Fetch::Failed(why) if why == said));
-        assert!(state.agents.rows.is_empty());
-        assert_eq!(state.places.cwd("b", 4), Some("/w/b"));
+        assert!(matches!(&picker.agents.status, Fetch::Failed(why) if why == said));
+        assert!(picker.agents.rows.is_empty());
+        assert_eq!(picker.places.cwd("b", 4), Some("/w/b"));
     }
 }

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use kdl::{KdlDocument, KdlNode};
 use zellij_tile::prelude::*;
 
-use crate::agents::{AgentSet, Live, Seat};
+use crate::agents::{AgentSet, Live};
 use crate::close::{self, Act, Leaving, Plan, Ran, Scope};
 use crate::daemon;
 use crate::dirs::{self, WORKTREES};
@@ -969,8 +969,8 @@ impl Menu {
         let manifest = self.panes.as_ref()?;
         let leaves = tree::leaves(session, &self.tabs, manifest, &self.places, &[]);
         let agents = close::agents_of(&self.agents, session, &leaves);
-        let seat = Seat::Here(session.to_owned());
-        Some(close::Subject::new(seat, Some(id), &leaves, agents, self.refuge.clone()))
+        let session = session.to_owned();
+        Some(close::Subject::new(session, id, &leaves, agents, self.refuge.clone()))
     }
 
     /// Goes ahead with the delete key that asked, planned again from what
@@ -1004,8 +1004,7 @@ impl Menu {
                 self.phase = Phase::Leaving(leaving);
                 set_timeout(LEAVING_TICK);
             },
-            Ran::Failed(reason) => self.phase = Phase::Wrong(reason),
-            Ran::Done | Ran::Asked => return self.close(),
+            Ran::Done => return self.close(),
         }
         self.place();
         true
