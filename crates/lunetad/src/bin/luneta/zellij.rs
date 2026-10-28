@@ -573,7 +573,7 @@ fn started(session: &str, patience: Duration) -> Option<SystemTime> {
 pub enum After {
     /// Open this, for the menu numbered so, as `open` does.
     Open(u64, Open),
-    /// Kill the session the client left, which it was in.
+    /// Kill the session the client left, which it was in, and delete it.
     Kill(String),
 }
 
@@ -829,9 +829,17 @@ pub fn close_tab(session: &str, tab: u32, events: &Sender<Event>) {
     run(tab_closer(session, tab), None, events);
 }
 
-/// Kills `session`, which luneta's client is not in, on a thread of its own.
+/// Kills `session`, which luneta's client is not in, and deletes it, on a
+/// thread of its own, as `killed` does.
 pub fn kill(session: &str, events: &Sender<Event>) {
-    run(killer(session), None, events);
+    let session = session.to_owned();
+    let events = events.clone();
+    thread::spawn(move || {
+        if let Err(why) = killed(&session) {
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
+        }
+    });
 }
 
 /// Closes the terminal `pane` of `session`, and says why not when zellij
@@ -846,10 +854,29 @@ pub fn tab_closed(session: &str, tab: u32) -> Result<(), String> {
     done(tab_closer(session, tab))
 }
 
-/// Kills `session`, and says why not when zellij did not. A client in it
-/// ends with it: luneta's own takes it to another session.
+/// What `delete-session --force` says as it kills a session that runs.
+const KILLING: &str = "will be force killed and deleted";
+
+/// How `delete-session` ends where zellij keeps nothing of the session.
+const UNKEPT: i32 = 2;
+
+/// Kills `session` and deletes it, so that zellij keeps nothing to bring it
+/// back with, and says why not when zellij did not. A client in it ends with
+/// it: luneta's own takes it to another session. zellij first keeps anything
+/// of a session a second after it starts: it kills a younger one all the
+/// same, and fails to delete what it does not keep.
 pub fn killed(session: &str) -> Result<(), String> {
-    done(killer(session))
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.args(["delete-session", "--force", session]);
+    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
+    if let program::Ran::Ended { status, stdout, .. } = &ran
+        && status.code() == Some(UNKEPT)
+        && String::from_utf8_lossy(stdout).contains(KILLING)
+    {
+        return Ok(());
+    }
+    ran.answer().map(drop).map_err(|why| format!("zellij: {why}"))
 }
 
 /// What `list-sessions` says where no session runs, nor ended to be brought
@@ -979,13 +1006,6 @@ fn pane_closer(session: &str, pane: u32) -> Command {
 fn tab_closer(session: &str, tab: u32) -> Command {
     let mut command = Command::new("zellij");
     command.args(["--session", session, "action", "close-tab-by-id", &tab.to_string()]);
-    command
-}
-
-/// zellij, to kill `session`.
-fn killer(session: &str) -> Command {
-    let mut command = Command::new("zellij");
-    command.args(["kill-session", session]);
     command
 }
 

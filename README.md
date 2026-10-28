@@ -363,7 +363,7 @@ and under them those zellij keeps to bring back; its agents are as the
 you type narrows both, and the preview beside the list shows the screen of the
 highlighted agent's pane, or of the pane you would come to in the highlighted
 session. `Enter` takes zellij there, brings back a session that ended, or
-makes the session you typed the name of. `Del` kills the highlighted session,
+makes the session you typed the name of. `Del` deletes the highlighted session,
 lets go of one that ended, or closes the agent's pane, and asks first, as the
 menu's delete does, while an agent at work would end: `y` goes ahead. `Ctrl r`
 renames the highlighted session. `Esc`, or a click off the box, closes it.
@@ -471,13 +471,14 @@ first group, where `/` searches the skills the pane's directory can run, and
 keys do.
 
 `d d` closes the highlighted pane, or its tab once nothing else holds the tab
-open, floating panes and all. `d s` kills its session. On the last
-pane that holds a session's only tab open, or on a session's row, `d d` kills
-the session too: zellij would leave an empty tab in a session with no client,
-and end the one zellij is in. The session zellij is in is killed once zellij
-is in another, the newest, so that zellij stays on screen throughout, and the
-sidebar says where zellij goes until then; with no other, it is killed with
-zellij in it, and luneta ends. When that would end an
+open, floating panes and all. `d s` deletes its session: luneta kills it, and
+has zellij keep nothing of it, so it is not left to resurrect. On the last
+pane that holds a session's only tab open, or on a session's row, `d d`
+deletes the session too: zellij would leave an empty tab in a session with no
+client, and end the one zellij is in. The session zellij is in is deleted once
+zellij is in another, the newest, so that zellij stays on screen throughout,
+and the sidebar says where zellij goes until then; with no other, it is
+deleted with zellij in it, and luneta ends. When that would end an
 agent that is busy, waiting on you, or that says nothing luneta knows, the
 menu asks first, as it does for one whose session file lunetad cannot read, in
 the pane its process runs in, which the sidebar says at its bottom. So does
@@ -678,7 +679,7 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta open tab [--session S] [--cwd D] [--name N] [-- CMD…]` | opens a tab of the session it runs in, or of `S` |
 | `luneta open session [--cwd D] [--name N]` | makes a session and takes you there |
 | `luneta go S[:P]` | takes you to a session, or to a pane of one |
-| `luneta close S[:P]… [--yes PLAN]` | closes panes and kills sessions |
+| `luneta close S[:P]… [--yes PLAN]` | closes panes and deletes sessions |
 | `luneta here` | says which pane it runs in, as `S:P` |
 
 They are for a pane of zellij, where an agent runs, and take what it runs in
@@ -714,7 +715,7 @@ nothing, and exits 3, so that an agent shows you that and asks before it goes
 ahead:
 
 ```text
-kill session bipa: 1 agent, 1 busy
+delete session bipa: 1 agent, 1 busy
   bipa:0  busy     3602051  cipher-6d
 close pane luneta:12: no agent
 luneta: closed nothing; run it again with --yes 9c41d07e3b2a5f18 to close what it says
@@ -727,8 +728,9 @@ now, and its plan.
 
 What holds the pane it runs in goes last, and its agent's line says `(this
 runs here)`: the agent ends with it. Where anything before it failed to
-close, it stays, so that the agent can tell you. It kills only sessions that
-run, not those zellij keeps to resurrect.
+close, it stays, so that the agent can tell you. It deletes only sessions
+that run, as `d s` does, so that zellij keeps nothing of them to resurrect,
+and leaves alone those zellij keeps already.
 
 #### From luneta's sidebar
 

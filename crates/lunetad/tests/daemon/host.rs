@@ -90,7 +90,8 @@ impl<'a> Vars<'a> {
 /// asks it for the panes of, for `asked`, and each pane, tab and session it is
 /// asked to close, for `closed`, and closes nothing; in a session a test had
 /// it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
-/// lists nothing, and answers nothing. It knows no other command.
+/// lists nothing, and answers nothing. A session a test had `unkept` or
+/// `gone` it deletes as zellij deletes those. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -104,14 +105,25 @@ impl FakeZellij {
 asked="$*"
 session="$2"
 [ "$1" = --session ] && shift 2
+[ "$1" = delete-session ] && session="$3"
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
     "action list-panes --json") asking=laid ;;
     "action list-clients") asking=clients ;;
-    "action close-pane --pane-id "* | "action close-tab-by-id "* | "kill-session "*)
+    "action close-pane --pane-id "* | "action close-tab-by-id "* | "delete-session --force "*)
         if [ -f "{panes}/$session.refused" ]; then
             echo "zellij refused to close anything of $session" >&2
             exit 1
+        fi
+        if [ -f "{panes}/$session.unkept" ]; then
+            echo "A session by the name \"$session\" exists and is active, but will be force killed and deleted."
+            echo "$asked" >> "{panes}/closed"
+            echo "Session: \"$session\" not found." >&2
+            exit 2
+        fi
+        if [ -f "{panes}/$session.gone" ]; then
+            echo "Session: \"$session\" not found." >&2
+            exit 2
         fi
         echo "$asked" >> "{panes}/closed"
         exit 0
@@ -211,6 +223,20 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
+    }
+
+    /// Has zellij kill the session `session` from now on and keep nothing of
+    /// it, as it does a session that ran for less than a second: it says it
+    /// kills it, notes it, and fails to delete it.
+    pub fn unkept(&self, session: &str) {
+        self.write(&format!("{session}.unkept"), "");
+    }
+
+    /// Has zellij find nothing of the session `session` from now on, as of
+    /// one that ended and that it keeps nothing of: it fails to delete it, and
+    /// notes nothing.
+    pub fn gone(&self, session: &str) {
+        self.write(&format!("{session}.gone"), "");
     }
 
     /// Has zellij answer nothing from now on of what it is asked to list of

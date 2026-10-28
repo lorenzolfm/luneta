@@ -5,7 +5,7 @@
 //! other, and what you type narrows both. `Enter` takes zellij to the
 //! session highlighted, bringing back one that ended, or to the pane of the
 //! agent highlighted, or makes the session you typed the name of. `Del`
-//! kills the session highlighted, or lets go of one that ended, or closes
+//! deletes the session highlighted, or lets go of one that ended, or closes
 //! the agent's pane, asking first as the menu does while an agent at work
 //! would end; `Ctrl r` renames the session highlighted. Beside the list, the
 //! preview shows the pane highlighted, or the one a client coming to the
@@ -709,7 +709,7 @@ impl Picker {
         SessionName::parse(&self.term).map(Some)
     }
 
-    /// What `Del` does: plans killing the session highlighted, or closing the
+    /// What `Del` does: plans deleting the session highlighted, or closing the
     /// pane of the agent highlighted, or lets go of the session highlighted
     /// that ended. What is typed stays, and the highlight goes on to the row
     /// after once the row goes: `Del` again deletes the row it shows, not
@@ -1206,7 +1206,7 @@ impl Picker {
                 ("<ENTER>", "Go"),
                 ("<TAB>", "Agents"),
                 ("<Ctrl r>", "Rename"),
-                ("<Del>", "Kill"),
+                ("<Del>", "Delete"),
                 ("<ESC>", "Close"),
             ],
             (Stage::Search, List::Agents) => vec![
@@ -1607,7 +1607,7 @@ mod tests {
         }
     }
 
-    /// `Del` on a session plans killing it, and asks first, as the menu
+    /// `Del` on a session plans deleting it, and asks first, as the menu
     /// does, while the plan ends an agent at work: `y` plans again, and goes
     /// ahead with the plan it asked about, but asks again of one that changed
     /// meanwhile. Any other key gives it up.
@@ -1620,7 +1620,7 @@ mod tests {
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
         let asks = |picker: &Picker| {
             let buffer = drawn(picker);
-            text(&buffer, buffer.area).iter().any(|line| line.contains("Kill session c?"))
+            text(&buffer, buffer.area).iter().any(|line| line.contains("Delete session c?"))
         };
         assert!(asks(&picker));
         assert_eq!(press(&mut picker, KeyCode::Char('n')), Picked::Nothing);

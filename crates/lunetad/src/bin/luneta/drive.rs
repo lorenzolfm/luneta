@@ -667,7 +667,7 @@ fn says(act: &Act) -> String {
             let panes: Vec<String> = panes.iter().map(|pane| format!("{session}:{pane}")).collect();
             format!("close the tab of {}", panes.join(", "))
         },
-        Act::Kill(session) | Act::Leave { session, .. } => format!("kill session {session}"),
+        Act::Kill(session) | Act::Leave { session, .. } => format!("delete session {session}"),
     }
 }
 

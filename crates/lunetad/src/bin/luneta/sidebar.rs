@@ -944,7 +944,7 @@ impl Sidebar {
     }
 
     /// luneta takes its zellij out of the session it is in, to `place` in
-    /// another, and kills that session once it has left it, which the
+    /// another, and deletes that session once it has left it, which the
     /// sidebar says until then. A look to ask zellij for once it is there.
     pub fn leaving(&mut self, place: &Place) -> Option<Look> {
         self.goes(place, true)
@@ -5220,7 +5220,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13..15], [" Kill session older? 1 agent,", " 1 waiting"]);
+        assert_eq!(lines[13..15], [" Delete session older? 1", " agent, 1 waiting"]);
         let to = Place::Session(listed("newer", 20));
         let leave = Act::Leave { session: "older".to_owned(), to };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
