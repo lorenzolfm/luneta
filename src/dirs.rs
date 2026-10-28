@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use crate::cursor::{Cursor, Stops};
+use crate::cursor::Cursor;
 use crate::fetch::Fetch;
 use crate::panes;
 use crate::sessions::{Selection, SessionName, Sessions, Taken};
@@ -283,8 +283,6 @@ fn cut_at<'a>(text: &'a str, marker: &str) -> &'a str {
         None => text,
     }
 }
-
-impl Stops for DirRow {}
 
 impl DirRow {
     fn new(dir: &Dir, name: SessionName, score: i64, indices: Vec<usize>, is_exact: bool) -> Self {

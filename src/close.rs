@@ -1,10 +1,9 @@
 //! Deleting what a menu is for: its pane, or its session. What goes, which
 //! agents end with it, and asking zellij for it.
 //!
-//! zellij closes a tab with its last tiled pane. The sidebar's column never
-//! closes, so a tab that keeps one would stay open with nothing of yours in
-//! it: closing the last pane that holds a tab open closes the tab instead.
-//! A session's only tab takes the session with it, and the menu deletes the
+//! zellij closes a tab with its last tiled pane, and the floating panes go
+//! with it: closing the last pane that holds a tab open closes the tab. A
+//! session's only tab takes the session with it, and the menu deletes the
 //! session for it.
 
 use std::collections::BTreeMap;
@@ -12,12 +11,10 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use crate::agents::{AgentSet, Seat, Status};
-use crate::coming::Coming;
-use crate::dock::{self, TabId};
-use crate::elapsed::{Age, Moment};
+use crate::elapsed::Age;
 use crate::fetch::Fetch;
 use crate::panes;
-use crate::tree::{is_placeholder, Leaf};
+use crate::tree::{Leaf, TabId};
 
 /// What a key of the menu's Delete group deletes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,15 +33,9 @@ impl Scope {
     }
 }
 
-/// Whether `pane` keeps its tab open: a tiled pane you can go to, and not the
-/// sidebar's column. A tab left with none closes, as it would without the
-/// column.
+/// Whether `pane` keeps its tab open: a tiled pane you can go to.
 pub fn holds_tab(pane: &PaneInfo) -> bool {
-    pane.is_selectable
-        && !pane.is_suppressed
-        && !pane.is_floating
-        && !is_placeholder(pane)
-        && !dock::is_sidebar(pane)
+    pane.is_selectable && !pane.is_suppressed && !pane.is_floating
 }
 
 /// Whether nothing among a tab's `panes` but the terminal `pane` keeps the tab
@@ -52,8 +43,7 @@ pub fn holds_tab(pane: &PaneInfo) -> bool {
 /// terminal another stands in place of keeps it open too, since zellij brings
 /// it back once the other closes.
 pub fn alone(panes: &[PaneInfo], pane: u32) -> bool {
-    let suspended =
-        |other: &PaneInfo| !other.is_plugin && other.is_suppressed && !is_placeholder(other);
+    let suspended = |other: &PaneInfo| !other.is_plugin && other.is_suppressed;
     !panes.iter().any(|other| {
         (other.is_plugin || other.id != pane) && (holds_tab(other) || suspended(other))
     })
@@ -88,16 +78,6 @@ pub fn refuge<'a>(others: impl IntoIterator<Item = (&'a str, Age)>) -> Option<St
         .into_iter()
         .min_by(|(a, a_age), (b, b_age)| a_age.cmp(b_age).then_with(|| a.cmp(b)))
         .map(|(name, _)| name.to_owned())
-}
-
-/// Where the client goes before the session it is in is killed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Refuge {
-    pub session: String,
-    /// The session's sidebar, standing in its column, for the focus to land
-    /// in when you leave from the sidebar: you go on along its rows there.
-    /// None lands you where the session had you.
-    pub sidebar: Option<u32>,
 }
 
 /// An agent of a session: where it sits, and what it is doing.
@@ -146,8 +126,9 @@ pub struct Subject {
     pub pane: Option<Pane>,
     /// The agents of its session, once the daemon has said.
     pub agents: Fetch<Vec<Agent>>,
-    /// Where the client goes before the session it is in is killed.
-    pub refuge: Option<Refuge>,
+    /// The session the client goes to before the session it is in is
+    /// killed.
+    pub refuge: Option<String>,
 }
 
 /// The pane a menu is for.
@@ -188,7 +169,7 @@ impl Subject {
         id: Option<u32>,
         leaves: &[Leaf],
         agents: Fetch<Vec<Agent>>,
-        refuge: Option<Refuge>,
+        refuge: Option<String>,
     ) -> Self {
         let pane = id.map(|id| Pane::of(id, leaves));
         Subject { seat, pane, agents, refuge }
@@ -357,7 +338,7 @@ pub enum Act {
     Kill(String),
     /// Go to the session `to`, and kill the session you are in once you have
     /// left it.
-    Leave { session: String, to: Refuge },
+    Leave { session: String, to: String },
 }
 
 /// What came of asking.
@@ -465,18 +446,10 @@ pub struct Leaving {
 }
 
 impl Leaving {
-    /// Takes the client to `to`, into its sidebar when it names one. That
-    /// sidebar would send on the focus you come with, as one no key of its
-    /// session asked for: the word left first says you were taken there.
-    fn go(session: &str, to: &Refuge) -> Self {
-        match to.sidebar {
-            Some(sidebar) => {
-                Coming::shared().say(&to.session, sidebar, Moment::now());
-                switch_session_with_focus(&to.session, None, Some((sidebar, true)));
-            },
-            None => switch_session(Some(&to.session)),
-        }
-        Leaving { session: session.to_owned(), to: to.session.clone(), ticks: 0, asking: false }
+    /// Takes the client to `to`.
+    fn go(session: &str, to: &str) -> Self {
+        switch_session(Some(to));
+        Leaving { session: session.to_owned(), to: to.to_owned(), ticks: 0, asking: false }
     }
 
     /// The session the client is on its way to.
@@ -533,29 +506,23 @@ mod tests {
     }
 
     /// zellij closes a tab with its last tiled pane, floating panes and all,
-    /// and a session with its only tab. The sidebar and its placeholder never
-    /// close, and hold no tab open. A pane another stands in place of comes
-    /// back once the other closes.
+    /// and a session with its only tab. A bar holds no tab open. A pane
+    /// another stands in place of comes back once the other closes.
     #[test]
     fn the_last_pane_that_holds_its_tab_open_closes_the_tab() {
-        let sidebar = PaneInfo { is_plugin: true, title: dock::TITLE.to_owned(), ..pane(1) };
-        let placeholder =
-            PaneInfo { terminal_command: Some("tail -f /dev/null".to_owned()), ..pane(2) };
-        let hidden = PaneInfo { is_suppressed: true, ..placeholder.clone() };
         let floating = PaneInfo { is_floating: true, ..pane(5) };
         let bar = PaneInfo { is_plugin: true, is_selectable: false, ..pane(3) };
         // A plugin pane of yours with a terminal's id.
         let other_plugin = PaneInfo { is_plugin: true, ..pane(4) };
         let suspended = PaneInfo { is_suppressed: true, ..pane(7) };
-        let column = vec![sidebar, hidden, bar.clone()];
         for (panes, id, closes_tab) in [
-            ([column.clone(), vec![pane(4)]].concat(), 4, true),
-            ([column.clone(), vec![pane(4), floating.clone()]].concat(), 4, true),
-            ([column.clone(), vec![pane(4), pane(6)]].concat(), 4, false),
-            ([column.clone(), vec![pane(4), floating.clone()]].concat(), 5, false),
-            (vec![placeholder, bar, floating], 5, true),
-            ([column.clone(), vec![pane(4), other_plugin]].concat(), 4, false),
-            ([column, vec![suspended, pane(4)]].concat(), 4, false),
+            (vec![bar.clone(), pane(4)], 4, true),
+            (vec![bar.clone(), pane(4), floating.clone()], 4, true),
+            (vec![bar.clone(), pane(4), pane(6)], 4, false),
+            (vec![bar.clone(), pane(4), floating.clone()], 5, false),
+            (vec![bar.clone(), floating], 5, true),
+            (vec![bar.clone(), pane(4), other_plugin], 4, false),
+            (vec![bar, suspended, pane(4)], 4, false),
         ] {
             assert_eq!(alone(&panes, id), closes_tab, "pane {id} of {panes:?}");
             let (of_two, of_one) = if closes_tab {
@@ -585,16 +552,11 @@ mod tests {
             };
             Pane { id, tab: Some(TabId(tab)), closes }
         });
-        Subject { seat, pane, agents, refuge: Some(to_elo()) }
+        Subject { seat, pane, agents, refuge: Some("elo".to_owned()) }
     }
 
     fn here() -> Seat {
         Seat::Here("luneta".to_owned())
-    }
-
-    /// Session `elo`, its sidebar in pane 4.
-    fn to_elo() -> Refuge {
-        Refuge { session: "elo".to_owned(), sidebar: Some(4) }
     }
 
     /// A pane closes alone, or its tab with it once nothing else holds the
@@ -605,7 +567,7 @@ mod tests {
     #[test]
     fn each_key_deletes_what_it_names_and_what_goes_with_it() {
         let elo = Seat::There("elo".to_owned());
-        let leave = || Act::Leave { session: "luneta".to_owned(), to: to_elo() };
+        let leave = || Act::Leave { session: "luneta".to_owned(), to: "elo".to_owned() };
         for (seat, id, scope, act) in [
             (here(), Some(2), Scope::Pane, Act::Pane(here(), 2)),
             (here(), Some(5), Scope::Pane, Act::Tab(here(), TabId(8))),

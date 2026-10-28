@@ -416,8 +416,7 @@ const ANSWER: Duration = Duration::from_secs(2);
 /// `--no-focus` beside the one the command runs in, which it reads in
 /// `PANE_VAR`, whatever tab that is in and whether a client is on it, and
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
-/// the one it lists in that tab, but for the placeholder of the plugin's dock,
-/// which a layout of the dock's opens first.
+/// the one it lists in that tab.
 fn opening(open: &Open) -> Result<u32, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
@@ -465,14 +464,6 @@ pub enum Closes {
     Session,
 }
 
-/// What a placeholder of the plugin's dock runs: the column each tab keeps
-/// for the plugin's sidebar, beside luneta's or in its place.
-const PLACEHOLDER: [&str; 3] = ["tail", "-f", "/dev/null"];
-
-/// The title the plugin's sidebar gives its pane where it stands in that
-/// column.
-const SIDEBAR_TITLE: &str = "luneta";
-
 /// A pane as `zellij action list-panes --json` lists it, as much of it as
 /// says what it holds open.
 #[derive(Clone, Deserialize)]
@@ -484,43 +475,23 @@ struct Laid {
     is_suppressed: bool,
     is_floating: bool,
     tab_id: u32,
-    title: String,
-    /// What a terminal opened to run, as one line; none for a shell.
-    #[serde(default)]
-    terminal_command: Option<String>,
 }
 
 impl Laid {
     /// Whether it keeps its tab open: a tiled pane you can go to, a plugin's
     /// as well, or a terminal another took the place of, which zellij brings
     /// back once that one closes. A floating pane goes with the tab, and so
-    /// does a bar, which you cannot go to. So does the column of the plugin's
-    /// dock, which closes a tab with the last pane beside it, as zellij would
-    /// close the tab without one.
+    /// does a bar, which you cannot go to.
     fn holds_tab(&self) -> bool {
-        if self.docked() {
-            return false;
-        }
         let tiled = self.is_selectable && !self.is_suppressed && !self.is_floating;
         tiled || (self.is_suppressed && !self.is_plugin)
     }
-
-    /// Whether it stands in the column of the plugin's dock: a placeholder,
-    /// or the plugin's sidebar.
-    fn docked(&self) -> bool {
-        if self.is_plugin {
-            return self.title == SIDEBAR_TITLE && !self.is_floating;
-        }
-        let placeholder = |command: &str| command.split(' ').eq(PLACEHOLDER);
-        self.terminal_command.as_deref().is_some_and(placeholder)
-    }
 }
 
-/// The terminal of the tab whose id is `tab` among `laid`, the first that is
-/// not a placeholder of the plugin's dock: where luneta goes in a tab it
-/// opened.
+/// The terminal of the tab whose id is `tab` among `laid`, the first it
+/// lists: where luneta goes in a tab it opened.
 fn terminal_of(laid: &[Laid], tab: u32) -> Option<u32> {
-    let terminal = |pane: &&Laid| !pane.is_plugin && !pane.docked() && pane.tab_id == tab;
+    let terminal = |pane: &&Laid| !pane.is_plugin && pane.tab_id == tab;
     laid.iter().find(terminal).map(|pane| pane.id)
 }
 
@@ -842,31 +813,19 @@ mod tests {
             is_suppressed: false,
             is_floating: false,
             tab_id,
-            title: String::new(),
-            terminal_command: None,
         }
-    }
-
-    /// The column the plugin's dock keeps in a tab, as a layout of the dock's
-    /// gives it.
-    fn placeholder(id: u32, tab_id: u32) -> Laid {
-        Laid { terminal_command: Some("tail -f /dev/null".to_owned()), ..laid(id, tab_id) }
     }
 
     /// zellij closes a tab with its last pane that holds it open, its
     /// floating panes and all, and a session with its last tab. A bar holds
     /// none open, a plugin's pane you can go to does, and so does a terminal
-    /// another took the place of, which comes back. The column of the plugin's
-    /// dock holds none open: its placeholder, shown or hidden, nor the
-    /// sidebar that stands in it.
+    /// another took the place of, which comes back.
     #[test]
     fn the_last_pane_that_holds_its_tab_open_closes_the_tab_or_the_session() {
         let floating = Laid { is_floating: true, ..laid(5, 0) };
         let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
         let plugin = Laid { is_plugin: true, ..laid(4, 0) };
         let suspended = Laid { is_suppressed: true, ..laid(7, 0) };
-        let sidebar = Laid { is_plugin: true, title: SIDEBAR_TITLE.to_owned(), ..laid(3, 0) };
-        let hidden = Laid { is_suppressed: true, ..placeholder(2, 0) };
         let other_tab = laid(9, 1);
         let tab = |panes: Vec<u32>| Ok(Closes::Tab { id: 0, panes });
         for (panes, id, closes) in [
@@ -876,8 +835,6 @@ mod tests {
             (vec![laid(4, 0), floating.clone(), other_tab.clone()], 5, Ok(Closes::Pane)),
             (vec![laid(4, 0), plugin, other_tab.clone()], 4, Ok(Closes::Pane)),
             (vec![suspended, laid(4, 0), other_tab.clone()], 4, Ok(Closes::Pane)),
-            (vec![placeholder(2, 0), laid(4, 0), other_tab.clone()], 4, tab(vec![2, 4])),
-            (vec![sidebar, hidden, laid(4, 0), bar.clone()], 4, Ok(Closes::Session)),
             (vec![laid(4, 0), floating, bar], 4, Ok(Closes::Session)),
             (vec![other_tab], 4, Err("pane 4 is gone".to_owned())),
         ] {
@@ -885,11 +842,10 @@ mod tests {
         }
     }
 
-    /// luneta goes to the terminal of a tab it opened, of that tab, and not to
-    /// the placeholder a layout of the plugin's dock opens in it first.
+    /// luneta goes to the terminal of a tab it opened, of that tab.
     #[test]
-    fn a_tab_opened_is_gone_to_on_its_terminal_past_the_dock_s_placeholder() {
-        let panes = [laid(1, 0), placeholder(2, 1), laid(3, 1)];
+    fn a_tab_opened_is_gone_to_on_its_terminal() {
+        let panes = [laid(1, 0), laid(3, 1)];
         assert_eq!(terminal_of(&panes, 1), Some(3));
     }
 

@@ -49,8 +49,7 @@ use crate::own::{Look, Looked, OwnClient};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
 
-/// How many columns the sidebar takes until its edge is dragged, as the
-/// plugin's column did.
+/// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
 
 /// The fewest columns the sidebar is dragged to, where the terminal has twice
@@ -2190,8 +2189,7 @@ impl Sidebar {
     }
 
     /// How the title's rule and the edge are drawn: in `ACCENT` while the
-    /// sidebar has the keys, and dim while zellij or a brief has them, as
-    /// zellij's frame was around the plugin's.
+    /// sidebar has the keys, and dim while zellij or a brief has them.
     fn framing(&self) -> Style {
         match self.keys {
             Keys::Sidebar => Style::new().fg(ACCENT),
@@ -2411,10 +2409,10 @@ fn seated<'a>(agents: &'a [Agent], sessions: &'a [Session]) -> HashMap<(&'a str,
 }
 
 /// The session of an agent the daemon cannot follow to one, as it cannot one
-/// renamed before it started, found as the plugin's sidebar finds it: the one
-/// session that lists a pane of the agent's id that works where the agent
-/// does. Of more than one, the session the agent's environment names, or else
-/// the one whose pane runs `claude` or an agent titled, if one alone does.
+/// renamed before it started, found by where it works: the one session that
+/// lists a pane of the agent's id that works where the agent does. Of more
+/// than one, the session the agent's environment names, or else the one whose
+/// pane runs `claude` or an agent titled, if one alone does.
 fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<&'a str> {
     if agent.cwd.is_empty() {
         return None;
@@ -2489,8 +2487,8 @@ fn status_word(agent: &Agent) -> String {
 
 /// The name of an agent's session, if someone gave it one, as `/rename` does:
 /// one Claude Code derives from the directory, or makes up, is no name a row
-/// goes by, as the plugin's sidebar has it. A name from before Claude Code said
-/// who chose it is taken for given.
+/// goes by. A name from before Claude Code said who chose it is taken for
+/// given.
 fn given_name(agent: &Agent) -> Option<&str> {
     let name = agent.name.as_ref()?;
     let source = name.source.map(NameSource::try_from);

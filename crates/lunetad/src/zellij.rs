@@ -273,11 +273,11 @@ impl Sessions {
     /// The session of a shell that started at `started`, in a session called
     /// `named` then: the one `led` leads to, or else, of those that could be
     /// it, the one that has the name now. A session made under the name of one
-    /// renamed, while that one runs, so has the shells started in it, as the
-    /// plugin's sidebar has them; a shell started since in an old pane of the
-    /// one renamed, which says its old name too, goes there as well. An agent
-    /// goes by `lead` alone: where that gives up, the sidebar finds its pane
-    /// by where it works, which a shell does not say.
+    /// renamed, while that one runs, so has the shells started in it; a shell
+    /// started since in an old pane of the one renamed, which says its old
+    /// name too, goes there as well. An agent goes by `lead` alone: where that
+    /// gives up, the sidebar finds its pane by where it works, which a shell
+    /// does not say.
     #[must_use]
     pub fn housing(&self, named: &str, started: SystemTime) -> Option<Id> {
         if let Some(id) = self.led(named, Some(started)) {

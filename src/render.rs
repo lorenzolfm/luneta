@@ -1,21 +1,16 @@
-use std::ops::Range;
-
 use unicode_width::UnicodeWidthStr;
 
-use crate::agents::{self, AgentRow, AgentSet, Status};
-use crate::checkouts::Checkout;
+use crate::agents::{self, AgentRow, AgentSet};
 use crate::dirs::{short_cwd, DirRow, DirSet, Listing};
 use crate::fetch::Fetch;
-use crate::icons::Icons;
 use crate::layout::{
     anchor, truncate, truncate_left, Border, Ink, Line, Rect, Screen, PAD, VERTICAL,
 };
-use crate::menu::{self, Entry, Keys, Legend, Menu, Shown, SidebarMenu};
+use crate::menu::{self, Entry, Keys, Menu, Shown};
 use crate::paint::{self, Colour, Painted};
 use crate::panes::{self, Peek, Peeks};
 use crate::sessions::{Contents, Kind, MatchSet, Row};
 use crate::skills::{Search, Skill};
-use crate::tree::{Mark, Node, Outcome, PaneNode, SessionNode, Summary, Tree};
 
 const TAG: Colour = Colour::Level0;
 const NAME: Colour = Colour::Level1;
@@ -986,8 +981,7 @@ pub fn render_notice(text: &str, rows: usize, cols: usize) {
     }
 }
 
-/// What follows a group's name in the menu: it opens, as a folded session
-/// does in the sidebar.
+/// What follows a group's name in the menu: it opens.
 const GROUP: &str = "▸";
 
 /// The rows of the menu that are not its entries: the rule on top, a blank
@@ -1137,7 +1131,6 @@ fn menu_entry_width(entry: &Entry) -> usize {
         Entry::Start { prompt, .. } => prompt.width(),
         Entry::New(new) => new.does().width(),
         Entry::Close { scope, .. } => scope.does().width(),
-        Entry::Command(command) => command.does().width(),
         Entry::Search => menu::SEARCH_DOES.width(),
     };
     entry.key().to_string().width() + GAP + does
@@ -1157,7 +1150,6 @@ fn menu_line(entry: &Entry, inner: usize) -> Painted {
         Entry::Start { prompt, .. } => line.push(&truncate(prompt, room), NAME),
         Entry::New(new) => line.push(&truncate(new.does(), room), NAME),
         Entry::Close { scope, .. } => line.push(&truncate(scope.does(), room), NAME),
-        Entry::Command(command) => line.push(&truncate(command.does(), room), NAME),
         Entry::Search => line.push(&truncate(menu::SEARCH_DOES, room), NAME),
     }
     line.finish(inner)
@@ -1246,646 +1238,6 @@ fn menu_help(width: usize, opened: bool) -> Painted {
     }
 }
 
-/// What takes the bottom of the sidebar: the menu while it shows something,
-/// or else the search box while it is open, with a line of its keys under it
-/// while the sidebar has the focus, or else the legend while the sidebar has
-/// the focus. A menu that shows nothing gives way to the search box, and not
-/// to the legend: the keys are still the menu's.
-enum Bottom<'a> {
-    Menu(&'a SidebarMenu),
-    Search { term: &'a str, keys: bool },
-    Legend(&'a Legend),
-}
-
-impl<'a> Bottom<'a> {
-    fn of(tree: &'a Tree, focused: bool) -> Option<Self> {
-        if let Some(menu) = tree.menu.as_ref().filter(|menu| menu.shown().is_some()) {
-            return Some(Bottom::Menu(menu));
-        }
-        match (tree.search(), &tree.legend) {
-            (Some(term), _) => Some(Bottom::Search { term, keys: focused }),
-            (None, Some(legend)) if focused && tree.menu.is_none() => {
-                Some(Bottom::Legend(legend))
-            },
-            (None, _) => None,
-        }
-    }
-
-    /// How many lines it takes at the bottom of a sidebar `rows` tall and
-    /// `cols` wide: as many as the menu wants, its keys under them, or the
-    /// legend's rule and what it shows, that leave the tree a row; or the
-    /// search box, and its keys while there are two more lines.
-    fn height(&self, rows: usize, cols: usize) -> usize {
-        let wants = match self {
-            Bottom::Menu(menu) => sidebar_menu_height(menu, cols),
-            Bottom::Legend(legend) => {
-                menu_parts(legend.shown(), cols.saturating_sub(2), usize::MAX).body.len() + 1
-            },
-            Bottom::Search { keys, .. } => {
-                return usize::from(rows > 0) + usize::from(*keys && rows > 2);
-            },
-        };
-        wants.min(rows.saturating_sub(1))
-    }
-
-    /// Its lines in `lines` lines, each as wide as the sidebar, and the keys
-    /// that go under them on the last: the menu's, or the search box's while
-    /// it has a line for them. The legend has none.
-    fn lines(&self, lines: usize, cols: usize) -> (Vec<Painted>, Option<Painted>) {
-        match self {
-            Bottom::Menu(menu) => sidebar_menu_lines(menu, lines, cols),
-            Bottom::Legend(legend) => (ruled(legend.shown(), None, lines, cols).0, None),
-            Bottom::Search { term, .. } => {
-                let inner = cols.saturating_sub(2);
-                let drawn = (lines > 0).then(|| search_line(term, inner));
-                (drawn.into_iter().collect(), (lines > 1).then(|| search_help_line(inner)))
-            },
-        }
-    }
-}
-
-/// How many lines the menu takes at the bottom of a sidebar `cols` wide, with
-/// the room it wants: its rule, what it shows, and the keys under them. No
-/// line once it shows nothing.
-fn sidebar_menu_height(menu: &SidebarMenu, cols: usize) -> usize {
-    let Some(shown) = menu.shown() else {
-        return 0;
-    };
-    menu_parts(shown, cols.saturating_sub(2), usize::MAX).body.len() + 2
-}
-
-/// The menu at the bottom of the sidebar, in `lines` lines: the lines from
-/// its top, each as wide as the sidebar, and the keys under them.
-fn sidebar_menu_lines(
-    menu: &SidebarMenu,
-    lines: usize,
-    cols: usize,
-) -> (Vec<Painted>, Option<Painted>) {
-    let Some((shown, room)) = menu.shown().zip(lines.checked_sub(1)) else {
-        return (Vec::new(), None);
-    };
-    let (drawn, help) = ruled(shown, menu.cwd(), room, cols);
-    (drawn, Some(help))
-}
-
-/// What a menu shows in `room` lines of the sidebar, and the keys that go
-/// under them. A rule names the groups opened and says where an agent starts,
-/// in `cwd`, as the border of the floating menu does, over what the menu
-/// shows. Short of room, what it shows goes first, then the rule.
-fn ruled(shown: Shown, cwd: Option<&str>, room: usize, cols: usize) -> (Vec<Painted>, Painted) {
-    let body_room = room.saturating_sub(1);
-    let MenuParts { title, right, body, help } =
-        menu_parts(shown, cols.saturating_sub(2), body_room);
-    let mut drawn: Vec<Painted> = Vec::with_capacity(room);
-    if room > 0 {
-        let right = if right { menu_where(cwd) } else { String::new() };
-        drawn.push(menu_rule(&title, &right, cols));
-    }
-    drawn.extend(body.into_iter().take(room.saturating_sub(1)));
-    (drawn, help)
-}
-
-/// The rule over the menu in the sidebar: the groups opened, and where an
-/// agent starts while the rule has room for all of both.
-fn menu_rule(title: &str, right: &str, cols: usize) -> Painted {
-    let mut line = Line::new();
-    line.push(RULE, Ink::Dim);
-    line.gap(1);
-    // A space, the right, a space and a last stretch of the rule.
-    let tail = right.width() + 2 + RULE.width();
-    let fits =
-        !right.is_empty() && line.columns() + title.width() + 1 + RULE.width() + tail <= cols;
-    let tail = if fits { tail } else { 0 };
-    let room = cols.saturating_sub(line.columns() + 1 + RULE.width() + tail);
-    line.push(&truncate(title, room), Ink::Bold(LABEL));
-    line.gap(1);
-    line.push(&RULE.repeat(cols.saturating_sub(line.columns() + tail)), Ink::Dim);
-    if fits {
-        line.gap(1);
-        line.push(right, TAG);
-        line.gap(1);
-        line.push(RULE, Ink::Dim);
-    }
-    line.fill(cols)
-}
-
-/// How a sidebar `rows` tall is cut up: the header and a blank line under it
-/// at the top, the tree under them, the notes under it, and what takes the
-/// bottom under them all. The search box opens at the bottom so that no row
-/// moves. The header goes before it would leave the tree no row. The menu
-/// and the legend leave the tree a row, and the notes leave it that row too:
-/// they are for the row the cursor is on.
-struct Shelf {
-    header: usize,
-    tree: usize,
-    notes: usize,
-    /// Where what takes the bottom starts, while it has a line.
-    bottom_y: Option<usize>,
-}
-
-impl Shelf {
-    fn new(rows: usize, notes: usize, bottom: Option<&Bottom>, cols: usize) -> Self {
-        let below = bottom.map_or(0, |bottom| bottom.height(rows, cols));
-        let kept = match bottom {
-            Some(Bottom::Menu(_) | Bottom::Legend(_)) => usize::from(below > 0),
-            Some(Bottom::Search { .. }) | None => 0,
-        };
-        let header = if rows > below + notes + HEADER { HEADER } else { 0 };
-        let notes = notes.min((rows - below - header).saturating_sub(kept));
-        Shelf {
-            header,
-            tree: rows - below - header - notes,
-            notes,
-            bottom_y: (below > 0).then(|| rows - below),
-        }
-    }
-}
-
-/// The header's rule, and the blank line under it.
-pub const HEADER: usize = 2;
-
-pub fn render_sidebar(
-    tree: &Tree,
-    agents: &AgentSet,
-    focused: bool,
-    rows: usize,
-    cols: usize,
-    frame: u64,
-) {
-    let inner = cols.saturating_sub(2);
-    let notes = sidebar_notes(tree, agents, inner);
-    let bottom = Bottom::of(tree, focused);
-    let shelf = Shelf::new(rows, notes.len(), bottom.as_ref(), cols);
-    for (y, line) in sidebar_lines(tree, &notes, &shelf, focused, cols, frame).iter().enumerate() {
-        print_at(line, 0, y, cols);
-    }
-    let Some((y, bottom)) = shelf.bottom_y.zip(bottom) else {
-        return;
-    };
-    let (lines, keys) = bottom.lines(rows - y, cols);
-    for (at, line) in lines.iter().enumerate() {
-        print_at(line, 0, y + at, cols);
-    }
-    if let Some(keys) = keys {
-        print_at(&keys, 1, rows - 1, inner);
-    }
-}
-
-/// The row of the tree drawn on `line` of the sidebar, if one is.
-pub fn sidebar_row_at(
-    tree: &Tree,
-    agents: &AgentSet,
-    focused: bool,
-    rows: usize,
-    cols: usize,
-    line: usize,
-) -> Option<usize> {
-    let shelf = sidebar_shelf(tree, agents, focused, rows, cols);
-    let mut line = line.checked_sub(shelf.header).filter(|line| *line < shelf.tree)?;
-    let (shown, _) = on_screen(tree, focused, shelf.tree);
-    for index in shown {
-        let span = span(&tree.rows[index]);
-        if line < span {
-            return Some(index);
-        }
-        line -= span;
-    }
-    None
-}
-
-/// Moves the view of the sidebar `delta` lines down, or up, as far as there
-/// are rows to show, and says whether it moved.
-pub fn scroll_sidebar(
-    tree: &mut Tree,
-    agents: &AgentSet,
-    focused: bool,
-    rows: usize,
-    cols: usize,
-    delta: isize,
-) -> bool {
-    let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
-    let (Range { start, .. }, _) = on_screen(tree, focused, height);
-    let last = top_ending_at(&tree.rows, tree.rows.len().saturating_sub(1), height);
-    let top = top_after(&tree.rows, start, delta).min(last);
-    if top == start {
-        return false;
-    }
-    tree.scroll_to(top);
-    true
-}
-
-/// The top row of a view moved `delta` lines from row `top`: a row the move
-/// takes any of goes out of the view whole, or comes into it whole.
-fn top_after(rows: &[Node], mut top: usize, delta: isize) -> usize {
-    let mut lines = delta.unsigned_abs();
-    while lines > 0 {
-        if delta > 0 && top + 1 < rows.len() {
-            lines = lines.saturating_sub(span(&rows[top]));
-            top += 1;
-        } else if delta < 0 && top > 0 {
-            top -= 1;
-            lines = lines.saturating_sub(span(&rows[top]));
-        } else {
-            break;
-        }
-    }
-    top
-}
-
-/// Puts the cursor on `row`, as a click does, and says whether it can be
-/// there. A view the wheel moved stays where it is while the row is in it, so
-/// that the row stays under the pointer.
-pub fn select_sidebar_row(
-    tree: &mut Tree,
-    agents: &AgentSet,
-    focused: bool,
-    rows: usize,
-    cols: usize,
-    row: usize,
-) -> bool {
-    let height = sidebar_shelf(tree, agents, focused, rows, cols).tree;
-    let (shown, _) = on_screen(tree, focused, height);
-    let wheeled = tree.top().is_some();
-    let selected = tree.rows.select(row);
-    if wheeled && shown.contains(&row) {
-        tree.scroll_to(shown.start);
-    }
-    selected
-}
-
-/// How a sidebar `rows` tall cuts itself up, as `render_sidebar` draws it.
-fn sidebar_shelf(tree: &Tree, agents: &AgentSet, focused: bool, rows: usize, cols: usize) -> Shelf {
-    let notes = sidebar_notes(tree, agents, cols.saturating_sub(2)).len();
-    Shelf::new(rows, notes, Bottom::of(tree, focused).as_ref(), cols)
-}
-
-/// The notes under the sidebar's tree: what is wrong with the icons the
-/// configuration gives, and then what the agent list says.
-fn sidebar_notes(tree: &Tree, agents: &AgentSet, width: usize) -> Vec<Note> {
-    let wrong = tree.icons_wrong.as_deref().map(|wrong| Note::error(truncate(wrong, width)));
-    wrong.into_iter().chain(agent_note_texts(agents, width)).collect()
-}
-
-/// Whether a click on `column` of a row folds it: a session's, on its fold.
-pub fn folds_at(node: &Node, column: usize) -> bool {
-    matches!(node, Node::Session(_)) && column < FOLD
-}
-
-/// The rows of the tree a sidebar shows in `height` lines, and the one of them
-/// that is lit: the cursor while the sidebar has the focus, and the pane you
-/// are in while it does not. The rows shown are the ones around the lit row,
-/// or around the cursor while none is, so a lit row is never out of sight
-/// until the wheel moves the view off it. The last row shown can be cut short
-/// by the bottom of the view.
-fn on_screen(tree: &Tree, focused: bool, height: usize) -> (Range<usize>, Option<usize>) {
-    let lit = if focused {
-        tree.rows.selected()
-    } else {
-        tree.rows.iter().position(|node| matches!(node, Node::Pane(pane) if pane.here))
-    };
-    let last = tree.rows.len().saturating_sub(1);
-    let start = match tree.top() {
-        Some(top) => top.min(top_ending_at(&tree.rows, last, height)),
-        None => top_ending_at(&tree.rows, lit.or(tree.rows.selected()).unwrap_or(0), height),
-    };
-    let mut end = start;
-    let mut used = 0;
-    while end < tree.rows.len() && used < height {
-        used += span(&tree.rows[end]);
-        end += 1;
-    }
-    (start..end, lit)
-}
-
-/// The top row of a view `height` lines tall that ends with all of row
-/// `last`: as many of the rows before it as fit with it. A row taller than
-/// the view is the top of its own.
-fn top_ending_at(rows: &[Node], last: usize, height: usize) -> usize {
-    let mut top = last;
-    let mut used = rows.get(last).map_or(0, span);
-    while top > 0 && used + span(&rows[top - 1]) <= height {
-        top -= 1;
-        used += span(&rows[top]);
-    }
-    top
-}
-
-/// How many lines a row takes: a pane's takes one more for its branch, where
-/// it has one.
-fn span(node: &Node) -> usize {
-    match node {
-        Node::Pane(PaneNode { checkout: Some(_), .. }) => 2,
-        Node::Pane(_) | Node::Session(_) => 1,
-    }
-}
-
-const UNFOLDED: &str = "▾";
-
-const FOLDED: &str = "▸";
-
-/// The columns of a session's row a click folds it by: the `▾` or `▸`, and
-/// the column either side of it.
-const FOLD: usize = 3;
-
-/// What marks the pane you are in, in its first column, whether the sidebar
-/// has the focus or not.
-const HERE_MARK: &str = "▌";
-
-const RULE: &str = "─";
-
-/// The column every row leaves empty on its right.
-const MARGIN: usize = 1;
-
-const GLYPH: usize = 1;
-
-/// The dot before a pane's mark for what is new in it since you were last
-/// there, and on a folded session's row for what is new in one of its panes.
-const NEW: &str = "•";
-
-/// How wide the dots and the ages are across the rows on screen, and the
-/// icons the rows draw, wherever they are, so that every label starts at the
-/// same column and is cut at the same column. No icons take no column.
-struct Columns<'a> {
-    glyph: usize,
-    icons: &'a Icons,
-    age: usize,
-}
-
-impl Columns<'_> {
-    /// How far a label starts from where the dot does: past the dot, and the
-    /// icon, and a space after each.
-    fn label(&self) -> usize {
-        let icon = match self.icons.width() {
-            0 => 0,
-            width => width + 1,
-        };
-        self.glyph + 1 + icon
-    }
-}
-
-fn sidebar_lines(
-    tree: &Tree,
-    notes: &[Note],
-    shelf: &Shelf,
-    focused: bool,
-    cols: usize,
-    frame: u64,
-) -> Vec<Painted> {
-    let inner = cols.saturating_sub(2);
-    let mut lines = Vec::with_capacity(shelf.header + shelf.tree + shelf.notes);
-    if shelf.header > 0 {
-        lines.extend(header_lines(&tree.summary, cols, frame));
-    }
-    if tree.rows.is_empty() {
-        if shelf.tree > 0 {
-            let empty = if tree.narrowed() { "no match" } else { "no sessions" };
-            lines.push(note_within(inner, &Note::dim(empty)));
-        }
-    } else {
-        let (Range { start, end }, lit) = on_screen(tree, focused, shelf.tree);
-        let window = &tree.rows[start..end];
-        let marks = || {
-            window.iter().filter_map(|node| match node {
-                Node::Pane(PaneNode { mark: Some(mark), .. }) => Some(mark),
-                _ => None,
-            })
-        };
-        let columns = Columns {
-            glyph: marks()
-                .map(|mark| glyph(mark, frame).0.width())
-                .max()
-                .unwrap_or(0)
-                .max(GLYPH),
-            icons: &tree.icons,
-            age: marks().map(|mark| mark.age().label().width()).max().unwrap_or(0),
-        };
-        for (offset, node) in window.iter().enumerate() {
-            let lit = lit == Some(start + offset);
-            let light = |line: Painted| if lit { line.selected() } else { line };
-            match node {
-                Node::Session(node) => lines.push(light(branch_line(node, cols, frame))),
-                Node::Pane(node) => {
-                    lines.push(light(leaf_line(node, &columns, cols, frame)));
-                    if let Some(checkout) = &node.checkout {
-                        lines.push(light(checkout_line(node, checkout, &columns, cols)));
-                    }
-                },
-            }
-        }
-    }
-    // The last row on screen can run past the bottom of the tree.
-    lines.resize_with(shelf.header + shelf.tree, || Painted::new(" ".repeat(cols)));
-    lines.extend(notes.iter().take(shelf.notes).map(|note| note_within(inner, note)));
-    lines
-}
-
-/// The lines the header takes, as many as `HEADER` says: its rule, and a
-/// blank line under it.
-fn header_lines(summary: &Summary, cols: usize, frame: u64) -> [Painted; HEADER] {
-    [header_line(summary, cols, frame), Painted::new(" ".repeat(cols))]
-}
-
-/// The rule along the top of the sidebar: how many sessions are live, how
-/// many agents and commands across them wait for you, how many finished since
-/// you were last in their panes, and how many are at work. A count of none is left out, and so is the word for the sessions
-/// where the counts need its room.
-fn header_line(summary: &Summary, cols: usize, frame: u64) -> Painted {
-    let (waiting, busy) = (Status::Waiting, Status::Busy);
-    let counts: Vec<(String, Ink, usize, Ink)> = [
-        (agents::dot(&waiting, frame), dot_ink(&waiting), summary.waiting, Ink::Bold(ACCENT)),
-        (NEW.to_owned(), Ink::Bold(ACCENT), summary.unseen, Ink::Plain),
-        (agents::dot(&busy, frame), dot_ink(&busy), summary.busy, Ink::Plain),
-    ]
-    .into_iter()
-    .filter(|(_, _, n, _)| *n > 0)
-    .collect();
-    let counted: usize = counts
-        .iter()
-        .map(|(glyph, _, n, _)| glyph.width() + n.to_string().len())
-        .sum::<usize>()
-        + counts.len().saturating_sub(1);
-    // A space, the counts, a space and a last stretch of the rule.
-    let tail = if counted > 0 { counted + 2 + RULE.width() } else { 0 };
-    let word = (summary.sessions > 0)
-        .then(|| plural(summary.sessions, "session"))
-        .filter(|word| RULE.width() + word.width() + 2 + RULE.width() + tail <= cols);
-
-    let mut line = Line::new();
-    if let Some(word) = &word {
-        line.push(RULE, Ink::Dim);
-        line.gap(1);
-        line.push(word, Ink::Dim);
-        line.gap(1);
-    }
-    if counted > 0 && line.columns() + RULE.width() + tail <= cols {
-        line.push(&RULE.repeat(cols - line.columns() - tail), Ink::Dim);
-        line.gap(1);
-        for (nth, (glyph, ink, n, counted)) in counts.iter().enumerate() {
-            if nth > 0 {
-                line.gap(1);
-            }
-            line.push(glyph, *ink);
-            line.push(&n.to_string(), *counted);
-        }
-        line.gap(1);
-        line.push(RULE, Ink::Dim);
-    } else {
-        line.push(&RULE.repeat(cols.saturating_sub(line.columns())), Ink::Dim);
-    }
-    line.fill(cols)
-}
-
-/// A session's row: its name, and a rule out to what it says about its
-/// agents. The session you are in has its name in a colour and its rule in
-/// the accent.
-fn branch_line(node: &SessionNode, cols: usize, frame: u64) -> Painted {
-    let badge = branch_badge(node, frame);
-    let reserve = badge.as_ref().map_or(0, |(badge, _)| badge.width() + 1);
-    let mut line = Line::new();
-    line.gap(1);
-    line.push(if node.folded { FOLDED } else { UNFOLDED }, Ink::Dim);
-    line.gap(1);
-    let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
-    let name = if node.current { Ink::Bold(NAME) } else { Ink::Strong };
-    let (text, hits) = lit(&node.name, room, &node.hits);
-    line.push_hits(&text, name, Ink::Bold(ACCENT), &hits);
-    let rule = cols.saturating_sub(line.columns() + 1 + reserve + MARGIN);
-    if rule > 0 {
-        line.gap(1);
-        let ink = if node.current { Ink::Level(ACCENT) } else { Ink::Dim };
-        line.push(&RULE.repeat(rule), ink);
-    }
-    if let Some((badge, ink)) = badge {
-        line.pad_to(cols.saturating_sub(badge.width() + MARGIN));
-        line.push(&badge, ink);
-    }
-    line.fill(cols)
-}
-
-/// What a session says on its own row: how many of its agents wait for you,
-/// and once it is folded, the mark of the pane that wants you most, or the
-/// dot of what is new in one.
-fn branch_badge(node: &SessionNode, frame: u64) -> Option<(String, Ink)> {
-    if node.waiting > 0 {
-        let dot = agents::dot(&Status::Waiting, frame);
-        return Some((format!("{dot}{}", node.waiting), Ink::Bold(ACCENT)));
-    }
-    match &node.loudest {
-        Some(mark) if node.folded && mark.is_new() => Some((NEW.to_owned(), Ink::Bold(ACCENT))),
-        Some(mark) if node.folded => Some(glyph(mark, frame)),
-        _ => None,
-    }
-}
-
-/// A mark's glyph and its colour: its status's dot, dimmed for an agent you
-/// have seen finish. A command at work has the spinner of an agent at work,
-/// and one that waits for you to type the dot of an agent that waits for you.
-/// One that ended has `✓` in green, or `✗` in red, or `$` where its shell
-/// did not say how it ended.
-fn glyph(mark: &Mark, frame: u64) -> (String, Ink) {
-    let dot = |status: &Status| (agents::dot(status, frame), dot_ink(status));
-    match mark {
-        Mark::Agent { status: Status::Idle, .. } => (agents::dot(&Status::Idle, frame), Ink::Dim),
-        Mark::Agent { status, .. } => dot(status),
-        Mark::Finished { .. } | Mark::Ran { outcome: Outcome::Passed, .. } => dot(&Status::Idle),
-        Mark::Ran { outcome: Outcome::Failed, .. } => (FAILED.to_owned(), Ink::Error),
-        Mark::Ran { outcome: Outcome::Untold, .. } => {
-            (agents::dot(&Status::Shell, frame), Ink::Plain)
-        },
-        Mark::Running { .. } => dot(&Status::Busy),
-        Mark::Asking { .. } => dot(&Status::Waiting),
-    }
-}
-
-/// The glyph of a command that ended with a status other than 0.
-const FAILED: &str = "✗";
-
-/// The colour of a status: the accent for an agent that waits for you, the
-/// success colour for one that is done, the tag for one at work. A shell and
-/// an agent that says nothing are dimmed.
-fn dot_ink(status: &Status) -> Ink {
-    match status {
-        Status::Waiting => Ink::Bold(ACCENT),
-        Status::Idle => Ink::Bold(Colour::Success),
-        Status::Busy | Status::Unknown(_) => Ink::Level(TAG),
-        Status::Shell | Status::Unreported => Ink::Dim,
-    }
-}
-
-/// A pane's row: the dot of what is new in it, its mark, the icon of its
-/// program, its label, and how long its agent has been in its state, or since
-/// its shell finished a command. The label is plain, in the accent while its
-/// agent waits for you, and dimmed with no mark, and the icon is drawn as the
-/// label is. The pane you are in has the mark of the pane you are in, and a
-/// bold one.
-fn leaf_line(node: &PaneNode, columns: &Columns, cols: usize, frame: u64) -> Painted {
-    let mut line = pane_margin(node, node.mark.as_ref().is_some_and(Mark::is_new));
-    let start = line.columns();
-    if let Some(mark) = &node.mark {
-        let (glyph, ink) = glyph(mark, frame);
-        line.push(&glyph, ink);
-    }
-    // A label in the accent shows the letters a search lands on in a colour.
-    let (label, hit) = match &node.mark {
-        _ if node.here => (Ink::Strong, Ink::Bold(ACCENT)),
-        Some(mark) if mark.is_waiting() => (Ink::Bold(ACCENT), Ink::Bold(NAME)),
-        Some(_) => (Ink::Plain, Ink::Bold(ACCENT)),
-        None => (Ink::Dim, Ink::Bold(ACCENT)),
-    };
-    if let Some(icon) = node.program().and_then(|program| columns.icons.of(program)) {
-        line.pad_to(start + columns.glyph + 1);
-        line.push(icon, label);
-    }
-    line.pad_to(start + columns.label());
-    let reserve = if columns.age > 0 { columns.age + 1 } else { 0 };
-    let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
-    let (text, hits) = lit(&node.label, room, &node.hits);
-    line.push_hits(&text, label, hit, &hits);
-    if let Some(mark) = &node.mark {
-        let age = mark.age().label();
-        line.pad_to(cols.saturating_sub(age.width() + MARGIN));
-        line.push(&age, Ink::Dim);
-    }
-    line.fill(cols)
-}
-
-/// The line under a pane's row: the branch checked out where the pane works,
-/// in gray, under its label, and how its work tree stands, under the age. The
-/// branch is cut to leave the status room. The mark of the pane you are in
-/// runs down this line too.
-fn checkout_line(node: &PaneNode, checkout: &Checkout, columns: &Columns, cols: usize) -> Painted {
-    let mut line = pane_margin(node, false);
-    line.gap(columns.label());
-    let status = checkout.status.as_str();
-    let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-    let room = cols.saturating_sub(line.columns() + reserve + MARGIN);
-    line.push(&truncate(checkout.branch.as_str(), room), Ink::Gray);
-    if !status.is_empty() {
-        line.pad_to(cols.saturating_sub(status.width() + MARGIN));
-        line.push(status, Ink::Plain);
-    }
-    line.fill(cols)
-}
-
-/// The columns of a pane's lines before its mark: the mark of the pane you
-/// are in, or a blank where it goes, and the indent under its session, whose
-/// last column has the dot of what is `new` in the pane.
-fn pane_margin(node: &PaneNode, new: bool) -> Line {
-    let mut line = Line::new();
-    if node.here {
-        line.push(HERE_MARK, Ink::Bold(ACCENT));
-    } else {
-        line.gap(1);
-    }
-    line.gap(1);
-    if new {
-        line.push(NEW, Ink::Bold(ACCENT));
-    } else {
-        line.gap(1);
-    }
-    line
-}
-
 /// `text` cut to `room`, and the characters a search lit that are left in it.
 /// The `…` that ends a cut stands for what it took, and is not one of them.
 fn lit(text: &str, room: usize, hits: &[usize]) -> (String, Vec<usize>) {
@@ -1905,13 +1257,6 @@ fn search_line(term: &str, inner: usize) -> Painted {
     line.finish(inner)
 }
 
-fn search_help_line(width: usize) -> Painted {
-    keys_text(
-        width,
-        &[("<↓↑>", "Move", "Move"), ("<ENTER>", "Go", "Go"), ("<ESC>", "Clear", "Clear")],
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use luneta_protocol::v1;
@@ -1919,11 +1264,9 @@ mod tests {
     use super::*;
     use crate::agents::given::{self, agent};
     use crate::cursor::Cursor;
-    use crate::icons;
     use crate::places::Places;
     use crate::elapsed::Age;
     use crate::sessions::{Focus, Selection, Session, Sessions};
-    use crate::elapsed::Held;
 
     fn picture<R: Into<PreviewRow>>(
         rect: &Rect,
@@ -2700,678 +2043,6 @@ mod tests {
         \x1b[33m\u{e673} \x1b[1;4mMakefile\x1b[0m\n\
         \x1b[33m\u{f00ba} \x1b[1;4mREADME.md\x1b[0m\n";
 
-    /// The mark `word` names, held for `age` seconds: `finished` for an
-    /// agent that finished since you were last in its pane, `ran` for a
-    /// command its shell finished, `passed` and `failed` for one its shell's
-    /// hook said how it ended, `running` and `asking` for one it runs, and
-    /// else an agent's status.
-    fn mark(word: &str, age: u64) -> Mark {
-        let age = Held::from_secs(age);
-        match word {
-            "finished" => Mark::Finished { age },
-            "ran" => Mark::Ran { age, outcome: Outcome::Untold },
-            "passed" => Mark::Ran { age, outcome: Outcome::Passed },
-            "failed" => Mark::Ran { age, outcome: Outcome::Failed },
-            "running" => Mark::Running { age },
-            "asking" => Mark::Asking { age },
-            _ => Mark::Agent { status: given::status(word), age },
-        }
-    }
-
-    fn session_node(name: &str, folded: bool, waiting: usize, loudest: Option<&str>) -> Node {
-        Node::Session(SessionNode {
-            name: name.to_owned(),
-            current: false,
-            folded,
-            waiting,
-            loudest: loudest.map(|word| mark(word, 0)),
-            hits: Vec::new(),
-        })
-    }
-
-    fn pane_node(session: &str, id: u32, label: &str, marked: Option<(&str, u64)>) -> Node {
-        Node::Pane(PaneNode {
-            session: session.to_owned(),
-            id,
-            tab: None,
-            label: label.to_owned(),
-            mark: marked.map(|(word, age)| mark(word, age)),
-            runs: None,
-            checkout: None,
-            here: false,
-            hits: Vec::new(),
-        })
-    }
-
-    fn here(node: Node) -> Node {
-        match node {
-            Node::Pane(pane) => Node::Pane(PaneNode { here: true, ..pane }),
-            session @ Node::Session(_) => session,
-        }
-    }
-
-    /// `node`, in a work tree on `branch` that stands as `status` says.
-    fn on(branch: &str, status: &str, node: Node) -> Node {
-        let checkout = Checkout::on(branch, status);
-        match node {
-            Node::Pane(pane) => Node::Pane(PaneNode { checkout: Some(checkout), ..pane }),
-            session @ Node::Session(_) => session,
-        }
-    }
-
-    /// `node`, its terminal running `program`.
-    fn running(program: &str, node: Node) -> Node {
-        match node {
-            Node::Pane(pane) => Node::Pane(PaneNode { runs: Some(program.to_owned()), ..pane }),
-            session @ Node::Session(_) => session,
-        }
-    }
-
-    fn sidebar_tree(nodes: Vec<Node>, selected: usize) -> Tree {
-        Tree::of(nodes, selected)
-    }
-
-    /// `workday`, and what its header counts: the busy agent folded away in
-    /// floresta as well as the ones on show.
-    fn workday_tree(selected: usize) -> Tree {
-        let mut tree = sidebar_tree(workday(), selected);
-        tree.summary = Summary { sessions: 3, waiting: 1, unseen: 1, busy: 3 };
-        tree
-    }
-
-    fn sidebar_picture(
-        tree: &Tree,
-        notes: &[Note],
-        focused: bool,
-        rows: usize,
-        cols: usize,
-    ) -> Vec<String> {
-        let shelf = Shelf::new(rows, notes.len(), Bottom::of(tree, focused).as_ref(), cols);
-        sidebar_lines(tree, notes, &shelf, focused, cols, 0)
-            .iter()
-            .map(|line| line.content().to_owned())
-            .collect()
-    }
-
-    fn workday() -> Vec<Node> {
-        vec![
-            session_node("bipa", false, 1, Some("waiting")),
-            pane_node("bipa", 31, "handoff-eng-11259-pr4b", Some(("finished", 13 * HOUR))),
-            pane_node("bipa", 39, "dda-bank-slip-paid-feature", Some(("waiting", 180))),
-            pane_node("bipa", 47, "Handoff pix outflow request readback", Some(("busy", 12))),
-            session_node("floresta", true, 0, Some("busy")),
-            session_node("unnamed", false, 0, Some("busy")),
-            here(pane_node("unnamed", 0, "orca-copy", Some(("busy", 12)))),
-            pane_node("unnamed", 1, "~/P/m/unnamed", None),
-        ]
-    }
-
-    /// Every label is cut at one column, whatever its age, so the `…` line up.
-    #[test]
-    fn the_sidebar_draws_each_session_over_its_panes() {
-        let tree = workday_tree(6);
-        assert_eq!(
-            sidebar_picture(&tree, &[], false, 11, 30),
-            vec![
-                "─ 3 sessions ────── ●1 •1 ⠋3 ─",
-                "                              ",
-                " ▾ bipa ────────────────── ●1 ",
-                "  •✓ handoff-eng-11259-p… 13h ",
-                "   ● dda-bank-slip-paid-…  3m ",
-                "   ⠋ Handoff pix outflow… 12s ",
-                " ▸ floresta ─────────────── ⠋ ",
-                " ▾ unnamed ────────────────── ",
-                "▌  ⠋ orca-copy            12s ",
-                "     ~/P/m/unnamed            ",
-                "                              ",
-            ]
-        );
-    }
-
-    /// Agents in worktrees, a shell in no repository, and a branch too long
-    /// for the pane beside its work tree's status, in nvim.
-    fn worktrees() -> Vec<Node> {
-        vec![
-            session_node("luneta", false, 0, None),
-            on("main", "", pane_node("luneta", 1, "fold", Some(("busy", 12)))),
-            here(on(
-                "branch-name",
-                "!?⇡",
-                pane_node("luneta", 2, "branch-name", Some(("idle", 60))),
-            )),
-            running("fish", pane_node("luneta", 3, "~/notes", None)),
-            session_node("elo", false, 0, None),
-            running(
-                "nvim",
-                on("feature/very-long-branch-name", "+", pane_node("elo", 4, "elo/main", None)),
-            ),
-        ]
-    }
-
-    /// The branch goes on a line of its own under the label, in gray and cut
-    /// to leave its work tree's status room under the age, and is lit with
-    /// its row.
-    #[test]
-    fn a_pane_s_branch_is_gray_on_the_line_under_its_label() {
-        let tree = sidebar_tree(worktrees(), 0);
-        let shelf = Shelf::new(11, 0, None, 30);
-        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
-        let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
-        assert_eq!(
-            drawn,
-            [
-                "──────────────────────────────",
-                "                              ",
-                " ▾ luneta ─────────────────── ",
-                "   ⠋ fold                 12s ",
-                "     main                     ",
-                "▌  ✓ branch-name           1m ",
-                "▌    branch-name          !?⇡ ",
-                "     ~/notes                  ",
-                " ▾ elo ────────────────────── ",
-                "     elo/main                 ",
-                "     feature/very-long-bra… + ",
-            ]
-        );
-        let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
-        assert_eq!(lit, [HEADER + 3, HEADER + 4]);
-        assert!((5..16).all(|at| lines[HEADER + 4].is_gray_at(at)));
-        assert!(!(26..29).any(|at| lines[HEADER + 4].is_gray_at(at)));
-        assert!(!lines[HEADER + 3].is_gray_at(5));
-    }
-
-    /// The icon of a pane's program goes in a column of its own after the
-    /// dot, so that a label starts at one column with an icon or without, and
-    /// the branch under it. A program with no icon leaves the column blank.
-    #[test]
-    fn a_pane_s_icon_has_a_column_of_its_own_after_the_dot() {
-        let mut tree = sidebar_tree(worktrees(), 0);
-        let (icons, wrong) = icons::configured(Some(r#"claude "C"; fish "F"; nvim """#));
-        assert_eq!(wrong, None);
-        tree.icons = icons;
-        assert_eq!(
-            sidebar_picture(&tree, &[], false, 11, 30),
-            [
-                "──────────────────────────────",
-                "                              ",
-                " ▾ luneta ─────────────────── ",
-                "   ⠋ C fold               12s ",
-                "       main                   ",
-                "▌  ✓ C branch-name         1m ",
-                "▌      branch-name        !?⇡ ",
-                "     F ~/notes                ",
-                " ▾ elo ────────────────────── ",
-                "       elo/main               ",
-                "       feature/very-long-b… + ",
-            ]
-        );
-    }
-
-    /// Icons the configuration gives that luneta cannot read say so under the
-    /// tree, before what the agent list says.
-    #[test]
-    fn icons_luneta_cannot_read_say_so_under_the_tree() {
-        let mut tree = sidebar_tree(worktrees(), 0);
-        (tree.icons, tree.icons_wrong) = icons::configured(Some("nvim"));
-        let mut agents = AgentSet::default();
-        agents.fail("lunetad does not answer");
-        let notes: Vec<(String, bool)> = sidebar_notes(&tree, &agents, 30)
-            .into_iter()
-            .map(|note| (note.text, note.error))
-            .collect();
-        assert_eq!(
-            notes,
-            [
-                (r#"icons: "nvim" takes one strin…"#.to_owned(), true),
-                ("lunetad does not answer".to_owned(), true),
-            ]
-        );
-        let shelf = sidebar_shelf(&tree, &agents, false, 11, 32);
-        assert_eq!(shelf.notes, 2);
-    }
-
-    /// A row of two lines is one row: a click on either line lands on it, the
-    /// view keeps the whole of the lit row in sight and cuts the last row it
-    /// has no room for, the wheel counts both of its lines, and stops once the
-    /// whole of the last row is in sight.
-    #[test]
-    fn a_row_of_two_lines_is_one_row_to_the_view_and_the_mouse() {
-        let agents = AgentSet::default();
-        let view = |tree: &Tree, focused: bool, rows: usize| -> Vec<usize> {
-            (0..rows)
-                .filter_map(|line| sidebar_row_at(tree, &agents, focused, rows, 30, line))
-                .collect()
-        };
-        let mut tree = sidebar_tree(worktrees(), 0);
-        assert_eq!(view(&tree, false, 11), [0, 1, 1, 2, 2, 3, 4, 5, 5]);
-        assert_eq!(view(&tree, false, 10), [0, 1, 1, 2, 2, 3, 4, 5]);
-        // Your pane is the third row.
-        assert_eq!(view(&tree, false, 6), [1, 1, 2, 2]);
-
-        // Four lines of tree, under the header. Three lines of the wheel take
-        // the session's row and the two of the pane under it.
-        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 30, 3));
-        assert_eq!(view(&tree, true, 6), [2, 2, 3, 4]);
-        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 30, -1));
-        assert_eq!(view(&tree, true, 6), [1, 1, 2, 2]);
-        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 30, 99));
-        assert_eq!(view(&tree, true, 6), [3, 4, 5, 5]);
-        assert!(!scroll_sidebar(&mut tree, &agents, true, 6, 30, 1));
-    }
-
-    /// While the sidebar does not have the focus, the highlight shows where
-    /// you are; once it has it, the highlight goes with the cursor, and the
-    /// mark stays on the pane you are in.
-    #[test]
-    fn the_highlight_is_on_your_pane_until_the_sidebar_has_the_focus() {
-        let tree = workday_tree(2);
-        for (focused, row) in [(false, 6), (true, 2)] {
-            let shelf = Shelf::new(11, 0, None, 30);
-            let lines = sidebar_lines(&tree, &[], &shelf, focused, 30, 0);
-            let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
-            assert_eq!(lit, [HEADER + row], "focused: {focused}");
-            assert!(lines[HEADER + 6].content().starts_with(HERE_MARK), "focused: {focused}");
-        }
-    }
-
-    /// A command at work turns the spinner an agent at work does, and one that
-    /// waits for you to type has the dot of an agent that waits for you, its
-    /// label in the accent. One that ended has the dot of what is new before
-    /// `✓` in green, or before `✗` in red. The header counts each with the
-    /// agents like it.
-    #[test]
-    fn a_command_shows_what_an_agent_would_and_how_it_ended() {
-        let nodes = vec![
-            session_node("a", false, 1, None),
-            pane_node("a", 1, "cargo build --release", Some(("running", 42))),
-            pane_node("a", 2, "sudo nixos-rebuild switch", Some(("asking", 8))),
-            pane_node("a", 3, "cargo test", Some(("passed", 60))),
-            pane_node("a", 4, "cargo test", Some(("failed", 5))),
-        ];
-        let mut tree = sidebar_tree(nodes, 1);
-        tree.summary = Summary { sessions: 1, waiting: 1, unseen: 2, busy: 1 };
-        let shelf = Shelf::new(7, 0, None, 30);
-        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
-        let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
-        assert_eq!(
-            drawn,
-            [
-                "─ 1 session ─────── ●1 •2 ⠋1 ─",
-                "                              ",
-                " ▾ a ───────────────────── ●1 ",
-                "   ⠋ cargo build --relea… 42s ",
-                "   ● sudo nixos-rebuild…   8s ",
-                "  •✓ cargo test            1m ",
-                "  •✗ cargo test            5s ",
-            ]
-        );
-        let [running, asking, passed, failed] = [3, 4, 5, 6].map(|row| &lines[row]);
-        assert_eq!(running.colour_at(3), Some(TAG));
-        assert_eq!(asking.colour_at(3), Some(ACCENT));
-        assert_eq!(asking.colour_at(5), Some(ACCENT));
-        assert_eq!(passed.colour_at(3), Some(Colour::Success));
-        assert!(failed.is_error_at(3) && failed.is_bold_at(3));
-        assert_eq!(failed.colour_at(2), Some(ACCENT));
-    }
-
-    /// What finished since you were last in its pane has a dot before its
-    /// mark, in the accent: an agent's `✓` in green, and a shell's `$`, its
-    /// row named for the command it ran. An agent you have seen finish keeps
-    /// its `✓`, dimmed, and has no dot. A folded session shows the dot for
-    /// what is new in it.
-    #[test]
-    fn what_is_new_has_a_dot_before_its_mark() {
-        let nodes = vec![
-            session_node("a", false, 0, Some("finished")),
-            pane_node("a", 1, "seen", Some(("idle", 60))),
-            pane_node("a", 2, "unseen", Some(("finished", 60))),
-            pane_node("a", 3, "cargo build --relea", Some(("ran", 8))),
-            pane_node("a", 4, "~/P/m/a", None),
-            session_node("b", true, 0, Some("ran")),
-        ];
-        let tree = sidebar_tree(nodes, 1);
-        let shelf = Shelf::new(8, 0, None, 30);
-        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
-        let drawn: Vec<&str> = lines.iter().map(Painted::content).collect();
-        assert_eq!(
-            drawn[HEADER..],
-            [
-                " ▾ a ──────────────────────── ",
-                "   ✓ seen                  1m ",
-                "  •✓ unseen                1m ",
-                "  •$ cargo build --relea   8s ",
-                "     ~/P/m/a                  ",
-                " ▸ b ────────────────────── • ",
-            ]
-        );
-        let [seen, unseen, ran, plain] = [1, 2, 3, 4].map(|row| &lines[HEADER + row]);
-        assert!(seen.is_dim_at(3));
-        for new in [unseen, ran] {
-            assert_eq!(new.colour_at(2), Some(ACCENT));
-            assert!(new.is_bold_at(2) && !new.is_dim_at(3) && !new.is_dim_at(5));
-        }
-        assert_eq!(unseen.colour_at(3), Some(Colour::Success));
-        assert!(plain.is_dim_at(5));
-        assert_eq!(lines[HEADER + 5].colour_at(28), Some(ACCENT));
-    }
-
-    #[test]
-    fn the_header_leaves_out_what_there_is_none_of() {
-        let header =
-            |summary: Summary, cols: usize| header_line(&summary, cols, 0).content().to_owned();
-        let summary = Summary { sessions: 4, waiting: 2, unseen: 0, busy: 1 };
-        assert_eq!(header(summary, 30), "─ 4 sessions ───────── ●2 ⠋1 ─");
-        assert_eq!(header(summary, 16), "──────── ●2 ⠋1 ─");
-        let unseen = Summary { sessions: 4, unseen: 3, ..Summary::default() };
-        assert_eq!(header(unseen, 30), "─ 4 sessions ──────────── •3 ─");
-        assert_eq!(header(Summary { sessions: 1, ..Summary::default() }, 16), "─ 1 session ────");
-        assert_eq!(header(Summary::default(), 6), "──────");
-    }
-
-    /// While the sidebar has the focus, the legend takes its bottom: the top
-    /// of help, `/` first, under a rule. It gives way to the search box, which
-    /// spells out its own keys, and to the menu. Without the focus, the tree
-    /// and the notes take the whole sidebar.
-    #[test]
-    fn the_legend_shows_at_the_bottom_while_the_sidebar_has_the_focus() {
-        let mut tree = workday_tree(6);
-        tree.legend = Some(Legend::new(Some(MENU_KDL)));
-        let notes = [Note::error("lunetad does not answer")];
-        let unfocused = sidebar_picture(&tree, &notes, false, 6, 32);
-        assert_eq!(unfocused.len(), 6);
-        assert_eq!(unfocused[5], " lunetad does not answer        ");
-        let agents = AgentSet::default();
-        assert_eq!(sidebar_shelf(&tree, &agents, false, 13, 30).bottom_y, None);
-
-        let shelf = sidebar_shelf(&tree, &agents, true, 13, 30);
-        assert_eq!((shelf.tree, shelf.bottom_y), (5, Some(7)));
-        let Some(bottom) = Bottom::of(&tree, true) else { panic!("no legend") };
-        let (lines, help) = bottom.lines(13 - 7, 30);
-        assert!(help.is_none());
-        assert_eq!(
-            lines.iter().map(Painted::content).collect::<Vec<_>>(),
-            [
-                "─ luneta ─────────────────────",
-                " /  Search                    ",
-                " c  Claude ▸                  ",
-                " n  New ▸                     ",
-                " d  Delete ▸                  ",
-                " b  Brief ▸                   ",
-            ]
-        );
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, HEADER + 4), Some(6));
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, 7), None);
-
-        tree.search_for(String::new());
-        assert!(matches!(Bottom::of(&tree, true), Some(Bottom::Search { keys: true, .. })));
-        assert_eq!(sidebar_shelf(&tree, &agents, true, 13, 30).bottom_y, Some(11));
-        assert!(search_help_line(30).content().width() <= 30);
-
-        tree.menu = sidebar_menu(MENU_KDL, Some('c'));
-        assert!(matches!(Bottom::of(&tree, true), Some(Bottom::Menu(_))));
-    }
-
-    #[test]
-    fn the_search_box_opens_under_the_tree_and_moves_no_row() {
-        let mut tree = sidebar_tree(workday(), 0);
-        let closed = sidebar_picture(&tree, &[], true, 9, 32);
-        tree.search_for("handoff-eng-11259".to_owned());
-        let open = sidebar_picture(&tree, &[], true, 9, 32);
-        // The box, and its keys under it.
-        assert_eq!(open.len(), closed.len() - 2);
-        assert_eq!(open[..], closed[..open.len()]);
-
-        let search = Bottom::Search { term: "", keys: true };
-        assert_eq!(Shelf::new(9, 0, Some(&search), 32).bottom_y, Some(7));
-        assert_eq!(search_line("pix", 30).content(), " /pix_                          ");
-        assert_eq!(search_line("handoff-eng-11259", 10).content(), " /…g-11259_ ");
-
-        let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 6), Some(4));
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 9, 32, 7), None);
-    }
-
-    #[test]
-    fn the_sidebar_scrolls_to_keep_the_cursor_in_sight() {
-        let tree = sidebar_tree(workday(), 7);
-        let lines = sidebar_picture(&tree, &[], true, 5, 32);
-        assert_eq!(lines.len(), 5);
-        assert!(lines[4].contains("~/P/m/unnamed"), "{lines:?}");
-        let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 5, 32, 2), Some(5));
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 5, 32, 4), Some(7));
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 5, 32, 5), None);
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 4, 32, 3), Some(7));
-    }
-
-    /// A sidebar too short for both the cursor and the pane you are in shows
-    /// your pane, lit, while it does not have the focus, and a click on it
-    /// lands on it.
-    #[test]
-    fn a_short_sidebar_keeps_your_pane_in_sight_until_it_has_the_focus() {
-        let tree = workday_tree(0);
-        let shelf = Shelf::new(5, 0, None, 30);
-        let lines = sidebar_lines(&tree, &[], &shelf, false, 30, 0);
-        let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
-        assert_eq!(lit, [HEADER + 2]);
-        assert!(lines[HEADER + 2].content().starts_with(HERE_MARK));
-        let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 5, 30, HEADER + 2), Some(6));
-    }
-
-    #[test]
-    fn the_letters_a_search_lands_on_stand_out_on_every_session_row() {
-        for current in [false, true] {
-            let node = SessionNode {
-                name: "misc".to_owned(),
-                current,
-                folded: false,
-                waiting: 0,
-                loudest: None,
-                hits: vec![0, 2],
-            };
-            let line = branch_line(&node, 20, 0);
-            assert_eq!(line.content().chars().skip(3).take(4).collect::<String>(), "misc");
-            let [m, i, s, c] = [3, 4, 5, 6].map(|at| line.colour_at(at));
-            assert_eq!((m, i), (s, c), "current: {current}");
-            assert_eq!(m, Some(ACCENT), "current: {current}");
-            assert_eq!(i, current.then_some(NAME), "current: {current}");
-        }
-    }
-
-    /// Whatever ink a label takes, the letters a search lands on in it take a
-    /// colour of their own.
-    #[test]
-    fn the_letters_a_search_lands_on_stand_out_on_every_pane_row() {
-        let columns = Columns { glyph: GLYPH, icons: &Icons::default(), age: 2 };
-        for (here, agent) in [
-            (false, Some("waiting")),
-            (false, Some("idle")),
-            (false, None),
-            (true, Some("waiting")),
-        ] {
-            let node = PaneNode {
-                session: "a".to_owned(),
-                id: 0,
-                tab: None,
-                label: "misc".to_owned(),
-                mark: agent.map(|word| Mark::Agent {
-                    status: given::status(word),
-                    age: Held::from_secs(4),
-                }),
-                runs: None,
-                checkout: None,
-                here,
-                hits: vec![0, 2],
-            };
-            let line = leaf_line(&node, &columns, 20, 0);
-            assert_eq!(line.content().chars().skip(5).take(4).collect::<String>(), "misc");
-            let [m, i, s, c] = [5, 6, 7, 8].map(|at| line.colour_at(at));
-            assert_eq!((m, i), (s, c), "{agent:?}, here: {here}");
-            assert!(m.is_some(), "{agent:?}, here: {here}");
-            assert_ne!(m, i, "{agent:?}, here: {here}");
-        }
-    }
-
-    /// The wheel moves the view and leaves the cursor and the highlight where
-    /// they are, out of sight or not, until a key comes or the cursor goes to
-    /// another row.
-    #[test]
-    fn the_wheel_moves_the_view_until_the_cursor_moves() {
-        let mut tree = workday_tree(1);
-        let agents = AgentSet::default();
-        let top =
-            |tree: &Tree, focused: bool| sidebar_row_at(tree, &agents, focused, 6, 32, HEADER);
-        // Four rows of eight, around your pane on the seventh.
-        assert_eq!(top(&tree, false), Some(3));
-
-        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
-        assert_eq!(top(&tree, false), Some(0));
-        assert!(!scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
-        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, 99));
-        assert_eq!(top(&tree, false), Some(4));
-        assert_eq!(tree.rows.selected(), Some(1));
-        assert!(!sidebar_picture(&tree, &[], false, 6, 32)[HEADER].contains("bipa"));
-
-        // The focus lights the cursor instead, and the view stays.
-        assert_eq!(top(&tree, true), Some(4));
-        tree.unscroll();
-        assert_eq!(top(&tree, true), Some(0));
-
-        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
-        assert_eq!(top(&tree, true), Some(3));
-        assert!(tree.rows.select(2));
-        assert_eq!(top(&tree, true), Some(0));
-    }
-
-    /// A click on a row the wheel brought into view lights it where it is:
-    /// the view stays, and the row stays under the pointer.
-    #[test]
-    fn a_click_leaves_the_view_where_the_wheel_left_it() {
-        let mut tree = workday_tree(0);
-        let agents = AgentSet::default();
-        let row_at =
-            |tree: &Tree, line: usize| sidebar_row_at(tree, &agents, true, 6, 32, HEADER + line);
-        // Three rows of eight, under the header and over the keys.
-        assert!(scroll_sidebar(&mut tree, &agents, true, 6, 32, 3));
-        assert_eq!(row_at(&tree, 0), Some(3));
-        let clicked = row_at(&tree, 1).expect("a row on the second line");
-        select_sidebar_row(&mut tree, &agents, true, 6, 32, clicked);
-        assert_eq!(tree.rows.selected(), Some(clicked));
-        assert_eq!(row_at(&tree, 0), Some(3));
-        assert_eq!(row_at(&tree, 1), Some(clicked));
-    }
-
-    /// So does the click that brings the focus in, with your own session
-    /// folded: no row is lit before the focus comes, and the cursor is lit
-    /// after, but it is on your session's row both times.
-    #[test]
-    fn the_click_that_brings_the_focus_leaves_the_view_where_the_wheel_left_it() {
-        let mut nodes = workday();
-        nodes.truncate(5);
-        nodes.extend([
-            session_node("zeta", false, 0, None),
-            pane_node("zeta", 5, "one", None),
-            pane_node("zeta", 6, "two", None),
-            session_node("unnamed", true, 0, None),
-        ]);
-        let mut tree = sidebar_tree(nodes, 8);
-        let agents = AgentSet::default();
-        let row_at = |tree: &Tree, focused: bool| {
-            sidebar_row_at(tree, &agents, focused, 6, 32, HEADER + 1)
-        };
-        assert!(scroll_sidebar(&mut tree, &agents, false, 6, 32, -3));
-        let clicked = row_at(&tree, false).expect("a row on the second line");
-        select_sidebar_row(&mut tree, &agents, true, 6, 32, clicked);
-        assert_eq!(row_at(&tree, true), Some(clicked));
-    }
-
-    #[test]
-    fn a_session_row_folds_on_its_fold_and_nowhere_else() {
-        let session = session_node("bipa", false, 0, None);
-        let Node::Session(node) = &session else { panic!("a session row") };
-        let line = branch_line(node, 30, 0);
-        let glyph = line.content().chars().position(|c| c.to_string() == UNFOLDED);
-        assert!(glyph.is_some_and(|at| folds_at(&session, at)), "{:?}", line.content());
-        let folds: Vec<bool> = (0..6).map(|column| folds_at(&session, column)).collect();
-        assert_eq!(folds, [true, true, true, false, false, false]);
-        assert!(!folds_at(&pane_node("bipa", 31, "handoff", None), 1));
-    }
-
-    #[test]
-    fn a_click_on_the_header_or_below_the_last_row_lands_on_nothing() {
-        let tree = sidebar_tree(workday(), 0);
-        let agents = AgentSet::default();
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 0), None);
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 1), None);
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 2), Some(0));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 9), Some(7));
-        assert_eq!(sidebar_row_at(&tree, &agents, false, 20, 32, 10), None);
-        assert_eq!(sidebar_row_at(&Tree::default(), &agents, false, 20, 32, 2), None);
-    }
-
-    #[test]
-    fn a_sidebar_with_no_sessions_says_so() {
-        let mut tree = Tree::default();
-        assert_eq!(
-            sidebar_picture(&tree, &[], false, 2, 20),
-            vec![" no sessions        ", "                    "]
-        );
-        tree.search_for(String::new());
-        assert_eq!(sidebar_picture(&tree, &[], true, 3, 20)[0], " no sessions        ");
-        tree.search_for("zz".to_owned());
-        assert_eq!(sidebar_picture(&tree, &[], true, 3, 20)[0], " no match           ");
-    }
-
-    #[test]
-    fn every_sidebar_line_is_exactly_the_width_of_the_pane() {
-        let notes = [Note::dim("2 agents sit in panes luneta cannot find")];
-        for cols in 2..48 {
-            let search = search_line("handoff pix outflow", cols - 2);
-            assert_eq!(search.content().width(), cols, "{cols}: {}", search.content());
-            for rows in 1..12 {
-                for (focused, searching, menu) in [
-                    (false, false, None),
-                    (true, false, None),
-                    (true, true, None),
-                    (true, false, Some('c')),
-                ] {
-                    let trees = [0, 3, 7].into_iter().flat_map(|selected| {
-                        let mut iconed = sidebar_tree(worktrees(), selected);
-                        iconed.icons = Icons::luneta();
-                        [workday_tree(selected), sidebar_tree(worktrees(), selected), iconed]
-                    });
-                    for mut tree in trees {
-                        if searching {
-                            tree.search_for("pix".to_owned());
-                        }
-                        tree.legend = Some(Legend::new(Some(MENU_KDL)));
-                        tree.menu = menu.and_then(|key| sidebar_menu(MENU_KDL, Some(key)));
-                        let lines = sidebar_picture(&tree, &notes, focused, rows, cols);
-                        let agents = AgentSet::default();
-                        let shelf = sidebar_shelf(&tree, &agents, focused, rows, cols);
-                        let below = shelf.bottom_y.map_or(0, |y| rows - y);
-                        assert_eq!(lines.len() + below, rows, "{cols}x{rows}");
-                        assert!(shelf.bottom_y.is_none_or(|y| y == lines.len()), "{rows}");
-                        assert!(shelf.header == 0 || shelf.tree > 0, "{cols}x{rows}");
-                        for line in lines {
-                            assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
-                        }
-                        let Some(bottom) = Bottom::of(&tree, focused) else {
-                            continue;
-                        };
-                        let (drawn, keys) = bottom.lines(below, cols);
-                        let shown = drawn.len() + usize::from(keys.is_some());
-                        assert_eq!(shown, below, "{cols}x{rows}");
-                        for line in drawn.iter().map(Painted::content) {
-                            assert_eq!(line.width(), cols, "{cols}x{rows}: {line:?}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     const MENU_KDL: &str = r#"
         c "Claude" {
             t "/thermo-nuclear-review"
@@ -3380,125 +2051,52 @@ mod tests {
         }
     "#;
 
-    /// The menu in the sidebar, as `key` opens it for a pane that works in
-    /// `/w/misc/unnamed`.
-    fn sidebar_menu(entries: &str, key: Option<char>) -> Option<SidebarMenu> {
-        let cwd = Some("/w/misc/unnamed".to_owned());
-        let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
-        let row = crate::menu::Row { pane, there: None, back: None };
-        SidebarMenu::open(Some(entries), row, key, &mut crate::menu::Numbers::default(), 0)
-    }
-
-    /// The menu's lines in `lines` lines of a sidebar `cols` wide, the keys
-    /// under them last.
-    fn sidebar_menu_picture(menu: &SidebarMenu, lines: usize, cols: usize) -> Vec<String> {
-        let (drawn, help) = sidebar_menu_lines(menu, lines, cols);
-        let drawn = drawn.iter().map(|line| line.content().to_owned());
-        drawn.chain(help.map(|help| format!(" {}", help.content()))).collect()
-    }
-
-    /// The menu opens at the bottom of the sidebar, in the place of its keys:
-    /// a rule that names the group open and where an agent starts, the keys
-    /// of the group, and the keys that go back and close. The tree makes room
-    /// for it and keeps the row it is for in sight.
+    /// The keys of the group open, each with what it does: a group's name
+    /// with the mark that it opens, and a prompt as it is typed, cut to fit.
     #[test]
-    fn the_menu_opens_at_the_bottom_of_the_sidebar() {
-        let mut tree = workday_tree(6);
-        tree.menu = sidebar_menu(MENU_KDL, Some('c'));
-        let agents = AgentSet::default();
-        let shelf = sidebar_shelf(&tree, &agents, true, 13, 30);
-        assert_eq!((shelf.tree, shelf.bottom_y), (6, Some(8)));
-        let menu = tree.menu.as_ref().expect("a menu");
-        let mut picture = sidebar_picture(&tree, &[], true, 13, 30);
-        picture.extend(sidebar_menu_picture(menu, 13 - 8, 30));
+    fn the_menu_shows_each_key_of_the_group_open_and_what_it_does() {
+        let mut keys = Keys::new(Some(MENU_KDL)).expect("a menu");
+        let shown = |keys: &Keys| -> Vec<String> {
+            let parts = menu_parts(Shown::Keys(keys), 28, usize::MAX);
+            parts.body.iter().map(|line| line.content().to_owned()).collect()
+        };
         assert_eq!(
-            picture,
+            shown(&keys),
             [
-                "─ 3 sessions ────── ●1 •1 ⠋3 ─",
-                "                              ",
-                "  •✓ handoff-eng-11259-p… 13h ",
-                "   ● dda-bank-slip-paid-…  3m ",
-                "   ⠋ Handoff pix outflow… 12s ",
-                " ▸ floresta ─────────────── ⠋ ",
-                " ▾ unnamed ────────────────── ",
-                "▌  ⠋ orca-copy            12s ",
-                "─ Claude ────── misc/unnamed ─",
-                " t  /thermo-nuclear-review    ",
-                " m  /make-illegal-states-unr… ",
-                " s  /tigerstyle               ",
-                " <BS> - Back, <ESC> - Close",
-            ]
-        );
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, HEADER + 5), Some(6));
-        assert_eq!(sidebar_row_at(&tree, &agents, true, 13, 30, 8), None);
-
-        let root = sidebar_menu(MENU_KDL, None).expect("a menu");
-        assert_eq!(
-            sidebar_menu_picture(&root, 4, 30),
-            [
-                "─ luneta ────── misc/unnamed ─",
                 " /  Search skills             ",
-                " c  Claude ▸                  ",
-                " <ESC> - Close",
-            ]
-        );
-
-        let cwd = Some("/w/misc/unnamed".to_owned());
-        let pane = Some(crate::menu::RowPane { id: 0, cwd, branch: None });
-        let row = crate::menu::Row { pane, there: None, back: None };
-        let numbers = &mut crate::menu::Numbers::default();
-        let brief = SidebarMenu::help(Some(MENU_KDL), row, 'b', numbers);
-        let back = zellij_tile::prelude::KeyWithModifier::new(
-            zellij_tile::prelude::BareKey::Backspace,
-        );
-        let help = brief.key(&back, None, 0).0.expect("the top of help");
-        assert_eq!(
-            sidebar_menu_picture(&help, 7, 30),
-            [
-                "─ luneta ────── misc/unnamed ─",
-                " /  Search                    ",
                 " c  Claude ▸                  ",
                 " n  New ▸                     ",
                 " d  Delete ▸                  ",
-                " b  Brief ▸                   ",
-                " <ESC> - Close",
             ]
         );
-
-        let new = sidebar_menu(MENU_KDL, Some('n')).expect("a menu");
+        assert_eq!(menu_title(&keys), TITLE);
+        keys.key(&zellij_tile::prelude::KeyWithModifier::new(
+            zellij_tile::prelude::BareKey::Char('c'),
+        ));
         assert_eq!(
-            sidebar_menu_picture(&new, 5, 30),
+            shown(&keys),
             [
-                "─ New ───────── misc/unnamed ─",
-                " p  new pane                  ",
-                " t  new tab                   ",
-                " s  new session               ",
-                " <BS> - Back, <ESC> - Close",
+                " t  /thermo-nuclear-review    ",
+                " m  /make-illegal-states-unr… ",
+                " s  /tigerstyle               ",
             ]
         );
+        assert_eq!(menu_title(&keys), "Claude");
     }
 
-    /// The sidebar's menu for `/w/misc/unnamed`, its search box open with
-    /// `typed` in it, once the finder found `skills`, each its name and what
-    /// it does.
-    fn searching(skills: &[(&str, &str)], typed: &str) -> SidebarMenu {
-        use zellij_tile::prelude::{BareKey, KeyWithModifier};
-        let menu = sidebar_menu(MENU_KDL, None).expect("a menu");
-        let slash = KeyWithModifier::new(BareKey::Char('/'));
-        let menu = menu.key(&slash, None, 0).0.expect("a menu");
+    /// The search box over the skills of `/w/misc/unnamed`, with `typed` in
+    /// it, once the finder found `skills`, each its name and what it does.
+    fn searching(skills: &[(&str, &str)], typed: &str) -> Search {
+        let mut search = Search::ask("/w/misc/unnamed");
         let mut stdout = String::from("[]\0");
         for (name, does) in skills {
             stdout.extend(["\0skills/", name, "/SKILL.md\0description: ", does, "\0"]);
         }
-        let context = std::collections::BTreeMap::from([
-            (crate::context::CONTEXT_KEY.to_owned(), crate::skills::CONTEXT_VALUE.to_owned()),
-            (menu::MENU_KEY.to_owned(), "1".to_owned()),
-        ]);
-        let mut menu = menu.found(Some(0), stdout.as_bytes(), b"", &context);
+        search.fill(crate::skills::answer(Some(0), stdout.as_bytes(), b""));
         for c in typed.chars() {
-            menu = menu.key(&KeyWithModifier::new(BareKey::Char(c)), None, 0).0.expect("a menu");
+            search.push(c);
         }
-        menu
+        search
     }
 
     /// The skills of a test's finder: more than the box shows at once.
@@ -3515,120 +2113,78 @@ mod tests {
         ("triage", "Triage issues."),
     ];
 
+    fn drawn(lines: &[Painted]) -> Vec<&str> {
+        lines.iter().map(Painted::content).collect()
+    }
+
     /// The search box takes the place of the menu's keys: what is typed, and
     /// under it the skills that match, best first, the one the cursor is on
     /// lit, each with what it does, dimmed and cut to fit. It keeps the lines
     /// the skills found fill, `SEARCH_ROWS` at most, however many match, so
-    /// the tree above it stays put as you type.
+    /// the menu keeps its size as you type.
     #[test]
     fn the_search_box_lists_the_skills_that_match() {
-        let menu = searching(SKILLS, "");
-        assert_eq!(sidebar_menu_height(&menu, 30), SEARCH_ROWS + 3);
-        let picture = sidebar_menu_picture(&menu, 11, 30);
+        let lines = search_lines(&searching(SKILLS, ""), 28, 9);
+        assert_eq!(lines.len(), SEARCH_ROWS + 1);
         assert_eq!(
-            picture[..4],
+            drawn(&lines)[..3],
             [
-                "─ Skills ────── misc/unnamed ─",
                 " /_                           ",
                 " /code-review  Review the ch… ",
                 " /codebase-design  Design de… ",
             ]
         );
-        assert_eq!(picture[9], " /test-audit  Audit tests.    ");
-        assert_eq!(picture[10], " <↓↑>/<ENTER>/<ESC>");
-        let (lines, _) = sidebar_menu_lines(&menu, 11, 30);
+        assert_eq!(lines[8].content(), " /test-audit  Audit tests.    ");
         let lit: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].is_selected()).collect();
-        assert_eq!(lit, [2]);
-        assert!(lines[2].is_dim_at(16), "{}", lines[2].content());
+        assert_eq!(lit, [1]);
+        assert!(lines[1].is_dim_at(16), "{}", lines[1].content());
 
-        let menu = searching(SKILLS, "rev");
-        let (lines, _) = sidebar_menu_lines(&menu, 11, 30);
-        assert_eq!(lines.len(), SEARCH_ROWS + 2);
-        assert_eq!(lines[1].content(), " /rev_                        ");
-        assert_eq!(lines[2].content(), " /code-review  Review the ch… ");
-        assert!(lines[3..].iter().all(|line| line.content().trim().is_empty()));
+        let lines = search_lines(&searching(SKILLS, "rev"), 28, 9);
+        assert_eq!(lines.len(), SEARCH_ROWS + 1);
+        assert_eq!(lines[0].content(), " /rev_                        ");
+        assert_eq!(lines[1].content(), " /code-review  Review the ch… ");
+        assert!(lines[2..].iter().all(|line| line.content().trim().is_empty()));
         // The margin, the `/`, then `code-`: `rev` lands on the rest.
-        let colours: Vec<_> = (6..=9).map(|at| lines[2].colour_at(at)).collect();
+        let colours: Vec<_> = (6..=9).map(|at| lines[1].colour_at(at)).collect();
         assert_eq!(colours, [Some(NAME), Some(ACCENT), Some(ACCENT), Some(ACCENT)]);
 
-        let menu = searching(SKILLS, "zzz");
-        assert_eq!(sidebar_menu_picture(&menu, 11, 30)[2], " no match                     ");
-        let menu = searching(&[], "");
+        let lines = search_lines(&searching(SKILLS, "zzz"), 28, 9);
+        assert_eq!(lines[1].content(), " no match                     ");
+        let lines = search_lines(&searching(&[], ""), 28, 9);
         assert_eq!(
-            sidebar_menu_picture(&menu, 11, 30),
-            [
-                "─ Skills ────── misc/unnamed ─",
-                " /_                           ",
-                " no skills here               ",
-                " <↓↑>/<ENTER>/<ESC>",
-            ]
+            drawn(&lines),
+            [" /_                           ", " no skills here               "]
         );
     }
 
     /// The search box scrolls to keep the skill the cursor is on in sight,
-    /// in what room the sidebar has.
+    /// in what room the menu has.
     #[test]
     fn the_search_box_scrolls_to_the_cursor() {
-        use zellij_tile::prelude::{BareKey, KeyWithModifier};
-        let mut menu = searching(SKILLS, "");
+        let mut search = searching(SKILLS, "");
         for _ in 0..SKILLS.len() {
-            menu = menu.key(&KeyWithModifier::new(BareKey::Down), None, 0).0.expect("a menu");
+            search.move_by(1);
         }
-        let picture = sidebar_menu_picture(&menu, 11, 30);
-        assert_eq!(picture[2], " /diagnosing-bugs  Diagnose…  ");
-        assert_eq!(picture[9], " /triage  Triage issues.      ");
-        let (lines, _) = sidebar_menu_lines(&menu, 5, 30);
-        let shown: Vec<&str> = lines.iter().map(Painted::content).collect();
+        let lines = search_lines(&search, 28, 9);
+        assert_eq!(lines[1].content(), " /diagnosing-bugs  Diagnose…  ");
+        assert_eq!(lines[8].content(), " /triage  Triage issues.      ");
+        let lines = search_lines(&search, 28, 3);
         assert_eq!(
-            shown,
+            drawn(&lines),
             [
-                "─ Skills ────── misc/unnamed ─",
                 " /_                           ",
                 " /tigerstyle  Apply TigerSty… ",
                 " /triage  Triage issues.      ",
             ]
         );
-        assert!(lines[3].is_selected());
-    }
-
-    /// A sidebar too short for the whole menu leaves the tree a row, which a
-    /// note leaves it too, and cuts the entries first, then the rule. A rule
-    /// too narrow for where an agent starts leaves it out, and a menu that
-    /// cannot be read says why.
-    #[test]
-    fn a_short_sidebar_cuts_the_menu_and_keeps_its_keys() {
-        let menu = sidebar_menu(MENU_KDL, Some('c')).expect("a menu");
-        let bottom = Bottom::Menu(&menu);
-        assert_eq!(bottom.height(99, 30), 5);
-        assert_eq!(Shelf::new(4, 0, Some(&bottom), 30).bottom_y, Some(1));
-        for (rows, cut) in [(4, (1, 0, Some(1))), (7, (1, 1, Some(2)))] {
-            let shelf = Shelf::new(rows, 1, Some(&bottom), 30);
-            assert_eq!((shelf.tree, shelf.notes, shelf.bottom_y), cut, "{rows}");
-        }
-        assert_eq!(
-            sidebar_menu_picture(&menu, 3, 30),
-            [
-                "─ Claude ────── misc/unnamed ─",
-                " t  /thermo-nuclear-review    ",
-                " <BS> - Back, <ESC> - Close",
-            ]
-        );
-        assert_eq!(sidebar_menu_picture(&menu, 1, 30), [" <BS> - Back, <ESC> - Close"]);
-        assert!(sidebar_menu_picture(&menu, 0, 30).is_empty());
-        assert_eq!(menu_rule("Claude", "misc/unnamed", 20).content(), "─ Claude ───────────");
-        assert_eq!(menu_rule("Claude", "", 8).content(), "─ Cla… ─");
-
-        let wrong = sidebar_menu("t", Some('t')).expect("a menu");
-        let picture = sidebar_menu_picture(&wrong, sidebar_menu_height(&wrong, 30), 30);
-        assert!(picture[0].starts_with("─ luneta ──"), "{picture:?}");
-        assert!(picture[1].starts_with(" menu: \"t\" takes one string"), "{picture:?}");
+        assert!(lines[2].is_selected());
     }
 
     /// The floating menu is wide enough, while a delete key asks, to spell out
     /// the keys that answer it, however narrow the group's keys are.
     #[test]
     fn the_keys_that_answer_a_close_key_are_spelled_out() {
-        let keys = Keys::new(None, crate::close::Scope::Pane).expect("a menu");
+        let keys = Keys::new(None).expect("a menu");
         let asking = Shown::Asking(&keys, "Close its tab? 2 agents, 1 busy");
         let help = menu_parts(asking, MIN_ASKING - PAD * 2, usize::MAX).help;
         assert!(help.content().contains("<y> Yes"), "{}", help.content());

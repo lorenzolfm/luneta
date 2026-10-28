@@ -11,10 +11,6 @@ struct Pane {
     /// program gave, so a pane where claude ended still counts, under a shell
     /// that sets no title of its own.
     claude: bool,
-    /// What its terminal runs in the foreground, when zellij could say: the
-    /// command line of the process group in front, or of the shell itself at
-    /// its prompt.
-    command: Option<String>,
 }
 
 /// One session that holds a pane of a given id. `find` asks about a pane many
@@ -41,15 +37,13 @@ impl Places {
         let panes = |session: &v1::Session| {
             let listed = session.panes.as_ref().map_or(&[][..], |panes| panes.panes.as_slice());
             let pane = |pane: &v1::Pane| {
-                let command = pane.command.clone().filter(|command| !command.trim().is_empty());
+                let runs_claude = pane.command.as_deref().is_some_and(|c| c.contains("claude"));
                 Some(Pane {
                     id: pane.id,
                     cwd: Said::new(pane.cwd.clone()?)?,
                     // The daemon says what an agent said in a title only where
                     // an agent's glyph led it, as the `✳` does.
-                    claude: command.as_deref().is_some_and(|command| command.contains("claude"))
-                        || pane.titled.is_some(),
-                    command,
+                    claude: runs_claude || pane.titled.is_some(),
                 })
             };
             listed.iter().filter_map(pane).collect()
@@ -86,14 +80,6 @@ impl Places {
         panes.iter().find(|held| held.id == pane).map(|held| held.cwd.as_str())
     }
 
-    /// What a pane's terminal runs in the foreground, as its session last
-    /// said, as zellij spells a command: its path, then each argument after a
-    /// space.
-    pub fn command(&self, session: &str, pane: u32) -> Option<&str> {
-        let panes = self.sessions.get(session)?;
-        panes.iter().find(|held| held.id == pane)?.command.as_deref()
-    }
-
     pub fn find(&self, pane: u32, cwd: &str, reported: &str) -> Option<&str> {
         let holders = self.holders.get(&pane)?;
         let held = || holders.iter().filter(|held| held.cwd.as_str() == cwd);
@@ -127,7 +113,6 @@ impl Places {
                             id: *id,
                             cwd: Said::new((*cwd).to_owned()).expect("a pane works somewhere"),
                             claude: true,
-                            command: None,
                         })
                         .collect();
                     (name.to_string(), panes)
@@ -182,7 +167,7 @@ mod tests {
     }
 
     /// What the daemon says takes the place of all it said: where each pane
-    /// works, and what runs in it. A session whose panes it has yet to list
+    /// works. A session whose panes it has yet to list
     /// holds none, and a session it no longer lists, none either.
     #[test]
     fn what_the_daemon_says_stands_in_the_place_of_what_it_said() {
@@ -194,9 +179,7 @@ mod tests {
         ];
         places.heard(&[session("luneta", Some(listed)), session("new", None)]);
         assert_eq!(places.find(0, "/w/repo", ""), Some("luneta"));
-        assert_eq!(places.command("luneta", 0), Some("claude"));
         assert_eq!(places.cwd("luneta", 1), Some("/w/repo/src"));
-        assert_eq!(places.command("luneta", 1), None);
         assert_eq!(places.cwd("luneta", 2), None);
         assert_eq!(places.find(0, "/home/lorenzo/Projects/misc", ""), None);
     }

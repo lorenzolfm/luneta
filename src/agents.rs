@@ -6,14 +6,16 @@ use std::num::NonZeroU64;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use luneta_protocol::said::Said;
+use luneta_protocol::tab;
 use luneta_protocol::v1::{self, agent::Status as Reported, NameSource};
 
-use crate::cursor::{Cursor, Stops};
+use crate::cursor::Cursor;
+use crate::dirs::short_cwd;
 use crate::elapsed::{Held, Moment};
 use crate::fetch::Fetch;
 use crate::places::Places;
 use crate::sessions::{Selection, Session};
-use crate::tree::{self, Branch, Leaf};
+use crate::tree::{Branch, Leaf};
 
 pub const CLOSE_VALUE: &str = "close";
 pub const LABEL_KEY: &str = "luneta_label";
@@ -23,22 +25,6 @@ pub const LABEL_KEY: &str = "luneta_label";
 /// can be another's too.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Pid(u32);
-
-/// The id of an agent's Claude Code session, which names its transcript: a
-/// UUID's characters, and so never a path that would name some other file.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionId(String);
-
-impl SessionId {
-    pub fn parse(id: &str) -> Option<Self> {
-        let uuid = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
-        uuid.then(|| SessionId(id.to_owned()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Seat {
@@ -151,12 +137,10 @@ impl Housed {
 /// When an agent came to its status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Came {
-    /// As Claude Code dates it, to the millisecond, which the daemon says
-    /// alike to every sidebar.
+    /// As Claude Code dates it, to the millisecond.
     Dated(Moment),
-    /// When this sidebar first heard it at its status, which Claude Code
-    /// dates not: another sidebar may hear it later, and so may this one
-    /// once the daemon has not answered a while.
+    /// When luneta first heard it at its status, which Claude Code dates not,
+    /// or heard it again once the daemon had not answered a while.
     Heard(Moment),
 }
 
@@ -177,8 +161,6 @@ pub struct Agent {
     came: Came,
     /// Where the agent works, when Claude Code says.
     cwd: Option<String>,
-    /// The id of its Claude Code session, which names its transcript.
-    transcript: Option<SessionId>,
     /// When its session started, in seconds since the epoch, when Claude Code
     /// says.
     started: Option<NonZeroU64>,
@@ -196,11 +178,7 @@ pub struct AgentRow {
     pub status: Status,
     /// How long it has held its status.
     pub age: Held,
-    pub came: Came,
     pub cwd: Option<String>,
-    /// The id of its Claude Code session, which names its transcript, when
-    /// Claude Code says.
-    pub transcript: Option<SessionId>,
     shared: Shared,
     /// The agent names a session that is still running, but its pane turned
     /// up in another, matched by its id and directory alone: where it sits is
@@ -211,10 +189,8 @@ pub struct AgentRow {
     found: Option<Found>,
 }
 
-impl Stops for AgentRow {}
-
 impl AgentRow {
-    /// `agent` in `seat` at `now`, going by what the sidebar names its pane.
+    /// `agent` in `seat` at `now`, going by what its pane is named.
     fn new(Seated { agent, seat, guessed }: Seated, live: &Live, now: Moment) -> Self {
         let mut row = AgentRow {
             pid: agent.pid,
@@ -225,21 +201,19 @@ impl AgentRow {
             pane: agent.pane,
             status: agent.status.clone(),
             age: now.since(agent.came.moment()),
-            came: agent.came,
             cwd: agent.cwd.clone(),
-            transcript: agent.transcript.clone(),
             shared: Shared::Not,
             found: None,
         };
         if matches!(row.name, Name::Session) {
             if let Some(leaf) = live.leaf(row.seat.session(), row.pane) {
-                row.name = Name::Pane(tree::label(leaf, Some(&row)));
+                row.name = Name::Pane(label(leaf, Some(&row)));
             }
         }
         row
     }
 
-    /// What the sidebar names the agent's row.
+    /// What the agent's row goes by.
     pub fn name(&self) -> &str {
         match &self.name {
             Name::Chosen(name) | Name::Pane(name) => name,
@@ -289,7 +263,7 @@ impl AgentRow {
 enum Name {
     /// The name a person gave the agent, with `/rename`.
     Chosen(String),
-    /// What the sidebar names its pane.
+    /// What its pane is named, as `label` names it.
     Pane(String),
     /// Its session's, before zellij has listed its pane.
     Session,
@@ -456,17 +430,16 @@ impl AgentSet {
 
     /// The rows keep their order, whatever the agents do: their sessions' in
     /// the session list, and the order their panes were opened in within each.
-    /// A pane holds one agent, as the sidebar draws it: of those the daemon
-    /// puts in it, the one `holds_before` picks. The others are counted, and
-    /// a guess that the pane's own agent refutes counts among the agents that
-    /// sit nowhere luneta can find. A term puts the best match first, as it
-    /// does in the session list. An agent is found by its label or by its
-    /// session's name, as the sidebar finds a session's panes, and only its
-    /// label is lit up. Each label is told apart from the others whatever the
-    /// term leaves out, so that it stays what was typed. The cursor holds to
-    /// its agent, wherever the agent turns up. Every agent, those the rows
-    /// leave out too, is counted where a delete key ends it. Each row has
-    /// held its status until `now`.
+    /// A pane holds one agent: of those the daemon puts in it, the one
+    /// `holds_before` picks. The others are counted, and a guess that the
+    /// pane's own agent refutes counts among the agents that sit nowhere
+    /// luneta can find. A term puts the best match first, as it does in the
+    /// session list. An agent is found by its label or by its session's name,
+    /// and only its label is lit up. Each label is told apart from the others
+    /// whatever the term leaves out, so that it stays what was typed. The
+    /// cursor holds to its agent, wherever the agent turns up. Every agent,
+    /// those the rows leave out too, is counted where a delete key ends it.
+    /// Each row has held its status until `now`.
     pub fn rebuild(
         &mut self,
         term: &str,
@@ -585,20 +558,6 @@ impl AgentSet {
     pub fn any_busy(&self) -> bool {
         self.rows.iter().any(|row| row.status.is_busy())
     }
-
-    /// Highlights the agent in `pane` of `session`, or else the first in
-    /// `session`: the nearest the list has to a row of the sidebar.
-    pub fn select_seated(&mut self, session: &str, pane: Option<u32>) {
-        let seated = |row: &AgentRow| row.seat.session() == session;
-        let at = self
-            .rows
-            .iter()
-            .position(|row| seated(row) && Some(row.pane) == pane)
-            .or_else(|| self.rows.iter().position(seated));
-        if let Some(at) = at {
-            self.rows.select(at);
-        }
-    }
 }
 
 fn mark_shared(rows: &mut [&mut AgentRow]) {
@@ -660,20 +619,6 @@ fn glyph(status: &Status, frame: u64) -> &'static str {
     }
 }
 
-/// The sidebar's mark for a status: one column wide, whatever a terminal
-/// makes of an emoji, so that the labels after it line up and it takes the
-/// colour it is drawn in. The picker keeps the emoji.
-pub fn dot(status: &Status, frame: u64) -> String {
-    match status {
-        Status::Waiting => "●".to_owned(),
-        Status::Idle => "✓".to_owned(),
-        Status::Busy => SPINNER[(frame as usize) % SPINNER.len()].to_owned(),
-        Status::Shell => "$".to_owned(),
-        Status::Unknown(Some(word)) => word.initial().to_uppercase().collect(),
-        Status::Unknown(None) | Status::Unreported => "?".to_owned(),
-    }
-}
-
 pub fn full_tag(status: &Status, frame: u64) -> String {
     format!("{} {}", glyph(status, frame), status.word().to_uppercase())
 }
@@ -686,7 +631,7 @@ pub fn abbr_tag(status: &Status, frame: u64) -> String {
 }
 
 /// The name of an agent's session, if someone chose it: one Claude Code
-/// derives from the directory is no name the sidebar goes by. A name from
+/// derives from the directory is no name a row goes by. A name from
 /// before Claude Code said who chose it is taken for chosen.
 fn chosen_name(name: Option<&str>, chosen: bool) -> Option<String> {
     let name = name.map(str::trim).filter(|name| !name.is_empty())?;
@@ -735,11 +680,93 @@ impl Agent {
             status,
             came,
             cwd: Some(agent.cwd.clone()).filter(|cwd| !cwd.is_empty()),
-            transcript: SessionId::parse(&agent.session_id),
             started: started.and_then(NonZeroU64::new),
             cli: entrypoint.is_some_and(|entry| entry.eq_ignore_ascii_case("cli")),
         })
     }
+}
+
+/// A name a person gave the agent, or else what the pane says it is doing.
+/// Claude Code titles a pane `✳ Claude Code` until it has a topic, and some
+/// never get one. A tab that someone renamed says more than that, and else the
+/// directory the agent works in, which tells two such agents apart. A shell at
+/// its prompt titles its pane with its cwd cut down to initials, and is shown
+/// its cwd's last two parts instead, as the agent list shows a cwd:
+/// `luneta/main`, where `~/P/m/l/main` hides the repository behind an `l`.
+fn label(leaf: &Leaf, agent: Option<&AgentRow>) -> String {
+    if let Some(name) = agent.and_then(AgentRow::chosen) {
+        return name.to_owned();
+    }
+    let title = bare_title(&leaf.title);
+    if let Some(cwd) = leaf.cwd.as_deref().filter(|cwd| abbreviates(shell_title(title), cwd)) {
+        return short_cwd(cwd);
+    }
+    if !title.is_empty() && title != GENERIC_TITLE {
+        return title.to_owned();
+    }
+    if let Some(tab) = tab::named(&leaf.tab) {
+        return tab.to_owned();
+    }
+    if let Some(cwd) = agent.and_then(|agent| agent.cwd.as_deref()) {
+        return short_cwd(cwd);
+    }
+    if title.is_empty() {
+        return format!("pane {}", leaf.id);
+    }
+    title.to_owned()
+}
+
+const GENERIC_TITLE: &str = "Claude Code";
+
+/// Whether a title is the cwd, as a shell writes it: whole, or with `~` for
+/// home and any part but the last cut short, as fish's `~/P/m/l/main` is
+/// `/home/you/Projects/misc/luneta/main`. Each part of the title begins the
+/// part of the cwd in its place, counting from the end. A cwd luneta has not
+/// caught up with since a `cd` is not the one the title writes, and the title
+/// stays until it has.
+fn abbreviates(title: &str, cwd: &str) -> bool {
+    let (written, rooted) = if title.starts_with('/') {
+        (title, true)
+    } else if let Some(rest) =
+        title.strip_prefix('~').filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    {
+        (rest, false)
+    } else {
+        return false;
+    };
+    let written: Vec<&str> = written.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = cwd.split('/').filter(|part| !part.is_empty()).collect();
+    // `~` stands for a part or more.
+    let fits = if rooted { written.len() == parts.len() } else { written.len() < parts.len() };
+    let begins = |(written, part): (&&str, &&str)| part.starts_with(written);
+    fits && written.last().is_some_and(|last| parts.last() == Some(last))
+        && written.iter().rev().zip(parts.iter().rev()).all(begins)
+}
+
+/// A shell's title without the host fish puts before it over SSH, as in
+/// `[nixos] ~/P/m/l/main`: ten characters of its name at most, in brackets.
+fn shell_title(title: &str) -> &str {
+    let host = title.strip_prefix('[').and_then(|rest| rest.split_once("] "));
+    let host = host.filter(|(host, _)| {
+        !host.is_empty() && host.chars().count() <= 10 && !host.contains(char::is_whitespace)
+    });
+    host.map_or(title, |(_, rest)| rest)
+}
+
+/// The title without the glyph an agent leads it with: Claude Code's `✳` at
+/// rest, and a turning frame while it works.
+fn bare_title(title: &str) -> &str {
+    let title = title.trim();
+    let mut chars = title.chars();
+    match chars.next() {
+        Some(glyph) if is_agent_glyph(glyph) => chars.as_str().trim_start(),
+        _ => title,
+    }
+}
+
+fn is_agent_glyph(glyph: char) -> bool {
+    matches!(glyph, '✳' | '◐' | '◑' | '✢' | '✶' | '✻' | '✽' | '·')
+        || ('\u{2800}'..='\u{28ff}').contains(&glyph)
 }
 
 /// The moment a timestamp of the protocol's names, by its seconds since the
@@ -826,9 +853,6 @@ mod tests {
     use super::*;
     use crate::close::Closes;
 
-    /// An id of Claude Code's for a session, and so for its transcript.
-    const UUID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
-
     /// The rows of the agents the daemon gives at `NOW`, in the session you
     /// are in, `current`.
     fn rows(agents: &[v1::Agent], current: Option<&str>, places: &Places) -> AgentSet {
@@ -880,7 +904,7 @@ mod tests {
     /// its name, a word it does not as the word, a number of a newer daemon's
     /// as unknown, and none as unreported; held since the daemon says it came
     /// to it; the name its session goes by only where someone chose it, or
-    /// Claude Code does not say who did; its transcript, and where it works.
+    /// Claude Code does not say who did; and where it works.
     #[test]
     fn an_agent_reads_as_the_daemon_gives_it() {
         let known = |status: v1::Status| Some(Reported::KnownStatus(status.into()));
@@ -916,10 +940,8 @@ mod tests {
             assert_eq!(read(&given).name.as_deref(), name, "{source:?}");
         }
 
-        let given = v1::Agent { session_id: UUID.to_owned(), ..agent(100, "s", 0, "/w/repo", "idle") };
-        let read = read(&given);
+        let read = read(&agent(100, "s", 0, "/w/repo", "idle"));
         assert_eq!(read.came, Came::Dated(NOW.back(Held::from_secs(4))));
-        assert_eq!(read.transcript.as_ref().map(SessionId::as_str), Some(UUID));
         assert_eq!(read.cwd.as_deref(), Some("/w/repo"));
     }
 
@@ -969,16 +991,88 @@ mod tests {
             tab: tab.to_owned(),
             tab_id: None,
             cwd: Some("/w/luneta".to_owned()),
-            runs: None,
-            checkout: None,
             closes: Closes::Pane,
         }
+    }
+
+    #[test]
+    fn a_title_loses_the_glyph_its_agent_leads_it_with() {
+        assert_eq!(bare_title("✳ Floresta issue 1326"), "Floresta issue 1326");
+        assert_eq!(bare_title("⠐ Floresta issue 1326"), "Floresta issue 1326");
+        assert_eq!(bare_title("◑ Floresta issue 1326"), "Floresta issue 1326");
+        assert_eq!(bare_title("✻Thinking"), "Thinking");
+        assert_eq!(bare_title("  ~/P/m/floresta "), "~/P/m/floresta");
+        assert_eq!(bare_title("nvim ✳"), "nvim ✳");
+        assert_eq!(bare_title("✳"), "");
+    }
+
+    #[test]
+    fn a_renamed_tab_names_an_agent_that_has_no_topic_yet() {
+        let leaf = |title: &str, tab: &str| Leaf {
+            id: 7,
+            title: title.to_owned(),
+            tab: tab.to_owned(),
+            tab_id: None,
+            cwd: None,
+            closes: Closes::Pane,
+        };
+        assert_eq!(label(&leaf("✳ Claude Code", "liquid dual"), None), "liquid dual");
+        assert_eq!(label(&leaf("✳ Claude Code", "Tab #13"), None), "Claude Code");
+        assert_eq!(label(&leaf("✳ pix outflow", "liquid dual"), None), "pix outflow");
+        assert_eq!(label(&leaf("", "Tab #2"), None), "pane 7");
+        assert_eq!(label(&leaf("", "notes"), None), "notes");
+    }
+
+    #[test]
+    fn a_shell_at_its_prompt_is_named_for_its_cwd() {
+        let leaf = |title: &str, cwd: Option<&str>| Leaf {
+            id: 7,
+            title: title.to_owned(),
+            tab: String::new(),
+            tab_id: None,
+            cwd: cwd.map(str::to_owned),
+            closes: Closes::Pane,
+        };
+        let main = Some("/home/you/Projects/misc/luneta/main");
+        assert_eq!(label(&leaf("~/P/m/l/main", main), None), "luneta/main");
+        assert_eq!(label(&leaf("[nixos] ~/P/m/l/main", main), None), "luneta/main");
+        assert_eq!(label(&leaf("~/Projects/misc/luneta/main", main), None), "luneta/main");
+        assert_eq!(label(&leaf("/home/you/Projects/misc/luneta/main", main), None), "luneta/main");
+        // Before luneta is told the cwd, and after a `cd` it has not yet caught
+        // up with.
+        assert_eq!(label(&leaf("~/P/m/l/main", None), None), "~/P/m/l/main");
+        let before = Some("/home/you/Projects/misc/luneta");
+        assert_eq!(label(&leaf("~/P/m/l/main", before), None), "~/P/m/l/main");
+        assert_eq!(label(&leaf("nvim ~/P/m/l/main", main), None), "nvim ~/P/m/l/main");
+        assert_eq!(label(&leaf("~", Some("/home/you")), None), "~");
+    }
+
+    #[test]
+    fn a_title_abbreviates_a_cwd_only_part_for_part() {
+        let main = "/home/you/Projects/misc/luneta/main";
+        assert!(abbreviates("~/P/m/l/main", main));
+        assert!(abbreviates("~/l/main", main));
+        assert!(abbreviates("~/main", main));
+        assert!(abbreviates("~/.c/fish", "/home/you/.config/fish"));
+        assert!(abbreviates("/etc/nixos", "/etc/nixos"));
+        assert!(abbreviates("/h/y/P/m/l/main/", main));
+        // A part that begins another, a last part cut short, and too many or
+        // too few parts for what `~` and `/` stand for.
+        assert!(!abbreviates("~/P/m/x/main", main));
+        assert!(!abbreviates("~/P/m/l/ma", main));
+        assert!(!abbreviates("/P/m/l/main", main));
+        assert!(!abbreviates("~/home/you/Projects/misc/luneta/main", main));
+        // Someone else's home, home itself, the root, and no path at all.
+        assert!(!abbreviates("~luneta/main", main));
+        assert!(!abbreviates("~", "/home/you"));
+        assert!(!abbreviates("/", "/"));
+        assert!(!abbreviates("main", main));
     }
 
     /// `luneta` has an agent with a topic in pane 29, and one in pane 31 that
     /// has none yet, in a tab named `review`.
     #[test]
-    fn an_agent_goes_by_the_name_the_sidebar_gives_its_pane() {
+    fn an_agent_goes_by_the_name_its_pane_gives_it() {
         let given = [
             agent(103, "luneta", 29, "/w/luneta", "busy"),
             agent(104, "luneta", 31, "/w/luneta", "idle"),
@@ -986,9 +1080,8 @@ mod tests {
         let places = Places::of(&[("luneta", &[(29, "/w/luneta"), (31, "/w/luneta")])]);
         let branches = [Branch {
             name: "luneta".to_owned(),
-            age: Age::ZERO,
             panes: vec![
-                leaf(29, "✳ Name agents as the sidebar does", "Tab #1"),
+                leaf(29, "✳ Name agents by their panes", "Tab #1"),
                 leaf(31, "✳ Claude Code", "review"),
             ],
         }];
@@ -1004,10 +1097,10 @@ mod tests {
 
         let live = Live::new(Some("luneta"), &[], &places, &branches);
         agents.rebuild("", &live, None, NOW, Selection::SnapToTop);
-        assert_eq!(named(&agents), ["Name agents as the sidebar does", "review"]);
+        assert_eq!(named(&agents), ["Name agents by their panes", "review"]);
 
         agents.rebuild("luneta", &live, None, NOW, Selection::SnapToTop);
-        assert_eq!(named(&agents), ["Name agents as the sidebar does", "review"]);
+        assert_eq!(named(&agents), ["Name agents by their panes", "review"]);
         assert!(agents.rows.iter().all(|row| row.hits().is_empty()));
 
         agents.rebuild("rev", &live, None, NOW, Selection::SnapToTop);
@@ -1025,7 +1118,6 @@ mod tests {
         let places = Places::of(&[("a", &[(0, "/w/luneta")]), ("b", &[(0, "/w/luneta")])]);
         let branch = |name: &str| Branch {
             name: name.to_owned(),
-            age: Age::ZERO,
             panes: vec![leaf(0, "✳ Claude Code", "Tab #1")],
         };
         let branches = [branch("a"), branch("b")];
@@ -1050,7 +1142,6 @@ mod tests {
         let places = Places::of(&[("luneta", &[(4, "/w/luneta"), (6, "/w/luneta")])]);
         let branches = [Branch {
             name: "luneta".to_owned(),
-            age: Age::ZERO,
             panes: vec![leaf(4, "✳ Claude Code", "Tab #1"), leaf(6, "✳ Claude Code", "Tab #1")],
         }];
         let mut agents = AgentSet::default();
@@ -1189,7 +1280,7 @@ mod tests {
         once_gone(&mut agents);
         assert_eq!(seats(&agents), [("x", 2), ("y", 2)]);
 
-        agents.rows.select(1);
+        agents.rows.move_selection(1);
         once_gone(&mut agents);
         assert_eq!(agents.rows.selected(), Some(1));
     }
@@ -1199,7 +1290,7 @@ mod tests {
         let mut agents = AgentSet::default();
         agents.heard(&once_gone_agents(), NOW);
         once_gone(&mut agents);
-        agents.rows.select(1);
+        agents.rows.move_selection(1);
         agents.forget_selected();
         once_gone(&mut agents);
         assert_eq!(seats(&agents), [("x", 2)]);
@@ -1344,18 +1435,6 @@ mod tests {
         assert_eq!(read[0].housed, Housed::Followed("s".to_owned()));
     }
 
-    /// The session id Claude Code gives names the agent's transcript, which
-    /// the brief reads by it from a shell: one that is not a UUID's
-    /// characters could name some other file, and names none.
-    #[test]
-    fn a_session_id_names_a_transcript_only_as_a_uuid() {
-        for (id, transcript) in [(UUID, Some(UUID)), ("../../.ssh/id_ed25519", None), ("", None)] {
-            let given = v1::Agent { session_id: id.to_owned(), ..agent(121, "s", 0, "/w/s", "idle") };
-            let read = read(&given).transcript;
-            assert_eq!(read.as_ref().map(SessionId::as_str), transcript, "{id}");
-        }
-    }
-
     /// A status luneta does not know draws by the word Claude Code wrote, and
     /// as unknown where the daemon has no word for it.
     #[test]
@@ -1364,7 +1443,6 @@ mod tests {
         assert_eq!(status.word(), "Compacting");
         assert_eq!(full_tag(&status, 0), "🛸 COMPACTING");
         assert_eq!(abbr_tag(&status, 0), "[C]");
-        assert_eq!(dot(&status, 0), "C");
 
         let wordless = Status::Unknown(None);
         assert_eq!(full_tag(&wordless, 0), "🛸 UNKNOWN");
@@ -1389,7 +1467,8 @@ mod tests {
             agents.heard(&[given], Moment::from_millis(now));
             let live = Live::new(None, &[], &places, &[]);
             agents.rebuild("", &live, None, Moment::from_millis(now + 500), Selection::Hold);
-            (agents.rows[0].came, agents.rows[0].age)
+            let Fetch::Ready(read) = &agents.status else { panic!("the daemon said") };
+            (read[0].came, agents.rows[0].age)
         };
         let (dated, heard) = (Came::Dated, Came::Heard);
         let (at, held) = (Moment::from_millis, Held::from_millis);
@@ -1468,7 +1547,7 @@ mod tests {
     #[test]
     fn a_closing_pane_takes_only_its_own_agent_out_of_the_list() {
         let mut agents = three_sessions(|_, _| ("idle", 10));
-        agents.rows.select(3);
+        agents.rows.move_selection(3);
         agents.forget_selected();
         rebuild_three(&mut agents);
         assert_eq!(seats(&agents), [("here", 2), ("here", 5), ("new", 2), ("old", 2), ("old", 5)]);
@@ -1495,29 +1574,6 @@ mod tests {
         let guessed: Vec<(&str, u32, bool)> =
             agents.rows.iter().map(|row| (row.seat.session(), row.pane, row.guessed)).collect();
         assert_eq!(guessed, [("notes", 2, true), ("notes", 5, false), ("notes", 7, false)]);
-    }
-
-    #[test]
-    fn a_row_of_the_sidebar_lands_on_its_agent_or_else_the_first_in_its_session() {
-        let given = [
-            agent(131, "s", 0, "/w/s", "idle"),
-            agent(132, "s", 1, "/w/s", "busy"),
-            agent(133, "t", 0, "/w/t", "waiting"),
-        ];
-        let places = Places::of(&[("s", &[(0, "/w/s"), (1, "/w/s")]), ("t", &[(0, "/w/t")])]);
-        for (session, pane, landed) in [
-            ("s", Some(0), ("s", 0)),
-            ("s", Some(1), ("s", 1)),
-            ("s", Some(9), ("s", 0)),
-            ("s", None, ("s", 0)),
-            ("u", Some(0), ("t", 0)),
-        ] {
-            let mut agents = rows(&given, None, &places);
-            agents.rows.move_selection(2);
-            agents.select_seated(session, pane);
-            let row = agents.selected_row().expect("a row stays highlighted");
-            assert_eq!((row.seat.session(), row.pane), landed, "{session} {pane:?}");
-        }
     }
 
     #[test]

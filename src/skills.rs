@@ -18,7 +18,7 @@ use serde::Deserialize;
 use zellij_tile::prelude::*;
 
 use crate::context::{CONTEXT_KEY, DIR_KEY};
-use crate::cursor::{Cursor, Stops};
+use crate::cursor::Cursor;
 use crate::fetch::Fetch;
 
 pub const CONTEXT_VALUE: &str = "skills";
@@ -125,11 +125,13 @@ impl std::fmt::Display for Name {
     }
 }
 
-/// Asks the finder for the skills `cwd` can run, with `context`, which the
-/// answer carries back with the directory it is for.
-fn ask(cwd: &str, mut context: BTreeMap<String, String>) {
-    context.insert(CONTEXT_KEY.to_owned(), CONTEXT_VALUE.to_owned());
-    context.insert(DIR_KEY.to_owned(), cwd.to_owned());
+/// Asks the finder for the skills `cwd` can run. The answer carries back the
+/// directory it is for.
+fn ask(cwd: &str) {
+    let context = BTreeMap::from([
+        (CONTEXT_KEY.to_owned(), CONTEXT_VALUE.to_owned()),
+        (DIR_KEY.to_owned(), cwd.to_owned()),
+    ]);
     run_command(&["sh", "-c", FIND, "sh", cwd], context);
 }
 
@@ -407,8 +409,6 @@ pub struct Found {
     hits: Vec<usize>,
 }
 
-impl Stops for Found {}
-
 /// The search box over the skills of a directory, while it is open: the
 /// directory, what is typed, the skills, once the finder has said, and those
 /// that match what is typed, best first, the cursor on one. With nothing
@@ -422,9 +422,9 @@ pub struct Search {
 
 impl Search {
     /// A box over the skills `cwd` can run, once it has asked the finder for
-    /// them with `context`: no box waits on an answer nothing asked for.
-    pub fn ask(cwd: &str, context: BTreeMap<String, String>) -> Self {
-        ask(cwd, context);
+    /// them: no box waits on an answer nothing asked for.
+    pub fn ask(cwd: &str) -> Self {
+        ask(cwd);
         Search {
             cwd: cwd.to_owned(),
             term: String::new(),
@@ -818,7 +818,7 @@ mod tests {
     /// skills it finds are narrowed by what was typed by then.
     #[test]
     fn a_search_narrows_the_skills_to_the_best_match_first() {
-        let mut search = Search::ask("/w", BTreeMap::new());
+        let mut search = Search::ask("/w");
         search.push('r');
         search.push('e');
         assert_eq!(search.count(), 0);
