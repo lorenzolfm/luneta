@@ -119,14 +119,16 @@ fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
     );
     assert_eq!(said, plan);
 
-    // In a session no socket is for, which lunetad cannot follow it to.
+    // In a session no socket is for, which lunetad cannot follow it to. The
+    // close says it cannot read both files, as its stderr does, and cannot
+    // place one of them.
     let lost = process(Some(("gone", 4)));
     host.write(lost.pid(), &unnamed(&lost));
     eventually("the daemon cannot read two files", || (host.list().unread == 2).then_some(()));
     let (said, _) = planned(&luneta(&host, ("work", 2), &["close", "work:2"]));
     let plan = format!(
-        "close pane work:2: luneta cannot tell which agents it ends: lunetad cannot read 1 of \
-         Claude Code's session files, nor tell where its agent runs\n  \
+        "close pane work:2: luneta cannot tell which agents it ends: lunetad cannot read 2 of \
+         Claude Code's session files, nor tell where 1 of their agents runs\n  \
          work:2  busy     {here:>7}  here-name  (this runs here)\n"
     );
     assert_eq!(said, plan);
