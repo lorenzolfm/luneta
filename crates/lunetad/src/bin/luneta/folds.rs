@@ -4,9 +4,10 @@
 //! A folded session is a file named for it, in the folder `luneta/folded` of
 //! `$XDG_STATE_HOME`, or of `~/.local/state` where that is not set: a fold is
 //! a file to make or take away, so that two lunetas that fold at once never
-//! write over each other, as a file of every fold would have them. A session's
-//! name holds no `/`, and is neither `.` nor `..`, so it names a file. Each
-//! luneta watches the folder, and takes up a fold another makes as it makes it.
+//! write over each other, as a file of every fold would have them. A
+//! `SessionName` holds no `/`, and is neither `.` nor `..`, so it names a file.
+//! Each luneta watches the folder, and takes up a fold another makes as it
+//! makes it.
 //!
 //! A fold keeps to the name, so that a session started again under it comes
 //! back folded, and the sessions that share one fold together.
@@ -21,15 +22,25 @@ use notify::RecommendedWatcher;
 
 use crate::host::Event;
 use crate::state;
+use crate::zellij::SessionName;
 
 #[derive(Default)]
 pub struct Folds {
     names: BTreeSet<String>,
-    /// The folder they are shared through. Without one, the folds are this
-    /// luneta's alone: a test's, or one whose folder failed it.
-    dir: Option<PathBuf>,
-    /// Why the folds are this luneta's alone, where a folder failed them.
-    lost: Option<String>,
+    sharing: Sharing,
+}
+
+/// What the folds are shared through.
+#[derive(Default)]
+enum Sharing {
+    /// A folder, which every luneta watches.
+    Folder(PathBuf),
+    /// Nothing: the folds are this luneta's alone, as a test's are.
+    #[default]
+    Alone,
+    /// Nothing, as a folder failed them for this reason: the folds are this
+    /// luneta's alone from then on.
+    Lost(String),
 }
 
 impl Folds {
@@ -38,30 +49,38 @@ impl Folds {
         match state::path("folded") {
             Some(dir) => Folds::within(dir),
             None => Folds {
-                lost: Some("neither XDG_STATE_HOME nor HOME is set, to keep them in".to_owned()),
+                sharing: Sharing::Lost(
+                    "neither XDG_STATE_HOME nor HOME is set, to keep them in".to_owned(),
+                ),
                 ..Folds::default()
             },
         }
     }
 
     fn within(dir: PathBuf) -> Self {
-        let mut folds = Folds::default();
-        match fs::create_dir_all(&dir) {
-            Ok(()) => folds.dir = Some(dir),
-            Err(error) => folds.lost = Some(format!("{}: {error}", dir.display())),
-        }
+        let sharing = match fs::create_dir_all(&dir) {
+            Ok(()) => Sharing::Folder(dir),
+            Err(error) => Sharing::Lost(format!("{}: {error}", dir.display())),
+        };
+        let mut folds = Folds { sharing, ..Folds::default() };
         folds.reload();
         folds
     }
 
     /// The folder they are shared through, while they are.
     pub fn dir(&self) -> Option<&Path> {
-        self.dir.as_deref()
+        match &self.sharing {
+            Sharing::Folder(dir) => Some(dir),
+            Sharing::Alone | Sharing::Lost(_) => None,
+        }
     }
 
     /// Why the folds are this luneta's alone, where a folder failed them.
     pub fn lost(&self) -> Option<&str> {
-        self.lost.as_deref()
+        match &self.sharing {
+            Sharing::Lost(why) => Some(why),
+            Sharing::Folder(_) | Sharing::Alone => None,
+        }
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -71,14 +90,10 @@ impl Folds {
     /// Folds or unfolds `name`, for every luneta, and says whether that
     /// changed anything in this one. A folder that fails a write is given up,
     /// and the folds are this luneta's from then on, rather than undone by
-    /// the next `reload`. In a folder, a name that names no file there, as no
-    /// session's does, folds nothing.
-    pub fn set(&mut self, name: &str, folded: bool) -> bool {
-        if let Some(dir) = &self.dir {
-            if name.is_empty() || name == "." || name == ".." || name.contains('/') {
-                return false;
-            }
-            let path = dir.join(name);
+    /// the next `reload`.
+    pub fn set(&mut self, name: &SessionName, folded: bool) -> bool {
+        if let Sharing::Folder(dir) = &self.sharing {
+            let path = dir.join(name.as_str());
             let kept = if folded {
                 fs::write(&path, "")
             } else {
@@ -89,10 +104,10 @@ impl Folds {
                 })
             };
             if let Err(error) = kept {
-                self.lost = Some(format!("{}: {error}", path.display()));
-                self.dir = None;
+                self.sharing = Sharing::Lost(format!("{}: {error}", path.display()));
             }
         }
+        let name = name.as_str();
         if folded { self.names.insert(name.to_owned()) } else { self.names.remove(name) }
     }
 
@@ -100,7 +115,7 @@ impl Folds {
     /// whether that changed anything. A folder that cannot be read leaves the
     /// folds as they were.
     pub fn reload(&mut self) -> bool {
-        let Some(dir) = &self.dir else {
+        let Sharing::Folder(dir) = &self.sharing else {
             return false;
         };
         let Ok(entries) = fs::read_dir(dir) else {
@@ -129,6 +144,10 @@ mod tests {
 
     use super::*;
 
+    fn name(name: &str) -> SessionName {
+        SessionName::parse(name).unwrap()
+    }
+
     /// Two lunetas: what one folds or unfolds, the other shows once it
     /// reloads, and a luneta started later starts with it.
     #[test]
@@ -138,36 +157,24 @@ mod tests {
         let mut here = Folds::within(dir.clone());
         let mut there = Folds::within(dir.clone());
 
-        assert!(here.set("test", true));
-        assert!(here.set("my work", true));
+        assert!(here.set(&name("test"), true));
+        assert!(here.set(&name("my work"), true));
         assert!(there.reload());
         assert!(there.contains("test") && there.contains("my work"));
         assert!(Folds::within(dir.clone()).contains("test"));
 
-        assert!(there.set("test", false));
+        assert!(there.set(&name("test"), false));
         assert!(here.reload());
         assert!(!here.contains("test") && here.contains("my work"));
         assert!(!here.reload());
 
         // Unfolded twice, as two lunetas may before they hear of each other:
         // the folder still shares what comes after.
-        assert!(!here.set("test", false));
-        assert!(here.set("later", true));
+        assert!(!here.set(&name("test"), false));
+        assert!(here.set(&name("later"), true));
         there.reload();
         assert!(there.contains("later"));
         assert_eq!((here.lost(), there.lost()), (None, None));
-    }
-
-    #[test]
-    fn a_name_that_names_no_file_folds_nothing() {
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path().join("folded");
-        let mut folds = Folds::within(dir.clone());
-        for name in ["../out", "..", ".", ""] {
-            assert!(!folds.set(name, true), "{name:?}");
-        }
-        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 1);
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
     }
 
     /// A folder luneta cannot keep the folds in leaves them to this luneta,
@@ -179,7 +186,7 @@ mod tests {
         fs::write(&file, "").unwrap();
         let mut folds = Folds::within(file.join("folded"));
         assert!(folds.lost().is_some_and(|lost| lost.contains("not a folder")));
-        assert!(folds.set("work", true));
+        assert!(folds.set(&name("work"), true));
         assert!(folds.contains("work"));
     }
 
@@ -194,7 +201,7 @@ mod tests {
         here.reload();
         assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
 
-        Folds::within(scratch.path().to_owned()).set("work", true);
+        Folds::within(scratch.path().to_owned()).set(&name("work"), true);
         assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
         assert!(here.reload() && here.contains("work"));
     }
