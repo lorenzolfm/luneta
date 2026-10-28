@@ -253,7 +253,9 @@ fn asked(host: &Host, vars: &[(&str, &str)], args: &[&str]) -> Output {
 /// The agent luneta's ask box runs is in no pane, and goes by the pane you
 /// asked from, as the box names it: it is where `here` says it runs, and
 /// what holds it is what a close takes last. A command in a pane of zellij
-/// that names another for the box's goes by neither.
+/// that names another for the box's goes by neither. Where the box names
+/// none, as it cannot tell, a close in a turn of it closes nothing, as it
+/// could take your pane first.
 #[test]
 fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     let host = Host::new();
@@ -282,6 +284,64 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     let closed = ["kill-session play", "--session work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
+
+    let unseated = asked(&host, &[("LUNETA_TURN", "00000000000000aa")], &["close", "work:3"]);
+    let why = String::from_utf8_lossy(&unseated.stderr);
+    assert_eq!(unseated.status.code(), Some(1), "{why}");
+    assert!(why.contains("cannot tell which pane the user asked from"), "{why}");
+    assert!(unseated.stdout.is_empty(), "{}", String::from_utf8_lossy(&unseated.stdout));
+    assert_eq!(host.lists.closed(), closed);
+}
+
+/// The ask box's agent runs what it may without anyone asking you, and a
+/// pane runs what it is given: so a pane it opens, or a tab, runs your shell
+/// or Claude Code, as `claude [--name <name>] [<prompt>]`, which asks you or
+/// looks at what it does, in your permission mode. Any other command, an
+/// option of claude's but `--name`, and a prompt that is a line for your
+/// shell, are refused before zellij is asked anything. Out of the box, a
+/// pane runs what it is given.
+#[test]
+fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let tab = (0, "Tab #1");
+    host.lists.list("work", &json!([listed(2, "fish", tab, Some("/w"))]));
+    host.lists.clients("work", &[(1, "terminal_2")]);
+    let cwd = tempfile::tempdir().unwrap();
+    let cwd = cwd.path().to_str().unwrap();
+    let in_the_box = [("LUNETA_PANE", "work:2"), ("LUNETA_TURN", "00000000000000aa")];
+    let open = |what: &str, command: &[&str]| {
+        let args = [&["open", what, "--cwd", cwd, "--"][..], command].concat();
+        let opened = asked(&host, &in_the_box, &args);
+        assert_eq!(opened.status.code(), Some(1), "{what} {command:?}");
+        String::from_utf8_lossy(&opened.stderr).into_owned()
+    };
+    // The fake zellij opens nothing, and says what it was asked.
+    for (what, command) in [
+        ("pane", &[][..]),
+        ("pane", &["claude", "--name", "issue-42", "tackle it"]),
+        ("pane", &["claude", "/thermo-nuclear-review"]),
+        ("tab", &["claude"]),
+    ] {
+        let why = open(what, command);
+        assert!(why.contains(&format!("was asked: action new-{what}")), "{command:?}: {why}");
+    }
+    for (what, command, refused) in [
+        ("pane", &["touch", "x"][..], "it does not run touch x"),
+        ("pane", &["sh", "-c", "claude"], "it does not run sh -c claude"),
+        ("tab", &["claude", "--name", "x", "--model", "opus"], "it does not run"),
+        ("tab", &["claude", "--dangerously-skip-permissions"], "no option but --name"),
+        ("pane", &["claude", "--name", "-x"], "no option but --name"),
+        ("pane", &["claude", "!rm -rf ~"], "no prompt with a ! first"),
+    ] {
+        let why = open(what, command);
+        assert!(why.contains("in luneta's ask box, a pane runs your shell or"), "{command:?}: {why}");
+        assert!(why.contains(refused) && !why.contains("was asked"), "{command:?}: {why}");
+    }
+
+    let opened = luneta(&host, ("work", 2), &["open", "pane", "--cwd", cwd, "--", "touch", "x"]);
+    let why = String::from_utf8_lossy(&opened.stderr);
+    assert!(why.contains("was asked: action new-pane"), "{why}");
 }
 
 /// The ask box names the pane you asked from by its session's name as you
@@ -326,8 +386,10 @@ fn a_close_in_the_ask_box_takes_a_yes_only_in_the_turn_after_its_plan() {
     let close = |vars: &[(&str, &str)], yes: &[&str]| {
         asked(&host, vars, &[&["close", "work:3"][..], yes].concat())
     };
-    let first = [("LUNETA_TURN", "00000000000000aa")];
-    let second = [("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
+    let box_pane = ("LUNETA_PANE", "work:2");
+    let first = [box_pane, ("LUNETA_TURN", "00000000000000aa")];
+    let second =
+        [box_pane, ("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
 
     let (said, agreed) = planned(&close(&first, &[]));
     assert_eq!(said, format!("close pane work:3: {UNTOLD}\n"));

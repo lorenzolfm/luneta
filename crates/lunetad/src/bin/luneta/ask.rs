@@ -4,8 +4,10 @@
 //! but this one". `a` opens it over zellij, for the row highlighted then.
 //!
 //! What you type goes to `claude -p`, with luneta's skill, and with luneta's
-//! commands and the few its skill reads with as the only ones it may run.
-//! The box shows what it runs and what it says as it goes. Once it is done,
+//! commands and the few its skill reads with as the only ones it may run,
+//! and those your own settings let it: a pane it opens runs your shell or
+//! Claude Code, and no other command. The box shows what it runs, and what
+//! Claude Code denied it, and what it says as it goes. Once it is done,
 //! what you type next goes to it on the same Claude session, so that it can
 //! ask you before it closes anything, as the skill has it ask, or which of
 //! two things you meant. A close it runs takes a yes only in the turn after
@@ -65,12 +67,18 @@ const TITLE: &str = "Ask";
 /// pane for the one they run in.
 const LEFT_OUT: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
-/// The commands the agent may run, as Claude Code's rules name them: luneta's,
-/// and those its skill reads what your words point at with, and makes
-/// worktrees with. In `dontAsk` mode, Claude Code denies it any other, and a
+/// The commands the agent may run, as Claude Code's rules name them: the
+/// verbs of luneta's its skill has, and the commands its skill reads what
+/// your words point at with, and makes worktrees with. In `dontAsk` mode,
+/// Claude Code denies it any other but those your own settings allow, and a
 /// line that runs one inside another, as through `$(…)`.
-const ALLOWED: [&str; 9] = [
-    "Bash(luneta:*)",
+const ALLOWED: [&str; 14] = [
+    "Bash(luneta here:*)",
+    "Bash(luneta sessions:*)",
+    "Bash(luneta agents:*)",
+    "Bash(luneta open:*)",
+    "Bash(luneta go:*)",
+    "Bash(luneta close:*)",
     "Bash(zoxide query:*)",
     "Bash(gh issue view:*)",
     "Bash(gh issue list:*)",
@@ -85,19 +93,27 @@ const ALLOWED: [&str; 9] = [
 /// this luneta's commands are of, whatever skills Claude Code has installed.
 const SKILL: &str = include_str!("../../../../../skills/luneta/SKILL.md");
 
-/// What the agent is told, whatever you ask, before what it is told of where
-/// you are, and the skill.
+/// What the agent is told, whatever you ask, before what it is told of the
+/// row highlighted, and the skill.
 const SYSTEM: &str = "You run in luneta's ask box. The user typed what they want in luneta's \
     sidebar, and reads what you say in a small box over zellij: write plain text for a \
     terminal, with no markdown, no headings, no tables and no code fences, and keep it short. \
     Do what they ask with luneta's commands, as the luneta skill below says, and end with a \
     line or two on what you did, and where. Run one command in each call to Bash, with \
-    nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta, zoxide \
-    query, gh issue view and list, gh pr view and list, wt add, and git worktree add and \
-    list. Claude Code denies any other. You cannot wait for the user in the middle of a turn: \
-    to ask them anything, as the skill has you ask before a close, or which of two things \
-    they meant, end your turn with the question. Their answer comes as the next message. \
-    So a close takes --yes only in the turn after the one that said its plan.";
+    nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
+    sessions, agents, open, go and close, zoxide query, gh issue view and list, gh pr view \
+    and list, wt add, and git worktree add and list. Claude Code denies any other. A pane \
+    you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
+    with no other option of claude's: luneta refuses any other command. You cannot wait for \
+    the user in the middle of a turn: to ask them anything, as the skill has you ask before \
+    a close, or which of two things they meant, end your turn with the question. Their \
+    answer comes as the next message. So a close takes --yes only in the turn after the one \
+    that said its plan.\n\nEach message of the user's starts with a line of luneta's in \
+    brackets, which says the pane they are in as they send it, or that luneta cannot tell: \
+    that goes for the turn, whatever one before said. `luneta here` names that pane, and a \
+    close's plan marks the agent there (this runs here). You run in no pane yourself, so \
+    closing it does not end you, but it is the user's: leave it and its session out of \
+    \"all\", as the skill says.";
 
 /// What a key does to the box, for luneta to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -123,8 +139,11 @@ pub enum Heard {
 pub enum Step {
     /// The Claude session the turn runs on, which the next one goes on with.
     Session(String),
-    /// A command the agent ran, or a tool it used, by its name.
-    Ran(String),
+    /// A command the agent runs, or a tool it uses, by its name, and the id
+    /// Claude Code gives the call.
+    Ran { id: String, command: String },
+    /// Claude Code denied the agent the call of this id, which ran nothing.
+    Denied(String),
     /// What the agent said.
     Said(String),
 }
@@ -134,8 +153,9 @@ pub enum Step {
 enum Said {
     /// What you asked.
     You(String),
-    /// A command the agent ran.
-    Ran(String),
+    /// A command the agent ran, or that Claude Code denied it, by the id of
+    /// the call.
+    Ran { id: String, command: String, denied: bool },
     /// What the agent said.
     Agent(String),
     /// Why a turn went wrong.
@@ -216,8 +236,9 @@ impl Ask {
     }
 
     /// Hands what you typed to the agent, on a thread of its own, for you in
-    /// the pane `here`, if luneta can tell it, and takes it from what you are
-    /// typing. What the turn hears comes back on `events`.
+    /// the pane `here`, if luneta can tell it, as `told` tells it, and takes
+    /// it from what you are typing. What the turn hears comes back on
+    /// `events`.
     pub fn send(&mut self, here: Option<&Pane>, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
@@ -228,14 +249,15 @@ impl Ask {
         }
         let turn = self.next_turn();
         let claude = claude(&self.cwd, self.session.as_deref(), here, &self.highlighted, turn);
-        self.talk.push(Said::You(words.clone()));
+        let message = told(here, &words);
+        self.talk.push(Said::You(words));
         let (number, events) = (self.number, events.clone());
         self.turn = Some(Asking::on_thread(move |wanted| {
             let hear = |heard| {
                 // luneta is on its way out.
                 let _ = events.send(Event::Heard { number, heard });
             };
-            if let Some(ended) = talk(claude, &words, wanted, &|step| hear(Heard::Step(step))) {
+            if let Some(ended) = talk(claude, &message, wanted, &|step| hear(Heard::Step(step))) {
                 hear(Heard::Ended(ended));
             }
         }));
@@ -252,7 +274,18 @@ impl Ask {
     pub fn heard(&mut self, heard: Heard) {
         match heard {
             Heard::Step(Step::Session(session)) => self.session = Some(session),
-            Heard::Step(Step::Ran(command)) => self.talk.push(Said::Ran(command)),
+            Heard::Step(Step::Ran { id, command }) => {
+                self.talk.push(Said::Ran { id, command, denied: false });
+            },
+            Heard::Step(Step::Denied(id)) => {
+                for said in &mut self.talk {
+                    if let Said::Ran { id: ran, denied, .. } = said
+                        && *ran == id
+                    {
+                        *denied = true;
+                    }
+                }
+            },
             Heard::Step(Step::Said(said)) => self.talk.push(Said::Agent(said)),
             Heard::Ended(Ok(())) => self.turn = None,
             Heard::Ended(Err(why)) => {
@@ -292,6 +325,7 @@ impl Ask {
 
     /// The talk, on lines `inner` wide, and what you type under it, or that
     /// the agent is at a turn. Each of your turns has a blank line before it.
+    /// A command Claude Code denied the agent is in red, after a `✗`.
     fn lines(&self, inner: usize) -> Vec<Line<'static>> {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
@@ -304,9 +338,12 @@ impl Ask {
                     }
                     lines.extend(menu::wrap(&format!("› {words}"), inner, yours));
                 },
-                Said::Ran(command) => {
+                Said::Ran { command, denied, .. } => {
                     let command = sidebar::cut(&plain(command), inner.saturating_sub(5));
-                    lines.push(Line::styled(format!("   $ {command}"), dim));
+                    lines.push(match denied {
+                        false => Line::styled(format!("   $ {command}"), dim),
+                        true => Line::styled(format!("   ✗ {command}"), Style::new().fg(gruvbox::RED)),
+                    });
                 },
                 Said::Agent(said) => lines.extend(brief::paragraphs(said, inner, Style::new())),
                 Said::Wrong(why) => {
@@ -350,31 +387,34 @@ fn highlighted(target: &Target) -> String {
     )
 }
 
-/// What the agent is told, for you in the pane `here`, if luneta can tell
-/// it, with the row `highlighted` as the box opened, and the skill.
-fn system(here: Option<&Pane>, highlighted: &str) -> String {
+/// What the agent is told, with the row `highlighted` as the box opened, and
+/// the skill: the same each turn, as Claude Code keeps what a talk's first
+/// turn was told for the rest of it.
+fn system(highlighted: &str) -> String {
+    format!("{SYSTEM}\n\n{highlighted}\n\n{SKILL}")
+}
+
+/// The message of a turn: `words`, what you typed, after a line that says
+/// which pane you are in as you send it, `here`, if luneta can tell it.
+fn told(here: Option<&Pane>, words: &str) -> String {
     let here = match here {
-        Some(here) => format!(
-            "The user is in pane {here}: `luneta here` names it, and a close's plan marks the \
-             agent there (this runs here). You run in no pane yourself, so closing that one \
-             does not end you, but it is the user's: leave it and its session out of \"all\", \
-             as the skill says."
-        ),
-        None => "luneta cannot tell which pane the user is in just now: `luneta here`, `go`, \
-                 `open session` and a close fail until it can. Tell the user so where you need \
-                 them."
+        Some(here) => format!("[luneta: the user is in pane {here}.]"),
+        None => "[luneta: it cannot tell which pane the user is in just now, so `luneta here`, \
+                 `go`, `open session` and a close fail, and so do `open pane` without --beside \
+                 and `open tab` without --session. Tell the user so where you need them.]"
             .to_owned(),
     };
-    format!("{SYSTEM}\n\n{here} {highlighted}\n\n{SKILL}")
+    format!("{here}\n\n{words}")
 }
 
 /// `claude`, for `turn` in `cwd`, on the Claude session `resumed` if one
 /// went before, for you in the pane `here`, with the row `highlighted` as the
 /// box opened. It runs on the model the box has, in safe mode, so that none
 /// of your hooks, `CLAUDE.md` or MCP servers come into it, with Bash its one
-/// tool and `ALLOWED` all it runs, and with no zellij in its environment, so
-/// that the daemon places it in no pane. The `luneta` it runs is this one,
-/// and its closes know the turn.
+/// tool, and `ALLOWED` all it runs but what your own settings allow: not
+/// what those of the directory it runs in do, which a repository brings. It
+/// has no zellij in its environment, so that the daemon places it in no
+/// pane. The `luneta` it runs is this one, and its closes know the turn.
 fn claude(
     cwd: &Path,
     resumed: Option<&str>,
@@ -383,9 +423,10 @@ fn claude(
     turn: Turn,
 ) -> Command {
     let mut claude = Command::new("claude");
-    claude.args(["-p", "--model", MODEL, "--safe-mode", "--permission-mode", "dontAsk"]);
-    claude.args(["--tools", "Bash", "--output-format", "stream-json", "--verbose"]);
-    claude.arg("--append-system-prompt").arg(system(here, highlighted));
+    claude.args(["-p", "--model", MODEL, "--safe-mode", "--setting-sources", "user"]);
+    claude.args(["--permission-mode", "dontAsk", "--tools", "Bash"]);
+    claude.args(["--output-format", "stream-json", "--verbose"]);
+    claude.arg("--append-system-prompt").arg(system(highlighted));
     if let Some(session) = resumed {
         claude.args(["--resume", session]);
     }
@@ -429,9 +470,10 @@ enum Read {
 }
 
 /// What `line`, a JSON record of what `claude` does, says: the session it
-/// starts on, what the agent ran and said, and the turn's end. A subagent's
-/// records are left out, and so are what the agent thought, what a tool
-/// answered, and the rest.
+/// starts on, what the agent ran and said, and the turn's end, with the
+/// calls Claude Code denied it, as it says only then. A subagent's records
+/// are left out, and so are what the agent thought, what a tool answered,
+/// and the rest.
 fn read(line: &str) -> Vec<Read> {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
@@ -446,6 +488,9 @@ fn read(line: &str) -> Vec<Read> {
             blocks.filter_map(step).map(Read::Step).collect()
         },
         Some("result") => {
+            let denials = record["permission_denials"].as_array().into_iter().flatten();
+            let denied = denials.filter_map(|denial| denial["tool_use_id"].as_str());
+            let mut read: Vec<_> = denied.map(|id| Read::Step(Step::Denied(id.to_owned()))).collect();
             let said = record["result"].as_str().unwrap_or_default().trim().to_owned();
             let failed = record["is_error"].as_bool() != Some(false) || record["subtype"] != "success";
             let why = || match record["subtype"].as_str() {
@@ -453,7 +498,8 @@ fn read(line: &str) -> Vec<Read> {
                 Some(subtype) => subtype.to_owned(),
                 None => "the turn failed".to_owned(),
             };
-            vec![Read::Ended(if failed { Err(why()) } else { Ok(said.clone()) })]
+            read.push(Read::Ended(if failed { Err(why()) } else { Ok(said.clone()) }));
+            read
         },
         _ => Vec::new(),
     }
@@ -469,7 +515,8 @@ fn step(block: &Value) -> Option<Step> {
         },
         "tool_use" => {
             let ran = block["input"]["command"].as_str().or_else(|| block["name"].as_str())?;
-            Some(Step::Ran(ran.to_owned()))
+            let id = block["id"].as_str().unwrap_or_default().to_owned();
+            Some(Step::Ran { id, command: ran.to_owned() })
         },
         _ => None,
     }
@@ -634,8 +681,9 @@ mod tests {
     /// What you type shows on the box's last line, and `Enter` sends it once
     /// there is anything to send. While the agent is at its turn, the box
     /// shows what you asked, what it ran and what it said as it hears it, and
-    /// no key but `Esc` and `Ctrl c` does anything. Once the turn ends, you
-    /// can answer it, and what a turn that failed said is in its place.
+    /// no key but `Esc` and `Ctrl c` does anything. As the turn ends, what
+    /// Claude Code denied it is marked so. Then you can answer it, and what a
+    /// turn that failed said is in its place.
     #[test]
     fn the_box_shows_the_talk_and_takes_what_you_type_between_turns() {
         let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
@@ -663,25 +711,28 @@ mod tests {
         ask.talk.push(Said::You(std::mem::take(&mut ask.typed)));
         ask.turn = Some(at_a_turn());
         ask.heard(Heard::Step(Step::Session("7c22".to_owned())));
-        ask.heard(Heard::Step(Step::Ran("luneta close bipa\nelo".to_owned())));
+        let ran = |id: &str, command: &str| Step::Ran { id: id.to_owned(), command: command.to_owned() };
+        ask.heard(Heard::Step(ran("toolu_1", "luneta close bipa\nelo")));
+        ask.heard(Heard::Step(ran("toolu_2", "touch elo")));
         ask.heard(Heard::Step(Step::Said("This kills bipa and elo.\n\nClose them?".to_owned())));
         assert_eq!(ask.session.as_deref(), Some("7c22"));
         assert_eq!(ask.key(&key(KeyCode::Char('y'))), Keyed::Nothing);
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Nothing);
         ask.paste("y");
         assert_eq!(ask.typed, "");
-        let asked = [
+        let mut asked = [
             "┌─ Ask ──────────────────────────── luneta/main ─┐",
             "│ › close bipa and elo                           │",
             "│   $ luneta close bipa elo                      │",
+            "│   $ touch elo                                  │",
             "│ This kills bipa and elo.                       │",
             "│                                                │",
             "│ Close them?                                    │",
         ];
-        let lines = shown(&ask, 50, 12);
-        assert_eq!(lines[1..7], asked);
+        let lines = shown(&ask, 50, 13);
+        assert_eq!(lines[1..8], asked);
         assert_eq!(
-            lines[7..11],
+            lines[8..12],
             [
                 "│ Asking sonnet…                                 │",
                 "│                                                │",
@@ -690,12 +741,14 @@ mod tests {
             ]
         );
 
+        ask.heard(Heard::Step(Step::Denied("toolu_2".to_owned())));
         ask.heard(Heard::Ended(Ok(())));
+        asked[3] = "│   ✗ touch elo                                  │";
         typed(&mut ask, "yes");
         let lines = shown(&ask, 50, 12);
-        assert_eq!(lines[..6], asked);
+        assert_eq!(lines[..7], asked);
         assert_eq!(
-            lines[6..8],
+            lines[7..9],
             [
                 "│                                                │",
                 "│ › yes_                                         │",
@@ -705,10 +758,10 @@ mod tests {
         ask.talk.push(Said::You(std::mem::take(&mut ask.typed)));
         ask.turn = Some(at_a_turn());
         ask.heard(Heard::Ended(Err("ask: claude failed: no such session".to_owned())));
-        let lines = shown(&ask, 50, 14);
-        assert_eq!(lines[..6], asked);
+        let lines = shown(&ask, 50, 15);
+        assert_eq!(lines[..7], asked);
         assert_eq!(
-            lines[6..11],
+            lines[7..12],
             [
                 "│                                                │",
                 "│ › yes                                          │",
@@ -729,7 +782,11 @@ mod tests {
     fn a_talk_too_long_for_the_box_loses_its_start() {
         let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
         ask.talk.push(Said::You("tackle these".to_owned()));
-        ask.talk.extend((1..=6).map(|n| Said::Ran(format!("luneta open tab {n}"))));
+        ask.talk.extend((1..=6).map(|n| Said::Ran {
+            id: format!("toolu_{n}"),
+            command: format!("luneta open tab {n}"),
+            denied: false,
+        }));
         ask.talk.push(Said::Agent("Opened six tabs.".to_owned()));
         assert_eq!(
             shown(&ask, 40, 9),
@@ -748,13 +805,15 @@ mod tests {
     }
 
     /// The agent runs in the highlighted pane's directory, or luneta's on a
-    /// session's row, and is told which row that is, and the pane you are
-    /// in. It runs on the box's model, in safe mode, with no tool but Bash
-    /// and nothing it may run but `ALLOWED`, and the words go on its stdin,
-    /// as `--allowedTools` takes every word after it. It has no zellij in its
-    /// environment, and the pane you are in in luneta's, where luneta can
-    /// tell it, and the turn it is at. A turn after the first goes on with
-    /// the session the first said.
+    /// session's row, and is told which row that is. It is told the pane you
+    /// are in each turn, in what the turn sends it, as Claude Code keeps the
+    /// system prompt of a talk's first turn. It runs on the box's model, in
+    /// safe mode, with the permission rules of your settings alone, no tool
+    /// but Bash and nothing it may run but `ALLOWED`, and the words go on
+    /// its stdin, as `--allowedTools` takes every word after it. It has no
+    /// zellij in its environment, and the pane you are in in luneta's, where
+    /// luneta can tell it, and the turn it is at. A turn after the first
+    /// goes on with the session the first said.
     #[test]
     fn the_agent_runs_where_the_row_is_for_the_pane_you_are_in() {
         let args = |command: &Command| -> Vec<String> {
@@ -770,17 +829,22 @@ mod tests {
         let first = claude(&ask.cwd, None, Some(&here), &ask.highlighted, turn);
         assert_eq!(first.get_current_dir(), Some(Path::new("/w/luneta/main")));
         let said = args(&first);
-        let model = ["-p", "--model", "sonnet", "--safe-mode", "--permission-mode", "dontAsk"];
-        let output = ["--tools", "Bash", "--output-format", "stream-json", "--verbose"];
-        assert_eq!(said[..11], [&model[..], &output].concat());
-        assert_eq!(said[11], "--append-system-prompt");
-        let system = &said[12];
+        let model = ["-p", "--model", "sonnet", "--safe-mode", "--setting-sources", "user"];
+        let permissions = ["--permission-mode", "dontAsk", "--tools", "Bash"];
+        let output = ["--output-format", "stream-json", "--verbose"];
+        assert_eq!(said[..13], [&model[..], &permissions, &output].concat());
+        assert_eq!(said[13], "--append-system-prompt");
+        let system = &said[14];
         assert!(system.starts_with(SYSTEM), "{system}");
-        assert!(system.contains("The user is in pane luneta:2: `luneta here` names it"), "{system}");
+        assert!(!system.contains("pane luneta:2"), "{system}");
         let row = "is pane luneta:4, in /w/luneta/main, on branch feat/ask: \"this\"";
         assert!(system.contains(row), "{system}");
         assert!(system.ends_with(SKILL), "{system}");
-        assert_eq!(said[13..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
+        assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
+        assert_eq!(told(Some(&here), "close it"), "[luneta: the user is in pane luneta:2.]\n\nclose it");
+        let unseated = told(None, "close it");
+        assert!(unseated.starts_with("[luneta: it cannot tell which pane the user is in"), "{unseated}");
+        assert!(unseated.ends_with("]\n\nclose it"), "{unseated}");
         for name in LEFT_OUT {
             assert_eq!(var(&first, name), Some(None), "{name}");
         }
@@ -794,9 +858,8 @@ mod tests {
         let next = claude(&ask.cwd, Some("7c22"), None, &ask.highlighted, turn);
         assert_eq!(next.get_current_dir(), Some(Path::new("/w")));
         let said = args(&next);
-        assert_eq!(said[13..15], ["--resume", "7c22"]);
-        assert!(said[12].contains("luneta cannot tell which pane the user is in"), "{}", said[12]);
-        assert!(said[12].contains("is session luneta: \"this\""), "{}", said[12]);
+        assert_eq!(said[15..17], ["--resume", "7c22"]);
+        assert!(said[14].contains("is session luneta: \"this\""), "{}", said[14]);
         assert_eq!(var(&next, zellij::ASKED_VAR), Some(None));
         assert_eq!(var(&next, BEFORE_VAR), Some(Some("000000000000000a".to_owned())));
     }
@@ -823,8 +886,8 @@ mod tests {
 
     /// What the agent ran and said comes out of what `claude` writes, a
     /// record to a line, and so does the session it runs on and how its turn
-    /// ended. A subagent's records, what it thought and the rest are left
-    /// out.
+    /// ended, with what Claude Code denied it. A subagent's records, what it
+    /// thought and the rest are left out.
     #[test]
     fn what_claude_writes_says_what_the_agent_ran_and_said() {
         let line = |record: Value| record.to_string();
@@ -837,14 +900,14 @@ mod tests {
             read(&line(assistant(json!([
                 {"type": "thinking", "thinking": "hmm"},
                 {"type": "text", "text": "  Looking.  "},
-                {"type": "tool_use", "name": "Bash", "input": {"command": "luneta sessions", "description": "List"}},
-                {"type": "tool_use", "name": "Read", "input": {"file_path": "/w/x"}},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "luneta sessions", "description": "List"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {"file_path": "/w/x"}},
                 {"type": "text", "text": " "},
             ])))),
             [
                 Read::Step(Step::Said("Looking.".to_owned())),
-                Read::Step(Step::Ran("luneta sessions".to_owned())),
-                Read::Step(Step::Ran("Read".to_owned())),
+                Read::Step(Step::Ran { id: "toolu_1".to_owned(), command: "luneta sessions".to_owned() }),
+                Read::Step(Step::Ran { id: "toolu_2".to_owned(), command: "Read".to_owned() }),
             ]
         );
         let mut subagent = assistant(json!([{"type": "text", "text": "a subagent's"}]));
@@ -864,6 +927,16 @@ mod tests {
         assert_eq!(read(&result("success", false, "Done.\n")), [Read::Ended(Ok("Done.".to_owned()))]);
         assert_eq!(read(&result("success", true, "Not logged in")), [Read::Ended(Err("Not logged in".to_owned()))]);
         assert_eq!(read(&result("error_max_turns", true, "")), [Read::Ended(Err("error_max_turns".to_owned()))]);
+        let denied = json!({
+            "type": "result", "subtype": "success", "is_error": false, "result": "Done.",
+            "permission_denials": [
+                {"tool_name": "Bash", "tool_use_id": "toolu_3", "tool_input": {"command": "touch x"}},
+            ],
+        });
+        assert_eq!(
+            read(&line(denied)),
+            [Read::Step(Step::Denied("toolu_3".to_owned())), Read::Ended(Ok("Done.".to_owned()))]
+        );
     }
 
     /// A turn hands on what `claude` writes as it writes it, and ends as it
@@ -879,13 +952,13 @@ mod tests {
             (heard.into_inner(), ended)
         };
         let init = r#"{"type":"system","subtype":"init","session_id":"7c22"}"#;
-        let ran = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"luneta here"}}]}}"#;
+        let ran = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"luneta here"}}]}}"#;
         let done = r#"{"type":"result","subtype":"success","is_error":false,"result":"You are in luneta:2."}"#;
         let script = format!("read words; echo '{init}'; echo '{ran}'; echo \"$words\" >&2; echo '{done}'");
         let (said, ended) = heard(&script, "where am I\n");
         assert_eq!(said, [
             Step::Session("7c22".to_owned()),
-            Step::Ran("luneta here".to_owned()),
+            Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() },
             Step::Said("You are in luneta:2.".to_owned()),
         ]);
         assert_eq!(ended, Some(Ok(())));

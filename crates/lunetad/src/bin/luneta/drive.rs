@@ -11,7 +11,9 @@
 //! where none has typed in it since it came, and says nothing of it: `go`
 //! looks for the client where it sent it, and says so when it is not there.
 //! The agent of luneta's ask box runs in no pane, and goes by the one you
-//! asked from, where luneta's zellij is, which typed there last.
+//! asked from, where luneta's zellij is, which typed there last. Claude Code
+//! runs what that agent runs without asking you, so a pane it opens runs
+//! your shell or Claude Code, and no other command.
 //!
 //! A close says what it would close, and which agents it would end, and
 //! closes nothing until it is told yes to that plan, by the word it prints
@@ -161,7 +163,8 @@ pub enum Opening {
         /// The directory it starts in. Without one, this one.
         #[arg(long)]
         cwd: Option<PathBuf>,
-        /// What runs in it, after `--`. Without it, your shell.
+        /// What runs in it, after `--`. Without it, your shell. In luneta's
+        /// ask box, only `claude [--name <name>] [<prompt>]`.
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -178,7 +181,8 @@ pub enum Opening {
         /// What it is named. Without one, zellij numbers it.
         #[arg(long)]
         name: Option<String>,
-        /// What runs in it, after `--`. Without it, your shell.
+        /// What runs in it, after `--`. Without it, your shell. In luneta's
+        /// ask box, only `claude [--name <name>] [<prompt>]`.
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -216,6 +220,40 @@ fn seat_here(folder: &Path) -> Result<Option<Pane>, String> {
     seat(listed(folder).as_deref(), &running()?)
 }
 
+/// Whether a pane this opens may run `command`, as `runs` says: in luneta's
+/// ask box, only Claude Code. Or why not.
+fn may_run(command: &[String]) -> Result<(), String> {
+    match Turn::here()? {
+        None => Ok(()),
+        Some(_) => runs(command),
+    }
+}
+
+/// Whether `command` is your shell, as an empty one is, or Claude Code on a
+/// name and a prompt, `claude [--name <name>] [<prompt>]`, none of which it
+/// takes for an option, nor the prompt for a line of your shell. A pane runs
+/// what it is given without asking you, and Claude Code, in your permission
+/// mode, asks you or looks at what it does. Or why not.
+fn runs(command: &[String]) -> Result<(), String> {
+    const ONLY: &str = "in luneta's ask box, a pane runs your shell or `claude [--name <name>] \
+                        [<prompt>]`, and nothing else";
+    let words: Vec<&str> = command.iter().map(String::as_str).collect();
+    let (name, prompt) = match words[..] {
+        [] | ["claude"] => (None, None),
+        ["claude", "--name", name] => (Some(name), None),
+        ["claude", "--name", name, prompt] => (Some(name), Some(prompt)),
+        ["claude", prompt] => (None, Some(prompt)),
+        _ => return Err(format!("{ONLY}: it does not run {}", words.join(" "))),
+    };
+    if name.into_iter().chain(prompt).any(|word| word.starts_with('-')) {
+        return Err(format!("{ONLY}: claude takes no option but --name, nor a word with a - first"));
+    }
+    if prompt.is_some_and(|prompt| prompt.starts_with('!')) {
+        return Err(format!("{ONLY}: claude takes no prompt with a ! first, a line for your shell"));
+    }
+    Ok(())
+}
+
 /// Opens a pane running `command` beside `beside`, or the pane this runs in,
 /// in `cwd`, and names it.
 fn pane(
@@ -224,6 +262,7 @@ fn pane(
     command: &[String],
     folder: &Path,
 ) -> Result<String, String> {
+    may_run(command)?;
     let beside = match beside {
         Some(beside) => Some(beside.clone()),
         None => seat_here(folder)?,
@@ -246,6 +285,7 @@ fn tab(
     folder: &Path,
 ) -> Result<String, String> {
     const UNNAMED: &str = "this runs in no pane of zellij: name a --session";
+    may_run(command)?;
     let session = match session {
         Some(session) => session.to_owned(),
         None => seat_here(folder)?.ok_or(UNNAMED)?.session,
@@ -437,7 +477,8 @@ fn wanted(what: &[Address]) -> BTreeMap<&str, Wanted> {
 /// plan it said in the turn before: what holds the pane this runs in last,
 /// and not once anything before it failed to close. Nothing closes where any
 /// of them is gone, nor where luneta cannot tell which session this runs in,
-/// as `seat` says.
+/// as `seat` says, nor in luneta's ask box where it cannot tell which pane
+/// you asked from.
 pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let turn = match Turn::here() {
         Ok(turn) => turn,
@@ -473,6 +514,15 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
+    // The ask box's agent runs in no pane, and goes by the one you asked
+    // from. Without it, a close could take yours along, and first.
+    if turn.is_some() && here.is_none() {
+        eprintln!(
+            "luneta: luneta's ask box cannot tell which pane the user asked from just now, so a \
+             close cannot take theirs last, and closes nothing"
+        );
+        return ExitCode::FAILURE;
+    }
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
         let planned = started(session, &running)

@@ -719,26 +719,36 @@ zellij, and you tell the agent there:
 What you type goes to `claude -p --model sonnet`, on your Claude Code login,
 with luneta's skill, in the directory of the highlighted row's pane, or the one
 luneta started in on a session's row. The agent is told which row is
-highlighted, and which pane you are in: the one luneta's zellij is on, which the
-commands take for the pane they run in, as `LUNETA_PANE` names it. The box shows
-each command the agent runs, and what it says. Once a turn ends, what you type
-next goes to the agent on the same Claude session, so it asks before it closes
-anything, and you answer it there. A close it runs takes `--yes` only in the
-turn after the one that said its plan, so your answer is always between them:
-the box gives each turn a key in `LUNETA_TURN`, and the key of the turn before
-in `LUNETA_TURN_BEFORE`, and a plan is of the key of its turn. `Enter` sends,
+highlighted, and with each thing you send, which pane you are in: the one
+luneta's zellij is on, which the commands take for the pane they run in, as
+`LUNETA_PANE` names it. The box shows each command the agent runs, with a red
+`✗` for one Claude Code denied it, which ran nothing, and what it says. Once a
+turn ends, what you type next goes to the agent on the same Claude session, so
+it asks before it closes anything, and you answer it there. A close it runs
+takes `--yes` only in the turn after the one that said its plan, so your answer
+is always between them: the box gives each turn a key in `LUNETA_TURN`, and the
+key of the turn before in `LUNETA_TURN_BEFORE`, and a plan is of the key of its
+turn. Where luneta cannot tell which pane you are in, a close in the box closes
+nothing, as it could take yours first. `Enter` sends,
 and `Esc` closes the box, giving up a turn the agent is at, `claude` with it.
 While a turn runs, no other key does anything. The mouse does nothing while the
 box is open. Nothing is kept: the next `a` starts afresh.
 
 The agent runs in safe mode, so none of your hooks, `CLAUDE.md` or MCP servers
 come into it, and in Claude Code's `dontAsk` permission mode, with Bash its only
-tool. It may run `luneta`, `zoxide query`, `gh issue` and `gh pr` `view` and
-`list`, `wt add`, and `git worktree add` and `list`. Claude Code denies it
-anything else, any command run inside another, as with `$(…)`, and any that
-reads a variable or sets one, so the turn's keys stay out of its reach. The
-`luneta` it runs is the sidebar's own. Each turn writes a Claude session in that
-directory, as any `claude -p` does, so `claude --resume` lists it there.
+tool. It may run `luneta here`, `sessions`, `agents`, `open`, `go` and `close`,
+`zoxide query`, `gh issue` and `gh pr` `view` and `list`, `wt add`, and `git
+worktree add` and `list`, and what the permission rules of your own Claude Code
+settings let it. Those of the directory it runs in don't come into it, as a
+repository can bring its own. Claude Code denies it anything else, any command
+run inside another, as with `$(…)`, and any that reads a variable or sets one,
+so the turn's keys stay out of its reach. A pane or a tab it opens runs your
+shell, or Claude Code as `claude [--name <name>] [<prompt>]`: in the box, `luneta
+open` refuses any other command, and any option of `claude`'s but `--name`, as a
+pane runs what it is given without asking you. An agent it starts so runs on the
+prompt the box's agent wrote, in your own permission mode. The `luneta` it runs
+is the sidebar's own. Each turn writes a Claude session in that directory, as
+any `claude -p` does, so `claude --resume` lists it there.
 
 ## Getting started
 
