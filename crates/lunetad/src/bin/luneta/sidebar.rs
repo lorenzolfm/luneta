@@ -10,12 +10,13 @@
 //! dots, the agents at work and those in a shell.
 //!
 //! The rows go oldest session first, until you move them, and each session's
-//! panes in the order of their tabs: `v` selects the highlighted row's
+//! panes in the order of their tabs, a bracket down the left joining those of
+//! a tab that holds more than one: `v` selects the highlighted row's
 //! session, `j` and `k` grow the selection, and `J` and `K` move the sessions
 //! it holds, as a visual selection does in vim; and the mouse drags a session
 //! by its row. The order is kept for every luneta, and the next.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::path::Path;
@@ -73,6 +74,12 @@ const RULE: &str = "─";
 /// What runs down the sidebar's last column, its edge, between it and zellij,
 /// open or collapsed.
 const EDGE: &str = "│";
+/// What joins the panes of a tab that holds more than one, down the column
+/// after the mark of the pane luneta's zellij is on: from the first line of
+/// the first pane, by each line between, to the last line of the last.
+const BRACKET_TOP: &str = "╭";
+const BRACKET_SIDE: &str = "│";
+const BRACKET_FOOT: &str = "╰";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -399,7 +406,31 @@ enum Row {
         label: String,
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
+        /// Where it sits among the panes listed of its tab, if it shares it.
+        bracket: Option<Bracket>,
     },
+}
+
+/// Where a pane's row sits among the rows of the panes that share its tab,
+/// which a bracket down the gutter joins: the first, the last, or one between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bracket {
+    First,
+    Inner,
+    Last,
+}
+
+impl Bracket {
+    /// Where the pane `at` of the `count` listed of its tab sits among them:
+    /// none for a pane alone in its tab.
+    fn of(at: usize, count: usize) -> Option<Bracket> {
+        match at {
+            _ if count < 2 => None,
+            0 => Some(Bracket::First),
+            _ if at + 1 == count => Some(Bracket::Last),
+            _ => Some(Bracket::Inner),
+        }
+    }
 }
 
 /// The branch checked out where a pane works, as its row shows it under its
@@ -1087,7 +1118,10 @@ impl Sidebar {
             let named = finder.as_ref().and_then(|finder| finder.session(listed.name.as_str()));
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
-            let mut shown: Vec<(Row, Option<Fit>)> = Vec::new();
+            // The rows of the panes listed, by their tab, each made once its
+            // bracket is known: it joins the panes listed of a tab, as a
+            // search can leave some of them out.
+            let mut shown: BTreeMap<u32, Vec<_>> = BTreeMap::new();
             for (pane, Shows { marked, ran, unread }) in listing.into_iter().zip(by_pane) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
@@ -1112,17 +1146,21 @@ impl Sidebar {
                     continue;
                 }
                 let place = Place::Pane { session: listed.clone(), pane: pane.id };
-                let row = Row::Pane {
-                    session: listed.clone(),
+                let here = here_pane.as_ref() == Some(&place);
+                let icon = program.and_then(icons::of);
+                let session = listed.clone();
+                let row = move |bracket| Row::Pane {
+                    session,
                     pane: pane.id,
-                    here: here_pane.as_ref() == Some(&place),
+                    here,
                     unread,
                     marked,
-                    icon: program.and_then(icons::of),
+                    icon,
                     label,
                     checkout,
+                    bracket,
                 };
-                shown.push((row, found));
+                shown.entry(pane.tab).or_default().push((row, found));
             }
             if finder.is_some() && named.is_none() && shown.is_empty() {
                 continue;
@@ -1147,14 +1185,17 @@ impl Sidebar {
             // by its name hands the highlight on to. With none, its row hands it
             // on to its first pane.
             let mut lead: Option<(usize, Fit)> = None;
-            for (row, found) in shown {
-                if let Some(found) = found {
-                    weigh(rows.len(), found);
-                    if lead.is_none_or(|(_, top)| found > top) {
-                        lead = Some((rows.len(), found));
+            for tab in shown.into_values() {
+                let count = tab.len();
+                for (at, (row, found)) in tab.into_iter().enumerate() {
+                    if let Some(found) = found {
+                        weigh(rows.len(), found);
+                        if lead.is_none_or(|(_, top)| found > top) {
+                            lead = Some((rows.len(), found));
+                        }
                     }
+                    rows.push(row(Bracket::of(at, count)));
                 }
-                rows.push(row);
             }
             if let Some(named) = named {
                 weigh(lead.map_or(head, |(at, _)| at), named);
@@ -2673,7 +2714,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { here, unread, marked, icon, label, checkout, .. } => {
+        Row::Pane { here, unread, marked, icon, label, checkout, bracket, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
@@ -2685,7 +2726,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 Some(_) => Style::new(),
                 None => dim,
             };
-            let mut spans = vec![margin(*here), Span::raw(" ")];
+            let height = row.height();
+            let mut spans = vec![margin(*here), gutter(*bracket, 0, height)];
             let dotted = dotted(*unread, marked.as_ref());
             spans.push(if dotted { dot() } else { Span::raw(" ") });
             match mark {
@@ -2708,7 +2750,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
             if let Some(checkout) = checkout {
-                lines.push(checkout_line(*here, checkout, width));
+                lines.push(checkout_line(*here, gutter(*bracket, 1, height), checkout, width));
             }
             lines
         },
@@ -2742,11 +2784,30 @@ fn margin(here: bool) -> Span<'static> {
     }
 }
 
+/// The column after a pane's mark, on its line `at` of the `height` it
+/// takes: the bracket that joins it to the panes of its tab, where it sits
+/// among them as it `sits`, or else blank.
+fn gutter(sits: Option<Bracket>, at: usize, height: usize) -> Span<'static> {
+    let glyph = match sits {
+        None => return Span::raw(" "),
+        Some(Bracket::First) if at == 0 => BRACKET_TOP,
+        Some(Bracket::Last) if at + 1 == height => BRACKET_FOOT,
+        Some(Bracket::First | Bracket::Inner | Bracket::Last) => BRACKET_SIDE,
+    };
+    Span::styled(glyph, Style::new().fg(gruvbox::GREY))
+}
+
 /// The line under a pane's row, `width` wide: the branch checked out where it
 /// works, under its label, then the number of its pull request, and how its
 /// work tree stands. The branch is cut to leave the other two whole. The mark
-/// of the pane luneta's zellij is on, `here`, runs down it too.
-fn checkout_line(here: bool, checkout: &Checkout, width: usize) -> Line<'static> {
+/// of the pane luneta's zellij is on, `here`, runs down it too, and the
+/// `gutter` after it.
+fn checkout_line(
+    here: bool,
+    gutter: Span<'static>,
+    checkout: &Checkout,
+    width: usize,
+) -> Line<'static> {
     let status = &checkout.status;
     let number = checkout.pull_request.map(|(number, colour)| {
         Span::styled(format!("#{number}"), Style::new().fg(colour))
@@ -2757,7 +2818,8 @@ fn checkout_line(here: bool, checkout: &Checkout, width: usize) -> Line<'static>
     let gap = width.saturating_sub(LABEL + branch.width() + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
-        Span::raw(" ".repeat(LABEL - 1)),
+        gutter,
+        Span::raw(" ".repeat(LABEL - 2)),
         Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
     if let Some(number) = number {
@@ -3028,6 +3090,44 @@ mod tests {
                 "     \u{e795} w/b",
             ]
         );
+    }
+
+    /// A bracket down the column after `▌` joins the panes of a tab that
+    /// holds more than one, from the first line of the first, down the branch
+    /// under one, to the last line of the last. A pane alone in its tab has
+    /// none, nor has one a search lists alone of its tab, as for `c` here.
+    #[test]
+    fn a_bracket_joins_the_panes_that_share_a_tab() {
+        let panes = vec![
+            pane(1, 0, "/w/a", "less a"),
+            pane(2, 1, "/w/b", "less b"),
+            pane(3, 1, "/w/c", "less c"),
+            pane(4, 2, "/w/c", "less d"),
+            pane(5, 2, "/w/b", "less e"),
+        ];
+        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        let name = Said::new("main".to_owned()).expect("a branch's name");
+        let head = Head::Branch { name, upstream: None };
+        let tree = WorkTree::Checkout { head, changes: Changes::default(), stashes: 0 };
+        host.work_trees.push(tree.to_api("/w/b"));
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host);
+
+        assert_eq!(
+            rows_shown(&mut sidebar),
+            [
+                " ▾ s",
+                "       less a",
+                " ╭     less b",
+                " │     main",
+                " ╰     less c",
+                " ╭     less d",
+                " │     less e",
+                " ╰     main",
+            ]
+        );
+        type_in(&mut sidebar, "/c");
+        assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
     }
 
     /// The first line says `luneta`, in the accent, the word bold, while the
@@ -3717,9 +3817,9 @@ mod tests {
                 10,
                 vec![
                     pane(1, 0, "/w/a", "cargo test"),
-                    pane(2, 0, "/w/b", sudo),
-                    pane(3, 0, "/w/c", "make"),
-                    pane(4, 0, "/w/d", "dash"),
+                    pane(2, 1, "/w/b", sudo),
+                    pane(3, 2, "/w/c", "make"),
+                    pane(4, 3, "/w/d", "dash"),
                 ],
             )],
             vec![agent("s", 1, Status::Idle, Some("fold"))],
@@ -3748,7 +3848,7 @@ mod tests {
             ..agent("s", pane, Status::Idle, Some("x"))
         };
         let mut sidebar = Sidebar::default();
-        let panes = (1..=4).map(|id| pane(id, 0, "/w/a", "claude")).collect();
+        let panes = (1..=4).map(|id| pane(id, id, "/w/a", "claude")).collect();
         let agents = words.into_iter().zip(1..).map(|(word, id)| says(id, word)).collect();
         sidebar.heard(host(vec![session("s", 10, panes)], agents));
         // Up to the label's first letter, a character to a column.
@@ -3822,9 +3922,10 @@ mod tests {
         );
     }
 
-    /// A pane at its prompt, in `/w/luneta/main`, whose shell said `doing`.
+    /// A pane at its prompt, in `/w/luneta/main`, whose shell said `doing`,
+    /// in a tab of its own.
     fn in_shell(id: u32, doing: Doing) -> Pane {
-        Pane { shell: Some(Shell { doing: Some(doing) }), ..pane(id, 0, "/w/luneta/main", "fish") }
+        Pane { shell: Some(Shell { doing: Some(doing) }), ..pane(id, id, "/w/luneta/main", "fish") }
     }
 
     fn going(command: &str, since: i64, front: Front) -> Doing {
@@ -3934,7 +4035,7 @@ mod tests {
                 vec![
                     pane(1, 0, "/w/luneta/main", "claude"),
                     in_shell(2, ended("cargo test", Some(0), 5_000)),
-                    pane(3, 0, "/w/a", "fish"),
+                    pane(3, 3, "/w/a", "fish"),
                 ],
             )],
             vec![agent("s", 1, Status::Idle, Some("fold"))],
@@ -4028,7 +4129,7 @@ mod tests {
             vec![session(
                 "s",
                 10,
-                vec![pane(1, 0, "/w/luneta/main", "claude"), pane(3, 0, "/w/a", "fish")],
+                vec![pane(1, 0, "/w/luneta/main", "claude"), pane(3, 1, "/w/a", "fish")],
             )],
             vec![agent("s", 1, Status::Idle, Some("fold"))],
         )
@@ -4216,7 +4317,7 @@ mod tests {
     #[test]
     fn a_branch_shows_the_number_of_its_pull_request_in_its_state_s_colour() {
         let panes = ["/w/a", "/w/b", "/w/c", "/w/d"];
-        let panes = panes.iter().zip(1..).map(|(cwd, id)| pane(id, 0, cwd, "fish")).collect();
+        let panes = panes.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
         let checkouts = [
             ("/w/a", "main", 0, 126, State::Open),
@@ -4277,8 +4378,8 @@ mod tests {
                     10,
                     vec![
                         pane(1, 0, "/w/a", "a-p-i-x"),
-                        pane(2, 0, "/w/b", "dda-bank-slip"),
-                        pane(3, 0, "/w/c", "pix outflow"),
+                        pane(2, 1, "/w/b", "dda-bank-slip"),
+                        pane(3, 2, "/w/c", "pix outflow"),
                     ],
                 ),
                 session("notes", 20, vec![pane(1, 0, "/home/me/Documents", "fish")]),
@@ -4287,8 +4388,8 @@ mod tests {
                     30,
                     vec![
                         pane(1, 0, "/w/q", "htop"),
-                        pane(2, 0, "/w/r", "z-e-d"),
-                        pane(3, 0, "/w/s", "less logs"),
+                        pane(2, 1, "/w/r", "z-e-d"),
+                        pane(3, 2, "/w/s", "less logs"),
                     ],
                 ),
             ],
@@ -4305,10 +4406,10 @@ mod tests {
     }
 
     /// The lines of the rows the sidebar shows, focused, with no rule after a
-    /// session's name.
+    /// session's name: those down to the blank above the legend.
     fn rows_shown(sidebar: &mut Sidebar) -> Vec<String> {
-        let lines = screen(sidebar, true, 32, 16);
-        let rows = lines[HEADER..15].iter().filter(|line| !line.is_empty());
+        let lines = screen(sidebar, true, 32, 24);
+        let rows = lines[HEADER..].iter().take_while(|line| !line.is_empty());
         rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
     }
 
