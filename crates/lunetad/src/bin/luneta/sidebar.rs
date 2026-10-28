@@ -13,10 +13,11 @@
 //!
 //! The rows go oldest session first, until you move them, and each session's
 //! panes in the order of their tabs, a bracket down the left joining those of
-//! a tab that holds more than one: `v` selects the highlighted row's
-//! session, `j` and `k` grow the selection, and `J` and `K` move the sessions
-//! it holds, as a visual selection does in vim; and the mouse drags a session
-//! by its row. The order is kept for every luneta, and the next.
+//! a tab that holds more than one, in a colour of the tab's own: `v` selects
+//! the highlighted row's session, `j` and `k` grow the selection, and `J` and
+//! `K` move the sessions it holds, as a visual selection does in vim; and the
+//! mouse drags a session by its row. The order is kept for every luneta, and
+//! the next.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU64;
@@ -83,6 +84,18 @@ const EDGE: &str = "│";
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
+/// The colours of the brackets, a tab's by its position, as a browser
+/// colours its groups of tabs: two tabs side by side never share one, and no
+/// bracket is red, which says what went wrong. No two neighbours here are
+/// alike either, for tabs that go round them.
+const TABS: [Color; 6] = [
+    gruvbox::BLUE,
+    gruvbox::YELLOW,
+    gruvbox::PURPLE,
+    gruvbox::AQUA,
+    gruvbox::ORANGE,
+    gruvbox::GREEN,
+];
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -434,8 +447,9 @@ enum Row {
         label: String,
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
-        /// Where it sits among the panes listed of its tab, if it shares it.
-        bracket: Option<Bracket>,
+        /// Where it sits among the panes listed of its tab, if it shares it,
+        /// and the colour of that tab's bracket.
+        bracket: Option<(Bracket, Color)>,
     },
 }
 
@@ -1324,16 +1338,17 @@ impl Sidebar {
             // by its name hands the highlight on to. With none, its row hands it
             // on to its first pane.
             let mut lead: Option<(usize, Fit)> = None;
-            for tab in shown.into_values() {
-                let count = tab.len();
-                for (at, (row, found)) in tab.into_iter().enumerate() {
+            for (tab, of_tab) in shown {
+                let count = of_tab.len();
+                let colour = TABS[tab as usize % TABS.len()];
+                for (at, (row, found)) in of_tab.into_iter().enumerate() {
                     if let Some(found) = found {
                         weigh(rows.len(), found);
                         if lead.is_none_or(|(_, top)| found > top) {
                             lead = Some((rows.len(), found));
                         }
                     }
-                    rows.push(row(Bracket::of(at, count)));
+                    rows.push(row(Bracket::of(at, count).map(|sits| (sits, colour))));
                 }
             }
             if let Some(named) = named {
@@ -2980,15 +2995,17 @@ fn margin(here: bool) -> Span<'static> {
 
 /// The column after a pane's mark, on its line `at` of the `height` it
 /// takes: the bracket that joins it to the panes of its tab, where it sits
-/// among them as it `sits`, or else blank.
-fn gutter(sits: Option<Bracket>, at: usize, height: usize) -> Span<'static> {
-    let glyph = match sits {
-        None => return Span::raw(" "),
-        Some(Bracket::First) if at == 0 => BRACKET_TOP,
-        Some(Bracket::Last) if at + 1 == height => BRACKET_FOOT,
-        Some(Bracket::First | Bracket::Inner | Bracket::Last) => BRACKET_SIDE,
+/// among them as it `sits`, in its tab's colour, or else blank.
+fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'static> {
+    let Some((sits, colour)) = bracket else {
+        return Span::raw(" ");
     };
-    Span::styled(glyph, Style::new().fg(gruvbox::GREY))
+    let glyph = match sits {
+        Bracket::First if at == 0 => BRACKET_TOP,
+        Bracket::Last if at + 1 == height => BRACKET_FOOT,
+        Bracket::First | Bracket::Inner | Bracket::Last => BRACKET_SIDE,
+    };
+    Span::styled(glyph, Style::new().fg(colour))
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
@@ -3288,8 +3305,9 @@ mod tests {
 
     /// A bracket down the column after `▌` joins the panes of a tab that
     /// holds more than one, from the first line of the first, down the branch
-    /// under one, to the last line of the last. A pane alone in its tab has
-    /// none, nor has one a search lists alone of its tab, as for `c` here.
+    /// under one, to the last line of the last, in a colour of the tab's own.
+    /// A pane alone in its tab has none, nor has one a search lists alone of
+    /// its tab, as for `c` here.
     #[test]
     fn a_bracket_joins_the_panes_that_share_a_tab() {
         let panes = vec![
@@ -3320,6 +3338,10 @@ mod tests {
                 " ╰     main",
             ]
         );
+        let buffer = drawn(&mut sidebar, true, 32, 24);
+        let bracket = |row: usize| buffer[(1, (HEADER + row) as u16)].fg;
+        let (b, c) = (gruvbox::YELLOW, gruvbox::PURPLE);
+        assert_eq!((2..8).map(bracket).collect::<Vec<_>>(), [b, b, b, c, c, c]);
         type_in(&mut sidebar, "/c");
         assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
     }
