@@ -332,7 +332,7 @@ the session zellij is in ends, as zellij quits, its last pane exits, or it is
 killed, luneta attaches zellij to the newest session that runs, which the
 picker lists first, but never to the one luneta's own pane is in, and ends
 where none is left. When zellij fails, luneta ends and says what zellij said.
-zellij's keys are yours as they were, but three, which luneta takes before
+zellij's keys are yours as they were, but four, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
 - `Ctrl b` goes back and forth between zellij and the sidebar. A click goes to
@@ -343,10 +343,12 @@ zellij sees them, whichever of the two has the keys:
 - `Ctrl q` collapses the sidebar to a strip four columns wide, zellij taking
   the rest of its columns, and opens it again, as a click on the strip does.
   `Ctrl b` opens it too, and goes into it.
+- `Alt a` opens the [menu](#menu) over zellij, for the pane zellij is on, and
+  closes it again.
 
-Claude Code binds `Ctrl b` to send a task to the background, and neither of
-the other two. zellij's default config binds `Ctrl b` to tmux mode and `Ctrl q`
-to quit. luneta takes all three first: if you use those, bind them to other
+Claude Code binds `Ctrl b` to send a task to the background, and none of the
+other three. zellij's default config binds `Ctrl b` to tmux mode and `Ctrl q`
+to quit. luneta takes all four first: if you use those, bind them to other
 keys, in zellij's config or in Claude Code's `~/.claude/keybindings.json`.
 
 The sidebar lists every session, oldest first until you move them, the panes
@@ -413,8 +415,15 @@ row, and `Esc` clears the search. Giving zellij the keys clears it too.
 The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read
 your groups from yet. In their place, its Claude group has keys for a few
-skills, built in. While the sidebar has the keys and no menu is open, its
-bottom lists what you can press there:
+skills, built in. `Alt a` opens the same menu floating at the bottom right of
+zellij's side, for the pane zellij is on, wherever the keys are and folded or
+not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
+click anywhere closes it, and gives the keys back to zellij, or to the sidebar
+if it had them. What it opens takes zellij there, with the keys. What goes
+wrong it says where it floated, in a box any key or a click closes, and so it
+says why it does not open: zellij is on a plugin's pane, or luneta cannot yet
+tell which pane zellij is on. `Alt a` there tries again. While the sidebar
+has the keys and no menu is open, its bottom lists what you can press there:
 
 ```text
 ─ luneta ──────────────────────
@@ -447,8 +456,9 @@ open, floating panes and all. `d s` kills its session. On the last
 pane that holds a session's only tab open, or on a session's row, `d d` kills
 the session too: zellij would leave an empty tab in a session with no client,
 and end the one zellij is in. The session zellij is in is killed once zellij
-is in another, the newest, so that zellij stays on screen throughout; with no
-other, it is killed with zellij in it, and luneta ends. When that would end an
+is in another, the newest, so that zellij stays on screen throughout, and the
+sidebar says where zellij goes until then; with no other, it is killed with
+zellij in it, and luneta ends. When that would end an
 agent that is busy, waiting on you, or that says nothing luneta knows, the
 menu asks first, as it does for one whose session file lunetad cannot read, in
 the pane its process runs in, which the sidebar says at its bottom. So does
@@ -459,14 +469,17 @@ a file runs in, which may be any: `y`, or the key again, goes ahead, and `n` or
 luneta asks zellij what a pane takes along as you press the key, and again as
 you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
 and is not closed with it. A delete leaves you in the sidebar, the highlight on
-the row after once what it took is gone.
+the row after once what it took is gone, or, from the menu over zellij, where
+you were.
 
 `b` opens the [brief](#brief)'s keys: `b z` briefs you on every session, `b s`
 on the highlighted row's session, and `b h` on the agent in its pane, or on a
-session's row, on its session.
+session's row, on its session. Over zellij, the row is the pane zellij is on,
+and closing the brief gives the keys back where the menu took them from.
 
 `a` opens the [ask box](#from-lunetas-sidebar), where you tell an agent in
-words what you want done, as the menu would do it.
+words what you want done, as the menu would do it. From the menu over zellij,
+closing it gives the keys back where the menu took them from, as a brief does.
 
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no
@@ -608,8 +621,9 @@ heard or not. A session the order does not have
 goes after those it has, as a new session always went last. The order is the
 sidebar's only: zellij's tabs keep theirs.
 
-The picker and the floating menu are still the plugin's, and work in the
-zellij luneta runs as in any other.
+The picker is still the plugin's, and works in the zellij luneta runs as in
+any other. So does the plugin's floating menu, from the key you bind it to;
+`Alt a` opens luneta's own.
 
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not

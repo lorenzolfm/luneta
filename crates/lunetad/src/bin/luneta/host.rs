@@ -7,8 +7,12 @@
 //! column, drags it wider or narrower, zellij taking the columns it leaves.
 //! What the mouse drags on the sidebar's rows stays with the sidebar until it
 //! lets go, wherever the mouse goes, as what it drags on zellij stays with
-//! zellij. A brief the sidebar asks for shows in a box over zellij, which has
-//! the keys and the mouse until it closes, and so does the ask box.
+//! zellij. `Alt a` opens the menu in a box over zellij, for the pane zellij
+//! is on, and a brief or the ask box the menu asks for shows in a box there
+//! too, as does what went wrong with what the menu did there: each has the
+//! keys and the mouse until it closes, when the side that had them before has
+//! them again. What the mouse drags on zellij stays with zellij under a box
+//! too.
 
 use std::collections::VecDeque;
 use std::env;
@@ -43,6 +47,7 @@ use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
+use crate::menu;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
@@ -126,43 +131,81 @@ const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CON
 /// is on.
 const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
 
+/// The key that opens the menu over zellij, for the pane zellij is on, and
+/// closes it.
+const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
+
 /// How soon a second click on the cell of a first makes a double click of the
 /// two, as desktops have it by default.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
-/// Which side has the keys, and whether the sidebar is open.
+/// Where the keys are: with a side, or with a box over zellij, which has them
+/// and the mouse until it closes, when that side has them again.
 #[derive(Debug)]
-enum Focus {
+struct Focus {
+    /// The side with the keys, or with them again once the box closes, and
+    /// whether the sidebar is open.
+    side: Side,
+    over: Option<Over>,
+}
+
+impl Focus {
+    /// `side` with the keys, under no box.
+    fn on(side: Side) -> Focus {
+        Focus { side, over: None }
+    }
+
+    /// Whether zellij has the keys.
+    fn zellij(&self) -> bool {
+        match (self.side, &self.over) {
+            (Side::Zellij | Side::Collapsed, None) => true,
+            (Side::Sidebar, None) | (_, Some(_)) => false,
+        }
+    }
+}
+
+/// A side of luneta's terminal that takes the keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
     /// zellij, beside the sidebar.
     Zellij,
     Sidebar,
     /// zellij, beside the sidebar collapsed, with the rest of its columns:
     /// the sidebar takes the keys only once it opens again.
     Collapsed,
-    /// A brief in a box over zellij, beside the sidebar, from when the
-    /// sidebar asks for it: it has the keys and the mouse until it closes,
-    /// when the sidebar has them again. One closed while it is asked is
-    /// given up, and the model with it.
-    Brief(Briefing),
-    /// The ask box over zellij, beside the sidebar, as a brief is, from when
-    /// the sidebar asks for it until it closes, which gives up the turn its
-    /// agent is at.
-    Ask(Ask),
 }
 
-impl Focus {
-    /// Whether zellij has the keys.
-    fn zellij(&self) -> bool {
+impl Side {
+    /// zellij, beside the sidebar as it is: collapsed, or open.
+    fn zellij(self) -> Side {
         match self {
-            Focus::Zellij | Focus::Collapsed => true,
-            Focus::Sidebar | Focus::Brief(_) | Focus::Ask(_) => false,
+            Side::Collapsed => Side::Collapsed,
+            Side::Zellij | Side::Sidebar => Side::Zellij,
         }
     }
 }
 
+/// A box over zellij.
+#[derive(Debug)]
+enum Over {
+    /// The sidebar's menu, for the pane zellij is on. What it opens takes
+    /// zellij there, with the keys.
+    Menu,
+    /// What went wrong with what the menu did, said where it floated, or why
+    /// it did not open: any key or click closes it, and does nothing else.
+    /// `MENU` opens the menu again, as it says to try again.
+    Note(String),
+    /// A brief, from when the menu asks for it. One closed while it is asked
+    /// is given up, and the model with it.
+    Brief(Briefing),
+    /// The ask box, from when the menu asks for it until it closes, which
+    /// gives up the turn its agent is at.
+    Ask(Ask),
+}
+
 /// What a button held down holds, wherever the mouse goes, until it is let
-/// go: zellij, the sidebar's edge, its last column, or the brief it closed,
-/// and never two of them.
+/// go: zellij, the sidebar's edge, its last column, or the box over zellij it
+/// closed, and never two of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Held {
     /// Nothing: no button is down, or one went down on the sidebar's rows,
@@ -174,9 +217,10 @@ enum Held {
     /// it was dragged since. One let go undragged keeps no width, so that
     /// what another luneta dragged meanwhile stays.
     Edge { dragged: bool },
-    /// A brief, which the button closed as it went down: what it drags, and
-    /// its release, go nowhere, as zellij heard no press of it.
-    Brief,
+    /// A box over zellij, the menu or a brief, which the button closed as it
+    /// went down: what it drags, and its release, go nowhere, as zellij heard
+    /// no press of it.
+    Closed,
 }
 
 /// What luneta holds for zellij until zellij can take it: the input, and the
@@ -504,7 +548,7 @@ fn run_in(
         areas,
         width,
         held: Held::Nothing,
-        focus: Focus::Zellij,
+        focus: Focus::on(Side::Zellij),
         // Until the terminal says otherwise. One that never tells a program
         // of its window's focus has you in it all along.
         focused: true,
@@ -628,14 +672,14 @@ impl App {
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
             Event::Briefed { number, written } => {
-                if let Focus::Brief(briefing) = &mut self.focus
+                if let Some(Over::Brief(briefing)) = &mut self.focus.over
                     && briefing.number() == number
                 {
                     briefing.written(written);
                 }
             },
             Event::Heard { number, heard } => {
-                if let Focus::Ask(ask) = &mut self.focus
+                if let Some(Over::Ask(ask)) = &mut self.focus.over
                     && ask.number() == number
                 {
                     ask.heard(heard);
@@ -644,7 +688,18 @@ impl App {
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
         }
+        self.settle();
         Ok(())
+    }
+
+    /// Gives the keys back to the side the menu over zellij took them from,
+    /// once it closed: as a key or a click closed it, or as zellij said why
+    /// what a key asked for went wrong, which a box says in its place.
+    fn settle(&mut self) {
+        if matches!(self.focus.over, Some(Over::Menu)) && self.sidebar.floating().is_none() {
+            let over = self.sidebar.said().map(Over::Note);
+            self.give(Focus { side: self.focus.side, over });
+        }
     }
 
     /// Hands zellij what luneta holds for it once anything shows on its
@@ -723,7 +778,7 @@ impl App {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
             Input::Paste(text) => {
-                if let Focus::Ask(ask) = &mut self.focus {
+                if let Some(Over::Ask(ask)) = &mut self.focus.over {
                     ask.paste(&text);
                 } else if self.focus.zellij() {
                     self.client.hosted.send(keys::paste(&text, self.client.hosted.mode()));
@@ -734,39 +789,71 @@ impl App {
             // The next frame is of the new size, and zellij's terminal with it.
             Input::Resize(..) => {},
         }
+        // Before the next of the input held for zellij, which goes where the
+        // keys are once the menu closed.
+        self.settle();
     }
 
     fn key(&mut self, key: &KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        // A brief takes every key, which does nothing else, and so does the
-        // ask box.
-        if let Focus::Brief(briefing) = &self.focus {
-            if briefing.closes(key) {
-                self.give(Focus::Sidebar);
-            }
-            return;
-        }
-        if let Focus::Ask(ask) = &mut self.focus {
-            match ask.key(key) {
-                Keyed::Nothing => {},
-                Keyed::Send => self.converse(),
-                Keyed::Close => self.give(Focus::Sidebar),
-            }
-            return;
-        }
         let chord = (key.code, key.modifiers);
+        match &mut self.focus.over {
+            // The ask box takes every key, for its agent.
+            Some(Over::Ask(ask)) => {
+                match ask.key(key) {
+                    Keyed::Nothing => {},
+                    Keyed::Send => self.converse(),
+                    Keyed::Close => self.give(Focus::on(self.focus.side)),
+                }
+                return;
+            },
+            // So does a brief, which does nothing else with them.
+            Some(Over::Brief(briefing)) => {
+                if briefing.closes(key) {
+                    self.give(Focus::on(self.focus.side));
+                }
+                return;
+            },
+            // So does the menu over zellij, but for `MENU`, which closes it as
+            // it opened it.
+            Some(Over::Menu) => {
+                if chord == MENU {
+                    self.sidebar.close_menu();
+                } else {
+                    let asked = self.sidebar.key(key, SystemTime::now());
+                    self.follow(asked);
+                }
+                return;
+            },
+            // And so does a note, but for `MENU`, which then tries the menu
+            // again.
+            Some(Over::Note(_)) => {
+                self.give(Focus::on(self.focus.side));
+                if chord != MENU {
+                    return;
+                }
+            },
+            None => {},
+        }
+        if chord == MENU {
+            let over = match self.sidebar.float_menu() {
+                Ok(()) => Over::Menu,
+                Err(why) => Over::Note(why.to_owned()),
+            };
+            self.give(Focus { side: self.focus.side, over: Some(over) });
+            return;
+        }
         if chord == SWAP {
             // A collapsed sidebar opens to take the keys.
-            let other = if self.focus.zellij() { Focus::Sidebar } else { Focus::Zellij };
-            self.give(other);
+            let other = if self.focus.zellij() { Side::Sidebar } else { Side::Zellij };
+            self.give(Focus::on(other));
             return;
         }
         if chord == COLLAPSE {
-            let collapsed = matches!(self.focus, Focus::Collapsed);
-            let other = if collapsed { Focus::Zellij } else { Focus::Collapsed };
-            self.give(other);
+            let collapsed = self.focus.side == Side::Collapsed;
+            self.give(Focus::on(if collapsed { Side::Zellij } else { Side::Collapsed }));
             return;
         }
         if chord == NEXT {
@@ -784,25 +871,52 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) {
-        // A brief takes the mouse too, and a click, wherever it is, closes
-        // one written, and does nothing else.
-        if let Focus::Brief(briefing) = &self.focus {
-            if matches!(mouse.kind, MouseEventKind::Down(_)) && briefing.clicked() {
-                self.let_go();
-                self.held = Held::Brief;
-                self.give(Focus::Sidebar);
+        // A button that went down on zellij before a box opened over it
+        // drags there, and lets go there, as it would with no box.
+        let down = matches!(mouse.kind, MouseEventKind::Down(_));
+        if self.focus.over.is_some() && self.held == Held::Zellij && !down {
+            if let MouseEventKind::Up(_) = mouse.kind {
+                self.held = Held::Nothing;
             }
+            self.zellij_mouse(mouse);
             return;
         }
-        // The ask box takes the mouse too, and does nothing with it: a click
-        // would end the talk.
-        if let Focus::Ask(_) = &self.focus {
-            return;
+        // A brief takes the mouse too, and a click, wherever it is, closes
+        // one written, and does nothing else; and so do the menu over zellij
+        // and a note, which any click closes. The ask box takes it and does
+        // nothing with it: a click would end the talk.
+        match &self.focus.over {
+            Some(Over::Ask(_)) => return,
+            Some(Over::Brief(briefing)) => {
+                if down && briefing.clicked() {
+                    self.let_go();
+                    self.held = Held::Closed;
+                    self.give(Focus::on(self.focus.side));
+                }
+                return;
+            },
+            Some(Over::Menu) => {
+                if down {
+                    self.let_go();
+                    self.held = Held::Closed;
+                    self.sidebar.close_menu();
+                }
+                return;
+            },
+            Some(Over::Note(_)) => {
+                if down {
+                    self.let_go();
+                    self.held = Held::Closed;
+                    self.give(Focus::on(self.focus.side));
+                }
+                return;
+            },
+            None => {},
         }
-        // Anything but a drag lets the brief's button go: its release, or
+        // Anything but a drag lets the closing button go: its release, or
         // whatever comes after a release luneta never heard, which then does
         // what it does besides.
-        if self.held == Held::Brief {
+        if self.held == Held::Closed {
             match mouse.kind {
                 MouseEventKind::Drag(_) => return,
                 MouseEventKind::Up(_) => {
@@ -826,19 +940,14 @@ impl App {
                 MouseEventKind::Up(_) => self.held = Held::Nothing,
                 _ => {},
             }
-            let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
-            let row = mouse.row.saturating_sub(zellij.y);
-            if let Some(bytes) = keys::mouse(mouse, column, row, self.client.hosted.mode()) {
-                self.client.hosted.send(bytes);
-            }
+            self.zellij_mouse(mouse);
             return;
         }
         // A click on the sidebar collapsed opens it, as `COLLAPSE` does.
         let at = Position::new(mouse.column, mouse.row);
-        let down = matches!(mouse.kind, MouseEventKind::Down(_));
-        if matches!(self.focus, Focus::Collapsed) {
+        if self.focus.side == Side::Collapsed {
             if down {
-                self.give(Focus::Zellij);
+                self.give(Focus::on(Side::Zellij));
                 self.opener = Some((Instant::now(), at));
             }
             return;
@@ -860,6 +969,17 @@ impl App {
         }
         let asked = self.sidebar.mouse(mouse, sidebar);
         self.follow(asked);
+    }
+
+    /// Hands zellij what the mouse does, at the cell of zellij's nearest to
+    /// it.
+    fn zellij_mouse(&mut self, mouse: MouseEvent) {
+        let (_, zellij) = self.areas;
+        let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
+        let row = mouse.row.saturating_sub(zellij.y);
+        if let Some(bytes) = keys::mouse(mouse, column, row, self.client.hosted.mode()) {
+            self.client.hosted.send(bytes);
+        }
     }
 
     /// Takes what the mouse does while the sidebar's edge is held, and says
@@ -892,11 +1012,12 @@ impl App {
     }
 
     /// Does what the sidebar asked. What the menu opens is where you go, with
-    /// the keys; a delete leaves you in the sidebar, to go on along its rows.
+    /// the keys; a delete leaves you in the sidebar, to go on along its rows,
+    /// or, from the menu over zellij, where you were.
     fn follow(&mut self, asked: Asked) {
         match asked {
             Asked::Nothing => {},
-            Asked::Take => self.give(Focus::Sidebar),
+            Asked::Take => self.give(Focus::on(Side::Sidebar)),
             Asked::Leave => self.leave(),
             Asked::Go(place) => {
                 self.go(&place, None);
@@ -929,11 +1050,13 @@ impl App {
             Asked::Brief(brief) => {
                 self.briefs += 1;
                 let folder = self.claude_folder.clone();
-                self.give(Focus::Brief(brief::ask(self.briefs, brief, folder, &self.events)));
+                let briefing = brief::ask(self.briefs, brief, folder, &self.events);
+                self.give(Focus { side: self.focus.side, over: Some(Over::Brief(briefing)) });
             },
             Asked::Ask(target) => {
                 self.asks += 1;
-                self.give(Focus::Ask(Ask::new(self.asks, &target, &self.dir)));
+                let ask = Ask::new(self.asks, &target, &self.dir);
+                self.give(Focus { side: self.focus.side, over: Some(Over::Ask(ask)) });
             },
         }
     }
@@ -943,7 +1066,7 @@ impl App {
     /// client to type in its session, which zellij moves where the agent has
     /// it take you somewhere.
     fn converse(&mut self) {
-        let Focus::Ask(ask) = &mut self.focus else {
+        let Some(Over::Ask(ask)) = &mut self.focus.over else {
             return;
         };
         let here = self.sidebar.here_pane();
@@ -977,7 +1100,12 @@ impl App {
     /// Takes zellij's client from `here`, the session it is in, to `place`,
     /// and does `after` once it is there, in another session.
     fn go_from(&mut self, here: &str, place: &Place, after: Option<After>) {
-        let then = self.sidebar.went(place);
+        let then = match &after {
+            // The session it leaves ends once it has left it, which the
+            // sidebar says until then.
+            Some(After::Kill(_)) => self.sidebar.leaving(place),
+            Some(After::Open(..)) | None => self.sidebar.went(place),
+        };
         self.client.hosted.send(zellij::NUDGE);
         zellij::go(here, place.session(), place.pane(), then, after, &self.events);
     }
@@ -1020,27 +1148,32 @@ impl App {
         }
     }
 
-    /// Hands the keys to `side`, and tells zellij when it takes them or loses
-    /// them, as a terminal tells a program in it of the window's focus, and
-    /// the sidebar when it loses them.
-    fn give(&mut self, side: Focus) {
-        if matches!(side, Focus::Collapsed) {
-            // The strip has no edge to drag nor rows to hold: what the mouse
-            // holds of either is let go, as a release would let it go. A press
-            // held on the rows would keep the mouse from zellij, and the strip
+    /// Hands the keys to `focus`, and tells zellij when it takes them or
+    /// loses them, as a terminal tells a program in it of the window's focus,
+    /// and the sidebar where they are.
+    fn give(&mut self, focus: Focus) {
+        if focus.side == Side::Collapsed || focus.over.is_some() {
+            // The strip has no edge to drag nor rows to hold, and a box takes
+            // the mouse: what the mouse holds of either is let go, as a
+            // release would let it go. A press held on the rows would keep the
+            // mouse from zellij, and the keys from the box, and the sidebar
             // never hears the release.
             self.let_go();
             self.sidebar.let_go();
         }
-        let (had, has) = (self.focus.zellij(), side.zellij());
-        self.sidebar.focus(match side {
-            Focus::Sidebar => Keys::Sidebar,
-            // A brief leaves the sidebar as it stands, highlight and all, for
-            // the keys to go back to as it closes, and so does the ask box.
-            Focus::Brief(_) | Focus::Ask(_) => Keys::Lent,
-            Focus::Zellij | Focus::Collapsed => Keys::Zellij,
+        let (had, has) = (self.focus.zellij(), focus.zellij());
+        self.sidebar.focus(match (&focus.over, focus.side) {
+            (None, Side::Sidebar) => Keys::Sidebar,
+            (Some(Over::Menu), side) => Keys::Menu { lent: side == Side::Sidebar },
+            // A brief, the ask box or a note leaves the sidebar as it stands,
+            // highlight and all, for the keys to go back to as it closes.
+            (Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_)), Side::Sidebar) => Keys::Lent,
+            (
+                None | Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_)),
+                Side::Zellij | Side::Collapsed,
+            ) => Keys::Zellij,
         });
-        self.focus = side;
+        self.focus = focus;
         if self.focused
             && has != had
             && let Some(bytes) = keys::focus(has, self.client.hosted.mode())
@@ -1049,10 +1182,16 @@ impl App {
         }
     }
 
-    /// Hands zellij the keys, where the sidebar has them.
+    /// Hands zellij the keys, where the sidebar or the menu over zellij has
+    /// them, beside the sidebar as it is.
     fn leave(&mut self) {
-        if matches!(self.focus, Focus::Sidebar) {
-            self.give(Focus::Zellij);
+        let leaves = match &self.focus.over {
+            None => self.focus.side == Side::Sidebar,
+            Some(Over::Menu) => true,
+            Some(Over::Brief(_) | Over::Ask(_) | Over::Note(_)) => false,
+        };
+        if leaves {
+            self.give(Focus::on(self.focus.side.zellij()));
         }
     }
 
@@ -1179,7 +1318,7 @@ impl App {
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let now = SystemTime::now();
         terminal.draw(|frame| {
-            let collapsed = matches!(self.focus, Focus::Collapsed);
+            let collapsed = self.focus.side == Side::Collapsed;
             let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
             let (sidebar, zellij) = areas(frame.area(), own);
             self.areas = (sidebar, zellij);
@@ -1194,14 +1333,22 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now);
             }
             let cursor = self.client.hosted.draw(buffer, zellij);
-            if let Focus::Brief(briefing) = &self.focus {
-                briefing.draw(buffer, zellij);
-            } else if let Focus::Ask(ask) = &self.focus {
-                ask.draw(buffer, zellij);
-            } else if self.focus.zellij()
-                && let Some(cursor) = cursor
-            {
-                frame.set_cursor_position(cursor);
+            match &self.focus.over {
+                Some(Over::Brief(briefing)) => briefing.draw(buffer, zellij),
+                Some(Over::Ask(ask)) => ask.draw(buffer, zellij),
+                Some(Over::Note(note)) => menu::draw_note(buffer, zellij, note),
+                Some(Over::Menu) => {
+                    if let Some(menu) = self.sidebar.floating() {
+                        menu.draw(buffer, zellij);
+                    }
+                },
+                None => {
+                    if self.focus.zellij()
+                        && let Some(cursor) = cursor
+                    {
+                        frame.set_cursor_position(cursor);
+                    }
+                },
             }
         })?;
         let cursor = self.client.hosted.cursor_style();

@@ -3,12 +3,13 @@
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
 //! `▌` marks the pane it is on. `•` dots a pane where something finished since
 //! you were last there, and one you marked unread, and `u` takes the dot away
-//! or gives it. The menu opens at its bottom, for the row highlighted, and
-//! its Brief group asks for a brief of the agents by that row, as its `a`
-//! asks for the ask box. Its title along the top is in the accent while it
-//! has the keys, and dim while zellij, a brief or the ask box has them.
-//! Collapsed, it keeps only what it counts of the dots, the agents at work
-//! and those in a shell.
+//! or gives it. The menu opens at its bottom, for the row highlighted, or
+//! floats over zellij, for the pane zellij is on, and its Brief group asks
+//! for a brief of the agents by that row, or that pane, as its `a` asks for
+//! the ask box. Its title along the top is in the accent while it has the
+//! keys, and dim while zellij or a box over zellij has them. Collapsed, it
+//! keeps only what it counts of the dots, the agents at work and those in a
+//! shell.
 //!
 //! The rows go oldest session first, until you move them, and each session's
 //! panes in the order of their tabs, a bracket down the left joining those of
@@ -47,7 +48,7 @@ use crate::ledger::{self, Key};
 use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
 use crate::news::News;
 use crate::order::Order;
-use crate::own::{Look, Looked, OwnClient};
+use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
 
@@ -95,10 +96,11 @@ pub const ACCENT: Color = gruvbox::PURPLE;
 pub const NAME: Color = gruvbox::AQUA;
 /// The colour of an agent at work, and of the search's `/`.
 pub const TAG: Color = gruvbox::YELLOW;
-/// The colour of what went wrong: the notes at the bottom that say so, and the
-/// rule of the sidebar collapsed, which has no room for them, while the daemon
-/// does not answer.
-const ERROR: Color = gruvbox::RED;
+/// The colour of what went wrong: the notes at the bottom that say so, the
+/// box over zellij that says so for the menu there, and the rule of the
+/// sidebar collapsed, which has no room for them, while the daemon does not
+/// answer.
+pub const ERROR: Color = gruvbox::RED;
 /// The background of the highlight while the sidebar has the focus, on the
 /// row the keys took it to.
 pub const LIT: Color = gruvbox::BG2;
@@ -117,6 +119,19 @@ const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 /// How long a command runs before its row says it runs, and says how it
 /// ended once it does: an `ls` is no news.
 const LONG: Duration = Duration::from_secs(1);
+
+/// What the sidebar says as the menu cannot float over zellij for the pane
+/// zellij is on, as it does not know which that is: it has yet to hear.
+const NO_HERE_PANE: &str = "menu: luneta does not know yet which pane zellij is on; try again in a \
+                            moment";
+/// luneta cannot tell its zellij's client from the others of the session.
+const UNSURE_PANE: &str = "menu: luneta cannot tell yet which of the session's clients is its own; \
+                           go to a pane from the sidebar";
+/// zellij has the focus on a plugin's pane.
+const PLUGIN_PANE: &str = "menu: zellij is on a plugin's pane; the menu opens over a terminal's";
+/// The daemon lists more than one session of the name zellij is in.
+const TWIN_SESSIONS: &str = "menu: lunetad lists more than one session of the name zellij is in, \
+                             and luneta cannot tell which it is";
 
 /// A session as the sidebar tells it from another of its name: zellij
 /// versions with sockets of their own can each run one under it. Its start
@@ -164,13 +179,24 @@ struct Sent {
     /// The session the client leaves for this one, which it may be in still
     /// until it is there. None for one that starts there, as luneta's first
     /// does, and one that takes the place of a client that ended.
-    from: Option<String>,
+    from: Option<Leaving>,
     /// Whether the client is there. Until it is, a title of another session
     /// is of the one it is leaving.
     landed: bool,
     /// The number of the look that finds the client there, by which what
     /// comes back of a go luneta sent it on before is told from this one's.
     look: Option<u64>,
+}
+
+/// The session luneta's zellij leaves for the one it was sent to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Leaving {
+    session: String,
+    /// Whether it ends once the client has left it, as where the menu
+    /// deletes the session luneta's zellij is in. The sidebar says so for as
+    /// long as the go lasts, and no longer: zellij not taking the client
+    /// there, or the client ending on its way, ends the go.
+    ends: bool,
 }
 
 /// What a row stands for, by which the highlight keeps to it as rows come and
@@ -529,17 +555,22 @@ pub enum Keys {
     #[default]
     Zellij,
     Sidebar,
-    /// To a brief or the ask box the sidebar asked for, which gives them
-    /// back as it closes: the sidebar stays as it stands, highlight and all.
+    /// To a brief or the ask box the sidebar asked for, or a note over
+    /// zellij of what went wrong, which gives them back as it closes: the
+    /// sidebar stays as it stands, highlight and all.
     Lent,
+    /// To the sidebar's menu, floating over zellij, until it closes: back to
+    /// the sidebar where `lent`, which stays as it stands meanwhile, or else
+    /// to zellij.
+    Menu { lent: bool },
 }
 
 impl Keys {
     /// Whether the keys are the sidebar's, or come back to it.
     fn held(self) -> bool {
         match self {
-            Keys::Sidebar | Keys::Lent => true,
-            Keys::Zellij => false,
+            Keys::Sidebar | Keys::Lent | Keys::Menu { lent: true } => true,
+            Keys::Zellij | Keys::Menu { lent: false } => false,
         }
     }
 }
@@ -611,6 +642,9 @@ pub struct Sidebar {
     room: usize,
     /// The last thing that went wrong, until the next key.
     notice: Option<String>,
+    /// What went wrong as the menu floated over zellij, for luneta to say
+    /// there, where you look, and the sidebar collapsed has no room for.
+    said: Option<String>,
     /// The search, while it is open.
     search: Option<Search>,
     /// The menu, while it is open.
@@ -734,7 +768,6 @@ impl Sidebar {
             self.own.heard(listed.as_deref(), Instant::now());
         }
         self.rebuild();
-        self.left();
         look
     }
 
@@ -811,7 +844,6 @@ impl Sidebar {
             self.unfold(&session);
         }
         self.rebuild();
-        self.left();
         look
     }
 
@@ -819,9 +851,16 @@ impl Sidebar {
     /// far as the sidebar knows, and which unfolds: you go to a session for
     /// its panes. A look for zellij to answer once it is there.
     pub fn sending(&mut self, session: &SessionName) -> Option<Look> {
+        self.send(session, false)
+    }
+
+    /// luneta sends its zellij to `session`, as `sending` says, and the
+    /// session it leaves `ends` once it has left it.
+    fn send(&mut self, session: &SessionName, ends: bool) -> Option<Look> {
         self.unfold(session);
         let session = session.as_str();
-        let from = self.here().filter(|here| *here != session).map(str::to_owned);
+        let from = self.here().filter(|here| *here != session);
+        let from = from.map(|here| Leaving { session: here.to_owned(), ends });
         self.sent = Some(Sent { session: session.to_owned(), from, landed: false, look: None });
         let look = self.arrived();
         if let Some(sent) = &mut self.sent {
@@ -861,11 +900,6 @@ impl Sidebar {
             return None;
         }
         self.sent = None;
-        // A menu that took luneta's zellij out of the session it kills is
-        // done: the session stays.
-        if self.menu.as_ref().is_some_and(|menu| menu.leaving().is_some()) {
-            self.menu = None;
-        }
         let look = self.arrived();
         self.rebuild();
         look
@@ -885,12 +919,24 @@ impl Sidebar {
         let listed = listed.map(<[Client]>::to_vec);
         self.own.looked(looked, listed.as_deref(), Instant::now());
         self.rebuild();
-        self.left();
     }
 
     /// luneta takes its zellij to `place`. A look to ask zellij for once it
     /// has: in the session it is in, or the one it goes to.
     pub fn went(&mut self, place: &Place) -> Option<Look> {
+        self.goes(place, false)
+    }
+
+    /// luneta takes its zellij out of the session it is in, to `place` in
+    /// another, and kills that session once it has left it, which the
+    /// sidebar says until then. A look to ask zellij for once it is there.
+    pub fn leaving(&mut self, place: &Place) -> Option<Look> {
+        self.goes(place, true)
+    }
+
+    /// luneta takes its zellij to `place`, as `went` says, and the session
+    /// it leaves for another `ends` once it has left it.
+    fn goes(&mut self, place: &Place, ends: bool) -> Option<Look> {
         let listed = clients(self.host.as_ref(), place.session()).map(<[Client]>::to_vec);
         let now = Instant::now();
         let look = self.own.went(place.session(), place.pane(), listed.as_deref(), now);
@@ -903,17 +949,24 @@ impl Sidebar {
             return look;
         }
         // The client is on the pane as it comes to the other session.
-        self.sending(&place.listed().name)
+        self.send(&place.listed().name, ends)
     }
 
     /// The sidebar takes the keys, or gives them back. The keys take the
     /// highlight on from where luneta's zellij is, and it goes back there as
     /// they leave. A search lasts while the sidebar has them: one left open
-    /// would keep the rows it hides out of sight. So does the menu, but while
-    /// it takes luneta's zellij out of the session it kills, and so do a
-    /// selection and a session lifted, which goes back. A brief lent the keys
-    /// leaves all of it as it stands.
+    /// would keep the rows it hides out of sight. So do the menu, a selection
+    /// and a session lifted, which goes back. A brief or the menu over zellij
+    /// lent the keys leaves all of it as it stands. The menu over zellij
+    /// lasts while its box has the keys, and closes as the box gives them up.
     pub fn focus(&mut self, keys: Keys) {
+        if self.floats() && !matches!(keys, Keys::Menu { .. }) {
+            self.close_menu();
+            // What luneta did not take to say over zellij goes to the notes.
+            if let Some(said) = self.said.take() {
+                self.notice = Some(said);
+            }
+        }
         let (had, holds) = (self.keys.held(), keys.held());
         self.keys = keys;
         if had == holds {
@@ -932,21 +985,8 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// Closes the menu, but while it takes luneta's zellij out of the session
-    /// it kills, which it says until zellij's client has left.
     pub fn close_menu(&mut self) {
-        if self.menu.as_ref().is_none_or(|menu| menu.leaving().is_none()) {
-            self.menu = None;
-        }
-    }
-
-    /// Closes the menu once luneta's zellij is in the session it went to,
-    /// leaving the one the menu kills.
-    fn left(&mut self) {
-        let to = self.menu.as_ref().and_then(Menu::leaving);
-        if to.is_some_and(|to| self.going().is_none() && self.here() == Some(to)) {
-            self.menu = None;
-        }
+        self.menu = None;
     }
 
     /// A look for the session zellij's client is in, as `here` says, if it
@@ -1009,14 +1049,50 @@ impl Sidebar {
     pub fn seats(&self) -> Vec<&str> {
         match &self.sent {
             Some(Sent { session, from, landed: false, .. }) => {
-                from.iter().chain([session]).map(String::as_str).collect()
+                from.iter().map(|from| &from.session).chain([session]).map(String::as_str).collect()
             },
             _ => self.here().into_iter().collect(),
         }
     }
 
+    /// The pane luneta's zellij is on, in the one session of the name it is
+    /// in: both as luneta last followed its client, so that the pane is one
+    /// of that session's, whose ids another session has too. Or else why the
+    /// sidebar does not know it, as the menu says.
+    fn here_place(&self) -> Result<Place, &'static str> {
+        let (here, pane) = self.own.place().map_err(|unplaced| match unplaced {
+            Unplaced::Waiting => NO_HERE_PANE,
+            Unplaced::Unsure => UNSURE_PANE,
+            Unplaced::Plugin => PLUGIN_PANE,
+        })?;
+        let host = self.host.as_ref().ok_or(NO_HERE_PANE)?;
+        let (sessions, _) = oldest_first(&host.sessions);
+        let mut named = sessions.into_iter().filter(|(listed, _)| listed.name.as_str() == here);
+        match (named.next(), named.next()) {
+            (Some((listed, _)), None) => Ok(Place::Pane { session: listed, pane }),
+            (None, _) => Err(NO_HERE_PANE),
+            (Some(_), Some(_)) => Err(TWIN_SESSIONS),
+        }
+    }
+
     pub fn notify(&mut self, notice: String) {
         self.notice = Some(notice);
+    }
+
+    /// Says what went wrong with what the menu did: in the notes, or over
+    /// zellij while the menu floats there.
+    fn say(&mut self, notice: String) {
+        if self.floats() {
+            self.said = Some(notice);
+        } else {
+            self.notice = Some(notice);
+        }
+    }
+
+    /// What went wrong as the menu floated over zellij, for luneta to say
+    /// there, once.
+    pub fn said(&mut self) -> Option<String> {
+        self.said.take()
     }
 
     /// Whether a spinner turns: the rule along the top has one while an agent
@@ -1034,6 +1110,7 @@ impl Sidebar {
     /// session that matches best by its name has it on the pane of it that
     /// matches best, or else on its first.
     fn rebuild(&mut self) {
+        let here_pane = self.here_place().ok();
         let Some(host) = &self.host else {
             return;
         };
@@ -1055,17 +1132,6 @@ impl Sidebar {
             Some(Search::Empty) | None => (None, false),
         };
         let finder = term.map(|term| Finder { matcher: SkimMatcherV2::default(), term });
-        // The pane luneta's zellij is on, in the one session of the name.
-        let here_pane = {
-            let mut named =
-                sessions.iter().filter(|(listed, _)| here.as_deref() == Some(listed.name.as_str()));
-            match (named.next(), named.next(), self.own.pane()) {
-                (Some((listed, _)), None, Some(pane)) => {
-                    Some(Place::Pane { session: listed.clone(), pane })
-                },
-                _ => None,
-            }
-        };
         let here_key =
             here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
@@ -1570,17 +1636,46 @@ impl Sidebar {
         self.menu_did(did)
     }
 
-    /// What the menu is for, as it opens on the highlighted row: the row, the
-    /// directory its pane works in, and the branch checked out there.
+    /// What the menu is for, as it opens on the highlighted row.
     fn target(&self) -> Option<Target> {
         let place = self.cursor.clone()?;
-        let row = self.rows.iter().find(|row| row.place() == place)?;
-        let branch = match row {
-            Row::Pane { checkout, .. } => checkout.as_ref().map(|checkout| checkout.branch.clone()),
-            Row::Session { .. } => None,
-        };
+        self.rows.iter().any(|row| row.place() == place).then(|| self.target_at(place))
+    }
+
+    /// What the menu is for, as it opens on `place`: the place, the directory
+    /// its pane works in, and the branch checked out there. A session has
+    /// neither, having no pane.
+    fn target_at(&self, place: Place) -> Target {
         let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
-        Some(Target { cwd: pane.and_then(|pane| pane.cwd.clone()), branch, place })
+        let cwd = pane.and_then(|pane| pane.cwd.clone());
+        let trees = self.host.iter().flat_map(|host| &host.work_trees);
+        let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
+        let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
+        Target { cwd, branch: checkout.map(|checkout| checkout.branch), place }
+    }
+
+    /// Opens the menu for the pane luneta's zellij is on, on its first group,
+    /// in the place of one open at the bottom, to float over zellij once the
+    /// keys are its own. None opens while the sidebar does not know which
+    /// pane that is: why, for luneta to say over zellij. What went wrong
+    /// before goes from the notes, as it does for any key the sidebar takes.
+    pub fn float_menu(&mut self) -> Result<(), &'static str> {
+        self.notice = None;
+        let place = self.here_place()?;
+        self.menus += 1;
+        self.menu = Some(Menu::new(self.menus, self.target_at(place)));
+        Ok(())
+    }
+
+    /// The menu, while it floats over zellij.
+    pub fn floating(&self) -> Option<&Menu> {
+        self.menu.as_ref().filter(|_| self.floats())
+    }
+
+    /// Whether the menu floats over zellij, rather than standing at the
+    /// bottom of the sidebar: it does while the keys are its own there.
+    fn floats(&self) -> bool {
+        matches!(self.keys, Keys::Menu { .. })
     }
 
     /// The pane `id` of the session `listed`, as the daemon last said.
@@ -1600,7 +1695,7 @@ impl Sidebar {
                 return match done {
                     Done::Nothing => Asked::Nothing,
                     Done::Wrong(reason) => {
-                        self.notice = Some(reason);
+                        self.say(reason);
                         Asked::Nothing
                     },
                     Done::Start(cwd) => self.start(&cwd),
@@ -1637,7 +1732,6 @@ impl Sidebar {
                 let plan = close::plan(&self.subject(&target, Deletes::Session));
                 self.planned(plan)
             },
-            Wants::Leave { session, to } => self.delete(Act::Leave { session, to }),
         }
     }
 
@@ -1740,7 +1834,7 @@ impl Sidebar {
         match Brief::new(over, notes) {
             Ok(brief) => Asked::Brief(brief),
             Err(reason) => {
-                self.notice = Some(reason);
+                self.say(reason);
                 Asked::Nothing
             },
         }
@@ -1751,7 +1845,7 @@ impl Sidebar {
     /// that name.
     fn start(&mut self, cwd: &str) -> Asked {
         let Some(name) = zellij::session_for(Path::new(cwd)) else {
-            self.notice = Some(format!("menu: no session can be named for {cwd}"));
+            self.say(format!("menu: no session can be named for {cwd}"));
             return Asked::Nothing;
         };
         let sessions = self.host.iter().flat_map(|host| &host.sessions);
@@ -1795,7 +1889,7 @@ impl Sidebar {
         match opened {
             Ok(pane) => Asked::Go(Place::Pane { session, pane }),
             Err(why) => {
-                self.notice = Some(format!("menu: nothing opened: {why}"));
+                self.say(format!("menu: nothing opened: {why}"));
                 Asked::Nothing
             },
         }
@@ -2269,11 +2363,13 @@ impl Sidebar {
     }
 
     /// How the title's rule and the edge are drawn: in `ACCENT` while the
-    /// sidebar has the keys, and dim while zellij or a brief has them.
+    /// sidebar has the keys, and dim while zellij or a box over it has them.
     fn framing(&self) -> Style {
         match self.keys {
             Keys::Sidebar => Style::new().fg(ACCENT),
-            Keys::Zellij | Keys::Lent => Style::new().add_modifier(Modifier::DIM),
+            Keys::Zellij | Keys::Lent | Keys::Menu { .. } => {
+                Style::new().add_modifier(Modifier::DIM)
+            },
         }
     }
 
@@ -2368,8 +2464,14 @@ impl Sidebar {
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
         }
+        if let Some(Sent { session, from: Some(Leaving { ends: true, .. }), landed: false, .. }) =
+            &self.sent
+        {
+            let going = format!("Going to {session}; this session ends once you are there");
+            notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
+        }
         let room = height.saturating_sub(HEADER + 1 + notes.len());
-        if let Some(menu) = &self.menu {
+        if let Some(menu) = self.menu.as_ref().filter(|_| !self.floats()) {
             notes.extend(menu.lines(width, room));
         } else if let Some(term) = self.search() {
             notes.push(query(term, width));
@@ -4591,6 +4693,131 @@ mod tests {
         assert!(sidebar.menu.is_none());
     }
 
+    /// The menu floats over zellij for the pane luneta's zellij is on,
+    /// wherever the highlight is, and in a folded session too, and the
+    /// sidebar stands meanwhile as it does under a brief. Its keys open beside
+    /// that pane, where it works and for the branch checked out there, and
+    /// what they open is where luneta goes, as for the menu at the bottom.
+    /// None floats until the sidebar knows which pane zellij is on, and it
+    /// says why. It closes with its box.
+    #[test]
+    fn the_menu_floats_over_zellij_for_the_pane_zellij_is_on() {
+        let mut sidebar = Sidebar::default();
+        let mut host = host(
+            vec![
+                session("newer", 20, vec![pane(1, 0, "/w/b", "fish")]),
+                session("older", 10, vec![pane(1, 0, "/w/luneta/main", "claude")]),
+            ],
+            vec![agent("older", 1, Status::Waiting, Some("fold"))],
+        );
+        let head = Some(api::checkout::Head::Branch(api::Branch {
+            name: "feat/menu".to_owned(),
+            upstream: None,
+        }));
+        let checkout = api::Checkout { head, changes: Some(api::Changes::default()), stashes: 0 };
+        host.work_trees = vec![api::WorkTree {
+            dir: "/w/luneta/main".to_owned(),
+            stands: Some(api::work_tree::Stands::Checkout(checkout)),
+        }];
+        sidebar.heard(host);
+        let look = sidebar.titled("older | fold".to_owned()).expect("a look");
+        assert_eq!(sidebar.float_menu(), Err(NO_HERE_PANE));
+        assert!(sidebar.floating().is_none());
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
+
+        // The highlight on the newer session's pane, and the older folded.
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "hjj");
+        assert!(sidebar.folds.contains("older"));
+        assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("newer", 20), pane: 1 }));
+        // The sidebar as it stands, the keys where they are.
+        let standing = |sidebar: &mut Sidebar| {
+            let area = Rect::new(0, 0, 32, 14);
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw(&mut buffer, area, moment(160_000));
+            let row = |y| (0..32).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            (0..14).map(row).collect::<Vec<_>>()
+        };
+        sidebar.focus(Keys::Lent);
+        let lent = standing(&mut sidebar);
+        sidebar.focus(Keys::Sidebar);
+        assert_eq!(sidebar.float_menu(), Ok(()));
+        sidebar.focus(Keys::Menu { lent: true });
+        assert_eq!(standing(&mut sidebar), lent);
+        let target = sidebar.floating().map(Menu::target).cloned();
+        assert_eq!(target, Some(Target {
+            place: Place::Pane { session: listed("older", 10), pane: 1 },
+            cwd: Some("/w/luneta/main".to_owned()),
+            branch: Some("feat/menu".to_owned()),
+        }));
+
+        let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
+        let tab = Open::Tab { session: older.clone(), cwd: cwd.clone(), name: None, command: vec![] };
+        type_in(&mut sidebar, "n");
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Open { menu: 1, open: tab });
+        let opened = Place::Pane { session: listed("older", 10), pane: 7 };
+        assert_eq!(sidebar.opened(1, Ok(7)), Asked::Go(opened));
+        assert!(sidebar.floating().is_none());
+        sidebar.focus(Keys::Zellij);
+
+        assert_eq!(sidebar.float_menu(), Ok(()));
+        sidebar.focus(Keys::Menu { lent: false });
+        type_in(&mut sidebar, "c");
+        let command = ["claude", "--name", "thermo-nuclear-review: feat/menu", "/thermo-nuclear-review"];
+        let command = command.map(str::to_owned).to_vec();
+        let pane = Open::Pane { session: older, beside: 1, cwd, command };
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Open { menu: 2, open: pane });
+        // zellij has the keys again, which the sidebar never held meanwhile.
+        sidebar.focus(Keys::Zellij);
+        assert!(sidebar.menu.is_none());
+    }
+
+    /// What goes wrong with what the menu over zellij does is said over
+    /// zellij, where you look, and the sidebar collapsed has no room for:
+    /// luneta takes it once, and it stays out of the notes, but for what
+    /// luneta did not take as the box gave up the keys. The menu at the bottom
+    /// says it in the notes. What went wrong before goes from the notes as the
+    /// menu floats, and one that cannot float says why.
+    #[test]
+    fn the_menu_over_zellij_says_over_zellij_what_went_wrong() {
+        let mut sidebar = Sidebar::default();
+        let unknown = Pane { cwd: None, ..pane(1, 0, "/w/b", "fish") };
+        sidebar.heard(host(vec![session("only", 10, vec![unknown])], Vec::new()));
+        let look = sidebar.titled("only | fish".to_owned()).expect("a look");
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
+        let wrong = "menu: luneta does not know yet where pane 1 works; try again in a moment";
+
+        assert_eq!(sidebar.float_menu(), Ok(()));
+        sidebar.focus(Keys::Menu { lent: false });
+        type_in(&mut sidebar, "np");
+        assert!(sidebar.floating().is_none());
+        assert_eq!(sidebar.said().as_deref(), Some(wrong));
+        assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, None));
+        sidebar.focus(Keys::Zellij);
+
+        assert_eq!(sidebar.float_menu(), Ok(()));
+        sidebar.focus(Keys::Menu { lent: false });
+        type_in(&mut sidebar, "np");
+        sidebar.focus(Keys::Zellij);
+        assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, Some(wrong)));
+
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "np");
+        assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, Some(wrong)));
+        assert_eq!(sidebar.float_menu(), Ok(()));
+        assert!(sidebar.notice.is_none());
+
+        let mut sidebar = Sidebar::default();
+        let twin = || session("twin", 10, vec![pane(1, 0, "/w/b", "fish")]);
+        sidebar.heard(host(vec![twin(), Session { socket: 11, ..twin() }], Vec::new()));
+        let look = sidebar.titled("twin | fish".to_owned()).expect("a look");
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
+        assert_eq!(sidebar.float_menu(), Err(TWIN_SESSIONS));
+    }
+
     /// The Brief group's keys brief you by the row the menu was for: `b z` on
     /// every session, in the rows' order, as you moved them too, `b s` on the
     /// row's session, and `b h` on the agent in the row's pane, or on a
@@ -4768,10 +4995,43 @@ mod tests {
         let to = Place::Session(listed("newer", 20));
         let leave = Act::Leave { session: "older".to_owned(), to };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
-        assert_eq!(sidebar.menu.as_ref().and_then(Menu::leaving), Some("newer"));
-        // It says where it goes for as long as it takes, with the focus or not.
-        sidebar.focus(Keys::Zellij);
-        assert!(sidebar.menu.is_some());
+        assert!(sidebar.menu.is_none());
+    }
+
+    /// As luneta's zellij leaves the session a delete kills, the sidebar says
+    /// where it goes, with the keys or without, until zellij titles it there
+    /// or says it stayed. A client that ended on its way leaves nothing to
+    /// say: the one that takes its place goes nowhere, whichever session it
+    /// is in, and what zellij says late of the go changes nothing.
+    #[test]
+    fn the_sidebar_says_where_a_delete_goes_while_it_goes() {
+        let going = |sidebar: &mut Sidebar, focused: bool| {
+            let lines = screen(sidebar, focused, 32, 16);
+            lines.iter().any(|line| line.contains("Going to newer; this session"))
+        };
+        let newer = Place::Session(listed("newer", 20));
+        let mut sidebar = two_sessions();
+        sidebar.leaving(&newer);
+        assert!(going(&mut sidebar, true));
+        assert!(going(&mut sidebar, false));
+        sidebar.titled("newer | fish".to_owned());
+        assert!(!going(&mut sidebar, false));
+
+        let mut sidebar = two_sessions();
+        let look = sidebar.leaving(&newer).expect("a look");
+        sidebar.stayed(look.number);
+        assert!(!going(&mut sidebar, false));
+
+        let mut sidebar = two_sessions();
+        let look = sidebar.leaving(&newer).expect("a look");
+        let rejoined = sidebar.rejoining(&session_name("older"));
+        assert!(!going(&mut sidebar, false));
+        sidebar.stayed(look.number);
+        let clients = vec![Client { id: 2, pane: Some(1) }];
+        let before = Some(Before::Listed(vec![]));
+        sidebar.looked(Looked { number: rejoined.number, went: None, clients, before });
+        assert!(!going(&mut sidebar, false));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
     /// While luneta's zellij is on its way to a session, it may be in that

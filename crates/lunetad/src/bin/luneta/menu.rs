@@ -1,6 +1,7 @@
 //! The menu: a key, then another, and a pane opens where you work, as
 //! which-key shows the keys in neovim. It opens at the bottom of the sidebar,
-//! for the row highlighted then.
+//! for the row highlighted then, or floats in a box at the bottom right of
+//! zellij's side, for the pane zellij is on.
 //!
 //! Its keys are luneta's own. `/` searches every skill the directory of the
 //! row's pane can run, for an agent to start on the one you pick, beside that
@@ -20,6 +21,8 @@
 //! is open, the legend at its bottom lists the keys it takes there.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -79,6 +82,11 @@ const GAP: usize = 2;
 
 /// The most skills the search box shows at once. The list scrolls under it.
 const SEARCH_ROWS: usize = 8;
+
+/// The fewest and the most columns inside the box the menu floats in, past
+/// its borders: as many as what it shows takes, the search box the most, and
+/// what is longer wraps or is cut.
+const FLOATING: (usize, usize) = (24, 62);
 
 /// What a key that starts an agent starts.
 const CLAUDE: &str = "claude";
@@ -593,9 +601,6 @@ pub enum Wants {
     /// zellij to open what `opens` says, in `cwd`, for luneta to take its
     /// client there.
     Open { cwd: String, opens: Opens },
-    /// luneta's zellij taken to `to`, and `session`, which it is in, killed
-    /// once it has left. The menu says so meanwhile.
-    Leave { session: String, to: Place },
 }
 
 /// What a menu that closed leaves the sidebar to do.
@@ -606,7 +611,8 @@ pub enum Done {
     Wrong(String),
     /// Take luneta's zellij to a session it makes, that starts in `cwd`.
     Start(String),
-    /// Have zellij do what a delete key planned.
+    /// Have zellij do what a delete key planned: for the session luneta's
+    /// zellij is in, once it has left it.
     Act(Act),
     /// Brief you on what the agents `scope` covers are doing, by `place`, the
     /// row the menu was for.
@@ -616,7 +622,7 @@ pub enum Done {
 }
 
 /// The menu at the bottom of the sidebar, for the row highlighted when it
-/// opened.
+/// opened, or floating over zellij, for the pane zellij was on.
 pub struct Menu {
     /// Its number among the menus the sidebar has opened, which what zellij
     /// answers for it carries.
@@ -638,9 +644,6 @@ enum Stage {
     /// zellij opens what a key asked for, for luneta to take its client
     /// there. Keys do nothing but close the menu.
     Opening(Keys),
-    /// luneta's zellij is on its way to this session, and the session it
-    /// leaves ends once it is gone. Keys do nothing.
-    Leaving(String),
 }
 
 impl Menu {
@@ -660,6 +663,12 @@ impl Menu {
         })
     }
 
+    /// The menu numbered `number` for `target`, on its first group.
+    pub fn new(number: u64, target: Target) -> Menu {
+        let keys = Keys::new(target.deletes());
+        Menu { number, target, stage: Stage::Choosing(keys) }
+    }
+
     pub fn number(&self) -> u64 {
         self.number
     }
@@ -676,23 +685,13 @@ impl Menu {
             Stage::Planning { .. }
             | Stage::Choosing(_)
             | Stage::Asking { .. }
-            | Stage::Opening(_)
-            | Stage::Leaving(_) => None,
+            | Stage::Opening(_) => None,
         }
     }
 
     /// Whether the menu waits for zellij to open what a key asked for.
     pub fn opening(&self) -> bool {
         matches!(self.stage, Stage::Opening(_))
-    }
-
-    /// The session luneta's zellij is on its way to, while the session it
-    /// leaves ends once it is there. The menu outlasts the focus meanwhile.
-    pub fn leaving(&self) -> Option<&str> {
-        match &self.stage {
-            Stage::Leaving(to) => Some(to),
-            _ => None,
-        }
     }
 
     /// What `key` does to the menu, and what that leaves the sidebar to do.
@@ -746,9 +745,7 @@ impl Menu {
             Stage::Planning { .. } | Stage::Opening(_) if closes(key) => {
                 Did::Closed(Done::Nothing)
             },
-            stage @ (Stage::Planning { .. } | Stage::Opening(_) | Stage::Leaving(_)) => {
-                stays(stage, Wants::Nothing)
-            },
+            stage @ (Stage::Planning { .. } | Stage::Opening(_)) => stays(stage, Wants::Nothing),
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
                 Answer::Yes => {
                     let planning = Stage::Planning { keys, delete, agreed: Some(plan) };
@@ -782,15 +779,7 @@ impl Menu {
             let stage = Stage::Asking { keys, delete, plan, asks };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
-        match plan.act {
-            Act::Leave { session, to } => {
-                let stage = Stage::Leaving(to.session().to_owned());
-                Did::Stays(Menu { number, target, stage }, Wants::Leave { session, to })
-            },
-            act @ (Act::Pane { .. } | Act::Tab { .. } | Act::Kill(_)) => {
-                Did::Closed(Done::Act(act))
-            },
-        }
+        Did::Closed(Done::Act(plan.act))
     }
 
     /// Fills the search box with what the finder said, while it is open.
@@ -808,9 +797,31 @@ impl Menu {
     /// go back and close under them. Short of room, what it shows goes first,
     /// then the rule.
     pub fn lines(&self, width: usize, room: usize) -> Vec<Line<'static>> {
+        self.shown(width, room.saturating_sub(2)).lines(width, room)
+    }
+
+    /// Draws the menu floating at the bottom right of `over`, zellij's side,
+    /// as `float` does. The search box takes the most columns, so that it
+    /// keeps its width as you type.
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect) {
+        float(buffer, over, self.searching(), |width, body_room| self.shown(width, body_room));
+    }
+
+    /// Whether the search box over the skills is open.
+    fn searching(&self) -> bool {
+        match &self.stage {
+            Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
+                keys.search.is_some()
+            },
+            Stage::Asking { .. } => false,
+        }
+    }
+
+    /// What the menu shows `width` wide, with `body_room` lines at most for
+    /// what it shows under the rule.
+    fn shown(&self, width: usize, body_room: usize) -> Shown {
         let inner = width.saturating_sub(1);
         let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
-        let body_room = room.saturating_sub(2);
         let (title, right, body, footer) = match &self.stage {
             Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
                 if let Some(search) = &keys.search {
@@ -833,22 +844,110 @@ impl Menu {
                 wrap(asks, width, Style::new().fg(NAME)),
                 keys_line(width, &[("<y>", "Yes"), ("<BS>", "Back"), ("<ESC>", "Close")]),
             ),
-            Stage::Leaving(to) => {
-                let going = format!("Going to {to}; this session ends once you are there");
-                let body = wrap(&going, width, Style::new().fg(NAME));
-                (TITLE.to_owned(), String::new(), body, Line::default())
-            },
         };
+        Shown { title, right, body, footer }
+    }
+}
+
+/// What the menu shows: the title of the rule over it and where its pane
+/// works, at the rule's right, the lines under the rule, and the keys that go
+/// back and close under them.
+struct Shown {
+    title: String,
+    right: String,
+    body: Vec<Line<'static>>,
+    footer: Line<'static>,
+}
+
+impl Shown {
+    /// The columns it takes past the space each line starts with and one
+    /// after: those of its widest line, and the rule's, with room for all of
+    /// both its title and its right.
+    fn takes(&self) -> usize {
+        let lines = self.body.iter().chain([&self.footer]);
+        let widest = lines.map(|line| line.width() + 1).max().unwrap_or(0);
+        // `─ `, the title, a space and a `─`; and a space, the right, a space
+        // and a last `─`, as `rule` has it.
+        let tail = if self.right.is_empty() { 0 } else { self.right.width() + 3 };
+        widest.max(4 + self.title.width() + tail)
+    }
+
+    /// Its lines, `width` wide, in `room` lines at most: the rule, what it
+    /// shows under it, and the keys under them. Short of room, what it shows
+    /// goes first, then the rule.
+    fn lines(self, width: usize, room: usize) -> Vec<Line<'static>> {
+        let Shown { title, right, body, footer } = self;
         let mut lines = Vec::with_capacity(room);
         if room >= 2 {
             lines.push(rule(&title, &right, width));
         }
-        lines.extend(body.into_iter().take(body_room));
+        lines.extend(body.into_iter().take(room.saturating_sub(2)));
         if room >= 1 {
             lines.push(footer);
         }
         lines
     }
+}
+
+/// Draws what `shown` shows, for a width and the lines its body has room
+/// for, floating at the bottom right of `over`, zellij's side: in a box as
+/// wide as that takes, or the `widest` the box can be, within `FLOATING`,
+/// and as tall as its lines, the rule over them its top.
+fn float(buffer: &mut Buffer, over: Rect, widest: bool, shown: impl Fn(usize, usize) -> Shown) {
+    let (fewest, most) = FLOATING;
+    let most = most.min(usize::from(over.width.saturating_sub(2)));
+    // The rule is the box's top, and its bottom takes a line of its own.
+    let room = usize::from(over.height.saturating_sub(1));
+    if most == 0 || room < 2 {
+        return;
+    }
+    let inner =
+        if widest { most } else { shown(most, room - 2).takes().clamp(fewest.min(most), most) };
+    let lines = shown(inner, room - 2).lines(inner, room);
+    let Some((rule, rest)) = lines.split_first() else {
+        return;
+    };
+    // Both fit `over`, as `inner` and `lines` were made to.
+    let width = u16::try_from(inner + 2).unwrap_or(over.width);
+    let height = u16::try_from(lines.len() + 1).unwrap_or(over.height);
+    let area = Rect::new(over.right() - width, over.bottom() - height, width, height);
+    boxed(buffer, area, rule, rest);
+}
+
+/// Draws `note` floating at the bottom right of `over`, where the menu over
+/// zellij floats: what went wrong as it did what a key asked, or why it did
+/// not open, which any key or click closes.
+pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
+    float(buffer, over, false, |width, _| Shown {
+        title: TITLE.to_owned(),
+        right: String::new(),
+        body: wrap(note, width, Style::new().fg(sidebar::ERROR)),
+        footer: keys_line(width, &[("<any key>", "Close")]),
+    });
+}
+
+/// Draws `lines` in a box that covers `area`, under `rule` between `┌` and
+/// `┐` along its top, each line between `│` and `│`, and `─` along its
+/// bottom, between `└` and `┘`. What it covers is blanked first.
+pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>]) {
+    let (Some(inner), Some(last)) = (area.width.checked_sub(2), area.bottom().checked_sub(1)) else {
+        return;
+    };
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let plain = Style::reset().fg(gruvbox::FG1);
+    for row in area.rows() {
+        buffer.set_string(row.x, row.y, " ".repeat(usize::from(row.width)), plain);
+    }
+    let mut top = vec![Span::styled("┌", dim)];
+    top.extend(rule.spans.iter().cloned());
+    top.push(Span::styled("┐", dim));
+    buffer.set_line(area.x, area.y, &Line::from(top), area.width);
+    for (line, y) in lines.iter().zip(area.y + 1..last) {
+        buffer.set_string(area.x, y, "│", dim);
+        buffer.set_line(area.x + 1, y, line, inner);
+        buffer.set_string(area.right() - 1, y, "│", dim);
+    }
+    buffer.set_string(area.x, last, format!("└{}┘", "─".repeat(usize::from(inner))), dim);
 }
 
 /// `text` on as many lines of `width` as it takes, a space in from the edge,
@@ -1385,8 +1484,10 @@ mod tests {
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(act));
     }
 
+    /// A delete of the session luneta's zellij is in closes the menu as any
+    /// other does: what waits on zellij's client leaving it is the go's.
     #[test]
-    fn leaving_the_session_luneta_is_in_shows_where_you_are_going() {
+    fn a_delete_of_the_session_luneta_is_in_closes_the_menu() {
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('s')));
         let elo = Place::Session(Listed::new("elo", SystemTime::UNIX_EPOCH));
@@ -1397,17 +1498,81 @@ mod tests {
             agents: Ok(Vec::new()),
             refuge: Some(elo.clone()),
         };
-        let (menu, wants) = stays(menu.planned(close::plan(&subject)));
-        assert_eq!(wants, Wants::Leave { session: "luneta".to_owned(), to: elo });
-        assert_eq!(menu.leaving(), Some("elo"));
-        assert_eq!(
-            text(&menu.lines(31, 9)),
-            [
-                "─ luneta ──────────────────────",
-                " Going to elo; this session",
-                " ends once you are there",
-                "",
-            ]
-        );
+        let leave = Act::Leave { session: "luneta".to_owned(), to: elo };
+        assert_eq!(closed(menu.planned(close::plan(&subject))), Done::Act(leave));
+    }
+
+    /// zellij's side, `width` by `height` past `ZELLIJ_X` columns of the
+    /// sidebar's, with what `draw` draws floating over it, as text. Each cell
+    /// of the box is in gruvbox's colours.
+    fn floated(draw: impl FnOnce(&mut Buffer, Rect), width: u16, height: u16) -> Vec<String> {
+        const ZELLIJ_X: u16 = 10;
+        let over = Rect::new(ZELLIJ_X, 0, width, height);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, ZELLIJ_X + width, height));
+        // What zellij drew there goes under the box.
+        for row in over.rows() {
+            buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
+        }
+        draw(&mut buffer, over);
+        let content = buffer.content().iter();
+        for cell in content.filter(|cell| !matches!(cell.symbol(), "z" | " ")) {
+            assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+        }
+        let row = |y| (ZELLIJ_X..ZELLIJ_X + width).map(|x| buffer[(x, y)].symbol()).collect();
+        (0..height).map(row).collect()
+    }
+
+    /// The menu over zellij floats at the bottom right of zellij's side, in
+    /// a box as wide as the keys of the group open and the rule over them
+    /// take, and as tall as its lines.
+    #[test]
+    fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
+        let menu = Menu::new(1, pane_row());
+        let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
+        assert_eq!(floated(|buffer, over| menu.draw(buffer, over), 50, 10), [
+            "z".repeat(50),
+            format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
+            boxed(" /  Search skills"),
+            boxed(" a  Ask"),
+            boxed(" c  Claude ▸"),
+            boxed(" n  New ▸"),
+            boxed(" d  Delete ▸"),
+            boxed(" b  Brief ▸"),
+            boxed(" <ESC> - Close"),
+            format!("{}└{}┘", "z".repeat(24), "─".repeat(24)),
+        ]);
+
+        let (menu, _) = stays(menu.key(&char('c')));
+        let zellij = "z".repeat(7);
+        let rule = format!("─ Claude {} luneta/main ─", "─".repeat(18));
+        assert_eq!(floated(|buffer, over| menu.draw(buffer, over), 50, 7)[1..], [
+            format!("{zellij}┌{rule}┐"),
+            format!("{zellij}│{:<41}│", " t  /thermo-nuclear-review"),
+            format!("{zellij}│{:<41}│", " m  /make-illegal-states-unrepresentable"),
+            format!("{zellij}│{:<41}│", " s  /tigerstyle"),
+            format!("{zellij}│{:<41}│", " <BS> - Back, <ESC> - Close"),
+            format!("{zellij}└{}┘", "─".repeat(41)),
+        ]);
+        // Narrower than the keys take, the box is as wide as zellij's side.
+        let narrow = floated(|buffer, over| menu.draw(buffer, over), 30, 7);
+        assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
+    }
+
+    /// What went wrong with the menu over zellij floats where it did, in a
+    /// box as wide as what it says takes, over the key that closes it.
+    #[test]
+    fn a_note_floats_where_the_menu_does() {
+        let note = "menu: luneta does not know yet which pane zellij is on; try again in a moment";
+        let zellij = "z".repeat(5);
+        let boxed = |inner: &str| format!("{zellij}│{inner:<43}│");
+        assert_eq!(floated(|buffer, over| draw_note(buffer, over, note), 50, 7), [
+            "z".repeat(50),
+            "z".repeat(50),
+            format!("{zellij}┌─ luneta {}┐", "─".repeat(34)),
+            boxed(" menu: luneta does not know yet which pane"),
+            boxed(" zellij is on; try again in a moment"),
+            boxed(" <any key> - Close"),
+            format!("{zellij}└{}┘", "─".repeat(43)),
+        ]);
     }
 }
