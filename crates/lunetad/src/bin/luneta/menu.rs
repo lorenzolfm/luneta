@@ -513,8 +513,9 @@ struct Delete {
 }
 
 /// What the menu is for: the row highlighted as it opened, the directory
-/// its pane works in and the branch checked out there, as the daemon last
-/// said. A session's row has neither, having no pane.
+/// its pane works in, or its agent while zellij has not said, and the branch
+/// checked out there, as the daemon last said. A session's row has neither,
+/// having no pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub place: Place,
@@ -532,8 +533,8 @@ impl Target {
     /// The pane a key starts an agent or opens a pane beside, and the
     /// directory it works in, where a tab or a session opens too, or why
     /// there is none: a session's row has no pane, and a pane the daemon has
-    /// not said the directory of yet opens nothing, rather than wherever
-    /// zellij runs.
+    /// said no directory of yet, nor of an agent in it, opens nothing, rather
+    /// than wherever zellij runs.
     fn beside(&self) -> Result<(u32, String), String> {
         let Some(pane) = self.place.pane() else {
             return Err(NO_ROW_PANE.to_owned());

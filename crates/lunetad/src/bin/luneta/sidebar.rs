@@ -1725,11 +1725,17 @@ impl Sidebar {
     }
 
     /// What the menu is for, as it opens on `place`: the place, the directory
-    /// its pane works in, and the branch checked out there. A session has
-    /// neither, having no pane.
+    /// its pane works in, or its agent, as its row says it, and the branch
+    /// checked out there. A session has neither, having no pane.
     fn target_at(&self, place: Place) -> Target {
         let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
-        let cwd = pane.and_then(|pane| pane.cwd.clone());
+        let agents = self.host.as_ref().map(|host| seated(&host.agents, &host.sessions));
+        let cwd = pane.and_then(|pane| {
+            match agents.as_ref()?.get(&(place.session(), pane.id)) {
+                Some(agent) => Some(agent_dir(agent, pane).to_owned()),
+                None => pane.cwd.clone(),
+            }
+        });
         let trees = self.host.iter().flat_map(|host| &host.work_trees);
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
@@ -4894,6 +4900,26 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
+    }
+
+    /// The menu on an agent's row whose pane zellij has not said the
+    /// directory of yet is for where the agent works, as the row says it, and
+    /// opens beside the agent there.
+    #[test]
+    fn the_menu_on_an_agent_is_for_where_its_row_says_it_works() {
+        let mut sidebar = Sidebar::default();
+        let unsaid = Pane { cwd: None, ..pane(1, 0, "", "claude") };
+        let agents = vec![agent("s", 1, Status::Idle, None)];
+        sidebar.heard(host(vec![session("s", 10, vec![unsaid])], agents));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "j");
+        assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("s", 10), pane: 1 }));
+        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 32, 12);
+        assert_eq!(lines[7], "─ New ─────────── luneta/main ─", "{lines:?}");
+        let (session, cwd) = ("s".to_owned(), "/w/luneta/main".to_owned());
+        let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
+        assert_eq!(sidebar.key(&char('p'), moment(160_000)), Asked::Open { menu: 1, open: pane });
     }
 
     /// The menu floats over zellij for the pane luneta's zellij is on,
