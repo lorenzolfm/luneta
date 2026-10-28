@@ -7,30 +7,20 @@
 )]
 
 #[path = "../src/agents.rs"] mod agents;
-#[path = "../src/brief.rs"] mod brief;
-#[path = "../src/checkouts.rs"] mod checkouts;
 #[path = "../src/close.rs"] mod close;
-#[path = "../src/coming.rs"] mod coming;
 #[path = "../src/context.rs"] mod context;
 #[path = "../src/cursor.rs"] mod cursor;
 #[path = "../src/daemon.rs"] mod daemon;
 #[path = "../src/dirs.rs"] mod dirs;
-#[path = "../src/dock.rs"] mod dock;
 #[path = "../src/elapsed.rs"] mod elapsed;
 #[path = "../src/fetch.rs"] mod fetch;
-#[path = "../src/folds.rs"] mod folds;
-#[path = "../src/hiding.rs"] mod hiding;
-#[path = "../src/icons.rs"] mod icons;
 #[path = "../src/layout.rs"] mod layout;
-#[path = "../src/ledger.rs"] mod ledger;
 #[path = "../src/menu.rs"] mod menu;
-#[path = "../src/news.rs"] mod news;
 #[path = "../src/paint.rs"] mod paint;
 #[path = "../src/panes.rs"] mod panes;
 #[path = "../src/places.rs"] mod places;
 #[path = "../src/render.rs"] mod render;
 #[path = "../src/sessions.rs"] mod sessions;
-#[path = "../src/shells.rs"] mod shells;
 #[path = "../src/skills.rs"] mod skills;
 #[path = "../src/tree.rs"] mod tree;
 

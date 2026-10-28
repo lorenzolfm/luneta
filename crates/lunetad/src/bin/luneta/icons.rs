@@ -3,11 +3,9 @@
 //!
 //! The program is the agent in the pane, or else what the daemon says the
 //! pane's terminal runs in the foreground: the process group in front, or the
-//! shell itself at its prompt. The icons are the plugin's own, from its
-//! `src/icons.rs`, and Nerd Fonts', which only a Nerd Font draws, with the
-//! terminal for each shell a row is named as one for: `dash` and `elvish` too.
-//! The plugin's configuration changes them with `icons`; luneta has no
-//! configuration yet.
+//! shell itself at its prompt. The icons are Nerd Fonts', which only a Nerd
+//! Font draws, with the terminal for each shell a row is named as one for:
+//! `dash` and `elvish` too. luneta has no configuration to change them yet.
 
 use std::iter::Peekable;
 use std::str::SplitWhitespace;

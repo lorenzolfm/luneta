@@ -6,9 +6,7 @@ pub struct Age(Duration);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Held(Duration);
 
-/// A moment, as the host's clock tells it: how long after the epoch. Every
-/// session's sidebar reads the same clock, so a moment one of them keeps
-/// means the same to the others.
+/// A moment, as the host's clock tells it: how long after the epoch.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct Moment(Duration);
 
@@ -23,18 +21,15 @@ impl Moment {
         Moment(Duration::from_millis(millis))
     }
 
+    #[cfg(test)]
     pub fn millis(self) -> u64 {
         u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX)
     }
 
     /// The moment `held` before this one.
+    #[cfg(test)]
     pub fn back(self, held: Held) -> Moment {
         Moment(self.0.saturating_sub(held.0))
-    }
-
-    /// The moment `age` before this one: when what is that old now was made.
-    pub fn before(self, age: Age) -> Moment {
-        Moment(self.0.saturating_sub(age.0))
     }
 
     /// How long after `earlier` this moment is: no time at all when it is
@@ -74,6 +69,7 @@ impl Held {
         Held(Duration::from_secs(secs))
     }
 
+    #[cfg(test)]
     pub const fn from_millis(millis: u64) -> Self {
         Held(Duration::from_millis(millis))
     }

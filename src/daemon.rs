@@ -1,9 +1,9 @@
 //! What lunetad, the daemon of the host, says of it through `luneta watch`:
 //! the panes of each session, how the work tree stands where each pane works,
-//! and the agents. The sidebar, the picker and the menu take them from the
-//! daemon alone: while it does not answer, they say so, and ask it again
-//! every few seconds. Which sessions there are, and their tabs and titles,
-//! still come from zellij.
+//! and the agents. The picker and the menu take them from the daemon alone:
+//! while it does not answer, they say so, and ask it again every few seconds.
+//! Which sessions there are, and their tabs and titles, still come from
+//! zellij.
 //!
 //! Told the version of the host last seen, `luneta watch` waits for the next
 //! one, or four seconds at the most, before it answers: asked again as soon
@@ -60,7 +60,7 @@ pub enum Answer {
     Changed(Host),
     /// The host as it was last seen.
     Same,
-    /// Nothing that reads, and why, as the sidebar and the picker say it.
+    /// Nothing that reads, and why, as the picker says it.
     Silent(String),
 }
 
@@ -119,8 +119,8 @@ impl Daemon {
         }
     }
 
-    /// `luneta` is looked for again if it could not be started, for a sidebar
-    /// that comes back to whatever was installed while it was away.
+    /// `luneta` is looked for again if it could not be started, for a picker
+    /// that shows again over whatever was installed while it was hidden.
     pub fn wake(&mut self) {
         if let Heard::Absent(at) = self.heard {
             self.heard = Heard::Silent(at);
@@ -136,8 +136,8 @@ pub fn looked(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Ho
     Ok(host)
 }
 
-/// Why `luneta watch` did not say how the host stands, as the sidebar, the
-/// picker and the menu say it: `luneta` could not be started, or lunetad did
+/// Why `luneta watch` did not say how the host stands, as the picker and the
+/// menu say it: `luneta` could not be started, or lunetad did
 /// not answer, for `why`.
 fn silence(exit_code: Option<i32>, stderr: &[u8], why: &str) -> String {
     if unstarted(exit_code, stderr) {
@@ -198,10 +198,10 @@ mod tests {
     /// A daemon that is not running, or answers what does not read, is said
     /// not to answer, and why, and is asked again a few seconds on, from the
     /// start. A `luneta` that is not there at all is looked for again only
-    /// as the sidebar wakes, as zellij logs each command it cannot start.
+    /// as the picker shows again, as zellij logs each command it cannot start.
     #[test]
     fn a_daemon_that_does_not_answer_is_asked_again_a_while_on() {
-        /// How `luneta watch` ended, what it wrote out, and what the sidebar
+        /// How `luneta watch` ended, what it wrote out, and what the picker
         /// says of it.
         type Failure<'a> = (Option<i32>, &'a [u8], &'a [u8], &'a str);
 

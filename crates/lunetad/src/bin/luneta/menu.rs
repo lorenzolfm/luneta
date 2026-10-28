@@ -49,8 +49,7 @@ const BRIEF: char = 'b';
 const BRIEF_NAME: &str = "Brief";
 
 /// What the rule over the menu's first group, and over the legend, names
-/// them, and the sidebar's first line, as zellij's frame had it on the
-/// plugin's; and what it names the search box.
+/// them, and the sidebar's first line; and what it names the search box.
 pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
 

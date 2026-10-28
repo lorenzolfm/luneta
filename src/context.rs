@@ -1,7 +1,7 @@
 //! The context luneta runs each command with, which the command answers
 //! with: the kind of the command, by which its answer finds its way back.
 
-use crate::{agents, brief, close, daemon, dirs, menu, panes, skills};
+use crate::{agents, close, daemon, dirs, menu, panes, skills};
 
 /// What names the kind of a command luneta runs, in the context the command
 /// answers with: its value says where the answer goes.
@@ -11,26 +11,17 @@ pub const CONTEXT_KEY: &str = "luneta";
 /// answers for a directory that is not the one asked about now goes nowhere.
 pub const DIR_KEY: &str = "luneta_dir";
 
-/// What names the session a command was run for, in its context.
-pub const SESSION_KEY: &str = "luneta_session";
-
 /// Each kind of command luneta runs, by the value its context names it with.
 /// A kind that is not here may share its value with one that is.
-const CONTEXT_VALUES: [&str; 16] = [
+const CONTEXT_VALUES: [&str; 10] = [
     agents::CLOSE_VALUE,
-    brief::CONTEXT_VALUE,
     close::CLIENTS_VALUE,
     daemon::CONTEXT_VALUE,
     dirs::CONTEXT_VALUE,
     dirs::PREVIEW_VALUE,
     dirs::WORKTREES_VALUE,
     menu::BRANCH_VALUE,
-    menu::START_VALUE,
-    menu::OPENING_VALUE,
-    menu::CLOSING_VALUE,
     menu::NAMING_VALUE,
-    menu::ARRIVING_VALUE,
-    menu::TAB_VALUE,
     panes::CONTEXT_VALUE,
     skills::CONTEXT_VALUE,
 ];

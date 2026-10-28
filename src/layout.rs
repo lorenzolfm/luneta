@@ -126,16 +126,8 @@ pub enum Ink {
     Level(Colour),
     /// A colour, bold.
     Bold(Colour),
-    /// The theme's base colour, not bold.
-    Plain,
-    /// The theme's base colour, bold.
-    Strong,
     /// Dimmed, in the terminal's own colour.
     Dim,
-    /// The terminal's gray, not bold.
-    Gray,
-    /// The theme's error colour, bold.
-    Error,
 }
 
 impl From<Colour> for Ink {
@@ -148,7 +140,7 @@ impl Ink {
     fn colour(self) -> Option<Colour> {
         match self {
             Ink::Level(colour) | Ink::Bold(colour) => Some(colour),
-            Ink::Plain | Ink::Strong | Ink::Dim | Ink::Gray | Ink::Error => None,
+            Ink::Dim => None,
         }
     }
 }
@@ -225,12 +217,6 @@ impl Line {
         self.paint(inner_width, 1)
     }
 
-    /// The line in exactly `width` columns, with no margin: for a row that
-    /// draws in its first column.
-    pub fn fill(self, width: usize) -> Painted {
-        self.paint(width, 0)
-    }
-
     fn paint(self, width: usize, margin: usize) -> Painted {
         let Line { mut text, mut chars, mut columns, styles } = self;
         if columns > width {
@@ -262,9 +248,9 @@ impl Line {
         for style in &styles {
             let into = match style {
                 Style::Run(ink, _) | Style::Indices(ink, _) => match ink {
-                    Ink::Level(_) | Ink::Plain => &mut unbold,
+                    Ink::Level(_) => &mut unbold,
                     Ink::Dim => &mut dim,
-                    Ink::Bold(_) | Ink::Strong | Ink::Gray | Ink::Error => continue,
+                    Ink::Bold(_) => continue,
                 },
                 Style::Error(_) => &mut unbold,
             };
@@ -286,20 +272,10 @@ impl Line {
         }
         for style in styles {
             text = match style {
-                Style::Run(Ink::Gray, range) => match clamp(range) {
-                    Some(range) => text.gray_range(range),
-                    None => text,
-                },
-                Style::Indices(Ink::Gray, indices) => text.gray_indices(
-                    indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
-                ),
-                Style::Run(Ink::Error, range) | Style::Error(range) => match clamp(range) {
+                Style::Error(range) => match clamp(range) {
                     Some(range) => text.error_color_range(range),
                     None => text,
                 },
-                Style::Indices(Ink::Error, indices) => text.error_color_indices(
-                    indices.into_iter().filter(|i| *i < visible).map(shift).collect(),
-                ),
                 Style::Run(ink, range) => match (ink.colour(), clamp(range)) {
                     (Some(colour), Some(range)) => text.color_range(colour, range),
                     _ => text,
@@ -432,37 +408,25 @@ mod tests {
     use super::*;
 
     /// zellij leaves a character undimmed when it is also told not to be
-    /// bold, so a dimmed run must stay out of the unbolded ones. A gray run
-    /// is written over the component, so the component is told nothing.
+    /// bold, so a dimmed run must stay out of the unbolded ones.
     #[test]
     fn each_ink_paints_the_way_zellij_reads_it() {
         let mut line = Line::new();
-        for (text, ink) in [
-            ("a", Ink::Level(Colour::Level2)),
-            ("b", Ink::Bold(Colour::Level2)),
-            ("c", Ink::Plain),
-            ("d", Ink::Strong),
-            ("e", Ink::Dim),
-            ("f", Ink::Gray),
-        ] {
+        for (text, ink) in
+            [("a", Ink::Level(Colour::Level2)), ("b", Ink::Bold(Colour::Level2)), ("c", Ink::Dim)]
+        {
             line.push(text, ink);
         }
-        let painted = line.fill(6);
-        let seen: Vec<(Option<Colour>, bool, bool, bool)> = (0..6)
-            .map(|at| {
-                let (colour, bold) = (painted.colour_at(at), painted.is_bold_at(at));
-                (colour, bold, painted.is_dim_at(at), painted.is_gray_at(at))
-            })
+        let painted = line.finish(3);
+        let seen: Vec<(Option<Colour>, bool, bool)> = (1..=3)
+            .map(|at| (painted.colour_at(at), painted.is_bold_at(at), painted.is_dim_at(at)))
             .collect();
         assert_eq!(
             seen,
             [
-                (Some(Colour::Level2), false, false, false),
-                (Some(Colour::Level2), true, false, false),
-                (None, false, false, false),
-                (None, true, false, false),
-                (None, true, true, false),
-                (None, true, false, true),
+                (Some(Colour::Level2), false, false),
+                (Some(Colour::Level2), true, false),
+                (None, true, true),
             ]
         );
     }
