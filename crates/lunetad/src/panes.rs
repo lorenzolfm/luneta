@@ -11,7 +11,7 @@ use std::io;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use luneta_protocol::said::Said;
 use serde::Deserialize;
@@ -27,6 +27,15 @@ use crate::zellij::Id;
 /// How long zellij has to list a session's panes: a server that runs answers
 /// at once.
 const LIMIT: Duration = Duration::from_secs(2);
+
+/// How long the daemon leaves a session's server be once it made its socket,
+/// before it asks zellij anything: every call of zellij's CLI asks the server
+/// of every session whether it runs, and zellij-server 0.45.1 panics where
+/// such a call hangs up before the server took its first client (`lib.rs:1462`,
+/// fixed after 0.45.1 in zellij's 81f56e1), and the session ends with it. The
+/// client that started the server comes a few milliseconds after the socket,
+/// and the socket wakes the sweep as soon as `watch` lets the folder settle.
+const NEWBORN: Duration = Duration::from_millis(500);
 
 /// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,8 +170,8 @@ fn list(session: &str) -> Result<Vec<Pane>, String> {
 /// about, in a thread of its own, and tells the core what it says: every
 /// `sweep`, and at once when `woken`, as a session turns up. One zellij has
 /// not listed the panes of yet goes first, and one that turns up while the
-/// others are asked about goes before those left. The thread ends once the
-/// core has.
+/// others are asked about goes before those left. None is asked about while
+/// a session is `NEWBORN`. The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     woken: Receiver<()>,
@@ -175,6 +184,11 @@ pub fn follow(
             let Some(mut sessions) = core::ask(&core, core::Command::Sessions) else {
                 return;
             };
+            let started = sessions.iter().map(|(session, _)| session.started());
+            if let Some(wait) = newborn(started, SystemTime::now()) {
+                thread::sleep(wait);
+                continue;
+            }
             listed.retain(|session| sessions.iter().any(|(id, _)| id == session));
             sessions.sort_by_key(|(session, _)| listed.contains(session));
             for (session, name) in sessions {
@@ -206,4 +220,34 @@ pub fn follow(
         }
     })?;
     Ok(())
+}
+
+/// How long until the youngest of the sessions that `started` so is no longer
+/// `NEWBORN`, at `now`, where one is. One that started after `now`, by a clock
+/// set back since, is taken for old: it would hold the sweep up for as long
+/// as the clock went back.
+fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
+    let left = |started| NEWBORN.checked_sub(now.duration_since(started).ok()?);
+    started.filter_map(left).filter(|left| !left.is_zero()).max()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sweep waits out the youngest session that is newborn, and none
+    /// that is not. One that started after now, as by a clock set back since,
+    /// holds nothing up: the sweep would wait for as long as the clock went
+    /// back.
+    #[test]
+    fn the_sweep_waits_out_the_youngest_newborn_session() {
+        let now = SystemTime::now();
+        let ago = |age: Duration| now - age;
+        let quarter = NEWBORN / 4;
+        let started = [ago(quarter), ago(quarter * 3), ago(NEWBORN * 4)];
+        assert_eq!(newborn(started.into_iter(), now), Some(quarter * 3));
+        assert_eq!(newborn([ago(NEWBORN), ago(NEWBORN * 4)].into_iter(), now), None);
+        assert_eq!(newborn([now + Duration::from_mins(1)].into_iter(), now), None);
+        assert_eq!(newborn(std::iter::empty(), now), None);
+    }
 }

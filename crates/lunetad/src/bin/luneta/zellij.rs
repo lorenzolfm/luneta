@@ -20,7 +20,7 @@ use lunetad::{clients, program};
 use serde::Deserialize;
 
 use crate::host::Event;
-use crate::own::{Look, Looked};
+use crate::own::{Before, Look, Looked};
 
 /// The longest name zellij makes a session of, in bytes.
 const NAME_BYTES_MAX: usize = 60;
@@ -304,7 +304,7 @@ const ARRIVAL: Duration = Duration::from_secs(2);
 
 /// How long luneta waits for its client to come to the session it attaches
 /// to as it starts, which zellij can take a while to make.
-const START: Duration = Duration::from_secs(10);
+pub const START: Duration = Duration::from_secs(10);
 
 /// How often luneta asks zellij for the clients of a session its client is
 /// on its way to.
@@ -353,10 +353,31 @@ pub fn go(
 /// starts in `cwd`, and then takes the look `then`, if any, for the client's
 /// arrival there. A session that runs under that name is where it goes, and
 /// `cwd` goes unused. The client must have been sent `NUDGE` first.
-pub fn start(at: &str, to: &SessionName, cwd: &str, then: Option<Look>, events: &Sender<Event>) {
+///
+/// Unless zellij's sockets say one runs by that name, as they do not of one
+/// the sidebar names, zellij makes it, and must take the client there before
+/// it is asked anything, as `Before::Made` says: the look comes back as the
+/// client's arrival, for luneta to ask for once zellij titles its terminal in
+/// that session.
+pub fn start(
+    at: &str,
+    to: &SessionName,
+    cwd: &str,
+    then: Option<Look>,
+    events: &Sender<Event>,
+) -> Option<Arrival> {
     let mut command = Command::new("zellij");
     command.args(["--session", at, "action", "switch-session", &to.0, "--cwd", cwd]);
-    run(command, then.map(|look| Then::Arrive(look, None)), events);
+    match then {
+        Some(look) if runs(&to.0) != Some(true) => {
+            run(command, Some(Then::Made(look.number)), events);
+            Some(Arrival { look, before: Before::Made })
+        },
+        then => {
+            run(command, then.map(|look| Then::Arrive(look, None)), events);
+            None
+        },
+    }
 }
 
 /// What the CLI hears of a client it sent somewhere, where nothing typed in
@@ -768,12 +789,40 @@ pub fn look(look: Look, events: &Sender<Event>) {
     thread::spawn(move || looking(&look, &events));
 }
 
-/// Asks zellij for the clients of the session `look` is of, on a thread of
-/// its own, until it lists one that `before` does not, which is luneta's own
-/// client as it attaches, and hands back what it answers then.
-pub fn arrive(look: Look, before: Vec<Client>, events: &Sender<Event>) {
+/// luneta's client on its way to the session of `look`, which zellij lists
+/// once it is there: as a client of it that was not there `before`.
+pub struct Arrival {
+    pub look: Look,
+    pub before: Before,
+}
+
+/// Asks zellij for the clients of the session of `arrival`'s look, on a
+/// thread of its own, until it lists one that was not there before, which is
+/// luneta's own client as it comes, and hands back what it answers then. A
+/// client that comes to a session zellij makes is to be in it first, as
+/// zellij says by drawing for it: asked sooner, zellij can end that session,
+/// as `Before::Made` says.
+pub fn arrive(arrival: Arrival, events: &Sender<Event>) {
     let events = events.clone();
-    thread::spawn(move || arriving(&look, before, START, &events));
+    thread::spawn(move || arriving(&arrival.look, arrival.before, START, &events));
+}
+
+/// What luneta knows of the clients of `session` before its own comes there:
+/// none of one that does not run, as zellij's sockets say, which zellij is to
+/// make, and otherwise what zellij lists, if it does.
+pub fn before(session: &str) -> Before {
+    if runs(session) == Some(false) {
+        return Before::Made;
+    }
+    clients(session).map_or(Before::Unknown, Before::Listed)
+}
+
+/// Whether a session runs under the name `session`, as zellij's sockets say
+/// now: none where luneta cannot read all of zellij's folder, as the socket
+/// could be in what it cannot.
+fn runs(session: &str) -> Option<bool> {
+    let running = lunetad::zellij_sessions(&lunetad::zellij_folder())?;
+    Some(running.iter().any(|(name, _)| name == session))
 }
 
 /// The clients of `session`, as zellij lists them now, by their ids, or why
@@ -795,53 +844,68 @@ enum Then {
     /// The client's arrival in the session of the look, from another, and
     /// what to do once it is there.
     Arrive(Look, Option<After>),
+    /// The client's arrival in a session zellij makes for it, from another,
+    /// which luneta asks for itself once zellij is in it: only the look
+    /// numbered so, to hear that the client stayed where zellij did not take
+    /// it there.
+    Made(u64),
 }
 
 /// Runs a zellij action on a thread of its own, so that the sidebar goes on
 /// drawing while zellij answers, says why when it fails, and then does as
 /// `then` says. A client on its way to another session comes there once
 /// zellij lists one more client of it than before the action, and then what
-/// waits on it is done. A pane already focused is where the action would
-/// take the client, and no failure.
+/// waits on it is done.
 fn run(mut command: Command, then: Option<Then>, events: &Sender<Event>) {
     quiet(&mut command);
     let events = events.clone();
-    thread::spawn(move || {
-        let before = match &then {
-            Some(Then::Arrive(look, _)) => clients(&look.session).unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        thread::sleep(NUDGED);
-        let failure = match command.output() {
-            Ok(output) if output.status.success() => None,
-            Ok(output) => Some(failure(&output)).filter(|said| !said.contains("is already focused")),
-            Err(error) => Some(unrun(&error)),
-        };
-        if let Some(said) = &failure {
-            // luneta is on its way out.
-            let _ = events.send(Event::Notice(said.clone()));
-        }
-        match then {
-            None => {},
-            Some(Then::Look(look)) => {
-                let went = if failure.is_none() { look.went } else { None };
-                looking(&Look { went, ..look }, &events);
-            },
-            Some(Then::Arrive(look, after)) => {
-                let came = failure.is_none() && arriving(&look, before, ARRIVAL, &events);
-                if failure.is_none() && !came {
-                    let said = "zellij did not take its client there".to_owned();
-                    let _ = events.send(Event::Notice(said));
-                }
-                if !came {
-                    let _ = events.send(Event::Stayed(look.number));
-                }
-                if let Some(after) = after {
-                    after.done(came, &events);
-                }
-            },
-        }
+    thread::spawn(move || match then {
+        None => {
+            act(&mut command, &events);
+        },
+        Some(Then::Look(look)) => {
+            let went = if act(&mut command, &events) { look.went } else { None };
+            looking(&Look { went, ..look }, &events);
+        },
+        Some(Then::Arrive(look, after)) => {
+            let before = before(&look.session);
+            let acted = act(&mut command, &events);
+            let came = acted && arriving(&look, before, ARRIVAL, &events);
+            if acted && !came {
+                let said = "zellij did not take its client there".to_owned();
+                let _ = events.send(Event::Notice(said));
+            }
+            if !came {
+                let _ = events.send(Event::Stayed(look.number));
+            }
+            if let Some(after) = after {
+                after.done(came, &events);
+            }
+        },
+        Some(Then::Made(look)) => {
+            if !act(&mut command, &events) {
+                // luneta is on its way out.
+                let _ = events.send(Event::Stayed(look));
+            }
+        },
     });
+}
+
+/// Has zellij take the action `command`, once it has had the time to take in
+/// `NUDGE`, and says why when it fails. Whether it took it. A pane already
+/// focused is where the action would take the client, and no failure.
+fn act(command: &mut Command, events: &Sender<Event>) -> bool {
+    thread::sleep(NUDGED);
+    let failure = match command.output() {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(failure(&output)).filter(|said| !said.contains("is already focused")),
+        Err(error) => Some(unrun(&error)),
+    };
+    if let Some(said) = &failure {
+        // luneta is on its way out.
+        let _ = events.send(Event::Notice(said.clone()));
+    }
+    failure.is_none()
 }
 
 /// Asks zellij for the clients of the session `look` is of, and hands back
@@ -857,18 +921,21 @@ fn looking(look: &Look, events: &Sender<Event>) {
 }
 
 /// Asks zellij for the clients of the session `look` is of until it lists
-/// one that `before` does not, for as long as `patience`, and hands back what
-/// it answers then. Whether it did.
-fn arriving(look: &Look, before: Vec<Client>, patience: Duration, events: &Sender<Event>) -> bool {
+/// one that was not there `before`, for as long as `patience`, and hands back
+/// what it answers then. Whether it did. Of a session zellij makes, the first
+/// it lists is luneta's; of one it did not list the clients of, any it lists
+/// is taken for luneta's coming, though it may be another's.
+fn arriving(look: &Look, before: Before, patience: Duration, events: &Sender<Event>) -> bool {
     let deadline = Instant::now() + patience;
     loop {
         let came = clients(&look.session).ok().filter(|clients| {
-            clients.iter().any(|client| before.iter().all(|was| was.id != client.id))
+            let was = before.clients();
+            clients.iter().any(|client| was.iter().all(|was| was.id != client.id))
         });
         if let Some(clients) = came {
-            let (number, went) = (look.number, look.went);
+            let (number, went, before) = (look.number, look.went, Some(before));
             // luneta is on its way out.
-            let _ = events.send(Event::Looked(Looked { number, went, clients, before: Some(before) }));
+            let _ = events.send(Event::Looked(Looked { number, went, clients, before }));
             return true;
         }
         if Instant::now() >= deadline {

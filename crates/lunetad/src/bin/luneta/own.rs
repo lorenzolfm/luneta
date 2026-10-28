@@ -50,10 +50,46 @@ pub struct Looked {
     /// look's, unless zellij did not take it there.
     pub went: Option<u32>,
     pub clients: Vec<Client>,
-    /// What zellij listed of the session's clients just before luneta sent
-    /// its client there from elsewhere, if it did: all of `clients` but
-    /// luneta's own.
-    pub before: Option<Vec<Client>>,
+    /// What luneta knew of the session's clients just before it sent its
+    /// client there, from elsewhere or as it started, where the look was for
+    /// the client's arrival: all of `clients` but luneta's own, as far as
+    /// zellij said.
+    pub before: Option<Before>,
+}
+
+/// What luneta knows of a session's clients before its own comes there, of
+/// which none is luneta's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Before {
+    /// zellij listed them: the session runs.
+    Listed(Vec<Client>),
+    /// No session ran by that name, as far as zellij's sockets said: zellij
+    /// makes it, and luneta's client is its first. Its server cannot bear a call of
+    /// zellij's CLI before it takes that client: every call asks the server
+    /// of every session whether it runs, and zellij-server 0.45.1 panics
+    /// where one hangs up before then (`lib.rs:1462`, fixed after 0.45.1 in
+    /// zellij's 81f56e1), and the session ends with it.
+    Made,
+    /// zellij did not list them, as of a session whose server is gone or
+    /// hangs: a client it lists after may be anyone's.
+    Unknown,
+}
+
+impl Before {
+    /// The clients that were there, as far as zellij said: none of a session
+    /// it makes, nor of one it did not list.
+    pub fn clients(&self) -> &[Client] {
+        match self {
+            Before::Listed(clients) => clients,
+            Before::Made | Before::Unknown => &[],
+        }
+    }
+
+    /// Whether the session's server may have yet to take its first client
+    /// as luneta's comes: one zellij did not list the clients of.
+    pub fn fresh(&self) -> bool {
+        !matches!(self, Before::Listed(_))
+    }
 }
 
 /// Whose word on the pane stands.
@@ -71,7 +107,7 @@ enum Word {
 /// What was listed of a session's clients before luneta's came to it: none
 /// of them is luneta's.
 #[derive(Debug)]
-struct Before {
+struct Others {
     clients: Vec<Client>,
     /// Whether zellij listed them, just before luneta sent its client there.
     /// The daemon's list can be older, and miss a client that came just
@@ -109,7 +145,7 @@ pub struct OwnClient {
     /// listed as luneta's came to it, or first after, if it had not listed
     /// them. Luneta's client is not among them, unless the daemon listed them
     /// after it came.
-    before: Option<Before>,
+    before: Option<Others>,
     /// While luneta is not sure of its id: what zellij answered the last look.
     looked: Option<Vec<Client>>,
     /// A session luneta sent its client to, from another, and the pane there,
@@ -157,7 +193,7 @@ impl OwnClient {
         self.word = Word::Own { listed: listed.map(<[Client]>::to_vec), until: now + TRUSTED };
         self.before = match back {
             Some(_) => None,
-            None => listed.map(|clients| Before { clients: clients.to_vec(), by_zellij: false }),
+            None => listed.map(|clients| Others { clients: clients.to_vec(), by_zellij: false }),
         };
         self.looked = None;
         self.since = self.asked + 1;
@@ -201,7 +237,7 @@ impl OwnClient {
         }
         if self.id.is_none() && self.before.is_none() {
             self.before =
-                listed.map(|clients| Before { clients: clients.to_vec(), by_zellij: false });
+                listed.map(|clients| Others { clients: clients.to_vec(), by_zellij: false });
             self.learn(None);
         }
         if let Word::Own { listed: then, until } = &self.word {
@@ -238,7 +274,16 @@ impl OwnClient {
         if let Some(before) = before {
             // luneta's client came here, and left where it was sent from.
             self.left = None;
-            self.before = Some(Before { clients: before, by_zellij: true });
+            let others = match before {
+                Before::Listed(clients) => Some(clients),
+                Before::Made => Some(Vec::new()),
+                // zellij did not say who was there: what the daemon listed
+                // stands.
+                Before::Unknown => None,
+            };
+            if let Some(clients) = others {
+                self.before = Some(Others { clients, by_zellij: true });
+            }
         }
         self.word = Word::Own { listed: listed.map(<[Client]>::to_vec), until: now + TRUSTED };
         let on = |client: &Client| went.is_none_or(|pane| client.pane == Some(pane));
@@ -333,20 +378,24 @@ mod tests {
     /// luneta's client came to a session another was in already: it is the
     /// one the daemon did not list before, or that zellij did not list just
     /// before luneta sent its client there, as the daemon may not have yet.
+    /// Where zellij could not list them, what the daemon listed stands.
     /// zellij put it on the pane the other has the focus on.
     #[test]
     fn luneta_s_client_is_the_one_that_came_with_it() {
         let now = Instant::now();
         let other = [client(1, 3)];
-        for (listed, before) in [(Some(&other[..]), None), (None, Some(other.to_vec()))] {
+        let by_zellij = Some(Before::Listed(other.to_vec()));
+        let unknown = Some(Before::Unknown);
+        let cases = [(Some(&other[..]), None), (None, by_zellij), (Some(&other[..]), unknown)];
+        for (listed, before) in cases {
             let mut own = OwnClient::default();
             let look = own.came("work", listed, now);
             let both = [client(1, 3), client(2, 3)];
-            own.looked(Looked { before, ..answer(&look, &both) }, listed, now);
+            own.looked(Looked { before: before.clone(), ..answer(&look, &both) }, listed, now);
             own.heard(Some(&[client(1, 4), client(2, 3)]), now);
-            assert_eq!(own.pane(), Some(3), "{listed:?}");
+            assert_eq!(own.pane(), Some(3), "{listed:?} {before:?}");
             own.heard(Some(&[client(1, 4), client(2, 6)]), now);
-            assert_eq!(own.pane(), Some(6), "{listed:?}");
+            assert_eq!(own.pane(), Some(6), "{listed:?} {before:?}");
         }
     }
 
@@ -488,7 +537,8 @@ mod tests {
         let other = [client(1, 3)];
         let look = own.came("work", None, now);
         let both = [client(1, 3), client(2, 3)];
-        own.looked(Looked { before: Some(other.to_vec()), ..answer(&look, &both) }, None, now);
+        let before = Some(Before::Listed(other.to_vec()));
+        own.looked(Looked { before, ..answer(&look, &both) }, None, now);
         let listed = [client(1, 3), client(2, 4)];
         own.heard(Some(&listed), now);
         assert_eq!(own.went("play", Some(7), None, now), None);
