@@ -23,7 +23,7 @@ use prost::Message as _;
 use tonic::transport::Channel;
 
 use crate::daemon::{self, Reach};
-use crate::drive::{self, Address, Opening};
+use crate::drive::{self, Address, Agreed, Opening};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` starts
 /// a lunetad where none runs, as it is what luneta's zellij plugin asks: the
@@ -58,17 +58,18 @@ pub enum Command {
         #[arg(value_parser = drive::address)]
         to: Address,
     },
-    /// Close panes and kill sessions, as the menu's Delete group does. A pane
-    /// takes its tab along once nothing else holds the tab open, and the
-    /// session where that is its only tab. Without `--yes`, say what would go
-    /// and which agents with it, and close nothing.
+    /// Close panes and kill sessions, as the menu's Delete group does. The
+    /// panes of a session close together: a tab goes once nothing left holds
+    /// it open, and the session once all its tabs do. Without `--yes`, say
+    /// what would go and which agents with it, and the plan to tell `--yes`,
+    /// and close nothing.
     Close {
         /// Each `<session>` to kill, or `<session>:<pane>` to close.
         #[arg(required = true, value_parser = drive::address)]
         what: Vec<Address>,
-        /// Close them.
-        #[arg(long)]
-        yes: bool,
+        /// Close them, while what would go is still the plan said as `PLAN`.
+        #[arg(long, value_name = "PLAN", value_parser = drive::agreed)]
+        yes: Option<Agreed>,
     },
 }
 

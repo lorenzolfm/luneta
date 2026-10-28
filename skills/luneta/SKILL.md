@@ -37,7 +37,7 @@ luneta open pane [--beside <session>:<pane>] [--cwd <dir>] [-- <command>...]
 luneta open tab [--session <session>] [--cwd <dir>] [--name <name>] [-- <command>...]
 luneta open session [--cwd <dir>] [--name <name>]
 luneta go <session>[:<pane>]
-luneta close <session>[:<pane>]... [--yes]
+luneta close <session>[:<pane>]... [--yes <plan>]
 ```
 
 - `open pane` opens beside your pane by default, in its tab. `open tab` opens
@@ -55,8 +55,9 @@ luneta close <session>[:<pane>]... [--yes]
   since, they fail with "zellij moved nobody". Tell the user where things are
   instead.
 - `close` takes a pane's tab along when nothing else holds the tab open, and
-  the session when that was its only tab. It kills a session given by name.
-  It closes running sessions only.
+  the session when that was its only tab. The panes of a session given
+  together close together: give every pane of a tab and the tab closes. It
+  kills a session given by name. It closes running sessions only.
 
 ## Start an agent
 
@@ -106,16 +107,20 @@ there instead, unless the user asked for a new one.
 
 Always ask before closing anything. First run `luneta close` without `--yes`.
 It closes nothing, prints what would go and which agents end with it, and
-exits 1:
+exits 3. Its last line, on stderr, names the plan:
 
 ```text
 kill session bipa: 1 agent, 1 busy
   bipa:0  busy     3602051  cipher-6d
 close pane luneta:12: no agent
+luneta: closed nothing; run it again with --yes 9c41d07e3b2a5f18 to close what it says
 ```
 
-Show that to the user and ask. Run it again with `--yes` only after a clear
-yes, with the same arguments.
+Show that to the user and ask. Run it again with that `--yes <plan>` only
+after a clear yes, with the same arguments. If what would go has changed
+since, say an agent went busy or a pane closed, it closes nothing, prints
+what it would close now and a new plan, and exits 3 again: show the user the
+new plan and ask again. Exit 1 means something failed.
 
 - Name busy and waiting agents in the question. Their work is lost.
 - "All sessions" means the running ones in `luneta sessions`. Leave out the

@@ -625,7 +625,7 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta open tab [--session S] [--cwd D] [--name N] [-- CMD…]` | opens a tab of the session it runs in, or of `S` |
 | `luneta open session [--cwd D] [--name N]` | makes a session and takes you there |
 | `luneta go S[:P]` | takes you to a session, or to a pane of one |
-| `luneta close S[:P]… [--yes]` | closes panes and kills sessions |
+| `luneta close S[:P]… [--yes PLAN]` | closes panes and kills sessions |
 
 They are for a pane of zellij, where an agent runs, and take what it runs in
 for the pane, the session and the directory you leave out. A pane or a tab
@@ -644,16 +644,24 @@ since. zellij's client makes the session, so what runs in it has your
 environment, not the agent's.
 
 `close` takes a pane's tab along once nothing else holds the tab open, and the
-session where that is its only tab, as `d d` does. Without `--yes`, it says
-what each would close and which agents would end with it, as lunetad lists
-them, closes nothing, and fails, so that an agent shows you that and asks
-before it goes ahead:
+session where that is its only tab, as `d d` does. What it is given in a
+session closes together, so the panes that are all that holds a tab open close
+the tab. Without `--yes`, it says what each would close and which agents would
+end with it, as lunetad lists them, and the plan to tell `--yes`, closes
+nothing, and exits 3, so that an agent shows you that and asks before it goes
+ahead:
 
 ```text
 kill session bipa: 1 agent, 1 busy
   bipa:0  busy     3602051  cipher-6d
 close pane luneta:12: no agent
+luneta: closed nothing; run it again with --yes 9c41d07e3b2a5f18 to close what it says
 ```
+
+`--yes` closes only that plan, as the menu's `y` does only what it asked about:
+where an agent has gone to work since, a pane has closed, or a session was
+made again by the same name, it closes nothing, and says what it would close
+now, and its plan.
 
 What holds the pane it runs in goes last, and its agent's line says `(this
 runs here)`: the agent ends with it. It kills only sessions that run, not

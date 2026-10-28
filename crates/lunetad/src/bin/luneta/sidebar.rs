@@ -237,19 +237,6 @@ impl Mark {
         }
     }
 
-    /// What an agent marked so is doing, as far as deleting it goes.
-    fn doing(&self) -> close::Doing {
-        match self {
-            Mark::Waiting => close::Doing::Waiting,
-            Mark::Idle | Mark::Finished => close::Doing::Idle,
-            Mark::Busy => close::Doing::Busy,
-            Mark::Shell => close::Doing::Shell,
-            Mark::Other(_) | Mark::Unreported | Mark::Passed | Mark::Failed | Mark::Ran => {
-                close::Doing::Unknown
-            },
-        }
-    }
-
     /// Whether it says that something finished since you were last in its
     /// pane: an agent, or a command, which shows how it ended until then.
     fn is_news(&self) -> bool {
@@ -1585,7 +1572,7 @@ impl Sidebar {
             if self.away.is_none() {
                 let seated = seated(&host.agents, &host.sessions);
                 let doing = seated.iter().filter(|((at, _), _)| *at == session);
-                let doing = doing.map(|((_, pane), agent)| (*pane, Mark::of(agent).doing()));
+                let doing = doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
                 agents = Some(doing.collect());
             }
             // The newest of the other sessions, which the picker lists first.

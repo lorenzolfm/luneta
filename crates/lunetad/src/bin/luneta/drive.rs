@@ -11,54 +11,94 @@
 //! sent it, and says so when it is not there.
 //!
 //! A close says what it would close, and which agents it would end, and
-//! closes nothing until it is told `--yes`, so that an agent asks you first.
-//! What holds the pane it runs in goes last, as the agent that ran it goes
-//! with it.
+//! closes nothing until it is told yes to that plan, by the word it prints
+//! for it, so that an agent asks you first, and closes no more than you
+//! agreed to where what it closes has changed since. What it is given in a
+//! session closes together: the panes that are all that holds a tab open
+//! close the tab. What holds the pane it runs in goes last, as the agent that
+//! ran it goes with it.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use clap::Subcommand;
-use lunetad::api::agent::Status as Reported;
-use lunetad::api::{Agent, Status};
+use lunetad::api::Agent;
 
-use crate::close::{self, Act, Deletes, Doing, Plan, Seat, Subject};
+use crate::close::{Act, Doing, Plan};
 use crate::commands;
-use crate::zellij::{self, Open, SessionName};
+use crate::zellij::{self, Closing, Open, SessionName};
 
-/// A session, or a pane of one, as the CLI names them: `<session>`, or
-/// `<session>:<pane>`, as `luneta agents` writes them.
+/// A pane of a session, as the CLI names it: `<session>:<pane>`, as `luneta
+/// agents` writes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Address {
+pub struct Pane {
     pub session: String,
-    pub pane: Option<u32>,
+    pub pane: u32,
 }
 
-impl fmt::Display for Address {
+impl fmt::Display for Pane {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.pane {
-            Some(pane) => write!(f, "{}:{pane}", self.session),
-            None => f.write_str(&self.session),
+        write!(f, "{}:{}", self.session, self.pane)
+    }
+}
+
+/// A session, or a pane of one, as the CLI names them: `<session>`, or
+/// `<session>:<pane>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Address {
+    Session(String),
+    Pane(Pane),
+}
+
+impl Address {
+    /// The session it is, or is of.
+    fn session(&self) -> &str {
+        match self {
+            Address::Session(session) | Address::Pane(Pane { session, .. }) => session,
         }
     }
 }
 
-/// An address as it is spelled: a pane's id after the last `:`, where what
-/// follows it is a number, and the session's name before it; or else a
-/// session's name alone, which may hold a `:`, as zellij's may.
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Address::Session(session) => f.write_str(session),
+            Address::Pane(pane) => pane.fmt(f),
+        }
+    }
+}
+
+/// A pane as it is spelled: its id after the last `:`, and its session's name
+/// before it, which may hold a `:`, as zellij's may.
+pub fn pane_address(spelled: &str) -> Result<Pane, String> {
+    let pane = spelled.rsplit_once(':').and_then(|(session, pane)| {
+        let pane = pane.parse().ok()?;
+        (!session.is_empty()).then(|| Pane { session: session.to_owned(), pane })
+    });
+    pane.ok_or_else(|| format!("{spelled} is no pane: name one as <session>:<pane>"))
+}
+
+/// An address as it is spelled: a pane, as `pane_address` reads one, or else
+/// a session's name alone.
 pub fn address(spelled: &str) -> Result<Address, String> {
-    if let Some((session, pane)) = spelled.rsplit_once(':')
-        && let Ok(pane) = pane.parse()
-        && !session.is_empty()
-    {
-        return Ok(Address { session: session.to_owned(), pane: Some(pane) });
+    if let Ok(pane) = pane_address(spelled) {
+        return Ok(Address::Pane(pane));
     }
     if spelled.is_empty() {
         return Err("no session named".to_owned());
     }
-    Ok(Address { session: spelled.to_owned(), pane: None })
+    Ok(Address::Session(spelled.to_owned()))
+}
+
+/// The pane this runs in, as zellij names it in the variables of what runs
+/// in its panes: none outside zellij.
+fn here() -> Option<Pane> {
+    zellij::here().map(|(session, pane)| Pane { session, pane })
 }
 
 /// What `luneta open` opens.
@@ -69,8 +109,8 @@ pub enum Opening {
     Pane {
         /// The pane to open it beside, as `<session>:<pane>`. Without one,
         /// the pane this runs in.
-        #[arg(long, value_parser = address)]
-        beside: Option<Address>,
+        #[arg(long, value_parser = pane_address)]
+        beside: Option<Pane>,
         /// The directory it starts in. Without one, this one.
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -101,8 +141,8 @@ pub enum Opening {
     Session {
         /// Without one, it is named for its directory, as the picker names
         /// one, with a `-2` where a session runs by that name.
-        #[arg(long)]
-        name: Option<String>,
+        #[arg(long, value_parser = SessionName::parse)]
+        name: Option<SessionName>,
         /// The directory it starts in. Without one, this one.
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -116,28 +156,20 @@ pub fn open(what: &Opening) -> ExitCode {
         Opening::Tab { session, cwd, name, command } => {
             tab(session.as_deref(), cwd.as_deref(), name.as_deref(), command)
         },
-        Opening::Session { name, cwd } => session(name.as_deref(), cwd.as_deref()),
+        Opening::Session { name, cwd } => session(name.as_ref(), cwd.as_deref()),
     })
 }
 
 /// Opens a pane running `command` beside `beside`, or the pane this runs in,
 /// in `cwd`, and names it.
-fn pane(
-    beside: Option<&Address>,
-    cwd: Option<&Path>,
-    command: &[String],
-) -> Result<String, String> {
-    let here = || zellij::here().map(|(session, pane)| Address { session, pane: Some(pane) });
+fn pane(beside: Option<&Pane>, cwd: Option<&Path>, command: &[String]) -> Result<String, String> {
     let beside = beside.cloned().or_else(here);
-    let beside =
+    let Pane { session, pane } =
         beside.ok_or("this runs in no pane of zellij: name one to open beside with --beside")?;
-    let Some(pane) = beside.pane else {
-        return Err(format!("{beside} is a session: name a pane of it as {beside}:<pane>"));
-    };
-    let (session, command) = (beside.session, command.to_vec());
-    let open = Open::Pane { session: session.clone(), beside: pane, cwd: directory(cwd)?, command };
+    let cwd = directory(cwd)?;
+    let open = Open::Pane { session: session.clone(), beside: pane, cwd, command: command.to_vec() };
     let opened = zellij::opening(&open)?;
-    Ok(Address { session, pane: Some(opened) }.to_string())
+    Ok(Pane { session, pane: opened }.to_string())
 }
 
 /// Opens a tab of `session`, or of the session this runs in, named `name`,
@@ -150,9 +182,9 @@ fn tab(
 ) -> Result<String, String> {
     let session = match session {
         Some(session) => session.to_owned(),
-        None => zellij::here().ok_or("this runs in no pane of zellij: name a --session")?.0,
+        None => here().ok_or("this runs in no pane of zellij: name a --session")?.session,
     };
-    runs(&session)?;
+    started(&session, &running()?)?;
     if zellij::clients(&session)?.is_empty() {
         return Err(format!(
             "no client is in {session}, and zellij makes a tab with no room for its panes in a \
@@ -162,30 +194,27 @@ fn tab(
     let (name, command) = (name.map(str::to_owned), command.to_vec());
     let open = Open::Tab { session: session.clone(), cwd: directory(cwd)?, name, command };
     let opened = zellij::opening(&open)?;
-    Ok(Address { session, pane: Some(opened) }.to_string())
+    Ok(Pane { session, pane: opened }.to_string())
 }
 
 /// Makes a session named `name`, or for `cwd`, that starts in `cwd`, takes
 /// the client that last typed in the session this runs in there, and names
 /// it.
-fn session(name: Option<&str>, cwd: Option<&Path>) -> Result<String, String> {
-    let (at, _) = zellij::here().ok_or(UNSEATED)?;
+fn session(name: Option<&SessionName>, cwd: Option<&Path>) -> Result<String, String> {
+    let running = running()?;
+    let at = seated(&running)?;
     let cwd = directory(cwd)?;
-    let running = lunetad::zellij_sessions(&lunetad::zellij_folder()).unwrap_or_default();
     let names: Vec<&str> = running.iter().map(|(name, _)| name.as_str()).collect();
     let session = match name {
-        Some(name) => {
-            let name = SessionName::parse(name).map_err(|why| format!("no session {name}: {why}"))?;
-            if names.contains(&name.as_str()) {
-                return Err(format!("{name} runs already: `luneta go {name}` takes you there"));
-            }
-            name
+        Some(name) if names.contains(&name.as_str()) => {
+            return Err(format!("{name} runs already: `luneta go {name}` takes you there"));
         },
+        Some(name) => name.clone(),
         None => zellij::session_for(Path::new(&cwd))
             .ok_or_else(|| format!("no session can be named for {cwd}"))?
             .free(&names),
     };
-    zellij::taken(&at, session.as_str(), None, Some(&cwd))?;
+    zellij::made(&at, &session, &cwd)?;
     Ok(session.to_string())
 }
 
@@ -193,27 +222,120 @@ fn session(name: Option<&str>, cwd: Option<&Path>) -> Result<String, String> {
 const UNSEATED: &str = "this runs in no pane of zellij, and zellij moves the client that last \
                         typed in the session it is asked from";
 
+/// The session this runs in, of those `running`, for zellij to move the
+/// client that last typed in it: the name zellij gave it in the variables of
+/// this pane as it opened, which no session has where it was renamed since.
+fn seated(running: &[(String, SystemTime)]) -> Result<String, String> {
+    let at = here().ok_or(UNSEATED)?.session;
+    if running.iter().any(|(name, _)| *name == at) {
+        return Ok(at);
+    }
+    Err(format!(
+        "this runs in a pane of the session zellij named {at} as the pane opened, and no \
+         session runs by that name now: it was renamed since"
+    ))
+}
+
 /// Takes the client that last typed in the session this runs in to `to`.
 pub fn go(to: &Address) -> ExitCode {
-    let went = zellij::here().ok_or_else(|| UNSEATED.to_owned()).and_then(|(at, _)| {
-        runs(&to.session)?;
-        zellij::taken(&at, &to.session, to.pane, None)
+    let went = running().and_then(|running| {
+        let at = seated(&running)?;
+        started(to.session(), &running)?;
+        let pane = match to {
+            Address::Session(_) => None,
+            Address::Pane(pane) => Some(pane.pane),
+        };
+        zellij::taken(&at, to.session(), pane)
     });
     said(went.map(|()| String::new()))
 }
 
+/// What a close exits with where it closes nothing, as it was not told yes to
+/// the plan it says: neither 1, for what failed, nor clap's 2, for what it
+/// cannot read.
+const PLANNED: u8 = 3;
+
+/// What a close was told yes to: the plans it said, as one word an agent
+/// hands back with `--yes`. It is of what each plan does and the agents it
+/// ends, by what they are doing, as the menu compares a plan with the one it
+/// asked about, and of when each session it closes in started, so that one
+/// made again by the same name, its panes numbered from 0 again, is another
+/// plan. A new build of luneta may hash them otherwise, and so asks again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Agreed(u64);
+
+impl Agreed {
+    /// The word for `plans`, in the sessions that `started` when they did.
+    fn of(plans: &[Plan], started: &[(&str, SystemTime)]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        for plan in plans {
+            (says(&plan.act), plan.ends()).hash(&mut hasher);
+        }
+        started.hash(&mut hasher);
+        Agreed(hasher.finish())
+    }
+}
+
+impl fmt::Display for Agreed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// A plan as `--yes` spells it: as a close says it.
+pub fn agreed(spelled: &str) -> Result<Agreed, String> {
+    let read = u64::from_str_radix(spelled, 16);
+    read.map(Agreed).map_err(|_| format!("{spelled} is no plan a close said"))
+}
+
+/// What a close is given in one session: the session, or panes of it. The
+/// session takes along the panes of it given too, and a pane given twice is
+/// one.
+enum Wanted {
+    Session,
+    Panes(BTreeSet<u32>),
+}
+
+/// What `what` gives a close, by session.
+fn wanted(what: &[Address]) -> BTreeMap<&str, Wanted> {
+    let mut wanted = BTreeMap::new();
+    for address in what {
+        let entry = wanted.entry(address.session());
+        match (address, entry.or_insert_with(|| Wanted::Panes(BTreeSet::new()))) {
+            (Address::Session(_), wanted) => *wanted = Wanted::Session,
+            (Address::Pane(pane), Wanted::Panes(panes)) => {
+                panes.insert(pane.pane);
+            },
+            (Address::Pane(_), Wanted::Session) => {},
+        }
+    }
+    wanted
+}
+
 /// Says what closing each of `what` closes, and the agents it ends, and
-/// closes them where `yes`: what holds the pane this runs in last. Nothing
-/// closes where any of them is gone.
-pub fn close(what: &[Address], yes: bool, folder: &Path) -> ExitCode {
+/// closes them where `yes` is the plan it says: what holds the pane this
+/// runs in last. Nothing closes where any of them is gone.
+pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
+    let running = match running() {
+        Ok(running) => running,
+        Err(why) => {
+            eprintln!("luneta: {why}");
+            return ExitCode::FAILURE;
+        },
+    };
     let listed = commands::listed_agents(folder);
     let agents = listed.as_ref().ok().map(|listed| listed.agents.as_slice());
-    let mut plans = Vec::new();
-    for address in what {
-        match plan(address, agents) {
-            Ok(plan) => plans.push(plan),
+    let (mut plans, mut sessions) = (Vec::new(), Vec::new());
+    for (session, wanted) in wanted(what) {
+        let planned = started(session, &running)
+            .and_then(|started| Ok((started, plans_in(session, &wanted, agents)?)));
+        match planned {
+            Ok((started, planned)) => {
+                sessions.push((session, started));
+                plans.extend(planned);
+            },
             Err(why) => {
-                eprintln!("luneta: {address}: {why}");
+                eprintln!("luneta: {session}: {why}");
                 return ExitCode::FAILURE;
             },
         }
@@ -223,65 +345,65 @@ pub fn close(what: &[Address], yes: bool, folder: &Path) -> ExitCode {
         Ok(listed) if listed.unread > 0 => eprintln!("luneta: {}", commands::unread(listed.unread)),
         Ok(_) => {},
     }
-    let here = zellij::here();
+    let here = here();
     let holds_here = |plan: &Plan| {
-        let holds = |(session, pane): &(String, u32)| {
-            session_of(&plan.act) == session && plan.act.takes(*pane)
-        };
+        let holds = |here: &Pane| session_of(&plan.act) == here.session && plan.act.takes(here.pane);
         here.as_ref().is_some_and(holds)
     };
     plans.sort_by_key(holds_here);
+    let agreed = Agreed::of(&plans, &sessions);
+    let told = yes == Some(agreed);
     let mut failed = false;
     for plan in &plans {
         println!("{}: {}", says(&plan.act), plan.ends());
         for line in ending(&plan.act, agents.unwrap_or_default(), here.as_ref()) {
             println!("  {line}");
         }
-        if yes && let Err(why) = act(&plan.act) {
+        if told && let Err(why) = act(&plan.act) {
             eprintln!("luneta: {why}");
             failed = true;
         }
     }
-    if !yes {
-        eprintln!("luneta: closed nothing; run it again with --yes to close what it says");
+    match yes {
+        _ if told && failed => ExitCode::FAILURE,
+        _ if told => ExitCode::SUCCESS,
+        Some(_) => {
+            eprintln!(
+                "luneta: closed nothing, as it was told yes to another plan than this; run it \
+                 again with --yes {agreed} to close what it says now"
+            );
+            ExitCode::from(PLANNED)
+        },
+        None => {
+            eprintln!("luneta: closed nothing; run it again with --yes {agreed} to close what it says");
+            ExitCode::from(PLANNED)
+        },
     }
-    if failed || !yes { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
-/// What closing `address` does, and the agents it ends among `agents`, as
-/// far as luneta can tell them: none while lunetad does not list them. A
-/// pane takes along what zellij says closing it takes.
-fn plan(address: &Address, agents: Option<&[Agent]>) -> Result<Plan, String> {
-    let session = address.session.as_str();
-    runs(session)?;
-    let deletes = match address.pane {
-        Some(pane) => Deletes::Pane { pane, closes: zellij::closes_now(session, pane)? },
-        None => Deletes::Session,
+/// What closing what is `wanted` of `session` does, an act at a time, and
+/// the agents each ends among `agents`, as far as luneta can tell them: none
+/// while lunetad does not list them. Its panes close together, as zellij
+/// says closing them closes.
+fn plans_in(session: &str, wanted: &Wanted, agents: Option<&[Agent]>) -> Result<Vec<Plan>, String> {
+    let owned = || session.to_owned();
+    let acts = match wanted {
+        Wanted::Session => vec![Act::Kill(owned())],
+        Wanted::Panes(panes) => match zellij::closes_together(session, panes)? {
+            Closing::Session => vec![Act::Kill(owned())],
+            Closing::Parts { tabs, panes } => {
+                let tabs = tabs.into_iter().map(|(tab, panes)| Act::Tab { session: owned(), tab, panes });
+                let panes = panes.into_iter().map(|pane| Act::Pane { session: owned(), pane });
+                tabs.chain(panes).collect()
+            },
+        },
     };
     let in_session = |agent: &Agent| {
         let zellij = agent.zellij.as_ref()?;
-        (zellij.session.as_deref() == Some(session)).then(|| (zellij.pane, doing(agent)))
+        (zellij.session.as_deref() == Some(session)).then(|| (zellij.pane, Doing::from(agent)))
     };
-    let agents = agents.map(|agents| agents.iter().filter_map(in_session).collect());
-    // zellij ends a client in a session it kills, and luneta takes its own
-    // to another.
-    let seat = Seat::Elsewhere;
-    close::plan(&Subject { session, seat, deletes, agents, refuge: None })
-}
-
-/// What an agent is doing, as far as closing it goes.
-fn doing(agent: &Agent) -> Doing {
-    match &agent.status {
-        Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
-            Ok(Status::Busy) => Doing::Busy,
-            Ok(Status::Idle) => Doing::Idle,
-            Ok(Status::Waiting) => Doing::Waiting,
-            Ok(Status::Shell) => Doing::Shell,
-            // A daemon newer than this CLI's.
-            Ok(Status::Unspecified) | Err(_) => Doing::Unknown,
-        },
-        Some(Reported::OtherStatus(_)) | None => Doing::Unknown,
-    }
+    let agents: Option<Vec<_>> = agents.map(|agents| agents.iter().filter_map(in_session).collect());
+    Ok(acts.into_iter().map(|act| Plan::of(act, agents.as_deref())).collect())
 }
 
 /// The session `act` closes in.
@@ -308,7 +430,7 @@ fn says(act: &Act) -> String {
 
 /// The agents among `agents` that `act` ends, a line to each, as `luneta
 /// agents` writes them: the one in the pane this runs in, `here`, says so.
-fn ending(act: &Act, agents: &[Agent], here: Option<&(String, u32)>) -> Vec<String> {
+fn ending(act: &Act, agents: &[Agent], here: Option<&Pane>) -> Vec<String> {
     let session = session_of(act);
     let ends = |agent: &&Agent| {
         let zellij = agent.zellij.as_ref();
@@ -322,8 +444,8 @@ fn ending(act: &Act, agents: &[Agent], here: Option<&(String, u32)>) -> Vec<Stri
     let width = ended.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     let is_here = |agent: &Agent| {
         let zellij = agent.zellij.as_ref();
-        here.zip(zellij).is_some_and(|((session, pane), zellij)| {
-            zellij.session.as_deref() == Some(session.as_str()) && zellij.pane == *pane
+        here.zip(zellij).is_some_and(|(here, zellij)| {
+            zellij.session.as_deref() == Some(here.session.as_str()) && zellij.pane == here.pane
         })
     };
     let line = |(seat, agent): (String, &Agent)| {
@@ -342,13 +464,22 @@ fn act(act: &Act) -> Result<(), String> {
     }
 }
 
-/// Whether a session named `session` runs, by its socket, or why not.
-fn runs(session: &str) -> Result<(), String> {
-    let running = lunetad::zellij_sessions(&lunetad::zellij_folder()).unwrap_or_default();
-    if running.iter().any(|(name, _)| name == session) {
-        return Ok(());
-    }
-    Err(format!("no session {session} runs"))
+/// The sessions that run, by their sockets, each with when it started; or
+/// why luneta cannot tell them: a session's socket could be in what it cannot
+/// read.
+fn running() -> Result<Vec<(String, SystemTime)>, String> {
+    let folder = lunetad::zellij_folder();
+    lunetad::zellij_sessions(&folder).ok_or_else(|| {
+        let folder = folder.display();
+        format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")
+    })
+}
+
+/// When `session` started, of the sessions `running`, or that none runs by
+/// that name.
+fn started(session: &str, running: &[(String, SystemTime)]) -> Result<SystemTime, String> {
+    let found = running.iter().find(|(name, _)| name == session);
+    found.map(|(_, started)| *started).ok_or_else(|| format!("no session {session} runs"))
 }
 
 /// The directory to open in: `cwd`, from this one where it is relative, or
@@ -384,16 +515,19 @@ mod tests {
     use super::*;
 
     /// A pane's id follows the last `:`, as `luneta agents` writes it, and a
-    /// session's name may hold a `:` of its own, as zellij lets it.
+    /// session's name may hold a `:` of its own, as zellij lets it. Where a
+    /// pane is wanted, as beside one, a session alone is no pane.
     #[test]
     fn an_address_is_a_session_and_a_pane_after_its_last_colon() {
-        let at = |session: &str, pane| Ok(Address { session: session.to_owned(), pane });
-        assert_eq!(address("work"), at("work", None));
-        assert_eq!(address("work:2"), at("work", Some(2)));
-        assert_eq!(address("a:b"), at("a:b", None));
-        assert_eq!(address("a:b:3"), at("a:b", Some(3)));
-        assert_eq!(address("work:"), at("work:", None));
-        assert_eq!(address(":3"), at(":3", None));
+        let session = |session: &str| Ok(Address::Session(session.to_owned()));
+        let pane = |session: &str, pane| Ok(Address::Pane(Pane { session: session.to_owned(), pane }));
+        assert_eq!(address("work"), session("work"));
+        assert_eq!(address("work:2"), pane("work", 2));
+        assert_eq!(address("a:b"), session("a:b"));
+        assert_eq!(address("a:b:3"), pane("a:b", 3));
+        assert_eq!(address("work:"), session("work:"));
+        assert_eq!(address(":3"), session(":3"));
         assert!(address("").is_err());
+        assert!(pane_address("work").is_err());
     }
 }

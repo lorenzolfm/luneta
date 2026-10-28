@@ -10,6 +10,9 @@
 //! is in goes once its client is in another, which keeps the client on
 //! screen throughout, or with luneta, where it is the only one.
 
+use lunetad::api::agent::Status as Reported;
+use lunetad::api::{Agent, Status};
+
 use crate::sidebar::Place;
 use crate::zellij::Closes;
 
@@ -70,6 +73,23 @@ pub enum Doing {
     Unknown,
     /// A shell, which ends with nothing to lose.
     Shell,
+}
+
+impl From<&Agent> for Doing {
+    /// What an agent is doing, as lunetad says it.
+    fn from(agent: &Agent) -> Self {
+        match &agent.status {
+            Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
+                Ok(Status::Busy) => Doing::Busy,
+                Ok(Status::Idle) => Doing::Idle,
+                Ok(Status::Waiting) => Doing::Waiting,
+                Ok(Status::Shell) => Doing::Shell,
+                // A daemon newer than this luneta's.
+                Ok(Status::Unspecified) | Err(_) => Doing::Unknown,
+            },
+            Some(Reported::OtherStatus(_)) | None => Doing::Unknown,
+        }
+    }
 }
 
 /// What a delete is for, and what it takes along, as the sidebar knows it.
@@ -156,10 +176,7 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
             Seat::Moving => return Err(MOVING.to_owned()),
         },
     };
-    let ending = subject.agents.as_ref().map(|agents| {
-        Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
-    });
-    Ok(Plan { act, ending })
+    Ok(Plan::of(act, subject.agents.as_deref()))
 }
 
 /// The agents a delete would end, by what they are doing.
@@ -214,6 +231,15 @@ impl Ending {
 }
 
 impl Plan {
+    /// What doing `act` does, and the agents it ends among `agents`, those of
+    /// its session by their panes, or none while luneta cannot tell them.
+    pub fn of(act: Act, agents: Option<&[(u32, Doing)]>) -> Self {
+        let ending = agents.map(|agents| {
+            Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
+        });
+        Plan { act, ending }
+    }
+
     /// What to ask before going ahead, as `Kill session elo? 2 agents, 1
     /// busy`. Nothing when luneta knows that no agent busy or waiting on you
     /// would end: an idle agent or a shell goes without asking, and one whose
