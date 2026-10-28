@@ -225,3 +225,28 @@ fn a_session_that_takes_a_renamed_one_s_name_has_the_shells_started_in_it() {
     eventually("the new work has its shell", || (commands("work")? == new).then_some(()));
     assert_eq!(commands("play"), Some(old.to_vec()));
 }
+
+/// A command a shell runs can take its pane to another directory, as `cd`
+/// does, or run in front of it, and zellij writes nothing of either: the
+/// daemon asks about the session again as the shell says it ran one, ahead
+/// of its sweep.
+#[test]
+fn a_session_is_asked_about_again_as_a_shell_in_it_runs_a_command() {
+    let host = Host::new();
+    host.zellij.list("work", &json!([at_home(1)]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let started = now();
+    say(&host, "work", 1, started, &format!("ended {started} 0 2 true"));
+    eventually("work's shell has said", || shells(&host, "work")?[0].clone());
+
+    host.zellij.asked_again("work");
+    host.zellij.list("work", &json!([listed(1, "~/work", (0, "Tab #1"), Some("/home/you/work"))]));
+    say(&host, "work", 1, started, &format!("ended {} 0 3 cd work", now()));
+    let said = std::time::Instant::now();
+    eventually("work's pane is in work", || {
+        let panes = session(&host.host(), "work")?.panes.clone()?.panes;
+        (panes[0].cwd.as_deref() == Some("/home/you/work")).then_some(())
+    });
+    assert!(said.elapsed() < std::time::Duration::from_secs(1), "{:?}", said.elapsed());
+}

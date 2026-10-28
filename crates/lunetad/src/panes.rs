@@ -2,26 +2,32 @@
 //! lists them, and its clients.
 //!
 //! zellij tells no one as a pane opens, closes, or changes where it works or
-//! what it runs, nor as a client comes, goes, or moves its focus. So each
-//! session is asked again every sweep, and one the daemon has not asked about
-//! yet as soon as it turns up.
+//! what it runs, nor as a client comes, goes, or moves its focus. It writes
+//! what it keeps of a session within a second of most of those, though, but
+//! for where a pane works and what it runs, which luneta's hook has a shell
+//! say as it runs a command. So a session is asked about again as either
+//! changes, and every sweep besides, for the rest; and one the daemon has not
+//! asked about yet as soon as it turns up.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
+use notify::RecursiveMode;
 use serde::Deserialize;
 
 use crate::api;
 use crate::clients;
-use crate::core;
+use crate::core::{self, Addressed};
+use crate::metadata::{self, Metadata};
 use crate::program;
 use crate::shells::Shell;
-use crate::watch::Troubles;
+use crate::watch::{self, Troubles};
 use crate::zellij::Id;
 
 /// How long zellij has to list a session's panes: a server that runs answers
@@ -166,60 +172,142 @@ fn list(session: &str) -> Result<Vec<Pane>, String> {
     parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
+/// What tells the daemon that the panes of a session may have changed, short
+/// of asking zellij.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Signs {
+    /// What zellij last wrote of it.
+    metadata: Option<Metadata>,
+    /// The last word said of it, as the core counts them.
+    told: u64,
+}
+
+/// When the daemon last asked zellij about a session, and its signs then.
+struct Asked {
+    at: Instant,
+    signs: Signs,
+}
+
 /// Asks zellij for the panes and the clients of each session it can be asked
-/// about, in a thread of its own, and tells the core what it says: every
-/// `sweep`, and at once when `woken`, as a session turns up. One zellij has
-/// not listed the panes of yet goes first, and one that turns up while the
-/// others are asked about goes before those left. None is asked about while
-/// a session is `NEWBORN`. The thread ends once the core has.
+/// about, in a thread of its own, and tells the core what it says. It asks
+/// about a session as soon as it turns up, as zellij writes in
+/// `metadata_folder` that it changed, as a shell in it says a word, and once
+/// a `sweep` has passed since it last asked, for what changes with no sign: a
+/// shell without luneta's hook moves or runs a command, or an agent retitles
+/// its pane. The core wakes it on `woken`, and so does a change to the folder,
+/// which it watches with `wake`. One the host has no panes of goes first, and
+/// one that turns up while others are asked about goes before those left.
+/// None is asked about while a session is `NEWBORN`. The thread ends once the
+/// core has.
 pub fn follow(
     core: SyncSender<core::Command>,
+    wake: SyncSender<()>,
     woken: Receiver<()>,
+    metadata_folder: Option<PathBuf>,
     sweep: Duration,
 ) -> io::Result<()> {
     thread::Builder::new().name("panes".to_owned()).spawn(move || {
-        let mut listed: HashSet<Id> = HashSet::new();
-        let mut troubles = Troubles::default();
-        'sweep: loop {
-            let Some(mut sessions) = core::ask(&core, core::Command::Sessions) else {
+        let mut asked: HashMap<Id, Asked> = HashMap::new();
+        let mut troubles: HashMap<Id, Troubles> = HashMap::new();
+        let mut watcher = None;
+        let mut watching = Troubles::default();
+        'round: loop {
+            if let Some(folder) = metadata_folder.as_deref()
+                && watcher.is_none()
+            {
+                let (mode, wanted) = (RecursiveMode::Recursive, metadata::is_metadata);
+                watcher = watch::watching(folder, mode, wanted, &wake, &mut watching);
+                watching.done();
+            }
+            let Some(sessions) = core::ask(&core, core::Command::Sessions) else {
                 return;
             };
-            let started = sessions.iter().map(|(session, _)| session.started());
+            let started = sessions.iter().map(|session| session.id.started());
             if let Some(wait) = newborn(started, SystemTime::now()) {
                 thread::sleep(wait);
                 continue;
             }
-            listed.retain(|session| sessions.iter().any(|(id, _)| id == session));
-            sessions.sort_by_key(|(session, _)| listed.contains(session));
-            for (session, name) in sessions {
-                // What zellij listed last stands until it lists them again.
-                let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
-                if let Ok(panes) = list(&name).inspect_err(said) {
-                    listed.insert(session);
-                    let name = name.clone();
-                    if core.send(core::Command::Panes { session, name, panes }).is_err() {
-                        return;
-                    }
-                }
-                let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
-                let zellij = Command::new("zellij");
-                if let Ok(clients) = clients::list(zellij, &name).inspect_err(said)
-                    && core.send(core::Command::Clients { session, name, clients }).is_err()
-                {
+            let running = |id: &Id| sessions.iter().any(|session| session.id == *id);
+            asked.retain(|id, _| running(id));
+            troubles.retain(|id, _| running(id));
+            let now = Instant::now();
+            let mut asking: Vec<(Addressed, Signs)> = sessions
+                .into_iter()
+                .filter_map(|session| {
+                    let troubles = troubles.entry(session.id).or_default();
+                    let metadata = metadata_folder
+                        .as_deref()
+                        .and_then(|folder| written(folder, &session.name, troubles));
+                    let signs = Signs { metadata, told: session.told };
+                    due(asked.get(&session.id), signs, now, sweep).then_some((session, signs))
+                })
+                .collect();
+            asking.sort_by_key(|(session, _)| session.listed);
+            for (session, signs) in asking {
+                asked.insert(session.id, Asked { at: Instant::now(), signs });
+                let troubles = troubles.entry(session.id).or_default();
+                if ask(&core, &session, troubles).is_none() {
                     return;
                 }
+                troubles.done();
                 if woken.try_recv().is_ok() {
-                    continue 'sweep;
+                    watch::settle(&woken);
+                    continue 'round;
                 }
             }
-            troubles.done();
-            match woken.recv_timeout(sweep) {
-                Ok(()) | Err(RecvTimeoutError::Timeout) => {},
+            match woken.recv_timeout(next(asked.values(), sweep, Instant::now())) {
+                Ok(()) => watch::settle(&woken),
+                Err(RecvTimeoutError::Timeout) => {},
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
     })?;
     Ok(())
+}
+
+/// What zellij last wrote of the session `name` in `folder`. One that cannot
+/// be read, `troubles` says, and it says nothing.
+fn written(folder: &Path, name: &str, troubles: &mut Troubles) -> Option<Metadata> {
+    metadata::read(folder, name).unwrap_or_else(|error| {
+        troubles.say(format!("the metadata of {name}: {error}"));
+        None
+    })
+}
+
+/// Whether a session with `signs` is due to be asked about at `now`, as it
+/// was `asked` last: one never asked about, one whose signs have changed
+/// since, and one last asked about a `sweep` ago.
+fn due(asked: Option<&Asked>, signs: Signs, now: Instant, sweep: Duration) -> bool {
+    asked.is_none_or(|asked| {
+        asked.signs != signs || now.saturating_duration_since(asked.at) >= sweep
+    })
+}
+
+/// How long until the first of the sessions `asked` is due for the sweep, at
+/// `now`: a `sweep`, of none.
+fn next<'a>(asked: impl Iterator<Item = &'a Asked>, sweep: Duration, now: Instant) -> Duration {
+    let left = |asked: &Asked| (asked.at + sweep).saturating_duration_since(now);
+    asked.map(left).min().unwrap_or(sweep)
+}
+
+/// Asks zellij for the panes and the clients of `session`, and tells the core
+/// what it says: what zellij listed last stands until it lists them again.
+/// None once the core has stopped.
+fn ask(
+    core: &SyncSender<core::Command>,
+    session: &Addressed,
+    troubles: &mut Troubles,
+) -> Option<()> {
+    let Addressed { id, name, .. } = session;
+    let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
+    if let Ok(panes) = list(name).inspect_err(said) {
+        core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
+    }
+    let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
+    if let Ok(clients) = clients::list(Command::new("zellij"), name).inspect_err(said) {
+        core.send(core::Command::Clients { session: *id, name: name.clone(), clients }).ok()?;
+    }
+    Some(())
 }
 
 /// How long until the youngest of the sessions that `started` so is no longer

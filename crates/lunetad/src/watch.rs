@@ -67,7 +67,7 @@ pub fn watch<T: 'static>(
 
 /// A watcher of `dir`, or none, which leaves the folder to the sweep. One
 /// that cannot watch a folder that is there says why.
-fn watching(
+pub fn watching(
     dir: &Path,
     mode: RecursiveMode,
     wanted: fn(&Path) -> bool,
@@ -129,7 +129,7 @@ fn missing(error: &notify::Error) -> bool {
 
 /// Waits out a burst of changes, until `SETTLE` has passed without one, but no
 /// longer than `SETTLE_MAX` in all.
-fn settle(heard: &Receiver<()>) {
+pub fn settle(heard: &Receiver<()>) {
     let deadline = Instant::now() + SETTLE_MAX;
     while Instant::now() < deadline {
         match heard.recv_timeout(SETTLE) {

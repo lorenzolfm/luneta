@@ -104,6 +104,25 @@ pub enum Front {
 }
 
 impl Shell {
+    /// Whether `other` is this shell, and says what this one says: but for
+    /// what the command going in it does, which its terminal says and not its
+    /// hook, and which changes nothing that zellij lists of its pane.
+    #[must_use]
+    pub fn says_as(&self, other: &Shell) -> bool {
+        // Each field by name, so that one added is counted here or left out
+        // on purpose.
+        let Shell { named, pane, started, doing } = self;
+        let same = *named == other.named && *pane == other.pane;
+        same && *started == other.started
+            && match (doing, &other.doing) {
+                (
+                    Doing::Going { command, since, front: _ },
+                    Doing::Going { command: other_command, since: other_since, front: _ },
+                ) => command == other_command && since == other_since,
+                (doing, said) => doing == said,
+            }
+    }
+
     #[must_use]
     pub fn to_api(&self) -> api::Shell {
         use api::shell::{Doing as Told, Ended, Going, Stopped};

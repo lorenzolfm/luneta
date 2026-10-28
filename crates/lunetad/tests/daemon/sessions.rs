@@ -116,6 +116,40 @@ fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them(
     assert_eq!(panes.panes[0], pane(3, (0, "Tab #1"), Some("/home/you/work")));
 }
 
+/// zellij writes what it keeps of a session within a second of a pane or a
+/// tab opening or closing, and the daemon asks about the session again as it
+/// does, ahead of its sweep.
+#[test]
+fn a_session_is_asked_about_again_as_zellij_writes_that_it_changed() {
+    let host = Host::new();
+    let home = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
+    host.zellij.list("work", &json!([home]));
+    host.write_metadata("work", &kept(&[(1, 0)], 1));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("zellij lists the panes of work", || session(&host.host(), "work")?.panes.clone());
+
+    host.zellij.asked_again("work");
+    let opened = listed(2, "~/work", (1, "Tab #2"), Some("/home/you/work"));
+    host.zellij.list("work", &json!([home, opened]));
+    host.write_metadata("work", &kept(&[(1, 0), (2, 1)], 2));
+    let wrote = Instant::now();
+    eventually("work has the pane opened", || {
+        let panes = session(&host.host(), "work")?.panes.clone()?;
+        (panes.panes.len() == 2).then_some(())
+    });
+    assert!(wrote.elapsed() < Duration::from_secs(1), "{:?}", wrote.elapsed());
+}
+
+/// What zellij 0.45 keeps of a session `age` seconds after it began, cut
+/// down: each of its panes, by its id and the position of its tab.
+fn kept(panes: &[(u32, u32)], age: u32) -> String {
+    let pane = |&(id, tab): &(u32, u32)| {
+        format!("    pane {{\n        id {id}\n        tab_position {tab}\n    }}\n")
+    };
+    format!("panes {{\n{}}}\ncreation_time {age}\n", panes.iter().map(pane).collect::<String>())
+}
+
 fn client(id: u32, pane: Option<u32>) -> api::Client {
     api::Client { id, pane }
 }
@@ -279,6 +313,32 @@ fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
         let game: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "game").collect();
         (game.len() == 2 && game.iter().all(|session| session.panes.is_none())).then_some(())
     });
+}
+
+/// A session that no longer shares its name is asked about at once, however
+/// lately it was before it came to share it: its panes went as it did, and
+/// nothing else would have it asked about before the sweep.
+#[test]
+fn a_session_that_no_longer_shares_its_name_is_asked_about_at_once() {
+    let host = Host::new();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some("/home/you"))]));
+    let newer = host.sockets.path().join("contract_version_2");
+    fs::create_dir(&newer).unwrap();
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("zellij lists the panes of work", || session(&host.host(), "work")?.panes.clone());
+
+    host.zellij.asked_again("work");
+    let _shared = UnixListener::bind(newer.join("work")).unwrap();
+    eventually("neither session called work has panes", || {
+        let now = host.host();
+        let work: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "work").collect();
+        (work.len() == 2 && work.iter().all(|session| session.panes.is_none())).then_some(())
+    });
+    fs::remove_file(newer.join("work")).unwrap();
+    let ended = Instant::now();
+    eventually("work has its panes again", || session(&host.host(), "work")?.panes.clone());
+    assert!(ended.elapsed() < Duration::from_secs(1), "{:?}", ended.elapsed());
 }
 
 /// A folder of zellij's sockets the daemon cannot read could hold a session

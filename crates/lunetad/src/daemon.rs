@@ -32,11 +32,12 @@ use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsR
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, git, github, panes, shells, watch, zellij};
+use crate::{claude, client, git, github, metadata, panes, shells, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
-/// that crashed, which leaves its file as it was. zellij is asked for each
-/// session's panes as often, as it says nothing as they change either.
+/// that crashed, which leaves its file as it was. zellij is asked about each
+/// session's panes as often, for what changes in them with no word from zellij
+/// or a shell's hook.
 const SWEEP: Duration = Duration::from_secs(2);
 
 /// How often the shells' files are read again with no word that they changed,
@@ -130,14 +131,15 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
-    let core = core::start(Wakes { panes: wake_panes, git: wake_git, github: wake_github })?;
+    let wakes = Wakes { panes: wake_panes.clone(), git: wake_git, github: wake_github };
+    let core = core::start(wakes)?;
     let (end, ending) = oneshot::channel();
     // Read once, so that the folders the daemon says it reads are the ones it
     // does.
     let sockets = zellij::folder();
     let claude_folder = claude::folder();
     follow(&core, &claim.folder, claude_folder.clone(), sockets.clone(), end)?;
-    panes::follow(core.clone(), panes_woken, SWEEP)?;
+    panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
