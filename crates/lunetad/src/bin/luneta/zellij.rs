@@ -178,7 +178,7 @@ const SEEKING: Duration = Duration::from_secs(1);
 /// A session luneta's zellij can go on in: one that runs, as it answered for
 /// its clients, which are those it has before luneta's comes.
 pub struct Refuge {
-    pub session: String,
+    pub session: SessionName,
     pub before: Vec<Client>,
 }
 
@@ -205,7 +205,8 @@ pub fn refuge(seats: &[&str]) -> Option<Refuge> {
             let seeking = Instant::now() + SEEKING;
             let sessions = refuges(running, current.as_deref()).into_iter();
             return sessions.take_while(|_| Instant::now() < seeking).find_map(|session| {
-                let before = clients(&session).ok()?;
+                let session = SessionName::parse(&session).ok()?;
+                let before = clients(session.as_str()).ok()?;
                 Some(Refuge { session, before })
             });
         }
@@ -1071,6 +1072,15 @@ mod tests {
         let postfixed = long.with_postfix(12);
         assert_eq!(postfixed.0, format!("{}-12", "x".repeat(NAME_BYTES_MAX - 3)));
         assert!(SessionName::parse(&postfixed.0).is_ok());
+    }
+
+    /// A session's name names a file in a folder, as its fold does: no name
+    /// that names none, or one out of the folder, is a session's.
+    #[test]
+    fn a_name_that_names_no_file_is_no_session_s() {
+        for name in ["../out", "..", ".", ""] {
+            assert!(SessionName::parse(name).is_err(), "{name:?}");
+        }
     }
 
     fn laid(id: u32, tab_id: u32) -> Laid {

@@ -476,7 +476,7 @@ fn run_in(
     }
     let arrival = session.and_then(|session| {
         let before = zellij::before(session.as_str());
-        let look = sidebar.sending(session.as_str())?;
+        let look = sidebar.sending(session)?;
         Some(Arrival { look, before })
     });
     let (program, args) = zellij::client(session);
@@ -937,7 +937,7 @@ impl App {
         let Some(here) = self.here() else {
             return;
         };
-        let then = self.sidebar.sending(session.as_str());
+        let then = self.sidebar.sending(session);
         self.client.hosted.send(zellij::NUDGE);
         let made = zellij::start(&here, session, cwd, then, &self.events);
         let until = Instant::now() + zellij::START;
@@ -1077,7 +1077,7 @@ impl App {
         };
         let look = self.sidebar.rejoining(&to);
         let arrival = Some(Arrival { look, before: Before::Listed(before) });
-        let (program, args) = zellij::rejoin(&to);
+        let (program, args) = zellij::rejoin(to.as_str());
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, arrival, self.events.clone())?;
         // The client that takes its place heard no button go down over it.
