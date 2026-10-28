@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::tab;
@@ -2809,12 +2809,17 @@ pub type Fit = (bool, i64);
 /// find their rows with.
 pub struct Finder<'a> {
     matcher: SkimMatcherV2,
+    /// The matcher, but for a match at the start of a text, which counts as
+    /// one at the start of any word in it.
+    anywhere: SkimMatcherV2,
     term: &'a str,
 }
 
 impl<'a> Finder<'a> {
     pub fn new(term: &'a str) -> Self {
-        Finder { matcher: SkimMatcherV2::default(), term }
+        let anywhere = SkimScoreConfig { bonus_first_char_multiplier: 1, ..Default::default() };
+        let anywhere = SkimMatcherV2::default().score_config(anywhere);
+        Finder { matcher: SkimMatcherV2::default(), anywhere, term }
     }
 
     fn session(&self, name: &str) -> Option<Fit> {
@@ -2838,18 +2843,26 @@ impl<'a> Finder<'a> {
 
     /// What is typed against what a row shows, and against what else the row
     /// goes by, of which it need not have each: how well the best of them
-    /// fits, and the characters of what the row shows that the search found,
-    /// none where something else fits better.
+    /// fits, and the characters of what the row shows that the search found.
+    /// None light up where something else fits better, but for its start:
+    /// `review` fits a session named `review` better than its agent's row
+    /// `docs (review:4)` only by starting it, and lights up in the row.
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
         let exact = shown == self.term;
-        let also = also.iter().flatten();
-        let other = also.filter_map(|text| self.matcher.fuzzy_match(text, self.term)).max();
-        match self.matcher.fuzzy_indices(shown, self.term) {
-            Some((score, hits)) if other.is_none_or(|other| score >= other) => {
-                Some(((exact, score), hits))
-            },
-            _ => Some(((exact, other?), Vec::new())),
-        }
+        let best = |matcher: &SkimMatcherV2| {
+            also.iter().flatten().filter_map(|text| matcher.fuzzy_match(text, self.term)).max()
+        };
+        let other = best(&self.matcher);
+        let Some((score, hits)) = self.matcher.fuzzy_indices(shown, self.term) else {
+            return Some(((exact, other?), Vec::new()));
+        };
+        let fits = |score: i64, other: Option<i64>| other.is_none_or(|other| score >= other);
+        let lit = fits(score, other)
+            || self.anywhere.fuzzy_match(shown, self.term).is_some_and(|anywhere| {
+                fits(anywhere, best(&self.anywhere))
+            });
+        let fit = (exact, other.map_or(score, |other| score.max(other)));
+        Some((fit, if lit { hits } else { Vec::new() }))
     }
 }
 

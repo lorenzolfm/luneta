@@ -1519,6 +1519,19 @@ mod tests {
         (lines.into_iter().filter(|line| !line.is_empty()).collect(), lit)
     }
 
+    /// The lines of the list, top to bottom, each with what of it is in the
+    /// accent, as a search lights what it found.
+    fn found(picker: &Picker) -> Vec<(String, String)> {
+        let buffer = drawn(picker);
+        let (results, _) = parts();
+        let lit = |y| -> String {
+            let cells = (results.x..results.right()).map(|x| &buffer[(x, y)]);
+            cells.filter(|cell| cell.fg == ACCENT).map(ratatui::buffer::Cell::symbol).collect()
+        };
+        let lines = (results.y..results.bottom()).zip(text(&buffer, results));
+        lines.map(|(y, line)| (line, lit(y))).filter(|(line, _)| !line.is_empty()).collect()
+    }
+
     /// The first word of each line of the list.
     fn names(picker: &Picker) -> Vec<String> {
         let (lines, _) = list(picker);
@@ -1713,7 +1726,7 @@ mod tests {
     /// Agents named alike are told apart by their panes, and by their
     /// sessions too where they sit in two; the one in the pane luneta's
     /// zellij is on is pinned over the list, and is no row; and a search
-    /// finds an agent by its session's name.
+    /// finds an agent by its session's name, lit where its row shows it.
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
         let listing = Listing {
@@ -1741,14 +1754,17 @@ mod tests {
         assert_eq!(named, ["fix:1", "fix:2", "docs (work:3)", "docs (review:4)"]);
         assert!(lit.is_some_and(|lit| lit.contains("fix:1")));
         typed(&mut picker, "review");
-        let (lines, _) = list(&picker);
-        assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(lines[1].contains("docs (review:4)"));
+        let rows = found(&picker);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // `review` fits the session's name better than the row only by
+        // starting it, and lights up where the row shows it.
+        let (line, lit) = &rows[1];
+        assert!(line.contains("docs (review:4)") && lit == "review", "{rows:?}");
     }
 
     /// A search finds an agent by its directory as its row and its preview
     /// show it, and weighs it by what fits best, its name or another: its
-    /// name lights up only where it fits best. `zellij` lands on `zellij
+    /// name lights up only where it fits as well. `zellij` lands on `zellij
     /// panics` whole, on `src/zellij` after its `/`, and on `Zero-length lines
     /// in jobs` letter by letter.
     #[test]
@@ -1768,18 +1784,11 @@ mod tests {
         };
         let mut picker = Picker::open(1, List::Agents, listing);
         typed(&mut picker, "zellij");
-        let buffer = drawn(&picker);
-        let (results, _) = parts();
-        let lit = |y| (results.x..results.right()).any(|x| buffer[(x, y)].fg == ACCENT);
-        let rows: Vec<(String, bool)> = (results.y..results.bottom())
-            .zip(text(&buffer, results))
-            .map(|(y, line)| (line, lit(y)))
-            .filter(|(line, _)| !line.is_empty())
-            .collect();
-        let shown = [("zellij panics", true), ("Zero-length lines in jobs", false), ("fix", false)];
+        let rows = found(&picker);
+        let shown = [("zellij panics", "zellij"), ("Zero-length lines in jobs", ""), ("fix", "")];
         assert_eq!(rows.len(), shown.len(), "{rows:?}");
         for ((line, lit), (label, lights)) in rows.iter().zip(shown) {
-            assert!(line.contains(label) && *lit == lights, "{rows:?}");
+            assert!(line.contains(label) && lit == lights, "{rows:?}");
         }
     }
 
