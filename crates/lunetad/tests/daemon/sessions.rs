@@ -68,6 +68,7 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
         command: cwd.map(|_| "fish".to_owned()),
         titled: None,
         shell: None,
+        tab_id: Some(tab.0),
     }
 }
 

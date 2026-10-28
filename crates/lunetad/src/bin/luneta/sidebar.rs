@@ -84,10 +84,11 @@ const EDGE: &str = "│";
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
-/// The colours of the brackets, a tab's by its position, as a browser
-/// colours its groups of tabs: two tabs side by side never share one, and no
-/// bracket is red, which says what went wrong. No two neighbours here are
-/// alike either, for tabs that go round them.
+/// The colours of the brackets, a tab's by its id, as a browser colours its
+/// groups of tabs: zellij keeps a tab's id as it moves and as tabs before it
+/// close, so the tab keeps its colour, and two tabs opened one after the other
+/// never share one. No bracket is red, which says what went wrong. No two
+/// neighbours here are alike either, for tabs that go round them.
 const TABS: [Color; 6] = [
     gruvbox::BLUE,
     gruvbox::YELLOW,
@@ -1271,10 +1272,10 @@ impl Sidebar {
             let named = finder.as_ref().and_then(|finder| finder.session(listed.name.as_str()));
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
-            // The rows of the panes listed, by their tab, each made once its
-            // bracket is known: it joins the panes listed of a tab, as a
-            // search can leave some of them out.
-            let mut shown: BTreeMap<u32, Vec<_>> = BTreeMap::new();
+            // The rows of the panes listed, by their tab, its position and its
+            // id, each made once its bracket is known: it joins the panes
+            // listed of a tab, as a search can leave some of them out.
+            let mut shown: BTreeMap<(u32, Option<u32>), Vec<_>> = BTreeMap::new();
             for (pane, Shows { marked, ran, unread }) in listing.into_iter().zip(by_pane) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
@@ -1313,7 +1314,7 @@ impl Sidebar {
                     checkout,
                     bracket,
                 };
-                shown.entry(pane.tab).or_default().push((row, found));
+                shown.entry((pane.tab, pane.tab_id)).or_default().push((row, found));
             }
             if finder.is_some() && named.is_none() && shown.is_empty() {
                 continue;
@@ -1338,9 +1339,11 @@ impl Sidebar {
             // by its name hands the highlight on to. With none, its row hands it
             // on to its first pane.
             let mut lead: Option<(usize, Fit)> = None;
-            for (tab, of_tab) in shown {
+            for ((_, id), of_tab) in shown {
                 let count = of_tab.len();
-                let colour = TABS[tab as usize % TABS.len()];
+                // A daemon older than `tab_id` does not say which tab it is:
+                // its bracket stays grey, as every bracket was.
+                let colour = id.map_or(gruvbox::GREY, |id| TABS[id as usize % TABS.len()]);
                 for (at, (row, found)) in of_tab.into_iter().enumerate() {
                     if let Some(found) = found {
                         weigh(rows.len(), found);
@@ -3124,6 +3127,7 @@ mod tests {
             command: Some(command.to_owned()),
             titled: None,
             shell: None,
+            tab_id: Some(tab),
         }
     }
 
@@ -3305,9 +3309,8 @@ mod tests {
 
     /// A bracket down the column after `▌` joins the panes of a tab that
     /// holds more than one, from the first line of the first, down the branch
-    /// under one, to the last line of the last, in a colour of the tab's own.
-    /// A pane alone in its tab has none, nor has one a search lists alone of
-    /// its tab, as for `c` here.
+    /// under one, to the last line of the last. A pane alone in its tab has
+    /// none, nor has one a search lists alone of its tab, as for `c` here.
     #[test]
     fn a_bracket_joins_the_panes_that_share_a_tab() {
         let panes = vec![
@@ -3338,12 +3341,38 @@ mod tests {
                 " ╰     main",
             ]
         );
-        let buffer = drawn(&mut sidebar, true, 32, 24);
-        let bracket = |row: usize| buffer[(1, (HEADER + row) as u16)].fg;
-        let (b, c) = (gruvbox::YELLOW, gruvbox::PURPLE);
-        assert_eq!((2..8).map(bracket).collect::<Vec<_>>(), [b, b, b, c, c, c]);
         type_in(&mut sidebar, "/c");
         assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
+    }
+
+    /// A tab's bracket is in a colour of the tab's own, by the id zellij gave
+    /// it, which the tab keeps as a tab before it closes and its position goes
+    /// down. A daemon older than the id does not say it, and the brackets it
+    /// lists stay grey, rather than all in the first tab's colour.
+    #[test]
+    fn a_tab_keeps_its_colour_as_a_tab_before_it_closes() {
+        let colours = |sidebar: &mut Sidebar, lines: usize| {
+            let buffer = drawn(sidebar, true, 32, 24);
+            (1..=lines).map(|line| buffer[(1, (HEADER + line) as u16)].fg).collect::<Vec<_>>()
+        };
+        let three = (0..6).map(|id| pane(id + 1, id / 2, "/w/a", "less")).collect();
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(vec![session("s", 10, three)], Vec::new()));
+        let (b, y, p) = (gruvbox::BLUE, gruvbox::YELLOW, gruvbox::PURPLE);
+        assert_eq!(colours(&mut sidebar, 6), [b, b, y, y, p, p]);
+
+        // The first tab closed: the other two are at 0 and 1 now.
+        let closed = |tab_id: fn(u32) -> Option<u32>| {
+            let in_tab = |id: u32| Pane {
+                tab_id: tab_id(id / 2),
+                ..pane(id + 1, id / 2 - 1, "/w/a", "less")
+            };
+            host(vec![session("s", 10, (2..6).map(in_tab).collect())], Vec::new())
+        };
+        sidebar.heard(closed(Some));
+        assert_eq!(colours(&mut sidebar, 4), [y, y, p, p]);
+        sidebar.heard(closed(|_| None));
+        assert_eq!(colours(&mut sidebar, 4), [gruvbox::GREY; 4]);
     }
 
     /// The first line says `luneta`, in the accent, the word bold, while the
