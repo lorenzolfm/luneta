@@ -22,7 +22,9 @@ use serde::Deserialize;
 use crate::host::Event;
 use crate::own::{Before, Look, Looked};
 
-/// The longest name zellij makes a session of, in bytes.
+/// The longest name zellij makes a session of on any host, in bytes: what
+/// its socket's path leaves where the user's id has ten digits. Where it has
+/// fewer, zellij makes longer ones.
 const NAME_BYTES_MAX: usize = 60;
 
 // `SessionName::parse` refuses a longer name in zellij's words, which count the
@@ -44,13 +46,26 @@ const PANE_VAR: &str = "ZELLIJ_PANE_ID";
 /// no window.
 const LEFT_OUT: [&str; 5] = ["ZELLIJ", SESSION_VAR, PANE_VAR, "WINDOWID", "ALACRITTY_WINDOW_ID"];
 
-/// A name zellij can make a session of. `parse` is the one way to make one, so
-/// a name that reaches zellij as one has been held to what zellij takes.
+/// A name zellij can make a session of, or made one of. `parse` and `running`
+/// are the ways to make one, so a name that reaches zellij as one has been
+/// held to what zellij takes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionName(String);
 
 impl SessionName {
+    /// A name for luneta to make a session of: one zellij takes on any host.
     pub fn parse(name: &str) -> Result<Self, &'static str> {
+        let name = SessionName::running(name)?;
+        if name.0.len() > NAME_BYTES_MAX {
+            return Err("name must be shorter than 61 bytes");
+        }
+        Ok(name)
+    }
+
+    /// The name of a session zellij runs, as its folder lists it: one held
+    /// to what zellij holds every name to, which is not its length, as
+    /// zellij made the session on this host.
+    pub fn running(name: &str) -> Result<Self, &'static str> {
         if name.is_empty() {
             return Err("name must not be empty");
         }
@@ -62,9 +77,6 @@ impl SessionName {
         }
         if name.contains('/') {
             return Err("name cannot contain '/'");
-        }
-        if name.len() > NAME_BYTES_MAX {
-            return Err("name must be shorter than 61 bytes");
         }
         Ok(SessionName(name.to_owned()))
     }
@@ -205,7 +217,7 @@ pub fn refuge(seats: &[&str]) -> Option<Refuge> {
             let seeking = Instant::now() + SEEKING;
             let sessions = refuges(running, current.as_deref()).into_iter();
             return sessions.take_while(|_| Instant::now() < seeking).find_map(|session| {
-                let session = SessionName::parse(&session).ok()?;
+                let session = SessionName::running(&session).ok()?;
                 let before = clients(session.as_str()).ok()?;
                 Some(Refuge { session, before })
             });
@@ -1075,11 +1087,13 @@ mod tests {
     }
 
     /// A session's name names a file in a folder, as its fold does: no name
-    /// that names none, or one out of the folder, is a session's.
+    /// that names none, or one out of the folder, is a session's, to make or
+    /// of one that runs.
     #[test]
     fn a_name_that_names_no_file_is_no_session_s() {
         for name in ["../out", "..", ".", ""] {
             assert!(SessionName::parse(name).is_err(), "{name:?}");
+            assert!(SessionName::running(name).is_err(), "{name:?}");
         }
     }
 

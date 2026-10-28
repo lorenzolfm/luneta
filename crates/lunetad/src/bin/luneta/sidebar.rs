@@ -126,7 +126,7 @@ impl Listed {
     /// named for, before 1970, or with a name zellij refuses, which luneta
     /// can neither go to nor fold.
     fn of(session: &Session) -> Option<Self> {
-        let name = SessionName::parse(&session.name).ok()?;
+        let name = SessionName::running(&session.name).ok()?;
         let started = SystemTime::try_from(session.started_at?).ok()?;
         let kept = ledger::Session::new(started, NonZeroU64::new(session.socket)?)?;
         Some(Listed { name, kept })
@@ -772,7 +772,7 @@ impl Sidebar {
         let look = self.arrived();
         if let Some(look) = &look
             && !sent_there
-            && let Ok(session) = SessionName::parse(&look.session)
+            && let Ok(session) = SessionName::running(&look.session)
         {
             self.unfold(&session);
         }
@@ -3185,7 +3185,9 @@ mod tests {
 
     /// A daemon of another build can list a session with no start, or with
     /// no socket, which the sidebar cannot tell from another, or with a name
-    /// zellij refuses, which luneta can neither go to nor fold.
+    /// zellij refuses, which luneta can neither go to nor fold. A name longer
+    /// than luneta makes one is zellij's to refuse: where the user's id is
+    /// short, it makes one of 66 bytes.
     #[test]
     fn a_session_with_no_start_or_socket_or_a_refused_name_is_left_out_and_said() {
         let mut sidebar = Sidebar::default();
@@ -3194,13 +3196,15 @@ mod tests {
         let mut unsocketed = session("z", 30, vec![]);
         unsocketed.socket = 0;
         let misnamed = session("a/b", 40, vec![]);
-        let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed];
+        let long = session(&"w".repeat(66), 50, vec![]);
+        let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed, long];
         sidebar.heard(host(sessions, Vec::new()));
-        let lines = screen(&mut sidebar, false, 60, 6);
-        assert_eq!(lines[1], format!("─ 1 session {}", "─".repeat(47)));
+        let lines = screen(&mut sidebar, false, 60, 7);
+        assert_eq!(lines[1], format!("─ 2 sessions {}", "─".repeat(46)));
         assert_eq!(lines[3], format!(" ▾ y {}", "─".repeat(53)));
-        assert_eq!(lines[4], " lunetad: 3 sessions with no start or socket, or a name ze");
-        assert_eq!(lines[5], " llij refuses, not listed");
+        assert!(lines[4].starts_with(" ▾ wwww"), "{:?}", lines[4]);
+        assert_eq!(lines[5], " lunetad: 3 sessions with no start or socket, or a name ze");
+        assert_eq!(lines[6], " llij refuses, not listed");
     }
 
     /// `▌` marks the pane luneta's zellij is on, down the line of its branch
