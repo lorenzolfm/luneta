@@ -1,8 +1,10 @@
 //! luneta: zellij, beside a sidebar of every session on this host and what
 //! runs in each, and the CLI that asks lunetad, the daemon of this host, and
-//! has zellij open, move and close what the sidebar's menu does.
+//! has zellij open, move and close what the sidebar's menu does, for the
+//! agent of its ask box among others.
 
 mod answers;
+mod ask;
 mod brief;
 mod close;
 mod commands;

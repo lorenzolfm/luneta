@@ -8,7 +8,7 @@
 //! What the mouse drags on the sidebar's rows stays with the sidebar until it
 //! lets go, wherever the mouse goes, as what it drags on zellij stays with
 //! zellij. A brief the sidebar asks for shows in a box over zellij, which has
-//! the keys and the mouse until it closes.
+//! the keys and the mouse until it closes, and so does the ask box.
 
 use std::collections::VecDeque;
 use std::env;
@@ -36,6 +36,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
+use crate::ask::{Ask, Heard, Keyed};
 use crate::brief::{self, Briefing, Written};
 use crate::close::Act;
 use crate::folds::{self, Folds};
@@ -83,6 +84,8 @@ pub enum Event {
     Skills { menu: u64, skills: Result<Vec<Skill>, String> },
     /// What came of the brief numbered `number`.
     Briefed { number: u64, written: Written },
+    /// What the turn of the ask box numbered `number` heard its agent do.
+    Heard { number: u64, heard: Heard },
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -141,6 +144,10 @@ enum Focus {
     /// when the sidebar has them again. One closed while it is asked is
     /// given up, and the model with it.
     Brief(Briefing),
+    /// The ask box over zellij, beside the sidebar, as a brief is, from when
+    /// the sidebar asks for it until it closes, which gives up the turn its
+    /// agent is at.
+    Ask(Ask),
 }
 
 impl Focus {
@@ -148,7 +155,7 @@ impl Focus {
     fn zellij(&self) -> bool {
         match self {
             Focus::Zellij | Focus::Collapsed => true,
-            Focus::Sidebar | Focus::Brief(_) => false,
+            Focus::Sidebar | Focus::Brief(_) | Focus::Ask(_) => false,
         }
     }
 }
@@ -319,6 +326,9 @@ struct App {
     /// How many briefs luneta has asked for. A brief takes the next number
     /// as it is asked, which what comes of it carries.
     briefs: u64,
+    /// How many ask boxes luneta has opened, which are numbered as briefs
+    /// are.
+    asks: u64,
     /// The folder the daemon reads Claude Code's sessions in, where a brief
     /// reads the transcripts of the agents it lists: none until luneta has
     /// reached one.
@@ -503,6 +513,7 @@ fn run_in(
         colours,
         turned: None,
         briefs: 0,
+        asks: 0,
         claude_folder: None,
         daemon,
         events,
@@ -623,6 +634,13 @@ impl App {
                     briefing.written(written);
                 }
             },
+            Event::Heard { number, heard } => {
+                if let Focus::Ask(ask) = &mut self.focus
+                    && ask.number() == number
+                {
+                    ask.heard(heard);
+                }
+            },
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
         }
@@ -705,7 +723,9 @@ impl App {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
             Input::Paste(text) => {
-                if self.focus.zellij() {
+                if let Focus::Ask(ask) = &mut self.focus {
+                    ask.paste(&text);
+                } else if self.focus.zellij() {
                     self.client.hosted.send(keys::paste(&text, self.client.hosted.mode()));
                 }
             },
@@ -720,10 +740,19 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        // A brief takes every key, which does nothing else.
+        // A brief takes every key, which does nothing else, and so does the
+        // ask box.
         if let Focus::Brief(briefing) = &self.focus {
             if briefing.closes(key) {
                 self.give(Focus::Sidebar);
+            }
+            return;
+        }
+        if let Focus::Ask(ask) = &mut self.focus {
+            match ask.key(key) {
+                Keyed::Nothing => {},
+                Keyed::Send => self.converse(),
+                Keyed::Close => self.give(Focus::Sidebar),
             }
             return;
         }
@@ -763,6 +792,11 @@ impl App {
                 self.held = Held::Brief;
                 self.give(Focus::Sidebar);
             }
+            return;
+        }
+        // The ask box takes the mouse too, and does nothing with it: a click
+        // would end the talk.
+        if let Focus::Ask(_) = &self.focus {
             return;
         }
         // Anything but a drag lets the brief's button go: its release, or
@@ -897,7 +931,26 @@ impl App {
                 let folder = self.claude_folder.clone();
                 self.give(Focus::Brief(brief::ask(self.briefs, brief, folder, &self.events)));
             },
+            Asked::Ask(target) => {
+                self.asks += 1;
+                self.give(Focus::Ask(Ask::new(self.asks, &target, &self.dir)));
+            },
         }
+    }
+
+    /// Hands what you typed in the ask box to its agent, for you in the pane
+    /// luneta's zellij is on. luneta's zellij types there first, as the last
+    /// client to type in its session, which zellij moves where the agent has
+    /// it take you somewhere.
+    fn converse(&mut self) {
+        let Focus::Ask(ask) = &mut self.focus else {
+            return;
+        };
+        let here = self.sidebar.here_pane();
+        if here.is_some() {
+            self.client.hosted.send(zellij::NUDGE);
+        }
+        ask.send(here.as_ref(), &self.events);
     }
 
     /// Takes zellij's client to the pane the sidebar lists after the one it
@@ -983,8 +1036,8 @@ impl App {
         self.sidebar.focus(match side {
             Focus::Sidebar => Keys::Sidebar,
             // A brief leaves the sidebar as it stands, highlight and all, for
-            // the keys to go back to as it closes.
-            Focus::Brief(_) => Keys::Lent,
+            // the keys to go back to as it closes, and so does the ask box.
+            Focus::Brief(_) | Focus::Ask(_) => Keys::Lent,
             Focus::Zellij | Focus::Collapsed => Keys::Zellij,
         });
         self.focus = side;
@@ -1143,6 +1196,8 @@ impl App {
             let cursor = self.client.hosted.draw(buffer, zellij);
             if let Focus::Brief(briefing) = &self.focus {
                 briefing.draw(buffer, zellij);
+            } else if let Focus::Ask(ask) = &self.focus {
+                ask.draw(buffer, zellij);
             } else if self.focus.zellij()
                 && let Some(cursor) = cursor
             {

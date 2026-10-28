@@ -107,7 +107,8 @@ link>` takes a link), then open a tab there.
 ## New session to work on X
 
 ```sh
-luneta open session --cwd "$(zoxide query X)"
+zoxide query X                        # the directory X is
+luneta open session --cwd <that directory>
 ```
 
 If a session for X already runs (`luneta sessions`), say so, and `luneta go`
