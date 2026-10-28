@@ -9,6 +9,7 @@ mod brief;
 mod close;
 mod commands;
 mod daemon;
+mod dirs;
 mod drive;
 mod folds;
 mod gruvbox;

@@ -3047,7 +3047,7 @@ pub fn cut(text: &str, room: usize) -> String {
 }
 
 /// `text` cut to its last `room` columns, with a `…` for what it took.
-fn tail(text: &str, room: usize) -> String {
+pub fn tail(text: &str, room: usize) -> String {
     if text.width() <= room {
         return text.to_owned();
     }

@@ -12,8 +12,8 @@
 //! too, as does what went wrong with what the menu did there: each has the
 //! keys and the mouse until it closes, when the side that had them before has
 //! them again. `Ctrl j` opens the picker in a box there too, on the
-//! sessions, and `Ctrl a` on the agents. What the mouse drags on zellij stays
-//! with zellij under a box too.
+//! sessions, `Ctrl a` on the agents and `Ctrl d` on the directories. What the
+//! mouse drags on zellij stays with zellij under a box too.
 
 use std::collections::VecDeque;
 use std::env;
@@ -145,6 +145,9 @@ const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CON
 /// The key that opens the picker over zellij, on the agents.
 const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
 
+/// The key that opens the picker over zellij, on the directories.
+const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
+
 /// How soon a second click on the cell of a first makes a double click of the
 /// two, as desktops have it by default.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
@@ -211,8 +214,8 @@ enum Over {
     /// The ask box, from when the menu asks for it until it closes, which
     /// gives up the turn its agent is at.
     Ask(Ask),
-    /// The picker, from `SESSIONS` or `AGENTS` until it closes, or takes
-    /// zellij somewhere.
+    /// The picker, from `SESSIONS`, `AGENTS` or `DIRS` until it closes, or
+    /// takes zellij somewhere.
     Picker(Box<Picker>),
 }
 
@@ -943,8 +946,13 @@ impl App {
             self.give(Focus { side: self.focus.side, over: Some(over) });
             return;
         }
-        if chord == SESSIONS || chord == AGENTS {
-            let list = if chord == SESSIONS { List::Sessions } else { List::Agents };
+        let list = match chord {
+            SESSIONS => Some(List::Sessions),
+            AGENTS => Some(List::Agents),
+            DIRS => Some(List::Dirs),
+            _ => None,
+        };
+        if let Some(list) = list {
             self.pickers += 1;
             let picker = Box::new(Picker::open(self.pickers, list, self.sidebar.listing()));
             self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
@@ -1195,8 +1203,8 @@ impl App {
                 self.go(&place, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Start(session) => {
-                self.start(&session, None);
+            Picked::Start { session, cwd } => {
+                self.start(&session, cwd.as_deref());
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { session, deletes } => {

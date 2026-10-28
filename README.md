@@ -332,7 +332,7 @@ the session zellij is in ends, as zellij quits, its last pane exits, or it is
 killed, luneta attaches zellij to the newest session that runs, which the
 picker lists first, but never to the one luneta's own pane is in, and ends
 where none is left. When zellij fails, luneta ends and says what zellij said.
-zellij's keys are yours as they were, but six, which luneta takes before
+zellij's keys are yours as they were, but seven, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
 - `Ctrl b` goes back and forth between zellij and the sidebar. A click goes to
@@ -345,28 +345,31 @@ zellij sees them, whichever of the two has the keys:
   `Ctrl b` opens it too, and goes into it.
 - `Alt a` opens the [menu](#menu) over zellij, for the pane zellij is on, and
   closes it again.
-- `Ctrl j` opens the picker over zellij, on the sessions, and `Ctrl a` on the
-  agents.
+- `Ctrl j` opens the picker over zellij, on the sessions, `Ctrl a` on the
+  agents, and `Ctrl d` on the directories.
 
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
-line, and `Ctrl x` `Ctrl a` to what shows above its prompt. zellij's default
-config binds `Ctrl b` to tmux mode and `Ctrl q` to quit, and the plugin's
-[binds](#bind-keys) take `Ctrl j` and `Ctrl a` already. luneta takes all six
-first: if you use those, bind them to other keys, in zellij's config or in
-Claude Code's `~/.claude/keybindings.json`.
+line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
+and a shell ends on `Ctrl d`. zellij's default config binds `Ctrl b` to tmux
+mode and `Ctrl q` to quit, and the plugin's [binds](#bind-keys) take `Ctrl j`,
+`Ctrl a` and `Ctrl d` already. luneta takes all seven first: if you use those,
+bind them to other keys, in zellij's config or in Claude Code's
+`~/.claude/keybindings.json`.
 
 The picker floats over zellij's side, as the plugin's does over a tab. Its
 sessions are the one zellij is in, then the others that run, newest first,
 and under them those zellij keeps to bring back; its agents are as the
-[agents](#agents) tab lists them. `Tab` goes from one list to the other, what
-you type narrows both, and the preview beside the list shows the screen of the
-highlighted agent's pane, or of the pane you would come to in the highlighted
-session. `Enter` takes zellij there, brings back a session that ended, or
-makes the session you typed the name of. `Del` kills the highlighted session,
+[agents](#agents) tab lists them, and its directories as the
+[directories](#directories) tab does, luneta running zoxide and eza itself.
+`Tab` goes from one list to the next, what you type narrows all three, and the
+preview beside the list shows the screen of the highlighted agent's pane, or
+of the pane you would come to in the highlighted session, or what is in the
+highlighted directory. `Enter` takes zellij there, brings back a session that
+ended, makes the session you typed the name of, or makes one in the
+highlighted directory, named for it. `Del` kills the highlighted session,
 lets go of one that ended, or closes the agent's pane, and asks first, as the
 menu's delete does, while an agent at work would end: `y` goes ahead. `Ctrl r`
 renames the highlighted session. `Esc`, or a click off the box, closes it.
-Directories, `Ctrl d`, are still the plugin's.
 
 The sidebar lists every session, oldest first until you move them, the panes
 in each, in the order of their tabs, and what the agent in each pane is doing,
@@ -638,9 +641,10 @@ heard or not. A session the order does not have
 goes after those it has, as a new session always went last. The order is the
 sidebar's only: zellij's tabs keep theirs.
 
-The picker is still the plugin's, and works in the zellij luneta runs as in
-any other. So does the plugin's floating menu, from the key you bind it to;
-`Alt a` opens luneta's own.
+The plugin's picker opens in a zellij luneta doesn't run, from the keys you
+bind it to; in the one it runs, luneta takes `Ctrl j`, `Ctrl a` and `Ctrl d`
+first, and opens its own. The plugin's floating menu works in either, from the
+key you bind it to; `Alt a` opens luneta's own.
 
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not
