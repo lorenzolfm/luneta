@@ -764,6 +764,7 @@ fn git_runs_no_command_a_repository_names() {
 /// panes work in, and at once as a pane comes to a branch. What gh found of a
 /// branch is no longer a directory's once another is checked out there, and
 /// a branch with no pull request has none, which is no trouble to the daemon.
+/// Each comes with its page, which says the repository its number counts in.
 #[test]
 fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let host = Host::new();
@@ -775,31 +776,32 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
         assert!(git(dir, &["init", "-q", "-b", "main"]));
         commit(dir, "README", "start\n");
     }
-    host.gh.open("main", &json!({ "number": 7, "state": "OPEN", "isDraft": false }));
-    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true }));
+    let page = |number| format!("https://github.com/owner/repo/pull/{number}");
+    let main = json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page(7) });
+    host.gh.open("main", &main);
+    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page(8) }));
     let spelled = |dir: &Path| dir.display().to_string();
     let (top, src, beside) = (spelled(&tree), spelled(&tree.join("src")), spelled(&other));
     let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
     host.zellij.list("work", &json!([in_dir(1, &top), in_dir(2, &src), in_dir(3, &beside)]));
     let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
-    let found = || -> BTreeMap<String, (u32, PullRequestState)> {
+    let found = || -> BTreeMap<String, (u32, PullRequestState, String)> {
         let pull_requests = host.host().pull_requests.into_iter();
-        let found = |it: api::PullRequest| (it.number, it.state(), it.dir);
-        pull_requests.map(found).map(|(number, state, dir)| (dir, (number, state))).collect()
+        pull_requests.map(|it| (it.dir.clone(), (it.number, it.state(), it.url))).collect()
     };
 
-    let open = (7, PullRequestState::Open);
+    let open = (7, PullRequestState::Open, page(7));
     let all = eventually("gh finds main's pull request in all three", || {
         let found = found();
         (found.len() == 3).then_some(found)
     });
-    let wanted = [(top.clone(), open), (src.clone(), open), (beside.clone(), open)];
+    let wanted = [top.clone(), src.clone(), beside.clone()].map(|dir| (dir, open.clone()));
     assert_eq!(all, BTreeMap::from(wanted));
     assert_eq!(host.gh.asked(), ["main", "main"]);
 
     assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
-    let draft = (8, PullRequestState::Draft);
+    let draft = (8, PullRequestState::Draft, page(8));
     eventually("gh finds fold's pull request in both of tree's", || {
         let found = found();
         (found.get(&top) == Some(&draft) && found.get(&src) == Some(&draft)).then_some(())
@@ -831,7 +833,8 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     assert!(git(tree.path(), &["init", "-q", "-b", "main"]));
     commit(tree.path(), "README", "start\n");
     assert!(git(tree.path(), &["branch", "fold"]));
-    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true }));
+    let page = "https://github.com/owner/repo/pull/8";
+    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page }));
     host.gh.switch("fold");
     let cwd = tree.path().display().to_string();
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));

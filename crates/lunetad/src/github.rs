@@ -39,7 +39,10 @@ pub struct Found {
     pub pull_request: PullRequest,
 }
 
-/// A pull request as `gh pr view --json number,state,isDraft` writes it.
+/// What gh is asked of a pull request: `--json` takes them so.
+const VIEWED: &str = "number,state,isDraft,url";
+
+/// A pull request as `gh pr view --json` writes what `VIEWED` asks of it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
@@ -47,6 +50,8 @@ struct Viewed {
     state: Stands,
     /// Whether it is a draft, which a closed one can still be.
     is_draft: bool,
+    /// Its page, of the repository gh found it in.
+    url: String,
 }
 
 /// A pull request's state, as GitHub spells it.
@@ -67,7 +72,7 @@ fn parse(said: &[u8]) -> Result<PullRequest, String> {
         (Stands::Merged, _) => State::Merged,
         (Stands::Closed, _) => State::Closed,
     };
-    Ok(PullRequest { number: viewed.number, state })
+    Ok(PullRequest { number: viewed.number, state, url: Some(viewed.url) })
 }
 
 /// What gh said of the branch it was asked about.
@@ -91,7 +96,7 @@ enum Answer {
 /// so what is checked out is read again once gh has answered.
 fn view(dir: &str, branch: &str) -> Result<Answer, String> {
     let mut gh = Command::new("gh");
-    git::local(gh.args(["pr", "view", "--json", "number,state,isDraft"]).current_dir(dir));
+    git::local(gh.args(["pr", "view", "--json", VIEWED]).current_dir(dir));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh pr view in {dir} could not be run: {error}"))?;
     let found = match ran.answer() {
@@ -206,7 +211,7 @@ fn tell(
 ) -> bool {
     let mut found = BTreeMap::new();
     for (branch, dirs) in on {
-        let Some(pull_request) = asked.get(branch).and_then(|was| was.found) else {
+        let Some(pull_request) = asked.get(branch).and_then(|was| was.found.clone()) else {
             continue;
         };
         let of = Found { branch: branch.1.clone(), pull_request };
@@ -225,29 +230,36 @@ mod tests {
 
     /// A draft is open: one closed or merged is closed or merged, though
     /// GitHub still says it is a draft. What does not read, as a state GitHub
-    /// has not spelled before, or a number it does not count, is no pull
-    /// request.
+    /// has not spelled before, or a number it does not count, or one with no
+    /// page, is no pull request.
     #[test]
     fn a_pull_request_reads_as_gh_writes_it() {
         let read = |said: &str| parse(said.as_bytes());
         let state = |said: &str| read(said).map(|pull_request| pull_request.state);
         let number = NonZeroU32::new(126).unwrap();
+        let url = "https://github.com/owner/repo/pull/126";
         assert_eq!(
-            read(r#"{"isDraft":false,"number":126,"state":"OPEN"}"#),
-            Ok(PullRequest { number, state: State::Open })
+            read(&format!(r#"{{"isDraft":false,"number":126,"state":"OPEN","url":"{url}"}}"#)),
+            Ok(PullRequest { number, state: State::Open, url: Some(url.to_owned()) })
         );
-        assert_eq!(state(r#"{"isDraft":true,"number":1,"state":"OPEN"}"#), Ok(State::Draft));
-        assert_eq!(state(r#"{"isDraft":true,"number":1,"state":"MERGED"}"#), Ok(State::Merged));
-        assert_eq!(state(r#"{"isDraft":true,"number":1,"state":"CLOSED"}"#), Ok(State::Closed));
+        let page = r#""url":"https://github.com/owner/repo/pull/1""#;
+        let viewed = |fields: &str| format!("{{{fields},{page}}}");
+        let draft = viewed(r#""isDraft":true,"number":1,"state":"OPEN""#);
+        assert_eq!(state(&draft), Ok(State::Draft));
+        let merged = viewed(r#""isDraft":true,"number":1,"state":"MERGED""#);
+        assert_eq!(state(&merged), Ok(State::Merged));
+        let closed = viewed(r#""isDraft":true,"number":1,"state":"CLOSED""#);
+        assert_eq!(state(&closed), Ok(State::Closed));
         let unread = [
-            r#"{"isDraft":false,"number":1,"state":"QUEUED"}"#,
-            r#"{"number":1,"state":"OPEN"}"#,
-            r#"{"isDraft":false,"number":-1,"state":"OPEN"}"#,
-            r#"{"isDraft":false,"number":0,"state":"OPEN"}"#,
-            "",
+            viewed(r#""isDraft":false,"number":1,"state":"QUEUED""#),
+            viewed(r#""number":1,"state":"OPEN""#),
+            viewed(r#""isDraft":false,"number":-1,"state":"OPEN""#),
+            viewed(r#""isDraft":false,"number":0,"state":"OPEN""#),
+            r#"{"isDraft":false,"number":1,"state":"OPEN"}"#.to_owned(),
+            String::new(),
         ];
         for said in unread {
-            assert!(read(said).is_err(), "{said:?}");
+            assert!(read(&said).is_err(), "{said:?}");
         }
     }
 }

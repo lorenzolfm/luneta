@@ -505,6 +505,23 @@ and closing the brief gives the keys back where the menu took them from.
 words what you want done, as the menu would do it. From the menu over zellij,
 closing it gives the keys back where the menu took them from, as a brief does.
 
+A pull request's link, pasted while the sidebar has the keys or in the menu
+over zellij, opens the menu for that pull request instead. `w` makes a
+worktree of it with [`wt add`](https://github.com/lorenzolfm/wt) and opens a
+tab there, named `#123`, in the session that works in its repository: the one
+zellij is in, or else another, or else a session luneta makes in a clone of it
+that zoxide knows, named as the picker's directories name it. `r` does the
+same and starts Claude Code in the tab on `/thermo-nuclear-review` and the
+link, named for the skill and the branch. Where a pane has the pull request's
+branch checked out already, `w` takes zellij there, and `r` starts the agent
+beside it. A repository is the pull request's where any of its remotes is the
+pull request's repository on GitHub, by GitHub's name or, by ssh, another your
+ssh config gives it, so a fork's clone with the repository it forks among its
+remotes is one. wt makes the worktree only in a clone wt made:
+in one git made, it would make it in the clone's `.git`. The menu waits while
+wt fetches, and says why when it makes nothing; with no clone wt made, it says
+to `wt clone` one first. A paste while zellij has the keys stays zellij's.
+
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no
 topic, and such a row goes by its tab, if you named it, or else by the
@@ -799,7 +816,8 @@ any `claude -p` does, so `claude --resume` lists it there.
 | **zellij 0.45.0** | | everything |
 | [`claude`](https://claude.com/claude-code) | optional | the menu, the brief and the ask box |
 | `git` | optional | the branch in the name of an agent the menu starts |
-| [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list |
+| [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's repository that no session works in |
+| [`wt`](https://github.com/lorenzolfm/wt) | optional | a worktree of a pull request you paste in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |

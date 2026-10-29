@@ -321,7 +321,7 @@ impl FakeGh {
         fs::create_dir(&gh.pulls).unwrap();
         let script = format!(
             r#"#!/bin/sh
-if [ "$*" != "pr view --json number,state,isDraft" ]; then
+if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi

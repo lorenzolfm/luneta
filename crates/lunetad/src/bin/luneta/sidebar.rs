@@ -51,6 +51,7 @@ use crate::news::News;
 use crate::order::Order;
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Listing, Live, Seated, Shown};
+use crate::pull::{Link, Ready, Worked};
 use crate::skills::Skill;
 use crate::zellij::{self, Closes, Open, SessionName};
 
@@ -564,6 +565,22 @@ pub enum Asked {
     OpenThere { menu: u64, place: Place, open: Open },
     /// Take zellij's client to a session it makes, that starts in `cwd`.
     Start { session: SessionName, cwd: String },
+    /// Take zellij's client to a session it makes, `session`, that starts in
+    /// `cwd`, and have zellij open a tab of it once it is there, in `tab_cwd`,
+    /// named `name`, with `command` in it, or your shell for none, for the
+    /// menu numbered `menu`, which takes its client there once zellij says
+    /// what it opened.
+    Make {
+        menu: u64,
+        session: SessionName,
+        cwd: String,
+        tab_cwd: String,
+        name: String,
+        command: Vec<String>,
+    },
+    /// Find where a key of the menu numbered `menu`, for the pull request
+    /// `link`, goes among the panes `worked`, and have its worktree made.
+    Pull { menu: u64, link: Link, worked: Vec<Worked> },
     /// Find the skills that `cwd` can run, for the menu numbered `menu`.
     Find { menu: u64, cwd: String },
     /// Have the model write this brief, and show it.
@@ -1209,11 +1226,7 @@ impl Sidebar {
         let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
-        let pull_requests: HashMap<&str, PullRequest> = host
-            .pull_requests
-            .iter()
-            .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
-            .collect();
+        let pull_requests = pull_requests(host);
         let (mut sessions, unlisted) = oldest_first(&host.sessions);
         self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
         let (term, seek) = match &mut self.search {
@@ -1291,7 +1304,7 @@ impl Sidebar {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
                     let tree = WorkTree::of_api(trees.get(cwd)?)?;
-                    checkout(&tree, pull_requests.get(cwd).copied())
+                    checkout(&tree, pull_requests.get(cwd))
                 });
                 let command = pane.command.as_deref();
                 // An agent's pane runs Claude Code, whatever its terminal has
@@ -1766,6 +1779,24 @@ impl Sidebar {
         Ok(())
     }
 
+    /// Opens the menu for the pull request `text` is the link of, if it is
+    /// one, in the place of the menu open, over zellij or at the bottom of
+    /// the sidebar, or else at the bottom, for the row highlighted. Other text
+    /// does nothing, as a paste did before.
+    pub fn paste(&mut self, text: &str) {
+        let Some(link) = Link::parse(text) else {
+            return;
+        };
+        self.notice = None;
+        let target = self.menu.as_ref().map(|menu| menu.target().clone()).or_else(|| self.target());
+        let Some(target) = target else {
+            self.say(format!("menu: no row is highlighted for {link} to open the menu on"));
+            return;
+        };
+        self.menus += 1;
+        self.menu = Some(Menu::pull(self.menus, target, link));
+    }
+
     /// The menu, while it floats over zellij.
     pub fn floating(&self) -> Option<&Menu> {
         self.menu.as_ref().filter(|_| self.floats())
@@ -1798,6 +1829,7 @@ impl Sidebar {
                         Asked::Nothing
                     },
                     Done::Start(cwd) => self.start(&cwd),
+                    Done::Go(place) => Asked::Go(place),
                     Done::Act(act) => self.delete(act),
                     Done::Brief { scope, place } => self.brief(scope, &place),
                     Done::Ask(target) => Asked::Ask(target),
@@ -1817,14 +1849,17 @@ impl Sidebar {
             // session luneta's zellij is in has one, and another opens it once
             // luneta's zellij is there: its last client may have left since
             // lunetad listed them.
-            Wants::Open { cwd, opens: Opens::Tab } => {
-                let (name, command) = (None, Vec::new());
+            Wants::Open { cwd, opens: Opens::Tab { name, command } } => {
                 let open = Open::Tab { session: session.clone(), cwd, name, command };
                 if self.going().is_none() && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, open }
                 } else {
                     Asked::OpenThere { menu: number, place: target.place, open }
                 }
+            },
+            Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
+            Wants::Make { session, cwd, tab_cwd, name, command } => {
+                Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
             Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
             Wants::Plan(Scope::Session) => {
@@ -1841,6 +1876,55 @@ impl Sidebar {
             return Asked::Nothing;
         };
         self.menu_did(menu.planned(plan))
+    }
+
+    /// luneta found where the key of the menu numbered `menu`, for a pull
+    /// request, goes, as `ready` says, or why it found nothing: the menu goes
+    /// on, while it waits on it.
+    pub fn pulled(&mut self, menu: u64, ready: Result<Ready, String>) -> Asked {
+        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.pulling()) else {
+            return Asked::Nothing;
+        };
+        self.menu_did(waiting.pulled(ready))
+    }
+
+    /// Every pane the daemon says a directory of, in the order of the rows,
+    /// for luneta to find where a key of the menu for a pull request goes:
+    /// where each works, as its row says, the pull request of the branch
+    /// checked out there, by its page, and whether luneta's zellij is in its
+    /// session. A daemon older than the page says none of one.
+    fn worked(&self) -> Vec<Worked> {
+        let Some(host) = &self.host else {
+            return Vec::new();
+        };
+        let here = self.here();
+        let agents = seated(&host.agents, &host.sessions);
+        let pulls = pull_requests(host);
+        let (mut sessions, _) = oldest_first(&host.sessions);
+        self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+        let mut worked = Vec::new();
+        for (listed, session) in sessions {
+            let mut panes: Vec<&Pane> =
+                session.panes.iter().flat_map(|panes| &panes.panes).collect();
+            panes.sort_by_key(|pane| (pane.tab, pane.id));
+            for pane in panes {
+                let dir = match agents.get(&(session.name.as_str(), pane.id)) {
+                    Some(agent) => Some(agent_dir(agent, pane)),
+                    None => pane.cwd.as_deref(),
+                };
+                let Some(dir) = dir else {
+                    continue;
+                };
+                worked.push(Worked {
+                    session: listed.clone(),
+                    pane: pane.id,
+                    dir: dir.to_owned(),
+                    pull: pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?)),
+                    here: here == Some(session.name.as_str()),
+                });
+            }
+        }
+        worked
     }
 
     /// What deleting what `deletes` deletes of `listed` does, as the
@@ -1990,20 +2074,31 @@ impl Sidebar {
 
     /// zellij opened the terminal `opened` for the menu numbered `menu`, or
     /// says why it did not. luneta takes its client there while the menu
-    /// still waits on it: one closed since is no longer what you are on.
+    /// still waits on it: one closed since is no longer what you are on. A
+    /// session zellij made for it is the one the daemon lists by its name,
+    /// as it does by the time zellij opens a tab of it.
     pub fn opened(&mut self, menu: u64, opened: Result<u32, String>) -> Asked {
-        let waiting = self.menu.as_ref().filter(|it| it.number() == menu && it.opening());
-        let Some(session) = waiting.map(|it| it.target().place.listed().clone()) else {
+        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.opening()) else {
             return Asked::Nothing;
         };
-        self.menu = None;
-        match opened {
-            Ok(pane) => Asked::Go(Place::Pane { session, pane }),
+        let pane = match opened {
+            Ok(pane) => pane,
             Err(why) => {
                 self.say(format!("menu: nothing opened: {why}"));
-                Asked::Nothing
+                return Asked::Nothing;
             },
+        };
+        let Some(made) = waiting.making() else {
+            let session = waiting.target().place.listed().clone();
+            return Asked::Go(Place::Pane { session, pane });
+        };
+        let sessions = self.host.as_ref().map(|host| oldest_first(&host.sessions).0);
+        let mut named = sessions.into_iter().flatten().filter(|(listed, _)| listed.name == *made);
+        if let (Some((session, _)), None) = (named.next(), named.next()) {
+            return Asked::Go(Place::Pane { session, pane });
         }
+        self.say(format!("menu: zellij opened pane {pane} in {made}, which luneta cannot tell"));
+        Asked::Nothing
     }
 
     /// zellij said what closing the pane of the menu numbered `menu` closes,
@@ -2653,6 +2748,17 @@ fn clients<'a>(host: Option<&'a Host>, name: &str) -> Option<&'a [Client]> {
     session.clients.as_ref().map(|clients| clients.clients.as_slice())
 }
 
+/// The pull request of the branch checked out in each directory the daemon
+/// says one of, by the directory: as the rows show it, and as a key of the
+/// menu for one finds where it goes. None of one with no number or state, or
+/// a state of a newer daemon's.
+fn pull_requests(host: &Host) -> HashMap<&str, PullRequest> {
+    host.pull_requests
+        .iter()
+        .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
+        .collect()
+}
+
 /// The sessions the daemon lists, as the sidebar tells them apart, oldest
 /// first, so that a row never moves under your eye or your mouse but as you
 /// move it; and how many it lists that `Listed` leaves out.
@@ -2893,7 +2999,7 @@ impl<'a> Finder<'a> {
 /// The branch checked out in a work tree, how the tree stands, and its
 /// `pull_request`, or none for a detached `HEAD` or a directory in no
 /// repository.
-fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checkout> {
+fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes } = tree
     else {
         return None;
@@ -2908,7 +3014,7 @@ fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checko
 /// The number of a pull request and the colour of its state, which gh lists
 /// it in: green while it is open, grey while it is a draft, and purple once
 /// it is merged. A closed one is none.
-fn numbered(pull_request: PullRequest) -> Option<(u32, Color)> {
+fn numbered(pull_request: &PullRequest) -> Option<(u32, Color)> {
     let colour = match pull_request.state {
         State::Open => gruvbox::GREEN,
         State::Draft => gruvbox::GREY,
@@ -3184,6 +3290,7 @@ mod tests {
 
     use super::*;
     use crate::own::Before;
+    use crate::pull::At;
 
     fn pane(id: u32, tab: u32, cwd: &str, command: &str) -> Pane {
         Pane {
@@ -4664,7 +4771,7 @@ mod tests {
             let changes = Changes { modified, ..Changes::default() };
             host.work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
-            host.pull_requests.push(PullRequest { number, state }.to_api(dir));
+            host.pull_requests.push(PullRequest { number, state, url: None }.to_api(dir));
         }
         let mut sidebar = Sidebar::default();
         sidebar.heard(host);
@@ -4918,6 +5025,63 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
+    }
+
+    /// A pull request's link pasted with the sidebar's keys opens the menu
+    /// for it at the bottom, and other text does nothing. A key hands luneta
+    /// every pane that says where it works, in the order of the rows, to find
+    /// where it goes. A session luneta makes for it is where luneta goes, by
+    /// its name, once zellij has opened its tab.
+    #[test]
+    fn a_pull_request_s_link_pasted_opens_the_menu_for_it() {
+        let mut sidebar = two_sessions();
+        if let Some(host) = &mut sidebar.host {
+            let number = NonZeroU32::new(5).unwrap();
+            let url = Some("https://github.com/lorenzolfm/luneta/pull/5".to_owned());
+            host.pull_requests.push(PullRequest { number, state: State::Open, url }.to_api("/w/b"));
+        }
+        sidebar.focus(Keys::Sidebar);
+        sidebar.paste("ls -la");
+        assert!(sidebar.menu.is_none());
+        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5\n");
+        let lines = screen(&mut sidebar, true, 32, 16);
+        assert_eq!(lines[12..], [
+            "─ #5 ────── lorenzolfm/luneta ─",
+            " w  worktree",
+            " r  /thermo-nuclear-review",
+            " <ESC> - Close",
+        ]);
+        let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
+        let worked = |session, pane, dir: &str, pull, here| Worked {
+            session,
+            pane,
+            dir: dir.to_owned(),
+            pull,
+            here,
+        };
+        let worked = vec![
+            worked(listed("older", 10), 1, "/w/luneta/main", None, true),
+            worked(listed("older", 10), 2, "/w/c", None, true),
+            worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
+        ];
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Pull { menu: 1, link, worked });
+
+        let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
+        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
+        let asked = Asked::Make {
+            menu: 1,
+            session: session_name("newer-2"),
+            cwd: "/w/n".to_owned(),
+            tab_cwd: "/w/n/feat".to_owned(),
+            name: "#5".to_owned(),
+            command: Vec::new(),
+        };
+        assert_eq!(sidebar.pulled(1, Ok(ready)), asked);
+        if let Some(host) = &mut sidebar.host {
+            host.sessions.push(session("newer-2", 30, vec![pane(1, 0, "/w/n", "fish")]));
+        }
+        let opened = Place::Pane { session: listed("newer-2", 30), pane: 3 };
+        assert_eq!(sidebar.opened(1, Ok(3)), Asked::Go(opened));
     }
 
     /// The menu on an agent's row whose pane zellij has not said the

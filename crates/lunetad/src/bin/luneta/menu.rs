@@ -15,6 +15,12 @@
 //! pane. The plugin's menu reads its keys for skills from its configuration;
 //! luneta has none, and the Claude group's are its own.
 //!
+//! A pull request's link pasted with the sidebar's keys, or in the menu,
+//! opens it for that pull request instead: `w` makes a worktree of it, in a
+//! tab of the session that works in its repository, and `r` starts an agent
+//! on a review of it there too. Where a pane has its branch checked out
+//! already, `w` takes you there, and `r` starts the agent beside it.
+//!
 //! At the top of the sidebar, a key the sidebar has no use of its own for
 //! opens the menu on the group it opens, and `m` opens it on its first group,
 //! where every key is the menu's. While the sidebar has the focus and no menu
@@ -30,8 +36,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::pull::{At, Link, Ready};
 use crate::sidebar::{self, ACCENT, LIT, NAME, Place, TAG};
 use crate::skills::{Search, Skills};
+use crate::zellij::SessionName;
 
 /// The key that opens the search over the skills, at the top of the menu, and
 /// what the menu says it does.
@@ -49,10 +57,14 @@ const ASK_DOES: &str = "Ask";
 const SKILLS: char = 'c';
 const SKILLS_NAME: &str = "Claude";
 const SKILL_KEYS: [(char, &str); 3] = [
-    ('t', "/thermo-nuclear-review"),
+    ('t', REVIEW),
     ('m', "/make-illegal-states-unrepresentable"),
     ('s', "/tigerstyle"),
 ];
+
+/// The skill an agent reviews a pull request with: the Claude group's `t`,
+/// and the `r` of the menu for a pull request, which gives it the link.
+const REVIEW: &str = "/thermo-nuclear-review";
 
 /// The key of luneta's own New group, and its name.
 const NEW: char = 'n';
@@ -242,6 +254,44 @@ impl New {
     }
 }
 
+/// What a key of the menu for a pull request does, in a tab of the session
+/// that works in its repository, or where its branch is checked out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pull {
+    /// A worktree of the pull request, as `wt add` makes it.
+    Worktree,
+    /// The same, with an agent on a review of it.
+    Review,
+}
+
+impl Pull {
+    /// Each, in the order the menu shows them.
+    const ALL: [Pull; 2] = [Pull::Worktree, Pull::Review];
+
+    const fn key(self) -> char {
+        match self {
+            Pull::Worktree => 'w',
+            Pull::Review => 'r',
+        }
+    }
+
+    /// What the menu says the key does.
+    const fn does(self) -> &'static str {
+        match self {
+            Pull::Worktree => "worktree",
+            Pull::Review => REVIEW,
+        }
+    }
+
+    /// The one `key` presses, if any: its key, with no modifier but `Shift`.
+    fn pressed(key: &KeyEvent) -> Option<Pull> {
+        let KeyCode::Char(c) = key.code else {
+            return None;
+        };
+        Pull::ALL.into_iter().find(|pull| bare(key) && pull.key() == c)
+    }
+}
+
 enum Entry {
     /// A key that opens a group, the name the menu shows for it, and the keys
     /// in it.
@@ -259,6 +309,8 @@ enum Entry {
     /// A command of the sidebar's own, which the legend lists beside the
     /// menu's keys.
     Command(Command),
+    /// A key of the menu for a pull request, which that menu shows.
+    Pull(Pull),
     /// The key that opens the search over the skills.
     Search,
     /// The key that opens the ask box.
@@ -272,6 +324,7 @@ impl Entry {
             Entry::New(new) => new.key(),
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
+            Entry::Pull(pull) => pull.key(),
             Entry::Search => SEARCH,
             Entry::Ask => ASK,
         }
@@ -420,8 +473,9 @@ impl Keys {
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
-            // The legend only shows, and runs nothing.
-            Entry::Command(_) => return Pressed::Nothing,
+            // The legend only shows, and runs nothing, as does the menu for a
+            // pull request, which takes its keys itself.
+            Entry::Command(_) | Entry::Pull(_) => return Pressed::Nothing,
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -578,8 +632,9 @@ fn skill(prompt: &str) -> Option<&str> {
 pub enum Opens {
     /// `command`, or your shell for none, in a pane beside the pane `beside`.
     Pane { beside: u32, command: Vec<String> },
-    /// A tab of the pane's session.
-    Tab,
+    /// A tab of the pane's session, named `name` or as zellij numbers it,
+    /// with `command` in it, or your shell for none.
+    Tab { name: Option<String>, command: Vec<String> },
 }
 
 /// What a key of the menu leaves the sidebar to do: the menu open still,
@@ -602,6 +657,14 @@ pub enum Wants {
     /// zellij to open what `opens` says, in `cwd`, for luneta to take its
     /// client there.
     Open { cwd: String, opens: Opens },
+    /// luneta to find where a key of the menu for the pull request goes, and
+    /// to have its worktree made, for `pulled`.
+    Pull(Link),
+    /// zellij to make the session `session`, that starts in `cwd`, for luneta
+    /// to take its client there, and then to open a tab of it in `tab_cwd`,
+    /// named `name`, with `command` in it, or your shell for none, for luneta
+    /// to take its client there in turn.
+    Make { session: SessionName, cwd: String, tab_cwd: String, name: String, command: Vec<String> },
 }
 
 /// What a menu that closed leaves the sidebar to do.
@@ -612,6 +675,9 @@ pub enum Done {
     Wrong(String),
     /// Take luneta's zellij to a session it makes, that starts in `cwd`.
     Start(String),
+    /// Take luneta's zellij to the pane that has the pull request's branch
+    /// checked out.
+    Go(Place),
     /// Have zellij do what a delete key planned: for the session luneta's
     /// zellij is in, once it has left it.
     Act(Act),
@@ -645,6 +711,24 @@ enum Stage {
     /// zellij opens what a key asked for, for luneta to take its client
     /// there. Keys do nothing but close the menu.
     Opening(Keys),
+    /// The menu for the pull request `link`, which a paste opened, at `step`.
+    /// Once luneta has found where its keys go, its target is there.
+    Pull { link: Link, step: Step },
+}
+
+/// How far the menu for a pull request is, with its keys, `w` and `r`.
+enum Step {
+    /// Its keys wait for one.
+    Choosing,
+    /// The key `pull` waits for luneta to find where it goes, and for `wt
+    /// add` to make the worktree. Keys do nothing but close the menu.
+    Pulling(Pull),
+    /// zellij opens what the key asked for, for luneta to take its client
+    /// there. Keys do nothing but close the menu.
+    Opening,
+    /// zellij makes this session, and opens a tab of it, for luneta to take
+    /// its client there. Keys do nothing but close the menu.
+    Making(SessionName),
 }
 
 impl Menu {
@@ -670,6 +754,12 @@ impl Menu {
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
+    /// The menu numbered `number` for the pull request `link`, pasted with
+    /// the menu for `target` open, or the row highlighted.
+    pub fn pull(number: u64, target: Target, link: Link) -> Menu {
+        Menu { number, target, stage: Stage::Pull { link, step: Step::Choosing } }
+    }
+
     pub fn number(&self) -> u64 {
         self.number
     }
@@ -686,13 +776,32 @@ impl Menu {
             Stage::Planning { .. }
             | Stage::Choosing(_)
             | Stage::Asking { .. }
-            | Stage::Opening(_) => None,
+            | Stage::Opening(_)
+            | Stage::Pull { .. } => None,
         }
     }
 
     /// Whether the menu waits for zellij to open what a key asked for.
     pub fn opening(&self) -> bool {
-        matches!(self.stage, Stage::Opening(_))
+        matches!(
+            self.stage,
+            Stage::Opening(_) | Stage::Pull { step: Step::Opening | Step::Making(_), .. }
+        )
+    }
+
+    /// The session zellij makes for what a key asked for, while the menu
+    /// waits for it to open a tab of it.
+    pub fn making(&self) -> Option<&SessionName> {
+        match &self.stage {
+            Stage::Pull { step: Step::Making(session), .. } => Some(session),
+            _ => None,
+        }
+    }
+
+    /// Whether a key of the menu for a pull request waits for luneta to find
+    /// where it goes.
+    pub fn pulling(&self) -> bool {
+        matches!(self.stage, Stage::Pull { step: Step::Pulling(_), .. })
     }
 
     /// What `key` does to the menu, and what that leaves the sidebar to do.
@@ -730,7 +839,8 @@ impl Menu {
                         stays(Stage::Opening(keys), Wants::Open { cwd, opens })
                     },
                     (Ok((_, cwd)), New::Tab) => {
-                        stays(Stage::Opening(keys), Wants::Open { cwd, opens: Opens::Tab })
+                        let opens = Opens::Tab { name: None, command: Vec::new() };
+                        stays(Stage::Opening(keys), Wants::Open { cwd, opens })
                     },
                     (Ok((_, cwd)), New::Session) => Did::Closed(Done::Start(cwd)),
                 },
@@ -743,10 +853,26 @@ impl Menu {
                 },
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
-            Stage::Planning { .. } | Stage::Opening(_) if closes(key) => {
+            Stage::Planning { .. } | Stage::Opening(_) | Stage::Pull { .. } if closes(key) => {
                 Did::Closed(Done::Nothing)
             },
-            stage @ (Stage::Planning { .. } | Stage::Opening(_)) => stays(stage, Wants::Nothing),
+            // `Backspace` goes out of the menu from its first group, and the
+            // menu for a pull request has no other.
+            Stage::Pull { step: Step::Choosing, .. }
+                if key.code == KeyCode::Backspace && bare(key) =>
+            {
+                Did::Closed(Done::Nothing)
+            },
+            Stage::Pull { link, step: Step::Choosing } => match Pull::pressed(key) {
+                Some(pull) => {
+                    let wants = Wants::Pull(link.clone());
+                    stays(Stage::Pull { link, step: Step::Pulling(pull) }, wants)
+                },
+                None => stays(Stage::Pull { link, step: Step::Choosing }, Wants::Nothing),
+            },
+            stage @ (Stage::Planning { .. } | Stage::Opening(_) | Stage::Pull { .. }) => {
+                stays(stage, Wants::Nothing)
+            },
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
                 Answer::Yes => {
                     let planning = Stage::Planning { keys, delete, agreed: Some(plan) };
@@ -783,6 +909,52 @@ impl Menu {
         Did::Closed(Done::Act(plan.act))
     }
 
+    /// What the key of the menu for a pull request that waits does, now that
+    /// luneta found where it goes, as `ready` says, or why it found nothing.
+    /// `w` takes luneta's zellij to the pane that has the pull request's
+    /// branch checked out, or opens a tab in the worktree, named for the pull
+    /// request, in the session that works in its repository, or one luneta
+    /// makes; `r` opens an agent on a review of it beside that pane, or in
+    /// that tab. The menu is then for where it opens that, and waits for
+    /// zellij to open it.
+    pub fn pulled(self, ready: Result<Ready, String>) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Pull { link, step: Step::Pulling(pull) } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
+        let Ready { at, worktree, branch } = match ready {
+            Ok(ready) => ready,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {link}: {why}"))),
+        };
+        let command = match pull {
+            Pull::Worktree => Vec::new(),
+            Pull::Review => claude(&format!("{REVIEW} {}", link.url()), branch.as_deref()),
+        };
+        let opening = |place: Place, opens: Opens| {
+            let target = Target { place, cwd: Some(worktree.clone()), branch: branch.clone() };
+            let stage = Stage::Pull { link: link.clone(), step: Step::Opening };
+            Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
+        };
+        match (at, pull) {
+            (At::There { session, pane }, Pull::Worktree) => {
+                Did::Closed(Done::Go(Place::Pane { session, pane }))
+            },
+            (At::There { session, pane }, Pull::Review) => {
+                opening(Place::Pane { session, pane }, Opens::Pane { beside: pane, command })
+            },
+            (At::Session { session, pane }, _) => {
+                let opens = Opens::Tab { name: Some(link.tab()), command };
+                opening(Place::Pane { session, pane }, opens)
+            },
+            (At::Clone { cwd, name }, _) => {
+                let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
+                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
+                let stage = Stage::Pull { link, step: Step::Making(name) };
+                Did::Stays(Menu { number, target, stage }, wants)
+            },
+        }
+    }
+
     /// Fills the search box with what the finder said, while it is open.
     pub fn found(&mut self, skills: Result<Vec<crate::skills::Skill>, String>) {
         if let Stage::Choosing(keys) = &mut self.stage
@@ -814,16 +986,27 @@ impl Menu {
             Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
                 keys.search.is_some()
             },
-            Stage::Asking { .. } => false,
+            Stage::Asking { .. } | Stage::Pull { .. } => false,
         }
     }
 
     /// What the menu shows `width` wide, with `body_room` lines at most for
-    /// what it shows under the rule.
+    /// what it shows under the rule. The menu for a pull request is named for
+    /// it, and says its repository where another says where its pane works.
     fn shown(&self, width: usize, body_room: usize) -> Shown {
         let inner = width.saturating_sub(1);
         let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
         let (title, right, body, footer) = match &self.stage {
+            Stage::Pull { link, step: Step::Pulling(_) } => {
+                let making = format!("Making a worktree of {}…", link.tab());
+                let body = wrap(&making, width, Style::new().fg(NAME));
+                (link.tab(), link.repository(), body, keys_line(width, &[("<ESC>", "Close")]))
+            },
+            Stage::Pull { link, step: Step::Choosing | Step::Opening | Step::Making(_) } => {
+                let body = Pull::ALL.map(|pull| entry_line(&Entry::Pull(pull), inner));
+                let footer = keys_line(width, &[("<ESC>", "Close")]);
+                (link.tab(), link.repository(), body.to_vec(), footer)
+            },
             Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
                 if let Some(search) = &keys.search {
                     let moves = [("<↓↑>", "Move"), ("<ENTER>", "Start"), ("<ESC>", "Back")];
@@ -1045,6 +1228,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
+        Entry::Pull(pull) => spans.push(does(pull.does())),
         Entry::Search => spans.push(does(SEARCH_DOES)),
         Entry::Ask => spans.push(does(ASK_DOES)),
     }
@@ -1158,6 +1342,7 @@ mod tests {
 
     use super::*;
     use crate::close::{self, Deletes, Doing, Seat, Subject};
+    use crate::pull::{At, Link, Ready};
     use crate::sidebar::Listed;
     use crate::skills::{Name, Skill};
     use crate::zellij::Closes;
@@ -1578,5 +1763,112 @@ mod tests {
             boxed(" <any key> - Close"),
             format!("{zellij}└{}┘", "─".repeat(43)),
         ]);
+    }
+
+    fn link() -> Link {
+        Link::parse("https://github.com/cashubtc/cdk/pull/2736").expect("a link")
+    }
+
+    /// The menu for the pull request, its key `key` pressed, waiting for
+    /// luneta to find where it goes.
+    fn pulling(key: char) -> Menu {
+        let (menu, wants) = stays(Menu::pull(1, pane_row(), link()).key(&char(key)));
+        assert_eq!(wants, Wants::Pull(link()));
+        assert!(menu.pulling());
+        menu
+    }
+
+    /// A paste opens the menu for the pull request, named for it, with its
+    /// repository where another menu says where its pane works. A key waits
+    /// for luneta to find where it goes and to make the worktree, and does
+    /// nothing else meanwhile, but close the menu.
+    #[test]
+    fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
+        let menu = Menu::pull(1, pane_row(), link());
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            [
+                "─ #2736 ──────── cashubtc/cdk ─",
+                " w  worktree",
+                " r  /thermo-nuclear-review",
+                " <ESC> - Close",
+            ]
+        );
+        let (menu, wants) = stays(menu.key(&char('x')));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, wants) = stays(menu.key(&char('w')));
+        assert_eq!(wants, Wants::Pull(link()));
+        assert_eq!(
+            text(&menu.lines(31, 9)),
+            ["─ #2736 ──────── cashubtc/cdk ─", " Making a worktree of #2736…", " <ESC> - Close"]
+        );
+        let (menu, wants) = stays(menu.key(&char('r')));
+        assert_eq!(wants, Wants::Nothing);
+        assert!(menu.pulling());
+        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+    }
+
+    /// `w` opens a tab in the worktree, named for the pull request, in the
+    /// session found, and `r` the same with an agent on a review of it named
+    /// for the branch; or else, where a pane has the branch checked out, `w`
+    /// goes there and `r` opens the agent beside it. The menu is then for
+    /// where it opens, for luneta to take its client there.
+    #[test]
+    fn a_key_for_a_pull_request_opens_where_luneta_found_it_goes() {
+        let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
+        let worktree = "/w/cdk/feat-x".to_owned();
+        let branch = Some("feat/x".to_owned());
+        let ready = |at| Ok(Ready { at, worktree: worktree.clone(), branch: branch.clone() });
+        let review = [
+            "claude",
+            "--name",
+            "thermo-nuclear-review: feat/x",
+            "/thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let session = || At::Session { session: other.clone(), pane: 7 };
+        for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
+            let (menu, wants) = stays(pulling(key).pulled(ready(session())));
+            let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
+            assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
+            assert!(menu.opening());
+            assert_eq!(menu.target().place, Place::Pane { session: other.clone(), pane: 7 });
+        }
+        let there = || At::There { session: other.clone(), pane: 9 };
+        let place = Place::Pane { session: other.clone(), pane: 9 };
+        assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(place.clone()));
+        let (menu, wants) = stays(pulling('r').pulled(ready(there())));
+        let opens = Opens::Pane { beside: 9, command: review };
+        assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
+        assert_eq!(menu.target().place, place);
+    }
+
+    /// Where no session works in the repository, luneta makes one in its
+    /// clone, and the menu waits for zellij to make it and open the tab.
+    #[test]
+    fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
+        let name = SessionName::parse("cdk").unwrap();
+        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
+        let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None };
+        let (menu, wants) = stays(pulling('w').pulled(Ok(ready)));
+        assert_eq!(
+            wants,
+            Wants::Make {
+                session: name.clone(),
+                cwd: "/w/cdk".to_owned(),
+                tab_cwd: "/w/cdk/feat-x".to_owned(),
+                name: "#2736".to_owned(),
+                command: Vec::new(),
+            }
+        );
+        assert!(menu.opening());
+        assert_eq!(menu.making(), Some(&name));
+        // Why luneta found nothing closes the menu, and says so.
+        let why = "no session works in cashubtc/cdk".to_owned();
+        assert_eq!(
+            closed(pulling('r').pulled(Err(why))),
+            Done::Wrong("menu: cashubtc/cdk#2736: no session works in cashubtc/cdk".to_owned())
+        );
     }
 }
