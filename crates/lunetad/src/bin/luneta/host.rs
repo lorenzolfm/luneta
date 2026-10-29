@@ -461,7 +461,8 @@ struct App {
     /// sees you in a pane only while it does.
     focused: bool,
     /// The clicks on the cell of one that opened the sidebar collapsed, or
-    /// pressed a spot, that come fast after it, onto what that drew there.
+    /// pressed a spot, or next to it, that come fast after it, onto what
+    /// that drew there.
     burst: Option<Burst>,
     /// What has the mouse drew last: the box over zellij, where one is, or
     /// else the sidebar, with the spots on its menu or legend, which a click
@@ -1122,13 +1123,13 @@ impl App {
             self.zellij_mouse(mouse);
             return;
         }
-        // A click of a burst on one cell is no click on what its first drew
-        // under it: on the row a click on the sidebar collapsed opened there,
-        // it would fold a session, or take zellij to a pane; on the entry
-        // that took the place of a group a click opened, it would press that
-        // entry's key, as a delete's, and the next click the key of the entry
-        // that took its place in turn; and on zellij, where a click closed
-        // the box over it, it would click there.
+        // A click of a burst on one cell, or next to it, is no click on what
+        // its first drew under it: on the row a click on the sidebar
+        // collapsed opened there, it would fold a session, or take zellij to
+        // a pane; on the entry that took the place of a group a click opened,
+        // it would press that entry's key, as a delete's, and the next click
+        // the key of the entry that took its place in turn; and on zellij,
+        // where a click closed the box over it, it would click there.
         if down {
             if self.burst.as_mut().is_some_and(|burst| burst.takes(at, Instant::now())) {
                 self.held = Held::Taken;

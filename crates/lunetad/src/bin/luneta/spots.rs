@@ -24,8 +24,8 @@ use crate::picker::Pick;
 /// on keeps.
 pub const POINTED: Color = gruvbox::BG1;
 
-/// How soon after a click on a cell another there is the next of a burst,
-/// as desktops have a double click by default.
+/// How soon after a click on a cell another there, or next to it, is the
+/// next of a burst, as desktops have a double click by default.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
 /// Spots, each where it is, and what a click on it does: on luneta's
@@ -194,7 +194,10 @@ impl Drawn {
 /// there: a spot's, or the one that opened the sidebar collapsed. None of
 /// them is a click on what the first drew there, and the burst lasts from
 /// the last of them, so that the third click of a triple click is none
-/// either.
+/// either. A hand that clicks twice moves a little, as desktops allow it a
+/// few pixels, which can take the pointer over a cell's edge: a click on a
+/// cell next to the last one's is one more of the burst too, and the burst
+/// goes on from there.
 #[derive(Clone, Copy, Debug)]
 pub struct Burst {
     at: Position,
@@ -208,10 +211,12 @@ impl Burst {
     }
 
     /// Whether a press at `at`, `now`, is one more of the burst, which then
-    /// lasts from it.
+    /// lasts from it, and from where it is.
     pub fn takes(&mut self, at: Position, now: Instant) -> bool {
-        let more = self.at == at && now.saturating_duration_since(self.last) < DOUBLE_CLICK;
+        let near = self.at.x.abs_diff(at.x) <= 1 && self.at.y.abs_diff(at.y) <= 1;
+        let more = near && now.saturating_duration_since(self.last) < DOUBLE_CLICK;
         if more {
+            self.at = at;
             self.last = now;
         }
         more
@@ -285,7 +290,7 @@ mod tests {
 
     /// Every click on the cell soon after the one before it is one more of
     /// the burst: the second of a double click, and the third of a triple.
-    /// One later than that, or elsewhere, is a click.
+    /// One later than that, or two cells off, is a click.
     #[test]
     fn every_fast_click_on_the_cell_is_one_more_of_the_burst() {
         let start = Instant::now();
@@ -297,7 +302,25 @@ mod tests {
         // 450ms after the last, whatever the time since the first.
         assert!(burst.takes(at, after(750)));
         assert!(!burst.takes(at, after(1300)));
-        let mut burst = Burst::new(at, start);
-        assert!(!burst.takes(Position::new(5, 14), after(100)));
+        for off in [Position::new(6, 14), Position::new(2, 14), Position::new(4, 16)] {
+            let mut burst = Burst::new(at, start);
+            assert!(!burst.takes(off, after(100)), "{off:?}");
+        }
+    }
+
+    /// A fast click on a cell next to the last one's, as the hand moved a
+    /// little between them, is one more of the burst: on the line of the
+    /// entry clicked, it would hit the one that took its place, and on the
+    /// line under it, the one under that. The burst goes on from where the
+    /// last of it is.
+    #[test]
+    fn a_fast_click_next_to_the_last_is_one_more_of_the_burst() {
+        let start = Instant::now();
+        let after = |ms| start + Duration::from_millis(ms);
+        let mut burst = Burst::new(Position::new(4, 14), start);
+        assert!(burst.takes(Position::new(5, 14), after(150)));
+        assert!(burst.takes(Position::new(5, 15), after(300)));
+        // Next to the last, though two columns from the first.
+        assert!(burst.takes(Position::new(6, 14), after(450)));
     }
 }

@@ -453,9 +453,10 @@ A click on an entry of it presses its key, as a click on one of the menu's
 does at the bottom of the sidebar or over zellij. The entry, the row of the
 picker or the key under the pointer is lit, a step softer than the
 highlight, so you see what a click hits before you click. A click that comes
-fast after another on the same cell is none, the second of a double click and
-the third of a triple: a click that opened a group leaves another entry under
-the pointer, as `d` opens Delete onto `d  close the pane`.
+fast after another on the same cell, or one next to it, is none, the second
+of a double click and the third of a triple: a click that opened a group
+leaves another entry under the pointer, as `d` opens Delete onto
+`d  close the pane`, and `s  delete the session` under it.
 
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
 tab and in the directory it works in, `n t` a tab of its session there, and
