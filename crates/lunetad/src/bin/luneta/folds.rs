@@ -198,6 +198,10 @@ mod tests {
         let mut here = Folds::within(scratch.path().to_owned());
         let (events, heard) = mpsc::channel();
         let _watcher = watch(scratch.path(), events).unwrap();
+        // macOS can tell of the folder's own making once the watch has
+        // started: FSEvents numbers a change as it hears of it, which can be
+        // after. What comes before the folder goes quiet is that.
+        while heard.recv_timeout(Duration::from_millis(200)).is_ok() {}
         here.reload();
         assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
 
