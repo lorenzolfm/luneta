@@ -14,7 +14,9 @@
 //! pull request's branch is already, in a repository wt cloned: in one git
 //! cloned, wt would make it in its `.git`. An issue's branch is `issue-123`,
 //! which wt makes from origin's default branch where there is none yet, so
-//! a second paste of the link finds the first's worktree. A pane that has the
+//! a second paste of the link finds the first's worktree. gh says first that
+//! GitHub has an issue of its number, and no pull request: a link can say an
+//! issue of any number, and wt would make a branch of each. A pane that has the
 //! pull request's branch checked out, as the daemon says by its page, or that
 //! works in the worktree `wt add` says, is where a key goes instead of a new
 //! tab.
@@ -47,6 +49,10 @@ const MAKING: Duration = Duration::from_mins(3);
 /// in a directory: it reads files.
 const ANSWER: Duration = Duration::from_secs(5);
 
+/// How long gh has to say what an issue's number is on GitHub: it asks
+/// GitHub, across the network.
+const ASKING: Duration = Duration::from_secs(30);
+
 /// A pull request or an issue on GitHub, as its link names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
@@ -56,7 +62,9 @@ pub struct Link {
     number: NonZeroU32,
 }
 
-/// What a link is the page of: a pull request, or an issue.
+/// What a link is the page of: a pull request, or an issue. GitHub counts
+/// the two in one sequence, and takes a link of either page for the other's
+/// number, so a link can say an issue of a pull request's number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Pull,
@@ -130,10 +138,10 @@ impl Link {
     }
 
     /// Whether `other` is the same pull request or issue, case aside in the
-    /// names of its repository, as GitHub takes them.
+    /// names of its repository, as GitHub takes them: by its number, of
+    /// whichever page either link is, as GitHub has one of the number.
     pub fn is(&self, other: &Link) -> bool {
-        self.kind == other.kind
-            && self.number == other.number
+        self.number == other.number
             && self.owner.eq_ignore_ascii_case(&other.owner)
             && self.name.eq_ignore_ascii_case(&other.name)
     }
@@ -316,6 +324,14 @@ pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event
 
 /// Where a key goes for `link`, as `prepare` says.
 fn ready(link: &Link, worked: &[Worked]) -> Result<Ready, String> {
+    // wt asks GitHub for a pull request's branch, and finds none for an
+    // issue's number; but it makes an issue's branch whatever the number is.
+    if link.kind() == Kind::Issue {
+        let page = page(link)?;
+        if page.kind() == Kind::Pull {
+            return Err(format!("it is a pull request on GitHub: paste {}", page.url()));
+        }
+    }
     let mut seen: HashMap<String, Option<Repository>> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
     let mut repository_of = |dir: &str| {
@@ -500,6 +516,23 @@ fn said(git: &mut Command) -> Option<String> {
     Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
 }
 
+/// The page on GitHub of `link`'s number, as gh says: `gh issue view` answers
+/// of a pull request's number too, with the pull request's page. Or why gh
+/// did not say, as that GitHub has none of the number, or that gh is not
+/// logged in.
+fn page(link: &Link) -> Result<Link, String> {
+    let number = link.number.to_string();
+    let repository = format!("{GITHUB}/{}", link.repository());
+    let mut gh = Command::new("gh");
+    gh.args(["issue", "view", &number, "--repo", &repository, "--json", "url", "--jq", ".url"]);
+    let ran = program::run(&mut gh, ASKING)
+        .map_err(|error| format!("gh issue view could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("gh issue view: {why}"))?;
+    let said = String::from_utf8_lossy(&said);
+    let said = said.trim();
+    Link::parse(said).ok_or_else(|| format!("gh issue view said {said}, which is no link"))
+}
+
 /// Has `wt add` make a worktree of the pull request or the issue `link` in
 /// the repository `dir` is in, and says where it is, or where one of its
 /// branch is already: the last line wt prints, as the real path of the
@@ -613,7 +646,8 @@ mod tests {
 
     /// An issue's link names it as a pull request's does, but for `issues`:
     /// the agent takes it, and `wt add` the branch luneta has it make, or
-    /// find where a paste made it before.
+    /// find where a paste made it before. It is the pull request of its
+    /// number, as GitHub counts the two in one sequence.
     #[test]
     fn a_link_is_of_an_issue_or_of_a_page_of_one() {
         for text in [
@@ -628,7 +662,8 @@ mod tests {
         assert_eq!(issue().url(), "https://github.com/cashubtc/cdk/issues/2736");
         assert_eq!(issue().tab(), "#2736");
         assert_eq!(issue().wt(), "issue-2736");
-        assert!(!issue().is(&link()));
+        // GitHub has one #2736 of cdk, of whichever page a link is.
+        assert!(issue().is(&link()));
         assert_eq!(Link::parse("https://github.com/cashubtc/cdk/issues/0"), None);
     }
 
@@ -729,8 +764,6 @@ mod tests {
         assert_eq!(found(&link(), &checked_out, remotes), Some(Found::There(2)));
         let fork = [worked("cdk", 1, "/cdk/main", Some(&fork), true)];
         assert_eq!(found(&link(), &fork, remotes), Some(Found::Session(0)));
-        // No pane has an issue checked out, whatever pull request it has.
-        assert_eq!(found(&issue(), &checked_out, remotes), Some(Found::Session(0)));
     }
 
     /// Of the directories zoxide knows, the clone wt made that is the pull

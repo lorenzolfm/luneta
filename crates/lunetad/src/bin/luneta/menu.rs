@@ -262,41 +262,37 @@ impl New {
 
 /// What a key of the menu for a pull request or an issue does, in a tab of
 /// the session that works in its repository, or where its branch is checked
-/// out.
+/// out. The menu for a link of either kind has each, and the link's kind
+/// says what its agent is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pull {
     /// A worktree of the pull request, or of the issue's branch, as `wt add`
     /// makes it.
     Worktree,
-    /// The same, with an agent on a review of the pull request.
-    Review,
-    /// The same, with an agent on tackling the issue.
-    Tackle,
+    /// The same, with an agent on it: on a review of the pull request, or on
+    /// tackling the issue.
+    Agent,
 }
 
 impl Pull {
-    /// Each the menu for a link of `kind` has, in the order it shows them.
-    const fn of(kind: Kind) -> [Pull; 2] {
-        match kind {
-            Kind::Pull => [Pull::Worktree, Pull::Review],
-            Kind::Issue => [Pull::Worktree, Pull::Tackle],
+    /// Each, in the order the menu shows them.
+    const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
+
+    /// Its key in the menu for a link of `kind`.
+    const fn key(self, kind: Kind) -> char {
+        match (self, kind) {
+            (Pull::Worktree, _) => 'w',
+            (Pull::Agent, Kind::Pull) => 'r',
+            (Pull::Agent, Kind::Issue) => 't',
         }
     }
 
-    const fn key(self) -> char {
-        match self {
-            Pull::Worktree => 'w',
-            Pull::Review => 'r',
-            Pull::Tackle => 't',
-        }
-    }
-
-    /// What the menu says the key does.
-    const fn does(self) -> &'static str {
-        match self {
-            Pull::Worktree => "worktree",
-            Pull::Review => REVIEW,
-            Pull::Tackle => "tackle",
+    /// What the menu for a link of `kind` says the key does.
+    const fn does(self, kind: Kind) -> &'static str {
+        match (self, kind) {
+            (Pull::Worktree, _) => "worktree",
+            (Pull::Agent, Kind::Pull) => REVIEW,
+            (Pull::Agent, Kind::Issue) => "tackle",
         }
     }
 
@@ -306,7 +302,7 @@ impl Pull {
         let KeyCode::Char(c) = key.code else {
             return None;
         };
-        Pull::of(kind).into_iter().find(|pull| bare(key) && pull.key() == c)
+        Pull::ALL.into_iter().find(|pull| bare(key) && pull.key(kind) == c)
     }
 }
 
@@ -327,9 +323,9 @@ enum Entry {
     /// A command of the sidebar's own, which the legend lists beside the
     /// menu's keys.
     Command(Command),
-    /// A key of the menu for a pull request or an issue, which that menu
-    /// shows.
-    Pull(Pull),
+    /// A key of the menu for a link of that kind, a pull request's or an
+    /// issue's, which that menu shows.
+    Pull(Pull, Kind),
     /// The key that opens the search over the skills.
     Search,
     /// The key that opens the ask box.
@@ -343,7 +339,7 @@ impl Entry {
             Entry::New(new) => new.key(),
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
-            Entry::Pull(pull) => pull.key(),
+            Entry::Pull(pull, kind) => pull.key(*kind),
             Entry::Search => SEARCH,
             Entry::Ask => ASK,
         }
@@ -494,7 +490,7 @@ impl Keys {
             Entry::Ask => return Pressed::Ask,
             // The legend only shows, and runs nothing, as does the menu for a
             // pull request, which takes its keys itself.
-            Entry::Command(_) | Entry::Pull(_) => return Pressed::Nothing,
+            Entry::Command(_) | Entry::Pull(..) => return Pressed::Nothing,
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -948,10 +944,14 @@ impl Menu {
             Ok(ready) => ready,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {link}: {why}"))),
         };
-        let command = match pull {
-            Pull::Worktree => Vec::new(),
-            Pull::Review => claude(&format!("{REVIEW} {}", link.url()), branch.as_deref()),
-            Pull::Tackle => claude(&format!("{TACKLE} {}", link.url()), branch.as_deref()),
+        let command = match (pull, link.kind()) {
+            (Pull::Worktree, _) => Vec::new(),
+            (Pull::Agent, Kind::Pull) => {
+                claude(&format!("{REVIEW} {}", link.url()), branch.as_deref())
+            },
+            (Pull::Agent, Kind::Issue) => {
+                claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
+            },
         };
         let opening = |place: Place, opens: Opens| {
             let target = Target { place, cwd: Some(worktree.clone()), branch: branch.clone() };
@@ -962,7 +962,7 @@ impl Menu {
             (At::There { session, pane }, Pull::Worktree) => {
                 Did::Closed(Done::Go(Place::Pane { session, pane }))
             },
-            (At::There { session, pane }, Pull::Review | Pull::Tackle) => {
+            (At::There { session, pane }, Pull::Agent) => {
                 opening(Place::Pane { session, pane }, Opens::Pane { beside: pane, command })
             },
             (At::Session { session, pane }, _) => {
@@ -1027,7 +1027,8 @@ impl Menu {
                 (link.tab(), link.repository(), body, keys_line(width, &[("<ESC>", "Close")]))
             },
             Stage::Pull { link, step: Step::Choosing | Step::Opening | Step::Making(_) } => {
-                let body = Pull::of(link.kind()).map(|pull| entry_line(&Entry::Pull(pull), inner));
+                let entry = |pull| entry_line(&Entry::Pull(pull, link.kind()), inner);
+                let body = Pull::ALL.map(entry);
                 let footer = keys_line(width, &[("<ESC>", "Close")]);
                 (link.tab(), link.repository(), body.to_vec(), footer)
             },
@@ -1252,7 +1253,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
-        Entry::Pull(pull) => spans.push(does(pull.does())),
+        Entry::Pull(pull, kind) => spans.push(does(pull.does(*kind))),
         Entry::Search => spans.push(does(SEARCH_DOES)),
         Entry::Ask => spans.push(does(ASK_DOES)),
     }

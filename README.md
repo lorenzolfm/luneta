@@ -530,7 +530,10 @@ default branch where there is none yet, and opens a tab there, named `#123`,
 in the session that works in its repository, found as for a pull request. `t`
 does the same and starts Claude Code in the tab, told to `Tackle` the link.
 Pasted again, the link finds the worktree the first paste made: `w` takes
-zellij to a pane that works in it, and `t` starts the agent beside it.
+zellij to a pane that works in it, and `t` starts the agent beside it. luneta
+asks `gh` first what the number is: GitHub counts issues and pull requests in
+one sequence, and a link of an issue of a pull request's number, or of none,
+makes nothing, and the menu says why.
 
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no
@@ -832,7 +835,7 @@ any `claude -p` does, so `claude --resume` lists it there.
 | [`wt`](https://github.com/lorenzolfm/wt) | optional | a worktree of a pull request or an issue you paste in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
-| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
+| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), and the issue of a link you paste there |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | `luneta` and [`lunetad`](#building-from-source), side by side | optional | the agents, in the agent list, the menu, luneta's sidebar and the brief |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in luneta's sidebar, and how it ended |
