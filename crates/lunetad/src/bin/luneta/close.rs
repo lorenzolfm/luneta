@@ -202,7 +202,7 @@ pub struct Plan {
 /// luneta, where it is the only one; and none goes while luneta cannot tell
 /// which session that is.
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
-    let (session, started) = (subject.session.name().to_owned(), subject.session.started());
+    let (session, started) = (subject.session.name().to_string(), subject.session.started());
     let act = match &subject.deletes {
         Deletes::Pane { pane, closes: Closes::Pane } => Act::Pane { session, pane: *pane },
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {

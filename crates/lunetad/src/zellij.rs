@@ -38,6 +38,11 @@ const WEB_SERVER: &str = "web_server_bus";
 /// so on.
 const CONTRACT: &str = "contract_version_";
 
+/// The folder of the contract zellij 0.45 speaks, which luneta speaks: of its
+/// sessions' sockets in this folder, and of their metadata in zellij's cache
+/// folder.
+pub const SPOKEN: &str = "contract_version_1";
+
 /// Where zellij keeps the folders its sockets are in: `$ZELLIJ_SOCKET_DIR`, or
 /// else `zellij` in `$XDG_RUNTIME_DIR` on Linux, or else `zellij-<uid>` in the
 /// temporary folder, which is where macOS has them. zellij-utils' `consts.rs`

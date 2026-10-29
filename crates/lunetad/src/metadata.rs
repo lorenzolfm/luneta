@@ -21,11 +21,13 @@ use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{self, ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 
+use crate::zellij;
+
 /// Where zellij writes the metadata of each session, in its cache folder: in
 /// the folder of the contract between a zellij client and its server that
 /// zellij 0.45 speaks. A zellij of another contract writes it elsewhere, and
 /// the panes of its sessions are listed on the sweep alone.
-const SESSIONS: [&str; 2] = ["contract_version_1", "session_info"];
+const SESSIONS: [&str; 2] = [zellij::SPOKEN, "session_info"];
 
 /// The file zellij writes a session's metadata in, in the session's folder.
 const FILE: &str = "session-metadata.kdl";

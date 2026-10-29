@@ -160,8 +160,8 @@ impl Listed {
         Some(Listed { name, kept })
     }
 
-    pub fn name(&self) -> &str {
-        self.name.as_str()
+    pub fn name(&self) -> &SessionName {
+        &self.name
     }
 
     /// When its server made its socket, which tells it from a session that
@@ -1945,7 +1945,7 @@ impl Sidebar {
     /// What the delete is for, as the sidebar knows it: `listed`, where
     /// luneta's zellij is, and what it `deletes`.
     fn subject<'a>(&'a self, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
-        let session = listed.name();
+        let session = listed.name().as_str();
         let seat = match (self.going(), self.here()) {
             (None, Some(here)) if here == session => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
