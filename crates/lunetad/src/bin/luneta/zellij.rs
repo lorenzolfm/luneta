@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read as _, Write as _};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::Sender;
@@ -1057,9 +1058,46 @@ fn spelled_ago(spelled: &str) -> Option<Duration> {
 /// Renames `session` to `to`, or says why zellij did not. A session with no
 /// client takes the name as well as one with.
 pub fn renamed(session: &str, to: &SessionName) -> Result<(), String> {
+    relisted(session)?;
     let mut command = Command::new("zellij");
     command.args(["--session", session, "action", "rename-session", &to.0]);
     done(command)
+}
+
+/// The folder of the sockets of the servers that speak the contract `RELIST`
+/// is of, zellij 0.45's, in zellij's folder.
+const CONTRACT: &str = "contract_version_1";
+
+/// What zellij's web client says to its server to have it read again which
+/// sessions run and which ended, framed as zellij frames a message: four
+/// bytes of length, low first, then a `ClientToServerMsg` of zellij-utils'
+/// `client_to_server.proto` that holds an empty `RequestSessionList`, its
+/// field 25.
+const RELIST: [u8; 7] = [3, 0, 0, 0, 0xca, 0x01, 0];
+
+/// What the server answers each message once it has done what it says, so
+/// framed: a `ServerToClientMsg` that holds an empty `UnblockInputThread`,
+/// its field 2.
+const DONE: [u8; 6] = [2, 0, 0, 0, 0x12, 0];
+
+/// Has the server of `session` read again which sessions run and which
+/// ended, or says why it did not. zellij 0.45.1 refuses to rename a session
+/// to a name among those it read last, and reads them only as a web client
+/// or a plugin asks, so a session renamed could not take its old name back:
+/// zellij still had it as its own. The server answers once it has read them
+/// and handed them on, ahead of a rename asked after.
+fn relisted(session: &str) -> Result<(), String> {
+    let socket = lunetad::zellij_folder().join(CONTRACT).join(session);
+    let failed = |error: io::Error| format!("zellij did not list its sessions again: {error}");
+    let mut stream = UnixStream::connect(socket).map_err(failed)?;
+    stream.set_read_timeout(Some(ANSWER)).map_err(failed)?;
+    stream.write_all(&RELIST).map_err(failed)?;
+    let mut answer = [0; DONE.len()];
+    stream.read_exact(&mut answer).map_err(failed)?;
+    if answer != DONE {
+        return Err(format!("zellij did not list its sessions again: it answered {answer:?}"));
+    }
+    Ok(())
 }
 
 /// Has zellij let go of `session`, one that ended, which then cannot be
