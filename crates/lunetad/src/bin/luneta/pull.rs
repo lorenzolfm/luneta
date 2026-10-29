@@ -1,6 +1,8 @@
 //! A pull request's link, pasted in luneta, and where the menu it opens
 //! goes for it: a worktree of the pull request, in a tab of the session that
-//! works in its repository, or the same with an agent on a review of it.
+//! works in its repository, or the same with an agent on a review of it. An
+//! issue's link opens it as well, for a worktree of a branch of its own, or
+//! the same with an agent on the issue.
 //!
 //! luneta finds that session as a key of the menu is pressed: the one its
 //! zellij is in, where a pane of it works in the repository, or else another
@@ -10,9 +12,17 @@
 //! forks among its remotes, and that is the one its pull requests are of.
 //! `wt add` makes the worktree, and says where it is, or where one of the
 //! pull request's branch is already, in a repository wt cloned: in one git
-//! cloned, wt would make it in its `.git`. A pane that has that branch
-//! checked out, as the daemon says by the pull request's page, or that works
-//! in the worktree `wt add` says, is where a key goes instead of a new tab.
+//! cloned, wt would make it in its `.git`. An issue's branch is `issue-123`,
+//! so a second paste of the link finds the first's worktree. Where neither
+//! the repository nor origin has it yet, luneta makes it from the default
+//! branch of the issue's repository as GitHub has it then, by the remote
+//! that is of it: wt would make it from origin's, as the repository last
+//! fetched it, and a fork's clone has the fork for its origin. gh says first
+//! that GitHub has an issue of its number, and no pull request: a link can
+//! say an issue of any number, and luneta would make a branch of each. A
+//! pane that has the pull request's branch checked out, as the daemon says
+//! by its page, or that works in the worktree `wt add` says, is where a key
+//! goes instead of a new tab.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -34,26 +44,60 @@ use crate::zellij::{self, SessionName};
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
 
-/// How long `wt add` has to make a worktree: it fetches the pull request's
-/// branch across the network, which takes a while of a large repository.
+/// How long `wt add` has to make a worktree, as it fetches the pull
+/// request's branch, or git to ask a remote of an issue's branch, or to fetch
+/// the branch it is made from: across the network, which takes a while of a
+/// large repository.
 const MAKING: Duration = Duration::from_mins(3);
 
 /// How long git has to say a repository's remotes, or the branch checked out
 /// in a directory: it reads files.
 const ANSWER: Duration = Duration::from_secs(5);
 
-/// A pull request on GitHub, as its link names it.
+/// How long gh has to say what an issue's number is on GitHub: it asks
+/// GitHub, across the network.
+const ASKING: Duration = Duration::from_secs(30);
+
+/// The remote of the repository a clone was cloned from, as git names it:
+/// a branch wt makes goes there.
+const ORIGIN: &str = "origin";
+
+/// A pull request or an issue on GitHub, as its link names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     owner: String,
     name: String,
+    kind: Kind,
     number: NonZeroU32,
 }
 
+/// What a link is the page of: a pull request, or an issue. GitHub counts
+/// the two in one sequence, and takes a link of either page for the other's
+/// number, so a link can say an issue of a pull request's number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Pull,
+    Issue,
+}
+
+impl Kind {
+    /// Each, as a link may name it.
+    const ALL: [Kind; 2] = [Kind::Pull, Kind::Issue];
+
+    /// What its link names it by, after the repository.
+    const fn path(self) -> &'static str {
+        match self {
+            Kind::Pull => "pull",
+            Kind::Issue => "issues",
+        }
+    }
+}
+
 impl Link {
-    /// The pull request `text` is the link of, but for the space around it:
-    /// of the pull request itself or of a page of it, as its files or a
-    /// comment on it, with or without `https://`. None for any other text.
+    /// The pull request or the issue `text` is the link of, but for the space
+    /// around it: of it itself or of a page of it, as a pull request's files
+    /// or a comment on it, with or without `https://`. None for any other
+    /// text.
     pub fn parse(text: &str) -> Option<Link> {
         let text = text.trim();
         let rest = text.strip_prefix("https://").or_else(|| text.strip_prefix("http://"));
@@ -63,18 +107,39 @@ impl Link {
         let path = rest.split(['?', '#']).next().unwrap_or_default();
         let mut parts = path.split('/');
         let (owner, name) = (parts.next()?, parts.next()?);
-        let (pull, number) = (parts.next()?, parts.next()?);
+        let (page, number) = (parts.next()?, parts.next()?);
+        let kind = Kind::ALL.into_iter().find(|kind| kind.path() == page)?;
         let digits = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
-        if pull != "pull" || !named(owner) || !named(name) || !digits {
+        if !named(owner) || !named(name) || !digits {
             return None;
         }
         let number = number.parse().ok()?;
-        Some(Link { owner: owner.to_owned(), name: name.to_owned(), number })
+        Some(Link { owner: owner.to_owned(), name: name.to_owned(), kind, number })
     }
 
-    /// Its link, as `wt add` and the review take it.
+    /// Its link, as the agent on it takes it.
     pub fn url(&self) -> String {
-        format!("https://{GITHUB}/{}/{}/pull/{}", self.owner, self.name, self.number)
+        let Link { owner, name, kind, number } = self;
+        format!("https://{GITHUB}/{owner}/{name}/{}/{number}", kind.path())
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The branch luneta has wt make for it: an issue's, `issue-123`. None
+    /// for a pull request, which has its own.
+    fn branch(&self) -> Option<String> {
+        match self.kind {
+            Kind::Pull => None,
+            Kind::Issue => Some(format!("issue-{}", self.number)),
+        }
+    }
+
+    /// What `wt add` takes for it: a pull request's link, for wt to find its
+    /// branch, or an issue's branch.
+    fn wt(&self) -> String {
+        self.branch().unwrap_or_else(|| self.url())
     }
 
     /// What its tab is named, and the menu calls it: `#123`.
@@ -87,8 +152,9 @@ impl Link {
         format!("{}/{}", self.owner, self.name)
     }
 
-    /// Whether `other` is the same pull request, case aside in the names of
-    /// its repository, as GitHub takes them.
+    /// Whether `other` is the same pull request or issue, case aside in the
+    /// names of its repository, as GitHub takes them: by its number, of
+    /// whichever page either link is, as GitHub has one of the number.
     pub fn is(&self, other: &Link) -> bool {
         self.number == other.number
             && self.owner.eq_ignore_ascii_case(&other.owner)
@@ -181,6 +247,13 @@ enum Remote {
     Other,
 }
 
+impl Remote {
+    /// How the remote named `name` is, where it is of the pull request.
+    fn of(name: &str) -> Remote {
+        if name == ORIGIN { Remote::Origin } else { Remote::Other }
+    }
+}
+
 /// A repository that is the pull request's: `by` which of its remotes, and
 /// whether it is `bare`, as wt clones one, with its worktrees beside its
 /// hidden `.bare`, or in it. Of one git cloned, wt would make the worktree in
@@ -198,25 +271,25 @@ fn repository(
     link: &Link,
     ssh_host: impl FnMut(&str) -> Option<String>,
 ) -> Option<Repository> {
-    let by = remote(&remotes_in(dir)?, link, ssh_host)?;
-    Some(Repository { by, bare: bare(dir) })
+    let remote = remote(&remotes_in(dir)?, link, ssh_host)?;
+    Some(Repository { by: Remote::of(&remote), bare: bare(dir) })
 }
 
-/// How the remotes `listed` are of the pull request `link`'s repository, if
-/// any is: as `git config --get-regexp` prints them, `remote.<name>.url
-/// <url>` a line, as `ssh_host` says what host ssh takes a name for.
+/// The name of the remote of `listed` that is of the pull request `link`'s
+/// repository, if any is: origin, or else the first, as `git config
+/// --get-regexp` prints them, `remote.<name>.url <url>` a line, as
+/// `ssh_host` says what host ssh takes a name for.
 fn remote(
     listed: &str,
     link: &Link,
     mut ssh_host: impl FnMut(&str) -> Option<String>,
-) -> Option<Remote> {
+) -> Option<String> {
     let of = |line: &str| {
         let (key, url) = line.split_once(' ')?;
         let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
-        let by = if name == "origin" { Remote::Origin } else { Remote::Other };
-        link.of(url.trim(), &mut ssh_host).then_some(by)
+        link.of(url.trim(), &mut ssh_host).then(|| name.to_owned())
     };
-    listed.lines().filter_map(of).min()
+    listed.lines().filter_map(of).min_by_key(|name| Remote::of(name))
 }
 
 /// A pane as the sidebar knows it, for luneta to find where a key of the
@@ -259,9 +332,9 @@ pub struct Ready {
 }
 
 /// Finds where a key of the menu numbered `menu` goes for the pull request
-/// `link`, among the panes the sidebar knows, `worked`, and has `wt add` make
-/// the worktree, on a thread of its own, and hands back what it found, or why
-/// it found nothing.
+/// or the issue `link`, among the panes the sidebar knows, `worked`, and has
+/// `wt add` make the worktree, on a thread of its own, and hands back what it
+/// found, or why it found nothing.
 pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
@@ -273,6 +346,14 @@ pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event
 
 /// Where a key goes for `link`, as `prepare` says.
 fn ready(link: &Link, worked: &[Worked]) -> Result<Ready, String> {
+    // wt asks GitHub for a pull request's branch, and finds none for an
+    // issue's number; but it makes an issue's branch whatever the number is.
+    if link.kind() == Kind::Issue {
+        let page = page(link)?;
+        if page.kind() == Kind::Pull {
+            return Err(format!("it is a pull request on GitHub: paste {}", page.url()));
+        }
+    }
     let mut seen: HashMap<String, Option<Repository>> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
     let mut repository_of = |dir: &str| {
@@ -295,6 +376,9 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready, String> {
             None => return Err(no_clone(link, &seen)),
         },
     };
+    if let Some(branch) = link.branch() {
+        base(&repository, link, &branch)?;
+    }
     let worktree = worktree(&repository, link)?;
     // The worktree of the pull request's branch, where it was one already,
     // may have a pane that works in it, as the kernel says where.
@@ -457,13 +541,66 @@ fn said(git: &mut Command) -> Option<String> {
     Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
 }
 
-/// Has `wt add` make a worktree of the pull request `link` in the repository
-/// `dir` is in, and says where it is, or where one of the pull request's
+/// The page on GitHub of `link`'s number, as gh says: `gh issue view` answers
+/// of a pull request's number too, with the pull request's page. Or why gh
+/// did not say, as that GitHub has none of the number, or that gh is not
+/// logged in.
+fn page(link: &Link) -> Result<Link, String> {
+    let number = link.number.to_string();
+    let repository = format!("{GITHUB}/{}", link.repository());
+    let mut gh = Command::new("gh");
+    gh.args(["issue", "view", &number, "--repo", &repository, "--json", "url", "--jq", ".url"]);
+    let ran = program::run(&mut gh, ASKING)
+        .map_err(|error| format!("gh issue view could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("gh issue view: {why}"))?;
+    let said = String::from_utf8_lossy(&said);
+    let said = said.trim();
+    Link::parse(said).ok_or_else(|| format!("gh issue view said {said}, which is no link"))
+}
+
+/// Makes `branch`, the issue `link`'s, in the repository `dir` is in, where
+/// neither it nor origin has one yet: from the default branch of the issue's
+/// repository as the remote that is of it has it now, with no upstream, as
+/// wt makes a new branch. wt would make it from origin's, as the repository
+/// last fetched it, which can be weeks behind, and of the fork in a fork's
+/// clone. Where either has the branch, wt goes on with it: one origin has
+/// may be one pushed from another machine. Or why it made none.
+fn base(dir: &str, link: &Link, branch: &str) -> Result<(), String> {
+    let head = format!("refs/heads/{branch}");
+    let mut git = Command::new("git");
+    lunetad::local_git(git.args(["-C", dir, "rev-parse", "--verify", "--quiet", &head]));
+    if said(&mut git).is_some() {
+        return Ok(());
+    }
+    let remote = remotes_in(dir).and_then(|listed| remote(&listed, link, ssh_host));
+    let remote = remote
+        .ok_or_else(|| format!("git no longer says a remote of {dir} is {}", link.repository()))?;
+    let pushed = across(dir, "ls-remote", &[ORIGIN, &head])?;
+    let pushed = String::from_utf8_lossy(&pushed);
+    if pushed.lines().any(|line| line.split('\t').nth(1) == Some(head.as_str())) {
+        return Ok(());
+    }
+    across(dir, "fetch", &[&remote, &format!("HEAD:{head}")]).map(drop)
+}
+
+/// What git says, as it runs `command` with `args` in the repository `dir`
+/// is in, which asks a remote across the network: alone, as ssh may ask for
+/// a passphrase. Or why it said nothing.
+fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut git = Command::new("git");
+    lunetad::local_git(git.args(["-C", dir, command]).args(args));
+    let ran = program::run_alone(&mut git, MAKING)
+        .map_err(|error| format!("git {command} could not be run: {error}"))?;
+    ran.answer().map_err(|why| format!("git {command}: {why}"))
+}
+
+/// Has `wt add` make a worktree of the pull request or the issue `link` in
+/// the repository `dir` is in, and says where it is, or where one of its
 /// branch is already: the last line wt prints, as the real path of the
 /// directory it names. Or why it made none, as wt says it.
 fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     let mut wt = Command::new("wt");
-    lunetad::local_git(wt.args(["add", "--repo", dir, &link.url()]));
+    lunetad::local_git(wt.args(["add", "--repo", dir, &link.wt()]));
     // It fetches across the network, by ssh as like as not.
     let ran = program::run_alone(&mut wt, MAKING)
         .map_err(|error| format!("wt add could not be run: {error}"))?;
@@ -499,10 +636,13 @@ fn failure(stderr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Found, Link, Remote, Repository, Worked, cloned, failure, found, no_clone, remote,
+        Found, Kind, Link, Remote, Repository, Worked, base, cloned, failure, found, no_clone,
+        remote,
     };
     use crate::sidebar::Listed;
 
@@ -528,6 +668,10 @@ mod tests {
     /// One git cloned, that is the pull request's by its origin.
     const BY_GIT: Repository = Repository { by: Remote::Origin, bare: false };
 
+    fn issue() -> Link {
+        Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link")
+    }
+
     #[test]
     fn a_link_is_of_a_pull_request_or_of_a_page_of_one() {
         let pulled = |text: &str| Link::parse(text).map(|link| (link.to_string(), link.url()));
@@ -547,7 +691,7 @@ mod tests {
             assert_eq!(pulled(text), cdk, "{text:?}");
         }
         for text in [
-            "https://github.com/cashubtc/cdk/issues/2736",
+            "https://github.com/cashubtc/cdk/discussions/2736",
             "https://github.com/cashubtc/cdk/pull/0",
             "https://github.com/cashubtc/cdk/pull/+1",
             "https://github.com/cashubtc/cdk/pull/",
@@ -561,6 +705,30 @@ mod tests {
             assert_eq!(pulled(text), None, "{text:?}");
         }
         assert_eq!(link().tab(), "#2736");
+        assert_eq!(link().wt(), "https://github.com/cashubtc/cdk/pull/2736");
+    }
+
+    /// An issue's link names it as a pull request's does, but for `issues`:
+    /// the agent takes it, and `wt add` the branch luneta has it make, or
+    /// find where a paste made it before. It is the pull request of its
+    /// number, as GitHub counts the two in one sequence.
+    #[test]
+    fn a_link_is_of_an_issue_or_of_a_page_of_one() {
+        for text in [
+            "https://github.com/cashubtc/cdk/issues/2736",
+            "github.com/CashuBTC/cdk/issues/2736#issuecomment-1\n",
+        ] {
+            let link = Link::parse(text).expect("an issue's link");
+            assert_eq!(link.kind(), Kind::Issue, "{text:?}");
+            assert!(link.is(&issue()), "{text:?}");
+        }
+        assert_eq!(issue().to_string(), "cashubtc/cdk#2736");
+        assert_eq!(issue().url(), "https://github.com/cashubtc/cdk/issues/2736");
+        assert_eq!(issue().tab(), "#2736");
+        assert_eq!(issue().wt(), "issue-2736");
+        // GitHub has one #2736 of cdk, of whichever page a link is.
+        assert!(issue().is(&link()));
+        assert_eq!(Link::parse("https://github.com/cashubtc/cdk/issues/0"), None);
     }
 
     /// ssh's config gives GitHub another name, `github-work`, as its `Host`
@@ -599,15 +767,17 @@ mod tests {
     }
 
     /// A fork's clone has the repository it forks among its remotes, by any
-    /// name: the pull request is of it as well as of a clone of that one.
+    /// name: the pull request is of it as well as of a clone of that one. Of
+    /// those that are, origin goes first, and then the first.
     #[test]
     fn a_repository_is_the_pull_request_s_by_any_remote_its_origin_first() {
         let fork = "remote.cashubtc.url git@github.com:cashubtc/cdk.git\n\
-                    remote.origin.url git@github.com:lorenzolfm/cdk.git\n";
-        assert_eq!(remote(fork, &link(), ssh_host), Some(Remote::Other));
-        let clone = "remote.origin.url https://github.com/cashubtc/cdk\n\
-                     remote.upstream.url https://github.com/cashubtc/cdk\n";
-        assert_eq!(remote(clone, &link(), ssh_host), Some(Remote::Origin));
+                    remote.origin.url git@github.com:lorenzolfm/cdk.git\n\
+                    remote.upstream.url https://github.com/cashubtc/cdk\n";
+        assert_eq!(remote(fork, &link(), ssh_host).as_deref(), Some("cashubtc"));
+        let clone = "remote.upstream.url https://github.com/cashubtc/cdk\n\
+                     remote.origin.url https://github.com/cashubtc/cdk\n";
+        assert_eq!(remote(clone, &link(), ssh_host).as_deref(), Some("origin"));
         let other = "remote.origin.url git@github.com:lorenzolfm/cdk.git\n";
         assert_eq!(remote(other, &link(), ssh_host), None);
         assert_eq!(remote("", &link(), ssh_host), None);
@@ -697,6 +867,59 @@ mod tests {
             "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make the \
              worktree in its .git; wt clone it first"
         );
+    }
+
+    /// git as the test runs it, on the repository at `dir`, with no config but
+    /// its own, as no one in particular: what it said, where it ended well.
+    fn git(dir: impl AsRef<Path>, args: &[&str]) -> Option<String> {
+        let mut git = Command::new("git");
+        lunetad::local_git(&mut git)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .arg("-C")
+            .arg(dir.as_ref())
+            .args(args);
+        let ran = git.output().unwrap();
+        let said = String::from_utf8(ran.stdout).unwrap();
+        ran.status.success().then(|| said.trim_end().to_owned())
+    }
+
+    /// An issue's branch is made from the default branch of the issue's
+    /// repository as it is now, by the remote that is of it, and not from
+    /// origin's, the fork's, as the clone last fetched it. It has no
+    /// upstream. Made once, it stays where it was made; and one origin has,
+    /// as pushed from another machine, is left for wt.
+    #[test]
+    fn an_issue_s_branch_is_made_from_its_repository_s_default_branch_as_it_is_now() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = |name: &str| scratch.path().join(name).to_str().unwrap().to_owned();
+        let (cdk, fork, clone) = (path("cdk"), path("fork.git"), path("clone"));
+        let empty = |dir: &str, message: &str| {
+            assert!(git(dir, &["commit", "-q", "--allow-empty", "-m", message]).is_some());
+        };
+        assert!(git(scratch.path(), &["init", "-q", "-b", "main", &cdk]).is_some());
+        empty(&cdk, "one");
+        assert!(git(scratch.path(), &["clone", "-q", "--bare", &cdk, &fork]).is_some());
+        assert!(git(scratch.path(), &["clone", "-q", &fork, &clone]).is_some());
+        // cdk's remote in the fork's clone, by its name on GitHub, which git
+        // takes for the scratch cdk.
+        let github = "git@github.com:cashubtc/cdk.git";
+        assert!(git(&clone, &["remote", "add", "cashubtc", github]).is_some());
+        assert!(git(&clone, &["config", &format!("url.{cdk}.insteadOf"), github]).is_some());
+        empty(&cdk, "two");
+        let now = git(&cdk, &["rev-parse", "HEAD"]);
+        let made = || git(&clone, &["rev-parse", "refs/heads/issue-2736"]);
+        assert_eq!(base(&clone, &issue(), "issue-2736"), Ok(()));
+        assert_eq!(made(), now);
+        assert_eq!(git(&clone, &["config", "branch.issue-2736.remote"]), None);
+        empty(&cdk, "three");
+        assert_eq!(base(&clone, &issue(), "issue-2736"), Ok(()));
+        assert_eq!(made(), now);
+        assert!(git(&fork, &["branch", "issue-7", "main"]).is_some());
+        let pushed = Link::parse("https://github.com/cashubtc/cdk/issues/7").expect("a link");
+        assert_eq!(base(&clone, &pushed, "issue-7"), Ok(()));
+        assert_eq!(git(&clone, &["rev-parse", "--verify", "-q", "refs/heads/issue-7"]), None);
     }
 
     #[test]
