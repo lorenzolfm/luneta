@@ -294,12 +294,16 @@ impl OwnClient {
     /// clients so. One older than a look taken in already, or of a session
     /// the client has left, says nothing. An id luneta took for its own that
     /// zellij does not list, or, unless luneta is sure of it, not on the pane
-    /// luneta's client went to, was another's.
-    pub fn looked(&mut self, looked: Looked, listed: Option<&[Client]>, now: Instant) {
+    /// luneta's client went to, was another's. Whether zellij took no client
+    /// of luneta's to that pane, but another, or none: luneta is sure of its
+    /// client, zellij lists it elsewhere, and luneta has sent it nowhere
+    /// since.
+    pub fn looked(&mut self, looked: Looked, listed: Option<&[Client]>, now: Instant) -> bool {
         if looked.number < self.since || looked.number <= self.taken {
-            return;
+            return false;
         }
         self.taken = looked.number;
+        let last = looked.number == self.asked;
         let Looked { went, clients, before, .. } = looked;
         if let Some(before) = before {
             // luneta's client came here, and left where it was sent from.
@@ -320,13 +324,14 @@ impl OwnClient {
         let own = self.id.and_then(|id| clients.iter().find(|client| client.id == id));
         if let Some(own) = own.filter(|own| self.sure || on(own)) {
             self.pane = own.pane;
-            return;
+            return last && !on(own);
         }
         self.id = None;
         self.sure = false;
         self.looked = Some(clients);
         self.pane = went;
         self.learn(went);
+        false
     }
 
     /// Takes the one client that can be luneta's for its own, unless luneta
@@ -527,7 +532,9 @@ mod tests {
 
     /// luneta is sure of its client, which zellij listed alone. A go that
     /// zellij takes another client on, as one that typed in it last, leaves
-    /// luneta's client where it is, and the other never moves the mark.
+    /// luneta's client where it is, which the look says, and the other never
+    /// moves the mark. A go zellij takes luneta's client on says nothing, nor
+    /// does the look of one luneta sent it on again before it came back.
     #[test]
     fn a_go_that_took_another_client_keeps_an_id_luneta_is_sure_of() {
         let now = Instant::now();
@@ -537,12 +544,19 @@ mod tests {
         let listed = [client(1, 3), client(2, 4)];
         own.heard(Some(&listed), now);
         let went = own.went("work", Some(5), Some(&listed), now).unwrap();
-        own.looked(answer(&went, &[client(1, 3), client(2, 5)]), Some(&listed), now);
+        assert!(own.looked(answer(&went, &[client(1, 3), client(2, 5)]), Some(&listed), now));
         assert_eq!(own.pane(), Some(3));
         own.heard(Some(&[client(1, 3), client(2, 6)]), now);
         assert_eq!(own.pane(), Some(3));
         own.heard(Some(&[client(1, 7), client(2, 6)]), now);
         assert_eq!(own.pane(), Some(7));
+
+        let went = own.went("work", Some(8), None, now).unwrap();
+        let again = own.went("work", Some(9), None, now).unwrap();
+        let there = [client(1, 9), client(2, 6)];
+        assert!(!own.looked(answer(&went, &there), None, now));
+        assert!(!own.looked(answer(&again, &there), None, now));
+        assert_eq!(own.pane(), Some(9));
     }
 
     /// Sent to a pane of another session, luneta's client is there as soon as

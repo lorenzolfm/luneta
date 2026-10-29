@@ -303,6 +303,42 @@ struct Client {
     /// Where luneta sent the client to a session zellij makes for it, while
     /// zellij has yet to title luneta's terminal there.
     making: Option<Making>,
+    /// The last key it typed, and where, as far as luneta knows. It makes the
+    /// client the one zellij moves only in a session it is in still.
+    typed: Option<Typed>,
+}
+
+/// A key zellij's client typed in `session`, at `at`: one of yours, or
+/// `zellij::NUDGE`. zellij moves the client that last typed in a session on
+/// an action asked of it there, unless that client left it since. luneta
+/// hears it left only from zellij's title or from a go of its own: one that
+/// zellij's keys took out and back, with no title, leaves the key standing,
+/// and an action there right after goes on its nudge alone. The look after
+/// it says when zellij then took the client nowhere.
+struct Typed {
+    session: String,
+    at: Instant,
+}
+
+/// What an action asked of zellij in `session` waits for, to move zellij's
+/// client: zellij to take in, by `until`, the last key the client typed
+/// there, as the nudge that made this, or one before. Only the client makes
+/// one, as it types that nudge.
+pub struct Nudged {
+    session: String,
+    until: Instant,
+}
+
+impl Nudged {
+    /// The session the action is asked of, which zellij's client is in.
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// When the action can go.
+    pub fn until(&self) -> Instant {
+        self.until
+    }
 }
 
 impl Client {
@@ -320,7 +356,7 @@ impl Client {
         let hosted = Hosted::start(program, args, dir, size, events)?;
         let until = Instant::now() + WAITING_MAX;
         let coming = Some(Coming::Held(Waiting { input: Vec::new(), arrival, until }));
-        Ok(Client { hosted, exited: None, coming, making: None })
+        Ok(Client { hosted, exited: None, coming, making: None, typed: None })
     }
 
     /// Whether it may be on its way into a server zellij makes, which has yet
@@ -329,6 +365,41 @@ impl Client {
     /// every session's server how it is.
     fn arriving(&self) -> bool {
         self.coming.is_some() || self.making.is_some()
+    }
+
+    /// It typed a key just now, in `session`, the one it is in.
+    fn typed_in(&mut self, session: String) {
+        self.typed = Some(Typed { session, at: Instant::now() });
+    }
+
+    /// When it last typed in `session`, as far as luneta knows.
+    fn typed_at(&self, session: &str) -> Option<Instant> {
+        self.typed.as_ref().filter(|typed| typed.session == session).map(|typed| typed.at)
+    }
+
+    /// Types `zellij::NUDGE` in `session`, the one it is in, where zellij
+    /// reads it as a key.
+    fn nudge_in(&mut self, session: String) {
+        if let Some(nudge) = zellij::nudge(self.hosted.mode()) {
+            self.hosted.send(nudge);
+            self.typed_in(session);
+        }
+    }
+
+    /// Types `zellij::NUDGE` in `here`, the session it is in, for an action
+    /// asked of zellij there to move it, which can go once zellij has taken
+    /// in the key it typed there last before, or this one, where it typed
+    /// none there since it came. The nudge takes the client's turn back from
+    /// another that typed there since, in time unless the action reaches
+    /// zellij first.
+    fn nudge(&mut self, here: String) -> Nudged {
+        let before = self.typed_at(&here);
+        self.nudge_in(here.clone());
+        // Where it typed nothing there, as zellij reads no nudge, no wait
+        // makes zellij move it.
+        let typed = before.or_else(|| self.typed_at(&here));
+        let until = typed.map_or_else(Instant::now, |typed| typed + zellij::NUDGED);
+        Nudged { session: here, until }
     }
 }
 
@@ -702,7 +773,7 @@ impl App {
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
             Event::Daemon(Ok(host)) => {
                 let look = self.sidebar.heard(host);
-                self.look(look);
+                self.arrived(look);
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => self.sidebar.looked(looked),
@@ -712,6 +783,7 @@ impl App {
                     self.client.making = None;
                 }
                 let look = self.sidebar.stayed(look);
+                // The client never left: what it typed there counts still.
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
@@ -999,6 +1071,7 @@ impl App {
         if self.focus.zellij() {
             if let Some(bytes) = keys::key(key, self.client.hosted.mode()) {
                 self.client.hosted.send(bytes);
+                self.typed();
             }
         } else {
             let asked = self.sidebar.key(key, SystemTime::now());
@@ -1121,6 +1194,11 @@ impl App {
             self.held = Held::Edge { dragged: false };
             return;
         }
+        // A press on the sidebar may end in a click that takes zellij's
+        // client to a pane.
+        if down {
+            self.nudge_ahead();
+        }
         let asked = self.sidebar.mouse(mouse, sidebar);
         self.follow(asked);
     }
@@ -1188,10 +1266,9 @@ impl App {
                     self.deleting.push(zellij::kill(&session, started, &self.events));
                 },
                 // The plan found zellij's client in `session`, and on its
-                // way nowhere, as the key was pressed.
+                // way nowhere, as the key was pressed: where it goes from.
                 Act::Leave { session, started, to } => {
-                    let after = After::Kill { session: session.clone(), started };
-                    self.go_from(&session, &to, Some(after));
+                    self.go(&to, Some(After::Kill { session, started }));
                 },
             },
             Asked::Open { menu, open } => zellij::open(menu, open, &self.events),
@@ -1260,8 +1337,7 @@ impl App {
                 }
             },
             Picked::Delete(Act::Leave { session, started, to }) => {
-                let after = After::Kill { session: session.clone(), started };
-                self.go_from(&session, &to, Some(after));
+                self.go(&to, Some(After::Kill { session, started }));
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Delete(act) => self.follow(Asked::Delete(act)),
@@ -1273,14 +1349,17 @@ impl App {
     /// client to type in its session, which zellij moves where the agent has
     /// it take you somewhere.
     fn converse(&mut self) {
-        let Some(Over::Ask(ask)) = &mut self.focus.over else {
-            return;
-        };
         let here = self.sidebar.here_pane();
-        if here.is_some() {
-            self.client.hosted.send(zellij::NUDGE);
+        // Whether it typed there before or not: another client may have
+        // since, and the agent acts well after the nudge.
+        if here.is_some()
+            && let Ok(seat) = self.seat()
+        {
+            self.client.nudge_in(seat);
         }
-        ask.send(here.as_ref(), &self.events);
+        if let Some(Over::Ask(ask)) = &mut self.focus.over {
+            ask.send(here.as_ref(), &self.events);
+        }
     }
 
     /// Takes zellij's client to the pane the sidebar lists after the one it
@@ -1297,24 +1376,17 @@ impl App {
     /// Takes zellij's client to `place`, and does `after` once it is there,
     /// in another session. Whether it went.
     fn go(&mut self, place: &Place, after: Option<After>) -> bool {
-        let Some(here) = self.here() else {
+        let Some(nudged) = self.nudge() else {
             return false;
         };
-        self.go_from(&here, place, after);
-        true
-    }
-
-    /// Takes zellij's client from `here`, the session it is in, to `place`,
-    /// and does `after` once it is there, in another session.
-    fn go_from(&mut self, here: &str, place: &Place, after: Option<After>) {
         let then = match &after {
             // The session it leaves ends once it has left it, which the
             // sidebar says until then.
             Some(After::Kill { .. }) => self.sidebar.leaving(place),
             Some(After::Open(..)) | None => self.sidebar.went(place),
         };
-        self.client.hosted.send(zellij::NUDGE);
-        zellij::go(here, place.session(), place.pane(), then, after, &self.events);
+        zellij::go(&nudged, place.session(), place.pane(), then, after, &self.events);
+        true
     }
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
@@ -1324,12 +1396,11 @@ impl App {
     /// client: luneta asks for the client's arrival there once zellij titles
     /// its terminal in it. Whether it went.
     fn start(&mut self, session: &SessionName, cwd: Option<&str>, after: Option<After>) -> bool {
-        let Some(here) = self.here() else {
+        let Some(nudged) = self.nudge() else {
             return false;
         };
         let then = self.sidebar.sending(session);
-        self.client.hosted.send(zellij::NUDGE);
-        let made = zellij::start(&here, session, cwd, then, after, &self.events);
+        let made = zellij::start(&nudged, session, cwd, then, after, &self.events);
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
         true
@@ -1349,20 +1420,57 @@ impl App {
         }
     }
 
-    /// The session zellij's client is in, for an action to take it from, or
-    /// none while it is on its way to another, which the sidebar then says.
-    fn here(&mut self) -> Option<String> {
-        let Some(here) = self.sidebar.here().map(str::to_owned) else {
-            self.sidebar.notify("zellij has yet to say which session it is in".to_owned());
-            return None;
+    /// The session zellij's client is in, where a key it types counts and an
+    /// action can take it from; or why it is in none, as far as luneta knows:
+    /// zellij has yet to have it in one, or to say which, or it is on its way
+    /// to another, which the key or the action may reach first.
+    fn seat(&self) -> Result<String, String> {
+        if self.client.coming.is_some() {
+            return Err("zellij has yet to come to its session".to_owned());
+        }
+        let Some(here) = self.sidebar.here() else {
+            return Err("zellij has yet to say which session it is in".to_owned());
         };
         // An action would move the client that last typed in a session that
         // luneta's has yet to come to.
         if let Some(going) = self.sidebar.going() {
-            self.sidebar.notify(format!("zellij has yet to take its client to {going}"));
-            return None;
+            return Err(format!("zellij has yet to take its client to {going}"));
         }
-        Some(here)
+        Ok(here.to_owned())
+    }
+
+    /// Types `zellij::NUDGE` into zellij's client, for an action asked of
+    /// zellij in the session it is in to move it, or says why it is in none.
+    fn nudge(&mut self) -> Option<Nudged> {
+        match self.seat() {
+            Ok(here) => Some(self.client.nudge(here)),
+            Err(why) => {
+                self.sidebar.notify(why);
+                None
+            },
+        }
+    }
+
+    /// Types `zellij::NUDGE` into zellij's client as the keys or a press of
+    /// the mouse come to luneta, ahead of the action they may ask for, which
+    /// then waits for zellij to take it in for less, if at all. A client that
+    /// typed in the session since it came gets none: zellij moves it already,
+    /// but where another typed there since, which the nudge before the action
+    /// takes the turn back from, and it may be renaming a tab or a pane,
+    /// whose name zellij would write the nudge into.
+    fn nudge_ahead(&mut self) {
+        if let Ok(here) = self.seat()
+            && self.client.typed_at(&here).is_none()
+        {
+            self.client.nudge_in(here);
+        }
+    }
+
+    /// zellij's client typed a key for you just now.
+    fn typed(&mut self) {
+        if let Ok(here) = self.seat() {
+            self.client.typed_in(here);
+        }
     }
 
     /// Asks zellij for the clients of a session, if the sidebar wants to know.
@@ -1370,6 +1478,17 @@ impl App {
         if let Some(look) = look {
             zellij::look(look, &self.events);
         }
+    }
+
+    /// Asks zellij for the clients of the session its client came to, as
+    /// `look` is for, if it came to one. What the client typed before, it
+    /// typed elsewhere: zellij forgets the keys of a client that leaves, of
+    /// one that comes back too.
+    fn arrived(&mut self, look: Option<Look>) {
+        if look.is_some() {
+            self.client.typed = None;
+        }
+        self.look(look);
     }
 
     /// Hands the keys to `focus`, and tells zellij when it takes them or
@@ -1406,6 +1525,10 @@ impl App {
             && let Some(bytes) = keys::focus(has, self.client.hosted.mode())
         {
             self.client.hosted.send(bytes);
+        }
+        // What has the keys now may take zellij's client to a pane.
+        if had && !has {
+            self.nudge_ahead();
         }
     }
 
@@ -1445,7 +1568,7 @@ impl App {
                         zellij::arrive(making.arrival, &self.events);
                     }
                     let look = self.sidebar.titled(title);
-                    self.look(look);
+                    self.arrived(look);
                     let coming = self.client.coming.take();
                     self.came_in(coming);
                 }
