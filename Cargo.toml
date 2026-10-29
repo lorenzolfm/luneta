@@ -1,46 +1,15 @@
-# The plugin is the root package, and the daemon and the protocol both read
-# are members beside it. A plain `cargo build` here builds the plugin alone:
-# the root package is the workspace's default member.
+# The daemon, with luneta's CLI, and the protocol it speaks. A plain
+# `cargo build` here builds both.
+#
+# Resolver 2, as the workspace had while a package of edition 2021 was its
+# root: edition 2024's would pick dependencies by the rust they need.
 [workspace]
 members = ["crates/*"]
+resolver = "2"
 
-# One version for the plugin and the daemon, which ship together and speak the
-# same protocol.
+# One version for the daemon and the protocol, which ship together.
 [workspace.package]
 version = "0.2.2"
-
-[package]
-name = "luneta"
-version.workspace = true
-edition = "2021"
-
-# Not `luneta`, which is the name of the CLI that `crates/lunetad` builds: the
-# two would land on the same path in a host build of the whole workspace. The
-# file installed into zellij is still `luneta.wasm`; `dev install` and the
-# release name it themselves.
-[[bin]]
-name = "luneta-plugin"
-path = "src/main.rs"
-
-[dependencies]
-zellij-tile = "=0.45.0"
-# Same crates the upstream session-manager uses, at the versions zellij's own
-# workspace pins. `fuzzy-matcher` is the skim scorer behind the filter.
-fuzzy-matcher = { version = "0.3.7", default-features = false }
-unicode-width = { version = "0.2.2", default-features = false }
-# Claude Code's transcripts and its list of plugins are JSON. Both crates are
-# already in the tree by way of `zellij-tile`, so naming them here costs a
-# manifest line and no wasm bytes.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-# The menu's entries come as KDL, the way zellij hands over a node of a
-# plugin's configuration that has children. zellij parses its config with this
-# crate, at this version.
-kdl = { version = "4.7.1", default-features = false }
-# What the daemon says of the host comes as the protocol encodes it. prost is
-# for decoding it: zellij-tile's own is of another version.
-luneta-protocol = { path = "crates/protocol" }
-prost = "0.14.4"
 
 [profile.release]
 opt-level = "z"
@@ -88,6 +57,3 @@ disallowed_methods = { level = "allow", priority = 3 }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-
-[lints]
-workspace = true

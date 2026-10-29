@@ -12,8 +12,8 @@
 //! opens the Delete group, which closes the pane or deletes its session, and
 //! asks first when that would end an agent at work. `b` opens the Brief group,
 //! which briefs you on every session, the row's session, or the agent in its
-//! pane. The plugin's menu reads its keys for skills from its configuration;
-//! luneta has none, and the Claude group's are its own.
+//! pane. luneta has no configuration to read keys for skills from, and the
+//! Claude group's are its own.
 //!
 //! A pull request's link pasted with the sidebar's keys, or in the menu,
 //! opens it for that pull request instead: `w` makes a worktree of it, in a
@@ -54,8 +54,8 @@ const ASK: char = 'a';
 const ASK_DOES: &str = "Ask";
 
 /// The key of the Claude group, its name, and its keys, each with the skill
-/// it starts an agent on: the skills the plugin's menu has keys for in the
-/// author's configuration. luneta has no configuration to read yours from.
+/// it starts an agent on: the skills the author runs most. luneta has no
+/// configuration to read yours from.
 const SKILLS: char = 'c';
 const SKILLS_NAME: &str = "Claude";
 const SKILL_KEYS: [(char, &str); 3] = [

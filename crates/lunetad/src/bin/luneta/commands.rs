@@ -27,8 +27,8 @@ use crate::daemon::{self, Reach};
 use crate::drive::{self, Address, Agreed, Opening};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` starts
-/// a lunetad where none runs, as it is what luneta's zellij plugin asks: the
-/// rest say that none does, or, for `close`, that it cannot tell the agents.
+/// a lunetad where none runs, as a program reads the host by it: the rest say
+/// that none does, or, for `close`, that it cannot tell the agents.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -39,8 +39,8 @@ pub enum Command {
     /// each pane works in stands.
     Sessions,
     /// Wait for the host to change, and write it out as the protocol encodes
-    /// it, for a program to read: luneta's zellij plugin. lunetad is started
-    /// where none runs, and again where an older one does.
+    /// it, for a program to read. lunetad is started where none runs, and
+    /// again where an older one does.
     Watch {
         /// The host as last seen, `<pid>:<seq>` from its version, to wait for
         /// the next. Without it, the host is written out at once.

@@ -41,7 +41,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// Claude Code's word for it, in any case, as the plugin reads it.
+    /// Claude Code's word for it, in any case.
     #[must_use]
     pub fn of(word: Option<&str>) -> Self {
         let Some(word) = word.map(|word| word.trim().to_owned()).and_then(Said::new) else {

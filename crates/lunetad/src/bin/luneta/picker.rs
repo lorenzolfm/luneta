@@ -1,7 +1,7 @@
 //! The picker: the sessions on this host, those that run and those zellij
 //! keeps to bring back, the agents in their panes, and the directories you
-//! go to, as zoxide ranks them, in a box over zellij, as the plugin's picker
-//! floated over a tab. `Ctrl j` opens it on the sessions, `Ctrl a` on the
+//! go to, as zoxide ranks them, in a box floating over zellij's side.
+//! `Ctrl j` opens it on the sessions, `Ctrl a` on the
 //! agents and `Ctrl d` on the directories, `Tab` goes from one list to the
 //! next, and what you type narrows all three. `Enter` takes zellij to the
 //! session highlighted, bringing back one that ended, or to the pane of the
@@ -752,8 +752,7 @@ impl Picker {
     }
 
     /// The box over zellij's side, `over`, the picker is drawn in: the
-    /// middle three fifths of it each way, as the plugin's floated over a
-    /// tab.
+    /// middle three fifths of it each way.
     pub fn area(over: Rect) -> Rect {
         Rect::new(
             over.x + over.width / 5,
@@ -1554,8 +1553,7 @@ fn matched<'a>(
 /// term; or else those whose path matches it, or the name the row shows, one
 /// named `term` first, or whose own name is, then the best matches. A row
 /// shows the session's name, or the directory's own while there is none. Its
-/// hits are of its path, as the plugin lit them: what you type of a
-/// directory is mostly its path.
+/// hits are of its path: what you type of a directory is mostly its path.
 fn dir_rows<'a>(
     matcher: &SkimMatcherV2,
     term: &str,
@@ -1722,9 +1720,9 @@ fn draw_input(buffer: &mut Buffer, layout: &Layout, title: &str, prompt: Line<'s
     }
 }
 
-/// Where the picker's parts go in the box, as the plugin's went in its pane:
-/// the search over the help line at the bottom, and the list over it, with
-/// the preview at its right where both have the room.
+/// Where the picker's parts go in the box: the search over the help line at
+/// the bottom, and the list over it, with the preview at its right where both
+/// have the room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Layout {
     results: Option<Rect>,

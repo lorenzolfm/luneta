@@ -1,5 +1,4 @@
-# The same pin that zellij uses. The flake is the source of truth on NixOS. This file
-# gives a machine with rustup the same toolchain and target.
+# The rust the flake pins. The flake is the source of truth on NixOS. This file
+# gives a machine with rustup the same toolchain.
 [toolchain]
 channel = "1.95.0"
-targets = ["wasm32-wasip1"]

@@ -12,7 +12,7 @@ Set Padding 20
 Set Framerate 24
 
 Hide
-Type "zellij attach --create luneta" Enter
+Type "luneta luneta" Enter
 Sleep 3s
 Show
 
@@ -40,8 +40,10 @@ Sleep 2500ms
 Enter
 Sleep 3s
 
+# Detach zellij, which ends luneta.
 Hide
-Type "exit" Enter
+Ctrl+o
+Type "d"
 Sleep 500ms
 Type "zellij delete-all-sessions --yes --force" Enter
 Sleep 1s

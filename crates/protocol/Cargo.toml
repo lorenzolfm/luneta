@@ -2,11 +2,10 @@
 name = "luneta-protocol"
 version.workspace = true
 edition = "2024"
-description = "What luneta's daemon and its zellij plugin both read: the protocol, and git's status"
+description = "What luneta's daemon and its clients both read: the protocol, and git's status"
 
-# The messages alone, without the transport: the plugin is wasm, and has no
-# use for the tokio stack that tonic brings. The daemon writes out the service
-# on top of these, in `crates/lunetad`.
+# The messages alone, without the transport. The daemon writes out the
+# service on top of these, in `crates/lunetad`.
 [dependencies]
 prost = "0.14.4"
 prost-types = "0.14.4"

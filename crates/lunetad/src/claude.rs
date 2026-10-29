@@ -39,7 +39,7 @@ const TORN: Duration = Duration::from_secs(1);
 /// few hundred bytes: a file past this is no session file of its.
 const FILE_BYTES_MAX: u64 = 64 * 1024;
 
-/// Claude Code's folder: `$CLAUDE_CONFIG_DIR`, or `~/.claude`, as the plugin
+/// Claude Code's folder: `$CLAUDE_CONFIG_DIR`, or `~/.claude`, as Claude Code
 /// takes it.
 #[must_use]
 pub fn folder() -> Option<PathBuf> {

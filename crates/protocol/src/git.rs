@@ -278,7 +278,7 @@ mod tests {
     }
 
     /// What the daemon writes out of a work tree reads back as the same work
-    /// tree, so that the plugin says of it what git said to the daemon. One
+    /// tree, so that luneta says of it what git said to the daemon. One
     /// that leaves out what the protocol says is always there, or names a
     /// branch with no name, reads as none.
     #[test]

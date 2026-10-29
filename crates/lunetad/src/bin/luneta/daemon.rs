@@ -4,9 +4,9 @@
 //! luneta starts the lunetad beside it, which the same build made, or else
 //! the first on the `PATH`. It starts it detached: in a session of its own,
 //! in `/`, with nothing on its stdin and stdout, and its stderr in a log in
-//! the folder. So it holds nothing of luneta's: zellij reads what a plugin's
-//! command says to its end, and a daemon that held luneta's stdout would keep
-//! `luneta watch` from ever answering.
+//! the folder. So it holds nothing of luneta's: a program reads what
+//! `luneta watch` says to its end, and a daemon that held luneta's stdout
+//! would keep it from ever answering.
 //!
 //! Two lunetas that find none in the same moment start one each, and the
 //! folder's lock lets one through. The other ends at once, and both lunetas
@@ -14,9 +14,9 @@
 //!
 //! A daemon makes way only for a newer one. Were it to make way for one of
 //! any other version, two lunetas of two versions, each with its lunetad
-//! beside it, would take turns at it for as long as both ask: zellij's
-//! plugin runs a `luneta watch` for each answer, which knows nothing of the
-//! one before it.
+//! beside it, would take turns at it for as long as both ask: a program
+//! that watches runs a `luneta watch` for each answer, which knows nothing of
+//! the one before it.
 //!
 //! A daemon that reads zellij's sessions in another folder than luneta's
 //! zellij keeps them in, as one started with another `ZELLIJ_SOCKET_DIR`

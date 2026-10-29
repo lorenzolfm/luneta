@@ -1,6 +1,6 @@
 //! The protocol, as `proto/luneta/v1/daemon.proto` defines it: its messages,
-//! which `luneta-protocol` writes out for the plugin too, and the service,
-//! which tonic-prost-build writes out here on top of them.
+//! which `luneta-protocol` writes out, and the service, which
+//! tonic-prost-build writes out here on top of them.
 
 // The code is generated, and reads as tonic-prost-build writes it: with the
 // `#[allow]`s of its own that the workspace's lints would have spelled

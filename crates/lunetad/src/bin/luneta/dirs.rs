@@ -1,7 +1,6 @@
 //! What luneta asks of zoxide and of eza, for the picker's directories: the
 //! directories you go to, as zoxide ranks them, and what is in one, as eza
-//! lists it. The plugin ran both as zellij's commands; luneta runs them
-//! itself.
+//! lists it. luneta runs both itself, rather than lunetad.
 
 use std::io;
 use std::path::Path;

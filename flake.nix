@@ -1,5 +1,5 @@
 {
-  description = "luneta — a personal zellij session picker plugin, and its daemon";
+  description = "luneta — zellij beside a sidebar of its sessions and agents, and its daemon";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -17,10 +17,7 @@
     }:
     let
       # Where luneta runs: a Linux desktop, an arm64 Linux server and an Apple
-      # Silicon Mac, each with a daemon of its own. The plugin is wasm, and runs
-      # on each; each system builds it too, so that each has a devshell. A
-      # release is the x86_64-linux build: another system's works the same but
-      # is not the same bytes, as the paths it is built in are written into it.
+      # Silicon Mac, each with a daemon of its own.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -38,12 +35,10 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          # Pinned to the channel that the rust-toolchain.toml of zellij names, with the
-          # wasm target added. The system rustc cannot build wasm32-wasip1, because nix
-          # ships std for the host triple only and there is no rustup to add a target.
-          toolchain = pkgs.rust-bin.stable."1.95.0".default.override {
-            targets = [ "wasm32-wasip1" ];
-          };
+          # Pinned, as rust-toolchain.toml is for rustup, so that every build and every
+          # run of clippy is of one rust, whatever the system has: a newer clippy brings
+          # lints of its own, and fails a tree this one passes.
+          toolchain = pkgs.rust-bin.stable."1.95.0".default;
 
           # Every crate is built through crane, on the toolchain above, because it
           # builds a crate's dependencies in a derivation of their own. That
@@ -60,12 +55,9 @@
           );
 
           # The source is filtered to what cargo reads, so editing the README or a tape
-          # is a cache hit rather than a rebuild. The daemon's crate and the protocol are
-          # in it for the plugin too: cargo loads every member of the workspace,
-          # whichever package it builds. luneta's skill is in it for the ask box, which
-          # tells its agent the skill.
+          # is a cache hit rather than a rebuild. luneta's skill is in it for the ask
+          # box, which tells its agent the skill.
           cargoFiles = pkgs.lib.fileset.unions [
-            ./src
             ./crates
             ./proto
             ./skills/luneta/SKILL.md
@@ -78,75 +70,15 @@
             fileset = cargoFiles;
           };
 
-          # clippy reads more: clippy.toml, and the profiling example, which
-          # `--all-targets` lints and no build compiles. It has a source of its own, so
-          # that editing either rebuilds no package.
+          # clippy reads clippy.toml too, which no build does. It has a source of its
+          # own, so that editing it rebuilds no package.
           lintSrc = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
               cargoFiles
               ./clippy.toml
-              ./examples
             ];
           };
-
-          # What the plugin's derivations share.
-          #
-          # crane builds for the target CARGO_BUILD_TARGET names. buildRustPackage
-          # would not: its cargoBuildHook hardcodes `--target <host triple>` over
-          # anything the caller sets, so the crate gets built for x86_64, where
-          # zellij-tile pulls in the whole non-wasm stack, down to openssl-sys.
-          plugin = {
-            pname = "luneta";
-            inherit version src;
-            strictDeps = true;
-
-            CARGO_BUILD_TARGET = "wasm32-wasip1";
-            cargoExtraArgs = "--locked -p luneta";
-
-            # protoc is for the build script of the protocol's crate, which the
-            # plugin reads the daemon's answers with.
-            nativeBuildInputs = [ pkgs.protobuf ];
-
-            # The unit tests are host-target and run with `cargo test` in the devshell.
-            # Nothing in this sandbox can execute a wasm32-wasip1 binary.
-            doCheck = false;
-          };
-
-          # Checked for every target too, as clippy checks every target against them.
-          pluginDeps = craneLib.buildDepsOnly (plugin // { cargoCheckExtraArgs = "--all-targets"; });
-
-          # The release artifact.
-          #
-          # `dev build` and this derivation are not redundant, and they run the same
-          # cargo invocation on purpose. `dev build` is the development loop:
-          # incremental, against whatever cargo resolves, in a tree you are editing.
-          # This one is what a tag ships — every dependency at the revision Cargo.lock
-          # names, fetched by hash and built in the sandbox with no network and no
-          # ambient state, so the bytes the provenance attestation covers do not depend
-          # on what the runner had lying around.
-          luneta = craneLib.buildPackage (
-            plugin
-            // {
-              cargoArtifacts = pluginDeps;
-
-              # There is no bin/ to install: zellij loads the .wasm by path, so the
-              # derivation is the file and nothing else. Cargo names it after the
-              # plugin's binary; the file goes out under the name zellij is told to load.
-              installPhaseCommand = ''
-                install -Dm0644 \
-                  target/wasm32-wasip1/release/luneta-plugin.wasm \
-                  "$out/luneta.wasm"
-              '';
-
-              meta = {
-                description = "A telescope-style session picker plugin for zellij";
-                homepage = "https://github.com/lorenzolfm/luneta";
-                license = pkgs.lib.licenses.mit;
-                platforms = systems;
-              };
-            }
-          );
 
           # What the daemon's derivations share.
           daemon = {
@@ -200,47 +132,31 @@
             }
           );
 
-          # The two runs of clippy, which `dev clippy` makes in the tree you are editing
-          # and the checks below make in the sandbox, for CI. They are written down here
-          # once, for both. One run for each side of the workspace, as neither side
-          # builds for the other's target: the plugin for the wasm it ships as, and the
-          # daemon for this host, which is what it ships for. Two parts of them are
-          # load-bearing:
-          #
-          #   --all-targets   the tests and the profiling example are code too, and
-          #                   `unwrap_used` reads differently in each — clippy.toml
-          #                   exempts tests, not examples.
-          #   --target        the plugin's run names the triple `dev build` uses.
-          #                   Linting the plugin for the host would check a build that
-          #                   never ships, and `cfg(target_*)` code would be linted on
-          #                   the wrong side. The daemon's run names none, and so lints
-          #                   the host's.
-          clippyRuns = {
-            plugin = "--all-targets --target wasm32-wasip1 -p luneta";
-            daemon = "--all-targets --workspace --exclude luneta";
-          };
+          # The run of clippy, which `dev clippy` makes in the tree you are editing and
+          # the check below makes in the sandbox, for CI. It is written down here once,
+          # for both. `--all-targets`, as the tests are code too, which clippy.toml
+          # lets unwrap.
+          clippyRun = "--all-targets --workspace";
 
-          # One run of clippy, against the dependencies the side's build compiled, so
-          # it compiles none of them again. That is a release build, where `dev clippy`
-          # lints in dev: the profile changes nothing clippy reads but
+          # clippy in the sandbox, against the dependencies the daemon's build
+          # compiled, so it compiles none of them again. That is a release build, where
+          # `dev clippy` lints in dev: the profile changes nothing clippy reads but
           # `cfg(debug_assertions)`, and no code of ours is behind it.
           #
           # `-D warnings`, as every lint in Cargo.toml is set to `warn`, so without it
           # the run always passes and gates nothing.
-          clippy =
-            side: deps: run:
-            craneLib.cargoClippy (
-              side
-              // {
-                src = lintSrc;
-                cargoArtifacts = deps;
-                cargoExtraArgs = "--locked";
-                cargoClippyExtraArgs = "${run} -- -D warnings";
-                # A check: nothing to test, and no `target/` that anything builds on.
-                doCheck = false;
-                doInstallCargoArtifacts = false;
-              }
-            );
+          clippy = craneLib.cargoClippy (
+            daemon
+            // {
+              src = lintSrc;
+              cargoArtifacts = daemonDeps;
+              cargoExtraArgs = "--locked";
+              cargoClippyExtraArgs = "${clippyRun} -- -D warnings";
+              # A check: nothing to test, and no `target/` that anything builds on.
+              doCheck = false;
+              doInstallCargoArtifacts = false;
+            }
+          );
 
           # The project CLI, and the only place the build recipes are written down. It
           # replaced a Makefile whose every target was .PHONY: there was no dependency
@@ -255,9 +171,8 @@
           dev = pkgs.writeShellApplication {
             name = "dev";
             meta.description = "luneta build recipes on the flake-pinned toolchain";
-            # zellij is absent on purpose — see the reload comment in `text` below.
             # protoc is for the build scripts of the protocol's crate and of the
-            # daemon, which `dev build` and `dev clippy` run.
+            # daemon, which `dev clippy` and `dev skills` run.
             runtimeInputs = [
               toolchain
               pkgs.coreutils
@@ -269,8 +184,8 @@
               #
               # Lives in the devshell and behind `nix run .#dev`, and nowhere else. The rust
               # toolchain comes from runtimeInputs, so every subcommand builds with the version
-              # this flake pins whether or not the caller entered the shell first. The system
-              # rustc cannot build this crate; see the toolchain comment above.
+              # this flake pins whether or not the caller entered the shell first; see the
+              # toolchain comment above.
               #
               # writeShellApplication supplies the shebang and `set -euo pipefail`, and lints
               # this text with shellcheck at build time.
@@ -279,10 +194,7 @@
                 cat <<'HELP'
               dev — luneta build recipes (pinned nix tooling)
 
-                dev build                  cargo build --release --target wasm32-wasip1
                 dev clippy [args...]       cargo clippy over every target, warnings denied
-                dev install                build, then install to ~/.local/share/zellij/plugins
-                dev reload [session]       install, then put the new bytes in the running picker
                 dev clean                  cargo clean
                 dev skills [dir]           check the menu's skill finder against what claude runs in dir
               HELP
@@ -296,7 +208,7 @@
                   usage
                   exit 0
                   ;;
-                build | clippy | install | reload | clean | skills) ;;
+                clippy | clean | skills) ;;
                 *)
                   # Explicit failure, not a silent fall-through to help: `dev buidl` in a script
                   # or a CI step must not exit 0.
@@ -314,85 +226,16 @@
               here="$PWD"
               cd "$root"
 
-              # Named after the plugin's binary, `luneta-plugin`; it is installed as
-              # `luneta.wasm`.
-              wasm="target/wasm32-wasip1/release/luneta-plugin.wasm"
-
-              # Zellij caches permissions against the absolute path of the .wasm. Keep this path
-              # stable — including the literal ~/.local/share, rather than XDG_DATA_HOME, which
-              # would move the file for anyone who sets it — or zellij asks for the permissions
-              # again after each install.
-              install_dir="$HOME/.local/share/zellij/plugins"
-              installed="$install_dir/luneta.wasm"
-
-              build() {
-                cargo build --release --target wasm32-wasip1 -p luneta
-              }
-
-              do_install() {
-                build
-                mkdir -p "$install_dir"
-                install -m 0644 "$wasm" "$installed"
-                echo "installed -> $installed"
-              }
-
               case "$cmd" in
-                build)
-                  build
-                  ;;
-
                 # The lint set lives in Cargo.toml and clippy.toml, so this is only the
-                # invocation: the two runs of `clippyRuns` in flake.nix, which the checks CI
-                # builds make too. `-D warnings`, as every lint in Cargo.toml is set to
-                # `warn`, so without it the command always exits 0 and gates nothing.
+                # invocation: `clippyRun` in flake.nix, which the check CI builds makes too.
+                # `-D warnings`, as every lint in Cargo.toml is set to `warn`, so without it
+                # the command always exits 0 and gates nothing.
                 #
-                # Anything after `dev clippy` goes to cargo in both runs, ahead of the `--`,
-                # so `dev clippy --fix --allow-dirty` applies the machine-applicable ones.
+                # Anything after `dev clippy` goes to cargo, ahead of the `--`, so
+                # `dev clippy --fix --allow-dirty` applies the machine-applicable ones.
                 clippy)
-                  cargo clippy --locked ${clippyRuns.plugin} "$@" -- -D warnings
-                  cargo clippy --locked ${clippyRuns.daemon} "$@" -- -D warnings
-                  ;;
-
-                install)
-                  do_install
-                  ;;
-
-                # Installing first is not optional here: a reload that reads the old bytes off
-                # disk is the failure this command exists to avoid, and the copy is free.
-                #
-                # zellij is deliberately not a runtimeInput. These calls drive the server that is
-                # already running, and a pinned client that drifts from it fails on a version
-                # mismatch instead of reloading. It comes from the ambient PATH.
-                #
-                # Two calls are necessary, because neither one covers both states:
-                #
-                #   launch-or-focus  Creates the picker if it does not run, and is the only call
-                #                    that can pass --floating, which is the geometry the key
-                #                    binding gives it. On a picker that runs, it takes focus.
-                #   start-or-reload  Reads the .wasm from disk again and puts it into the pane
-                #                    that is already there. This is what loads the new bytes.
-                #
-                # The order matters. Focus or create first, so that there is something to reload.
-                #
-                # Do not return to a close-and-relaunch pair. That version had to name the pane it
-                # closed, and it could not: zellij documents a `plugin_<id>` on the stdout of
-                # launch-or-focus-plugin ("Returns: Plugin pane ID"), but 0.45.1 prints nothing.
-                # The guard thus saw an empty id and refused to run, which was correct:
-                # `close-pane` without an id closes the focused pane, which during development is
-                # usually your editor. A reload needs no pane id.
-                #
-                # Pass a session name to drive another session. Omit it to use the current one.
-                reload)
-                  do_install
-
-                  zellij=(zellij)
-                  if [ "$#" -gt 0 ] && [ -n "$1" ]; then
-                    zellij=(zellij -s "$1")
-                  fi
-
-                  "''${zellij[@]}" action launch-or-focus-plugin \
-                    --skip-plugin-cache --floating "file:$installed"
-                  "''${zellij[@]}" action start-or-reload-plugin "file:$installed"
+                  cargo clippy --locked ${clippyRun} "$@" -- -D warnings
                   ;;
 
                 clean)
@@ -402,11 +245,11 @@
                 # The menu's search finds skills where Claude Code looks for them, which
                 # Claude Code can change in any release. This asks Claude Code itself, by the
                 # `init` a headless start prints on a model that is none, and fails with the
-                # names only one side has. Like zellij for `reload`, claude comes from the
-                # ambient PATH: the check is against the claude you run.
+                # names only one side has. claude comes from the ambient PATH, and not from
+                # the flake: the check is against the claude you run.
                 skills)
                   dir="$(cd "''${1:-$here}" && pwd -P)"
-                  LUNETA_SKILLS_DIR="$dir" cargo test --locked \
+                  LUNETA_SKILLS_DIR="$dir" cargo test --locked -p lunetad --bin luneta \
                     skills::tests::the_finder_finds_what_claude_code_runs -- --ignored --exact
                   ;;
               esac
@@ -414,12 +257,9 @@
           };
         in
         {
-          inherit dev luneta lunetad;
+          inherit dev lunetad;
 
-          checks = {
-            clippy-plugin = clippy plugin pluginDeps clippyRuns.plugin;
-            clippy-daemon = clippy daemon daemonDeps clippyRuns.daemon;
-          };
+          checks = { inherit clippy; };
 
           shell = pkgs.mkShell {
             # protoc for the daemon's build script, as `cargo build -p lunetad` runs it.
@@ -440,14 +280,14 @@
     {
       devShells = nixpkgs.lib.mapAttrs (_: built: { default = built.shell; }) bySystem;
 
-      # `dev` is exposed so that `nix run .#dev -- build` works without a devshell,
+      # `dev` is exposed so that `nix run .#dev -- clippy` works without a devshell,
       # and so that CI builds it, which runs shellcheck over the recipes.
       packages = nixpkgs.lib.mapAttrs (_: built: {
-        inherit (built) dev luneta lunetad;
-        default = built.luneta;
+        inherit (built) dev lunetad;
+        default = built.lunetad;
       }) bySystem;
 
-      # clippy over both sides of the workspace, as CI runs it.
+      # clippy over the workspace, as CI runs it.
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
     };
 }
