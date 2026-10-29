@@ -270,6 +270,11 @@ message PullRequest {
   uint32 number = 2;
   // Never unspecified.
   PullRequestState state = 3;
+  // Its page on GitHub, as gh says it: of the repository gh found it in,
+  // which `number` counts in. A repository with remotes of several, as a
+  // fork's clone has, can be any of them. Empty from a daemon older than this
+  // field, which did not say.
+  string url = 4;
 }
 
 enum PullRequestState {

@@ -296,7 +296,7 @@ fn stands(tree: &WorkTree) -> Option<String> {
 /// A pull request, in words: its number and its state. None for one that
 /// does not read, as a newer daemon's could send.
 fn pulled(pull_request: &PullRequest) -> Option<String> {
-    let github::PullRequest { number, state } = github::PullRequest::of_api(pull_request)?;
+    let github::PullRequest { number, state, .. } = github::PullRequest::of_api(pull_request)?;
     let state = match state {
         State::Open => "open",
         State::Draft => "draft",

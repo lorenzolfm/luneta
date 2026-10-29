@@ -515,10 +515,12 @@ same and starts Claude Code in the tab on `/thermo-nuclear-review` and the
 link, named for the skill and the branch. Where a pane has the pull request's
 branch checked out already, `w` takes zellij there, and `r` starts the agent
 beside it. A repository is the pull request's where any of its remotes is the
-pull request's repository on GitHub, so a fork's clone with the repository it
-forks among its remotes is one. The menu waits while wt fetches, and says why
-when it makes nothing; with no clone anywhere, it says to `wt clone` one
-first. A paste while zellij has the keys stays zellij's.
+pull request's repository on GitHub, by GitHub's name or, by ssh, another your
+ssh config gives it, so a fork's clone with the repository it forks among its
+remotes is one. wt makes the worktree only in a clone wt made:
+in one git made, it would make it in the clone's `.git`. The menu waits while
+wt fetches, and says why when it makes nothing; with no clone wt made, it says
+to `wt clone` one first. A paste while zellij has the keys stays zellij's.
 
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no

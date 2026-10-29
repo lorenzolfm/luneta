@@ -9,9 +9,10 @@
 //! repository on GitHub the link is of: a fork's clone has the repository it
 //! forks among its remotes, and that is the one its pull requests are of.
 //! `wt add` makes the worktree, and says where it is, or where one of the
-//! pull request's branch is already. A pane that has that branch checked out,
-//! as the daemon says, or that works in the worktree `wt add` says, is where
-//! a key goes instead of a new tab.
+//! pull request's branch is already, in a repository wt cloned: in one git
+//! cloned, wt would make it in its `.git`. A pane that has that branch
+//! checked out, as the daemon says by the pull request's page, or that works
+//! in the worktree `wt add` says, is where a key goes instead of a new tab.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -86,12 +87,26 @@ impl Link {
         format!("{}/{}", self.owner, self.name)
     }
 
+    /// Whether `other` is the same pull request, case aside in the names of
+    /// its repository, as GitHub takes them.
+    pub fn is(&self, other: &Link) -> bool {
+        self.number == other.number
+            && self.owner.eq_ignore_ascii_case(&other.owner)
+            && self.name.eq_ignore_ascii_case(&other.name)
+    }
+
     /// Whether a remote's `url` is of its repository, case aside, as GitHub
-    /// takes the names.
-    fn of(&self, url: &str) -> bool {
-        repository_of(url).is_some_and(|(owner, name)| {
-            owner.eq_ignore_ascii_case(&self.owner) && name.eq_ignore_ascii_case(&self.name)
-        })
+    /// takes the names: on GitHub, by its name, or by ssh, by another that
+    /// ssh's config gives it, as `ssh_host` says what host ssh takes a name
+    /// for.
+    fn of(&self, url: &str, ssh_host: impl FnOnce(&str) -> Option<String>) -> bool {
+        let Some(Spelled { host, ssh, owner, name }) = spelled(url) else {
+            return false;
+        };
+        let github = |host: &str| host.eq_ignore_ascii_case(GITHUB);
+        owner.eq_ignore_ascii_case(&self.owner)
+            && name.eq_ignore_ascii_case(&self.name)
+            && (github(host) || (ssh && ssh_host(host).is_some_and(|host| github(&host))))
     }
 }
 
@@ -108,22 +123,54 @@ fn named(part: &str) -> bool {
     !part.is_empty() && part.chars().all(allowed) && part.chars().any(|c| c != '.')
 }
 
-/// The repository on GitHub a remote's `url` is of, its owner and its name,
-/// as git spells it by ssh or https: `git@github.com:owner/name.git`,
-/// `https://github.com/owner/name` or `ssh://git@github.com/owner/name.git`.
-/// None for one of another host, or a path.
-fn repository_of(url: &str) -> Option<(&str, &str)> {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+/// A remote's url, as git spells it by ssh or https: `git@host:owner/name.git`,
+/// `https://host/owner/name` or `ssh://git@host:22/owner/name.git`. The host
+/// it names, and whether by ssh, whose config can give a host another name,
+/// and the owner and the name of the repository there.
+#[derive(Debug, PartialEq, Eq)]
+struct Spelled<'a> {
+    host: &'a str,
+    ssh: bool,
+    owner: &'a str,
+    name: &'a str,
+}
+
+/// How git spells the remote's `url`, as `Spelled` has it. None for a path,
+/// or a repository with no owner.
+fn spelled(url: &str) -> Option<Spelled<'_>> {
+    let (scheme, rest) = url.split_once("://").map_or((None, url), |(it, rest)| (Some(it), rest));
     let rest = match rest.split_once('@') {
         Some((user, host)) if !user.contains('/') => host,
         _ => rest,
     };
-    let rest = rest.strip_prefix(GITHUB)?;
-    let rest = rest.strip_prefix(':').or_else(|| rest.strip_prefix('/'))?;
-    let rest = rest.trim_end_matches('/');
-    let rest = rest.strip_suffix(".git").unwrap_or(rest);
-    let (owner, name) = rest.split_once('/')?;
-    (named(owner) && named(name)).then_some((owner, name))
+    // As scp spells it, `host:path`, with no `/` before the `:`, which git
+    // takes for a path; or else `host:port/path`.
+    let (host, path) = if scheme.is_some() {
+        let (host, path) = rest.split_once('/')?;
+        (host.split_once(':').map_or(host, |(host, _)| host), path)
+    } else {
+        rest.split_once(':').filter(|(host, _)| !host.contains('/'))?
+    };
+    let ssh = matches!(scheme, None | Some("ssh" | "git+ssh" | "ssh+git"));
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    (named(owner) && named(name)).then_some(Spelled { host, ssh, owner, name })
+}
+
+/// The host ssh connects to for `host`, which its config can give another
+/// name, as its `Host` and `HostName` do: as `ssh -G` says, which reads the
+/// config and connects nowhere. None for what names no host, as what starts
+/// with `-`, which ssh would take for an option.
+fn ssh_host(host: &str) -> Option<String> {
+    let spelled = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_');
+    if host.is_empty() || host.starts_with('-') || !host.chars().all(spelled) {
+        return None;
+    }
+    let mut ssh = Command::new("ssh");
+    ssh.args(["-G", host]);
+    let said = String::from_utf8(program::run(&mut ssh, ANSWER).ok()?.answer().ok()?).ok()?;
+    said.lines().find_map(|line| line.strip_prefix("hostname ")).map(str::to_owned)
 }
 
 /// How a repository is the pull request's: by its `origin`, or by another of
@@ -134,28 +181,55 @@ enum Remote {
     Other,
 }
 
+/// A repository that is the pull request's: `by` which of its remotes, and
+/// whether it is `bare`, as wt clones one, with its worktrees beside its
+/// hidden `.bare`, or in it. Of one git cloned, wt would make the worktree in
+/// its `.git`, and luneta has it make none there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Repository {
+    by: Remote,
+    bare: bool,
+}
+
+/// How the repository `dir` is in is the pull request `link`'s, if it is,
+/// as `ssh_host` says what host ssh takes a name of its remotes for.
+fn repository(
+    dir: &str,
+    link: &Link,
+    ssh_host: impl FnMut(&str) -> Option<String>,
+) -> Option<Repository> {
+    let by = remote(&remotes_in(dir)?, link, ssh_host)?;
+    Some(Repository { by, bare: bare(dir) })
+}
+
 /// How the remotes `listed` are of the pull request `link`'s repository, if
 /// any is: as `git config --get-regexp` prints them, `remote.<name>.url
-/// <url>` a line.
-fn remote(listed: &str, link: &Link) -> Option<Remote> {
+/// <url>` a line, as `ssh_host` says what host ssh takes a name for.
+fn remote(
+    listed: &str,
+    link: &Link,
+    mut ssh_host: impl FnMut(&str) -> Option<String>,
+) -> Option<Remote> {
     let of = |line: &str| {
         let (key, url) = line.split_once(' ')?;
         let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
-        link.of(url.trim()).then_some(if name == "origin" { Remote::Origin } else { Remote::Other })
+        let by = if name == "origin" { Remote::Origin } else { Remote::Other };
+        link.of(url.trim(), &mut ssh_host).then_some(by)
     };
     listed.lines().filter_map(of).min()
 }
 
 /// A pane as the sidebar knows it, for luneta to find where a key of the
 /// menu goes: its session and its id, where it works, the pull request of the
-/// branch checked out there, as the daemon says, and whether luneta's zellij
-/// is in its session. The sidebar hands them in the order of its rows.
+/// branch checked out there, by its page, as the daemon says, and whether
+/// luneta's zellij is in its session. The sidebar hands them in the order of
+/// its rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
     pub session: Listed,
     pub pane: u32,
     pub dir: String,
-    pub pull: Option<NonZeroU32>,
+    pub pull: Option<Link>,
     pub here: bool,
 }
 
@@ -199,12 +273,14 @@ pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event
 
 /// Where a key goes for `link`, as `prepare` says.
 fn ready(link: &Link, worked: &[Worked]) -> Result<Ready, String> {
-    let mut remotes: HashMap<String, Option<Remote>> = HashMap::new();
-    let mut remote_of = |dir: &str| {
-        let listed = || remotes_in(dir).and_then(|listed| remote(&listed, link));
-        *remotes.entry(dir.to_owned()).or_insert_with(listed)
+    let mut seen: HashMap<String, Option<Repository>> = HashMap::new();
+    let mut hosts: HashMap<String, Option<String>> = HashMap::new();
+    let mut repository_of = |dir: &str| {
+        let host_of =
+            |host: &str| hosts.entry(host.to_owned()).or_insert_with(|| ssh_host(host)).clone();
+        *seen.entry(dir.to_owned()).or_insert_with(|| repository(dir, link, host_of))
     };
-    let (repository, at) = match found(link, worked, &mut remote_of) {
+    let (repository, at) = match found(link, worked, &mut repository_of) {
         Some(Found::There(at)) => {
             let Worked { session, pane, dir, .. } = &worked[at];
             let at = At::There { session: session.clone(), pane: *pane };
@@ -214,7 +290,10 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready, String> {
             let Worked { session, pane, dir, .. } = &worked[at];
             (dir.clone(), At::Session { session: session.clone(), pane: *pane })
         },
-        None => clone(link, &mut remote_of)?,
+        None => match clone(link, &mut repository_of)? {
+            Some(clone) => clone,
+            None => return Err(no_clone(link, &seen)),
+        },
     };
     let worktree = worktree(&repository, link)?;
     // The worktree of the pull request's branch, where it was one already,
@@ -236,44 +315,45 @@ enum Found {
     Session(usize),
 }
 
-/// Where a key goes for `link` among the panes `worked`, by how `remote_of`
-/// says a directory's repository is the pull request's, if it is: the pane
-/// that has the pull request's branch checked out, or else a pane that works
-/// in its repository. Of either, one in the session luneta's zellij is in
-/// goes first, then one whose repository is the pull request's by its origin,
-/// then the first row.
+/// Where a key goes for `link` among the panes `worked`: the pane that has
+/// the pull request's branch checked out, or else a pane that works in its
+/// repository, where wt cloned it, by how `repository_of` says a directory's
+/// repository is the pull request's, if it is. Of either, one in the session
+/// luneta's zellij is in goes first; of a repository's, then one that is the
+/// pull request's by its origin; then the first row.
 fn found(
     link: &Link,
     worked: &[Worked],
-    mut remote_of: impl FnMut(&str) -> Option<Remote>,
+    mut repository_of: impl FnMut(&str) -> Option<Repository>,
 ) -> Option<Found> {
-    let mut there = None;
-    let mut session = None;
+    let checked_out = |(_, it): &(usize, &Worked)| it.pull.as_ref().is_some_and(|it| it.is(link));
+    let there = worked.iter().enumerate().filter(checked_out);
+    let there = there.min_by_key(|(at, it)| (!it.here, *at));
+    if let Some((at, _)) = there {
+        return Some(Found::There(at));
+    }
+    let mut session: Option<(bool, Remote, usize)> = None;
     for (at, it) in worked.iter().enumerate() {
-        let Some(by) = remote_of(&it.dir) else {
+        let Some(Repository { by, bare: true }) = repository_of(&it.dir) else {
             continue;
         };
         let rank = (!it.here, by, at);
-        let best = |was: Option<(bool, Remote, usize)>| Some(was.map_or(rank, |was| was.min(rank)));
-        if it.pull == Some(link.number) {
-            there = best(there);
-        }
-        session = best(session);
+        session = Some(session.map_or(rank, |was| was.min(rank)));
     }
-    let at = |(_, _, at)| at;
-    there.map(at).map(Found::There).or_else(|| session.map(at).map(Found::Session))
+    session.map(|(_, _, at)| Found::Session(at))
 }
 
-/// The clone of `link`'s repository among the directories zoxide knows, by
-/// how `remote_of` says a directory's repository is the pull request's: a
-/// directory of it, for `wt add`, and the session luneta makes for it, in the
-/// directory that holds it, named as the picker names that directory, with a
-/// `-2` where a session has the name: one that runs, or one that ended, which
-/// zellij keeps to bring back. Or why there is none.
+/// The clone of `link`'s repository that wt made among the directories
+/// zoxide knows, by how `repository_of` says a directory's repository is the
+/// pull request's: a directory of it, for `wt add`, and the session luneta
+/// makes for it, in the directory that holds it, named as the picker names
+/// that directory, with a `-2` where a session has the name: one that runs,
+/// or one that ended, which zellij keeps to bring back. None where zoxide
+/// knows none; or why luneta cannot tell.
 fn clone(
     link: &Link,
-    remote_of: impl FnMut(&str) -> Option<Remote>,
-) -> Result<(String, At), String> {
+    repository_of: impl FnMut(&str) -> Option<Repository>,
+) -> Result<Option<(String, At)>, String> {
     let repository = link.repository();
     let dirs: Vec<String> = dirs::visited()
         .map_err(|why| {
@@ -282,11 +362,8 @@ fn clone(
         .into_iter()
         .map(|dir| dir.path)
         .collect();
-    let Some(dir) = cloned(&dirs, remote_of) else {
-        return Err(format!(
-            "no session works in {repository}, nor does zoxide know a clone of it; wt clone it \
-             first"
-        ));
+    let Some(dir) = cloned(&dirs, repository_of) else {
+        return Ok(None);
     };
     let dir = dirs[dir].clone();
     let cwd = holder(&dir).ok_or_else(|| format!("git does not say what repository {dir} is"))?;
@@ -295,16 +372,37 @@ fn clone(
     let named =
         zellij::named().ok_or_else(|| "luneta cannot tell which sessions zellij has".to_owned())?;
     let name = name.free(&named.iter().map(String::as_str).collect::<Vec<_>>());
-    Ok((dir, At::Clone { cwd, name }))
+    Ok(Some((dir, At::Clone { cwd, name })))
 }
 
-/// Which of `dirs`, best first, is of the pull request's repository, by how
-/// `remote_of` says a directory's is: the first by its origin, or else the
-/// first by another remote.
-fn cloned(dirs: &[String], mut remote_of: impl FnMut(&str) -> Option<Remote>) -> Option<usize> {
+/// Why no clone of `link`'s repository is for `wt add`, as what luneta has
+/// `seen` of each directory it looked in says: there is none, or one git
+/// cloned, in whose `.git` wt would make the worktree.
+fn no_clone(link: &Link, seen: &HashMap<String, Option<Repository>>) -> String {
+    let repository = link.repository();
+    let by_git = seen.iter().filter(|(_, it)| it.is_some_and(|it| !it.bare));
+    match by_git.map(|(dir, _)| dir).min() {
+        Some(dir) => format!(
+            "{dir} is in a clone of {repository} that git made, and wt would make the worktree \
+             in its .git; wt clone it first"
+        ),
+        None => format!(
+            "no session works in {repository}, nor does zoxide know a clone of it; wt clone it \
+             first"
+        ),
+    }
+}
+
+/// Which of `dirs`, best first, is of the pull request's repository, where
+/// wt cloned it, by how `repository_of` says a directory's is: the first by
+/// its origin, or else the first by another remote.
+fn cloned(
+    dirs: &[String],
+    mut repository_of: impl FnMut(&str) -> Option<Repository>,
+) -> Option<usize> {
     let mut best: Option<(Remote, usize)> = None;
     for (at, dir) in dirs.iter().enumerate() {
-        if let Some(by) = remote_of(dir) {
+        if let Some(Repository { by, bare: true }) = repository_of(dir) {
             best = Some(best.map_or((by, at), |was| was.min((by, at))));
             if by == Remote::Origin {
                 break;
@@ -314,10 +412,8 @@ fn cloned(dirs: &[String], mut remote_of: impl FnMut(&str) -> Option<Remote>) ->
     best.map(|(_, at)| at)
 }
 
-/// The directory that holds the repository `dir` is in: where wt keeps its
-/// worktrees, beside its hidden `.bare`, or the work tree of one cloned as
-/// git clones, beside its `.git`. A bare repository that is not hidden holds
-/// itself.
+/// The directory that holds the bare repository `dir` is in, as wt keeps its
+/// worktrees: beside its hidden `.bare`, or in it, where it is not hidden.
 fn holder(dir: &str) -> Option<String> {
     let mut git = Command::new("git");
     lunetad::local_git(git.args(["-C", dir, "rev-parse", "--path-format=absolute"]))
@@ -336,6 +432,13 @@ fn remotes_in(dir: &str) -> Option<String> {
     lunetad::local_git(git.args(["-C", dir, "config", "--get-regexp", r"^remote\..*\.url$"]));
     let ran = program::run(&mut git, ANSWER).ok()?;
     String::from_utf8(ran.answer().ok()?).ok()
+}
+
+/// Whether the repository `dir` is in is bare, as git says.
+fn bare(dir: &str) -> bool {
+    let mut git = Command::new("git");
+    lunetad::local_git(git.args(["-C", dir, "config", "--type=bool", "--get", "core.bare"]));
+    said(&mut git).as_deref() == Some("true")
 }
 
 /// The branch checked out in `dir`, as `git status` names it: its ref
@@ -361,7 +464,8 @@ fn said(git: &mut Command) -> Option<String> {
 fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     let mut wt = Command::new("wt");
     lunetad::local_git(wt.args(["add", "--repo", dir, &link.url()]));
-    let ran = program::run(&mut wt, MAKING)
+    // It fetches across the network, by ssh as like as not.
+    let ran = program::run_alone(&mut wt, MAKING)
         .map_err(|error| format!("wt add could not be run: {error}"))?;
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
@@ -394,10 +498,12 @@ fn failure(stderr: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
-    use super::{Found, Link, Remote, Worked, cloned, failure, found, remote, repository_of};
+    use super::{
+        Found, Link, Remote, Repository, Worked, cloned, failure, found, no_clone, remote,
+    };
     use crate::sidebar::Listed;
 
     fn link() -> Link {
@@ -408,10 +514,19 @@ mod tests {
         Listed::new(name, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
     }
 
-    fn worked(session: &str, pane: u32, dir: &str, pull: Option<u32>, here: bool) -> Worked {
-        let pull = pull.map(|number| NonZeroU32::new(number).expect("a pull request's number"));
+    /// A pane in `dir`, with the pull request of the page `pull` checked out.
+    fn worked(session: &str, pane: u32, dir: &str, pull: Option<&str>, here: bool) -> Worked {
+        let pull = pull.map(|page| Link::parse(page).expect("a pull request's page"));
         Worked { session: listed(session), pane, dir: dir.to_owned(), pull, here }
     }
+
+    /// A repository wt cloned, that is the pull request's `by` a remote.
+    fn by_wt(by: Remote) -> Repository {
+        Repository { by, bare: true }
+    }
+
+    /// One git cloned, that is the pull request's by its origin.
+    const BY_GIT: Repository = Repository { by: Remote::Origin, bare: false };
 
     #[test]
     fn a_link_is_of_a_pull_request_or_of_a_page_of_one() {
@@ -448,6 +563,15 @@ mod tests {
         assert_eq!(link().tab(), "#2736");
     }
 
+    /// ssh's config gives GitHub another name, `github-work`, as its `Host`
+    /// and `HostName` do.
+    fn ssh_host(host: &str) -> Option<String> {
+        (host == "github-work").then(|| "github.com".to_owned())
+    }
+
+    /// A remote is of the pull request's repository by ssh or https, on
+    /// GitHub by its name, or by ssh by another that ssh's config gives it,
+    /// which https takes no account of.
     #[test]
     fn a_remote_is_of_a_repository_by_ssh_or_https_case_aside() {
         for url in [
@@ -457,18 +581,21 @@ mod tests {
             "https://github.com/CashuBTC/CDK/",
             "ssh://git@github.com/cashubtc/cdk.git",
             "https://token@github.com/cashubtc/cdk",
+            "git@github-work:cashubtc/cdk.git",
+            "ssh://git@github-work:22/cashubtc/cdk",
         ] {
-            assert_eq!(
-                repository_of(url).map(|(owner, name)| (owner.to_lowercase(), name.to_lowercase())),
-                Some(("cashubtc".to_owned(), "cdk".to_owned())),
-                "{url}"
-            );
-            assert!(link().of(url), "{url}");
+            assert!(link().of(url, ssh_host), "{url}");
         }
-        for url in ["git@gitlab.com:cashubtc/cdk.git", "/srv/git/cdk.git", "git@github.com:cdk"] {
-            assert!(!link().of(url), "{url}");
+        for url in [
+            "git@gitlab.com:cashubtc/cdk.git",
+            "/srv/git/cdk.git",
+            "/srv/github.com:cashubtc/cdk",
+            "git@github.com:cdk",
+            "git@github.com:lorenzolfm/cdk.git",
+            "https://github-work/cashubtc/cdk",
+        ] {
+            assert!(!link().of(url, ssh_host), "{url}");
         }
-        assert!(!link().of("git@github.com:lorenzolfm/cdk.git"));
     }
 
     /// A fork's clone has the repository it forks among its remotes, by any
@@ -477,26 +604,35 @@ mod tests {
     fn a_repository_is_the_pull_request_s_by_any_remote_its_origin_first() {
         let fork = "remote.cashubtc.url git@github.com:cashubtc/cdk.git\n\
                     remote.origin.url git@github.com:lorenzolfm/cdk.git\n";
-        assert_eq!(remote(fork, &link()), Some(Remote::Other));
+        assert_eq!(remote(fork, &link(), ssh_host), Some(Remote::Other));
         let clone = "remote.origin.url https://github.com/cashubtc/cdk\n\
                      remote.upstream.url https://github.com/cashubtc/cdk\n";
-        assert_eq!(remote(clone, &link()), Some(Remote::Origin));
-        assert_eq!(remote("remote.origin.url git@github.com:lorenzolfm/cdk.git\n", &link()), None);
-        assert_eq!(remote("", &link()), None);
+        assert_eq!(remote(clone, &link(), ssh_host), Some(Remote::Origin));
+        let other = "remote.origin.url git@github.com:lorenzolfm/cdk.git\n";
+        assert_eq!(remote(other, &link(), ssh_host), None);
+        assert_eq!(remote("", &link(), ssh_host), None);
     }
 
     /// The pane that has the pull request's branch checked out wins over a
-    /// session that works in its repository, wherever it is; of each, one in
-    /// the session luneta's zellij is in, then one by its origin, then the
-    /// first row.
+    /// session that works in its repository, wherever it is: by the pull
+    /// request's page, case aside, as the daemon says it, so that one of
+    /// another repository's with its number, as a fork's own, is not it. Of
+    /// each, one in the session luneta's zellij is in goes first; of a
+    /// session, then one whose repository is the pull request's by its
+    /// origin, then the first row. A repository git cloned has no session for
+    /// `wt add`, though a pane with the branch checked out in it is still
+    /// where the branch is.
     #[test]
     fn a_key_goes_to_the_pane_with_the_branch_or_else_a_session_of_the_repository() {
         let remotes = |dir: &str| match dir {
-            "/cdk/main" | "/cdk/2736" => Some(Remote::Other),
-            "/cdk-upstream/master" => Some(Remote::Origin),
+            "/cdk/main" | "/cdk/2736" => Some(by_wt(Remote::Other)),
+            "/cdk-upstream/master" => Some(by_wt(Remote::Origin)),
+            "/cdk-git" => Some(BY_GIT),
             _ => None,
         };
-        let number = Some(2736);
+        let page = |repository, number| format!("https://github.com/{repository}/pull/{number}");
+        let (cdk, before) = (page("CashuBTC/cdk", 2736), page("cashubtc/cdk", 2735));
+        let fork = page("lorenzolfm/cdk", 2736);
         let away = [
             worked("dots", 1, "/dots", None, true),
             worked("cdk", 2, "/cdk/main", None, false),
@@ -512,28 +648,55 @@ mod tests {
         ];
         // luneta's own session before any.
         assert_eq!(found(&link(), &here, remotes), Some(Found::Session(2)));
+        let by_git =
+            [worked("dots", 1, "/cdk-git", None, true), worked("cdk", 2, "/cdk/main", None, false)];
+        assert_eq!(found(&link(), &by_git, remotes), Some(Found::Session(1)));
+        assert_eq!(found(&link(), &by_git[..1], remotes), None);
         let checked_out = [
             worked("dots", 4, "/cdk/main", None, true),
-            worked("upstream", 3, "/cdk-upstream/master", Some(2735), false),
-            worked("cdk", 5, "/cdk/2736", number, false),
+            worked("upstream", 3, "/cdk-upstream/master", Some(&before), false),
+            worked("git", 5, "/cdk-git", Some(&cdk), false),
         ];
         assert_eq!(found(&link(), &checked_out, remotes), Some(Found::There(2)));
-        // The number of another repository's pull request is not this one's.
-        let elsewhere = [worked("dots", 1, "/dots", number, true)];
-        assert_eq!(found(&link(), &elsewhere, remotes), None);
+        let fork = [worked("cdk", 1, "/cdk/main", Some(&fork), true)];
+        assert_eq!(found(&link(), &fork, remotes), Some(Found::Session(0)));
     }
 
+    /// Of the directories zoxide knows, the clone wt made that is the pull
+    /// request's by its origin goes first, or else the first by another
+    /// remote. One git cloned is none, by any remote.
     #[test]
     fn a_clone_is_the_first_by_its_origin_or_else_by_another_remote() {
-        let dirs = ["/a", "/fork/main", "/b", "/upstream", "/fork"].map(str::to_owned);
+        let dirs = ["/a", "/git", "/fork/main", "/b", "/upstream", "/fork"].map(str::to_owned);
         let remotes = |dir: &str| match dir {
-            "/fork/main" | "/fork" => Some(Remote::Other),
-            "/upstream" => Some(Remote::Origin),
+            "/fork/main" | "/fork" => Some(by_wt(Remote::Other)),
+            "/upstream" => Some(by_wt(Remote::Origin)),
+            "/git" => Some(BY_GIT),
             _ => None,
         };
-        assert_eq!(cloned(&dirs, remotes), Some(3));
-        assert_eq!(cloned(&dirs[..3], remotes), Some(1));
-        assert_eq!(cloned(&dirs[..1], remotes), None);
+        assert_eq!(cloned(&dirs, remotes), Some(4));
+        assert_eq!(cloned(&dirs[..4], remotes), Some(2));
+        assert_eq!(cloned(&dirs[..2], remotes), None);
+    }
+
+    /// With no clone for `wt add`, luneta says to have wt clone one, and
+    /// names one git made where it saw one, as wt would make the worktree in
+    /// its `.git`.
+    #[test]
+    fn with_no_clone_for_wt_luneta_says_of_one_git_made() {
+        let seen = |seen: &[(&str, Option<Repository>)]| -> HashMap<String, Option<Repository>> {
+            seen.iter().map(|(dir, it)| ((*dir).to_owned(), *it)).collect()
+        };
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/dots", None)])),
+            "no session works in cashubtc/cdk, nor does zoxide know a clone of it; wt clone it \
+             first"
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/dots", None), ("/w/cdk/src", Some(BY_GIT))])),
+            "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make the \
+             worktree in its .git; wt clone it first"
+        );
     }
 
     #[test]

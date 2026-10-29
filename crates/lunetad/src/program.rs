@@ -1,14 +1,18 @@
 //! Another program the daemon asks something of: zellij what panes a session
 //! has, git how a work tree stands, gh what pull request a branch has; or that
-//! luneta does: lunetad its version.
+//! luneta does: lunetad its version, wt a worktree of a pull request.
 //! Each answers on its stdout, and has a time to answer in: one that takes
 //! longer is stuck, and is killed, as one is whose answer is no longer wanted.
 
 use std::io::{self, Read};
-use std::process::{Command, ExitStatus, Stdio};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use rustix::io::Errno;
+use rustix::process::{self, Pid, Signal};
 
 /// How often a program that runs is looked at, to see whether it has ended.
 const LOOK: Duration = Duration::from_millis(5);
@@ -55,6 +59,18 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     Ok(ran.expect("a program wanted all along is never given up"))
 }
 
+/// Runs `command` as `run` does, in a session of its own, with no terminal,
+/// and kills what it started with it, where it is stuck. A program that asks
+/// across the network, as git does by ssh, may want a passphrase or a
+/// password, which it asks for on the terminal of its session, whatever its
+/// stdin: on luneta's, it would draw over luneta's screen, and read the keys
+/// typed there. With none, it fails, and says why. What it started, as git
+/// does that wt runs, would run on once it is killed.
+pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
+    let ran = running(alone(command), limit, &|| true, Kills::Group)?;
+    Ok(ran.expect("a program wanted all along is never given up"))
+}
+
 /// Runs `command` as `run` does, for as long as `wanted` says what it would
 /// say is still wanted, which it is asked each `LOOK` until it ends: none
 /// once it is not, as it is killed and waited for then, as one stuck is.
@@ -62,6 +78,26 @@ pub fn run_while(
     command: &mut Command,
     limit: Duration,
     wanted: impl Fn() -> bool,
+) -> io::Result<Option<Ran>> {
+    running(command, limit, &wanted, Kills::Program)
+}
+
+/// What of a program is killed, as it is stuck or no longer wanted.
+#[derive(Clone, Copy)]
+enum Kills {
+    /// The program alone.
+    Program,
+    /// The program, and what it started: the group it leads, as `alone` has
+    /// it lead one.
+    Group,
+}
+
+/// Runs `command`, as `run_while` does, and kills of it what `kills` says.
+fn running(
+    command: &mut Command,
+    limit: Duration,
+    wanted: &dyn Fn() -> bool,
+    kills: Kills,
 ) -> io::Result<Option<Ran>> {
     let deadline = Instant::now() + limit;
     let mut child =
@@ -76,7 +112,10 @@ pub fn run_while(
         if stuck || !wanted() {
             // One that ended just now is not waited for yet, and takes the
             // signal all the same.
-            child.kill()?;
+            match kills {
+                Kills::Program => child.kill()?,
+                Kills::Group => kill_group(&child)?,
+            }
             child.wait()?;
             return Ok(stuck.then_some(Ran::Stuck));
         }
@@ -85,9 +124,35 @@ pub fn run_while(
     let left = || deadline.saturating_duration_since(Instant::now());
     let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
     else {
+        // What it started holds its stdout open still.
+        if let Kills::Group = kills {
+            kill_group(&child)?;
+        }
         return Ok(Some(Ran::Stuck));
     };
     Ok(Some(Ran::Ended { status, stdout: stdout?, stderr: stderr? }))
+}
+
+/// Has `command` lead a session of its own, with no terminal, and a group of
+/// its own in it, numbered as it is.
+#[expect(unsafe_code, reason = "std has no safe way to start a command in a session of its own")]
+fn alone(command: &mut Command) -> &mut Command {
+    // SAFETY: the closure runs in the child, between its fork and its exec,
+    // where only what a signal handler may do is safe: `setsid` is a system
+    // call alone, and its error holds no memory.
+    unsafe {
+        command.pre_exec(|| process::setsid().map(|_| ()).map_err(io::Error::from));
+    }
+    command
+}
+
+/// Kills the group `child` leads, which ends what it started, as the group
+/// of its session. One that has all ended is no failure.
+fn kill_group(child: &Child) -> io::Result<()> {
+    match process::kill_process_group(Pid::from_child(child), Signal::KILL) {
+        Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// What comes out of `pipe` until it closes, read in a thread of its own and
@@ -113,10 +178,14 @@ fn read(mut pipe: impl Read + Send + 'static) -> io::Result<Receiver<io::Result<
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::process::Command;
+    use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{Ran, SAID_MAX, run, run_while};
+    use rustix::process::{self, Pid};
+
+    use super::{Ran, SAID_MAX, alone, run, run_alone, run_while};
 
     /// A program that says more than the most has failed, rather than been
     /// read short.
@@ -149,5 +218,38 @@ mod tests {
         let ran = run_while(Command::new("sleep").arg("10"), Duration::from_secs(10), wanted);
         assert!(ran.unwrap().is_none());
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
+    }
+
+    /// A program run alone leads a session of its own, with no terminal to
+    /// ask for a passphrase on, rather than its caller's.
+    #[test]
+    fn a_program_run_alone_has_a_session_of_its_own() {
+        let mut sleep = Command::new("sleep");
+        let mut child = alone(sleep.arg("10")).spawn().expect("sleep runs");
+        let pid = Pid::from_child(&child);
+        let session = process::getsid(Some(pid));
+        child.kill().expect("sleep is killed");
+        child.wait().expect("sleep ends");
+        assert_eq!(session, Ok(pid));
+    }
+
+    /// A program run alone that does not end in its time is killed with what
+    /// it started, which would run on otherwise, as git does that wt runs.
+    #[test]
+    fn a_program_run_alone_that_is_stuck_is_killed_with_what_it_started() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let started = dir.path().join("started");
+        let mut sh = Command::new("sh");
+        sh.args(["-c", r#"sleep 30 & echo $! > "$0"; wait"#]).arg(&started);
+        let ran = run_alone(&mut sh, Duration::from_millis(500)).expect("sh runs");
+        assert!(matches!(ran, Ran::Stuck));
+        let pid = fs::read_to_string(&started).expect("sh says what it started");
+        let pid = Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid");
+        // Gone once the process that took it in has waited for it.
+        let gone = Instant::now() + Duration::from_secs(5);
+        while process::test_kill_process(pid).is_ok() {
+            assert!(Instant::now() < gone, "what sh started runs on");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

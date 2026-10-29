@@ -1304,7 +1304,7 @@ impl Sidebar {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
                     let tree = WorkTree::of_api(trees.get(cwd)?)?;
-                    checkout(&tree, pull_requests.get(cwd).copied())
+                    checkout(&tree, pull_requests.get(cwd))
                 });
                 let command = pane.command.as_deref();
                 // An agent's pane runs Claude Code, whatever its terminal has
@@ -1891,7 +1891,8 @@ impl Sidebar {
     /// Every pane the daemon says a directory of, in the order of the rows,
     /// for luneta to find where a key of the menu for a pull request goes:
     /// where each works, as its row says, the pull request of the branch
-    /// checked out there, and whether luneta's zellij is in its session.
+    /// checked out there, by its page, and whether luneta's zellij is in its
+    /// session. A daemon older than the page says none of one.
     fn worked(&self) -> Vec<Worked> {
         let Some(host) = &self.host else {
             return Vec::new();
@@ -1918,7 +1919,7 @@ impl Sidebar {
                     session: listed.clone(),
                     pane: pane.id,
                     dir: dir.to_owned(),
-                    pull: pulls.get(dir).map(|it| it.number),
+                    pull: pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?)),
                     here: here == Some(session.name.as_str()),
                 });
             }
@@ -2998,7 +2999,7 @@ impl<'a> Finder<'a> {
 /// The branch checked out in a work tree, how the tree stands, and its
 /// `pull_request`, or none for a detached `HEAD` or a directory in no
 /// repository.
-fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checkout> {
+fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes } = tree
     else {
         return None;
@@ -3013,7 +3014,7 @@ fn checkout(tree: &WorkTree, pull_request: Option<PullRequest>) -> Option<Checko
 /// The number of a pull request and the colour of its state, which gh lists
 /// it in: green while it is open, grey while it is a draft, and purple once
 /// it is merged. A closed one is none.
-fn numbered(pull_request: PullRequest) -> Option<(u32, Color)> {
+fn numbered(pull_request: &PullRequest) -> Option<(u32, Color)> {
     let colour = match pull_request.state {
         State::Open => gruvbox::GREEN,
         State::Draft => gruvbox::GREY,
@@ -4770,7 +4771,7 @@ mod tests {
             let changes = Changes { modified, ..Changes::default() };
             host.work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
-            host.pull_requests.push(PullRequest { number, state }.to_api(dir));
+            host.pull_requests.push(PullRequest { number, state, url: None }.to_api(dir));
         }
         let mut sidebar = Sidebar::default();
         sidebar.heard(host);
@@ -5036,7 +5037,8 @@ mod tests {
         let mut sidebar = two_sessions();
         if let Some(host) = &mut sidebar.host {
             let number = NonZeroU32::new(5).unwrap();
-            host.pull_requests.push(PullRequest { number, state: State::Open }.to_api("/w/b"));
+            let url = Some("https://github.com/lorenzolfm/luneta/pull/5".to_owned());
+            host.pull_requests.push(PullRequest { number, state: State::Open, url }.to_api("/w/b"));
         }
         sidebar.focus(Keys::Sidebar);
         sidebar.paste("ls -la");
@@ -5060,7 +5062,7 @@ mod tests {
         let worked = vec![
             worked(listed("older", 10), 1, "/w/luneta/main", None, true),
             worked(listed("older", 10), 2, "/w/c", None, true),
-            worked(listed("newer", 20), 1, "/w/b", NonZeroU32::new(5), false),
+            worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
         ];
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Pull { menu: 1, link, worked });
 
