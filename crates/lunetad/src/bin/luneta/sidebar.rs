@@ -1223,15 +1223,17 @@ impl Sidebar {
         let pull_requests = pull_requests(host);
         let (mut sessions, unlisted) = oldest_first(&host.sessions);
         self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
-        let running: Vec<ledger::Session> =
+        let mut running: Vec<ledger::Session> =
             sessions.iter().map(|(listed, _)| listed.kept).collect();
         // What the daemon said last, while it does not answer, can list a
         // session that has ended since, whose colour another luneta gave up.
-        let colours = if self.away.is_some() {
-            self.order.colours(&running)
-        } else {
-            self.order.colour_sessions(&running)
-        };
+        // A colour kept takes up the order as another luneta left it, which
+        // the rows go in.
+        if self.away.is_none() && self.order.colour_sessions(&running) {
+            self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+            running = sessions.iter().map(|(listed, _)| listed.kept).collect();
+        }
+        let colours = self.order.colours(&running);
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
             Some(Search::Empty) | None => (None, false),
@@ -3606,6 +3608,27 @@ mod tests {
         std::fs::write(&file, r#"{"sessions": []}"#).unwrap();
         sidebar.reorder();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"sessions": []}"#);
+    }
+
+    /// A colour kept for a session that starts takes up a move another
+    /// luneta made, which this one has yet to hear of, and the rows go in it
+    /// then, rather than once something else builds them again.
+    #[test]
+    fn a_colour_kept_takes_up_a_move_made_elsewhere() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let order = Order::within(file.clone());
+        let mut sidebar = Sidebar::new(Folds::default(), News::default(), order);
+        let listing = |named: &[(&str, i64)]| {
+            let sessions = named.iter().map(|(name, at)| session(name, *at, Vec::new()));
+            host(sessions.collect(), Vec::new())
+        };
+        sidebar.heard(listing(&[("a", 1), ("b", 2)]));
+        Order::within(file).keep_sessions(vec!["b".to_owned(), "a".to_owned()]);
+        sidebar.heard(listing(&[("a", 1), ("b", 2), ("c", 3)]));
+        assert_eq!(rows_shown(&mut sidebar), [" ▾ b", " ▾ a", " ▾ c"]);
+        sidebar.reorder();
+        assert_eq!(rows_shown(&mut sidebar), [" ▾ b", " ▾ a", " ▾ c"]);
     }
 
     /// The first line says `luneta`, in the accent, the word bold, while the
