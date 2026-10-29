@@ -27,6 +27,7 @@ mod picker;
 mod pull;
 mod sidebar;
 mod skills;
+mod spots;
 mod state;
 mod watch;
 mod width;
