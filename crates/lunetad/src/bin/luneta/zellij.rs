@@ -1104,15 +1104,18 @@ fn relisted_in(folder: &Path, session: &SessionName) -> Result<(), String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(failed(error)),
     };
-    let deadline = Instant::now() + ANSWER;
+    // macOS sets no option of a socket its peer closed, as the server closes
+    // this one once it answered, though what it sent is still there to read.
+    stream.set_read_timeout(Some(ANSWER)).map_err(failed)?;
     stream.write_all(&RELIST).map_err(failed)?;
     stream.write_all(&CONN_STATUS).map_err(failed)?;
-    connected(&mut stream, deadline).map_err(failed)
+    connected(&mut stream, Instant::now() + ANSWER).map_err(failed)
 }
 
 /// Reads the messages of the server on `stream`, each its length and then
-/// itself, as zellij frames them, until it says `CONNECTED`, by `deadline`;
-/// or says why it did not.
+/// itself, as zellij frames them, until it says `CONNECTED`, starting no
+/// read past `deadline`; or says why it did not. Each read waits as long as
+/// the stream's timeout at most.
 fn connected(stream: &mut UnixStream, deadline: Instant) -> io::Result<()> {
     let mut part = [0; 4096];
     loop {
@@ -1131,17 +1134,15 @@ fn connected(stream: &mut UnixStream, deadline: Instant) -> io::Result<()> {
     }
 }
 
-/// Fills `buffer` with what comes next on `stream`, by `deadline`, or says
-/// why it did not.
+/// Fills `buffer` with what comes next on `stream`, starting no read past
+/// `deadline`, or says why it did not.
 fn filled(stream: &mut UnixStream, buffer: &mut [u8], deadline: Instant) -> io::Result<()> {
     let late = || io::Error::new(io::ErrorKind::TimedOut, "it did not answer in time");
     let mut at = 0;
     while at < buffer.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        if Instant::now() >= deadline {
             return Err(late());
         }
-        stream.set_read_timeout(Some(left))?;
         match stream.read(&mut buffer[at..]) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "it hung up")),
             Ok(read) => at += read,
