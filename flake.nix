@@ -35,10 +35,11 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          # Pinned, as rust-toolchain.toml is for rustup, so that every build and every
-          # run of clippy is of one rust, whatever the system has: a newer clippy brings
-          # lints of its own, and fails a tree this one passes.
-          toolchain = pkgs.rust-bin.stable."1.95.0".default;
+          # Pinned in rust-toolchain.toml, which rustup reads too, so that every build and
+          # every run of clippy is of one rust, whatever the system has: a newer clippy
+          # brings lints of its own, and fails a tree this one passes. Read from there
+          # and not written again here, so that the two cannot name two rusts.
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
           # Every crate is built through crane, on the toolchain above, because it
           # builds a crate's dependencies in a derivation of their own. That

@@ -54,7 +54,7 @@ jobs:
       # Without it each store would carry every build before it.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -109,7 +109,7 @@ jobs:
       # runner builds the daemon for a system of its own.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -120,8 +120,8 @@ jobs:
       # each run. As in `clippy`, main saves and a PR restores.
       #
       # Its key is what cargo builds the dependencies from: the lockfiles, which
-      # name them, the manifests, which turn on their features, and flake.nix,
-      # which names the rust. main saves only on a miss, so a change the key left
+      # name them, the manifests, which turn on their features, and flake.nix and
+      # rust-toolchain.toml, which name the rust. main saves only on a miss, so a change the key left
       # out would hit the `target/` from before it and never save another, and
       # every run after would compile what changed again. A feature of rustix's,
       # turned on in a manifest, leaves Cargo.lock as it was.
@@ -138,7 +138,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             target/
-          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix') }}
+          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml') }}
 
       # `--locked`, so that the tests build against what Cargo.lock names, as
       # the derivation does. Not incremental, which is for one tree's edits in a row:

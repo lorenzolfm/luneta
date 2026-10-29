@@ -1,4 +1,4 @@
-# The rust the flake pins. The flake is the source of truth on NixOS. This file
-# gives a machine with rustup the same toolchain.
+# The rust every build of luneta is of. The flake reads it, and so does rustup,
+# so that a machine with rustup and not nix builds with the same toolchain.
 [toolchain]
 channel = "1.95.0"
