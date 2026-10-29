@@ -525,9 +525,12 @@ wt fetches, and says why when it makes nothing; with no clone wt made, it says
 to `wt clone` one first. A paste while zellij has the keys stays zellij's.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
-makes a worktree of a branch for it, `issue-123`, which wt makes from origin's
-default branch where there is none yet, and opens a tab there, named `#123`,
-in the session that works in its repository, found as for a pull request. `t`
+makes a worktree of a branch for it, `issue-123`, and opens a tab there, named
+`#123`, in the session that works in its repository, found as for a pull
+request. Where neither the clone nor origin has the branch yet, luneta fetches
+the default branch of the issue's repository and makes it from that, with no
+upstream: in a fork's clone, from the repository it forks, not from the fork.
+A branch origin has, as one you pushed from another machine, wt checks out. `t`
 does the same and starts Claude Code in the tab, told to `Tackle` the link.
 Pasted again, the link finds the worktree the first paste made: `w` takes
 zellij to a pane that works in it, and `t` starts the agent beside it. luneta
