@@ -1034,6 +1034,12 @@ watch` start `lunetad` when none answers, as zellij and tmux start their
 servers. They start the `lunetad` beside them, which the same build made, or
 else the first on the `PATH`, detached, with what it says in `lunetad.log`
 beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
+What it says goes in `luneta.log` too, with what goes wrong in luneta's
+sidebar, in `$XDG_STATE_HOME/luneta`, or `~/.local/state/luneta` (on macOS
+too), which outlives a reboot: a line for each, with when, in UTC, and which
+process said it, as `2026-10-29T14:03:12.481Z luneta[4123] zellij did not take
+its client there`. Once it is 1 MiB, it moves to `luneta.log.1`, in the place
+of the one before.
 It lives as long as zellij does, not as long as a client is attached: once
 zellij has had no session for 30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A

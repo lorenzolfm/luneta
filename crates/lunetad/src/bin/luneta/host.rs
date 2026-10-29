@@ -38,6 +38,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::SetTitle;
 use lunetad::api::Host;
+use lunetad::log::{self, Also};
 use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
@@ -525,9 +526,11 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         },
     };
     // ratatui's hook puts the terminal back as it found it before a panic is
-    // printed, all but the modes luneta turns on itself.
+    // printed, all but the modes luneta turns on itself. The panic goes in
+    // the log first, which no terminal can hold up.
     let restore = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
+        log::panicked(panic);
         let _ = execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
@@ -617,6 +620,9 @@ fn run_in(
     let news_watched = news::watch(&news, events.clone());
     let order_watched = order.file().map(|file| order::watch(file, events.clone())).transpose();
     let mut sidebar = Sidebar::new(folds, news, order);
+    if let Err(why) = log::start("luneta", Also::Nowhere) {
+        sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
+    }
     let mut watching = Vec::new();
     match folds_watched {
         Ok(watcher) => watching.extend(watcher),

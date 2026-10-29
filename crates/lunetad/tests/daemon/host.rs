@@ -25,9 +25,9 @@ pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
 pub const SOCKET: &str = "luneta/lunetad.sock";
 
 /// The variables that the daemon and the CLI find their folders by: their
-/// own, Claude Code's and zellij's, its cache among them. `None` leaves one
-/// unset, so that nothing a
-/// test runs ever reads the folders of whoever runs the tests. `bin` comes
+/// own, their state's, where the log is, Claude Code's and zellij's, its
+/// cache among them. `None` leaves one unset, so that nothing a test runs
+/// ever reads the folders of whoever runs the tests. `bin` comes
 /// first on the `PATH`, for a test's own programs to stand in for those of
 /// whoever runs the tests, and git reads no config of theirs either. Nothing
 /// runs in a pane of theirs: zellij's names of one are left out, and the
@@ -51,6 +51,7 @@ impl<'a> Vars<'a> {
         let names = [
             "XDG_RUNTIME_DIR",
             "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
             "TMPDIR",
             "HOME",
             "CLAUDE_CONFIG_DIR",

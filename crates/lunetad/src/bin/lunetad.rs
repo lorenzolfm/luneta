@@ -8,6 +8,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::process::ExitCode;
 
 use clap::Parser;
+use lunetad::log::{self, Also};
 use lunetad::{folder, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
@@ -24,28 +25,37 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    // What lunetad says from here on goes in luneta's log too, with when and
+    // its pid, and so does a panic. The log holds nothing open between its
+    // lines, for `close_inherited` to close.
+    let unkept = log::start("lunetad", Also::Stderr).err();
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        log::panicked(panic);
+        default(panic);
+    }));
     // Before anything of lunetad's own is open, which it would close too.
     if args.detached
         && let Err(error) = close_inherited()
     {
-        eprintln!("lunetad: what it was handed open is not closed: {error}");
+        log::say(&format!("what it was handed open is not closed: {error}"));
     }
     // A shell that runs it as a job has made it the leader of a group of its
     // own, which cannot leave for a session.
     if args.detached
         && let Err(error) = rustix::process::setsid()
     {
-        eprintln!("lunetad: no session of its own: {error}");
+        log::say(&format!("no session of its own: {error}"));
         return ExitCode::FAILURE;
     }
     let Some(folder) = folder::find() else {
-        eprintln!("lunetad: neither XDG_RUNTIME_DIR nor TMPDIR is set, to listen in");
+        log::say("neither XDG_RUNTIME_DIR nor TMPDIR is set, to listen in");
         return ExitCode::FAILURE;
     };
     let claim = match Claim::take(&folder) {
         Ok(claim) => claim,
         Err(refusal) => {
-            eprintln!("lunetad: {refusal}");
+            log::say(&refusal.to_string());
             return match refusal {
                 Refusal::Running(_) => ExitCode::from(folder::ANOTHER_RUNS),
                 Refusal::NotYours(_) | Refusal::Open(_) | Refusal::Io(..) => ExitCode::FAILURE,
@@ -55,13 +65,18 @@ fn main() -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("lunetad: no runtime: {error}");
+            log::say(&format!("no runtime: {error}"));
             return ExitCode::FAILURE;
         },
     };
+    // Once lunetad runs, so that the first thing one that does not start
+    // says is why, which luneta reads back.
+    if let Some(why) = unkept {
+        log::say(&format!("what goes wrong is kept in no log: {why}"));
+    }
     let socket = claim.socket().to_owned();
     if let Err(error) = runtime.block_on(lunetad::serve(claim)) {
-        eprintln!("lunetad: {}: {error}", socket.display());
+        log::say(&format!("{}: {error}", socket.display()));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

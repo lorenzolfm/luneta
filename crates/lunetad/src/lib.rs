@@ -15,12 +15,14 @@ mod daemon;
 pub mod folder;
 mod git;
 mod github;
+pub mod log;
 mod metadata;
 mod panes;
 mod process;
 pub mod program;
 pub mod release;
 mod shells;
+pub mod state;
 mod watch;
 mod zellij;
 

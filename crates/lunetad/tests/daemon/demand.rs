@@ -162,6 +162,22 @@ fn luneta_watch_starts_a_detached_daemon_where_none_runs() {
     assert_eq!(pid(&watch(&host, Path::new(LUNETA))), daemon.pid);
 }
 
+/// What lunetad says goes in luneta's log too, in the state folder of the
+/// home, each line with when it said it and its pid: by the time it says on
+/// stderr that it listens, the log has it.
+#[test]
+fn lunetad_says_in_lunetas_log_when_and_which_daemon() {
+    let host = Host::new();
+    let daemon = start(host.vars()).unwrap();
+    let log = fs::read_to_string(host.home.path().join(".local/state/luneta/luneta.log")).unwrap();
+    let listening = format!("lunetad[{}] listening on ", daemon.pid());
+    let line = log.lines().find(|line| line.contains(&listening)).expect(&log);
+    let (when, said) = line.split_once(' ').unwrap();
+    assert!(said.starts_with(&listening), "{line}");
+    let date = |at: usize| when.as_bytes().get(at).copied();
+    assert_eq!((when.len(), date(10), date(23)), (24, Some(b'T'), Some(b'Z')), "{when}");
+}
+
 /// `luneta info`, `agents` and `sessions` say that no daemon runs, as `tmux
 /// ls` says that no server does, and start none: in a folder no daemon has
 /// made yet, and in one that a daemon that crashed left its socket in.
