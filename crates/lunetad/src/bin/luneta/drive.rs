@@ -38,7 +38,7 @@ use lunetad::api::{Agent, UnreadFile, Zellij};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
-use crate::zellij::{self, pane_address, Closing, Open, Pane, Seat, SessionName};
+use crate::zellij::{self, pane_address, Closing, Open, Pane, Seat, SessionName, Tab};
 
 /// A session, or a pane of one, as the CLI names them: `<session>`, or
 /// `<session>:<pane>`.
@@ -298,7 +298,8 @@ fn tab(
         ));
     }
     let (name, command) = (name.map(str::to_owned), command.to_vec());
-    let open = Open::Tab { session: session.clone(), cwd: directory(cwd)?, name, command };
+    let tab = Tab { cwd: directory(cwd)?, name, command };
+    let open = Open::Tab { session: session.clone(), tab };
     let opened = zellij::opening(&open)?;
     Ok(Pane { session, pane: opened }.to_string())
 }

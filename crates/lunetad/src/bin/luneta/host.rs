@@ -58,7 +58,7 @@ use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::width::Width;
-use crate::zellij::{self, After, Arrival, Closes, Open, Refuge, SessionName};
+use crate::zellij::{self, After, Arrival, Closes, Refuge, SessionName, Tab};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -261,7 +261,7 @@ impl Waiting {
     /// as of a client started with none, or one it did not list the clients
     /// of.
     fn fresh(&self) -> bool {
-        self.arrival.as_ref().is_none_or(|arrival| arrival.before.fresh())
+        self.arrival.as_ref().is_none_or(Arrival::fresh)
     }
 }
 
@@ -639,7 +639,7 @@ fn run_in(
     let arrival = session.and_then(|session| {
         let before = zellij::before(session.as_str());
         let look = sidebar.sending(session)?;
-        Some(Arrival { look, before, after: None })
+        Some(Arrival::new(look, before))
     });
     let (program, args) = zellij::client(session);
     let client = Client::start(program, args, dir, window(areas.1), arrival, events.clone())?;
@@ -1285,13 +1285,8 @@ impl App {
             // The menu waits until zellij has opened it, and takes the keys
             // there with it.
             Asked::Make { menu, session, cwd, tab_cwd, name, command } => {
-                let open = Open::Tab {
-                    session: session.to_string(),
-                    cwd: tab_cwd,
-                    name: Some(name),
-                    command,
-                };
-                if !self.make(&session, &cwd, Some(After::Open(menu, open))) {
+                let tab = Tab { cwd: tab_cwd, name: Some(name), command };
+                if !self.make(&session, &cwd, Some((menu, tab))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1392,28 +1387,29 @@ impl App {
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
     /// `cwd`, or where the client started, or brings back, where zellij kept
-    /// one that ended, and does `after` once it is there. Where zellij makes
-    /// it, its server cannot bear being asked anything before it takes the
-    /// client: luneta asks for the client's arrival there once zellij titles
-    /// its terminal in it. Whether it went.
-    fn start(&mut self, session: &SessionName, cwd: Option<&str>, after: Option<After>) -> bool {
+    /// one that ended, and opens `tab` there once it is, for the menu
+    /// numbered so. Where zellij makes it, its server cannot bear being asked
+    /// anything before it takes the client: luneta asks for the client's
+    /// arrival there once zellij titles its terminal in it. Whether it went.
+    fn start(&mut self, session: &SessionName, cwd: Option<&str>, tab: Option<(u64, Tab)>) -> bool {
         let Some(nudged) = self.nudge() else {
             return false;
         };
         let then = self.sidebar.sending(session);
-        let made = zellij::start(&nudged, session, cwd, then, after, &self.events);
+        let made = zellij::start(&nudged, session, cwd, then, tab, &self.events);
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
         true
     }
 
     /// Takes zellij's client to a session zellij makes, `session`, that
-    /// starts in `cwd`, and does `after` once it is there; or says why zellij
-    /// would make none, but take it to one that has the name, before the
-    /// sidebar takes the client for one on its way there. Whether it went.
-    fn make(&mut self, session: &SessionName, cwd: &str, after: Option<After>) -> bool {
+    /// starts in `cwd`, and opens `tab` there once it is, as `start` does; or
+    /// says why zellij would make none, but take it to one that has the name,
+    /// before the sidebar takes the client for one on its way there. Whether
+    /// it went.
+    fn make(&mut self, session: &SessionName, cwd: &str, tab: Option<(u64, Tab)>) -> bool {
         match zellij::makes(session) {
-            Ok(()) => self.start(session, Some(cwd), after),
+            Ok(()) => self.start(session, Some(cwd), tab),
             Err(why) => {
                 self.sidebar.notify(why);
                 false
@@ -1619,7 +1615,7 @@ impl App {
             return Ok(());
         };
         let look = self.sidebar.rejoining(&to);
-        let arrival = Some(Arrival { look, before: Before::Listed(before), after: None });
+        let arrival = Some(Arrival::new(look, Before::Listed(before)));
         let (program, args) = zellij::rejoin(to.as_str());
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, arrival, self.events.clone())?;
