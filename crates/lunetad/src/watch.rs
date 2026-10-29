@@ -119,7 +119,7 @@ fn worth_a_read(event: &Event, wanted: fn(&Path) -> bool) -> bool {
 }
 
 /// Whether `error` is the folder's not being there yet.
-fn missing(error: &notify::Error) -> bool {
+pub fn missing(error: &notify::Error) -> bool {
     match &error.kind {
         notify::ErrorKind::PathNotFound => true,
         notify::ErrorKind::Io(error) => error.kind() == ErrorKind::NotFound,
