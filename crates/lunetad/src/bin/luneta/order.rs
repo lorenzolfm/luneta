@@ -1,5 +1,6 @@
-//! The order the sidebar lists the sessions in, as you moved them, the same in
-//! every luneta on the host, and kept for the next.
+//! The order the sidebar lists the sessions in, as you moved them, and the
+//! colour of each, the same in every luneta on the host, and kept for the
+//! next.
 //!
 //! A session goes by its name, as a fold does, so that one started again under
 //! it comes back to its place, and the sessions that share one go together. A
@@ -7,6 +8,10 @@
 //! nothing moved, the rows go as they always went. A session's panes go in the
 //! order of their tabs: zellij numbers a session's panes from 0 each time it
 //! starts, so no id would keep a pane's place in one started again.
+//!
+//! A session takes a colour as a browser's group of tabs does as it opens:
+//! the first that no other session has. It keeps it for as long as it runs,
+//! as sessions close and move around it, and gives it up as it ends.
 //!
 //! It is kept as JSON in the file `luneta/order` of `$XDG_STATE_HOME`, or of
 //! `~/.local/state` where that is not set. The file is written whole, under a
@@ -17,7 +22,7 @@
 //! the file, and takes up a move another makes as it makes it. Of two that
 //! move sessions at once, the last to write holds the order.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -35,6 +40,10 @@ use crate::state;
 struct Kept {
     /// The sessions, by name.
     sessions: Vec<String>,
+    /// The colour of each session that runs, by its name, as the place of the
+    /// colour in the sidebar's palette.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    colours: BTreeMap<String, usize>,
     /// What else the file has, as a luneta of another build keeps there,
     /// written back as it was read.
     #[serde(flatten)]
@@ -137,6 +146,24 @@ impl Order {
         self.keep(|kept| kept.sessions = merged(&kept.sessions, &sessions));
     }
 
+    /// The colour of the session `name`, by its place in a palette, once
+    /// `colour_sessions` gave it one.
+    pub fn colour(&self, name: &str) -> Option<usize> {
+        self.kept.colours.get(name).copied()
+    }
+
+    /// Gives each of `running`, the names of the sessions that run, a colour
+    /// of a palette of `count`, and keeps it for every luneta, where that
+    /// changes what the order has: one with none takes the first that the
+    /// fewest of the others have, and one that no longer runs gives its own
+    /// up.
+    pub fn colour_sessions(&mut self, running: &[&str], count: usize) {
+        if coloured(&self.kept.colours, running, count) == self.kept.colours {
+            return;
+        }
+        self.keep(|kept| kept.colours = coloured(&kept.colours, running, count));
+    }
+
     /// Makes `change` to the order as its file has it now, rather than as
     /// this luneta last took it up, and keeps that for every luneta: so what
     /// it does not change, as the sessions that do not run and what a luneta
@@ -178,6 +205,30 @@ fn merged(kept: &[String], running: &[String]) -> Vec<String> {
         }
     }
     merged
+}
+
+/// The colours of `running`, by name: one that `kept` has a colour of the
+/// `count` for keeps it, and each other, in the order `running` goes, takes
+/// the first of them that the fewest of those before it have.
+fn coloured(
+    kept: &BTreeMap<String, usize>,
+    running: &[&str],
+    count: usize,
+) -> BTreeMap<String, usize> {
+    let mut coloured: BTreeMap<String, usize> = kept
+        .iter()
+        .filter(|(name, colour)| running.contains(&name.as_str()) && **colour < count)
+        .map(|(name, colour)| (name.clone(), *colour))
+        .collect();
+    for name in running {
+        if coloured.contains_key(*name) {
+            continue;
+        }
+        let had = |colour: &usize| coloured.values().filter(|it| *it == colour).count();
+        let fewest = (0..count).min_by_key(had).expect("a palette of a colour at least");
+        coloured.insert((*name).to_owned(), fewest);
+    }
+    coloured
 }
 
 /// Writes `kept` to `file`, first under a name of this luneta's own beside
@@ -293,6 +344,44 @@ mod tests {
         assert!(order.lost().is_some_and(|lost| lost.contains("not a folder")));
         order.keep_sessions(names(&["b", "a"]));
         assert_eq!(sorted(&order, &["a", "b"]), ["b", "a"]);
+    }
+
+    /// A session takes the first colour that no other has, and keeps it as
+    /// sessions end and move around it. One that ends gives its own up, for
+    /// the next to take. With every colour taken, the next goes round them.
+    #[test]
+    fn a_session_takes_the_first_colour_no_other_has_and_keeps_it() {
+        let mut order = Order::default();
+        let colours = |order: &Order, names: &[&str]| -> Vec<Option<usize>> {
+            names.iter().map(|name| order.colour(name)).collect()
+        };
+        order.colour_sessions(&["a", "b", "c"], 6);
+        assert_eq!(colours(&order, &["a", "b", "c"]), [Some(0), Some(1), Some(2)]);
+        order.colour_sessions(&["b", "c"], 6);
+        assert_eq!(colours(&order, &["a", "b", "c"]), [None, Some(1), Some(2)]);
+        order.colour_sessions(&["c", "d", "b"], 6);
+        assert_eq!(colours(&order, &["b", "c", "d"]), [Some(1), Some(2), Some(0)]);
+        order.colour_sessions(&["b", "c", "d", "e"], 4);
+        order.colour_sessions(&["b", "c", "d", "e", "f"], 4);
+        assert_eq!(colours(&order, &["e", "f"]), [Some(3), Some(0)]);
+    }
+
+    /// The colours one luneta gives, another takes up once it reloads, and a
+    /// luneta started later starts with them. A file kept before there were
+    /// colours reads as one with none, and a move leaves them be.
+    #[test]
+    fn a_colour_is_the_same_in_every_luneta() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        fs::write(&file, r#"{"sessions": ["b", "a"]}"#).unwrap();
+        let mut here = Order::within(file.clone());
+        let mut there = Order::within(file.clone());
+        here.colour_sessions(&["b", "a"], 6);
+        assert!(there.reload());
+        there.keep_sessions(names(&["a", "b"]));
+        let later = Order::within(file);
+        assert_eq!((later.colour("b"), later.colour("a")), (Some(0), Some(1)));
+        assert_eq!(sorted(&later, &["b", "a"]), ["a", "b"]);
     }
 
     /// What another luneta keeps wakes this one's loop, and nothing else in
