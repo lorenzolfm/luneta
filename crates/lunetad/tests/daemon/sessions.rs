@@ -525,8 +525,11 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
 }
 
 /// Has `change` made, and waits for the work tree to stand as `shows` takes
-/// it to where a pane works in `cwd`: within a second, though git would not
-/// be asked again for seconds more on its sweep.
+/// it to where a pane works in `cwd`: within 4s of the change's start, though
+/// git would not be asked again on its sweep for 5s, as each change comes as
+/// soon as git said the one before. The CI's Mac takes up to 2.7s, with each
+/// test's daemon and gits at once on its 3 cores, and the daemon resting from
+/// git as long as git took before it asks again.
 fn shows_at_once(
     host: &Host,
     cwd: &str,
@@ -534,10 +537,10 @@ fn shows_at_once(
     change: impl FnOnce(),
     shows: impl Fn(&Checkout) -> bool,
 ) {
+    let started = Instant::now();
     change();
-    let changed = Instant::now();
     eventually(what, || checkout(host, cwd).filter(|it| shows(it)));
-    assert!(changed.elapsed() < Duration::from_secs(1), "{what}: {:?}", changed.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(4), "{what}: {:?}", started.elapsed());
 }
 
 /// git is asked again as the work tree a pane works in changes, well before
