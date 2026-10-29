@@ -472,7 +472,8 @@ pub fn go(
 /// the sidebar names, zellij makes it, and must take the client there before
 /// it is asked anything, as `Before::Made` says: the look comes back as the
 /// client's arrival, for luneta to ask for once zellij titles its terminal in
-/// that session, with what waits on it.
+/// that session, with what waits on it: a tab it opens there takes the place
+/// of zellij's, as `After::made` says.
 pub fn start(
     nudged: &Nudged,
     to: &SessionName,
@@ -650,6 +651,19 @@ impl After {
             },
         }
     }
+
+    /// Does it, as `done` does, in a session zellij made for the client to
+    /// come to: a tab it opens there is the session's alone, as `alone` says.
+    fn made(self, came: bool, events: &Sender<Event>) {
+        match self {
+            After::Open(menu, open) if came => {
+                let opened = alone(&open, events);
+                // luneta is on its way out.
+                let _ = events.send(Event::Opened { menu, opened });
+            },
+            after => after.done(came, events),
+        }
+    }
 }
 
 /// What a key of the menu, or the CLI, opens in a session.
@@ -688,10 +702,10 @@ const ANSWER: Duration = Duration::from_secs(2);
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
 /// the one it lists in that tab.
 pub fn opening(open: &Open) -> Result<u32, String> {
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
     match open {
         Open::Pane { session, beside, cwd, command: runs } => {
+            let mut command = Command::new("zellij");
+            quiet(&mut command);
             command.env(PANE_VAR, beside.to_string());
             command.args(["--session", session, "action", "new-pane", "--no-focus", "--cwd", cwd]);
             if !runs.is_empty() {
@@ -702,19 +716,53 @@ pub fn opening(open: &Open) -> Result<u32, String> {
             pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
         },
         Open::Tab { session, cwd, name, command: runs } => {
-            command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
-            command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
-            if !runs.is_empty() {
-                command.arg("--").args(runs);
-            }
-            let said = answered(&mut command)?;
-            let Ok(tab) = said.trim().parse::<u32>() else {
-                return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
-            };
-            let laid = laid(session)?;
+            let (tab, laid) = tab_opened(session, cwd, name.as_deref(), runs)?;
             terminal_of(&laid, tab).ok_or_else(|| "zellij opened a tab with no pane".to_owned())
         },
     }
+}
+
+/// Opens `open`, as `opening` does, in a session zellij made for it. A tab
+/// takes the place of the tabs zellij made the session with, which hold what
+/// its layout laid out and no more, and which luneta closes, so that the
+/// session holds the tab alone. What zellij says of a tab it did not close
+/// comes back as a notice.
+fn alone(open: &Open, events: &Sender<Event>) -> Result<u32, String> {
+    let Open::Tab { session, cwd, name, command } = open else {
+        return opening(open);
+    };
+    let (tab, laid) = tab_opened(session, cwd, name.as_deref(), command)?;
+    let terminal = terminal_of(&laid, tab).ok_or("zellij opened a tab with no pane")?;
+    for made in besides(&laid, tab) {
+        if let Err(why) = tab_closed(session, made) {
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
+        }
+    }
+    Ok(terminal)
+}
+
+/// Opens a tab of `session`, in `cwd`, named `name` or as zellij numbers it,
+/// with `runs` in it, or your shell where there is none, as `opening` does,
+/// and says its id, and the panes of the session with it in.
+fn tab_opened(
+    session: &str,
+    cwd: &str,
+    name: Option<&str>,
+    runs: &[String],
+) -> Result<(u32, Vec<Laid>), String> {
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
+    command.args(name.iter().flat_map(|name| ["--name", name]));
+    if !runs.is_empty() {
+        command.arg("--").args(runs);
+    }
+    let said = answered(&mut command)?;
+    let Ok(tab) = said.trim().parse::<u32>() else {
+        return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
+    };
+    Ok((tab, laid(session)?))
 }
 
 /// What `command`, a zellij of `quiet`'s, said on its stdout as it did what
@@ -775,6 +823,12 @@ impl Laid {
 fn terminal_of(laid: &[Laid], tab: u32) -> Option<u32> {
     let terminal = |pane: &&Laid| !pane.is_plugin && pane.tab_id == tab;
     laid.iter().find(terminal).map(|pane| pane.id)
+}
+
+/// The ids of the tabs `laid` lists a pane of, a plugin's as well, but for
+/// the tab whose id is `tab`.
+fn besides(laid: &[Laid], tab: u32) -> BTreeSet<u32> {
+    laid.iter().map(|pane| pane.tab_id).filter(|&id| id != tab).collect()
 }
 
 /// Asks zellij, on a thread of its own, what closing the terminal `pane` of
@@ -1242,11 +1296,11 @@ impl Pending {
         Pending { after: Some(after), events: events.clone() }
     }
 
-    /// Does it, now that the client is there, or says why not when it did not
-    /// come.
+    /// Does it, now that the client is there, as `After::made` does, or says
+    /// why not when it did not come.
     fn done(mut self, came: bool) {
         if let Some(after) = self.after.take() {
-            after.done(came, &self.events);
+            after.made(came, &self.events);
         }
     }
 }
@@ -1733,6 +1787,15 @@ mod tests {
     fn a_tab_opened_is_gone_to_on_its_terminal() {
         let panes = [laid(1, 0), laid(3, 1)];
         assert_eq!(terminal_of(&panes, 1), Some(3));
+    }
+
+    /// A tab opened in a session made for it closes every other tab, those
+    /// that hold a plugin's pane alone as well.
+    #[test]
+    fn a_tab_opened_in_a_made_session_closes_the_others() {
+        let bar = Laid { is_plugin: true, ..laid(0, 2) };
+        let panes = [laid(0, 0), laid(1, 1), laid(2, 1), bar];
+        assert_eq!(besides(&panes, 1), BTreeSet::from([0, 2]));
     }
 
     /// The client leaves out the variable zellij refuses by to attach a pane's
