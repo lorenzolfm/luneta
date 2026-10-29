@@ -13,10 +13,11 @@
 //!
 //! The rows go oldest session first, until you move them, and each session's
 //! panes in the order of their tabs, a bracket down the left joining those of
-//! a tab that holds more than one: `v` selects the highlighted row's
-//! session, `j` and `k` grow the selection, and `J` and `K` move the sessions
-//! it holds, as a visual selection does in vim; and the mouse drags a session
-//! by its row. The order is kept for every luneta, and the next.
+//! a tab that holds more than one, in a colour of the tab's own: `v` selects
+//! the highlighted row's session, `j` and `k` grow the selection, and `J` and
+//! `K` move the sessions it holds, as a visual selection does in vim; and the
+//! mouse drags a session by its row. The order is kept for every luneta, and
+//! the next.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU64;
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::tab;
@@ -83,6 +84,19 @@ const EDGE: &str = "│";
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
+/// The colours of the brackets, a tab's by its id, as a browser colours its
+/// groups of tabs: zellij keeps a tab's id as it moves and as tabs before it
+/// close, so the tab keeps its colour, and two tabs opened one after the other
+/// never share one. No bracket is red, which says what went wrong. No two
+/// neighbours here are alike either, for tabs that go round them.
+const TABS: [Color; 6] = [
+    gruvbox::BLUE,
+    gruvbox::YELLOW,
+    gruvbox::PURPLE,
+    gruvbox::AQUA,
+    gruvbox::ORANGE,
+    gruvbox::GREEN,
+];
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -434,8 +448,9 @@ enum Row {
         label: String,
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
-        /// Where it sits among the panes listed of its tab, if it shares it.
-        bracket: Option<Bracket>,
+        /// Where it sits among the panes listed of its tab, if it shares it,
+        /// and the colour of that tab's bracket.
+        bracket: Option<(Bracket, Color)>,
     },
 }
 
@@ -1113,7 +1128,7 @@ impl Sidebar {
                     mark: marked.mark,
                     status: status_word(agent),
                     since: marked.since,
-                    cwd: pane.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
+                    dir: short_cwd(agent_dir(agent, pane)),
                 });
             }
             panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -1194,7 +1209,7 @@ impl Sidebar {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
             Some(Search::Empty) | None => (None, false),
         };
-        let finder = term.map(|term| Finder { matcher: SkimMatcherV2::default(), term });
+        let finder = term.map(Finder::new);
         let here_key =
             here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
@@ -1257,10 +1272,10 @@ impl Sidebar {
             let named = finder.as_ref().and_then(|finder| finder.session(listed.name.as_str()));
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
-            // The rows of the panes listed, by their tab, each made once its
-            // bracket is known: it joins the panes listed of a tab, as a
-            // search can leave some of them out.
-            let mut shown: BTreeMap<u32, Vec<_>> = BTreeMap::new();
+            // The rows of the panes listed, by their tab, its position and its
+            // id, each made once its bracket is known: it joins the panes
+            // listed of a tab, as a search can leave some of them out.
+            let mut shown: BTreeMap<(u32, Option<u32>), Vec<_>> = BTreeMap::new();
             for (pane, Shows { marked, ran, unread }) in listing.into_iter().zip(by_pane) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
@@ -1280,7 +1295,12 @@ impl Sidebar {
                     None => label(agent(pane.id), pane),
                 };
                 let branch = checkout.as_ref().map(|checkout| checkout.branch.as_str());
-                let found = finder.as_ref().and_then(|finder| finder.pane(&label, branch, pane));
+                // An agent's pane is found by where the agent works, as its
+                // row and the picker say it.
+                let dir = agent(pane.id).map_or(cwd, |agent| Some(agent_dir(agent, pane)));
+                let tab = &pane.tab_name;
+                let found =
+                    finder.as_ref().and_then(|finder| finder.pane(&label, branch, tab, dir));
                 if finder.is_some() && found.is_none() && named.is_none() {
                     continue;
                 }
@@ -1299,7 +1319,7 @@ impl Sidebar {
                     checkout,
                     bracket,
                 };
-                shown.entry(pane.tab).or_default().push((row, found));
+                shown.entry((pane.tab, pane.tab_id)).or_default().push((row, found));
             }
             if finder.is_some() && named.is_none() && shown.is_empty() {
                 continue;
@@ -1324,16 +1344,19 @@ impl Sidebar {
             // by its name hands the highlight on to. With none, its row hands it
             // on to its first pane.
             let mut lead: Option<(usize, Fit)> = None;
-            for tab in shown.into_values() {
-                let count = tab.len();
-                for (at, (row, found)) in tab.into_iter().enumerate() {
+            for ((_, id), of_tab) in shown {
+                let count = of_tab.len();
+                // A daemon older than `tab_id` does not say which tab it is:
+                // its bracket stays grey, as every bracket was.
+                let colour = id.map_or(gruvbox::GREY, |id| TABS[id as usize % TABS.len()]);
+                for (at, (row, found)) in of_tab.into_iter().enumerate() {
                     if let Some(found) = found {
                         weigh(rows.len(), found);
                         if lead.is_none_or(|(_, top)| found > top) {
                             lead = Some((rows.len(), found));
                         }
                     }
-                    rows.push(row(Bracket::of(at, count)));
+                    rows.push(row(Bracket::of(at, count).map(|sits| (sits, colour))));
                 }
             }
             if let Some(named) = named {
@@ -1702,11 +1725,17 @@ impl Sidebar {
     }
 
     /// What the menu is for, as it opens on `place`: the place, the directory
-    /// its pane works in, and the branch checked out there. A session has
-    /// neither, having no pane.
+    /// its pane works in, or its agent, as its row says it, and the branch
+    /// checked out there. A session has neither, having no pane.
     fn target_at(&self, place: Place) -> Target {
         let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
-        let cwd = pane.and_then(|pane| pane.cwd.clone());
+        let agents = self.host.as_ref().map(|host| seated(&host.agents, &host.sessions));
+        let cwd = pane.and_then(|pane| {
+            match agents.as_ref()?.get(&(place.session(), pane.id)) {
+                Some(agent) => Some(agent_dir(agent, pane).to_owned()),
+                None => pane.cwd.clone(),
+            }
+        });
         let trees = self.host.iter().flat_map(|host| &host.work_trees);
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
@@ -1879,7 +1908,7 @@ impl Sidebar {
                 let Some(agent) = agents.get(&(session.name.as_str(), pane.id)) else {
                     continue;
                 };
-                let cwd = pane.cwd.as_deref().unwrap_or(agent.cwd.as_str());
+                let cwd = agent_dir(agent, pane);
                 let branch = trees.get(cwd).and_then(|tree| {
                     checkout(&WorkTree::of_api(tree)?, None).map(|checkout| checkout.branch)
                 });
@@ -2697,6 +2726,13 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
+/// Where an agent works, as its row, the picker and a search say it: where
+/// zellij says its pane works, which its branch is found by, or else, while
+/// zellij has not said, where Claude Code says.
+fn agent_dir<'a>(agent: &'a Agent, pane: &'a Pane) -> &'a str {
+    pane.cwd.as_deref().unwrap_or(&agent.cwd)
+}
+
 /// What a pane's row is named. Its agent goes by the name someone gave it, or
 /// else by its topic, as the daemon reads it in the title Claude Code gives
 /// its pane; or else by its tab, if someone named it, or else by where it
@@ -2707,7 +2743,7 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
         let topic = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
         let name = given_name(agent).or(topic).or(tab::named(&pane.tab_name));
-        return name.map_or_else(|| short_cwd(&agent.cwd), str::to_owned);
+        return name.map_or_else(|| short_cwd(agent_dir(agent, pane)), str::to_owned);
     }
     let mut words = pane.command.iter().flat_map(|command| command.split_whitespace());
     let program = words.next().map(|program| {
@@ -2777,35 +2813,66 @@ pub fn short_cwd(path: &str) -> String {
 
 /// How well a row matches a search: a row that shows what is typed itself
 /// beats any other, and then the higher score wins.
-type Fit = (bool, i64);
+pub type Fit = (bool, i64);
 
-/// What is typed in the search, and the matcher the picker uses.
-struct Finder<'a> {
+/// What is typed in a search, and the matcher the sidebar and the picker
+/// find their rows with.
+pub struct Finder<'a> {
     matcher: SkimMatcherV2,
+    /// The matcher, but for a match at the start of a text, which counts as
+    /// one at the start of any word in it.
+    anywhere: SkimMatcherV2,
     term: &'a str,
 }
 
-impl Finder<'_> {
-    fn session(&self, name: &str) -> Option<Fit> {
-        self.find(name, &[])
+impl<'a> Finder<'a> {
+    pub fn new(term: &'a str) -> Self {
+        let anywhere = SkimScoreConfig { bonus_first_char_multiplier: 1, ..Default::default() };
+        let anywhere = SkimMatcherV2::default().score_config(anywhere);
+        Finder { matcher: SkimMatcherV2::default(), anywhere, term }
     }
 
-    /// A pane by its row, its branch, its tab and its directory. A tab zellij
-    /// named `Tab #N` is no name to find, and a directory is its last two
-    /// parts, as a shell's row shows it: a whole path has the letters for a
-    /// few typed ones to land on nearly any of it.
-    fn pane(&self, label: &str, branch: Option<&str>, pane: &Pane) -> Option<Fit> {
-        let tab = tab::named(&pane.tab_name);
-        let cwd = pane.cwd.as_deref().map(short_cwd);
-        self.find(label, &[branch, tab, cwd.as_deref()])
+    fn session(&self, name: &str) -> Option<Fit> {
+        self.find(name, &[]).map(|(fit, _)| fit)
+    }
+
+    /// A pane by its row, its branch, its tab and the directory it, or its
+    /// agent, works in. A tab zellij named `Tab #N` is no name to find, and a
+    /// directory is its last two parts, as a shell's row shows it: a whole
+    /// path has the letters for a few typed ones to land on nearly any of it.
+    fn pane(
+        &self,
+        label: &str,
+        branch: Option<&str>,
+        tab_name: &str,
+        cwd: Option<&str>,
+    ) -> Option<Fit> {
+        let cwd = cwd.map(short_cwd);
+        self.find(label, &[branch, tab::named(tab_name), cwd.as_deref()]).map(|(fit, _)| fit)
     }
 
     /// What is typed against what a row shows, and against what else the row
-    /// goes by, of which it need not have each.
-    fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<Fit> {
-        let texts = also.iter().flatten().copied().chain([shown]);
-        let score = texts.filter_map(|text| self.matcher.fuzzy_match(text, self.term)).max()?;
-        Some((shown == self.term, score))
+    /// goes by, of which it need not have each: how well the best of them
+    /// fits, and the characters of what the row shows that the search found.
+    /// None light up where something else fits better, but for its start:
+    /// `review` fits a session named `review` better than its agent's row
+    /// `docs (review:4)` only by starting it, and lights up in the row.
+    pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
+        let exact = shown == self.term;
+        let best = |matcher: &SkimMatcherV2| {
+            also.iter().flatten().filter_map(|text| matcher.fuzzy_match(text, self.term)).max()
+        };
+        let other = best(&self.matcher);
+        let Some((score, hits)) = self.matcher.fuzzy_indices(shown, self.term) else {
+            return Some(((exact, other?), Vec::new()));
+        };
+        let fits = |score: i64, other: Option<i64>| other.is_none_or(|other| score >= other);
+        let lit = fits(score, other)
+            || self.anywhere.fuzzy_match(shown, self.term).is_some_and(|anywhere| {
+                fits(anywhere, best(&self.anywhere))
+            });
+        let fit = (exact, other.map_or(score, |other| score.max(other)));
+        Some((fit, if lit { hits } else { Vec::new() }))
     }
 }
 
@@ -2984,15 +3051,17 @@ fn margin(here: bool) -> Span<'static> {
 
 /// The column after a pane's mark, on its line `at` of the `height` it
 /// takes: the bracket that joins it to the panes of its tab, where it sits
-/// among them as it `sits`, or else blank.
-fn gutter(sits: Option<Bracket>, at: usize, height: usize) -> Span<'static> {
-    let glyph = match sits {
-        None => return Span::raw(" "),
-        Some(Bracket::First) if at == 0 => BRACKET_TOP,
-        Some(Bracket::Last) if at + 1 == height => BRACKET_FOOT,
-        Some(Bracket::First | Bracket::Inner | Bracket::Last) => BRACKET_SIDE,
+/// among them as it `sits`, in its tab's colour, or else blank.
+fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'static> {
+    let Some((sits, colour)) = bracket else {
+        return Span::raw(" ");
     };
-    Span::styled(glyph, Style::new().fg(gruvbox::GREY))
+    let glyph = match sits {
+        Bracket::First if at == 0 => BRACKET_TOP,
+        Bracket::Last if at + 1 == height => BRACKET_FOOT,
+        Bracket::First | Bracket::Inner | Bracket::Last => BRACKET_SIDE,
+    };
+    Span::styled(glyph, Style::new().fg(colour))
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
@@ -3111,6 +3180,7 @@ mod tests {
             command: Some(command.to_owned()),
             titled: None,
             shell: None,
+            tab_id: Some(tab),
         }
     }
 
@@ -3326,6 +3396,36 @@ mod tests {
         );
         type_in(&mut sidebar, "/c");
         assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
+    }
+
+    /// A tab's bracket is in a colour of the tab's own, by the id zellij gave
+    /// it, which the tab keeps as a tab before it closes and its position goes
+    /// down. A daemon older than the id does not say it, and the brackets it
+    /// lists stay grey, rather than all in the first tab's colour.
+    #[test]
+    fn a_tab_keeps_its_colour_as_a_tab_before_it_closes() {
+        let colours = |sidebar: &mut Sidebar, lines: usize| {
+            let buffer = drawn(sidebar, true, 32, 24);
+            (1..=lines).map(|line| buffer[(1, (HEADER + line) as u16)].fg).collect::<Vec<_>>()
+        };
+        let three = (0..6).map(|id| pane(id + 1, id / 2, "/w/a", "less")).collect();
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(vec![session("s", 10, three)], Vec::new()));
+        let (b, y, p) = (gruvbox::BLUE, gruvbox::YELLOW, gruvbox::PURPLE);
+        assert_eq!(colours(&mut sidebar, 6), [b, b, y, y, p, p]);
+
+        // The first tab closed: the other two are at 0 and 1 now.
+        let closed = |tab_id: fn(u32) -> Option<u32>| {
+            let in_tab = |id: u32| Pane {
+                tab_id: tab_id(id / 2),
+                ..pane(id + 1, id / 2 - 1, "/w/a", "less")
+            };
+            host(vec![session("s", 10, (2..6).map(in_tab).collect())], Vec::new())
+        };
+        sidebar.heard(closed(Some));
+        assert_eq!(colours(&mut sidebar, 4), [y, y, p, p]);
+        sidebar.heard(closed(|_| None));
+        assert_eq!(colours(&mut sidebar, 4), [gruvbox::GREY; 4]);
     }
 
     /// The first line says `luneta`, in the accent, the word bold, while the
@@ -3974,7 +4074,8 @@ mod tests {
 
     /// An agent goes by the name someone gave it, then by its topic, the title
     /// Claude Code gives its pane, then by its tab if someone named it, then
-    /// by where it works. An agent's title with no topic, as a bare
+    /// by where it works: where its pane works, or else, while zellij has not
+    /// said, where Claude Code says. An agent's title with no topic, as a bare
     /// `Claude Code`, is passed over, and so is zellij's `Tab #N`.
     #[test]
     fn an_agent_goes_by_its_name_then_its_topic_then_its_tab_then_its_directory() {
@@ -3991,8 +4092,10 @@ mod tests {
         assert_eq!(label(Some(&unnamed), &topic), "Fix the fold");
         assert_eq!(label(Some(&unnamed), &titled(None, "review")), "review");
         assert_eq!(label(Some(&unnamed), &untitled("review")), "review");
-        assert_eq!(label(Some(&unnamed), &titled(None, "Tab #12")), "luneta/main");
-        assert_eq!(label(Some(&unnamed), &untitled(" ")), "luneta/main");
+        assert_eq!(label(Some(&unnamed), &titled(None, "Tab #12")), "w/x");
+        assert_eq!(label(Some(&unnamed), &untitled(" ")), "w/x");
+        let unsaid = Pane { cwd: None, ..untitled("Tab #1") };
+        assert_eq!(label(Some(&unnamed), &unsaid), "luneta/main");
         // A name Claude Code gave the session itself is none a row goes by.
         let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
         let source = Some(NameSource::Derived.into());
@@ -4214,6 +4317,22 @@ mod tests {
     /// Whether the cell on line `y` at column `x` is dimmed, drawn at `now`.
     fn dimmed(sidebar: &mut Sidebar, x: u16, y: u16, now: SystemTime) -> bool {
         drawn_at(sidebar, false, 32, 7, now)[(x, y)].modifier.contains(Modifier::DIM)
+    }
+
+    /// The picker gets an agent's directory as luneta shows one, its last two
+    /// parts: its pane's, or else, while zellij has not said where the pane
+    /// works, the agent's own.
+    #[test]
+    fn the_picker_gets_an_agents_directory_as_its_last_two_parts() {
+        let mut sidebar = Sidebar::default();
+        let unsaid = Pane { cwd: None, ..pane(2, 0, "", "claude") };
+        sidebar.heard(host(
+            vec![session("s", 10, vec![pane(1, 0, "/home/me/src/luneta/pr-12", "claude"), unsaid])],
+            vec![agent("s", 1, Status::Idle, None), agent("s", 2, Status::Idle, None)],
+        ));
+        let agents = sidebar.listing().agents;
+        let dirs: Vec<&str> = agents.iter().map(|seated| seated.dir.as_str()).collect();
+        assert_eq!(dirs, ["luneta/pr-12", "luneta/main"]);
     }
 
     /// An agent that finished, and a command that ended, have the dot until
@@ -4643,14 +4762,23 @@ mod tests {
     }
 
     /// A tab zellij named, and the parts of a directory a row leaves out,
-    /// find nothing.
+    /// find nothing. An agent's pane zellij has not said the directory of is
+    /// found by where the agent works.
     #[test]
     fn a_pane_is_found_by_its_branch_its_named_tab_and_its_directory() {
         let mut notes = pane(1, 0, "/w/a", "nvim a");
         notes.tab_name = "notes".to_owned();
         let deep = pane(2, 1, "/home/lorenzo/Projects/misc/luneta", "nvim b");
         let branched = pane(3, 2, "/w/c", "nvim c");
-        let mut host = host(vec![session("s", 10, vec![notes, deep, branched])], Vec::new());
+        let unsaid = Pane {
+            cwd: None,
+            titled: Some(api::Titled { topic: Some("Rename the rows".to_owned()) }),
+            ..pane(4, 3, "", "claude")
+        };
+        let elsewhere = "/w/fold/review".to_owned();
+        let seated = Agent { cwd: elsewhere, ..agent("s", 4, Status::Idle, None) };
+        let panes = vec![notes, deep, branched, unsaid];
+        let mut host = host(vec![session("s", 10, panes)], vec![seated]);
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None };
         let tree = WorkTree::Checkout { head, changes: Changes::default(), stashes: 0 };
@@ -4664,6 +4792,8 @@ mod tests {
         assert_eq!(found("notes"), [" ▾ s", "     \u{e6ae} nvim a"]);
         assert_eq!(found("luneta"), [" ▾ s", "     \u{e6ae} nvim b"]);
         assert_eq!(found("sidebar"), [" ▾ s", "     \u{e6ae} nvim c", "       feature/sidebar"]);
+        let seated = found("fold/review");
+        assert!(seated.len() == 2 && seated[1].contains("Rename the rows"), "{seated:?}");
         assert_eq!(found("tab"), [" no match"]);
         assert_eq!(found("loren"), [" no match"]);
     }
@@ -4774,6 +4904,26 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
+    }
+
+    /// The menu on an agent's row whose pane zellij has not said the
+    /// directory of yet is for where the agent works, as the row says it, and
+    /// opens beside the agent there.
+    #[test]
+    fn the_menu_on_an_agent_is_for_where_its_row_says_it_works() {
+        let mut sidebar = Sidebar::default();
+        let unsaid = Pane { cwd: None, ..pane(1, 0, "", "claude") };
+        let agents = vec![agent("s", 1, Status::Idle, None)];
+        sidebar.heard(host(vec![session("s", 10, vec![unsaid])], agents));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "j");
+        assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("s", 10), pane: 1 }));
+        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 32, 12);
+        assert_eq!(lines[7], "─ New ─────────── luneta/main ─", "{lines:?}");
+        let (session, cwd) = ("s".to_owned(), "/w/luneta/main".to_owned());
+        let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
+        assert_eq!(sidebar.key(&char('p'), moment(160_000)), Asked::Open { menu: 1, open: pane });
     }
 
     /// The menu floats over zellij for the pane luneta's zellij is on,

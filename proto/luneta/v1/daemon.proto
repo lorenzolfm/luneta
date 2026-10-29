@@ -132,6 +132,10 @@ message Pane {
   // What its shell says through luneta's hook. Absent for a shell without the
   // hook, and for one that has said nothing yet.
   Shell shell = 7;
+  // The id zellij gave its tab, which stays the tab's as it moves and as tabs
+  // before it close, where `tab` does not. Absent from a daemon older than
+  // this field.
+  optional uint32 tab_id = 8;
 }
 
 // What an agent says in the title of its pane, without the glyph.

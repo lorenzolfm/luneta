@@ -49,6 +49,9 @@ pub struct Pane {
     pub id: u32,
     /// The position of its tab, from 0.
     pub tab: u32,
+    /// The id zellij gave its tab, which stays the tab's as it moves and as
+    /// tabs before it close.
+    pub tab_id: u32,
     pub tab_name: String,
     pub cwd: Option<Said>,
     /// What runs in front in it.
@@ -69,6 +72,7 @@ impl Pane {
             command: self.command.clone().map(String::from),
             titled: self.titled.as_ref().map(Titled::to_api),
             shell: shell.map(Shell::to_api),
+            tab_id: Some(self.tab_id),
         }
     }
 }
@@ -97,6 +101,7 @@ struct Wire {
     id: u32,
     is_plugin: bool,
     is_suppressed: bool,
+    tab_id: u32,
     tab_position: u32,
     tab_name: String,
     #[serde(default)]
@@ -117,6 +122,7 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
         .map(|pane| Pane {
             id: pane.id,
             tab: pane.tab_position,
+            tab_id: pane.tab_id,
             tab_name: pane.tab_name,
             cwd: pane.pane_cwd.and_then(Said::new),
             command: pane.pane_command.and_then(Said::new),

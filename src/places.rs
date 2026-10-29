@@ -140,6 +140,7 @@ mod tests {
             command: command.map(str::to_owned),
             titled: titled.then_some(v1::Titled { topic: None }),
             shell: None,
+            tab_id: Some(0),
         }
     }
 
