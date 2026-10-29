@@ -90,7 +90,13 @@ impl<'a> Vars<'a> {
 /// asks it for the panes of, for `asked`, and each pane, tab and session it is
 /// asked to close, for `closed`, and closes nothing; in a session a test had
 /// it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
-/// lists nothing, and answers nothing. It knows no other command.
+/// lists nothing, and answers nothing. It deletes a session as zellij does:
+/// takes its socket away, as its server does once killed, and what it keeps
+/// of it in the home, which a session a test had `rewrites` has back at
+/// once; and one a test had `unkept` or `gone` as zellij deletes those. As it
+/// deletes one a test had `renews`, another session is made by a name. It
+/// lets go of what it keeps of one with no socket, as of one that ended. It
+/// knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -104,16 +110,56 @@ impl FakeZellij {
 asked="$*"
 session="$2"
 [ "$1" = --session ] && shift 2
+[ "$1" = delete-session ] && session="${{3:-$2}}"
+socket="$ZELLIJ_SOCKET_DIR/contract_version_1/$session"
+case "$(uname)" in
+    Darwin) cache="$HOME/Library/Caches/org.Zellij-Contributors.Zellij" ;;
+    *) cache="$HOME/.cache/zellij" ;;
+esac
+kept="$cache/contract_version_1/session_info/$session"
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
     "action list-panes --json") asking=laid ;;
     "action list-clients") asking=clients ;;
-    "action close-pane --pane-id "* | "action close-tab-by-id "* | "kill-session "*)
+    "action close-pane --pane-id "* | "action close-tab-by-id "* | "delete-session --force "*)
         if [ -f "{panes}/$session.refused" ]; then
             echo "zellij refused to close anything of $session" >&2
             exit 1
         fi
+        if [ -f "{panes}/$session.gone" ]; then
+            echo "Session: \"$session\" not found." >&2
+            exit 2
+        fi
         echo "$asked" >> "{panes}/closed"
+        [ "$1" = delete-session ] && [ -n "$session" ] || exit 0
+        echo "A session by the name \"$session\" exists and is active, but will be force killed and deleted."
+        rm -f "$socket"
+        rm -rf "$kept"
+        if [ -f "{panes}/$session.renews" ]; then
+            touch "$ZELLIJ_SOCKET_DIR/contract_version_1/$(cat "{panes}/$session.renews")"
+        fi
+        if [ -f "{panes}/$session.rewrites" ]; then
+            mkdir -p "$kept"
+            : > "$kept/session-layout.kdl"
+        fi
+        if [ -f "{panes}/$session.unkept" ]; then
+            echo "Session: \"$session\" not found." >&2
+            exit 2
+        fi
+        exit 0
+        ;;
+    "delete-session "*)
+        if [ -S "$socket" ]; then
+            echo "A session by the name \"$session\" exists and is active, use --force to delete it."
+            exit 1
+        fi
+        if [ ! -d "$kept" ]; then
+            echo "Session: \"$session\" not found." >&2
+            exit 2
+        fi
+        rm -r "$kept"
+        echo "$asked" >> "{panes}/closed"
+        echo "Session: \"$session\" successfully deleted."
         exit 0
         ;;
     *)
@@ -211,6 +257,34 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
+    }
+
+    /// Has zellij kill the session `session` from now on and keep nothing of
+    /// it, as it does a session that ran for less than a second: it says it
+    /// kills it, notes it, and fails to delete it.
+    pub fn unkept(&self, session: &str) {
+        self.write(&format!("{session}.unkept"), "");
+    }
+
+    /// Has zellij write what it keeps of the session `session` anew from now
+    /// on as it deletes it, as the server's writer does where it ticks
+    /// before the server has ended.
+    pub fn rewrites(&self, session: &str) {
+        self.write(&format!("{session}.rewrites"), "");
+    }
+
+    /// Has a session be made by the name `other` from now on as zellij
+    /// deletes the session `session`: the socket of `other` tells of a start
+    /// since, as the socket of one made by its name does.
+    pub fn renews(&self, session: &str, other: &str) {
+        self.write(&format!("{session}.renews"), other);
+    }
+
+    /// Has zellij find nothing of the session `session` from now on, as of
+    /// one that ended and that it keeps nothing of: it fails to delete it, and
+    /// notes nothing.
+    pub fn gone(&self, session: &str) {
+        self.write(&format!("{session}.gone"), "");
     }
 
     /// Has zellij answer nothing from now on of what it is asked to list of

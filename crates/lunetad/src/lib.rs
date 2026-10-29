@@ -27,4 +27,5 @@ pub use claude::folder as claude_folder;
 pub use client::{connect, listening};
 pub use daemon::{serve, Claim};
 pub use folder::Refusal;
+pub use metadata::folder as zellij_info_folder;
 pub use zellij::{folder as zellij_folder, running as zellij_sessions};
