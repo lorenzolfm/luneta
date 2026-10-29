@@ -15,11 +15,12 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
+use alacritty_terminal::term::TermMode;
 use lunetad::api::Client;
 use lunetad::{clients, program};
 use serde::Deserialize;
 
-use crate::host::Event;
+use crate::host::{Event, Nudged};
 use crate::own::{Before, Look, Looked};
 
 /// The longest name zellij makes a session of on any host, in bytes: what
@@ -384,8 +385,17 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 /// never asked to hear of, and passes it over: nvim does, where the key
 /// pressed would have it insert a character of the protocol's own in the
 /// text. The client reads it as kitty spells it unless its config turns the
-/// protocol off, and then zellij moves the client only once you type in it.
-pub const NUDGE: &[u8] = b"\x1b[57359;1:3u";
+/// protocol off: then zellij takes it for no key, and hands the pane
+/// nothing. So `nudge` gives it only to a client that asks its terminal for
+/// kitty's keys, and zellij moves one that does not only once you type in
+/// it.
+const NUDGE: &[u8] = b"\x1b[57359;1:3u";
+
+/// `NUDGE`, where zellij's client reads it as a key: in `mode`, it asked its
+/// terminal, luneta's, for keys as kitty spells them.
+pub fn nudge(mode: TermMode) -> Option<&'static [u8]> {
+    mode.contains(TermMode::DISAMBIGUATE_ESC_CODES).then_some(NUDGE)
+}
 
 /// How long an action waits, after the client typed `NUDGE` or another key,
 /// for zellij to take it in, as it goes to zellij through its client while
@@ -405,22 +415,22 @@ pub const START: Duration = Duration::from_secs(10);
 /// on its way to.
 const ARRIVING: Duration = Duration::from_millis(20);
 
-/// Takes the client from the session `at` to the pane `pane` of `to`, or to
-/// the session `to` alone, on the pane it last had the focus on, and then
-/// takes the look `then`, if any: of `at`, for the pane, or of `to`, for the
-/// client's arrival there, after which it does `after`. The client must have
-/// typed in `at` first, as `NUDGE` has it: zellij takes the action at
-/// `nudged`, once it has taken that key in. What zellij says of a failure
-/// comes back as a notice.
+/// Takes the client from the session it was `nudged` in to the pane `pane`
+/// of `to`, or to the session `to` alone, on the pane it last had the focus
+/// on, and then takes the look `then`, if any: of the session it was in, for
+/// the pane, or of `to`, for the client's arrival there, after which it does
+/// `after`. zellij takes the action once it has taken in the key that makes
+/// the client the one it moves, as `nudged` says. What zellij says of a
+/// failure comes back as a notice.
 pub fn go(
-    at: &str,
+    nudged: &Nudged,
     to: &str,
     pane: Option<u32>,
     then: Option<Look>,
     after: Option<After>,
-    nudged: Instant,
     events: &Sender<Event>,
 ) {
+    let at = nudged.session();
     let mut command = Command::new("zellij");
     let pane = pane.map(|id| format!("terminal_{id}"));
     match pane {
@@ -443,16 +453,16 @@ pub fn go(
             return;
         },
     };
-    run(command, then, nudged, events);
+    run(command, then, nudged.until(), events);
 }
 
-/// Takes the client from the session `at` to a session it makes, `to`, that
-/// starts in `cwd`, or where the client started, and then takes the look
-/// `then`, if any, for the client's arrival there, after which it does
-/// `after`. A session that runs under that name is where it goes, and `cwd`
-/// goes unused; one that ended, which zellij kept to bring back, comes back
-/// as it was: `makes` says first whether zellij would make it. The client
-/// must have typed in `at` first, as `go` says, for the action at `nudged`.
+/// Takes the client from the session it was `nudged` in, as `go` says, to a
+/// session it makes, `to`, that starts in `cwd`, or where the client
+/// started, and then takes the look `then`, if any, for the client's arrival
+/// there, after which it does `after`. A session that runs under that name
+/// is where it goes, and `cwd` goes unused; one that ended, which zellij
+/// kept to bring back, comes back as it was: `makes` says first whether
+/// zellij would make it.
 ///
 /// Unless zellij's sockets say one runs by that name, as they do not of one
 /// the sidebar names, zellij makes it, and must take the client there before
@@ -460,29 +470,29 @@ pub fn go(
 /// client's arrival, for luneta to ask for once zellij titles its terminal in
 /// that session, with what waits on it.
 pub fn start(
-    at: &str,
+    nudged: &Nudged,
     to: &SessionName,
     cwd: Option<&str>,
     then: Option<Look>,
     after: Option<After>,
-    nudged: Instant,
     events: &Sender<Event>,
 ) -> Option<Arrival> {
     let mut command = Command::new("zellij");
-    command.args(["--session", at, "action", "switch-session", &to.0]);
+    command.args(["--session", nudged.session(), "action", "switch-session", &to.0]);
     command.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
+    let when = nudged.until();
     match (then, after) {
         (Some(look), after) if runs(&to.0) != Some(true) => {
-            run(command, Some(Then::Made(look.number)), nudged, events);
+            run(command, Some(Then::Made(look.number)), when, events);
             let after = after.map(|after| Pending::new(after, events));
             Some(Arrival { look, before: Before::Made, after })
         },
         (Some(look), after) => {
-            run(command, Some(Then::Arrive(look, after)), nudged, events);
+            run(command, Some(Then::Arrive(look, after)), when, events);
             None
         },
         (None, None) => {
-            run(command, None, nudged, events);
+            run(command, None, when, events);
             None
         },
         // Nothing would say when the client is there.
@@ -1264,25 +1274,25 @@ enum Then {
     Made(u64),
 }
 
-/// Runs a zellij action at `nudged` on a thread of its own, so that the
+/// Runs a zellij action at `when` on a thread of its own, so that the
 /// sidebar goes on drawing while zellij answers, says why when it fails, and
 /// then does as `then` says. A client on its way to another session comes
 /// there once zellij lists one more client of it than before the action, and
 /// then what waits on it is done.
-fn run(mut command: Command, then: Option<Then>, nudged: Instant, events: &Sender<Event>) {
+fn run(mut command: Command, then: Option<Then>, when: Instant, events: &Sender<Event>) {
     quiet(&mut command);
     let events = events.clone();
     thread::spawn(move || match then {
         None => {
-            act(&mut command, nudged, &events);
+            act(&mut command, when, &events);
         },
         Some(Then::Look(look)) => {
-            let went = if act(&mut command, nudged, &events) { look.went } else { None };
+            let went = if act(&mut command, when, &events) { look.went } else { None };
             looking(&Look { went, ..look }, &events);
         },
         Some(Then::Arrive(look, after)) => {
             let before = before(&look.session);
-            let acted = act(&mut command, nudged, &events);
+            let acted = act(&mut command, when, &events);
             let came = acted && arriving(&look, before, ARRIVAL, &events);
             if acted && !came {
                 let said = "zellij did not take its client there".to_owned();
@@ -1296,7 +1306,7 @@ fn run(mut command: Command, then: Option<Then>, nudged: Instant, events: &Sende
             }
         },
         Some(Then::Made(look)) => {
-            if !act(&mut command, nudged, &events) {
+            if !act(&mut command, when, &events) {
                 // luneta is on its way out.
                 let _ = events.send(Event::Stayed(look));
             }
@@ -1304,12 +1314,11 @@ fn run(mut command: Command, then: Option<Then>, nudged: Instant, events: &Sende
     });
 }
 
-/// Has zellij take the action `command` at `nudged`, once it has taken in the
-/// key that makes luneta's client the one it moves, and says why when it
+/// Has zellij take the action `command` at `when`, and says why when it
 /// fails. Whether it took it. A pane already focused is where the action
 /// would take the client, and no failure.
-fn act(command: &mut Command, nudged: Instant, events: &Sender<Event>) -> bool {
-    thread::sleep(nudged.saturating_duration_since(Instant::now()));
+fn act(command: &mut Command, when: Instant, events: &Sender<Event>) -> bool {
+    thread::sleep(when.saturating_duration_since(Instant::now()));
     let failure = match command.output() {
         Ok(output) if output.status.success() => None,
         Ok(output) => Some(failure(&output)).filter(|said| !said.contains("is already focused")),
@@ -1409,6 +1418,15 @@ mod tests {
             assert!(seat_in(Some(asked), None, None).is_err(), "{asked}");
         }
         assert!(seat_in(Some("work:4"), Some("work"), Some("2")).is_err());
+    }
+
+    /// zellij's client reads `NUDGE` as a key let go once it asked its
+    /// terminal for kitty's keys. One its config keeps from asking reads it
+    /// as no key, which luneta would take for one, and gets none.
+    #[test]
+    fn only_a_client_that_reads_kitty_s_keys_is_nudged() {
+        assert_eq!(nudge(TermMode::DISAMBIGUATE_ESC_CODES), Some(NUDGE));
+        assert_eq!(nudge(TermMode::empty()), None);
     }
 
     /// The sessions that ended are read from what `list-sessions` lists,
