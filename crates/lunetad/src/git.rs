@@ -156,10 +156,13 @@ fn place(dir: &str) -> Option<Place> {
 }
 
 /// What git tracks in the work tree at `top`, as `git ls-files -z` says it:
-/// each path, after a NUL.
+/// each path, after a NUL. git reads the index for it, and `core.fsmonitor`
+/// is off as it is for `git status`, or a repository's own config could name
+/// a command for each read to run.
 fn listed(top: &Path) -> Result<Vec<u8>, String> {
     let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C"]).arg(top)).args(["ls-files", "-z"]);
+    git.args(["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit", "-C"]).arg(top);
+    local(&mut git).args(["ls-files", "-z"]);
     let ran = program::run(&mut git, LIMIT).map_err(|error| {
         format!("git ls-files in {} could not be run: {error}", top.display())
     })?;
@@ -197,8 +200,11 @@ fn tracked(top: &Path, listed: &[u8]) -> Option<BTreeSet<PathBuf>> {
 fn watched(place: &Place, tracked: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, RecursiveMode> {
     use RecursiveMode::{NonRecursive, Recursive};
     let folders = [&place.own, &place.common].map(|folder| (folder.clone(), NonRecursive));
+    let refs = place.common.join("refs");
     let refs = [
-        (place.common.join("refs"), Recursive),
+        // Where the refs really are: a watcher follows no link under them,
+        // and they can be one themselves, into another repository's folder.
+        (fs::canonicalize(&refs).unwrap_or(refs), Recursive),
         (place.common.join("reftable"), NonRecursive),
         (place.own.join("reftable"), NonRecursive),
     ];
@@ -260,7 +266,7 @@ fn watcher(
     wake: SyncSender<()>,
 ) -> notify::Result<RecommendedWatcher> {
     let watched_paths = paths.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+    let handler = move |event: notify::Result<Event>| {
         match word(&event, &watched_paths) {
             Word::Read => return,
             Word::Dirs => came_or_went.store(true, Ordering::SeqCst),
@@ -272,7 +278,12 @@ fn watcher(
             // hears is the thread's that has ended.
             Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
         }
-    })?;
+    };
+    // No link is followed under what is watched with all under it: one among
+    // the refs could lead anywhere, as to `/`, and each directory there would
+    // take a watch of the kernel's.
+    let config = notify::Config::default().with_follow_symlinks(false);
+    let mut watcher = RecommendedWatcher::new(handler, config)?;
     let mut adding = watcher.paths_mut();
     for (path, mode) in paths {
         match adding.add(path, *mode) {
@@ -394,10 +405,10 @@ struct Asked {
 
 impl Asked {
     /// When it is due again: on a word that its work tree changed, once git
-    /// has rested from it for as long as it took over it, so that a work tree
-    /// that changes all along takes up half of git's time at the most; with
-    /// no word, once git has rested from it for a `sweep`, or for as long as
-    /// it took if that is longer.
+    /// has rested from it for as long as it took over it, so that a directory
+    /// of a work tree that changes all along takes up half of git's time at
+    /// the most; with no word, once git has rested from it for a `sweep`, or
+    /// for as long as it took if that is longer.
     fn due(&self, sweep: Duration) -> Instant {
         self.ended + if self.changed { self.took } else { self.took.max(sweep) }
     }
@@ -476,8 +487,10 @@ pub fn follow(
                     },
                     Err(trouble) => troubles.say(trouble),
                 }
+                // Not let settle, as it is below: with a work tree that
+                // changes all along, git would ask about one directory each
+                // time it settles, and the others would wait.
                 if woken.try_recv().is_ok() {
-                    watch::settle(&woken);
                     continue 'sweep;
                 }
             }

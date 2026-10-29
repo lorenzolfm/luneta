@@ -695,9 +695,10 @@ fn git_says_at_once_as_a_directory_moved_into_a_work_tree_changes() {
     shows_at_once(&host, &cwd, "an edit in the one moved in", edited, clean);
 }
 
-/// What git ignores, the daemon does not watch: a build that writes in
-/// `target` all along has git asked nothing, though a file that turns up
-/// beside it has git asked at once.
+/// What git ignores, the daemon does not watch, nor where a link among git's
+/// refs leads, which could be anywhere: a build that writes in `target` all
+/// along has git asked nothing, though a link to `target` is among the refs,
+/// and a file that turns up beside it has git asked at once.
 #[test]
 fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     let host = Host::new();
@@ -708,6 +709,7 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     commit(top, ".gitignore", "/target/\n");
     let build = top.join("target/debug");
     fs::create_dir_all(&build).unwrap();
+    symlink(top.join("target"), top.join(".git/refs/target")).unwrap();
     let cwd = top.display().to_string();
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
@@ -730,6 +732,31 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     }
     assert_eq!(noted.statuses(), asked, "git was asked as the build wrote");
     shows_at_once(&host, &cwd, "another that turns up", turns_up("two"), untracked(2));
+}
+
+/// git runs no command that a repository's own config names, though the
+/// daemon asks it about any directory a pane works in, trusted or not: not
+/// the one `core.fsmonitor` names, which git runs as it reads the index, as
+/// it does to say which directories to watch and how the work tree stands.
+#[test]
+fn git_runs_no_command_a_repository_names() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let (top, ran) = (dirs.path().join("tree"), dirs.path().join("ran"));
+    fs::create_dir(&top).unwrap();
+    assert!(git(&top, &["init", "-q", "-b", "main"]));
+    commit(&top, "file", "start\n");
+    let named = format!("touch '{}'", ran.display());
+    assert!(git(&top, &["config", "core.fsmonitor", &named]));
+    let cwd = top.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says how the tree stands", || checkout(&host, &cwd));
+    assert!(!ran.exists(), "git ran the command the repository named");
+    // As it would have, let read the index.
+    assert!(git(&top, &["ls-files"]));
+    assert!(ran.exists(), "git runs no command the repository names here");
 }
 
 /// gh is asked for the pull request of the branch checked out where each pane
