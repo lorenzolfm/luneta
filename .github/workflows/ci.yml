@@ -38,10 +38,40 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # keep-outputs, for the cache below.
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            keep-outputs = true
+
+      # The nix store, as the last run on main left it, so that a run builds only
+      # what main has not built (#187). Each crate's dependencies are a derivation
+      # of their own (crane, in flake.nix), so a PR that changes luneta's code
+      # compiles luneta's crates and none of the others, and one that changes
+      # nothing cargo reads compiles nothing.
+      #
+      # Only main saves, and a PR restores what main saved. The Actions cache holds
+      # 10 GB for the whole repo, and a PR's store would serve that PR alone while
+      # it pushed main's out. The key is a hash of what nix reads: the flake, and
+      # the files its sources filter to. main saves once for each change to them,
+      # and GitHub evicts the stores no run restores any more. The key decides when
+      # main saves, never what nix builds: a file it misses costs a rebuild, not a
+      # wrong build.
+      #
+      # Before main saves, the store is collected down to what this job built and
+      # what built it, which keep-outputs keeps alive behind the `result` links.
+      # Without it each store would carry every build before it.
+      #
+      # Not on a tag. The bytes the attestation covers are built in the tag's run,
+      # and not pulled from a cache another run wrote.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        if: github.ref_type != 'tag'
+        with:
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'src/**', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'examples/**', 'clippy.toml') }}
+          restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
+          save: ${{ github.ref == 'refs/heads/main' }}
+          gc-max-store-size: 0
 
       # Through the flake and not through a toolchain action, so that CI builds with
       # the rust the flake pins (1.95.0, the channel the rust-toolchain.toml of
@@ -70,18 +100,25 @@ jobs:
       - name: Build the dev CLI
         run: nix build --no-link .#dev
 
-      # Through `dev` and not a bare `cargo clippy`, for the reason the build above
-      # goes through the flake: the invocation is written down once, and the rust
-      # this lints with is the one the flake pins rather than whatever the runner
-      # image ships. The lint set itself lives in Cargo.toml and clippy.toml.
+      # `dev clippy`'s two runs, as the flake's checks make them in the sandbox,
+      # against the dependencies the builds compiled, so that clippy compiles none of
+      # them again. Through the flake and not a bare `cargo clippy`, for the reason
+      # the build above goes through it: the invocation is written down once
+      # (`clippyRuns` in flake.nix), and the rust this lints with is the one the
+      # flake pins rather than whatever the runner image ships. The lint set itself
+      # lives in Cargo.toml and clippy.toml.
       #
-      # This compiles the tree a second time, and that is the point — it is the only
-      # step that reaches the tests and the profiling example, which `nix build
-      # .#luneta` filters out of its source and never sees.
+      # It is the only step that reaches the tests and the profiling example, which
+      # `nix build .#luneta` filters out of its source and never sees.
       #
-      # `nix run` writes no symlink, so `result` stays the wasm the next step stages.
+      # x86_64-linux by name, the system this job runs on. `--out-link`, so that
+      # `result` stays the wasm the next step stages, and so that the store keeps
+      # the daemon's dependencies for the cache to save.
       - name: Clippy
-        run: nix run .#dev -- clippy
+        run: >-
+          nix build -L --out-link clippy
+          .#checks.x86_64-linux.clippy-plugin
+          .#checks.x86_64-linux.clippy-daemon
 
       # Out of the read-only store and under a stable name, so the upload and the
       # release job can both name the file without knowing a store path.
@@ -127,12 +164,63 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            keep-outputs = true
+
+      # The nix store, as in `build`. The job and the system are in the key, as each
+      # runner builds the daemon for a system of its own.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'src/**', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'examples/**', 'clippy.toml') }}
+          restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
+          save: ${{ github.ref == 'refs/heads/main' }}
+          gc-max-store-size: 0
+
+      # The Mac's tests build outside the sandbox, so the nix store holds nothing
+      # of theirs: their `target/` is cached on its own, with the crates cargo
+      # downloads for it. It holds the dependencies, and luneta's crates compile on
+      # each run. As in `build`, main saves and a PR restores.
+      #
+      # Its key is what cargo builds the dependencies from: the lockfiles, which
+      # name them, the manifests, which turn on their features, and flake.nix,
+      # which names the rust. main saves only on a miss, so a change the key left
+      # out would hit the `target/` from before it and never save another, and
+      # every run after would compile what changed again. A feature of rustix's,
+      # turned on in a manifest, leaves Cargo.lock as it was.
+      #
+      # A key that misses restores nothing. A PR that changes one of them compiles
+      # everything, and so does the run on main that saves its `target/`: had it
+      # restored the last one, each `target/` would carry every dependency before it.
+      - name: Restore the tests' target/
+        id: target
+        if: runner.os == 'macOS'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            target/
+          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix') }}
 
       # `--locked`, so that the tests build against what Cargo.lock names, as
-      # the derivation does.
+      # the derivation does. Not incremental, which is for one tree's edits in a row:
+      # here it would only add to what the cache saves.
       - name: Test the daemon outside the sandbox
         if: runner.os == 'macOS'
+        env:
+          CARGO_INCREMENTAL: 0
         run: nix develop -c cargo test --locked -p lunetad -p luneta-protocol
+
+      - name: Save the tests' target/
+        if: >-
+          runner.os == 'macOS' && github.ref == 'refs/heads/main'
+          && steps.target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            target/
+          key: ${{ steps.target.outputs.cache-primary-key }}
 
       - name: Build the daemon, and on Linux test it
         run: nix build -L .#lunetad
