@@ -463,35 +463,38 @@ pub fn go(
 /// Takes the client from the session it was `nudged` in, as `go` says, to a
 /// session it makes, `to`, that starts in `cwd`, or where the client
 /// started, and then takes the look `then`, if any, for the client's arrival
-/// there, after which it does `after`. A session that runs under that name
-/// is where it goes, and `cwd` goes unused; one that ended, which zellij
-/// kept to bring back, comes back as it was: `makes` says first whether
-/// zellij would make it.
+/// there, after which it opens the tab `tab` there, if any, for the menu
+/// numbered so. A session that runs under that name is where it goes, and
+/// `cwd` goes unused; one that ended, which zellij kept to bring back, comes
+/// back as it was: `makes` says first whether zellij would make it.
 ///
 /// Unless zellij's sockets say one runs by that name, as they do not of one
 /// the sidebar names, zellij makes it, and must take the client there before
 /// it is asked anything, as `Before::Made` says: the look comes back as the
 /// client's arrival, for luneta to ask for once zellij titles its terminal in
-/// that session, with what waits on it.
+/// that session, with the tab, which takes the place of zellij's there, as
+/// `Pending` says.
 pub fn start(
     nudged: &Nudged,
     to: &SessionName,
     cwd: Option<&str>,
     then: Option<Look>,
-    after: Option<After>,
+    tab: Option<(u64, Tab)>,
     events: &Sender<Event>,
 ) -> Option<Arrival> {
     let mut command = Command::new("zellij");
     command.args(["--session", nudged.session(), "action", "switch-session", &to.0]);
     command.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
     let when = nudged.until();
-    match (then, after) {
-        (Some(look), after) if runs(&to.0) != Some(true) => {
+    let asked = SystemTime::now();
+    match (then, tab) {
+        (Some(look), tab) if runs(&to.0) != Some(true) => {
             run(command, Some(Then::Made(look.number)), when, events);
-            let after = after.map(|after| Pending::new(after, events));
+            let after = tab.map(|(menu, tab)| Pending::new(menu, tab, to, asked, events));
             Some(Arrival { look, before: Before::Made, after })
         },
-        (Some(look), after) => {
+        (Some(look), tab) => {
+            let after = tab.map(|(menu, tab)| After::tab(menu, to, tab));
             run(command, Some(Then::Arrive(look, after)), when, events);
             None
         },
@@ -500,7 +503,8 @@ pub fn start(
             None
         },
         // Nothing would say when the client is there.
-        (None, Some(after)) => {
+        (None, Some((menu, tab))) => {
+            let after = After::tab(menu, to, tab);
             // luneta is on its way out.
             let _ = events.send(Event::Notice(format!("luneta cannot tell {}", after.when())));
             after.done(false, events);
@@ -551,10 +555,8 @@ pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
 /// Makes the session `to`, starting in `cwd`, and takes the client that last
 /// typed in the session `at` there. zellij's client makes it, so that it has
 /// the client's environment, not the CLI's. zellij takes the client to a
-/// session that runs by that name instead, and makes none: one whose socket
-/// is older than the asking ran already. A socket's time is of the kernel's
-/// coarse clock, a tick behind at most, and zellij takes far longer than a
-/// tick to make a session.
+/// session that runs by that name instead, and makes none, as `made_since`
+/// tells.
 ///
 /// A session made so is there once its socket is: no client but the one sent
 /// would make it, and zellij's server, asked anything before its first client
@@ -564,11 +566,21 @@ pub fn made(at: &str, to: &SessionName, cwd: &str) -> Result<(), String> {
     command.args(["--session", at, "action", "switch-session", &to.0, "--cwd", cwd]);
     let asked = SystemTime::now();
     done(command)?;
-    match started(&to.0, START) {
-        Some(started) if started >= asked => Ok(()),
-        Some(_) => Err(format!("{to} ran already, so zellij made none")),
+    match made_since(&to.0, asked, START) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!("{to} ran already, so zellij made none")),
         None => Err(UNMOVED.to_owned()),
     }
+}
+
+/// Whether the session named `session`, once one runs within `patience`,
+/// started at `asked` or after, by its socket: one zellij made as luneta
+/// asked, rather than one that ran already, under that name or another,
+/// renamed to it since, as a rename keeps the socket's time. A socket's time
+/// is of the kernel's coarse clock, a tick behind at most, and zellij takes
+/// far longer than a tick to make a session. None where none runs.
+fn made_since(session: &str, asked: SystemTime, patience: Duration) -> Option<bool> {
+    started(session, patience).map(|started| started >= asked)
 }
 
 /// What `seen` makes of the clients of `session`, once it makes anything of
@@ -617,6 +629,11 @@ pub enum After {
 }
 
 impl After {
+    /// Open `tab` in `session`, for the menu numbered `menu`.
+    fn tab(menu: u64, session: &SessionName, tab: Tab) -> Self {
+        After::Open(menu, Open::Tab { session: session.to_string(), tab })
+    }
+
     /// What waits on the client's arrival, as a sentence about it ends.
     fn when(&self) -> String {
         match self {
@@ -658,12 +675,20 @@ pub enum Open {
     /// `command`, or your shell where there is none, in a pane of its own
     /// beside the pane `beside` of `session`, in its tab, and in `cwd`.
     Pane { session: String, beside: u32, cwd: String, command: Vec<String> },
-    /// A tab of `session`, in `cwd`, named `name` or as zellij numbers it,
-    /// with `command` in it, or your shell where there is none. zellij makes
-    /// a tab as big as a client of its session, and one it opens in a session
-    /// with none has no room for its panes: in another session than luneta's
-    /// client's, it opens once that client has come.
-    Tab { session: String, cwd: String, name: Option<String>, command: Vec<String> },
+    /// The tab `tab`, in `session`. zellij makes a tab as big as a client of
+    /// its session, and one it opens in a session with none has no room for
+    /// its panes: in another session than luneta's client's, it opens once
+    /// that client has come.
+    Tab { session: String, tab: Tab },
+}
+
+/// A tab luneta opens, in `cwd`, named `name` or as zellij numbers it, with
+/// `command` in it, or your shell where there is none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tab {
+    pub cwd: String,
+    pub name: Option<String>,
+    pub command: Vec<String>,
 }
 
 /// Opens `open`, on a thread of its own, for the menu numbered `menu`, with
@@ -688,10 +713,10 @@ const ANSWER: Duration = Duration::from_secs(2);
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
 /// the one it lists in that tab.
 pub fn opening(open: &Open) -> Result<u32, String> {
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
     match open {
         Open::Pane { session, beside, cwd, command: runs } => {
+            let mut command = Command::new("zellij");
+            quiet(&mut command);
             command.env(PANE_VAR, beside.to_string());
             command.args(["--session", session, "action", "new-pane", "--no-focus", "--cwd", cwd]);
             if !runs.is_empty() {
@@ -701,20 +726,50 @@ pub fn opening(open: &Open) -> Result<u32, String> {
             let pane = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
             pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
         },
-        Open::Tab { session, cwd, name, command: runs } => {
-            command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
-            command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
-            if !runs.is_empty() {
-                command.arg("--").args(runs);
-            }
-            let said = answered(&mut command)?;
-            let Ok(tab) = said.trim().parse::<u32>() else {
-                return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
-            };
-            let laid = laid(session)?;
-            terminal_of(&laid, tab).ok_or_else(|| "zellij opened a tab with no pane".to_owned())
+        Open::Tab { session, tab } => {
+            let (opened, laid) = tab_opened(session, tab)?;
+            terminal_of(&laid, opened).ok_or_else(|| "zellij opened a tab with no pane".to_owned())
         },
     }
+}
+
+/// Opens `tab`, as `opening` does, in `to`, a session zellij made for it, in
+/// place of the tabs zellij made the session with, which luneta closes, so
+/// that the session holds the tab alone. They are those zellij lists before
+/// the tab opens, and they hold what its layout laid out and no more, as far
+/// as luneta can tell: nothing zellij has says so, but the session is new,
+/// and the menu has the keys until the tab opens, so that only a tab another
+/// client or an agent opened there by then goes with them. What zellij says
+/// of a tab it did not close comes back as a notice.
+fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, String> {
+    let made = tabs(&laid(&to.0)?);
+    let (opened, laid) = tab_opened(&to.0, tab)?;
+    let terminal = terminal_of(&laid, opened).ok_or("zellij opened a tab with no pane")?;
+    for made in made {
+        if let Err(why) = tab_closed(&to.0, made) {
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
+        }
+    }
+    Ok(terminal)
+}
+
+/// Opens `tab` in `session`, as `opening` does, and says its id, and the
+/// panes of the session with it in.
+fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
+    let Tab { cwd, name, command: runs } = tab;
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
+    command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
+    if !runs.is_empty() {
+        command.arg("--").args(runs);
+    }
+    let said = answered(&mut command)?;
+    let Ok(tab) = said.trim().parse::<u32>() else {
+        return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
+    };
+    Ok((tab, laid(session)?))
 }
 
 /// What `command`, a zellij of `quiet`'s, said on its stdout as it did what
@@ -775,6 +830,11 @@ impl Laid {
 fn terminal_of(laid: &[Laid], tab: u32) -> Option<u32> {
     let terminal = |pane: &&Laid| !pane.is_plugin && pane.tab_id == tab;
     laid.iter().find(terminal).map(|pane| pane.id)
+}
+
+/// The ids of the tabs `laid` lists a pane of, a plugin's as well.
+fn tabs(laid: &[Laid]) -> BTreeSet<u32> {
+    laid.iter().map(|pane| pane.tab_id).collect()
 }
 
 /// Asks zellij, on a thread of its own, what closing the terminal `pane` of
@@ -844,7 +904,7 @@ fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
     if let Some(gone) = panes.iter().find(|pane| !listed(**pane)) {
         return Err(format!("pane {gone} is gone"));
     }
-    let tabs: BTreeSet<u32> = laid.iter().map(|laid| laid.tab_id).collect();
+    let tabs = tabs(laid);
     let in_tab = |tab: u32| laid.iter().filter(move |laid| laid.tab_id == tab);
     let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(given));
     let held = |tab: &u32| in_tab(*tab).any(|laid| !given(laid) && laid.holds_tab());
@@ -1222,31 +1282,86 @@ pub fn look(look: Look, events: &Sender<Event>) {
 
 /// luneta's client on its way to the session of `look`, which zellij lists
 /// once it is there: as a client of it that was not there `before`. What
-/// waits on it is done once it is there, or not, when it does not come.
+/// waits on it is done once it is there, or not, when it does not come: only
+/// `start` has anything wait, as `before` says zellij makes the session.
 pub struct Arrival {
     pub look: Look,
-    pub before: Before,
-    pub after: Option<Pending>,
+    before: Before,
+    after: Option<Pending>,
 }
 
-/// What waits on luneta's client's arrival in a session zellij makes for it,
-/// done once: as the client comes, or else as luneta stops waiting on it,
-/// however it stops, as it drops it, so that what waits hears either way.
+impl Arrival {
+    /// luneta's client on its way to the session of `look`, with nothing
+    /// waiting on it.
+    pub fn new(look: Look, before: Before) -> Self {
+        Arrival { look, before, after: None }
+    }
+
+    /// Whether the session's server may have yet to take its first client as
+    /// luneta's comes, as `Before::fresh` says.
+    pub fn fresh(&self) -> bool {
+        self.before.fresh()
+    }
+}
+
+/// The tab that waits on luneta's client's arrival in `to`, a session zellij
+/// makes for it, for the menu numbered so. It opens once: as the client
+/// comes, or else as luneta stops waiting on it, however it stops, as it
+/// drops it, so that the menu hears either way.
 pub struct Pending {
-    after: Option<After>,
+    tab: Option<(u64, Tab)>,
+    to: SessionName,
+    /// When luneta asked zellij to make `to`: as zellij's sockets did not say
+    /// one ran by that name, which one that did by then would have.
+    asked: SystemTime,
     events: Sender<Event>,
 }
 
 impl Pending {
-    fn new(after: After, events: &Sender<Event>) -> Self {
-        Pending { after: Some(after), events: events.clone() }
+    fn new(
+        menu: u64,
+        tab: Tab,
+        to: &SessionName,
+        asked: SystemTime,
+        events: &Sender<Event>,
+    ) -> Self {
+        Pending { tab: Some((menu, tab)), to: to.clone(), asked, events: events.clone() }
     }
 
-    /// Does it, now that the client is there, or says why not when it did not
-    /// come.
+    /// Opens the tab, now that the client is there, in place of the tabs
+    /// zellij made the session with, as `alone` says, where zellij made it;
+    /// beside them where it did not, as `made` says; or says why not when it
+    /// did not come.
     fn done(mut self, came: bool) {
-        if let Some(after) = self.after.take() {
-            after.done(came, &self.events);
+        let Some((menu, tab)) = self.tab.take() else {
+            return;
+        };
+        match came.then(|| self.made()) {
+            Some(Ok(())) => {
+                let opened = alone(&self.to, &tab, &self.events);
+                // luneta is on its way out.
+                let _ = self.events.send(Event::Opened { menu, opened });
+            },
+            Some(Err(why)) => {
+                let _ = self.events.send(Event::Notice(why));
+                After::tab(menu, &self.to, tab).done(true, &self.events);
+            },
+            None => After::tab(menu, &self.to, tab).done(false, &self.events),
+        }
+    }
+
+    /// Whether zellij made the session as luneta asked, by its socket, as
+    /// `made_since` tells, or why luneta takes it for one that ran already,
+    /// which keeps its tabs: zellij took the client to a session renamed to
+    /// that name after luneta looked.
+    fn made(&self) -> Result<(), String> {
+        let to = &self.to;
+        match made_since(&to.0, self.asked, Duration::ZERO) {
+            Some(true) => Ok(()),
+            Some(false) => Err(format!("{to} ran already, and keeps its tabs")),
+            None => {
+                Err(format!("luneta cannot tell whether zellij made {to}, which keeps its tabs"))
+            },
         }
     }
 }
@@ -1254,8 +1369,8 @@ impl Pending {
 impl Drop for Pending {
     /// luneta stopped waiting on the client, and did not hear it come.
     fn drop(&mut self) {
-        if let Some(after) = self.after.take() {
-            after.done(false, &self.events);
+        if let Some((menu, tab)) = self.tab.take() {
+            After::tab(menu, &self.to, tab).done(false, &self.events);
         }
     }
 }
@@ -1735,6 +1850,15 @@ mod tests {
         assert_eq!(terminal_of(&panes, 1), Some(3));
     }
 
+    /// The tabs zellij made a session with, which a tab opened there closes,
+    /// are every tab it lists, those that hold a plugin's pane alone as well.
+    #[test]
+    fn a_made_session_s_tabs_are_all_it_lists_a_plugin_s_too() {
+        let bar = Laid { is_plugin: true, ..laid(0, 2) };
+        let panes = [laid(0, 0), laid(1, 1), laid(2, 1), bar];
+        assert_eq!(tabs(&panes), BTreeSet::from([0, 1, 2]));
+    }
+
     /// The client leaves out the variable zellij refuses by to attach a pane's
     /// terminal to its own session, and luneta refuses in its place.
     #[test]
@@ -1814,13 +1938,12 @@ mod tests {
     #[test]
     fn what_waits_on_an_arrival_dropped_unheard_hears_that_it_did_not_come() {
         let (events, heard) = std::sync::mpsc::channel();
-        let open = Open::Tab {
-            session: "cdk".to_owned(),
-            cwd: "/w/cdk/feat".to_owned(),
-            name: Some("#5".to_owned()),
-            command: Vec::new(),
+        let Ok(to) = SessionName::parse("cdk") else {
+            panic!("a name zellij takes");
         };
-        let pending = || Pending::new(After::Open(7, open.clone()), &events);
+        let tab =
+            Tab { cwd: "/w/cdk/feat".to_owned(), name: Some("#5".to_owned()), command: Vec::new() };
+        let pending = || Pending::new(7, tab.clone(), &to, SystemTime::now(), &events);
         drop(pending());
         pending().done(false);
         let heard: Vec<Event> = heard.try_iter().collect();

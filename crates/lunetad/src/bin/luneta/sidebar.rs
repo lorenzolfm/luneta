@@ -54,7 +54,7 @@ use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Listing, Live, Seated, Shown};
 use crate::pull::{Link, Ready, Worked};
 use crate::skills::Skill;
-use crate::zellij::{self, Closes, Open, SessionName};
+use crate::zellij::{self, Closes, Open, SessionName, Tab};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
@@ -1859,7 +1859,7 @@ impl Sidebar {
             // luneta's zellij is there: its last client may have left since
             // lunetad listed them.
             Wants::Open { cwd, opens: Opens::Tab { name, command } } => {
-                let open = Open::Tab { session: session.clone(), cwd, name, command };
+                let open = Open::Tab { session: session.clone(), tab: Tab { cwd, name, command } };
                 if self.going().is_none() && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, open }
                 } else {
@@ -5092,7 +5092,7 @@ mod tests {
             " <BS> - Back, <ESC> - Close",
         ]);
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
-        let tab = Open::Tab { session: older, cwd, name: None, command: Vec::new() };
+        let tab = Open::Tab { session: older, tab: Tab { cwd, name: None, command: Vec::new() } };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Open { menu: 1, open: tab });
         let opened = Place::Pane { session: listed("older", 10), pane: 7 };
         assert_eq!(sidebar.opened(1, Ok(7)), Asked::Go(opened));
@@ -5107,7 +5107,7 @@ mod tests {
         type_in(&mut sidebar, "n");
         let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
         let (session, cwd) = ("newer".to_owned(), "/w/b".to_owned());
-        let tab = Open::Tab { session, cwd, name: None, command: Vec::new() };
+        let tab = Open::Tab { session, tab: Tab { cwd, name: None, command: Vec::new() } };
         let asked = Asked::OpenThere { menu: 2, place: newer, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
@@ -5251,7 +5251,8 @@ mod tests {
         }));
 
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
-        let tab = Open::Tab { session: older.clone(), cwd: cwd.clone(), name: None, command: vec![] };
+        let tab = Tab { cwd: cwd.clone(), name: None, command: vec![] };
+        let tab = Open::Tab { session: older.clone(), tab };
         type_in(&mut sidebar, "n");
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Open { menu: 1, open: tab });
         let opened = Place::Pane { session: listed("older", 10), pane: 7 };
