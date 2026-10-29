@@ -1058,15 +1058,11 @@ fn spelled_ago(spelled: &str) -> Option<Duration> {
 /// Renames `session` to `to`, or says why zellij did not. A session with no
 /// client takes the name as well as one with.
 pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
-    relisted(session)?;
+    relisted_in(&lunetad::zellij_folder(), session)?;
     let mut command = Command::new("zellij");
     command.args(["--session", &session.0, "action", "rename-session", &to.0]);
     done(command)
 }
-
-/// The folder of the sockets of the servers that speak the contract `RELIST`
-/// is of, zellij 0.45's, in zellij's folder.
-const CONTRACT: &str = "contract_version_1";
 
 /// What zellij's web client says to its server to have it read again which
 /// sessions run and which ended, framed as zellij frames a message: four
@@ -1080,16 +1076,27 @@ const RELIST: [u8; 7] = [3, 0, 0, 0, 0xca, 0x01, 0];
 /// its field 2.
 const DONE: [u8; 6] = [2, 0, 0, 0, 0x12, 0];
 
-/// Has the server of `session` read again which sessions run and which
-/// ended, or says why it did not. zellij 0.45.1 refuses to rename a session
-/// to a name among those it read last, and reads them only as a web client
-/// or a plugin asks, so a session renamed could not take its old name back:
-/// zellij still had it as its own. The server answers once it has read them
-/// and handed them on, ahead of a rename asked after.
-fn relisted(session: &SessionName) -> Result<(), String> {
-    let socket = lunetad::zellij_folder().join(CONTRACT).join(&session.0);
+/// Has the server of `session`, where its socket is in `folder`, zellij's,
+/// read again which sessions run and which ended, or says why it did not.
+/// zellij 0.45.1 refuses to rename a session to a name among those it read
+/// last, and reads them only as a web client or a plugin asks, so a session
+/// renamed could not take its old name back: zellij still had it as its own.
+/// The server answers each message once it has done what it says, so once it
+/// has read them and handed them on, ahead of a rename asked after. It
+/// answers one it cannot read as well, though, and reads none before its
+/// first client: then a name it had stays taken, and its refusal says so, as
+/// it did before luneta asked this. Where no session of the contract `RELIST`
+/// is of has the name, the rename is left to say why, as zellij's CLI speaks
+/// its own.
+fn relisted_in(folder: &Path, session: &SessionName) -> Result<(), String> {
+    let socket = folder.join(lunetad::ZELLIJ_CONTRACT).join(&session.0);
     let failed = |error: io::Error| format!("zellij did not list its sessions again: {error}");
-    let mut stream = UnixStream::connect(socket).map_err(failed)?;
+    let mut stream = match UnixStream::connect(socket) {
+        Ok(stream) => stream,
+        // One of a zellij of another contract, or one that ended.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failed(error)),
+    };
     stream.set_read_timeout(Some(ANSWER)).map_err(failed)?;
     stream.write_all(&RELIST).map_err(failed)?;
     let mut answer = [0; DONE.len()];
@@ -1689,6 +1696,26 @@ mod tests {
         assert!(refused(&session, Some("outer")).is_some());
         assert_eq!(refused(&session, Some("other")), None);
         assert_eq!(refused(&session, None), None);
+    }
+
+    /// Where no socket of zellij 0.45's contract has the name of the session
+    /// a rename is of, the rename is left to say why: the session is of a
+    /// zellij of another contract, or it ended. Where one has, and no server
+    /// listens on it, luneta says so, and renames nothing.
+    #[test]
+    fn a_rename_lists_the_sessions_again_only_where_a_socket_of_the_contract_has_its_name() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let Ok(session) = SessionName::running("work") else {
+            panic!("a name zellij takes");
+        };
+        assert_eq!(relisted_in(scratch.path(), &session), Ok(()));
+        let contract = scratch.path().join(lunetad::ZELLIJ_CONTRACT);
+        assert!(fs::create_dir(&contract).is_ok());
+        assert!(std::os::unix::net::UnixListener::bind(contract.join("work")).is_ok());
+        let refused = relisted_in(scratch.path(), &session);
+        assert!(refused.as_ref().is_err_and(|why| why.contains("did not list")), "{refused:?}");
     }
 
     /// What waits on luneta's client's arrival in a session zellij makes
