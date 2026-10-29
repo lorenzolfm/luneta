@@ -371,6 +371,49 @@ exec cat "{pulls}/$branch.json"
     }
 }
 
+/// A `git` of a test's own, beside its `zellij`, that runs the git of whoever
+/// runs the tests, and notes each `git status` it is asked for, for
+/// `statuses`.
+pub struct NotedGit {
+    notes: PathBuf,
+}
+
+impl NotedGit {
+    /// Writes the `git` in `bin`, in the place of the one first on the
+    /// `PATH` of the tests.
+    fn new(bin: &Path) -> Self {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let git = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|it| it.is_file());
+        let noted = NotedGit { notes: bin.join("statuses") };
+        let script = format!(
+            r#"#!/bin/sh
+for arg; do
+    if [ "$arg" = status ]; then
+        echo "$*" >> "{notes}"
+        break
+    fi
+done
+exec "{git}" "$@"
+"#,
+            notes = noted.notes.display(),
+            git = git.expect("git is on the PATH").display()
+        );
+        let path = bin.join("git");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        noted
+    }
+
+    /// How many times git has been asked how a work tree stands.
+    pub fn statuses(&self) -> usize {
+        match fs::read_to_string(&self.notes) {
+            Ok(notes) => notes.lines().count(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("what git was asked does not read: {error}"),
+        }
+    }
+}
+
 /// The folders of a host of a test's own: the daemon's, zellij's sockets,
 /// and a home with zellij's cache in it, with a zellij that lists the panes
 /// the test gives it, and a gh that finds the pull requests it gives it.
@@ -395,6 +438,11 @@ impl Host {
         fs::create_dir_all(host.contract()).unwrap();
         fs::create_dir_all(host.metadata()).unwrap();
         host
+    }
+
+    /// Has the daemon's git note each `git status` it runs, from now on.
+    pub fn note_git(&self) -> NotedGit {
+        NotedGit::new(self.zellij.bin())
     }
 
     pub fn vars(&self) -> Vars<'_> {

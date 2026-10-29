@@ -46,8 +46,10 @@ const SWEEP: Duration = Duration::from_secs(2);
 const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 
 /// How long git rests from a work tree, at the least, before it is asked
-/// about it again. `git status` reads the whole tree, which takes a large one
-/// a while, and git rests from one for as long as it took over it.
+/// about it again with no word that it changed: for a file in a directory new
+/// to git, or a work tree across the network. `git status` reads the whole
+/// tree, which takes a large one a while, and git rests from one for as long
+/// as it took over it.
 const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 
 /// How long gh rests from a branch before it is asked about its pull request
@@ -131,7 +133,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
-    let wakes = Wakes { panes: wake_panes.clone(), git: wake_git, github: wake_github };
+    let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github: wake_github };
     let core = core::start(wakes)?;
     let (end, ending) = oneshot::channel();
     // Read once, so that the folders the daemon says it reads are the ones it
@@ -140,7 +142,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let claude_folder = claude::folder();
     follow(&core, &claim.folder, claude_folder.clone(), sockets.clone(), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
-    git::follow(core.clone(), git_woken, WORK_TREE_SWEEP)?;
+    git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     eprintln!("lunetad: listening on {}", claim.socket.display());
     let host = Host { started: SystemTime::now(), sockets, claude_folder, core };

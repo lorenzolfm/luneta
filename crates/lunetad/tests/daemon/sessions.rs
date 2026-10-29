@@ -514,6 +514,165 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     });
 }
 
+/// How the work tree stands where a pane works in `cwd`, once git has said
+/// that it is a checkout there.
+fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
+    let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+    match tree.stands? {
+        Stands::Checkout(checkout) => Some(checkout),
+        Stands::Outside(_) => None,
+    }
+}
+
+/// Has `change` made, and waits for the work tree to stand as `shows` takes
+/// it to where a pane works in `cwd`: within a second, though git would not
+/// be asked again for seconds more on its sweep.
+fn shows_at_once(
+    host: &Host,
+    cwd: &str,
+    what: &str,
+    change: impl FnOnce(),
+    shows: impl Fn(&Checkout) -> bool,
+) {
+    change();
+    let changed = Instant::now();
+    eventually(what, || checkout(host, cwd).filter(|it| shows(it)));
+    assert!(changed.elapsed() < Duration::from_secs(1), "{what}: {:?}", changed.elapsed());
+}
+
+/// git is asked again as the work tree a pane works in changes, well before
+/// its sweep would have it asked: as a file is written in a directory git
+/// tracks, or a directory turns up there, a path is staged, a commit made, a
+/// stash made or dropped, and a branch checked out; as a file is written in a
+/// directory the index has only since a commit, or in one made anew in the
+/// place of one that went; and as another work tree of the repository
+/// fetches where its upstream moved, which touches nothing of this one's own.
+/// Each change comes as soon as git said the one before, when the sweep is
+/// furthest off. The repository keeps its refs as `format` has it.
+fn says_at_once_as_a_work_tree_changes(format: &str) {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let path = |name: &str| dirs.path().join(name);
+    let (origin, repo, elsewhere) = (path("origin.git"), path("repo"), path("elsewhere"));
+    let (tree, beside) = (path("tree"), path("beside"));
+    for dir in [&origin, &repo] {
+        fs::create_dir(dir).unwrap();
+    }
+    let format = format!("--ref-format={format}");
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main", &format]));
+    assert!(git(&repo, &["init", "-q", "-b", "main", &format]));
+    fs::create_dir(repo.join("src")).unwrap();
+    commit(&repo, "src/lib.rs", "start\n");
+    let spelled = |dir: &Path| dir.display().to_string();
+    assert!(git(&repo, &["remote", "add", "origin", &spelled(&origin)]));
+    assert!(git(&repo, &["push", "-q", "-u", "origin", "main"]));
+    assert!(git(&repo, &["worktree", "add", "-q", "-b", "work", &spelled(&tree), "origin/main"]));
+    assert!(git(&repo, &["worktree", "add", "-q", "--detach", &spelled(&beside)]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    let src = spelled(&tree.join("src"));
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&src))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says how the tree stands", || checkout(&host, &src));
+
+    let edit = |file: &str, text: &str| fs::write(tree.join(file), text).unwrap();
+    let in_tree = |args: &[&str]| assert!(git(&tree, args));
+    let changes = |it: &Checkout| it.changes.unwrap_or_default();
+    let branch = |it: &Checkout| match &it.head {
+        Some(Head::Branch(branch)) => Some(branch.clone()),
+        _ => None,
+    };
+    let upstream = |it: &Checkout| branch(it)?.upstream.map(|it| (it.ahead, it.behind));
+    let clean = |it: &Checkout| changes(it) == Changes::default();
+    let (host, src) = (&host, src.as_str());
+
+    let edited = || edit("src/lib.rs", "edited\n");
+    shows_at_once(host, src, "an edit in src", edited, |it| changes(it).modified == 1);
+    let made = || {
+        fs::create_dir(tree.join("src/new")).unwrap();
+        edit("src/new/mod.rs", "new\n");
+    };
+    shows_at_once(host, src, "a directory new in src", made, |it| changes(it).untracked == 1);
+    let staged = |it: &Checkout| changes(it).staged == 1 && changes(it).untracked == 0;
+    shows_at_once(host, src, "it staged", || in_tree(&["add", "src/new"]), staged);
+    let committed = |it: &Checkout| clean(it) && upstream(it) == Some((1, 0));
+    shows_at_once(host, src, "a commit", || in_tree(&["commit", "-q", "-am", "work"]), committed);
+    let modified = |it: &Checkout| changes(it).modified == 1;
+    let edited = || edit("src/new/mod.rs", "edited\n");
+    shows_at_once(host, src, "an edit in the directory committed", edited, modified);
+    let made_anew = || {
+        fs::remove_dir_all(tree.join("src/new")).unwrap();
+        made();
+    };
+    shows_at_once(host, src, "the directory made anew", made_anew, clean);
+    shows_at_once(host, src, "an edit in the one made anew", edited, modified);
+    let fetched = || {
+        commit(&elsewhere, "README", "start\n");
+        assert!(git(&elsewhere, &["push", "-q"]));
+        assert!(git(&beside, &["fetch", "-q"]));
+    };
+    let behind = |it: &Checkout| upstream(it) == Some((1, 1));
+    shows_at_once(host, src, "a fetch in another work tree", fetched, behind);
+    let stashed = |count: u32| move |it: &Checkout| clean(it) && it.stashes == count;
+    shows_at_once(host, src, "a stash", || in_tree(&["stash", "-q"]), stashed(1));
+    let stash = || {
+        edit("src/lib.rs", "kept\n");
+        in_tree(&["stash", "-q"]);
+    };
+    shows_at_once(host, src, "another stash", stash, stashed(2));
+    let dropped = || in_tree(&["stash", "drop", "-q", "stash@{1}"]);
+    shows_at_once(host, src, "the first stash dropped", dropped, stashed(1));
+    let other = |it: &Checkout| branch(it).is_some_and(|branch| branch.name == "other");
+    shows_at_once(host, src, "a checkout", || in_tree(&["switch", "-q", "-c", "other"]), other);
+}
+
+#[test]
+fn git_says_at_once_as_a_work_tree_changes_that_keeps_its_refs_in_files() {
+    says_at_once_as_a_work_tree_changes("files");
+}
+
+#[test]
+fn git_says_at_once_as_a_work_tree_changes_that_keeps_its_refs_in_a_reftable() {
+    says_at_once_as_a_work_tree_changes("reftable");
+}
+
+/// What git ignores, the daemon does not watch: a build that writes in
+/// `target` all along has git asked nothing, though a file that turns up
+/// beside it has git asked at once.
+#[test]
+fn a_build_in_what_git_ignores_has_git_asked_nothing() {
+    let host = Host::new();
+    let noted = host.note_git();
+    let tree = tempfile::tempdir().unwrap();
+    let top = tree.path();
+    assert!(git(top, &["init", "-q", "-b", "main"]));
+    commit(top, ".gitignore", "/target/\n");
+    let build = top.join("target/debug");
+    fs::create_dir_all(&build).unwrap();
+    let cwd = top.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let untracked = |count| {
+        let changes = |it: &Checkout| it.changes.unwrap_or_default();
+        move |it: &Checkout| changes(it).untracked == count
+    };
+    eventually("git says how the tree stands", || checkout(&host, &cwd).filter(untracked(0)));
+
+    let turns_up = |name: &'static str| move || fs::write(top.join(name), "").unwrap();
+    shows_at_once(&host, &cwd, "a file that turns up", turns_up("one"), untracked(1));
+    let asked = noted.statuses();
+    for step in 0..20 {
+        let made = build.join(format!("step{step}"));
+        fs::create_dir(&made).unwrap();
+        fs::write(made.join("out"), "built\n").unwrap();
+        fs::write(build.join("log"), format!("{step}\n")).unwrap();
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(noted.statuses(), asked, "git was asked as the build wrote");
+    shows_at_once(&host, &cwd, "another that turns up", turns_up("two"), untracked(2));
+}
+
 /// gh is asked for the pull request of the branch checked out where each pane
 /// works: once for a branch of a repository, however many of its directories
 /// panes work in, and at once as a pane comes to a branch. What gh found of a
