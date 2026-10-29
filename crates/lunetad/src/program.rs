@@ -4,6 +4,7 @@
 //! Each answers on its stdout, and has a time to answer in: one that takes
 //! longer is stuck, and is killed, as one is whose answer is no longer wanted.
 
+use std::convert::Infallible;
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -15,8 +16,8 @@ use rustix::io::Errno;
 use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions};
 
 /// How often whether a program is still wanted is asked, while it runs, where
-/// it is wanted only for a while; and on macOS, whether one that stopped has
-/// ended, until it goes on.
+/// it is wanted only for a while; and whether one has ended, where what was
+/// said of it is no end, as macOS says of one that stopped.
 const LOOK: Duration = Duration::from_millis(5);
 
 /// The most of what a program says that the daemon reads. `git status` says a
@@ -57,8 +58,8 @@ impl Ran {
 /// longer than that. An error when it could not be started, or what it said
 /// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let ran = running(command, limit, None, Kills::Program)?;
-    Ok(ran.expect("a program wanted all along is never given up"))
+    let Ok(ran) = running::<Infallible>(command, limit, None, Kills::Program)?;
+    Ok(ran)
 }
 
 /// Runs `command` as `run` does, in a session of its own, with no terminal,
@@ -69,8 +70,8 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
 /// typed there. With none, it fails, and says why. What it started, as git
 /// does that wt runs, would run on once it is killed.
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let ran = running(alone(command), limit, None, Kills::Group)?;
-    Ok(ran.expect("a program wanted all along is never given up"))
+    let Ok(ran) = running::<Infallible>(alone(command), limit, None, Kills::Group)?;
+    Ok(ran)
 }
 
 /// Runs `command` as `run` does, for as long as `wanted` says what it would
@@ -81,7 +82,8 @@ pub fn run_while(
     limit: Duration,
     wanted: impl Fn() -> bool,
 ) -> io::Result<Option<Ran>> {
-    running(command, limit, Some(&wanted), Kills::Program)
+    let wanted = || if wanted() { Ok(()) } else { Err(()) };
+    running::<()>(command, limit, Some(&wanted), Kills::Program).map(Result::ok)
 }
 
 /// What of a program is killed, as it is stuck or no longer wanted.
@@ -95,52 +97,87 @@ enum Kills {
 }
 
 /// Runs `command`, as `run_while` does, where it is `wanted` only for a
-/// while, or else as `run` does, and kills of it what `kills` says.
-fn running(
+/// while, which says what that comes to once it is not, or else as `run`
+/// does, and kills of it what `kills` says.
+fn running<N>(
     command: &mut Command,
     limit: Duration,
-    wanted: Option<&dyn Fn() -> bool>,
+    wanted: Option<&dyn Fn() -> Result<(), N>>,
     kills: Kills,
-) -> io::Result<Option<Ran>> {
+) -> io::Result<Result<Ran, N>> {
     let deadline = Instant::now() + limit;
     let mut child =
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let heard = hear(&mut child, deadline, wanted);
+    // Whatever was heard of it, or why nothing could be, what is left of it
+    // is killed, and it is waited for last, so that no kill names a pid let
+    // go. One that could not be killed is let go unwaited for, rather than
+    // waited for with no deadline.
+    if !matches!(heard, Ok(Heard::Ended { .. })) {
+        kill(&mut child, kills)?;
+    }
+    let status = child.wait()?;
+    Ok(match heard? {
+        Heard::Ended { stdout, stderr } => Ok(Ran::Ended { status, stdout, stderr }),
+        Heard::Stuck => Ok(Ran::Stuck),
+        Heard::Unwanted(not) => Err(not),
+    })
+}
+
+/// What was heard of a program, before it is waited for.
+enum Heard<N> {
+    /// It ended, and said all it had to say in its time.
+    Ended { stdout: Vec<u8>, stderr: Vec<u8> },
+    /// It, or what it started that holds its stdout open, went past its
+    /// deadline.
+    Stuck,
+    /// It was no longer wanted, and this is what that comes to.
+    Unwanted(N),
+}
+
+/// What is heard of `child` until `deadline`, for as long as it is `wanted`.
+fn hear<N>(
+    child: &mut Child,
+    deadline: Instant,
+    wanted: Option<&dyn Fn() -> Result<(), N>>,
+) -> io::Result<Heard<N>> {
     let stdout = read(child.stdout.take().expect("its stdout is piped"))?;
     let stderr = read(child.stderr.take().expect("its stderr is piped"))?;
-    let ended = ends(&child)?;
+    let ended = ends(child)?;
     let left = || deadline.saturating_duration_since(Instant::now());
-    let status = loop {
-        let stuck = Instant::now() >= deadline;
-        if stuck || wanted.is_some_and(|wanted| !wanted()) {
-            // One that ended just now is not waited for yet, and takes the
-            // signal all the same.
-            match kills {
-                Kills::Program => child.kill()?,
-                Kills::Group => kill_group(&child)?,
-            }
-            child.wait()?;
-            return Ok(stuck.then_some(Ran::Stuck));
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(Heard::Stuck);
+        }
+        if let Some(Err(not)) = wanted.map(|wanted| wanted()) {
+            return Ok(Heard::Unwanted(not));
         }
         // Heard from as it ends, or at its deadline, and where it is wanted
         // only for a while, each `LOOK` besides, to ask whether it still is.
         let look = if wanted.is_some() { left().min(LOOK) } else { left() };
         match ended.recv_timeout(look) {
-            Ok(end) => break end.and_then(|()| child.wait())?,
+            Ok(end) => break end?,
             Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => {
                 unreachable!("the thread that waits for a program says how that went")
             },
         }
-    };
+    }
     let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
     else {
         // What it started holds its stdout open still.
-        if let Kills::Group = kills {
-            kill_group(&child)?;
-        }
-        return Ok(Some(Ran::Stuck));
+        return Ok(Heard::Stuck);
     };
-    Ok(Some(Ran::Ended { status, stdout: stdout?, stderr: stderr? }))
+    Ok(Heard::Ended { stdout: stdout?, stderr: stderr? })
+}
+
+/// Kills of `child` what `kills` says. One that ended, and is not waited for
+/// yet, takes the signal all the same, and so does the group it leads.
+fn kill(child: &mut Child, kills: Kills) -> io::Result<()> {
+    match kills {
+        Kills::Program => child.kill(),
+        Kills::Group => kill_group(child),
+    }
 }
 
 /// Has `command` lead a session of its own, with no terminal, and a group of
@@ -174,12 +211,16 @@ fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
     in_thread(move || {
         loop {
             match process::waitid(WaitId::Pid(pid), ended) {
+                Ok(Some(status)) if status.exited() || status.killed() || status.dumped() => {
+                    return Ok(());
+                },
                 Err(Errno::INTR) => {},
-                // macOS says so of one that stopped too, each time it is
-                // asked until it goes on, where Linux waits for its end: it
-                // is asked again each `LOOK` meanwhile.
-                Ok(Some(status)) if status.stopped() || status.trapped() => thread::sleep(LOOK),
-                waited => return waited.map(drop).map_err(io::Error::from),
+                Err(error) => return Err(error.into()),
+                // What is no end, as macOS says of one that stopped, each
+                // time it is asked until it goes on, where Linux waits for
+                // its end: it is asked again each `LOOK` meanwhile, until it
+                // ends or is killed at its deadline.
+                Ok(_) => thread::sleep(LOOK),
             }
         }
     })
@@ -218,11 +259,12 @@ fn in_thread<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use rustix::process::{self, Pid};
+    use rustix::process::{self, Pid, Signal};
 
     use super::{Ran, SAID_MAX, alone, run, run_alone, run_while};
 
@@ -262,6 +304,20 @@ mod tests {
         }
         let (ran, output) = (quick(ran), quick(output));
         assert!(ran < output + Duration::from_millis(2), "{ran:?} against {output:?}");
+    }
+
+    /// A program a signal kills, rather than its deadline, is heard from as
+    /// it ends, as one is that exits.
+    #[test]
+    fn a_program_a_signal_kills_is_heard_from_as_it_ends() {
+        let asked = Instant::now();
+        let mut dies = Command::new("sh");
+        dies.args(["-c", "kill -KILL $$"]);
+        let Ran::Ended { status, .. } = run(&mut dies, Duration::from_secs(10)).unwrap() else {
+            panic!("it was not heard to end");
+        };
+        assert_eq!(status.signal(), Some(Signal::KILL.as_raw()));
+        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
     /// A program that does not end in its time is killed and waited for, so
@@ -310,23 +366,27 @@ mod tests {
         assert_eq!(session, Ok(pid));
     }
 
-    /// A program run alone that does not end in its time is killed with what
-    /// it started, which would run on otherwise, as git does that wt runs.
+    /// A program run alone that is stuck is killed with what it started, which
+    /// would run on otherwise, as git does that wt runs: one that does not end
+    /// in its time, and one that ended, where what it started holds its stdout
+    /// open past then.
     #[test]
     fn a_program_run_alone_that_is_stuck_is_killed_with_what_it_started() {
-        let dir = tempfile::tempdir().expect("a folder");
-        let started = dir.path().join("started");
-        let mut sh = Command::new("sh");
-        sh.args(["-c", r#"sleep 30 & echo $! > "$0"; wait"#]).arg(&started);
-        let ran = run_alone(&mut sh, Duration::from_millis(500)).expect("sh runs");
-        assert!(matches!(ran, Ran::Stuck));
-        let pid = fs::read_to_string(&started).expect("sh says what it started");
-        let pid = Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid");
-        // Gone once the process that took it in has waited for it.
-        let gone = Instant::now() + Duration::from_secs(5);
-        while process::test_kill_process(pid).is_ok() {
-            assert!(Instant::now() < gone, "what sh started runs on");
-            thread::sleep(Duration::from_millis(10));
+        for script in [r#"sleep 30 & echo $! > "$0"; wait"#, r#"sleep 30 & echo $! > "$0""#] {
+            let dir = tempfile::tempdir().expect("a folder");
+            let started = dir.path().join("started");
+            let mut sh = Command::new("sh");
+            sh.args(["-c", script]).arg(&started);
+            let ran = run_alone(&mut sh, Duration::from_millis(500)).expect("sh runs");
+            assert!(matches!(ran, Ran::Stuck), "{script}");
+            let pid = fs::read_to_string(&started).expect("sh says what it started");
+            let pid = Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid");
+            // Gone once the process that took it in has waited for it.
+            let gone = Instant::now() + Duration::from_secs(5);
+            while process::test_kill_process(pid).is_ok() {
+                assert!(Instant::now() < gone, "what `{script}` started runs on");
+                thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 }
