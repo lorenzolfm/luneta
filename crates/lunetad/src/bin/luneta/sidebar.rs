@@ -945,7 +945,9 @@ impl Sidebar {
 
     /// zellij answered a look so. One that says what it listed before
     /// luneta's zellij came, of the go luneta sent it on last, is from once
-    /// it had.
+    /// it had. One that finds zellij did not take it to the pane luneta sent
+    /// it to says so: zellij moved another client, the last to type in the
+    /// session, or none.
     pub fn looked(&mut self, looked: Looked) {
         if let Some(sent) = &mut self.sent
             && looked.before.is_some()
@@ -955,7 +957,9 @@ impl Sidebar {
         }
         let listed = self.own.session().and_then(|session| clients(self.host.as_ref(), session));
         let listed = listed.map(<[Client]>::to_vec);
-        self.own.looked(looked, listed.as_deref(), Instant::now());
+        if self.own.looked(looked, listed.as_deref(), Instant::now()) {
+            self.notify("zellij did not take its client to the pane".to_owned());
+        }
         self.rebuild();
     }
 
