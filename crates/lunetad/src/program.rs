@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::io::Errno;
-use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions};
+use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus};
 
 /// How often whether a program is still wanted is asked, while it runs, where
 /// it is wanted only for a while; and whether one has ended, where what was
@@ -194,12 +194,29 @@ fn alone(command: &mut Command) -> &mut Command {
 }
 
 /// Kills the group `child` leads, which ends what it started, as the group
-/// of its session. One that has all ended is no failure.
+/// of its session. One that has all ended is no failure: macOS signals none
+/// in it that ended, and says `EPERM` where it signalled none, as where all
+/// that is left of it is `child`, ended and not waited for yet.
 fn kill_group(child: &Child) -> io::Result<()> {
-    match process::kill_process_group(Pid::from_child(child), Signal::KILL) {
+    let pid = Pid::from_child(child);
+    match process::kill_process_group(pid, Signal::KILL) {
         Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(Errno::PERM) if has_ended(pid) => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether the program `pid` names has ended, and is not waited for yet, as
+/// `waitid` says at once.
+fn has_ended(pid: Pid) -> bool {
+    let now = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    matches!(process::waitid(WaitId::Pid(pid), now), Ok(Some(status)) if an_end(&status))
+}
+
+/// Whether what `waitid` said of a program is its end: an exit, a kill or a
+/// core dump, and not a stop, which macOS says too.
+fn an_end(status: &WaitIdStatus) -> bool {
+    status.exited() || status.killed() || status.dumped()
 }
 
 /// Says once `child` has ended, from a thread of its own, or why that could
@@ -211,9 +228,7 @@ fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
     in_thread(move || {
         loop {
             match process::waitid(WaitId::Pid(pid), ended) {
-                Ok(Some(status)) if status.exited() || status.killed() || status.dumped() => {
-                    return Ok(());
-                },
+                Ok(Some(status)) if an_end(&status) => return Ok(()),
                 Err(Errno::INTR) => {},
                 Err(error) => return Err(error.into()),
                 // What is no end, as macOS says of one that stopped, each
@@ -388,5 +403,28 @@ mod tests {
                 thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    /// A program run alone that ended, where what it started in a group of
+    /// its own holds its stdout open past its time, is stuck, as one is whose
+    /// own group holds it, and is waited for: macOS signals no group that has
+    /// only the program left in it, ended and not waited for yet.
+    #[test]
+    fn a_program_run_alone_held_from_outside_its_group_is_stuck_and_waited_for() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let (ran_as, started) = (dir.path().join("sh"), dir.path().join("started"));
+        let mut sh = Command::new("sh");
+        // `set -m` starts the `sleep` in a group of its own.
+        sh.args(["-c", r#"echo $$ > "$0"; set -m; sleep 30 & echo $! > "$1""#]);
+        let ran = run_alone(sh.arg(&ran_as).arg(&started), Duration::from_millis(500));
+        let pid = |path| {
+            let pid = fs::read_to_string(path).expect("sh says its pid and what it started");
+            Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid")
+        };
+        // Outside the group, it runs on.
+        process::kill_process(pid(&started), Signal::KILL).expect("what sh started runs on");
+        assert!(matches!(ran, Ok(Ran::Stuck)), "{:?}", ran.err());
+        // Gone, where one ended and not waited for yet is still there.
+        assert!(process::test_kill_process(pid(&ran_as)).is_err(), "sh was not waited for");
     }
 }
