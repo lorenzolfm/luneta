@@ -1057,10 +1057,10 @@ fn spelled_ago(spelled: &str) -> Option<Duration> {
 
 /// Renames `session` to `to`, or says why zellij did not. A session with no
 /// client takes the name as well as one with.
-pub fn renamed(session: &str, to: &SessionName) -> Result<(), String> {
+pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
     relisted(session)?;
     let mut command = Command::new("zellij");
-    command.args(["--session", session, "action", "rename-session", &to.0]);
+    command.args(["--session", &session.0, "action", "rename-session", &to.0]);
     done(command)
 }
 
@@ -1086,8 +1086,8 @@ const DONE: [u8; 6] = [2, 0, 0, 0, 0x12, 0];
 /// or a plugin asks, so a session renamed could not take its old name back:
 /// zellij still had it as its own. The server answers once it has read them
 /// and handed them on, ahead of a rename asked after.
-fn relisted(session: &str) -> Result<(), String> {
-    let socket = lunetad::zellij_folder().join(CONTRACT).join(session);
+fn relisted(session: &SessionName) -> Result<(), String> {
+    let socket = lunetad::zellij_folder().join(CONTRACT).join(&session.0);
     let failed = |error: io::Error| format!("zellij did not list its sessions again: {error}");
     let mut stream = UnixStream::connect(socket).map_err(failed)?;
     stream.set_read_timeout(Some(ANSWER)).map_err(failed)?;

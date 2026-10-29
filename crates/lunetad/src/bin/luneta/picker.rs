@@ -202,7 +202,7 @@ pub enum Heard {
     /// What closing the pane at `place` closes, for its delete.
     Closes { place: Place, closes: Result<Closes, String> },
     /// Whether the session `from` is called `to` now.
-    Renamed { from: String, to: SessionName, renamed: Result<(), String> },
+    Renamed { from: SessionName, to: SessionName, renamed: Result<(), String> },
     /// Whether zellij let go of the session `session`, one that ended.
     Deleted { session: SessionName, deleted: Result<(), String> },
     /// The directories zoxide knows, best first, or why it did not list them.
@@ -224,7 +224,7 @@ pub enum Ask {
     /// What closing the pane at `place` closes.
     Closes(Place),
     /// To call the session `from` `to`.
-    Rename { from: String, to: SessionName },
+    Rename { from: SessionName, to: SessionName },
     /// To let go of the session `session`, one that ended.
     Delete(SessionName),
     /// The directories zoxide knows.
@@ -335,7 +335,7 @@ enum Stage {
     /// Narrowing the lists by what is typed.
     Search,
     /// Naming the session called `session` again, `input` typed so far.
-    Rename { session: String, input: String },
+    Rename { session: SessionName, input: String },
     /// Waiting on zellij, or on the plan, to delete what `target` stands
     /// for: going ahead with the plan once it is `agreed`, what you said yes
     /// to, or else asking first, if it asks.
@@ -903,7 +903,7 @@ impl Picker {
         }
         match self.sessions.selected().map(|row| &row.key) {
             Some(Key::Live(place)) => {
-                let session = place.session().to_owned();
+                let session = place.listed().name().clone();
                 self.stage = Stage::Rename { session, input: String::new() };
             },
             Some(Key::Exited(name)) => {
@@ -920,7 +920,7 @@ impl Picker {
     fn rename_key(
         &mut self,
         key: &KeyEvent,
-        session: String,
+        session: SessionName,
         mut input: String,
     ) -> Picked {
         match key.code {
@@ -944,9 +944,9 @@ impl Picker {
     }
 
     /// The name `session` takes, of what was typed, or why it takes none.
-    fn rename_to(&self, session: &str, name: &str) -> Result<SessionName, &'static str> {
+    fn rename_to(&self, session: &SessionName, name: &str) -> Result<SessionName, &'static str> {
         let name = SessionName::parse(name)?;
-        if name.as_str() == session {
+        if name == *session {
             return Err("already called that");
         }
         if self.taken()?.contains(&name.as_str()) {
@@ -1443,11 +1443,17 @@ impl Picker {
     }
 
     /// Draws the box the new name of `session` is typed in, `input` so far.
-    fn draw_rename(&self, buffer: &mut Buffer, layout: &Layout, session: &str, input: &str) {
+    fn draw_rename(
+        &self,
+        buffer: &mut Buffer,
+        layout: &Layout,
+        session: &SessionName,
+        input: &str,
+    ) {
         if let Some(full) = layout.full {
             let inner = usize::from(full.width.saturating_sub(2));
             let mut lines = vec![Line::default()];
-            let what = if self.listing.here.as_deref() == Some(session) {
+            let what = if self.listing.here.as_deref() == Some(session.as_str()) {
                 format!("renaming \"{session}\", the session you are in")
             } else {
                 format!("renaming \"{session}\"")
@@ -2020,7 +2026,8 @@ mod tests {
         typed(&mut picker, "d");
         press(&mut picker, KeyCode::Enter);
         let to = SessionName::parse("d").unwrap();
-        assert_eq!(picker.asks(), vec![Ask::Rename { from: "c".to_owned(), to }]);
+        let from = SessionName::running("c").unwrap();
+        assert_eq!(picker.asks(), vec![Ask::Rename { from, to }]);
         assert!(!renaming(&picker));
 
         typed(&mut picker, "x");
