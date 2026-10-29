@@ -1060,6 +1060,15 @@ itself. The daemon asks
 `zellij`, `git` and `gh` on its `PATH`, which is the `PATH` of the luneta that
 started it.
 
+What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
+wrong in luneta's sidebar, in `$XDG_STATE_HOME/luneta`, or
+`~/.local/state/luneta` (on macOS too), which outlives a reboot: a line for
+each, with when, in UTC, and which process said it, as
+`2026-10-29T14:03:12.481Z luneta[4123] zellij did not take its client there`.
+Once the log is 1 MiB, it moves to `luneta.log.1`, in the place of the one
+before, where its folder lets it be locked and moved; where not, it grows on,
+and says why in it.
+
 ## License
 
 MIT. Zellij is MIT-licensed too.

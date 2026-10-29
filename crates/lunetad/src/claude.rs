@@ -27,7 +27,7 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{Agent, Name, Named, Source, Status, Unread};
-use crate::process;
+use crate::{log, process};
 use crate::watch::{self, Troubles};
 
 /// How long a file that does not read still says what it said before. Claude
@@ -268,7 +268,7 @@ fn text_of(path: &Path) -> io::Result<Vec<u8>> {
 /// halfway written, so that its first answer counts it.
 fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) -> Seen {
     let unread = || {
-        eprintln!("lunetad: {} does not read as a session file: {error}", path.display());
+        log::say(&format!("{} does not read as a session file: {error}", path.display()));
         Seen::Unread
     };
     match was {

@@ -35,6 +35,7 @@ use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::shell::Doing;
 use lunetad::api::{Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, Zellij};
+use lunetad::log;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -852,8 +853,12 @@ impl Sidebar {
         host.sessions.iter().map(|session| Some(Listed::of(session)?.kept)).collect()
     }
 
-    /// The daemon does not answer, for `why`. What it said last stands.
+    /// The daemon does not answer, for `why`, which the log has as it
+    /// changes: luneta asks again each second. What it said last stands.
     pub fn lost(&mut self, why: String) {
+        if self.away.as_ref() != Some(&why) {
+            log::say(&format!("lunetad: {why}"));
+        }
         self.away = Some(why);
     }
 
@@ -1180,13 +1185,16 @@ impl Sidebar {
         listing
     }
 
+    /// Says what went wrong, in the notes until the next key, and in the log.
     pub fn notify(&mut self, notice: String) {
+        log::say(&notice);
         self.notice = Some(notice);
     }
 
     /// Says what went wrong with what the menu did: in the notes, or over
-    /// zellij while the menu floats there.
+    /// zellij while the menu floats there, and in the log.
     fn say(&mut self, notice: String) {
+        log::say(&notice);
         if self.floats() {
             self.said = Some(notice);
         } else {
@@ -1778,11 +1786,12 @@ impl Sidebar {
     /// Opens the menu for the pane luneta's zellij is on, on its first group,
     /// in the place of one open at the bottom, to float over zellij once the
     /// keys are its own. None opens while the sidebar does not know which
-    /// pane that is: why, for luneta to say over zellij. What went wrong
-    /// before goes from the notes, as it does for any key the sidebar takes.
+    /// pane that is: why, for luneta to say over zellij, and in the log.
+    /// What went wrong before goes from the notes, as it does for any key the
+    /// sidebar takes.
     pub fn float_menu(&mut self) -> Result<(), &'static str> {
         self.notice = None;
-        let place = self.here_place()?;
+        let place = self.here_place().inspect_err(|why| log::say(why))?;
         self.menus += 1;
         self.menu = Some(Menu::new(self.menus, self.target_at(place)));
         Ok(())

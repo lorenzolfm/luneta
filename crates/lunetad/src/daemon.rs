@@ -32,7 +32,7 @@ use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsR
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, git, github, metadata, panes, release, shells, watch, zellij};
+use crate::{claude, client, git, github, log, metadata, panes, release, shells, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
 /// that crashed, which leaves its file as it was. zellij is asked about each
@@ -123,10 +123,12 @@ impl Claim {
 /// Listens on the claim's socket and answers there until zellij has had no
 /// session for `ALONE`. It says on stderr that it listens once it does, which
 /// is how whoever started it can tell that it is ready: by then it has read
-/// what runs, and answers with all of it. As it ends, it answers what it was
-/// asked already, and no more, and waits for its clients to go for `DRAIN`
-/// at the most.
-pub async fn serve(claim: Claim) -> io::Result<()> {
+/// what runs, and answers with all of it. Then it says `unkept`, why what goes
+/// wrong is kept in no log, where it is not: not before, so that the first
+/// thing one that does not start says is why, which luneta reads back. As it
+/// ends, it answers what it was asked already, and no more, and waits for its
+/// clients to go for `DRAIN` at the most.
+pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     // One wake-up is all a thread that asks on a sweep needs, however many
     // changes made it.
@@ -144,7 +146,10 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
-    eprintln!("lunetad: listening on {}", claim.socket.display());
+    log::say(&format!("listening on {}", claim.socket.display()));
+    if let Some(why) = unkept {
+        log::say(&format!("what goes wrong is kept in no log: {why}"));
+    }
     let host = Host { started: SystemTime::now(), sockets, claude_folder, core };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
@@ -152,12 +157,12 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     // has ended, which leaves the daemon blind to it.
     let ended = async move {
         if ending.await.is_err() {
-            eprintln!("lunetad: zellij's sessions are no longer followed, and so lunetad ends");
+            log::say("zellij's sessions are no longer followed, and so lunetad ends");
         }
         match fs::remove_file(&socket) {
             Ok(()) => {},
             Err(error) if error.kind() == ErrorKind::NotFound => {},
-            Err(error) => eprintln!("lunetad: {}: {error}", socket.display()),
+            Err(error) => log::say(&format!("{}: {error}", socket.display())),
         }
         let _ = begun.send(());
     };
@@ -178,7 +183,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         Ok(Err(error)) => Err(io::Error::other(error)),
         Err(_) => {
             let secs = DRAIN.as_secs();
-            eprintln!("lunetad: clients still connected after {secs}s are left");
+            log::say(&format!("clients still connected after {secs}s are left"));
             Ok(())
         },
     }
@@ -222,7 +227,7 @@ fn follow(
             let any = |_: &Path| true;
             watch::watch("claude", dir, RecursiveMode::NonRecursive, any, SWEEP, read, tell)?;
         },
-        None => eprintln!("lunetad: neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
+        None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
     let mut shells = shells::Shells::new(folder);
     let dir = shells.dir().to_owned();
@@ -246,7 +251,7 @@ fn follow(
             && let Some(end) = end.take()
         {
             let secs = ALONE.as_secs();
-            eprintln!("lunetad: zellij has had no session for {secs}s, and so lunetad ends");
+            log::say(&format!("zellij has had no session for {secs}s, and so lunetad ends"));
             // The server has ended already, if no one waits for the word.
             let _ = end.send(());
         }

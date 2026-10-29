@@ -162,6 +162,37 @@ fn luneta_watch_starts_a_detached_daemon_where_none_runs() {
     assert_eq!(pid(&watch(&host, Path::new(LUNETA))), daemon.pid);
 }
 
+/// What lunetad says goes in luneta's log too, in the state folder of the
+/// home, each line with when it said it and its pid: by the time it says on
+/// stderr that it listens, the log has it.
+#[test]
+fn lunetad_says_in_lunetas_log_when_and_which_daemon() {
+    let host = Host::new();
+    let daemon = start(host.vars()).unwrap();
+    let log = fs::read_to_string(host.home.path().join(".local/state/luneta/luneta.log")).unwrap();
+    let listening = format!("lunetad[{}] listening on ", daemon.pid());
+    let line = log.lines().find(|line| line.contains(&listening)).expect(&log);
+    let (when, said) = line.split_once(' ').unwrap();
+    assert!(said.starts_with(&listening), "{line}");
+    let date = |at: usize| when.as_bytes().get(at).copied();
+    assert_eq!((when.len(), date(10), date(23)), (24, Some(b'T'), Some(b'Z')), "{when}");
+}
+
+/// A daemon with no log to write in, as one with no home, that does not
+/// start says first why it does not, which luneta reads back: here, that its
+/// socket's path is longer than one can be.
+#[test]
+fn lunetad_with_no_log_says_first_why_it_does_not_start() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("r".repeat(110));
+    fs::create_dir(&runtime).unwrap();
+    let (ended, said) = start(Vars::runtime(&runtime)).err().unwrap();
+    assert!(!ended.success());
+    let socket = runtime.join(SOCKET);
+    let first = said.lines().next().unwrap_or_default();
+    assert!(first.starts_with(&format!("lunetad: {}: ", socket.display())), "{said}");
+}
+
 /// `luneta info`, `agents` and `sessions` say that no daemon runs, as `tmux
 /// ls` says that no server does, and start none: in a folder no daemon has
 /// made yet, and in one that a daemon that crashed left its socket in.

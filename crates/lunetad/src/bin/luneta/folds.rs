@@ -47,13 +47,8 @@ impl Folds {
     /// The folds every luneta on the host shares, as they stand.
     pub fn shared() -> Self {
         match state::path("folded") {
-            Some(dir) => Folds::within(dir),
-            None => Folds {
-                sharing: Sharing::Lost(
-                    "neither XDG_STATE_HOME nor HOME is set, to keep them in".to_owned(),
-                ),
-                ..Folds::default()
-            },
+            Ok(dir) => Folds::within(dir),
+            Err(unset) => Folds { sharing: Sharing::Lost(unset.to_string()), ..Folds::default() },
         }
     }
 

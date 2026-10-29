@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::log;
+
 /// How long a folder is let settle after a change before it is read: a file
 /// written in a few pieces makes a word for each, and one read covers them all.
 const SETTLE: Duration = Duration::from_millis(25);
@@ -164,7 +166,7 @@ impl Troubles {
     /// or has been said in this one.
     pub fn say(&mut self, what: String) {
         if !self.said.contains(&what) && !self.now.contains(&what) {
-            eprintln!("lunetad: {what}");
+            log::say(&what);
         }
         self.now.insert(what);
     }
