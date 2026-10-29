@@ -1,6 +1,8 @@
 //! A pull request's link, pasted in luneta, and where the menu it opens
 //! goes for it: a worktree of the pull request, in a tab of the session that
-//! works in its repository, or the same with an agent on a review of it.
+//! works in its repository, or the same with an agent on a review of it. An
+//! issue's link opens it as well, for a worktree of a branch of its own, or
+//! the same with an agent on the issue.
 //!
 //! luneta finds that session as a key of the menu is pressed: the one its
 //! zellij is in, where a pane of it works in the repository, or else another
@@ -10,9 +12,12 @@
 //! forks among its remotes, and that is the one its pull requests are of.
 //! `wt add` makes the worktree, and says where it is, or where one of the
 //! pull request's branch is already, in a repository wt cloned: in one git
-//! cloned, wt would make it in its `.git`. A pane that has that branch
-//! checked out, as the daemon says by the pull request's page, or that works
-//! in the worktree `wt add` says, is where a key goes instead of a new tab.
+//! cloned, wt would make it in its `.git`. An issue's branch is `issue-123`,
+//! which wt makes from origin's default branch where there is none yet, so
+//! a second paste of the link finds the first's worktree. A pane that has the
+//! pull request's branch checked out, as the daemon says by its page, or that
+//! works in the worktree `wt add` says, is where a key goes instead of a new
+//! tab.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -42,18 +47,40 @@ const MAKING: Duration = Duration::from_mins(3);
 /// in a directory: it reads files.
 const ANSWER: Duration = Duration::from_secs(5);
 
-/// A pull request on GitHub, as its link names it.
+/// A pull request or an issue on GitHub, as its link names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     owner: String,
     name: String,
+    kind: Kind,
     number: NonZeroU32,
 }
 
+/// What a link is the page of: a pull request, or an issue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Pull,
+    Issue,
+}
+
+impl Kind {
+    /// Each, as a link may name it.
+    const ALL: [Kind; 2] = [Kind::Pull, Kind::Issue];
+
+    /// What its link names it by, after the repository.
+    const fn path(self) -> &'static str {
+        match self {
+            Kind::Pull => "pull",
+            Kind::Issue => "issues",
+        }
+    }
+}
+
 impl Link {
-    /// The pull request `text` is the link of, but for the space around it:
-    /// of the pull request itself or of a page of it, as its files or a
-    /// comment on it, with or without `https://`. None for any other text.
+    /// The pull request or the issue `text` is the link of, but for the space
+    /// around it: of it itself or of a page of it, as a pull request's files
+    /// or a comment on it, with or without `https://`. None for any other
+    /// text.
     pub fn parse(text: &str) -> Option<Link> {
         let text = text.trim();
         let rest = text.strip_prefix("https://").or_else(|| text.strip_prefix("http://"));
@@ -63,18 +90,33 @@ impl Link {
         let path = rest.split(['?', '#']).next().unwrap_or_default();
         let mut parts = path.split('/');
         let (owner, name) = (parts.next()?, parts.next()?);
-        let (pull, number) = (parts.next()?, parts.next()?);
+        let (page, number) = (parts.next()?, parts.next()?);
+        let kind = Kind::ALL.into_iter().find(|kind| kind.path() == page)?;
         let digits = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
-        if pull != "pull" || !named(owner) || !named(name) || !digits {
+        if !named(owner) || !named(name) || !digits {
             return None;
         }
         let number = number.parse().ok()?;
-        Some(Link { owner: owner.to_owned(), name: name.to_owned(), number })
+        Some(Link { owner: owner.to_owned(), name: name.to_owned(), kind, number })
     }
 
-    /// Its link, as `wt add` and the review take it.
+    /// Its link, as the agent on it takes it.
     pub fn url(&self) -> String {
-        format!("https://{GITHUB}/{}/{}/pull/{}", self.owner, self.name, self.number)
+        let Link { owner, name, kind, number } = self;
+        format!("https://{GITHUB}/{owner}/{name}/{}/{number}", kind.path())
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// What `wt add` takes for it: a pull request's link, for wt to find its
+    /// branch, or an issue's branch, `issue-123`.
+    fn wt(&self) -> String {
+        match self.kind {
+            Kind::Pull => self.url(),
+            Kind::Issue => format!("issue-{}", self.number),
+        }
     }
 
     /// What its tab is named, and the menu calls it: `#123`.
@@ -87,10 +129,11 @@ impl Link {
         format!("{}/{}", self.owner, self.name)
     }
 
-    /// Whether `other` is the same pull request, case aside in the names of
-    /// its repository, as GitHub takes them.
+    /// Whether `other` is the same pull request or issue, case aside in the
+    /// names of its repository, as GitHub takes them.
     pub fn is(&self, other: &Link) -> bool {
-        self.number == other.number
+        self.kind == other.kind
+            && self.number == other.number
             && self.owner.eq_ignore_ascii_case(&other.owner)
             && self.name.eq_ignore_ascii_case(&other.name)
     }
@@ -259,9 +302,9 @@ pub struct Ready {
 }
 
 /// Finds where a key of the menu numbered `menu` goes for the pull request
-/// `link`, among the panes the sidebar knows, `worked`, and has `wt add` make
-/// the worktree, on a thread of its own, and hands back what it found, or why
-/// it found nothing.
+/// or the issue `link`, among the panes the sidebar knows, `worked`, and has
+/// `wt add` make the worktree, on a thread of its own, and hands back what it
+/// found, or why it found nothing.
 pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
@@ -457,13 +500,13 @@ fn said(git: &mut Command) -> Option<String> {
     Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
 }
 
-/// Has `wt add` make a worktree of the pull request `link` in the repository
-/// `dir` is in, and says where it is, or where one of the pull request's
+/// Has `wt add` make a worktree of the pull request or the issue `link` in
+/// the repository `dir` is in, and says where it is, or where one of its
 /// branch is already: the last line wt prints, as the real path of the
 /// directory it names. Or why it made none, as wt says it.
 fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     let mut wt = Command::new("wt");
-    lunetad::local_git(wt.args(["add", "--repo", dir, &link.url()]));
+    lunetad::local_git(wt.args(["add", "--repo", dir, &link.wt()]));
     // It fetches across the network, by ssh as like as not.
     let ran = program::run_alone(&mut wt, MAKING)
         .map_err(|error| format!("wt add could not be run: {error}"))?;
@@ -502,7 +545,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Found, Link, Remote, Repository, Worked, cloned, failure, found, no_clone, remote,
+        Found, Kind, Link, Remote, Repository, Worked, cloned, failure, found, no_clone, remote,
     };
     use crate::sidebar::Listed;
 
@@ -528,6 +571,10 @@ mod tests {
     /// One git cloned, that is the pull request's by its origin.
     const BY_GIT: Repository = Repository { by: Remote::Origin, bare: false };
 
+    fn issue() -> Link {
+        Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link")
+    }
+
     #[test]
     fn a_link_is_of_a_pull_request_or_of_a_page_of_one() {
         let pulled = |text: &str| Link::parse(text).map(|link| (link.to_string(), link.url()));
@@ -547,7 +594,7 @@ mod tests {
             assert_eq!(pulled(text), cdk, "{text:?}");
         }
         for text in [
-            "https://github.com/cashubtc/cdk/issues/2736",
+            "https://github.com/cashubtc/cdk/discussions/2736",
             "https://github.com/cashubtc/cdk/pull/0",
             "https://github.com/cashubtc/cdk/pull/+1",
             "https://github.com/cashubtc/cdk/pull/",
@@ -561,6 +608,28 @@ mod tests {
             assert_eq!(pulled(text), None, "{text:?}");
         }
         assert_eq!(link().tab(), "#2736");
+        assert_eq!(link().wt(), "https://github.com/cashubtc/cdk/pull/2736");
+    }
+
+    /// An issue's link names it as a pull request's does, but for `issues`:
+    /// the agent takes it, and `wt add` the branch luneta has it make, or
+    /// find where a paste made it before.
+    #[test]
+    fn a_link_is_of_an_issue_or_of_a_page_of_one() {
+        for text in [
+            "https://github.com/cashubtc/cdk/issues/2736",
+            "github.com/CashuBTC/cdk/issues/2736#issuecomment-1\n",
+        ] {
+            let link = Link::parse(text).expect("an issue's link");
+            assert_eq!(link.kind(), Kind::Issue, "{text:?}");
+            assert!(link.is(&issue()), "{text:?}");
+        }
+        assert_eq!(issue().to_string(), "cashubtc/cdk#2736");
+        assert_eq!(issue().url(), "https://github.com/cashubtc/cdk/issues/2736");
+        assert_eq!(issue().tab(), "#2736");
+        assert_eq!(issue().wt(), "issue-2736");
+        assert!(!issue().is(&link()));
+        assert_eq!(Link::parse("https://github.com/cashubtc/cdk/issues/0"), None);
     }
 
     /// ssh's config gives GitHub another name, `github-work`, as its `Host`
@@ -660,6 +729,8 @@ mod tests {
         assert_eq!(found(&link(), &checked_out, remotes), Some(Found::There(2)));
         let fork = [worked("cdk", 1, "/cdk/main", Some(&fork), true)];
         assert_eq!(found(&link(), &fork, remotes), Some(Found::Session(0)));
+        // No pane has an issue checked out, whatever pull request it has.
+        assert_eq!(found(&issue(), &checked_out, remotes), Some(Found::Session(0)));
     }
 
     /// Of the directories zoxide knows, the clone wt made that is the pull

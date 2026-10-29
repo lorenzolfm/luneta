@@ -91,8 +91,8 @@ pub enum Event {
     /// The skills the directory of the menu numbered `menu` can run, or why
     /// the finder found none.
     Skills { menu: u64, skills: Result<Vec<Skill>, String> },
-    /// Where the key of the menu numbered `menu`, for a pull request, goes,
-    /// with the worktree made, or why luneta found nothing.
+    /// Where the key of the menu numbered `menu`, for a pull request or an
+    /// issue, goes, with the worktree made, or why luneta found nothing.
     Pulled { menu: u64, ready: Result<Ready, String> },
     /// What came of the brief numbered `number`.
     Briefed { number: u64, written: Written },
@@ -963,9 +963,10 @@ impl App {
         match input {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
-            // A pull request's link pasted with the sidebar's keys, or in the
-            // menu over zellij, opens the menu for it. zellij keeps every
-            // paste it has the keys for, links too, for the agents in it.
+            // A pull request's or an issue's link pasted with the sidebar's
+            // keys, or in the menu over zellij, opens the menu for it. zellij
+            // keeps every paste it has the keys for, links too, for the
+            // agents in it.
             Input::Paste(text) => match &mut self.focus.over {
                 Some(Over::Ask(ask)) => ask.paste(&text),
                 Some(Over::Picker(picker)) => picker.paste(&text),

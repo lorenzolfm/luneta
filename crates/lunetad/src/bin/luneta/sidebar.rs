@@ -569,8 +569,9 @@ pub enum Asked {
         name: String,
         command: Vec<String>,
     },
-    /// Find where a key of the menu numbered `menu`, for the pull request
-    /// `link`, goes among the panes `worked`, and have its worktree made.
+    /// Find where a key of the menu numbered `menu`, for the pull request or
+    /// the issue `link`, goes among the panes `worked`, and have its worktree
+    /// made.
     Pull { menu: u64, link: Link, worked: Vec<Worked> },
     /// Find the skills that `cwd` can run, for the menu numbered `menu`.
     Find { menu: u64, cwd: String },
@@ -1787,10 +1788,10 @@ impl Sidebar {
         Ok(())
     }
 
-    /// Opens the menu for the pull request `text` is the link of, if it is
-    /// one, in the place of the menu open, over zellij or at the bottom of
-    /// the sidebar, or else at the bottom, for the row highlighted. Other text
-    /// does nothing, as a paste did before.
+    /// Opens the menu for the pull request or the issue `text` is the link
+    /// of, if it is one, in the place of the menu open, over zellij or at the
+    /// bottom of the sidebar, or else at the bottom, for the row highlighted.
+    /// Other text does nothing, as a paste did before.
     pub fn paste(&mut self, text: &str) {
         let Some(link) = Link::parse(text) else {
             return;

@@ -524,6 +524,14 @@ in one git made, it would make it in the clone's `.git`. The menu waits while
 wt fetches, and says why when it makes nothing; with no clone wt made, it says
 to `wt clone` one first. A paste while zellij has the keys stays zellij's.
 
+An issue's link, pasted the same way, opens the menu for that issue. `w`
+makes a worktree of a branch for it, `issue-123`, which wt makes from origin's
+default branch where there is none yet, and opens a tab there, named `#123`,
+in the session that works in its repository, found as for a pull request. `t`
+does the same and starts Claude Code in the tab, told to `Tackle` the link.
+Pasted again, the link finds the worktree the first paste made: `w` takes
+zellij to a pane that works in it, and `t` starts the agent beside it.
+
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no
 topic, and such a row goes by its tab, if you named it, or else by the
@@ -820,8 +828,8 @@ any `claude -p` does, so `claude --resume` lists it there.
 | **zellij 0.45.0** | | everything |
 | [`claude`](https://claude.com/claude-code) | optional | the menu, the brief and the ask box |
 | `git` | optional | the branch in the name of an agent the menu starts |
-| [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's repository that no session works in |
-| [`wt`](https://github.com/lorenzolfm/wt) | optional | a worktree of a pull request you paste in [luneta's sidebar](#luneta-in-your-terminal) |
+| [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's or issue's repository that no session works in |
+| [`wt`](https://github.com/lorenzolfm/wt) | optional | a worktree of a pull request or an issue you paste in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
