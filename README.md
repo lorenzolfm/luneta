@@ -1037,8 +1037,14 @@ beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
 It lives as long as zellij does, not as long as a client is attached: once
 zellij has had no session for 30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A
-newer one they keep, so that two versions in use at once never take turns at
+newer one they keep, so that two builds in use at once never take turns at
 it: after a rollback, the newer daemon runs on until zellij's last session ends.
+Older is of an earlier release, or of the same one and built from a commit
+made before theirs, as the flake stamps each build it makes: every commit is
+of one release until the next. A cargo build has no stamp, so it keeps the
+daemon an install of its release started, and an install stops one a cargo
+build started. `luneta info` and `lunetad --version` say the stamp after the
+release, as `0.2.2+1793301121`.
 One that reads zellij's sessions in another folder than their zellij keeps
 them in, as one started with another `ZELLIJ_SOCKET_DIR` does, they neither
 ask nor stop, and say so: one of theirs in its place would leave out the

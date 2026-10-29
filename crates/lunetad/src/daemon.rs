@@ -32,7 +32,7 @@ use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsR
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, git, github, metadata, panes, shells, watch, zellij};
+use crate::{claude, client, git, github, metadata, panes, release, shells, watch, zellij};
 
 /// How often a folder is read again with no word that it changed: for an agent
 /// that crashed, which leaves its file as it was. zellij is asked about each
@@ -271,11 +271,12 @@ struct Host {
 impl Daemon for Host {
     async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
         Ok(Response::new(InfoResponse {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: release::VERSION.to_owned(),
             pid: std::process::id(),
             started_at: Some(self.started.into()),
             zellij_folder: Some(self.sockets.as_os_str().as_bytes().to_vec()),
             claude_folder: self.claude_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
+            built: release::BUILT,
         }))
     }
 

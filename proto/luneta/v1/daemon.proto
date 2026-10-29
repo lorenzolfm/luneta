@@ -292,7 +292,9 @@ enum PullRequestState {
 message InfoRequest {}
 
 message InfoResponse {
-  // The version of luneta the daemon was built from.
+  // The release of luneta the daemon was built from, as Cargo.toml names it.
+  // Every commit is of one release until the next, so `built` is what tells
+  // two builds of one release apart.
   string version = 1;
   // Its process id, by which a client tells one daemon from the next across a
   // restart.
@@ -309,6 +311,12 @@ message InfoResponse {
   // folder alone, and their transcripts are in it. Absent when its environment
   // named none, and from a daemon older than this field.
   optional bytes claude_folder = 5;
+  // When the commit it was built from was made, in seconds since the epoch,
+  // as the flake stamps each build of its own. Absent from a cargo build of a
+  // checkout, and from a daemon older than this field: either is older than
+  // any stamped build of its `version`. `version` stays the release alone, as
+  // a client older than this field reads it.
+  optional uint64 built = 6;
 }
 
 message ListAgentsRequest {}

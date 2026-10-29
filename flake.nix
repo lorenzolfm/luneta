@@ -10,6 +10,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       rust-overlay,
       crane,
@@ -118,6 +119,13 @@
             daemon
             // {
               cargoArtifacts = daemonDeps;
+
+              # When the commit this builds was made, which luneta orders two builds of one
+              # release by: every commit is of one release until the next, and a luneta
+              # replaces only a daemon older than it. Here and not in `daemon`, which the
+              # dependencies' derivation shares: a stamp there would build every crate in
+              # Cargo.lock again on each commit.
+              LUNETA_BUILT = toString self.lastModified;
 
               # The protocol's crate too: what the daemon reads of git is read there,
               # and tested there.

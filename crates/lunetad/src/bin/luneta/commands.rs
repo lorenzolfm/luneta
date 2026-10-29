@@ -20,6 +20,7 @@ use lunetad::api::{
     Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::folder::SOCKET;
+use lunetad::release;
 use prost::Message as _;
 use tonic::transport::Channel;
 
@@ -148,11 +149,10 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
 async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let info = daemon.info(InfoRequest {}).await?.into_inner();
     let started = info.started_at.and_then(|at| SystemTime::try_from(at).ok());
+    let build = release::spelled(&info.version, info.built);
     match started.and_then(|at| at.elapsed().ok()) {
-        Some(up) => {
-            println!("lunetad {} (pid {}), up {}", info.version, info.pid, span(up.as_secs()));
-        },
-        None => println!("lunetad {} (pid {})", info.version, info.pid),
+        Some(up) => println!("lunetad {build} (pid {}), up {}", info.pid, span(up.as_secs())),
+        None => println!("lunetad {build} (pid {})", info.pid),
     }
     Ok(())
 }
