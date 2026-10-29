@@ -155,7 +155,7 @@ pub struct Worked {
     pub session: Listed,
     pub pane: u32,
     pub dir: String,
-    pub pull: Option<u32>,
+    pub pull: Option<NonZeroU32>,
     pub here: bool,
 }
 
@@ -218,10 +218,8 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready, String> {
     };
     let worktree = worktree(&repository, link)?;
     // The worktree of the pull request's branch, where it was one already,
-    // may have a pane that works in it.
-    let real = fs::canonicalize(&worktree).ok();
-    let real = real.as_deref().and_then(Path::to_str).unwrap_or(&worktree);
-    let in_it = worked.iter().filter(|it| it.dir == worktree || it.dir == real);
+    // may have a pane that works in it, as the kernel says where.
+    let in_it = worked.iter().filter(|it| it.dir == worktree);
     let at = match in_it.min_by_key(|it| !it.here) {
         Some(Worked { session, pane, .. }) => At::There { session: session.clone(), pane: *pane },
         None => at,
@@ -257,7 +255,7 @@ fn found(
         };
         let rank = (!it.here, by, at);
         let best = |was: Option<(bool, Remote, usize)>| Some(was.map_or(rank, |was| was.min(rank)));
-        if it.pull == Some(link.number.get()) {
+        if it.pull == Some(link.number) {
             there = best(there);
         }
         session = best(session);
@@ -358,8 +356,8 @@ fn said(git: &mut Command) -> Option<String> {
 
 /// Has `wt add` make a worktree of the pull request `link` in the repository
 /// `dir` is in, and says where it is, or where one of the pull request's
-/// branch is already: the last line wt prints. Or why it made none, as wt
-/// says it.
+/// branch is already: the last line wt prints, as the real path of the
+/// directory it names. Or why it made none, as wt says it.
 fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     let mut wt = Command::new("wt");
     lunetad::local_git(wt.args(["add", "--repo", dir, &link.url()]));
@@ -368,14 +366,22 @@ fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
-            let path = printed.lines().map(str::trim).rfind(|line| !line.is_empty());
-            path.map(str::to_owned).ok_or_else(|| "wt add said no worktree".to_owned())
+            let said = printed.lines().map(str::trim).rfind(|line| !line.is_empty());
+            let said = said.ok_or_else(|| "wt add said no worktree".to_owned())?;
+            directory(said).ok_or_else(|| format!("wt add said {said}, which is no directory"))
         },
         Ran::Ended { status, stderr, .. } => {
             Err(failure(&String::from_utf8_lossy(&stderr)).unwrap_or(format!("wt add: {status}")))
         },
         Ran::Stuck => Err(format!("wt add took longer than {} minutes", MAKING.as_secs() / 60)),
     }
+}
+
+/// The real path of the directory `path` names, where it names one, as the
+/// kernel says where a pane works.
+fn directory(path: &str) -> Option<String> {
+    let real = fs::canonicalize(path).ok().filter(|real| real.is_dir())?;
+    real.into_os_string().into_string().ok()
 }
 
 /// What wt said as it failed, on stderr after what it said of its progress:
@@ -388,6 +394,7 @@ fn failure(stderr: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::time::{Duration, SystemTime};
 
     use super::{Found, Link, Remote, Worked, cloned, failure, found, remote, repository_of};
@@ -402,6 +409,7 @@ mod tests {
     }
 
     fn worked(session: &str, pane: u32, dir: &str, pull: Option<u32>, here: bool) -> Worked {
+        let pull = pull.map(|number| NonZeroU32::new(number).expect("a pull request's number"));
         Worked { session: listed(session), pane, dir: dir.to_owned(), pull, here }
     }
 

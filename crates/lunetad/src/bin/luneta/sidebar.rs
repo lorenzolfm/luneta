@@ -565,10 +565,19 @@ pub enum Asked {
     OpenThere { menu: u64, place: Place, open: Open },
     /// Take zellij's client to a session it makes, that starts in `cwd`.
     Start { session: SessionName, cwd: String },
-    /// Take zellij's client to a session it makes, that starts in `cwd`, and
-    /// have zellij open this once it is there, for the menu numbered `menu`,
-    /// which takes its client there once zellij says what it opened.
-    Make { menu: u64, session: SessionName, cwd: String, open: Open },
+    /// Take zellij's client to a session it makes, `session`, that starts in
+    /// `cwd`, and have zellij open a tab of it once it is there, in `tab_cwd`,
+    /// named `name`, with `command` in it, or your shell for none, for the
+    /// menu numbered `menu`, which takes its client there once zellij says
+    /// what it opened.
+    Make {
+        menu: u64,
+        session: SessionName,
+        cwd: String,
+        tab_cwd: String,
+        name: String,
+        command: Vec<String>,
+    },
     /// Find where a key of the menu numbered `menu`, for the pull request
     /// `link`, goes among the panes `worked`, and have its worktree made.
     Pull { menu: u64, link: Link, worked: Vec<Worked> },
@@ -1217,11 +1226,7 @@ impl Sidebar {
         let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
             host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
-        let pull_requests: HashMap<&str, PullRequest> = host
-            .pull_requests
-            .iter()
-            .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
-            .collect();
+        let pull_requests = pull_requests(host);
         let (mut sessions, unlisted) = oldest_first(&host.sessions);
         self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
         let (term, seek) = match &mut self.search {
@@ -1854,13 +1859,7 @@ impl Sidebar {
             },
             Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
-                let open = Open::Tab {
-                    session: session.to_string(),
-                    cwd: tab_cwd,
-                    name: Some(name),
-                    command,
-                };
-                Asked::Make { menu: number, session, cwd, open }
+                Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
             Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
             Wants::Plan(Scope::Session) => {
@@ -1899,8 +1898,7 @@ impl Sidebar {
         };
         let here = self.here();
         let agents = seated(&host.agents, &host.sessions);
-        let pulls: HashMap<&str, u32> =
-            host.pull_requests.iter().map(|it| (it.dir.as_str(), it.number)).collect();
+        let pulls = pull_requests(host);
         let (mut sessions, _) = oldest_first(&host.sessions);
         self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
         let mut worked = Vec::new();
@@ -1920,7 +1918,7 @@ impl Sidebar {
                     session: listed.clone(),
                     pane: pane.id,
                     dir: dir.to_owned(),
-                    pull: pulls.get(dir).copied(),
+                    pull: pulls.get(dir).map(|it| it.number),
                     here: here == Some(session.name.as_str()),
                 });
             }
@@ -2747,6 +2745,17 @@ fn clients<'a>(host: Option<&'a Host>, name: &str) -> Option<&'a [Client]> {
         return None;
     };
     session.clients.as_ref().map(|clients| clients.clients.as_slice())
+}
+
+/// The pull request of the branch checked out in each directory the daemon
+/// says one of, by the directory: as the rows show it, and as a key of the
+/// menu for one finds where it goes. None of one with no number or state, or
+/// a state of a newer daemon's.
+fn pull_requests(host: &Host) -> HashMap<&str, PullRequest> {
+    host.pull_requests
+        .iter()
+        .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
+        .collect()
 }
 
 /// The sessions the daemon lists, as the sidebar tells them apart, oldest
@@ -5051,16 +5060,20 @@ mod tests {
         let worked = vec![
             worked(listed("older", 10), 1, "/w/luneta/main", None, true),
             worked(listed("older", 10), 2, "/w/c", None, true),
-            worked(listed("newer", 20), 1, "/w/b", Some(5), false),
+            worked(listed("newer", 20), 1, "/w/b", NonZeroU32::new(5), false),
         ];
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Pull { menu: 1, link, worked });
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
         let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
-        let (cwd, name) = ("/w/n/feat".to_owned(), Some("#5".to_owned()));
-        let tab = Open::Tab { session: "newer-2".to_owned(), cwd, name, command: Vec::new() };
-        let made = session_name("newer-2");
-        let asked = Asked::Make { menu: 1, session: made, cwd: "/w/n".to_owned(), open: tab };
+        let asked = Asked::Make {
+            menu: 1,
+            session: session_name("newer-2"),
+            cwd: "/w/n".to_owned(),
+            tab_cwd: "/w/n/feat".to_owned(),
+            name: "#5".to_owned(),
+            command: Vec::new(),
+        };
         assert_eq!(sidebar.pulled(1, Ok(ready)), asked);
         if let Some(host) = &mut sidebar.host {
             host.sessions.push(session("newer-2", 30, vec![pane(1, 0, "/w/n", "fish")]));

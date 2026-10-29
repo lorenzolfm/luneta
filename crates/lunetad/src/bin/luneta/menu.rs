@@ -282,6 +282,14 @@ impl Pull {
             Pull::Review => REVIEW,
         }
     }
+
+    /// The one `key` presses, if any: its key, with no modifier but `Shift`.
+    fn pressed(key: &KeyEvent) -> Option<Pull> {
+        let KeyCode::Char(c) = key.code else {
+            return None;
+        };
+        Pull::ALL.into_iter().find(|pull| bare(key) && pull.key() == c)
+    }
 }
 
 enum Entry {
@@ -301,7 +309,7 @@ enum Entry {
     /// A command of the sidebar's own, which the legend lists beside the
     /// menu's keys.
     Command(Command),
-    /// A key of the menu for a pull request.
+    /// A key of the menu for a pull request, which that menu shows.
     Pull(Pull),
     /// The key that opens the search over the skills.
     Search,
@@ -341,8 +349,6 @@ enum Pressed {
     Brief(brief::Scope),
     /// Opens the ask box.
     Ask,
-    /// Has the pull request's worktree made, or its review started.
-    Pull(Pull),
     /// Closes the menu.
     Close,
     /// Nothing: the group open has no such key.
@@ -394,13 +400,6 @@ impl Keys {
                 entries: brief::Scope::ALL.into_iter().map(Entry::Brief).collect(),
             },
         ];
-        Keys { root, open: Vec::new(), search: None }
-    }
-
-    /// The keys of the menu for a pull request: `w`, a worktree of it, and
-    /// `r`, a review.
-    fn pull() -> Self {
-        let root = Pull::ALL.into_iter().map(Entry::Pull).collect();
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -474,9 +473,9 @@ impl Keys {
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
-            Entry::Pull(pull) => return Pressed::Pull(*pull),
-            // The legend only shows, and runs nothing.
-            Entry::Command(_) => return Pressed::Nothing,
+            // The legend only shows, and runs nothing, as does the menu for a
+            // pull request, which takes its keys itself.
+            Entry::Command(_) | Entry::Pull(_) => return Pressed::Nothing,
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -696,10 +695,6 @@ pub struct Menu {
     /// answers for it carries.
     number: u64,
     target: Target,
-    /// The pull request it is for, where a paste opened it: its keys are
-    /// those of `Keys::pull`, and once luneta has found where they go, its
-    /// target is there.
-    link: Option<Link>,
     stage: Stage,
 }
 
@@ -716,13 +711,24 @@ enum Stage {
     /// zellij opens what a key asked for, for luneta to take its client
     /// there. Keys do nothing but close the menu.
     Opening(Keys),
-    /// A key of the menu for a pull request waits for luneta to find where
-    /// it goes, and for `wt add` to make the worktree. Keys do nothing but
-    /// close the menu.
-    Pulling { keys: Keys, pull: Pull },
-    /// zellij makes the session `session`, and opens a tab of it, for luneta
-    /// to take its client there. Keys do nothing but close the menu.
-    Making { keys: Keys, session: SessionName },
+    /// The menu for the pull request `link`, which a paste opened, at `step`.
+    /// Once luneta has found where its keys go, its target is there.
+    Pull { link: Link, step: Step },
+}
+
+/// How far the menu for a pull request is, with its keys, `w` and `r`.
+enum Step {
+    /// Its keys wait for one.
+    Choosing,
+    /// The key `pull` waits for luneta to find where it goes, and for `wt
+    /// add` to make the worktree. Keys do nothing but close the menu.
+    Pulling(Pull),
+    /// zellij opens what the key asked for, for luneta to take its client
+    /// there. Keys do nothing but close the menu.
+    Opening,
+    /// zellij makes this session, and opens a tab of it, for luneta to take
+    /// its client there. Keys do nothing but close the menu.
+    Making(SessionName),
 }
 
 impl Menu {
@@ -735,7 +741,7 @@ impl Menu {
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
-        let menu = Menu { number, target, link: None, stage: Stage::Choosing(keys) };
+        let menu = Menu { number, target, stage: Stage::Choosing(keys) };
         Some(match key {
             Some(key) => menu.key(&KeyEvent::from(KeyCode::Char(key))),
             None => Did::Stays(menu, Wants::Nothing),
@@ -745,13 +751,13 @@ impl Menu {
     /// The menu numbered `number` for `target`, on its first group.
     pub fn new(number: u64, target: Target) -> Menu {
         let keys = Keys::new(target.deletes());
-        Menu { number, target, link: None, stage: Stage::Choosing(keys) }
+        Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
     /// The menu numbered `number` for the pull request `link`, pasted with
     /// the menu for `target` open, or the row highlighted.
     pub fn pull(number: u64, target: Target, link: Link) -> Menu {
-        Menu { number, target, link: Some(link), stage: Stage::Choosing(Keys::pull()) }
+        Menu { number, target, stage: Stage::Pull { link, step: Step::Choosing } }
     }
 
     pub fn number(&self) -> u64 {
@@ -771,21 +777,23 @@ impl Menu {
             | Stage::Choosing(_)
             | Stage::Asking { .. }
             | Stage::Opening(_)
-            | Stage::Pulling { .. }
-            | Stage::Making { .. } => None,
+            | Stage::Pull { .. } => None,
         }
     }
 
     /// Whether the menu waits for zellij to open what a key asked for.
     pub fn opening(&self) -> bool {
-        matches!(self.stage, Stage::Opening(_) | Stage::Making { .. })
+        matches!(
+            self.stage,
+            Stage::Opening(_) | Stage::Pull { step: Step::Opening | Step::Making(_), .. }
+        )
     }
 
     /// The session zellij makes for what a key asked for, while the menu
     /// waits for it to open a tab of it.
     pub fn making(&self) -> Option<&SessionName> {
         match &self.stage {
-            Stage::Making { session, .. } => Some(session),
+            Stage::Pull { step: Step::Making(session), .. } => Some(session),
             _ => None,
         }
     }
@@ -793,7 +801,7 @@ impl Menu {
     /// Whether a key of the menu for a pull request waits for luneta to find
     /// where it goes.
     pub fn pulling(&self) -> bool {
-        matches!(self.stage, Stage::Pulling { .. })
+        matches!(self.stage, Stage::Pull { step: Step::Pulling(_), .. })
     }
 
     /// What `key` does to the menu, and what that leaves the sidebar to do.
@@ -801,9 +809,9 @@ impl Menu {
     /// directory it works in, and the menu waits for zellij to say it has,
     /// but for a session, which leaves the menu done.
     pub fn key(self, key: &KeyEvent) -> Did {
-        let Menu { number, target, link, stage } = self;
+        let Menu { number, target, stage } = self;
         let stays = |stage: Stage, wants: Wants| {
-            Did::Stays(Menu { number, target: target.clone(), link: link.clone(), stage }, wants)
+            Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
         match stage {
             Stage::Choosing(mut keys) => match keys.key(key) {
@@ -844,26 +852,27 @@ impl Menu {
                     Did::Closed(Done::Brief { scope, place: target.place.clone() })
                 },
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
-                Pressed::Pull(pull) => match &link {
-                    Some(pulled) => {
-                        let wants = Wants::Pull(pulled.clone());
-                        stays(Stage::Pulling { keys, pull }, wants)
-                    },
-                    None => stays(Stage::Choosing(keys), Wants::Nothing),
-                },
             },
-            Stage::Planning { .. }
-            | Stage::Opening(_)
-            | Stage::Pulling { .. }
-            | Stage::Making { .. }
-                if closes(key) =>
+            Stage::Planning { .. } | Stage::Opening(_) | Stage::Pull { .. } if closes(key) => {
+                Did::Closed(Done::Nothing)
+            },
+            // `Backspace` goes out of the menu from its first group, and the
+            // menu for a pull request has no other.
+            Stage::Pull { step: Step::Choosing, .. }
+                if key.code == KeyCode::Backspace && bare(key) =>
             {
                 Did::Closed(Done::Nothing)
             },
-            stage @ (Stage::Planning { .. }
-            | Stage::Opening(_)
-            | Stage::Pulling { .. }
-            | Stage::Making { .. }) => stays(stage, Wants::Nothing),
+            Stage::Pull { link, step: Step::Choosing } => match Pull::pressed(key) {
+                Some(pull) => {
+                    let wants = Wants::Pull(link.clone());
+                    stays(Stage::Pull { link, step: Step::Pulling(pull) }, wants)
+                },
+                None => stays(Stage::Pull { link, step: Step::Choosing }, Wants::Nothing),
+            },
+            stage @ (Stage::Planning { .. } | Stage::Opening(_) | Stage::Pull { .. }) => {
+                stays(stage, Wants::Nothing)
+            },
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
                 Answer::Yes => {
                     let planning = Stage::Planning { keys, delete, agreed: Some(plan) };
@@ -884,9 +893,9 @@ impl Menu {
     /// same agents, doing the same. Once that changed while you read, it
     /// asks again, while an agent at work would end.
     pub fn planned(self, plan: Result<Plan, String>) -> Did {
-        let Menu { number, target, link, stage } = self;
+        let Menu { number, target, stage } = self;
         let Stage::Planning { keys, delete, agreed } = stage else {
-            return Did::Stays(Menu { number, target, link, stage }, Wants::Nothing);
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let plan = match plan {
             Ok(plan) => plan,
@@ -895,7 +904,7 @@ impl Menu {
         let asks = if agreed.as_ref() == Some(&plan) { None } else { plan.question() };
         if let Some(asks) = asks {
             let stage = Stage::Asking { keys, delete, plan, asks };
-            return Did::Stays(Menu { number, target, link, stage }, Wants::Nothing);
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
         Did::Closed(Done::Act(plan.act))
     }
@@ -909,40 +918,39 @@ impl Menu {
     /// that tab. The menu is then for where it opens that, and waits for
     /// zellij to open it.
     pub fn pulled(self, ready: Result<Ready, String>) -> Did {
-        let Menu { number, target, link, stage } = self;
-        let (keys, pull, pulled) = match (stage, &link) {
-            (Stage::Pulling { keys, pull }, Some(pulled)) => (keys, pull, pulled.clone()),
-            (stage, _) => return Did::Stays(Menu { number, target, link, stage }, Wants::Nothing),
+        let Menu { number, target, stage } = self;
+        let Stage::Pull { link, step: Step::Pulling(pull) } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let Ready { at, worktree, branch } = match ready {
             Ok(ready) => ready,
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {pulled}: {why}"))),
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {link}: {why}"))),
         };
         let command = match pull {
             Pull::Worktree => Vec::new(),
-            Pull::Review => claude(&format!("{REVIEW} {}", pulled.url()), branch.as_deref()),
+            Pull::Review => claude(&format!("{REVIEW} {}", link.url()), branch.as_deref()),
         };
-        let opening = |place: Place, keys: Keys, opens: Opens| {
+        let opening = |place: Place, opens: Opens| {
             let target = Target { place, cwd: Some(worktree.clone()), branch: branch.clone() };
-            let menu = Menu { number, target, link: link.clone(), stage: Stage::Opening(keys) };
-            Did::Stays(menu, Wants::Open { cwd: worktree.clone(), opens })
+            let stage = Stage::Pull { link: link.clone(), step: Step::Opening };
+            Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
         };
         match (at, pull) {
             (At::There { session, pane }, Pull::Worktree) => {
                 Did::Closed(Done::Go(Place::Pane { session, pane }))
             },
             (At::There { session, pane }, Pull::Review) => {
-                opening(Place::Pane { session, pane }, keys, Opens::Pane { beside: pane, command })
+                opening(Place::Pane { session, pane }, Opens::Pane { beside: pane, command })
             },
             (At::Session { session, pane }, _) => {
-                let opens = Opens::Tab { name: Some(pulled.tab()), command };
-                opening(Place::Pane { session, pane }, keys, opens)
+                let opens = Opens::Tab { name: Some(link.tab()), command };
+                opening(Place::Pane { session, pane }, opens)
             },
             (At::Clone { cwd, name }, _) => {
-                let (session, tab_cwd, tab) = (name.clone(), worktree, pulled.tab());
+                let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
-                let stage = Stage::Making { keys, session: name };
-                Did::Stays(Menu { number, target, link, stage }, wants)
+                let stage = Stage::Pull { link, step: Step::Making(name) };
+                Did::Stays(Menu { number, target, stage }, wants)
             },
         }
     }
@@ -975,11 +983,10 @@ impl Menu {
     /// Whether the search box over the skills is open.
     fn searching(&self) -> bool {
         match &self.stage {
-            Stage::Choosing(keys)
-            | Stage::Planning { keys, .. }
-            | Stage::Opening(keys)
-            | Stage::Making { keys, .. } => keys.search.is_some(),
-            Stage::Asking { .. } | Stage::Pulling { .. } => false,
+            Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
+                keys.search.is_some()
+            },
+            Stage::Asking { .. } | Stage::Pull { .. } => false,
         }
     }
 
@@ -988,22 +995,19 @@ impl Menu {
     /// it, and says its repository where another says where its pane works.
     fn shown(&self, width: usize, body_room: usize) -> Shown {
         let inner = width.saturating_sub(1);
-        let right = match &self.link {
-            Some(link) => link.repository(),
-            None => self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default(),
-        };
-        let title = |keys: &Keys| self.link.as_ref().map_or_else(|| title(keys), Link::tab);
+        let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
         let (title, right, body, footer) = match &self.stage {
-            Stage::Pulling { .. } => {
-                let tab = self.link.as_ref().map(Link::tab).unwrap_or_default();
-                let making = format!("Making a worktree of {tab}…");
+            Stage::Pull { link, step: Step::Pulling(_) } => {
+                let making = format!("Making a worktree of {}…", link.tab());
                 let body = wrap(&making, width, Style::new().fg(NAME));
-                (tab, right, body, keys_line(width, &[("<ESC>", "Close")]))
+                (link.tab(), link.repository(), body, keys_line(width, &[("<ESC>", "Close")]))
             },
-            Stage::Choosing(keys)
-            | Stage::Planning { keys, .. }
-            | Stage::Opening(keys)
-            | Stage::Making { keys, .. } => {
+            Stage::Pull { link, step: Step::Choosing | Step::Opening | Step::Making(_) } => {
+                let body = Pull::ALL.map(|pull| entry_line(&Entry::Pull(pull), inner));
+                let footer = keys_line(width, &[("<ESC>", "Close")]);
+                (link.tab(), link.repository(), body.to_vec(), footer)
+            },
+            Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
                 if let Some(search) = &keys.search {
                     let moves = [("<↓↑>", "Move"), ("<ENTER>", "Start"), ("<ESC>", "Back")];
                     let body = search_lines(search, width, body_room);

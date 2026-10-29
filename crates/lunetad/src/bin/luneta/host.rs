@@ -58,7 +58,7 @@ use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::width::Width;
-use crate::zellij::{self, After, Arrival, Closes, Refuge, SessionName};
+use crate::zellij::{self, After, Arrival, Closes, Open, Refuge, SessionName};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -282,7 +282,9 @@ enum Coming {
 }
 
 /// luneta's client on its way to a session zellij makes for it, from the one
-/// it is in, until zellij titles luneta's terminal there.
+/// it is in, until zellij titles luneta's terminal there. Dropped before, as
+/// where zellij did not take it there, or luneta sent it elsewhere since, or
+/// it ended, what waits on its arrival hears that it did not come.
 struct Making {
     arrival: Arrival,
     /// When luneta takes the client for one zellij did not take there.
@@ -828,9 +830,6 @@ impl App {
             self.sidebar.notify("zellij did not take its client there".to_owned());
             let look = self.sidebar.stayed(making.arrival.look.number);
             self.look(look);
-            if let Some(after) = making.arrival.after {
-                after.done(false, &self.events);
-            }
         }
     }
 
@@ -1207,7 +1206,13 @@ impl App {
             },
             // The menu waits until zellij has opened it, and takes the keys
             // there with it.
-            Asked::Make { menu, session, cwd, open } => {
+            Asked::Make { menu, session, cwd, tab_cwd, name, command } => {
+                let open = Open::Tab {
+                    session: session.to_string(),
+                    cwd: tab_cwd,
+                    name: Some(name),
+                    command,
+                };
                 if !self.make(&session, &cwd, Some(After::Open(menu, open))) {
                     self.sidebar.close_menu();
                 }

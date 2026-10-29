@@ -469,6 +469,7 @@ pub fn start(
     match (then, after) {
         (Some(look), after) if runs(&to.0) != Some(true) => {
             run(command, Some(Then::Made(look.number)), events);
+            let after = after.map(|after| Pending::new(after, events));
             Some(Arrival { look, before: Before::Made, after })
         },
         (Some(look), after) => {
@@ -609,7 +610,7 @@ impl After {
 
     /// Does it, now that the client is there, or says why not when it did not
     /// come.
-    pub fn done(self, came: bool, events: &Sender<Event>) {
+    fn done(self, came: bool, events: &Sender<Event>) {
         match (self, came) {
             (After::Open(menu, open), came) => {
                 let opened = if came {
@@ -1112,7 +1113,38 @@ pub fn look(look: Look, events: &Sender<Event>) {
 pub struct Arrival {
     pub look: Look,
     pub before: Before,
-    pub after: Option<After>,
+    pub after: Option<Pending>,
+}
+
+/// What waits on luneta's client's arrival in a session zellij makes for it,
+/// done once: as the client comes, or else as luneta stops waiting on it,
+/// however it stops, as it drops it, so that what waits hears either way.
+pub struct Pending {
+    after: Option<After>,
+    events: Sender<Event>,
+}
+
+impl Pending {
+    fn new(after: After, events: &Sender<Event>) -> Self {
+        Pending { after: Some(after), events: events.clone() }
+    }
+
+    /// Does it, now that the client is there, or says why not when it did not
+    /// come.
+    fn done(mut self, came: bool) {
+        if let Some(after) = self.after.take() {
+            after.done(came, &self.events);
+        }
+    }
+}
+
+impl Drop for Pending {
+    /// luneta stopped waiting on the client, and did not hear it come.
+    fn drop(&mut self) {
+        if let Some(after) = self.after.take() {
+            after.done(false, &self.events);
+        }
+    }
 }
 
 /// Asks zellij for the clients of the session of `arrival`'s look, on a
@@ -1127,7 +1159,7 @@ pub fn arrive(arrival: Arrival, events: &Sender<Event>) {
         let Arrival { look, before, after } = arrival;
         let came = arriving(&look, before, START, &events);
         if let Some(after) = after {
-            after.done(came, &events);
+            after.done(came);
         }
     });
 }
@@ -1591,5 +1623,28 @@ mod tests {
         assert!(refused(&session, Some("outer")).is_some());
         assert_eq!(refused(&session, Some("other")), None);
         assert_eq!(refused(&session, None), None);
+    }
+
+    /// What waits on luneta's client's arrival in a session zellij makes
+    /// hears that it did not come where luneta drops it unheard, as where
+    /// zellij did not take the client there: the menu waiting on it closes,
+    /// and says so. Told once, it is told no more.
+    #[test]
+    fn what_waits_on_an_arrival_dropped_unheard_hears_that_it_did_not_come() {
+        let (events, heard) = std::sync::mpsc::channel();
+        let open = Open::Tab {
+            session: "cdk".to_owned(),
+            cwd: "/w/cdk/feat".to_owned(),
+            name: Some("#5".to_owned()),
+            command: Vec::new(),
+        };
+        let pending = || Pending::new(After::Open(7, open.clone()), &events);
+        drop(pending());
+        pending().done(false);
+        let heard: Vec<Event> = heard.try_iter().collect();
+        assert_eq!(heard.len(), 2);
+        for event in heard {
+            assert!(matches!(event, Event::Opened { menu: 7, opened: Err(_) }));
+        }
     }
 }
