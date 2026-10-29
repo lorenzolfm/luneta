@@ -44,11 +44,11 @@ use crate::state;
 const DWELL: Duration = Duration::from_secs(1);
 
 /// How long the daemon goes without listing a session before what was kept
-/// of it goes. A rename made while the daemon reads zellij's folder leaves the
-/// session out of one list, and a luneta can hear of a session after another
-/// kept something of it. The daemon lists it again within its sweep, of two
-/// seconds.
-const GONE: Duration = Duration::from_secs(10);
+/// of it goes: here, and its colour in the order. A rename made while the
+/// daemon reads zellij's folder leaves the session out of one list, and a
+/// luneta can hear of a session after another kept something of it. The
+/// daemon lists it again within its sweep, of two seconds.
+pub const GONE: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct News {

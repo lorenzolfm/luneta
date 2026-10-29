@@ -17,14 +17,18 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
 use crate::state;
 
 /// A session, as a ledger keeps it: when its socket was made, in nanoseconds
 /// since the epoch, and its inode. Two sockets can be made in one tick of the
 /// clock that dates them, and a socket made later can take the inode of one
 /// gone, but not both. Only `new` makes one of a moment, so a ledger can
-/// name every session it has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// name every session it has. It is written as its name, as the order keeps
+/// the colour of each by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Session {
     started: u64,
     socket: NonZeroU64,
@@ -41,6 +45,33 @@ impl Session {
     pub fn started(self) -> SystemTime {
         moment(self.started)
     }
+
+    /// Its name: when its socket was made, in nanoseconds since the epoch,
+    /// and its inode.
+    fn name(self) -> String {
+        format!("{}-{}", self.started, self.socket)
+    }
+
+    /// The session `name` is the name of, spelled as `name` spells it.
+    fn read(name: &str) -> Option<Self> {
+        let (started, socket) = name.split_once('-')?;
+        let session = Session { started: started.parse().ok()?, socket: socket.parse().ok()? };
+        (session.name() == name).then_some(session)
+    }
+}
+
+impl From<Session> for String {
+    fn from(session: Session) -> Self {
+        session.name()
+    }
+}
+
+impl TryFrom<String> for Session {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Session::read(&name).ok_or_else(|| format!("no session is named {name:?}"))
+    }
 }
 
 /// A pane, as a ledger keeps it.
@@ -51,11 +82,9 @@ pub struct Key {
 }
 
 impl Key {
-    /// The name of its file: when its session started, in nanoseconds since
-    /// the epoch, its socket's inode, and its id.
+    /// The name of its file: its session's name, and its id.
     fn name(self) -> String {
-        let Session { started, socket } = self.session;
-        format!("{started}-{socket}-{}", self.pane)
+        format!("{}-{}", self.session.name(), self.pane)
     }
 
     /// The pane whose file `name` is, if it is one's: spelled as `name`
@@ -63,10 +92,8 @@ impl Key {
     /// another way, as `+10-3-1` or `010-3-1`, which no luneta writes or
     /// takes away.
     fn read(name: &str) -> Option<Self> {
-        let mut parts = name.splitn(3, '-');
-        let started = parts.next()?.parse().ok()?;
-        let socket = parts.next()?.parse().ok()?;
-        let key = Key { session: Session { started, socket }, pane: parts.next()?.parse().ok()? };
+        let (session, pane) = name.rsplit_once('-')?;
+        let key = Key { session: Session::read(session)?, pane: pane.parse().ok()? };
         (key.name() == name).then_some(key)
     }
 

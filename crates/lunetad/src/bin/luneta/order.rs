@@ -10,8 +10,12 @@
 //! starts, so no id would keep a pane's place in one started again.
 //!
 //! A session takes a colour as a browser's group of tabs does as it opens:
-//! the first that no other session has. It keeps it for as long as it runs,
-//! as sessions close and move around it, and gives it up as it ends.
+//! the first that no other session has. A colour goes by the session itself,
+//! as the news does, rather than by its name: a session keeps its own as it
+//! is renamed, and two of one name have one each. It keeps it for as long as
+//! it runs, as sessions close and move around it, and gives it up once the
+//! daemon has not listed it for `GONE`, as a rename made while the daemon
+//! reads zellij's folder leaves a session out of one list.
 //!
 //! It is kept as JSON in the file `luneta/order` of `$XDG_STATE_HOME`, or of
 //! `~/.local/state` where that is not set. The file is written whole, under a
@@ -27,11 +31,14 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use notify::RecommendedWatcher;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::host::Event;
+use crate::ledger;
+use crate::news::GONE;
 use crate::state;
 
 /// The order as its file has it.
@@ -40,19 +47,43 @@ use crate::state;
 struct Kept {
     /// The sessions, by name.
     sessions: Vec<String>,
-    /// The colour of each session that runs, by its name, as the place of the
-    /// colour in the sidebar's palette.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    colours: BTreeMap<String, usize>,
+    /// The colour of each session that runs, by the session's name in the
+    /// ledger.
+    #[serde(deserialize_with = "known", skip_serializing_if = "BTreeMap::is_empty")]
+    colours: BTreeMap<ledger::Session, Colour>,
     /// What else the file has, as a luneta of another build keeps there,
     /// written back as it was read.
     #[serde(flatten)]
     rest: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The colour of a session, as gruvbox names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Colour {
+    Blue,
+    Yellow,
+    Purple,
+    Aqua,
+    Orange,
+    Green,
+}
+
+impl Colour {
+    /// Every colour, in the order sessions take them: those started one after
+    /// the other take them in this order, which keeps the ones that look
+    /// alike apart, round the wrap too. No session is red, which says what
+    /// went wrong.
+    pub const ALL: [Colour; 6] =
+        [Colour::Blue, Colour::Yellow, Colour::Purple, Colour::Aqua, Colour::Orange, Colour::Green];
+}
+
 #[derive(Default)]
 pub struct Order {
     kept: Kept,
+    /// The sessions with a colour that the daemon does not list, and since
+    /// when, by luneta's own clock.
+    missing: BTreeMap<ledger::Session, Instant>,
     /// The file it is shared through. Without one, the order is this luneta's
     /// alone: a test's, or one whose file failed it.
     file: Option<PathBuf>,
@@ -146,22 +177,53 @@ impl Order {
         self.keep(|kept| kept.sessions = merged(&kept.sessions, &sessions));
     }
 
-    /// The colour of the session `name`, by its place in a palette, once
-    /// `colour_sessions` gave it one.
-    pub fn colour(&self, name: &str) -> Option<usize> {
-        self.kept.colours.get(name).copied()
+    /// The colours of `running`, the sessions that run, in its order. One
+    /// with none takes the first that the fewest of the others have, kept for
+    /// every luneta. None gives its own up here: a session the daemon leaves
+    /// out of a list may still run, and `listed` takes the colour of one that
+    /// has gone.
+    pub fn colour_sessions(&mut self, running: &[ledger::Session]) -> Vec<Colour> {
+        let mut colours = self.kept.colours.clone();
+        let mut given = coloured(&mut colours, running);
+        if colours != self.kept.colours {
+            self.keep(|kept| given = coloured(&mut kept.colours, running));
+        }
+        given
     }
 
-    /// Gives each of `running`, the names of the sessions that run, a colour
-    /// of a palette of `count`, and keeps it for every luneta, where that
-    /// changes what the order has: one with none takes the first that the
-    /// fewest of the others have, and one that no longer runs gives its own
-    /// up.
-    pub fn colour_sessions(&mut self, running: &[&str], count: usize) {
-        if coloured(&self.kept.colours, running, count) == self.kept.colours {
-            return;
+    /// The colours of `running`, as `colour_sessions` gives them, kept for no
+    /// luneta: one with none has the one it would take, here alone.
+    pub fn colours(&self, running: &[ledger::Session]) -> Vec<Colour> {
+        coloured(&mut self.kept.colours.clone(), running)
+    }
+
+    /// The daemon lists the sessions of `live` at `at`, by luneta's own
+    /// clock, or none where its list may leave out one that runs. The colour
+    /// of a session it has not listed for `GONE` goes, for every luneta. Says
+    /// whether the order was kept, and so taken up as another luneta left it.
+    pub fn listed(&mut self, live: Option<&BTreeSet<ledger::Session>>, at: Instant) -> bool {
+        let Some(live) = live else {
+            self.missing.clear();
+            return false;
+        };
+        let unlisted: BTreeSet<ledger::Session> =
+            self.kept.colours.keys().filter(|session| !live.contains(session)).copied().collect();
+        self.missing.retain(|session, _| unlisted.contains(session));
+        for session in unlisted {
+            self.missing.entry(session).or_insert(at);
         }
-        self.keep(|kept| kept.colours = coloured(&kept.colours, running, count));
+        let gone: BTreeSet<ledger::Session> = self
+            .missing
+            .iter()
+            .filter(|(_, since)| at.duration_since(**since) >= GONE)
+            .map(|(session, _)| *session)
+            .collect();
+        if gone.is_empty() {
+            return false;
+        }
+        self.missing.retain(|session, _| !gone.contains(session));
+        self.keep(|kept| kept.colours.retain(|session, _| !gone.contains(session)));
+        true
     }
 
     /// Makes `change` to the order as its file has it now, rather than as
@@ -207,28 +269,41 @@ fn merged(kept: &[String], running: &[String]) -> Vec<String> {
     merged
 }
 
-/// The colours of `running`, by name: one that `kept` has a colour of the
-/// `count` for keeps it, and each other, in the order `running` goes, takes
-/// the first of them that the fewest of those before it have.
+/// The colours of `running`, in its order: one that `colours` has keeps it,
+/// and each other, in the order `running` goes, takes the first that the
+/// fewest of `colours` have, and is given it there.
 fn coloured(
-    kept: &BTreeMap<String, usize>,
-    running: &[&str],
-    count: usize,
-) -> BTreeMap<String, usize> {
-    let mut coloured: BTreeMap<String, usize> = kept
-        .iter()
-        .filter(|(name, colour)| running.contains(&name.as_str()) && **colour < count)
-        .map(|(name, colour)| (name.clone(), *colour))
-        .collect();
-    for name in running {
-        if coloured.contains_key(*name) {
+    colours: &mut BTreeMap<ledger::Session, Colour>,
+    running: &[ledger::Session],
+) -> Vec<Colour> {
+    let mut given = Vec::with_capacity(running.len());
+    for session in running {
+        if let Some(colour) = colours.get(session) {
+            given.push(*colour);
             continue;
         }
-        let had = |colour: &usize| coloured.values().filter(|it| *it == colour).count();
-        let fewest = (0..count).min_by_key(had).expect("a palette of a colour at least");
-        coloured.insert((*name).to_owned(), fewest);
+        let had = |colour: Colour| colours.values().filter(|it| **it == colour).count();
+        let fewest = Colour::ALL.into_iter().fold(Colour::ALL[0], |fewest, colour| {
+            if had(colour) < had(fewest) { colour } else { fewest }
+        });
+        colours.insert(*session, fewest);
+        given.push(fewest);
     }
-    coloured
+    given
+}
+
+/// The colours kept, by session. One of a colour this build does not have,
+/// as of a later build's palette, or kept for what names no session, as a
+/// person may spell it, reads as none, and its session takes one of this
+/// build's, rather than the whole file not reading.
+fn known<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<ledger::Session, Colour>, D::Error> {
+    let kept = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    let known = kept.into_iter().filter_map(|(session, colour)| {
+        Some((ledger::Session::try_from(session).ok()?, serde_json::from_value(colour).ok()?))
+    });
+    Ok(known.collect())
 }
 
 /// Writes `kept` to `file`, first under a name of this luneta's own beside
@@ -254,13 +329,21 @@ pub fn watch(file: &Path, events: Sender<Event>) -> notify::Result<RecommendedWa
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use super::*;
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// A session of the tests', whose socket was made `secs` after the epoch,
+    /// and whose inode is `secs` too.
+    fn session(secs: u64) -> ledger::Session {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        ledger::Session::new(started, NonZeroU64::new(secs).unwrap()).unwrap()
     }
 
     /// The sessions `order` puts `listed` in, as they came oldest first.
@@ -347,28 +430,50 @@ mod tests {
     }
 
     /// A session takes the first colour that no other has, and keeps it as
-    /// sessions end and move around it. One that ends gives its own up, for
-    /// the next to take. With every colour taken, the next goes round them.
+    /// sessions end and move around it. One that ends gives its own up once
+    /// the daemon has not listed it for `GONE`, for the next to take. With
+    /// every colour taken, the next goes round them.
     #[test]
     fn a_session_takes_the_first_colour_no_other_has_and_keeps_it() {
+        use Colour::{Aqua, Blue, Green, Orange, Purple, Yellow};
+        let [a, b, c, d] = [1, 2, 3, 4].map(session);
         let mut order = Order::default();
-        let colours = |order: &Order, names: &[&str]| -> Vec<Option<usize>> {
-            names.iter().map(|name| order.colour(name)).collect()
-        };
-        order.colour_sessions(&["a", "b", "c"], 6);
-        assert_eq!(colours(&order, &["a", "b", "c"]), [Some(0), Some(1), Some(2)]);
-        order.colour_sessions(&["b", "c"], 6);
-        assert_eq!(colours(&order, &["a", "b", "c"]), [None, Some(1), Some(2)]);
-        order.colour_sessions(&["c", "d", "b"], 6);
-        assert_eq!(colours(&order, &["b", "c", "d"]), [Some(1), Some(2), Some(0)]);
-        order.colour_sessions(&["b", "c", "d", "e"], 4);
-        order.colour_sessions(&["b", "c", "d", "e", "f"], 4);
-        assert_eq!(colours(&order, &["e", "f"]), [Some(3), Some(0)]);
+        assert_eq!(order.colour_sessions(&[a, b, c]), [Blue, Yellow, Purple]);
+        let start = Instant::now();
+        let listed = BTreeSet::from([b, c]);
+        order.listed(Some(&listed), start);
+        assert!(order.listed(Some(&listed), start + GONE));
+        assert_eq!(order.colour_sessions(&[c, d, b]), [Purple, Blue, Yellow]);
+        let started = [5, 6, 7, 8].map(session);
+        let running: Vec<ledger::Session> = [b, c, d].into_iter().chain(started).collect();
+        let colours = order.colour_sessions(&running);
+        assert_eq!(colours, [Yellow, Purple, Blue, Aqua, Orange, Green, Blue]);
+    }
+
+    /// A session the daemon leaves out of a list, as a rename made while it
+    /// reads zellij's folder can, keeps its colour, for none to take, until
+    /// the daemon has not listed it for `GONE`. A list that may leave out one
+    /// that runs counts for none, and starts the wait again.
+    #[test]
+    fn a_session_left_out_of_a_list_keeps_its_colour_until_it_is_gone() {
+        use Colour::{Blue, Purple, Yellow};
+        let [a, b, c, d] = [1, 2, 3, 4].map(session);
+        let mut order = Order::default();
+        order.colour_sessions(&[a, b]);
+        let start = Instant::now();
+        let only_b = BTreeSet::from([b]);
+        order.listed(Some(&only_b), start);
+        assert!(!order.listed(None, start + GONE));
+        assert!(!order.listed(Some(&only_b), start + GONE));
+        assert_eq!(order.colour_sessions(&[b, c]), [Yellow, Purple]);
+        assert!(order.listed(Some(&BTreeSet::from([b, c])), start + GONE * 2));
+        assert_eq!(order.colour_sessions(&[b, c, d]), [Yellow, Purple, Blue]);
     }
 
     /// The colours one luneta gives, another takes up once it reloads, and a
     /// luneta started later starts with them. A file kept before there were
-    /// colours reads as one with none, and a move leaves them be.
+    /// colours reads as one with none, and a move leaves them be. A colour is
+    /// kept by the session's name in the ledger, and gruvbox's.
     #[test]
     fn a_colour_is_the_same_in_every_luneta() {
         let scratch = tempfile::tempdir().unwrap();
@@ -376,12 +481,39 @@ mod tests {
         fs::write(&file, r#"{"sessions": ["b", "a"]}"#).unwrap();
         let mut here = Order::within(file.clone());
         let mut there = Order::within(file.clone());
-        here.colour_sessions(&["b", "a"], 6);
+        let [a, b] = [1, 2].map(session);
+        assert_eq!(here.colour_sessions(&[b, a]), [Colour::Blue, Colour::Yellow]);
         assert!(there.reload());
         there.keep_sessions(names(&["a", "b"]));
-        let later = Order::within(file);
-        assert_eq!((later.colour("b"), later.colour("a")), (Some(0), Some(1)));
+        let mut later = Order::within(file.clone());
+        assert_eq!(later.colour_sessions(&[a, b]), [Colour::Yellow, Colour::Blue]);
         assert_eq!(sorted(&later, &["b", "a"]), ["a", "b"]);
+        let text = fs::read_to_string(&file).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let colours = serde_json::json!({"1000000000-1": "yellow", "2000000000-2": "blue"});
+        assert_eq!(kept["colours"], colours);
+    }
+
+    /// A colour of a later build's palette, or one kept for what no session
+    /// is named, reads as none, and the rest of the file as it was: the
+    /// session takes a colour of this build's.
+    #[test]
+    fn a_colour_this_build_does_not_have_reads_as_none() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let kept = r#"{"sessions": ["b", "a"], "colours": {
+            "1000000000-1": "pink", "2000000000-2": "purple", "a": "blue"
+        }}"#;
+        fs::write(&file, kept).unwrap();
+        let mut order = Order::within(file.clone());
+        assert_eq!(order.unread(), None);
+        assert_eq!(sorted(&order, &["a", "b"]), ["b", "a"]);
+        let colours = order.colour_sessions(&[session(1), session(2)]);
+        assert_eq!(colours, [Colour::Blue, Colour::Purple]);
+        let text = fs::read_to_string(&file).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let colours = serde_json::json!({"1000000000-1": "blue", "2000000000-2": "purple"});
+        assert_eq!(kept["colours"], colours);
     }
 
     /// What another luneta keeps wakes this one's loop, and nothing else in

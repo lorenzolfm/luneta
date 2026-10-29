@@ -380,8 +380,8 @@ while it does not answer. A bracket, `╭`, `│` and `╰`, down the column aft
 `▌` joins the panes of a tab that holds more than one. Each session has a
 colour of its own, as a browser's group of tabs has, which its name sits on and
 its brackets are drawn in: a session takes the first that no other has as it
-starts, and keeps it until it ends, the same in every luneta. `j` and `k` move,
-`gg` and `Home` go to the first row, `G` and `End` to the last,
+starts, and keeps it until it ends, renamed too, the same in every luneta. `j`
+and `k` move, `gg` and `Home` go to the first row, `G` and `End` to the last,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, `u` marks a pane read or unread, and `Esc` goes back to zellij. The session
 zellij is in has its rule in
@@ -663,7 +663,8 @@ to the order as it is kept then, so it undoes none that another luneta made,
 heard or not. A session the order does not have
 goes after those it has, as a new session always went last. The order is the
 sidebar's only: zellij's tabs keep theirs. The sessions' colours are kept in
-the same file, by name too.
+the same file, by the session rather than its name, so a renamed one keeps its
+own, and given up once the daemon has not listed a session for 10 seconds.
 
 The plugin's picker opens in a zellij luneta doesn't run, from the keys you
 bind it to; in the one it runs, luneta takes `Ctrl j`, `Ctrl a` and `Ctrl d`
