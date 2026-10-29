@@ -54,6 +54,7 @@ use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
 use crate::picker::{self, List, Picked, Picker};
+use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::width::Width;
@@ -90,6 +91,9 @@ pub enum Event {
     /// The skills the directory of the menu numbered `menu` can run, or why
     /// the finder found none.
     Skills { menu: u64, skills: Result<Vec<Skill>, String> },
+    /// Where the key of the menu numbered `menu`, for a pull request, goes,
+    /// with the worktree made, or why luneta found nothing.
+    Pulled { menu: u64, ready: Result<Ready, String> },
     /// What came of the brief numbered `number`.
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
@@ -562,7 +566,7 @@ fn run_in(
     let arrival = session.and_then(|session| {
         let before = zellij::before(session.as_str());
         let look = sidebar.sending(session)?;
-        Some(Arrival { look, before })
+        Some(Arrival { look, before, after: None })
     });
     let (program, args) = zellij::client(session);
     let client = Client::start(program, args, dir, window(areas.1), arrival, events.clone())?;
@@ -719,6 +723,10 @@ impl App {
                 self.follow(asked);
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
+            Event::Pulled { menu, ready } => {
+                let asked = self.sidebar.pulled(menu, ready);
+                self.follow(asked);
+            },
             Event::Briefed { number, written } => {
                 if let Some(Over::Brief(briefing)) = &mut self.focus.over
                     && briefing.number() == number
@@ -820,6 +828,9 @@ impl App {
             self.sidebar.notify("zellij did not take its client there".to_owned());
             let look = self.sidebar.stayed(making.arrival.look.number);
             self.look(look);
+            if let Some(after) = making.arrival.after {
+                after.done(false, &self.events);
+            }
         }
     }
 
@@ -881,14 +892,16 @@ impl App {
         match input {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
-            Input::Paste(text) => {
-                if let Some(Over::Ask(ask)) = &mut self.focus.over {
-                    ask.paste(&text);
-                } else if let Some(Over::Picker(picker)) = &mut self.focus.over {
-                    picker.paste(&text);
-                } else if self.focus.zellij() {
-                    self.client.hosted.send(keys::paste(&text, self.client.hosted.mode()));
-                }
+            // A pull request's link pasted with the sidebar's keys, or in the
+            // menu over zellij, opens the menu for it. zellij keeps every
+            // paste it has the keys for, links too, for the agents in it.
+            Input::Paste(text) => match &mut self.focus.over {
+                Some(Over::Ask(ask)) => ask.paste(&text),
+                Some(Over::Picker(picker)) => picker.paste(&text),
+                Some(Over::Menu) => self.sidebar.paste(&text),
+                Some(Over::Brief(_) | Over::Note(_)) => {},
+                None if self.focus.side == Side::Sidebar => self.sidebar.paste(&text),
+                None => self.client.hosted.send(keys::paste(&text, self.client.hosted.mode())),
             },
             Input::FocusGained => self.focus_window(true),
             Input::FocusLost => self.focus_window(false),
@@ -1189,9 +1202,17 @@ impl App {
                 }
             },
             Asked::Start { session, cwd } => {
-                self.make(&session, &cwd);
+                self.make(&session, &cwd, None);
                 self.leave();
             },
+            // The menu waits until zellij has opened it, and takes the keys
+            // there with it.
+            Asked::Make { menu, session, cwd, open } => {
+                if !self.make(&session, &cwd, Some(After::Open(menu, open))) {
+                    self.sidebar.close_menu();
+                }
+            },
+            Asked::Pull { menu, link, worked } => pull::prepare(menu, link, worked, &self.events),
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
@@ -1219,11 +1240,11 @@ impl App {
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Start(session) => {
-                self.start(&session, None);
+                self.start(&session, None, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Make { session, cwd } => {
-                self.make(&session, &cwd);
+                self.make(&session, &cwd, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { session, deletes } => {
@@ -1293,28 +1314,33 @@ impl App {
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
     /// `cwd`, or where the client started, or brings back, where zellij kept
-    /// one that ended. Where zellij makes it, its server cannot bear being
-    /// asked anything before it takes the client: luneta asks for the
-    /// client's arrival there once zellij titles its terminal in it.
-    fn start(&mut self, session: &SessionName, cwd: Option<&str>) {
+    /// one that ended, and does `after` once it is there. Where zellij makes
+    /// it, its server cannot bear being asked anything before it takes the
+    /// client: luneta asks for the client's arrival there once zellij titles
+    /// its terminal in it. Whether it went.
+    fn start(&mut self, session: &SessionName, cwd: Option<&str>, after: Option<After>) -> bool {
         let Some(here) = self.here() else {
-            return;
+            return false;
         };
         let then = self.sidebar.sending(session);
         self.client.hosted.send(zellij::NUDGE);
-        let made = zellij::start(&here, session, cwd, then, &self.events);
+        let made = zellij::start(&here, session, cwd, then, after, &self.events);
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
+        true
     }
 
     /// Takes zellij's client to a session zellij makes, `session`, that
-    /// starts in `cwd`; or says why zellij would make none, but take it to
-    /// one that has the name, before the sidebar takes the client for one on
-    /// its way there.
-    fn make(&mut self, session: &SessionName, cwd: &str) {
+    /// starts in `cwd`, and does `after` once it is there; or says why zellij
+    /// would make none, but take it to one that has the name, before the
+    /// sidebar takes the client for one on its way there. Whether it went.
+    fn make(&mut self, session: &SessionName, cwd: &str, after: Option<After>) -> bool {
         match zellij::makes(session) {
-            Ok(()) => self.start(session, Some(cwd)),
-            Err(why) => self.sidebar.notify(why),
+            Ok(()) => self.start(session, Some(cwd), after),
+            Err(why) => {
+                self.sidebar.notify(why);
+                false
+            },
         }
     }
 
@@ -1464,7 +1490,7 @@ impl App {
             return Ok(());
         };
         let look = self.sidebar.rejoining(&to);
-        let arrival = Some(Arrival { look, before: Before::Listed(before) });
+        let arrival = Some(Arrival { look, before: Before::Listed(before), after: None });
         let (program, args) = zellij::rejoin(to.as_str());
         let size = window(self.areas.1);
         self.client = Client::start(program, args, &self.dir, size, arrival, self.events.clone())?;
