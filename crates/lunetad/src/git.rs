@@ -7,18 +7,21 @@
 //! file is written, made or taken away. Those folders are watched, and the
 //! directories of the work tree that hold a path git tracks, but none that
 //! holds only what git ignores, as a `target` that a build writes in all
-//! along. A directory is asked about again as its work tree changes, once git
-//! has rested from it for as long as it took over it, and once git has rested
-//! from it for a sweep besides, for what changes with no word to a watched
-//! folder: a file in a directory new to git, or a work tree across the
-//! network. One directory at a time, and one git has said nothing of yet
-//! first.
+//! along. Where the work tree is, and which folders git keeps it in, git is
+//! asked each time, as `git init` can make a directory of one a work tree of
+//! its own, and git can come to keep one in other folders. A directory is
+//! asked about again as its work tree changes, once git has rested from it
+//! for as long as it took over it, and once git has rested from it for a
+//! sweep besides, for what changes with no word to a watched folder: a file
+//! in a directory new to git, or a work tree across the network. One
+//! directory at a time, and one git has said nothing of yet first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +31,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::git::{self, WorkTree};
-use notify::event::{CreateKind, RemoveKind};
+use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::core;
@@ -120,6 +123,7 @@ pub fn branch(dir: &str) -> Option<String> {
 
 /// Where a work tree is, and the folders git keeps it in, each as the
 /// filesystem names it, as a watcher names what changes in it.
+#[derive(PartialEq, Eq)]
 struct Place {
     /// The top of the work tree.
     top: PathBuf,
@@ -142,10 +146,12 @@ fn place(dir: &str) -> Option<Place> {
         "--git-common-dir",
     ]);
     let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
-    let said = String::from_utf8(said).ok()?;
-    // A path with a newline in it makes more lines than three.
-    let [top, own, common]: [&str; 3] = said.lines().collect::<Vec<_>>().try_into().ok()?;
-    let real = |path: &str| fs::canonicalize(path).ok();
+    // Each path as the bytes it is, as a folder of git's needs to be UTF-8
+    // no more than a directory does. One with a newline in it makes more
+    // lines than three.
+    let lines = said.strip_suffix(b"\n")?.split(|byte| *byte == b'\n');
+    let [top, own, common]: [&[u8]; 3] = lines.collect::<Vec<_>>().try_into().ok()?;
+    let real = |path: &[u8]| fs::canonicalize(OsStr::from_bytes(path)).ok();
     Some(Place { top: real(top)?, own: real(own)?, common: real(common)? })
 }
 
@@ -200,35 +206,65 @@ fn watched(place: &Place, tracked: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, Recu
     folders.into_iter().chain(refs).chain(dirs).filter(|(path, _)| path.is_dir()).collect()
 }
 
-/// The index at `path` as it stands: its size, and when it was last written.
-/// None where there is none, as before a first `git add`.
-fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
+/// The index at `path` as it stands: the file it is, its size, and when it
+/// was last written. None where there is none, as before a first `git add`.
+/// git writes the index anew and moves it into the place of the one before,
+/// so the file tells one write from the next where two of the same size are
+/// written in the same tick of the clock.
+fn stamp(path: &Path) -> Option<(u64, u64, SystemTime)> {
     let index = fs::metadata(path).ok()?;
-    Some((index.len(), index.modified().ok()?))
+    Some((index.ino(), index.len(), index.modified().ok()?))
+}
+
+/// What a word from the watcher of a work tree tells.
+enum Word {
+    /// Nothing: a read changes nothing, git's own among them.
+    Read,
+    /// That something changed that git could find.
+    Change,
+    /// That a directory could have come or gone: one made or taken away, one
+    /// moved in or out, or words the kernel dropped, which could have been
+    /// any of those. A watched directory that goes, or moves away, takes its
+    /// watch with it, and one that comes in its place is not watched.
+    Dirs,
+}
+
+/// What `event` tells, from a watcher of `watched`. One that went wrong could
+/// have missed anything, as a read is how the daemon finds out what it missed.
+fn word(event: &notify::Result<Event>, watched: &BTreeMap<PathBuf, RecursiveMode>) -> Word {
+    let Ok(event) = event else {
+        return Word::Dirs;
+    };
+    match event.kind {
+        _ if event.need_rescan() => Word::Dirs,
+        kind if kind.is_access() => Word::Read,
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => Word::Dirs,
+        // A file moves all along, as an editor saves one, or git writes its
+        // index or a ref: only a directory that moves counts.
+        EventKind::Modify(ModifyKind::Name(_))
+            if event.paths.iter().any(|path| watched.contains_key(path) || path.is_dir()) =>
+        {
+            Word::Dirs
+        },
+        _ => Word::Change,
+    }
 }
 
 /// A watcher of `paths` that sets `heard`, and wakes the thread on `wake`, as
 /// anything changes there that a read could find, and sets `came_or_went` too
-/// as a directory does. One that goes wrong has heard a change, as a read is
-/// how the daemon finds out what it missed.
+/// as a directory could have come or gone.
 fn watcher(
     paths: &BTreeMap<PathBuf, RecursiveMode>,
     heard: Arc<AtomicBool>,
     came_or_went: Arc<AtomicBool>,
     wake: SyncSender<()>,
 ) -> notify::Result<RecommendedWatcher> {
+    let watched_paths = paths.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        if let Ok(event) = &event {
-            // A read changes nothing, git's own among them.
-            if event.kind.is_access() {
-                return;
-            }
-            if matches!(
-                event.kind,
-                EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder)
-            ) {
-                came_or_went.store(true, Ordering::SeqCst);
-            }
+        match word(&event, &watched_paths) {
+            Word::Read => return,
+            Word::Dirs => came_or_went.store(true, Ordering::SeqCst),
+            Word::Change => {},
         }
         heard.store(true, Ordering::SeqCst);
         match wake.try_send(()) {
@@ -251,148 +287,143 @@ fn watcher(
 }
 
 /// A work tree that a pane works in, as it is watched.
+#[derive(Default)]
 struct Tree {
-    place: Place,
     /// Set as the work tree changes, and taken as the directories in it are
     /// due again.
     heard: Arc<AtomicBool>,
-    /// Set as a directory comes or goes. A watched one that goes takes its
-    /// watch with it, and one made in its place, even much later, is not
-    /// watched, so the work tree is watched anew.
+    /// Set as a directory could have come or gone, so that the work tree is
+    /// watched anew.
     came_or_went: Arc<AtomicBool>,
     /// None before the work tree is watched.
     watched: Option<Watched>,
-    /// What went wrong as it was watched last, if anything did.
-    trouble: Option<String>,
 }
 
 /// How a work tree is watched.
 struct Watched {
+    /// Where git kept the work tree when it began to be watched. git can come
+    /// to keep one in other folders, as a submodule's are absorbed into its
+    /// superproject's.
+    place: Place,
     /// The index as it stood when the work tree began to be watched. A
     /// checkout can bring directories that the index did not have then.
-    index: Option<(u64, SystemTime)>,
-    /// Held for as long as the work tree is watched so. None where it could
-    /// not be, which leaves it to the sweep until its index changes.
-    _watcher: Option<RecommendedWatcher>,
+    index: Option<(u64, u64, SystemTime)>,
+    watching: Watching,
+}
+
+/// What of a work tree is watched, with the watcher held for as long as it
+/// is watched so.
+enum Watching {
+    /// git's folders, and each directory of the work tree that holds a path
+    /// git tracks.
+    Whole { _watcher: RecommendedWatcher },
+    /// git's folders alone, and why not the directories.
+    Folders { _watcher: RecommendedWatcher, why: String },
+    /// Nothing, which leaves the work tree to the sweep until its index
+    /// changes, and why.
+    Sweep { why: String },
+}
+
+impl Watching {
+    /// Why the work tree is not watched whole, where it is not.
+    fn trouble(&self) -> Option<&String> {
+        match self {
+            Watching::Whole { .. } => None,
+            Watching::Folders { why, .. } | Watching::Sweep { why } => Some(why),
+        }
+    }
 }
 
 impl Tree {
-    fn new(place: Place) -> Self {
-        Tree {
-            place,
-            heard: Arc::new(AtomicBool::new(false)),
-            came_or_went: Arc::new(AtomicBool::new(false)),
-            watched: None,
-            trouble: None,
-        }
-    }
-
-    /// Watches the work tree, and wakes the thread on `wake` as it changes:
-    /// anew where its index changed since it began to be watched, or a
-    /// directory came or went. What goes wrong, `troubles` says.
-    fn watch(&mut self, wake: &SyncSender<()>, troubles: &mut Troubles) {
-        let index = stamp(&self.place.own.join("index"));
+    /// Watches the work tree, which git keeps at `place`, and wakes the
+    /// thread on `wake` as it changes: anew where git kept it elsewhere when
+    /// it began to be watched, or its index changed since, or a directory
+    /// could have come or gone. What goes wrong, `troubles` says.
+    fn watch(&mut self, place: Place, wake: &SyncSender<()>, troubles: &mut Troubles) {
+        let index = stamp(&place.own.join("index"));
         let moved = self.came_or_went.swap(false, Ordering::SeqCst);
-        if !moved && self.watched.as_ref().is_some_and(|watched| watched.index == index) {
+        let same = |watched: &Watched| watched.place == place && watched.index == index;
+        if !moved && self.watched.as_ref().is_some_and(same) {
             return;
         }
         // The watcher before lets go of its watches first.
         self.watched = None;
-        let top = self.place.top.display();
-        let tracked = listed(&self.place.top).and_then(|listed| {
+        let top = place.top.display();
+        let tracked = listed(&place.top).and_then(|listed| {
             let many = || {
                 format!(
                     "{top} has more than {TREE_DIRS_MAX} directories that git tracks a path \
                      in, and only git's folders are watched"
                 )
             };
-            tracked(&self.place.top, &listed).ok_or_else(many)
+            tracked(&place.top, &listed).ok_or_else(many)
         });
-        let (tracked, mut trouble) = match tracked {
+        let (tracked, why) = match tracked {
             Ok(tracked) => (tracked, None),
-            Err(trouble) => (BTreeSet::new(), Some(trouble)),
+            Err(why) => (BTreeSet::new(), Some(why)),
         };
         let (heard, moved) = (self.heard.clone(), self.came_or_went.clone());
-        let watcher = watcher(&watched(&self.place, &tracked), heard, moved, wake.clone());
-        let alone = |error: &notify::Error| format!("{top} is read on the sweep alone: {error}");
-        let watcher = watcher.inspect_err(|error| trouble = Some(alone(error))).ok();
-        if let Some(trouble) = &trouble {
+        let watcher = watcher(&watched(&place, &tracked), heard, moved, wake.clone());
+        let watching = match (watcher, why) {
+            (Ok(watcher), None) => Watching::Whole { _watcher: watcher },
+            (Ok(watcher), Some(why)) => Watching::Folders { _watcher: watcher, why },
+            (Err(error), _) => {
+                Watching::Sweep { why: format!("{top} is read on the sweep alone: {error}") }
+            },
+        };
+        if let Some(trouble) = watching.trouble() {
             troubles.say(trouble.clone());
         }
-        self.trouble = trouble;
-        self.watched = Some(Watched { index, _watcher: watcher });
-    }
-}
-
-/// Where a directory is, as git said it last.
-enum Within {
-    /// The work tree with this top.
-    Tree(PathBuf),
-    /// No work tree.
-    Nothing,
-    /// git has not said.
-    Unsaid,
-}
-
-impl Within {
-    fn is(&self, top: &Path) -> bool {
-        matches!(self, Within::Tree(it) if it == top)
+        self.watched = Some(Watched { place, index, watching });
     }
 }
 
 /// Where git stands with a directory it has been asked about.
 struct Asked {
-    /// When it is due again with no word that its work tree changed: once
-    /// git has rested from it for a sweep, or for as long as it took over it
-    /// if that is longer.
-    next: Instant,
-    /// When it is due again on a word that its work tree changed: once git
-    /// has rested from it for as long as it took over it, so that a work tree
-    /// that changes all along takes up half of git's time at the most.
-    rested: Instant,
-    /// Whether its work tree changed since it was asked about.
+    /// When git was done with it last.
+    ended: Instant,
+    /// How long git took over it then.
+    took: Duration,
+    /// Whether its work tree changed since.
     changed: bool,
-    within: Within,
-    /// What went wrong the last time it was asked about, if anything did.
+    /// The top of the work tree git placed it in then, if any.
+    top: Option<PathBuf>,
+    /// What went wrong then, if anything did.
     trouble: Option<String>,
 }
 
 impl Asked {
-    fn due(&self) -> Instant {
-        if self.changed { self.rested } else { self.next }
+    /// When it is due again: on a word that its work tree changed, once git
+    /// has rested from it for as long as it took over it, so that a work tree
+    /// that changes all along takes up half of git's time at the most; with
+    /// no word, once git has rested from it for a `sweep`, or for as long as
+    /// it took if that is longer.
+    fn due(&self, sweep: Duration) -> Instant {
+        self.ended + if self.changed { self.took } else { self.took.max(sweep) }
+    }
+
+    /// Whether git placed it in the work tree with this top.
+    fn within(&self, top: &Path) -> bool {
+        self.top.as_deref() == Some(top)
     }
 }
 
-/// Asks git how the work tree in `dir` stands, as git said last that it is
-/// `within` one, where it was asked before. The work tree is watched first,
-/// so that a change while git reads it is heard. What git said, and where
-/// `dir` is now: in a work tree that `trees` has, where it is in one.
+/// Asks git where the work tree that `dir` is in is, and how it stands. The
+/// work tree is watched first, so that a change while git reads it is heard.
+/// The top of the work tree, which `trees` has, where `dir` is in one, and
+/// what git said.
 fn ask(
     dir: &str,
-    within: Option<&Within>,
     trees: &mut HashMap<PathBuf, Tree>,
     wake: &SyncSender<()>,
     troubles: &mut Troubles,
-) -> (Within, Result<WorkTree, String>) {
-    let top = match within {
-        Some(Within::Tree(top)) if trees.contains_key(top) => Some(top.clone()),
-        Some(Within::Nothing) => None,
-        Some(Within::Tree(_) | Within::Unsaid) | None => place(dir).map(|place| {
-            let top = place.top.clone();
-            trees.entry(top.clone()).or_insert_with(|| Tree::new(place));
-            top
-        }),
-    };
-    if let Some(tree) = top.as_ref().and_then(|top| trees.get_mut(top)) {
-        tree.watch(wake, troubles);
-    }
-    let said = status(dir);
-    let within = match (&said, top) {
-        (Ok(WorkTree::Outside), _) => Within::Nothing,
-        (_, Some(top)) => Within::Tree(top),
-        (_, None) => Within::Unsaid,
-    };
-    (within, said)
+) -> (Option<PathBuf>, Result<WorkTree, String>) {
+    let top = place(dir).map(|place| {
+        let top = place.top.clone();
+        trees.entry(top.clone()).or_default().watch(place, wake, troubles);
+        top
+    });
+    (top, status(dir))
 }
 
 /// Asks git how the work tree stands in each directory a pane works in, in a
@@ -419,27 +450,24 @@ pub fn follow(
                 return;
             };
             asked.retain(|dir, _| dirs.contains(dir));
-            trees.retain(|top, _| asked.values().any(|was| was.within.is(top)));
+            trees.retain(|top, _| asked.values().any(|was| was.within(top)));
             for (top, tree) in &trees {
                 if tree.heard.swap(false, Ordering::SeqCst) {
-                    let within = asked.values_mut().filter(|was| was.within.is(top));
+                    let within = asked.values_mut().filter(|was| was.within(top));
                     within.for_each(|was| was.changed = true);
                 }
             }
             let now = Instant::now();
-            let due = |dir: &&String| asked.get(*dir).is_none_or(|was| was.due() <= now);
+            let due = |dir: &&String| asked.get(*dir).is_none_or(|was| was.due(sweep) <= now);
             let mut due: Vec<String> = dirs.iter().filter(due).cloned().collect();
             // Never asked about before all others, then the one due longest.
-            due.sort_by_key(|dir| asked.get(dir).map(Asked::due));
+            due.sort_by_key(|dir| asked.get(dir).map(|was| was.due(sweep)));
             for dir in due {
                 let started = Instant::now();
-                let within = asked.get(&dir).map(|was| &was.within);
-                let (within, said) = ask(&dir, within, &mut trees, &wake, &mut troubles);
-                let (took, now) = (started.elapsed(), Instant::now());
+                let (top, said) = ask(&dir, &mut trees, &wake, &mut troubles);
+                let (took, ended) = (started.elapsed(), Instant::now());
                 let trouble = said.as_ref().err().cloned();
-                let next = now + took.max(sweep);
-                let was = Asked { next, rested: now + took, changed: false, within, trouble };
-                asked.insert(dir.clone(), was);
+                asked.insert(dir.clone(), Asked { ended, took, changed: false, top, trouble });
                 match said {
                     Ok(tree) => {
                         if core.send(core::Command::WorkTree { dir, tree }).is_err() {
@@ -456,13 +484,14 @@ pub fn follow(
             // What went wrong with one that git rests from has not gone right
             // since, and is not said again.
             let asking = asked.values().filter_map(|was| was.trouble.clone());
-            let watching = trees.values().filter_map(|tree| tree.trouble.clone());
+            let watched = trees.values().filter_map(|tree| tree.watched.as_ref());
+            let watching = watched.filter_map(|watched| watched.watching.trouble().cloned());
             for trouble in asking.chain(watching) {
                 troubles.say(trouble);
             }
             troubles.done();
             let now = Instant::now();
-            let next = asked.values().map(|was| was.due().saturating_duration_since(now));
+            let next = asked.values().map(|was| was.due(sweep).saturating_duration_since(now));
             match woken.recv_timeout(next.min().unwrap_or(sweep)) {
                 Ok(()) => watch::settle(&woken),
                 Err(RecvTimeoutError::Timeout) => {},
@@ -471,4 +500,27 @@ pub fn follow(
         }
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File};
+
+    use super::stamp;
+
+    /// git writes its index anew, and moves it into the place of the one
+    /// before. One written so with the size and the mtime of the one before
+    /// is stamped anew all the same.
+    #[test]
+    fn an_index_written_anew_is_stamped_anew() {
+        let dir = tempfile::tempdir().unwrap();
+        let (index, lock) = (dir.path().join("index"), dir.path().join("index.lock"));
+        fs::write(&index, "before").unwrap();
+        let modified = fs::metadata(&index).unwrap().modified().unwrap();
+        let before = stamp(&index);
+        fs::write(&lock, "after!").unwrap();
+        File::options().write(true).open(&lock).unwrap().set_modified(modified).unwrap();
+        fs::rename(&lock, &index).unwrap();
+        assert_ne!(stamp(&index), before);
+    }
 }

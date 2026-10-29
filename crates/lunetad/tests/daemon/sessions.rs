@@ -636,6 +636,65 @@ fn git_says_at_once_as_a_work_tree_changes_that_keeps_its_refs_in_a_reftable() {
     says_at_once_as_a_work_tree_changes("reftable");
 }
 
+/// A directory of a work tree that becomes a work tree of its own, as `git
+/// init` makes one there, is watched as that one from then on: a branch
+/// checked out in it, which writes nothing but the `HEAD` in its own git
+/// folder, shows at once.
+#[test]
+fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    let (top, src) = (tree.path(), tree.path().join("src"));
+    assert!(git(top, &["init", "-q", "-b", "main"]));
+    fs::create_dir(&src).unwrap();
+    commit(top, "src/lib.rs", "start\n");
+    let cwd = src.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says how the tree stands", || checkout(&host, &cwd));
+
+    let on = |name: &'static str| {
+        move |it: &Checkout| matches!(&it.head, Some(Head::Branch(branch)) if branch.name == name)
+    };
+    let made = || assert!(git(&src, &["init", "-q", "-b", "inner"]));
+    shows_at_once(&host, &cwd, "a work tree made in src", made, on("inner"));
+    let switched = || assert!(git(&src, &["switch", "-q", "-c", "other"]));
+    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on("other"));
+}
+
+/// A directory that moves into a work tree, in the place of one git tracks
+/// that moved away, is watched as one made anew there is: an edit in it shows
+/// at once.
+#[test]
+fn git_says_at_once_as_a_directory_moved_into_a_work_tree_changes() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let path = |name: &str| dirs.path().join(name);
+    let top = path("repo");
+    fs::create_dir_all(top.join("src")).unwrap();
+    assert!(git(&top, &["init", "-q", "-b", "main"]));
+    commit(&top, "src/lib.rs", "start\n");
+    let cwd = top.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says how the tree stands", || checkout(&host, &cwd));
+
+    let changes = |it: &Checkout| it.changes.unwrap_or_default();
+    let moved_in = || {
+        fs::create_dir(path("came")).unwrap();
+        fs::write(path("came/lib.rs"), "came\n").unwrap();
+        fs::rename(top.join("src"), path("went")).unwrap();
+        fs::rename(path("came"), top.join("src")).unwrap();
+    };
+    let modified = |it: &Checkout| changes(it).modified == 1;
+    shows_at_once(&host, &cwd, "a directory moved in", moved_in, modified);
+    let edited = || fs::write(top.join("src/lib.rs"), "start\n").unwrap();
+    let clean = |it: &Checkout| changes(it) == Changes::default();
+    shows_at_once(&host, &cwd, "an edit in the one moved in", edited, clean);
+}
+
 /// What git ignores, the daemon does not watch: a build that writes in
 /// `target` all along has git asked nothing, though a file that turns up
 /// beside it has git asked at once.
