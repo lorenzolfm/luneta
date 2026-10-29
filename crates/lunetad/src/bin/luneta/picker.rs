@@ -443,6 +443,31 @@ enum Preview {
     Dir(String),
 }
 
+/// What zellij said of the sessions it keeps to bring back.
+#[derive(Debug)]
+enum Ended {
+    /// Nothing yet.
+    Unheard,
+    /// As it listed them, and none has ended, nor been let go of, since.
+    Heard(Vec<Exited>),
+    /// As it listed them before a session ended, or one was let go of, and
+    /// asked for again: they show on, but free no name, as zellij keeps one
+    /// that ended since, and could keep one let go of yet.
+    Stale(Vec<Exited>),
+    /// Why it did not list them.
+    Failed(String),
+}
+
+impl Ended {
+    /// Has it go stale, as a session ended or one was let go of since
+    /// zellij listed them.
+    fn stale(&mut self) {
+        if let Ended::Heard(exited) = self {
+            *self = Ended::Stale(std::mem::take(exited));
+        }
+    }
+}
+
 /// The picker.
 #[derive(Debug)]
 pub struct Picker {
@@ -453,9 +478,8 @@ pub struct Picker {
     term: String,
     stage: Stage,
     listing: Listing,
-    /// The sessions zellij keeps to bring back, once it says, or why it did
-    /// not list them.
-    exited: Option<Result<Vec<Exited>, String>>,
+    /// The sessions zellij keeps to bring back, as far as it said.
+    exited: Ended,
     /// When `exited` was listed, which its ages count back from.
     exited_at: SystemTime,
     /// The directories zoxide knows, once it says, or why it did not list
@@ -485,7 +509,7 @@ impl Picker {
             term: String::new(),
             stage: Stage::Search,
             listing,
-            exited: None,
+            exited: Ended::Unheard,
             exited_at: SystemTime::now(),
             visited: None,
             sessions: Rows::default(),
@@ -520,6 +544,7 @@ impl Picker {
         let ended = !names(&self.listing).is_subset(&names(&listing));
         self.listing = listing;
         if ended {
+            self.exited.stale();
             self.asking.push(Ask::Exited);
         }
         self.rebuild(false);
@@ -529,7 +554,10 @@ impl Picker {
     pub fn heard(&mut self, heard: Heard) -> Picked {
         match heard {
             Heard::Exited(exited) => {
-                self.exited = Some(exited);
+                self.exited = match exited {
+                    Ok(exited) => Ended::Heard(exited),
+                    Err(why) => Ended::Failed(why),
+                };
                 self.exited_at = SystemTime::now();
                 self.rebuild(false);
             },
@@ -890,7 +918,8 @@ impl Picker {
     /// Takes a session that ended off the list, once zellij is asked to let
     /// go of it.
     fn forget_exited(&mut self, session: &SessionName) {
-        if let Some(Ok(exited)) = &mut self.exited {
+        self.exited.stale();
+        if let Ended::Stale(exited) = &mut self.exited {
             exited.retain(|exited| exited.name != *session);
         }
     }
@@ -956,13 +985,16 @@ impl Picker {
     }
 
     /// The names of the sessions that run and of those that ended, which no
-    /// other session can take; or why they are not known yet. A name zellij
-    /// has yet to say ended is one `switch-session` would bring back.
+    /// other session can take; or why they are not known yet, as zellij has
+    /// yet to list those that ended, or to list them again since. A name
+    /// zellij has yet to say ended is one `switch-session` would bring back.
     fn taken(&self) -> Result<Vec<&str>, &'static str> {
         let exited = match &self.exited {
-            Some(Ok(exited)) => exited,
-            None => return Err("zellij has yet to say which sessions ended"),
-            Some(Err(_)) => return Err("zellij did not say which sessions ended"),
+            Ended::Heard(exited) => exited,
+            Ended::Unheard | Ended::Stale(_) => {
+                return Err("zellij has yet to say which sessions ended");
+            },
+            Ended::Failed(_) => return Err("zellij did not say which sessions ended"),
         };
         let live = self.listing.sessions.iter().map(|live| live.place.session());
         Ok(live.chain(exited.iter().map(|exited| exited.name.as_str())).collect())
@@ -971,8 +1003,8 @@ impl Picker {
     /// The sessions zellij keeps to bring back, as far as it said.
     fn exited_list(&self) -> &[Exited] {
         match &self.exited {
-            Some(Ok(exited)) => exited,
-            Some(Err(_)) | None => &[],
+            Ended::Heard(exited) | Ended::Stale(exited) => exited,
+            Ended::Unheard | Ended::Failed(_) => &[],
         }
     }
 
@@ -1087,7 +1119,7 @@ impl Picker {
         }
         match self.list {
             List::Sessions => {
-                if let Some(Err(why)) = &self.exited {
+                if let Ended::Failed(why) = &self.exited {
                     notes.extend(menu::wrap(&format!("no ended sessions: {why}"), width, error));
                 }
             },
@@ -1245,7 +1277,7 @@ impl Picker {
             return format!("no match for \"{}\"", self.term);
         }
         match self.list {
-            List::Sessions if self.exited.is_none() => "asking zellij…".to_owned(),
+            List::Sessions if matches!(self.exited, Ended::Unheard) => "asking zellij…".to_owned(),
             List::Sessions => "no sessions".to_owned(),
             List::Agents if self.listing.away.is_some() => "no agents".to_owned(),
             List::Agents if self.yours().is_some() => "no other agents".to_owned(),
@@ -2036,6 +2068,31 @@ mod tests {
         let said = text(&buffer, buffer.area).join(" ");
         assert!(!said.contains("renaming"));
         assert!(said.contains("zellij renames only a session that runs"), "{said}");
+    }
+
+    /// A session that runs no more can be one zellij keeps to bring back, so
+    /// no name is free until zellij says again which sessions ended: a
+    /// rename waits on it, and those it said ended show on meanwhile.
+    #[test]
+    fn no_name_is_free_until_zellij_says_again_which_sessions_ended() {
+        let mut picker = three();
+        picker.asks();
+        let listing = Listing {
+            here: Some("b".to_owned()),
+            sessions: vec![live("c", 30, None), live("b", 20, Some(1))],
+            ..Listing::default()
+        };
+        picker.listed(listing);
+        assert_eq!(picker.asks(), vec![Ask::Exited]);
+        assert!(names(&picker).contains(&"x".to_owned()));
+        control(&mut picker, 'r');
+        typed(&mut picker, "a");
+        press(&mut picker, KeyCode::Enter);
+        assert!(picker.asks().is_empty());
+        picker.heard(Heard::Exited(Ok(vec![ended("x", 100), ended("y", 10)])));
+        press(&mut picker, KeyCode::Enter);
+        let (from, to) = (SessionName::running("c").unwrap(), SessionName::parse("a").unwrap());
+        assert_eq!(picker.asks(), vec![Ask::Rename { from, to }]);
     }
 
     /// Agents named alike are told apart by their panes, and by their
