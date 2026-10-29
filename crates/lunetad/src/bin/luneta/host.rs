@@ -1350,8 +1350,12 @@ impl App {
     /// it take you somewhere.
     fn converse(&mut self) {
         let here = self.sidebar.here_pane();
-        if here.is_some() {
-            self.nudge_ahead();
+        // Whether it typed there before or not: another client may have
+        // since, and the agent acts well after the nudge.
+        if here.is_some()
+            && let Ok(seat) = self.seat()
+        {
+            self.client.nudge_in(seat);
         }
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
             ask.send(here.as_ref(), &self.events);
@@ -1449,9 +1453,15 @@ impl App {
 
     /// Types `zellij::NUDGE` into zellij's client as the keys or a press of
     /// the mouse come to luneta, ahead of the action they may ask for, which
-    /// then waits for zellij to take it in for less, if at all.
+    /// then waits for zellij to take it in for less, if at all. A client that
+    /// typed in the session since it came gets none: zellij moves it already,
+    /// but where another typed there since, which the nudge before the action
+    /// takes the turn back from, and it may be renaming a tab or a pane,
+    /// whose name zellij would write the nudge into.
     fn nudge_ahead(&mut self) {
-        if let Ok(here) = self.seat() {
+        if let Ok(here) = self.seat()
+            && self.client.typed_at(&here).is_none()
+        {
             self.client.nudge_in(here);
         }
     }

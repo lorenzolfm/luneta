@@ -374,21 +374,24 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 }
 
 /// What luneta types into zellij's client before it asks zellij to move it,
-/// and ahead of that, as the keys or a press of the mouse come to luneta:
-/// `ScrollLock` let go, as the kitty keyboard protocol spells it, with no
-/// modifiers and the event of a release, `1:3`. zellij moves the client of a
-/// session that last sent it a key, and a client that has sent none since it
-/// came to the session, as luneta's has not once the sidebar took it there,
-/// moves for no action. The client counts a key let go as a key. No one binds
-/// `ScrollLock`, and zellij writes nothing of it to a pane that does not read
-/// keys as kitty spells them. One that does gets it as it came, a release it
+/// and ahead of that, as the keys or a press of the mouse come to luneta,
+/// where the client typed nothing in its session yet: `ScrollLock` let go,
+/// as the kitty keyboard protocol spells it, with no modifiers and the event
+/// of a release, `1:3`. zellij moves the client of a session that last sent
+/// it a key, and a client that has sent none since it came to the session,
+/// as luneta's has not once the sidebar took it there, moves for no action.
+/// The client counts a key let go as a key. No one binds `ScrollLock`, and
+/// zellij writes nothing of it to a pane that does not read keys as kitty
+/// spells them. One that does gets it as it came, a release it
 /// never asked to hear of, and passes it over: nvim does, where the key
 /// pressed would have it insert a character of the protocol's own in the
 /// text. The client reads it as kitty spells it unless its config turns the
 /// protocol off: then zellij takes it for no key, and hands the pane
 /// nothing. So `nudge` gives it only to a client that asks its terminal for
 /// kitty's keys, and zellij moves one that does not only once you type in
-/// it.
+/// it. As you rename a tab or a pane, zellij takes a key it binds nothing to
+/// for text, and writes the nudge's, `[57359;1:3u`, into the name: only a
+/// client that typed in its session can be renaming there.
 const NUDGE: &[u8] = b"\x1b[57359;1:3u";
 
 /// `NUDGE`, where zellij's client reads it as a key: in `mode`, it asked its
