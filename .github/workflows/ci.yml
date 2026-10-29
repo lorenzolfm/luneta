@@ -177,11 +177,17 @@ jobs:
 
       # The Mac's tests build outside the sandbox, so the nix store holds nothing
       # of theirs: their `target/` is cached on its own, with the crates cargo
-      # downloads for it. Its key is the lockfiles, which name the dependencies and
-      # the rust that builds them, so it holds the dependencies, and luneta's crates
-      # compile on each run. As in `build`, main saves and a PR restores.
+      # downloads for it. It holds the dependencies, and luneta's crates compile on
+      # each run. As in `build`, main saves and a PR restores.
       #
-      # A key that misses restores nothing. A PR that changes a lockfile compiles
+      # Its key is what cargo builds the dependencies from: the lockfiles, which
+      # name them, the manifests, which turn on their features, and flake.nix,
+      # which names the rust. main saves only on a miss, so a change the key left
+      # out would hit the `target/` from before it and never save another, and
+      # every run after would compile what changed again. A feature of rustix's,
+      # turned on in a manifest, leaves Cargo.lock as it was.
+      #
+      # A key that misses restores nothing. A PR that changes one of them compiles
       # everything, and so does the run on main that saves its `target/`: had it
       # restored the last one, each `target/` would carry every dependency before it.
       - name: Restore the tests' target/
@@ -193,7 +199,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             target/
-          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix') }}
 
       # `--locked`, so that the tests build against what Cargo.lock names, as
       # the derivation does. Not incremental, which is for one tree's edits in a row:
