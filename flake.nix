@@ -5,10 +5,16 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
-    { nixpkgs, rust-overlay, ... }:
+    {
+      nixpkgs,
+      rust-overlay,
+      crane,
+      ...
+    }:
     let
       # Where luneta runs: a Linux desktop, an arm64 Linux server and an Apple
       # Silicon Mac, each with a daemon of its own. The plugin is wasm, and runs
@@ -39,22 +45,76 @@
             targets = [ "wasm32-wasip1" ];
           };
 
+          # Every crate is built through crane, on the toolchain above, because it
+          # builds a crate's dependencies in a derivation of their own. That
+          # derivation reads the manifests and Cargo.lock, with each source file of
+          # ours swapped for an empty one, so a change to luneta's code leaves it as it
+          # was: a cache hit, which CI restores from what main built instead of
+          # compiling every crate in Cargo.lock again (#187).
+          #
+          # It writes TOML with remarshal, and not with crane-utils, a tool of its own
+          # that it builds on nixpkgs' rust: a second rust, which with its llvm was a
+          # third of what CI keeps of the store.
+          craneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
+            _: prev: { writeTOML = prev.writeTOMLViaRemarshal; }
+          );
+
           # The source is filtered to what cargo reads, so editing the README or a tape
           # is a cache hit rather than a rebuild. The daemon's crate and the protocol are
           # in it for the plugin too: cargo loads every member of the workspace,
           # whichever package it builds. luneta's skill is in it for the ask box, which
           # tells its agent the skill.
+          cargoFiles = pkgs.lib.fileset.unions [
+            ./src
+            ./crates
+            ./proto
+            ./skills/luneta/SKILL.md
+            ./Cargo.toml
+            ./Cargo.lock
+          ];
+
           src = pkgs.lib.fileset.toSource {
             root = ./.;
+            fileset = cargoFiles;
+          };
+
+          # clippy reads more: clippy.toml, and the profiling example, which
+          # `--all-targets` lints and no build compiles. It has a source of its own, so
+          # that editing either rebuilds no package.
+          lintSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
             fileset = pkgs.lib.fileset.unions [
-              ./src
-              ./crates
-              ./proto
-              ./skills/luneta/SKILL.md
-              ./Cargo.toml
-              ./Cargo.lock
+              cargoFiles
+              ./clippy.toml
+              ./examples
             ];
           };
+
+          # What the plugin's derivations share.
+          #
+          # crane builds for the target CARGO_BUILD_TARGET names. buildRustPackage
+          # would not: its cargoBuildHook hardcodes `--target <host triple>` over
+          # anything the caller sets, so the crate gets built for x86_64, where
+          # zellij-tile pulls in the whole non-wasm stack, down to openssl-sys.
+          plugin = {
+            pname = "luneta";
+            inherit version src;
+            strictDeps = true;
+
+            CARGO_BUILD_TARGET = "wasm32-wasip1";
+            cargoExtraArgs = "--locked -p luneta";
+
+            # protoc is for the build script of the protocol's crate, which the
+            # plugin reads the daemon's answers with.
+            nativeBuildInputs = [ pkgs.protobuf ];
+
+            # The unit tests are host-target and run with `cargo test` in the devshell.
+            # Nothing in this sandbox can execute a wasm32-wasip1 binary.
+            doCheck = false;
+          };
+
+          # Checked for every target too, as clippy checks every target against them.
+          pluginDeps = craneLib.buildDepsOnly (plugin // { cargoCheckExtraArgs = "--all-targets"; });
 
           # The release artifact.
           #
@@ -65,114 +125,122 @@
           # names, fetched by hash and built in the sandbox with no network and no
           # ambient state, so the bytes the provenance attestation covers do not depend
           # on what the runner had lying around.
-          #
-          # Not buildRustPackage: its cargoBuildHook hardcodes `--target
-          # <host triple>` and exports CARGO_BUILD_TARGET over anything the caller sets,
-          # so the crate gets built for x86_64 — where zellij-tile pulls in the whole
-          # non-wasm stack, down to openssl-sys — and its check, install and auditable
-          # hooks all then want a host binary that does not exist. Only the vendoring is
-          # useful here, so only the vendoring is used.
-          luneta = pkgs.stdenv.mkDerivation {
-            pname = "luneta";
+          luneta = craneLib.buildPackage (
+            plugin
+            // {
+              cargoArtifacts = pluginDeps;
+
+              # There is no bin/ to install: zellij loads the .wasm by path, so the
+              # derivation is the file and nothing else. Cargo names it after the
+              # plugin's binary; the file goes out under the name zellij is told to load.
+              installPhaseCommand = ''
+                install -Dm0644 \
+                  target/wasm32-wasip1/release/luneta-plugin.wasm \
+                  "$out/luneta.wasm"
+              '';
+
+              meta = {
+                description = "A telescope-style session picker plugin for zellij";
+                homepage = "https://github.com/lorenzolfm/luneta";
+                license = pkgs.lib.licenses.mit;
+                platforms = systems;
+              };
+            }
+          );
+
+          # What the daemon's derivations share.
+          daemon = {
+            pname = "lunetad";
             inherit version src;
+            strictDeps = true;
 
-            cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
+            cargoExtraArgs = "--locked -p lunetad";
 
-            # protoc is for the build script of the protocol's crate, which the
-            # plugin reads the daemon's answers with.
-            nativeBuildInputs = [
-              toolchain
-              pkgs.rustPlatform.cargoSetupHook
-              pkgs.protobuf
+            # The build scripts write the protocol out as Rust, through protoc.
+            nativeBuildInputs = [ pkgs.protobuf ];
+
+            # The daemon asks git how each work tree stands, and the tests make work
+            # trees of their own for it to ask about. It asks `ps` which processes are
+            # in front of the terminal a command runs on, and the tests ask it too.
+            nativeCheckInputs = [
+              pkgs.git
+              pkgs.procps
             ];
 
-            buildPhase = ''
-              runHook preBuild
-              cargo build --release --offline --target wasm32-wasip1 -p luneta
-              runHook postBuild
-            '';
-
-            # There is no bin/ to install: zellij loads the .wasm by path, so the
-            # derivation is the file and nothing else. Cargo names it after the plugin's
-            # binary; the file goes out under the name zellij is told to load.
-            installPhase = ''
-              runHook preInstall
-              install -Dm0644 \
-                target/wasm32-wasip1/release/luneta-plugin.wasm \
-                "$out/luneta.wasm"
-              runHook postInstall
-            '';
-
-            # The unit tests are host-target and run with `cargo test` in the devshell.
-            # Nothing in this sandbox can execute a wasm32-wasip1 binary.
-            doCheck = false;
-
-            meta = {
-              description = "A telescope-style session picker plugin for zellij";
-              homepage = "https://github.com/lorenzolfm/luneta";
-              license = pkgs.lib.licenses.mit;
-              platforms = systems;
-            };
+            # On Linux the tests run in the sandbox as part of the build, so a Linux
+            # whose daemon builds is one whose daemon passes them.
+            #
+            # Not on macOS. The tests run `/bin/ps` for when a process started, as
+            # Claude Code does, and its build sandbox will not let them: a build there
+            # with the tests on fails wherever the sandbox is on, as it is in CI. CI
+            # runs them on a Mac outside the sandbox instead, through the devshell,
+            # where they see the system as the daemon does when you run it.
+            doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
           };
 
+          daemonDeps = craneLib.buildDepsOnly daemon;
+
           # The daemon and its CLI, `lunetad` and `luneta`, for the system this is.
-          #
-          # buildRustPackage suits this one, for the reason it does not suit the plugin:
-          # its hooks build, test and install for the host triple, which is the target
-          # here. It builds on the toolchain the plugin builds on, and on Linux the tests
-          # run in the sandbox as part of the build, so a Linux whose daemon builds is
-          # one whose daemon passes them.
-          #
-          # Not on macOS. The tests run `/bin/ps` for when a process started, as Claude
-          # Code does, and its build sandbox will not let them: a build there with the
-          # tests on fails wherever the sandbox is on, as it is in CI. CI runs them on a
-          # Mac outside the sandbox instead, through the devshell, where they see the
-          # system as the daemon does when you run it.
-          lunetad =
-            (pkgs.makeRustPlatform {
-              cargo = toolchain;
-              rustc = toolchain;
-            }).buildRustPackage
-              {
-                pname = "lunetad";
-                inherit version src;
+          lunetad = craneLib.buildPackage (
+            daemon
+            // {
+              cargoArtifacts = daemonDeps;
 
-                cargoLock.lockFile = ./Cargo.lock;
-                cargoBuildFlags = [
-                  "-p"
-                  "lunetad"
-                ];
-                # The protocol's crate too: what the daemon reads of git is read
-                # there, and tested there.
-                cargoTestFlags = [
-                  "-p"
-                  "lunetad"
-                  "-p"
-                  "luneta-protocol"
-                ];
+              # The protocol's crate too: what the daemon reads of git is read there,
+              # and tested there.
+              cargoTestExtraArgs = "-p luneta-protocol";
 
-                # The build scripts write the protocol out as Rust, through protoc.
-                nativeBuildInputs = [ pkgs.protobuf ];
-
-                # The daemon asks git how each work tree stands, and the tests make
-                # work trees of their own for it to ask about. It asks `ps` which
-                # processes are in front of the terminal a command runs on, and the
-                # tests ask it too.
-                nativeCheckInputs = [
-                  pkgs.git
-                  pkgs.procps
-                ];
-
-                doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
-
-                meta = {
-                  description = "The luneta daemon, and the CLI that talks to it";
-                  homepage = "https://github.com/lorenzolfm/luneta";
-                  license = pkgs.lib.licenses.mit;
-                  mainProgram = "lunetad";
-                  platforms = systems;
-                };
+              meta = {
+                description = "The luneta daemon, and the CLI that talks to it";
+                homepage = "https://github.com/lorenzolfm/luneta";
+                license = pkgs.lib.licenses.mit;
+                mainProgram = "lunetad";
+                platforms = systems;
               };
+            }
+          );
+
+          # The two runs of clippy, which `dev clippy` makes in the tree you are editing
+          # and the checks below make in the sandbox, for CI. They are written down here
+          # once, for both. One run for each side of the workspace, as neither side
+          # builds for the other's target: the plugin for the wasm it ships as, and the
+          # daemon for this host, which is what it ships for. Two parts of them are
+          # load-bearing:
+          #
+          #   --all-targets   the tests and the profiling example are code too, and
+          #                   `unwrap_used` reads differently in each — clippy.toml
+          #                   exempts tests, not examples.
+          #   --target        the plugin's run names the triple `dev build` uses.
+          #                   Linting the plugin for the host would check a build that
+          #                   never ships, and `cfg(target_*)` code would be linted on
+          #                   the wrong side. The daemon's run names none, and so lints
+          #                   the host's.
+          clippyRuns = {
+            plugin = "--all-targets --target wasm32-wasip1 -p luneta";
+            daemon = "--all-targets --workspace --exclude luneta";
+          };
+
+          # One run of clippy, against the dependencies the side's build compiled, so
+          # it compiles none of them again. That is a release build, where `dev clippy`
+          # lints in dev: the profile changes nothing clippy reads but
+          # `cfg(debug_assertions)`, and no code of ours is behind it.
+          #
+          # `-D warnings`, as every lint in Cargo.toml is set to `warn`, so without it
+          # the run always passes and gates nothing.
+          clippy =
+            side: deps: run:
+            craneLib.cargoClippy (
+              side
+              // {
+                src = lintSrc;
+                cargoArtifacts = deps;
+                cargoExtraArgs = "--locked";
+                cargoClippyExtraArgs = "${run} -- -D warnings";
+                # A check: nothing to test, and no `target/` that anything builds on.
+                doCheck = false;
+                doInstallCargoArtifacts = false;
+              }
+            );
 
           # The project CLI, and the only place the build recipes are written down. It
           # replaced a Makefile whose every target was .PHONY: there was no dependency
@@ -274,27 +342,15 @@
                   ;;
 
                 # The lint set lives in Cargo.toml and clippy.toml, so this is only the
-                # invocation. It runs once for each side of the workspace, as neither side
-                # builds for the other's target: the plugin for the wasm it ships as, and the
-                # daemon for this host, which is what it ships for. Three parts of it are
-                # load-bearing:
-                #
-                #   --all-targets   the tests and the profiling example are code too, and
-                #                   `unwrap_used` reads differently in each — clippy.toml
-                #                   exempts tests, not examples.
-                #   --target        the plugin's run names the triple `dev build` uses.
-                #                   Linting the plugin for the host would check a build that
-                #                   never ships, and `cfg(target_*)` code would be linted on
-                #                   the wrong side. The daemon's run names none, and so lints
-                #                   the host's.
-                #   -D warnings     every lint in Cargo.toml is set to `warn`, so without
-                #                   this the command always exits 0 and gates nothing.
+                # invocation: the two runs of `clippyRuns` in flake.nix, which the checks CI
+                # builds make too. `-D warnings`, as every lint in Cargo.toml is set to
+                # `warn`, so without it the command always exits 0 and gates nothing.
                 #
                 # Anything after `dev clippy` goes to cargo in both runs, ahead of the `--`,
                 # so `dev clippy --fix --allow-dirty` applies the machine-applicable ones.
                 clippy)
-                  cargo clippy --locked --all-targets --target wasm32-wasip1 -p luneta "$@" -- -D warnings
-                  cargo clippy --locked --all-targets --workspace --exclude luneta "$@" -- -D warnings
+                  cargo clippy --locked ${clippyRuns.plugin} "$@" -- -D warnings
+                  cargo clippy --locked ${clippyRuns.daemon} "$@" -- -D warnings
                   ;;
 
                 install)
@@ -360,6 +416,11 @@
         {
           inherit dev luneta lunetad;
 
+          checks = {
+            clippy-plugin = clippy plugin pluginDeps clippyRuns.plugin;
+            clippy-daemon = clippy daemon daemonDeps clippyRuns.daemon;
+          };
+
           shell = pkgs.mkShell {
             # protoc for the daemon's build script, as `cargo build -p lunetad` runs it.
             packages = [
@@ -380,10 +441,13 @@
       devShells = nixpkgs.lib.mapAttrs (_: built: { default = built.shell; }) bySystem;
 
       # `dev` is exposed so that `nix run .#dev -- build` works without a devshell,
-      # which is what CI uses.
+      # and so that CI builds it, which runs shellcheck over the recipes.
       packages = nixpkgs.lib.mapAttrs (_: built: {
         inherit (built) dev luneta lunetad;
         default = built.luneta;
       }) bySystem;
+
+      # clippy over both sides of the workspace, as CI runs it.
+      checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
     };
 }
