@@ -401,6 +401,12 @@ exec "{git}" "$@"
         let path = bin.join("git");
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        // Run once here, and not first in the daemon's first ask: macOS looks
+        // a program over the first time it runs, which took that ask a quarter
+        // of a second more, and the daemon rests from a directory as long as
+        // its last ask took before it asks again on a change.
+        let ran = Command::new(&path).arg("--version").stdout(Stdio::null()).status().unwrap();
+        assert!(ran.success(), "the git of the test's own does not run");
         noted
     }
 
