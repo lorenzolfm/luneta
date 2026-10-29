@@ -303,8 +303,8 @@ struct Client {
     /// Where luneta sent the client to a session zellij makes for it, while
     /// zellij has yet to title luneta's terminal there.
     making: Option<Making>,
-    /// The last key it typed in the session it is in, if it typed one there
-    /// since it came, as far as luneta knows.
+    /// The last key it typed, and where, as far as luneta knows. It makes the
+    /// client the one zellij moves only in a session it is in still.
     typed: Option<Typed>,
 }
 
@@ -340,6 +340,25 @@ impl Client {
     /// every session's server how it is.
     fn arriving(&self) -> bool {
         self.coming.is_some() || self.making.is_some()
+    }
+
+    /// It typed a key just now, in `session`, the one it is in.
+    fn typed_in(&mut self, session: String) {
+        self.typed = Some(Typed { session, at: Instant::now() });
+    }
+
+    /// Types `zellij::NUDGE`, in the session `here`, for an action asked of
+    /// zellij there to move it. When the action can go: once zellij has taken
+    /// in the key it typed there last before, or this one, where it typed
+    /// none there since it came. The nudge takes the client's turn back from
+    /// another that typed there since, in time unless the action reaches
+    /// zellij first.
+    fn nudge(&mut self, here: &str) -> Instant {
+        let typed = self.typed.as_ref().filter(|typed| typed.session == here);
+        let before = typed.map(|typed| typed.at);
+        self.hosted.send(zellij::NUDGE);
+        self.typed_in(here.to_owned());
+        before.unwrap_or_else(Instant::now) + zellij::NUDGED
     }
 }
 
@@ -713,7 +732,7 @@ impl App {
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
             Event::Daemon(Ok(host)) => {
                 let look = self.sidebar.heard(host);
-                self.came(look);
+                self.arrived(look);
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => self.sidebar.looked(looked),
@@ -723,6 +742,7 @@ impl App {
                     self.client.making = None;
                 }
                 let look = self.sidebar.stayed(look);
+                // The client never left: what it typed there counts still.
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
@@ -1133,8 +1153,8 @@ impl App {
             self.held = Held::Edge { dragged: false };
             return;
         }
-        // A press on the rows may end in a click that takes zellij's client
-        // to a pane.
+        // A press on the sidebar may end in a click that takes zellij's
+        // client to a pane.
         if down {
             self.nudge_ahead();
         }
@@ -1330,7 +1350,7 @@ impl App {
             Some(After::Kill { .. }) => self.sidebar.leaving(place),
             Some(After::Open(..)) | None => self.sidebar.went(place),
         };
-        let nudged = self.nudge(here);
+        let nudged = self.client.nudge(here);
         zellij::go(here, place.session(), place.pane(), then, after, nudged, &self.events);
     }
 
@@ -1345,7 +1365,7 @@ impl App {
             return false;
         };
         let then = self.sidebar.sending(session);
-        let nudged = self.nudge(&here);
+        let nudged = self.client.nudge(&here);
         let made = zellij::start(&here, session, cwd, then, after, nudged, &self.events);
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
@@ -1382,35 +1402,20 @@ impl App {
         Some(here)
     }
 
-    /// Types `zellij::NUDGE` into zellij's client, in the session `here`, for
-    /// an action asked of zellij there to move it. When the action can go:
-    /// once zellij has taken in the key the client typed there last before,
-    /// or this one, where it typed none there since it came. The nudge takes
-    /// the client's turn back from another that typed there since, in time
-    /// unless the action reaches zellij first.
-    fn nudge(&mut self, here: &str) -> Instant {
-        let typed = self.client.typed.as_ref().filter(|typed| typed.session == here);
-        let before = typed.map(|typed| typed.at);
-        self.client.hosted.send(zellij::NUDGE);
-        let now = Instant::now();
-        self.client.typed = Some(Typed { session: here.to_owned(), at: now });
-        before.unwrap_or(now) + zellij::NUDGED
-    }
-
     /// Types `zellij::NUDGE` into zellij's client as the keys or a press of
     /// the mouse come to luneta, ahead of the action they may ask for, which
-    /// then has no wait for zellij to take it in.
+    /// then waits for zellij to take it in for less, if at all.
     fn nudge_ahead(&mut self) {
         if let Some(session) = self.typing_in() {
             self.client.hosted.send(zellij::NUDGE);
-            self.client.typed = Some(Typed { session, at: Instant::now() });
+            self.client.typed_in(session);
         }
     }
 
     /// zellij's client typed a key for you just now.
     fn typed(&mut self) {
         if let Some(session) = self.typing_in() {
-            self.client.typed = Some(Typed { session, at: Instant::now() });
+            self.client.typed_in(session);
         }
     }
 
@@ -1435,7 +1440,7 @@ impl App {
     /// `look` is for, if it came to one. What the client typed before, it
     /// typed elsewhere: zellij forgets the keys of a client that leaves, of
     /// one that comes back too.
-    fn came(&mut self, look: Option<Look>) {
+    fn arrived(&mut self, look: Option<Look>) {
         if look.is_some() {
             self.client.typed = None;
         }
@@ -1519,7 +1524,7 @@ impl App {
                         zellij::arrive(making.arrival, &self.events);
                     }
                     let look = self.sidebar.titled(title);
-                    self.came(look);
+                    self.arrived(look);
                     let coming = self.client.coming.take();
                     self.came_in(coming);
                 }
