@@ -354,7 +354,9 @@ ended, makes the session you typed the name of, or makes one in the
 highlighted directory, named for it. `Del` deletes the highlighted session,
 lets go of one that ended, or closes the agent's pane, and asks first, as the
 menu's delete does, while an agent at work would end: `y` goes ahead. `Ctrl r`
-renames the highlighted session. `Esc`, or a click off the box, closes it.
+renames the highlighted session. `Esc`, or a click off the box, closes it. A
+click on a row does what `Enter` does on it, the wheel moves the highlight,
+and a click on a key the line under the search names presses it, as `<TAB>`.
 
 The sidebar lists every session, oldest first until you move them, the panes
 in each, in the order of their tabs, and what the agent in each pane is doing,
@@ -426,8 +428,10 @@ your groups from yet. In their place, its Claude group has keys for a few
 skills, built in. `Alt a` opens the same menu floating at the bottom right of
 zellij's side, for the pane zellij is on, wherever the keys are and folded or
 not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
-click anywhere closes it, and gives the keys back to zellij, or to the sidebar
-if it had them. What it opens takes zellij there, with the keys. What goes
+click off its box closes it, and gives the keys back to zellij, or to the
+sidebar if it had them. A click on an entry presses its key, and on
+`<BS> - Back` or `<ESC> - Close` does what it says; a delete asks first, as its
+key does. What it opens takes zellij there, with the keys. What goes
 wrong it says where it floated, in a box any key or a click closes, and so it
 says why it does not open: zellij is on a plugin's pane, or luneta cannot yet
 tell which pane zellij is on. `Alt a` there tries again. While the sidebar
@@ -445,6 +449,15 @@ has the keys and no menu is open, its bottom lists what you can press there:
  b  Brief ▸
 ```
 
+A click on an entry of it presses its key, as a click on one of the menu's
+does at the bottom of the sidebar or over zellij. The entry, the row of the
+picker or the key under the pointer is lit, a step softer than the
+highlight, so you see what a click hits before you click. A click that comes
+fast after another on the same cell, or one next to it, is none, the second
+of a double click and the third of a triple: a click that opened a group
+leaves another entry under the pointer, as `d` opens Delete onto
+`d  close the pane`, and `s  delete the session` under it.
+
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
 tab and in the directory it works in, `n t` a tab of its session there, and
 `n s` a session there, named as the picker's directories name the directory,
@@ -458,7 +471,8 @@ for the skill and the branch; `c m` on `/make-illegal-states-unrepresentable`,
 and `c s` on `/tigerstyle`. For any other skill, `m` opens the menu on its
 first group, where `/` searches the skills the pane's directory can run, and
 `Enter` starts Claude Code on the one highlighted, beside the pane, as `c`'s
-keys do.
+keys do, and so does a click on a skill. The wheel over them moves the
+highlight.
 
 `d d` closes the highlighted pane, or its tab once nothing else holds the tab
 open, floating panes and all. `d s` deletes its session: luneta kills it, and

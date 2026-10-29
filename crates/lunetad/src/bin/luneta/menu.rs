@@ -40,7 +40,8 @@ use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::pull::{At, Kind, Link, Ready};
 use crate::sidebar::{self, ACCENT, LIT, NAME, Place, TAG};
-use crate::skills::{Search, Skills};
+use crate::skills::{Name, Search, Skills};
+use crate::spots::{Drawn, Spots};
 use crate::zellij::SessionName;
 
 /// The key that opens the search over the skills, at the top of the menu, and
@@ -703,6 +704,15 @@ pub enum Done {
     Ask(Target),
 }
 
+/// What a click on a spot of the menu does: presses the key of an entry, or
+/// one the line of keys names, or picks the skill so named of those its
+/// search finds, as `Enter` does with the cursor on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Key(KeyEvent),
+    Skill(Name),
+}
+
 /// The menu at the bottom of the sidebar, for the row highlighted when it
 /// opened, or floating over zellij, for the pane zellij was on.
 pub struct Menu {
@@ -987,20 +997,46 @@ impl Menu {
         }
     }
 
+    /// What a click on the skill called `name` in the search box does: what
+    /// `Enter` does with the cursor on it. Nothing where it matches no more,
+    /// nor while the keys do nothing but close the menu.
+    pub fn pick(mut self, name: &Name) -> Did {
+        if let Stage::Choosing(keys) = &mut self.stage
+            && let Some(search) = &mut keys.search
+            && search.select(name)
+        {
+            return self.key(&KeyEvent::from(KeyCode::Enter));
+        }
+        Did::Stays(self, Wants::Nothing)
+    }
+
+    /// Moves the cursor of the search box `by` skills down, or up, as the
+    /// wheel does over them.
+    pub fn scroll(&mut self, by: isize) {
+        if let Stage::Choosing(keys) = &mut self.stage
+            && let Some(search) = &mut keys.search
+        {
+            search.move_by(by);
+        }
+    }
+
     /// What the menu shows at the bottom of the sidebar, `width` wide, in
     /// `room` lines at most: a rule that names the groups opened and says
     /// where the pane works, what the menu shows under it, and the keys that
     /// go back and close under them. Short of room, what it shows goes first,
-    /// then the rule.
-    pub fn lines(&self, width: usize, room: usize) -> Vec<Line<'static>> {
+    /// then the rule. And the spots on those lines, as `Shown::lines` says.
+    pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
         self.shown(width, room.saturating_sub(2)).lines(width, room)
     }
 
     /// Draws the menu floating at the bottom right of `over`, zellij's side,
     /// as `float` does. The search box takes the most columns, so that it
     /// keeps its width as you type.
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect) {
-        float(buffer, over, self.searching(), |width, body_room| self.shown(width, body_room));
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect) -> Drawn {
+        let floated =
+            float(buffer, over, self.searching(), |width, body_room| self.shown(width, body_room));
+        let drawn = |(area, spots)| Drawn::Menu { number: self.number, area: Some(area), spots };
+        floated.map_or(Drawn::Nothing, drawn)
     }
 
     /// Whether the search box over the skills is open.
@@ -1016,56 +1052,78 @@ impl Menu {
     /// What the menu shows `width` wide, with `body_room` lines at most for
     /// what it shows under the rule. The menu for a pull request or an issue
     /// is named for it, and says its repository where another says where its
-    /// pane works.
+    /// pane works. An entry, or a skill, is a spot for a click only while the
+    /// keys choose, as they do nothing else but close the menu once a key
+    /// opens something, or deletes.
     fn shown(&self, width: usize, body_room: usize) -> Shown {
         let inner = width.saturating_sub(1);
         let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
-        let (title, right, body, footer) = match &self.stage {
+        let mut spots = Spots::default();
+        let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { link, step: Step::Pulling(_) } => {
                 let making = format!("Making a worktree of {}…", link.tab());
                 let body = wrap(&making, width, Style::new().fg(NAME));
-                (link.tab(), link.repository(), body, keys_line(width, &[("<ESC>", "Close")]))
+                (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
-            Stage::Pull { link, step: Step::Choosing | Step::Opening | Step::Making(_) } => {
-                let entry = |pull| entry_line(&Entry::Pull(pull, link.kind()), inner);
-                let body = Pull::ALL.map(entry);
-                let footer = keys_line(width, &[("<ESC>", "Close")]);
-                (link.tab(), link.repository(), body.to_vec(), footer)
+            Stage::Pull {
+                link,
+                step: step @ (Step::Choosing | Step::Opening | Step::Making(_)),
+            } => {
+                let entries = Pull::ALL.map(|pull| Entry::Pull(pull, link.kind()));
+                if matches!(step, Step::Choosing) {
+                    spots = entry_spots(&entries, width).map(Choice::Key);
+                }
+                let body = entries.iter().map(|entry| entry_line(entry, inner)).collect();
+                (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
+                let choosing = matches!(self.stage, Stage::Choosing(_));
                 if let Some(search) = &keys.search {
-                    let moves = [("<↓↑>", "Move"), ("<ENTER>", "Start"), ("<ESC>", "Back")];
-                    let body = search_lines(search, width, body_room);
-                    (SEARCH_TITLE.to_owned(), right, body, keys_line(width, &moves))
+                    let moves =
+                        [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Esc, "Back")];
+                    let (body, skills) = search_lines(search, width, body_room);
+                    if choosing {
+                        spots = skills;
+                    }
+                    (SEARCH_TITLE.to_owned(), right, body, keyed(width, &moves))
                 } else {
-                    let back: &[(&str, &str)] = if keys.open.is_empty() {
-                        &[("<ESC>", "Close")]
+                    let back: &[(Hint, &str)] = if keys.open.is_empty() {
+                        &[(Hint::Esc, "Close")]
                     } else {
-                        &[("<BS>", "Back"), ("<ESC>", "Close")]
+                        &[(Hint::Backspace, "Back"), (Hint::Esc, "Close")]
                     };
+                    if choosing {
+                        spots = entry_spots(keys.entries(), width).map(Choice::Key);
+                    }
                     let body = keys.entries().iter().map(|entry| entry_line(entry, inner));
-                    (title(keys), right, body.collect(), keys_line(width, back))
+                    (title(keys), right, body.collect(), keyed(width, back))
                 }
             },
             Stage::Asking { keys, asks, .. } => (
                 title(keys),
                 right,
                 wrap(asks, width, Style::new().fg(NAME)),
-                keys_line(width, &[("<y>", "Yes"), ("<BS>", "Back"), ("<ESC>", "Close")]),
+                keyed(
+                    width,
+                    &[(Hint::Char('y'), "Yes"), (Hint::Backspace, "Back"), (Hint::Esc, "Close")],
+                ),
             ),
         };
-        Shown { title, right, body, footer }
+        Shown { title, right, body, spots, footer, keys }
     }
 }
 
 /// What the menu shows: the title of the rule over it and where its pane
 /// works, at the rule's right, the lines under the rule, and the keys that go
-/// back and close under them.
+/// back and close under them; and the spots on the lines under the rule, by
+/// their place among them, and on the keys' line.
 struct Shown {
     title: String,
     right: String,
     body: Vec<Line<'static>>,
+    spots: Spots<Choice>,
     footer: Line<'static>,
+    keys: Spots<KeyEvent>,
 }
 
 impl Shown {
@@ -1083,44 +1141,55 @@ impl Shown {
 
     /// Its lines, `width` wide, in `room` lines at most: the rule, what it
     /// shows under it, and the keys under them. Short of room, what it shows
-    /// goes first, then the rule.
-    fn lines(self, width: usize, room: usize) -> Vec<Line<'static>> {
-        let Shown { title, right, body, footer } = self;
+    /// goes first, then the rule. And the spots on the lines that show, by
+    /// their place among them.
+    fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
+        let Shown { title, right, body, spots, footer, keys } = self;
         let mut lines = Vec::with_capacity(room);
         if room >= 2 {
             lines.push(rule(&title, &right, width));
         }
+        let ruled = lines.len();
         lines.extend(body.into_iter().take(room.saturating_sub(2)));
+        let mut spots = spots.first(lines.len() - ruled).down(ruled);
         if room >= 1 {
+            spots.extend(keys.map(Choice::Key).down(lines.len()));
             lines.push(footer);
         }
-        lines
+        (lines, spots)
     }
 }
 
 /// Draws what `shown` shows, for a width and the lines its body has room
 /// for, floating at the bottom right of `over`, zellij's side: in a box as
 /// wide as that takes, or the `widest` the box can be, within `FLOATING`,
-/// and as tall as its lines, the rule over them its top.
-fn float(buffer: &mut Buffer, over: Rect, widest: bool, shown: impl Fn(usize, usize) -> Shown) {
+/// and as tall as its lines, the rule over them its top. Says where the box
+/// is, and the spots in it, where it had the room for one.
+fn float(
+    buffer: &mut Buffer,
+    over: Rect,
+    widest: bool,
+    shown: impl Fn(usize, usize) -> Shown,
+) -> Option<(Rect, Spots<Choice>)> {
     let (fewest, most) = FLOATING;
     let most = most.min(usize::from(over.width.saturating_sub(2)));
     // The rule is the box's top, and its bottom takes a line of its own.
     let room = usize::from(over.height.saturating_sub(1));
     if most == 0 || room < 2 {
-        return;
+        return None;
     }
     let inner =
         if widest { most } else { shown(most, room - 2).takes().clamp(fewest.min(most), most) };
-    let lines = shown(inner, room - 2).lines(inner, room);
-    let Some((rule, rest)) = lines.split_first() else {
-        return;
-    };
+    let (lines, spots) = shown(inner, room - 2).lines(inner, room);
+    let (rule, rest) = lines.split_first()?;
     // Both fit `over`, as `inner` and `lines` were made to.
     let width = u16::try_from(inner + 2).unwrap_or(over.width);
     let height = u16::try_from(lines.len() + 1).unwrap_or(over.height);
     let area = Rect::new(over.right() - width, over.bottom() - height, width, height);
     boxed(buffer, area, rule, rest);
+    // The lines go between the box's sides, from its top down.
+    let inside = Rect::new(area.x + 1, area.y, width - 2, height - 1);
+    Some((area, spots.placed(inside)))
 }
 
 /// Draws `note` floating at the bottom right of `over`, where the menu over
@@ -1131,7 +1200,9 @@ pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
         title: TITLE.to_owned(),
         right: String::new(),
         body: wrap(note, width, Style::new().fg(sidebar::ERROR)),
-        footer: keys_line(width, &[("<any key>", "Close")]),
+        spots: Spots::default(),
+        footer: keys_line(width, &[(Hint::AnyKey, "Close")]),
+        keys: Spots::default(),
     });
 }
 
@@ -1191,17 +1262,28 @@ fn title(keys: &Keys) -> String {
 /// The legend at the bottom of the sidebar, `width` wide, in `room` lines at
 /// most: under a rule, the keys the top of the sidebar takes, as `Top::of`
 /// leaves them to the menu, and the sidebar's command, each with what it
-/// does.
-pub fn legend(width: usize, room: usize) -> Vec<Line<'static>> {
+/// does. Each is a spot that presses its key, by its line among them.
+pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     let keys = Keys::legend();
     let mut lines = Vec::with_capacity(room);
     if room == 0 {
-        return lines;
+        return (lines, Spots::default());
     }
     lines.push(rule(TITLE, "", width));
     let inner = width.saturating_sub(1);
     lines.extend(keys.root.iter().map(|entry| entry_line(entry, inner)).take(room - 1));
-    lines
+    let spots = entry_spots(&keys.root, width).first(lines.len() - 1).down(1);
+    (lines, spots)
+}
+
+/// A spot on the line of each of `entries`, `width` wide, one to a line, that
+/// presses its key.
+fn entry_spots(entries: &[Entry], width: usize) -> Spots<KeyEvent> {
+    let mut spots = Spots::default();
+    for (line, entry) in entries.iter().enumerate() {
+        spots.add(line, 0..width, KeyEvent::from(KeyCode::Char(entry.key())));
+    }
+    spots
 }
 
 /// The rule over the menu, `width` wide: its title, and where its pane works
@@ -1260,46 +1342,115 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A key a line of keys names, as `<ESC>`, `<y>` or `<Ctrl r>`, or what
+/// takes more than one, as `<↓↑>` or `<any key>`, which no click presses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hint {
+    Esc,
+    Backspace,
+    Enter,
+    Tab,
+    Delete,
+    Char(char),
+    Ctrl(char),
+    /// The arrows down and up.
+    Moves,
+    AnyKey,
+    AnyOtherKey,
+}
+
+impl Hint {
+    /// How a line of keys names it.
+    fn label(self) -> String {
+        match self {
+            Hint::Esc => "<ESC>".to_owned(),
+            Hint::Backspace => "<BS>".to_owned(),
+            Hint::Enter => "<ENTER>".to_owned(),
+            Hint::Tab => "<TAB>".to_owned(),
+            Hint::Delete => "<Del>".to_owned(),
+            Hint::Char(c) => format!("<{c}>"),
+            Hint::Ctrl(c) => format!("<Ctrl {c}>"),
+            Hint::Moves => "<↓↑>".to_owned(),
+            Hint::AnyKey => "<any key>".to_owned(),
+            Hint::AnyOtherKey => "<any other key>".to_owned(),
+        }
+    }
+
+    /// The key a click on it presses: none for what takes more than one.
+    fn key(self) -> Option<KeyEvent> {
+        let (code, modifiers) = match self {
+            Hint::Esc => (KeyCode::Esc, KeyModifiers::NONE),
+            Hint::Backspace => (KeyCode::Backspace, KeyModifiers::NONE),
+            Hint::Enter => (KeyCode::Enter, KeyModifiers::NONE),
+            Hint::Tab => (KeyCode::Tab, KeyModifiers::NONE),
+            Hint::Delete => (KeyCode::Delete, KeyModifiers::NONE),
+            Hint::Char(c) => (KeyCode::Char(c), KeyModifiers::NONE),
+            Hint::Ctrl(c) => (KeyCode::Char(c), KeyModifiers::CONTROL),
+            Hint::Moves | Hint::AnyKey | Hint::AnyOtherKey => return None,
+        };
+        Some(KeyEvent::new(code, modifiers))
+    }
+}
+
 /// The keys that go back and close, and what each does, in as many words as
 /// `width` has room for: all of them, or else the keys alone.
-pub fn keys_line(width: usize, keys: &[(&str, &str)]) -> Line<'static> {
-    let spelled = |sep: &str, joiner: &str| {
-        let each = keys.iter().map(|(key, does)| format!("{key}{sep}{does}"));
-        each.collect::<Vec<_>>().join(joiner)
+pub fn keys_line(width: usize, keys: &[(Hint, &str)]) -> Line<'static> {
+    keyed(width, keys).0
+}
+
+/// The line of `keys` that `keys_line` draws, and on it a spot for each key
+/// a click can press: the key, and the words after it that say what it does.
+pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEvent>) {
+    let labels: Vec<String> = keys.iter().map(|(hint, _)| hint.label()).collect();
+    let spelled = |sep: &str| -> Vec<String> {
+        let each = labels.iter().zip(keys);
+        each.map(|(label, (_, does))| format!("{label}{sep}{does}")).collect()
     };
-    let bare = |joiner: &str| keys.iter().map(|(key, _)| *key).collect::<Vec<_>>().join(joiner);
-    let candidates =
-        [spelled(" - ", ", "), spelled(" ", "  "), spelled(" ", " "), bare("/"), bare("")];
+    // Each key, with what it does or alone, and what goes between two; or
+    // else the keys alone, run together.
+    let candidates: [(Vec<String>, &str); 4] =
+        [(spelled(" - "), ", "), (spelled(" "), "  "), (spelled(" "), " "), (labels.clone(), "/")];
     let room = width.saturating_sub(1);
-    let line = candidates.into_iter().find(|line| line.width() <= room).unwrap_or_else(|| bare(""));
+    let fits = |(each, joiner): &(Vec<String>, &str)| each.join(joiner).width() <= room;
+    let (each, joiner) =
+        candidates.into_iter().find(fits).unwrap_or_else(|| (labels.clone(), ""));
     let dim = Style::new().add_modifier(Modifier::DIM);
     // Each key in the accent, and the words between them dimmed.
     let mut spans = vec![Span::raw(" ")];
-    let mut rest = line.as_str();
-    for (key, _) in keys {
-        let Some(at) = rest.find(key) else {
-            continue;
-        };
+    let mut spots = Spots::default();
+    let mut column = 1;
+    for (at, ((shown, label), (hint, _))) in each.iter().zip(&labels).zip(keys).enumerate() {
         if at > 0 {
-            spans.push(Span::styled(rest[..at].to_owned(), dim));
+            spans.push(Span::styled(joiner.to_owned(), dim));
+            column += joiner.width();
         }
-        spans.push(Span::styled((*key).to_owned(), Style::new().fg(ACCENT)));
-        rest = &rest[at + key.len()..];
+        spans.push(Span::styled(label.clone(), Style::new().fg(ACCENT)));
+        let words = &shown[label.len()..];
+        if !words.is_empty() {
+            spans.push(Span::styled(words.to_owned(), dim));
+        }
+        if let Some(pressed) = hint.key() {
+            spots.add(0, column..column + shown.width(), pressed);
+        }
+        column += shown.width();
     }
-    if !rest.is_empty() {
-        spans.push(Span::styled(rest.to_owned(), dim));
-    }
-    Line::from(spans)
+    (Line::from(spans), spots)
 }
 
 /// The search box over the skills, in at most `room` lines `width` wide: what
 /// is typed, and under it the skills that match, best first, as many as
 /// `SEARCH_ROWS` and the room show around the one the cursor is on, or a line
 /// that says why there are none. It keeps the lines the skills found fill,
-/// however many of them match, so the menu keeps its size as you type.
-fn search_lines(search: &Search, width: usize, room: usize) -> Vec<Line<'static>> {
+/// however many of them match, so the menu keeps its size as you type. Each
+/// skill shown is a spot that picks it, by its line among them.
+fn search_lines(
+    search: &Search,
+    width: usize,
+    room: usize,
+) -> (Vec<Line<'static>>, Spots<Choice>) {
+    let mut spots = Spots::default();
     let Some(list) = room.checked_sub(1) else {
-        return Vec::new();
+        return (Vec::new(), spots);
     };
     let total = match search.skills() {
         Skills::Found(skills) => skills.len(),
@@ -1324,12 +1475,14 @@ fn search_lines(search: &Search, width: usize, room: usize) -> Vec<Line<'static>
         let selected = search.selected().unwrap_or(0);
         let start = (selected + 1).saturating_sub(list);
         let shown = search.found().enumerate().skip(start).take(list);
-        lines.extend(shown.map(|(at, (skill, hits))| {
-            skill_line(&skill.name.to_string(), &skill.description, hits, at == selected, width)
-        }));
+        for (at, (skill, hits)) in shown {
+            spots.add(lines.len(), 0..width, Choice::Skill(skill.name.clone()));
+            let name = skill.name.to_string();
+            lines.push(skill_line(&name, &skill.description, hits, at == selected, width));
+        }
     }
     lines.resize(1 + list, Line::default());
-    lines
+    (lines, spots)
 }
 
 /// A skill in the search box, `width` wide: its name as a prompt runs it,
@@ -1365,11 +1518,14 @@ fn skill_line(
 mod tests {
     use std::time::{Duration, SystemTime};
 
+    use ratatui::layout::Position;
+
     use super::*;
     use crate::close::{self, Deletes, Doing, Seat, Subject};
     use crate::pull::{At, Link, Ready};
     use crate::sidebar::Listed;
-    use crate::skills::{Name, Skill};
+    use crate::skills::Skill;
+    use crate::spots::Hit;
     use crate::zellij::Closes;
 
     fn listed() -> Listed {
@@ -1422,7 +1578,7 @@ mod tests {
         let (menu, wants) = stays(opened(pane_row(), Some('n')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             [
                 "─ New ─────────── luneta/main ─",
                 " p  new pane",
@@ -1451,7 +1607,7 @@ mod tests {
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(pane_row(), None));
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
@@ -1465,7 +1621,7 @@ mod tests {
         );
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
-        assert_eq!(text(&menu.lines(31, 9))[0], "─ luneta ──────── luneta/main ─");
+        assert_eq!(text(&menu.lines(31, 9).0)[0], "─ luneta ──────── luneta/main ─");
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
         // A key the menu has not opens none.
         assert!(Menu::open(1, pane_row(), Some('x')).is_none());
@@ -1474,7 +1630,7 @@ mod tests {
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
-            text(&legend(31, 9)),
+            text(&legend(31, 9).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
@@ -1507,7 +1663,7 @@ mod tests {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             [
                 "─ Claude ──────── luneta/main ─",
                 " t  /thermo-nuclear-review",
@@ -1544,7 +1700,7 @@ mod tests {
     fn the_brief_group_briefs_you_by_the_row_the_menu_is_for() {
         let (menu, _) = stays(opened(session_row(), Some('b')));
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             [
                 "─ Brief ───────────────────────",
                 " z  Every session",
@@ -1601,17 +1757,17 @@ mod tests {
         let (mut menu, wants) = stays(menu.key(&char('/')));
         assert_eq!(wants, Wants::Skills("/w/luneta/main".to_owned()));
         assert_eq!(
-            text(&menu.lines(31, 6))[..3],
+            text(&menu.lines(31, 6).0)[..3],
             ["─ Skills ──────── luneta/main ─", " /_", " finding skills…"]
         );
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
         // The one the cursor is on is lit, as the sidebar's row is while it
         // has the focus, which it has while the search is open.
-        let lit: Vec<_> = menu.lines(31, 6)[2..4].iter().map(|line| line.style.bg).collect();
+        let lit: Vec<_> = menu.lines(31, 6).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [Some(LIT), None]);
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
-        assert_eq!(text(&menu.lines(31, 6))[..3], [
+        assert_eq!(text(&menu.lines(31, 6).0)[..3], [
             "─ Skills ──────── luneta/main ─".to_owned(),
             " /ti_".to_owned(),
             " /tigerstyle  tigerstyle it".to_owned(),
@@ -1621,6 +1777,68 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
         assert!(menu.opening());
+    }
+
+    /// Each skill the search box shows is a spot on its line that picks it:
+    /// a click starts an agent on it, as `Enter` does with the cursor on it.
+    /// The wheel over them moves the cursor. What is typed is no spot.
+    #[test]
+    fn a_click_on_a_skill_starts_an_agent_on_it_as_enter_does() {
+        let (mut menu, _) = stays(opened(pane_row(), Some('/')));
+        menu.found(Ok(skills(&["code-review", "tigerstyle"])));
+        let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
+        // The rule, what is typed, then the skills.
+        let (_, spots) = menu.lines(31, 6);
+        assert_eq!(spots.at(Position::new(4, 1)), None);
+        assert_eq!(spots.at(Position::new(4, 2)), Some(&Choice::Skill(skill("code-review"))));
+        assert_eq!(spots.at(Position::new(30, 3)), Some(&Choice::Skill(skill("tigerstyle"))));
+        menu.scroll(1);
+        let lit: Vec<_> = menu.lines(31, 6).0[2..4].iter().map(|line| line.style.bg).collect();
+        assert_eq!(lit, [None, Some(LIT)]);
+        // A skill that no longer matches picks nothing, not the one in its
+        // place.
+        let (menu, _) = stays(menu.key(&char('g')));
+        let (menu, wants) = stays(menu.pick(&skill("code-review")));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        let (menu, wants) = stays(menu.pick(&skill("code-review")));
+        let command = claude("/code-review", Some("feat/menu"));
+        let opens = Opens::Pane { beside: 4, command };
+        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
+        assert!(menu.opening());
+        // Waiting on zellij, the menu takes no click on a skill.
+        assert_eq!(menu.lines(31, 6).1.at(Position::new(4, 3)), None);
+        let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
+        assert_eq!(wants, Wants::Nothing);
+    }
+
+    /// Each key a line of keys names is a spot, with the words after it,
+    /// that presses the key it names, in the words the line has room for;
+    /// what takes more than a key is none.
+    #[test]
+    fn a_click_on_a_key_a_line_of_keys_names_presses_it() {
+        let keys = [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Ctrl('r'), "Rename")];
+        let (line, spots) = keyed(50, &keys);
+        assert_eq!(line.to_string(), " <↓↑> - Move, <ENTER> - Start, <Ctrl r> - Rename");
+        let at = |x| spots.at(Position::new(x, 0)).copied();
+        assert_eq!(at(1), None);
+        assert_eq!([at(14), at(28)], [Some(KeyEvent::from(KeyCode::Enter)); 2]);
+        assert_eq!(at(29), None);
+        let rename = Some(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!([at(31), at(47)], [rename, rename]);
+        assert_eq!(at(48), None);
+        // Short of room, the keys alone; and with less, run together.
+        let yes_or_delete = [(Hint::Char('y'), "Yes"), (Hint::Delete, "Delete")];
+        let (line, spots) = keyed(12, &yes_or_delete);
+        assert_eq!(line.to_string(), " <y>/<Del>");
+        let at = |x| spots.at(Position::new(x, 0)).copied();
+        let yes = Some(KeyEvent::from(KeyCode::Char('y')));
+        let delete = Some(KeyEvent::from(KeyCode::Delete));
+        assert_eq!([at(3), at(4), at(5)], [yes, None, delete]);
+        assert_eq!(keyed(9, &yes_or_delete).0.to_string(), " <y><Del>");
+        let any = [(Hint::AnyKey, "Close"), (Hint::AnyOtherKey, "No")];
+        assert_eq!(keyed(40, &any).0.to_string(), " <any key> - Close, <any other key> - No");
+        assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
     /// What closing pane 4 of `luneta` does, as zellij says what it closes,
@@ -1665,7 +1883,7 @@ mod tests {
         let (menu, wants) = stays(menu.planned(plan(Closes::Pane, busy())));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             [
                 "─ Delete ──────── luneta/main ─",
                 " Close the pane? 1 agent, 1",
@@ -1683,14 +1901,14 @@ mod tests {
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(plan(tab(), at_work)));
         assert_eq!(wants, Wants::Nothing);
-        let asking = text(&menu.lines(31, 9));
+        let asking = text(&menu.lines(31, 9).0);
         assert_eq!(asking[1..3], [" Close its tab? 2 agents, 1", " busy, 1 waiting"]);
         // The tab is the same, but its other agent went to work as you read.
         let (menu, _) = stays(menu.key(&char('y')));
         let busier = || vec![(4, Doing::Busy), (5, Doing::Busy)];
         let (menu, wants) = stays(menu.planned(plan(tab(), busier())));
         assert_eq!(wants, Wants::Nothing);
-        assert_eq!(text(&menu.lines(31, 9))[1..3], [" Close its tab? 2 agents, 2", " busy"]);
+        assert_eq!(text(&menu.lines(31, 9).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let act = Act::Tab { session: "luneta".to_owned(), tab: 2, panes: vec![4, 5] };
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(act));
@@ -1719,7 +1937,11 @@ mod tests {
     /// zellij's side, `width` by `height` past `ZELLIJ_X` columns of the
     /// sidebar's, with what `draw` draws floating over it, as text. Each cell
     /// of the box is in gruvbox's colours.
-    fn floated(draw: impl FnOnce(&mut Buffer, Rect), width: u16, height: u16) -> Vec<String> {
+    fn floated<R>(
+        draw: impl FnOnce(&mut Buffer, Rect) -> R,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
         const ZELLIJ_X: u16 = 10;
         let over = Rect::new(ZELLIJ_X, 0, width, height);
         let mut buffer = Buffer::empty(Rect::new(0, 0, ZELLIJ_X + width, height));
@@ -1772,6 +1994,67 @@ mod tests {
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
 
+    /// Where `text` first shows on `buffer`, each cell before it a character.
+    fn drawn_at(buffer: &Buffer, text: &str) -> Option<Position> {
+        let area = buffer.area;
+        (area.top()..area.bottom()).find_map(|y| {
+            let cells = (area.left()..area.right()).map(|x| buffer[(x, y)].symbol());
+            let line: String = cells.collect();
+            let at = line.find(text)?;
+            let x = u16::try_from(line[..at].chars().count()).ok()?;
+            Some(Position::new(area.x + x, y))
+        })
+    }
+
+    /// The spot a click on `text` hits, of the menu floating over zellij's
+    /// side, 50 by 10 past 10 columns of the sidebar's: the menu's own.
+    fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
+        let drawn = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10));
+        let at = drawn_at(&buffer, text).expect("drawn");
+        assert!(drawn.boxed().is_some_and(|area| area.contains(at)), "{text:?} is in the box");
+        drawn.at(at).map(|hit| match hit {
+            Hit::Menu(number, choice) if number == menu.number() => choice,
+            hit => panic!("{hit:?} is not the menu's"),
+        })
+    }
+
+    fn pressed(code: KeyCode) -> Choice {
+        Choice::Key(KeyEvent::from(code))
+    }
+
+    /// Each entry of the menu floating over zellij is a spot where it is
+    /// drawn that presses its key, and so is each key the line under them
+    /// names, with the words after it. The rule over them is none.
+    #[test]
+    fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
+        let menu = Menu::new(1, pane_row());
+        assert_eq!(clicked(&menu, "Claude ▸"), Some(pressed(KeyCode::Char('c'))));
+        assert_eq!(clicked(&menu, " /  Search"), Some(pressed(KeyCode::Char('/'))));
+        assert_eq!(clicked(&menu, "<ESC>"), Some(pressed(KeyCode::Esc)));
+        assert_eq!(clicked(&menu, "Close"), Some(pressed(KeyCode::Esc)));
+        assert_eq!(clicked(&menu, "─ luneta"), None);
+
+        let (menu, _) = stays(menu.key(&char('c')));
+        assert_eq!(clicked(&menu, "/tigerstyle"), Some(pressed(KeyCode::Char('s'))));
+        assert_eq!(clicked(&menu, "<BS> - Back"), Some(pressed(KeyCode::Backspace)));
+    }
+
+    /// A delete that asks first takes a click on its keys, and none on what
+    /// it asks; and once it goes ahead, waiting on zellij, the keys do
+    /// nothing but close the menu, and no entry takes a click.
+    #[test]
+    fn a_click_on_a_delete_asks_first_as_its_key_does() {
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        assert_eq!(clicked(&menu, "close the pane"), Some(pressed(KeyCode::Char('d'))));
+        let (menu, _) = stays(menu.key(&char('d')));
+        assert_eq!(clicked(&menu, "close the pane"), None);
+        let busy = vec![(4, Doing::Busy)];
+        let (menu, _) = stays(menu.planned(plan(Closes::Pane, busy)));
+        assert_eq!(clicked(&menu, "<y>"), Some(pressed(KeyCode::Char('y'))));
+        assert_eq!(clicked(&menu, "Close the pane?"), None);
+    }
+
     /// What went wrong with the menu over zellij floats where it did, in a
     /// box as wide as what it says takes, over the key that closes it.
     #[test]
@@ -1811,7 +2094,7 @@ mod tests {
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
         let menu = Menu::pull(1, pane_row(), link());
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " w  worktree",
@@ -1824,7 +2107,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(link()));
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             ["─ #2736 ──────── cashubtc/cdk ─", " Making a worktree of #2736…", " <ESC> - Close"]
         );
         let (menu, wants) = stays(menu.key(&char('r')));
@@ -1878,7 +2161,7 @@ mod tests {
         let issue = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let menu = Menu::pull(1, pane_row(), issue.clone());
         assert_eq!(
-            text(&menu.lines(31, 9)),
+            text(&menu.lines(31, 9).0),
             ["─ #2736 ──────── cashubtc/cdk ─", " w  worktree", " t  tackle", " <ESC> - Close"]
         );
         let (menu, wants) = stays(menu.key(&char('r')));

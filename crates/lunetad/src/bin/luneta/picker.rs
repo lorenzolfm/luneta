@@ -30,7 +30,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -40,8 +40,9 @@ use crate::dirs::{self, Dir};
 use crate::gruvbox;
 use crate::host::Event;
 use crate::hosted;
-use crate::menu;
+use crate::menu::{self, Hint};
 use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, LIT, Listed, Mark, NAME, Place};
+use crate::spots::{Drawn, Spots};
 use crate::zellij::{self, Closes, Exited, SessionName};
 
 /// What the rule over the box names it.
@@ -271,9 +272,18 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
     });
 }
 
+/// What a click on a spot of the picker does: presses the key its help line
+/// names, or picks the row that stands for this, as `Enter` does with the
+/// highlight on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Key(KeyEvent),
+    Row(Key),
+}
+
 /// What a row of a list stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Key {
+pub enum Key {
     /// A session that runs, the one luneta's zellij is in among them.
     Live(Place),
     /// A session that ended, which zellij keeps to bring back.
@@ -689,6 +699,24 @@ impl Picker {
         }
     }
 
+    /// What a click on `pick` does: what the key it names does, or what
+    /// `Enter` does with the highlight on its row. A row picks nothing once
+    /// the list shows it no more, nor while it picks none, as `picks` says.
+    pub fn click(&mut self, pick: Pick) -> Picked {
+        let row = match pick {
+            Pick::Key(key) => return self.key(&key),
+            Pick::Row(row) => row,
+        };
+        let at = self.rows().rows.iter().position(|it| it.key == row);
+        let Some(at) = at.filter(|_| self.picks()) else {
+            return Picked::Nothing;
+        };
+        self.error = None;
+        self.rows_mut().at = Some(at);
+        self.follow();
+        self.enter()
+    }
+
     /// What the delete waited on does, as `plan` says: asks first, or goes
     /// ahead, or says why it does nothing. Going ahead after you said yes
     /// does what you were asked about; once that changed while you read, it
@@ -762,34 +790,46 @@ impl Picker {
         )
     }
 
-    /// Draws the picker over `over`, zellij's side, at `now`.
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
+    /// Draws the picker over `over`, zellij's side, at `now`, and says where,
+    /// and the spots on its rows and its keys.
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
         let area = Picker::area(over);
         let (Some(width), Some(height)) = (area.width.checked_sub(2), area.height.checked_sub(2))
         else {
-            return;
+            return Drawn::Picker { number: self.number, area, spots: Spots::default() };
         };
         framed(buffer, area, TITLE, "", Vec::new());
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
         if let Stage::Rename { session, input } = &self.stage {
-            self.draw_rename(buffer, &layout, session, input);
-            return;
+            let spots = self.draw_rename(buffer, &layout, session, input);
+            return Drawn::Picker { number: self.number, area, spots };
         }
+        let mut spots = Spots::default();
         if let Some(results) = layout.results {
             let inner = usize::from(results.width.saturating_sub(2));
             let rows = usize::from(results.height.saturating_sub(2));
             let notes = self.notes(inner);
-            let body = self.body(inner, rows.saturating_sub(notes.len()), now);
+            let (body, picks) = self.body(inner, rows.saturating_sub(notes.len()), now);
             let count = count(self.rows().at, self.rows().rows.len());
-            let lines = anchored(notes, body, rows);
+            let (lines, body_at) = anchored(notes, body, rows);
             framed(buffer, results, self.list.title(), &count, lines);
+            // The lines go between the box's sides, under its rule.
+            spots.extend(picks.down(body_at).placed(results.inner(Margin::new(1, 1))));
         }
         if let Some(preview) = layout.preview {
             self.draw_preview(buffer, preview, now);
         }
         let prompt = self.prompt(usize::from(layout.input.width.saturating_sub(2)));
         draw_input(buffer, &layout, self.list.title(), prompt);
-        self.draw_help(buffer, layout.help);
+        spots.extend(self.draw_help(buffer, layout.help));
+        Drawn::Picker { number: self.number, area, spots }
+    }
+
+    /// Whether a click on a row picks it, as `Enter` would: while the lists
+    /// are searched, and not as a delete waits or asks, nor once you rename a
+    /// session. A row is a spot only then.
+    fn picks(&self) -> bool {
+        matches!(self.stage, Stage::Search)
     }
 
     /// The rows of the list shown.
@@ -1160,26 +1200,33 @@ impl Picker {
     }
 
     /// The lines of the list shown, `width` wide, `room` of them at most: the
-    /// highlight's row among them.
-    fn body(&self, width: usize, room: usize, now: SystemTime) -> Vec<Line<'static>> {
+    /// highlight's row among them. Each row is a spot that picks it, by its
+    /// line among them, while one does.
+    fn body(
+        &self,
+        width: usize,
+        room: usize,
+        now: SystemTime,
+    ) -> (Vec<Line<'static>>, Spots<Pick>) {
         let mut lines = Vec::new();
+        let mut spots = Spots::default();
         let mut room = room;
         if self.list == List::Agents
             && let Some(yours) = self.yours()
         {
             if room == 0 {
-                return lines;
+                return (lines, spots);
             }
             lines.push(here_line(&self.agent_name(yours), width));
             room -= 1;
         }
         if room == 0 {
-            return lines;
+            return (lines, spots);
         }
         let rows = self.rows();
         if rows.rows.is_empty() {
             lines.extend(menu::wrap(&self.empty(), width, Style::new().fg(gruvbox::GREY)));
-            return lines;
+            return (lines, spots);
         }
         // The rule over the sessions that ended takes a line of its own.
         let exited_at = rows.rows.iter().position(|row| matches!(row.key, Key::Exited(_)));
@@ -1198,9 +1245,12 @@ impl Picker {
             };
             let lit = rows.at == Some(row);
             let line = self.row_line(&rows.rows[row], width, frame, now);
+            if self.picks() {
+                spots.add(lines.len(), 0..width, Pick::Row(rows.rows[row].key.clone()));
+            }
             lines.push(if lit { line.patch_style(Style::new().bg(LIT)) } else { line });
         }
-        lines
+        (lines, spots)
     }
 
     /// Whether `place` is of the session luneta's zellij is in.
@@ -1457,52 +1507,56 @@ impl Picker {
         typed(&self.term, action, width)
     }
 
-    /// Draws the keys the help line names into `help`, if it has the room.
-    fn draw_help(&self, buffer: &mut Buffer, help: Option<Rect>) {
-        if let Some(help) = help {
-            let keys = menu::keys_line(usize::from(help.width), &self.keys());
-            buffer.set_line(help.x, help.y, &keys, help.width);
-        }
+    /// Draws the keys the help line names into `help`, if it has the room,
+    /// and says the spots on them.
+    fn draw_help(&self, buffer: &mut Buffer, help: Option<Rect>) -> Spots<Pick> {
+        let Some(help) = help else {
+            return Spots::default();
+        };
+        let (keys, spots) = menu::keyed(usize::from(help.width), &self.keys());
+        buffer.set_line(help.x, help.y, &keys, help.width);
+        spots.map(Pick::Key).placed(help)
     }
 
     /// The keys the help line names.
-    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+    fn keys(&self) -> Vec<(Hint, &'static str)> {
         match (&self.stage, self.list) {
-            (Stage::Asking { .. }, _) => vec![("<y>", "Yes"), ("<any other key>", "No")],
-            (Stage::Planning { .. }, _) => vec![("<ESC>", "Give up")],
-            (Stage::Rename { .. }, _) => vec![("<ENTER>", "Rename"), ("<ESC>", "Cancel")],
+            (Stage::Asking { .. }, _) => vec![(Hint::Char('y'), "Yes"), (Hint::AnyOtherKey, "No")],
+            (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
+            (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
             (Stage::Search, List::Sessions) => vec![
-                ("<↓↑>", "Move"),
-                ("<ENTER>", "Go"),
-                ("<TAB>", List::Sessions.next().title()),
-                ("<Ctrl r>", "Rename"),
-                ("<Del>", "Delete"),
-                ("<ESC>", "Close"),
+                (Hint::Moves, "Move"),
+                (Hint::Enter, "Go"),
+                (Hint::Tab, List::Sessions.next().title()),
+                (Hint::Ctrl('r'), "Rename"),
+                (Hint::Delete, "Delete"),
+                (Hint::Esc, "Close"),
             ],
             (Stage::Search, List::Agents) => vec![
-                ("<↓↑>", "Move"),
-                ("<ENTER>", "Go"),
-                ("<TAB>", List::Agents.next().title()),
-                ("<Del>", "Close its pane"),
-                ("<ESC>", "Close"),
+                (Hint::Moves, "Move"),
+                (Hint::Enter, "Go"),
+                (Hint::Tab, List::Agents.next().title()),
+                (Hint::Delete, "Close its pane"),
+                (Hint::Esc, "Close"),
             ],
             (Stage::Search, List::Dirs) => vec![
-                ("<↓↑>", "Move"),
-                ("<ENTER>", "Go"),
-                ("<TAB>", List::Dirs.next().title()),
-                ("<ESC>", "Close"),
+                (Hint::Moves, "Move"),
+                (Hint::Enter, "Go"),
+                (Hint::Tab, List::Dirs.next().title()),
+                (Hint::Esc, "Close"),
             ],
         }
     }
 
-    /// Draws the box the new name of `session` is typed in, `input` so far.
+    /// Draws the box the new name of `session` is typed in, `input` so far,
+    /// and says the spots on its keys.
     fn draw_rename(
         &self,
         buffer: &mut Buffer,
         layout: &Layout,
         session: &SessionName,
         input: &str,
-    ) {
+    ) -> Spots<Pick> {
         if let Some(full) = layout.full {
             let inner = usize::from(full.width.saturating_sub(2));
             let mut lines = vec![Line::default()];
@@ -1517,7 +1571,7 @@ impl Picker {
         let width = usize::from(layout.input.width.saturating_sub(2));
         let action = self.rename_to(session, input).map(|_| "Rename".to_owned());
         draw_input(buffer, layout, "Rename", typed(input, action.map_err(str::to_owned), width));
-        self.draw_help(buffer, layout.help);
+        self.draw_help(buffer, layout.help)
     }
 }
 
@@ -1658,19 +1712,20 @@ fn under_caption(area: Rect) -> Rect {
 }
 
 /// `notes` and `body` at the bottom of `rows` lines, blank ones over them,
-/// as the list grows up from the search.
+/// as the list grows up from the search; and the line the body starts on.
 fn anchored(
     notes: Vec<Line<'static>>,
     body: Vec<Line<'static>>,
     rows: usize,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, usize) {
     let notes: Vec<Line<'static>> = notes.into_iter().take(rows).collect();
     let body: Vec<Line<'static>> = body.into_iter().take(rows - notes.len()).collect();
     let blank = notes.len() + body.len()..rows;
     let mut lines: Vec<Line<'static>> = blank.map(|_| Line::default()).collect();
     lines.extend(notes);
+    let body_at = lines.len();
     lines.extend(body);
-    lines
+    (lines, body_at)
 }
 
 /// Which row of how many the highlight is on, as `3/7`.
@@ -1762,8 +1817,11 @@ impl Layout {
 mod tests {
     use std::time::UNIX_EPOCH;
 
+    use ratatui::layout::Position;
+
     use super::*;
     use crate::close::Doing;
+    use crate::spots::Hit;
 
     const NOW: Duration = Duration::from_secs(1000);
 
@@ -1914,6 +1972,100 @@ mod tests {
         assert_eq!(lit(&picker), "y");
         let y = SessionName::running("y").unwrap();
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(y));
+    }
+
+    /// The picker drawn as `drawn` draws it, the first word of each line of
+    /// its list with what a click a few columns into that line hits, and
+    /// what a click on `key` of its help line hits.
+    fn clicks(picker: &Picker, key: &str) -> (Vec<(String, Option<Pick>)>, Option<Pick>) {
+        let over = Rect::new(0, 0, 200, 50);
+        let mut buffer = Buffer::empty(over);
+        let drawn = picker.draw(&mut buffer, over, now());
+        assert_eq!(drawn.boxed(), Some(Picker::area(over)));
+        let pick = |at| {
+            drawn.at(at).map(|hit| match hit {
+                Hit::Picker(number, pick) if number == picker.number() => pick,
+                hit => panic!("{hit:?} is not the picker's"),
+            })
+        };
+        let (results, _) = parts();
+        let lines = (results.y..results.bottom()).zip(text(&buffer, results));
+        let rows = lines.filter(|(_, line)| !line.is_empty()).map(|(y, line)| {
+            let word = line.split(' ').next().unwrap_or("").to_owned();
+            (word, pick(Position::new(results.x + 2, y)))
+        });
+        // The help line is the box's last but one, under what may name its
+        // keys too, as what `Enter` does.
+        let help = (over.top()..over.bottom()).rev().find_map(|y| {
+            let cells = (over.left()..over.right()).map(|x| buffer[(x, y)].symbol());
+            let line: String = cells.collect();
+            let at = line.find(key)?;
+            Some(Position::new(u16::try_from(line[..at].chars().count()).ok()?, y))
+        });
+        let spot = help.and_then(pick);
+        (rows.collect(), spot)
+    }
+
+    /// Each row of the list is a spot on its line that picks it: a click
+    /// does what `Enter` does with the highlight on it, bringing back a
+    /// session that ended, and closing the picker on yours. It picks the row
+    /// drawn there, wherever the list has it since, and nothing once the
+    /// list shows it no more. The rule over those that ended is none. A key
+    /// of the help line presses it, but for what takes more than a key. No
+    /// row picks while the session highlighted is renamed.
+    #[test]
+    fn a_click_on_a_row_does_what_enter_does_on_it() {
+        let mut picker = three();
+        let (rows, tab) = clicks(&picker, "<TAB>");
+        let spotted: Vec<(&str, bool)> =
+            rows.iter().map(|(word, pick)| (word.as_str(), pick.is_some())).collect();
+        let rule = ("ended", false);
+        assert_eq!(spotted, [("b", true), ("c", true), ("a", true), rule, ("y", true), ("x", true)]);
+        let row = |word: &str| {
+            let shown = rows.iter().find(|(it, _)| it == word);
+            shown.and_then(|(_, pick)| pick.clone()).expect("a row")
+        };
+        assert_eq!(tab, Some(Pick::Key(KeyEvent::from(KeyCode::Tab))));
+        assert_eq!(clicks(&picker, "<↓↑>").1, None);
+        // `d` starts once the list is drawn, and takes the line `c` had.
+        let sessions = vec![
+            live("d", 40, None),
+            live("c", 30, None),
+            live("b", 20, Some(1)),
+            live("a", 10, None),
+        ];
+        picker.listed(Listing { here: Some("b".to_owned()), sessions, ..Listing::default() });
+        let c = Picked::Go(Place::Session(listed("c", 30)));
+        assert_eq!(picker.click(row("c")), c);
+        assert_eq!(picker.click(row("b")), Picked::Close);
+        assert_eq!(picker.click(row("y")), Picked::Start(SessionName::running("y").unwrap()));
+        typed(&mut picker, "c");
+        assert_eq!(picker.click(row("a")), Picked::Nothing);
+        press(&mut picker, KeyCode::Backspace);
+        assert_eq!(picker.click(row("c")), c);
+        control(&mut picker, 'r');
+        assert_eq!(picker.click(row("a")), Picked::Nothing);
+        let rename = clicks(&picker, "<ENTER>").1;
+        assert_eq!(rename, Some(Pick::Key(KeyEvent::from(KeyCode::Enter))));
+    }
+
+    /// While a delete waits on its plan, or asks, no row is a spot, as a
+    /// click on one picks nothing then: only the keys the help line names
+    /// are.
+    #[test]
+    fn no_row_is_a_spot_while_a_delete_waits_or_asks() {
+        let mut picker = three();
+        let planning = Picked::Plan { session: listed("c", 30), deletes: Deletes::Session };
+        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
+        let (rows, give_up) = clicks(&picker, "<ESC>");
+        assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
+        assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
+        let kill = Act::Kill { session: "c".to_owned(), started: listed("c", 30).started() };
+        let plan = Plan::of(kill, Ok(&[(0, Doing::Busy)]));
+        assert_eq!(picker.planned(Ok(plan)), Picked::Nothing);
+        let (rows, yes) = clicks(&picker, "<y>");
+        assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
+        assert_eq!(yes, Some(Pick::Key(KeyEvent::from(KeyCode::Char('y')))));
     }
 
     /// What is typed narrows the list, a name that is what is typed first,

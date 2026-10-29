@@ -48,13 +48,14 @@ use crate::folds::Folds;
 use crate::gruvbox;
 use crate::icons;
 use crate::ledger::{self, Key};
-use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
+use crate::menu::{self, Choice, Command, Did, Done, Menu, Opens, Target, Top, Wants};
 use crate::news::News;
 use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Listing, Live, Seated, Shown};
 use crate::pull::{Link, Ready, Worked};
-use crate::skills::Skill;
+use crate::skills::{Name, Skill};
+use crate::spots::Drawn;
 use crate::zellij::{self, Closes, Open, SessionName, Tab};
 
 /// How many columns the sidebar takes until its edge is dragged.
@@ -1820,6 +1821,49 @@ impl Sidebar {
         self.menu.as_ref().filter(|_| self.floats())
     }
 
+    /// What a click on `choice` of the menu numbered `menu` does: what its
+    /// key does, or `Enter` with the cursor on its skill. Nothing where that
+    /// menu closed since it drew, as what zellij answers it goes nowhere then.
+    pub fn chose(&mut self, menu: u64, choice: Choice, now: SystemTime) -> Asked {
+        if self.menu.as_ref().is_none_or(|open| open.number() != menu) {
+            return Asked::Nothing;
+        }
+        match choice {
+            Choice::Key(key) => self.key(&key, now),
+            Choice::Skill(name) => self.pick(&name),
+        }
+    }
+
+    /// What a click on the key `key` of the legend does: what the key does,
+    /// while the legend shows. Nothing once the menu or the search took its
+    /// place since it drew, or the keys went elsewhere.
+    pub fn legend_key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
+        if !matches!(self.bottom(), Bottom::Legend) {
+            return Asked::Nothing;
+        }
+        self.key(key, now)
+    }
+
+    /// What `Enter` does with the cursor of the menu's search box on the
+    /// skill called `name`, as a key would, which drops a `g` pressed before
+    /// it and what went wrong before.
+    fn pick(&mut self, name: &Name) -> Asked {
+        self.notice = None;
+        self.first_pressed = false;
+        let Some(menu) = self.menu.take() else {
+            return Asked::Nothing;
+        };
+        self.menu_did(menu.pick(name))
+    }
+
+    /// Moves the cursor of the search box of the menu numbered `menu` `by`
+    /// skills, as the wheel does over them, while that menu is open.
+    pub fn scroll_menu(&mut self, menu: u64, by: isize) {
+        if let Some(open) = self.menu.as_mut().filter(|open| open.number() == menu) {
+            open.scroll(by);
+        }
+    }
+
     /// Whether the menu floats over zellij, rather than standing at the
     /// bottom of the sidebar: it does while the keys are its own there.
     fn floats(&self) -> bool {
@@ -2471,14 +2515,15 @@ impl Sidebar {
     /// not, softer, which the view scrolls to show as the pane changes. A
     /// session the mouse lifted has it, where it lands, the others making room
     /// for it. Its last column is the edge, drawn as the title's rule is.
-    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
+    /// Says the spots on the menu at its bottom, or on the legend.
+    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width, frame));
-        let notes = self.notes(width, height);
+        let (notes, spotted) = self.notes(width, height);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
         let highlight = self.highlight();
@@ -2542,9 +2587,13 @@ impl Sidebar {
         }
         self.top = self.top.min(drawn.len().saturating_sub(1));
         lines.extend(drawn.into_iter().skip(self.top).take(room));
-        lines.resize(height.saturating_sub(notes.len()), Line::default());
+        let notes_from = height.saturating_sub(notes.len());
+        lines.resize(notes_from, Line::default());
         lines.extend(notes);
         put(buffer, area, &lines, self.framing());
+        // The notes go along the bottom, short of the edge.
+        let inside = Rect { width: area.width.saturating_sub(1), ..area };
+        spotted.placed(notes_from, inside)
     }
 
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
@@ -2654,8 +2703,10 @@ impl Sidebar {
     /// session files of Claude Code's it cannot read, what went wrong last,
     /// and the menu while it is open, or else the search while that is, or
     /// else the legend while the sidebar has the focus.
-    /// The menu and the legend leave the rows a line.
-    fn notes(&self, width: usize, height: usize) -> Vec<Line<'static>> {
+    /// The menu and the legend leave the rows a line. And what has the mouse
+    /// there, the menu or the legend, with the spots on it by their line among
+    /// the notes.
+    fn notes(&self, width: usize, height: usize) -> (Vec<Line<'static>>, Drawn) {
         let mut notes = Vec::new();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -2695,15 +2746,47 @@ impl Sidebar {
             notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
         }
         let room = height.saturating_sub(HEADER + 1 + notes.len());
-        if let Some(menu) = self.menu.as_ref().filter(|_| !self.floats()) {
-            notes.extend(menu.lines(width, room));
-        } else if let Some(term) = self.search() {
-            notes.push(query(term, width));
-        } else if self.keys == Keys::Sidebar {
-            notes.extend(menu::legend(width, room));
-        }
-        notes
+        let above = notes.len();
+        let (lines, spotted) = match self.bottom() {
+            Bottom::Menu(menu) => {
+                let (lines, spots) = menu.lines(width, room);
+                let spots = spots.down(above);
+                (lines, Drawn::Menu { number: menu.number(), area: None, spots })
+            },
+            Bottom::Search(term) => (vec![query(term, width)], Drawn::Nothing),
+            Bottom::Legend => {
+                let (lines, spots) = menu::legend(width, room);
+                (lines, Drawn::Legend(spots.down(above)))
+            },
+            Bottom::Nothing => (Vec::new(), Drawn::Nothing),
+        };
+        notes.extend(lines);
+        (notes, spotted)
     }
+
+    /// What the sidebar shows under its rows: the menu while it is open
+    /// there, or else the search while that is, or else the legend while the
+    /// sidebar has the keys.
+    fn bottom(&self) -> Bottom<'_> {
+        if let Some(menu) = self.menu.as_ref().filter(|_| !self.floats()) {
+            Bottom::Menu(menu)
+        } else if let Some(term) = self.search() {
+            Bottom::Search(term)
+        } else if self.keys == Keys::Sidebar {
+            Bottom::Legend
+        } else {
+            Bottom::Nothing
+        }
+    }
+}
+
+/// What the sidebar shows under its rows, at the bottom of its notes.
+enum Bottom<'a> {
+    Menu(&'a Menu),
+    /// The search, with what is typed in it.
+    Search(&'a str),
+    Legend,
+    Nothing,
 }
 
 /// The counts the sidebar keeps collapsed, each by the glyph of what it
@@ -3320,6 +3403,7 @@ mod tests {
     use super::*;
     use crate::own::Before;
     use crate::pull::At;
+    use crate::spots::Hit;
 
     fn pane(id: u32, tab: u32, cwd: &str, command: &str) -> Pane {
         Pane {
@@ -5081,6 +5165,109 @@ mod tests {
 
     fn char(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// Each line of the sidebar drawn 32 by 16, from the line `from` down, as
+    /// text, and what a click a few columns into it hits.
+    fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
+        let area = Rect::new(0, 0, 32, 16);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let text = |y| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        let click = |y| (text(y).trim_end().to_owned(), drawn.at(Position::new(4, y)));
+        (from..16).map(click).collect()
+    }
+
+    fn on_legend(c: char) -> Hit {
+        Hit::Legend(char(c))
+    }
+
+    /// A click on the menu numbered 1 that presses `code`.
+    fn on_menu(code: KeyCode) -> Hit {
+        Hit::Menu(1, Choice::Key(KeyEvent::from(code)))
+    }
+
+    /// Each entry of the legend is a spot where it is drawn, that presses its
+    /// key, and so is each of the menu once that opens it at the bottom, and
+    /// the keys under them. The rows are none: a click there goes as before.
+    #[test]
+    fn a_click_on_the_legend_or_the_menu_under_it_presses_its_key() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let clicked = clicks(&mut sidebar, 0);
+        assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
+        let legend: Vec<(&str, Option<Hit>)> =
+            clicked[7..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+        let rule = format!("─ luneta {}", "─".repeat(22));
+        assert_eq!(legend, [
+            (rule.as_str(), None),
+            (" /  Search", Some(on_legend('/'))),
+            (" u  Unread", Some(on_legend('u'))),
+            (" v  Reorder", Some(on_legend('v'))),
+            (" a  Ask", Some(on_legend('a'))),
+            (" c  Claude ▸", Some(on_legend('c'))),
+            (" n  New ▸", Some(on_legend('n'))),
+            (" d  Delete ▸", Some(on_legend('d'))),
+            (" b  Brief ▸", Some(on_legend('b'))),
+        ]);
+        sidebar.legend_key(&char('n'), moment(160_000));
+        let clicked = clicks(&mut sidebar, 11);
+        let menu: Vec<(&str, Option<Hit>)> =
+            clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+        assert_eq!(menu, [
+            ("─ New ─────────── luneta/main ─", None),
+            (" p  new pane", Some(on_menu(KeyCode::Char('p')))),
+            (" t  new tab", Some(on_menu(KeyCode::Char('t')))),
+            (" s  new session", Some(on_menu(KeyCode::Char('s')))),
+            (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
+        ]);
+    }
+
+    /// A click on the legend that comes once the menu took its place, as the
+    /// legend's `d` opened the Delete group there, does nothing: the group's
+    /// own `d` deletes what the highlighted row is for.
+    #[test]
+    fn a_click_on_the_legend_once_the_menu_took_its_place_does_nothing() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.legend_key(&char('d'), moment(160_000));
+        let delete = clicks(&mut sidebar, 13);
+        assert_eq!(delete[0].1, Some(on_menu(KeyCode::Char('d'))), "{delete:?}");
+        assert_eq!(sidebar.legend_key(&char('d'), moment(160_000)), Asked::Nothing);
+        assert_eq!(clicks(&mut sidebar, 13), delete);
+        let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
+        assert_ne!(deleted, Asked::Nothing);
+    }
+
+    /// The skills the menu's search finds at the bottom of the sidebar are
+    /// spots that pick them: a click on one starts an agent on it, as
+    /// `Enter` does with the cursor on it.
+    #[test]
+    fn a_click_on_a_skill_of_the_menu_under_the_rows_starts_an_agent_on_it() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.key(&char('m'), moment(160_000));
+        let cwd = "/w/luneta/main".to_owned();
+        let find = Asked::Find { menu: 1, cwd: cwd.clone() };
+        assert_eq!(sidebar.key(&char('/'), moment(160_000)), find);
+        let name = |name: &str| Name::new(name.to_owned()).expect("a name");
+        let skill = |named: &str| Skill { name: name(named), description: String::new() };
+        sidebar.found(1, Ok(vec![skill("code-review"), skill("tigerstyle")]));
+        let clicked = clicks(&mut sidebar, 11);
+        let skills: Vec<(&str, Option<Hit>)> =
+            clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+        let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
+        assert_eq!(skills, [
+            (" /_", None),
+            (" /code-review", on("code-review")),
+            (" /tigerstyle", on("tigerstyle")),
+        ]);
+        // A click on the skill of a menu that closed since does nothing.
+        let tigerstyle = || Choice::Skill(name("tigerstyle"));
+        assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
+        let command = ["claude", "--name", "tigerstyle", "/tigerstyle"].map(str::to_owned).to_vec();
+        let open = Open::Pane { session: "older".to_owned(), beside: 1, cwd, command };
+        assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), Asked::Open { menu: 1, open });
     }
 
     /// A key of the menu opens it at the bottom, for the highlighted row, and

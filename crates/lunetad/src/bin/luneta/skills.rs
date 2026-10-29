@@ -479,6 +479,16 @@ impl Search {
         popped
     }
 
+    /// Puts the cursor on the skill called `name`, where it is among those
+    /// that match, and says whether it is.
+    pub fn select(&mut self, name: &Name) -> bool {
+        let at = self.found().position(|(skill, _)| skill.name == *name);
+        if let Some(at) = at {
+            self.selected = at;
+        }
+        at.is_some()
+    }
+
     /// Moves the cursor `by` skills down, or up, and no further than the ends.
     pub fn move_by(&mut self, by: isize) {
         let last = self.found.len().saturating_sub(1);

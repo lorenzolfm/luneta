@@ -30,7 +30,7 @@ use serde_json::Value;
 
 use crate::gruvbox;
 use crate::host::Event;
-use crate::menu;
+use crate::menu::{self, Hint};
 use crate::sidebar;
 
 /// The model that writes the brief: a fast one, for a brief in seconds.
@@ -745,14 +745,14 @@ impl Briefing {
         let (mut lines, keys, at) = match &self.written {
             None => {
                 let asking = Line::styled(format!(" Asking {MODEL}…"), dim);
-                (vec![asking], ("<ESC>", "Close"), None)
+                (vec![asking], (Hint::Esc, "Close"), None)
             },
             Some(Written { at, said }) => {
                 let lines = match said {
                     Ok(said) => paragraphs(said, inner, Style::new()),
                     Err(why) => paragraphs(why, inner, Style::new().fg(gruvbox::RED)),
                 };
-                (lines, ("<any key>", "Close"), at.as_ref().map(|at| format!("at {at}")))
+                (lines, (Hint::AnyKey, "Close"), at.as_ref().map(|at| format!("at {at}")))
             },
         };
         let footer = [Line::default(), menu::keys_line(inner, &[keys])];
