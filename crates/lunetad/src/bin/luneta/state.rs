@@ -10,7 +10,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-pub use lunetad::state::path;
+pub use lunetad::state::{path, Unset};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::host::Event;

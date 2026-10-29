@@ -38,7 +38,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::SetTitle;
 use lunetad::api::Host;
-use lunetad::log::{self, Also};
+use lunetad::log::{self, Process};
 use ratatui::layout::{Position, Rect};
 use ratatui::DefaultTerminal;
 
@@ -525,6 +525,9 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             return ExitCode::FAILURE;
         },
     };
+    // Before the hook, so that no panic of the sidebar's goes by the log. Why
+    // there is none is for the sidebar to say, once it has its notes.
+    let unkept = log::start(Process::Luneta).err();
     // ratatui's hook puts the terminal back as it found it before a panic is
     // printed, all but the modes luneta turns on itself. The panic goes in
     // the log first, which no terminal can hold up.
@@ -566,7 +569,16 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             let disambiguate = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
             execute!(io::stdout(), PushKeyboardEnhancementFlags(disambiguate))?;
         }
-        run_in(&mut terminal, session.as_ref(), folder, &dir, answers.colours, events, &mut inbox)
+        run_in(
+            &mut terminal,
+            session.as_ref(),
+            folder,
+            unkept,
+            &dir,
+            answers.colours,
+            events,
+            &mut inbox,
+        )
     });
     // Each mode is put back however the rest went, and the first error is the
     // one said.
@@ -597,11 +609,13 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
 
 /// Runs zellij beside the sidebar until it ends, and says what it said as it
 /// failed, if it did. zellij's terminal answers it with `colours`, until
-/// luneta's terminal says others.
+/// luneta's terminal says others. `unkept` is why what goes wrong is kept in
+/// no log, where it is not.
 fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
     folder: Result<PathBuf, String>,
+    unkept: Option<String>,
     dir: &Path,
     colours: Colours,
     events: Sender<Event>,
@@ -620,7 +634,7 @@ fn run_in(
     let news_watched = news::watch(&news, events.clone());
     let order_watched = order.file().map(|file| order::watch(file, events.clone())).transpose();
     let mut sidebar = Sidebar::new(folds, news, order);
-    if let Err(why) = log::start("luneta", Also::Nowhere) {
+    if let Some(why) = unkept {
         sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
     }
     let mut watching = Vec::new();

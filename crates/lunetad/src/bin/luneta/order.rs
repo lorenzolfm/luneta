@@ -105,11 +105,8 @@ impl Order {
     /// The order every luneta on the host shares, as it stands.
     pub fn shared() -> Self {
         match state::path("order") {
-            Some(file) => Order::within(file),
-            None => Order {
-                lost: Some("neither XDG_STATE_HOME nor HOME is set, to keep it in".to_owned()),
-                ..Order::default()
-            },
+            Ok(file) => Order::within(file),
+            Err(unset) => Order { lost: Some(unset.to_string()), ..Order::default() },
         }
     }
 

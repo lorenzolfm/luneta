@@ -8,7 +8,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::process::ExitCode;
 
 use clap::Parser;
-use lunetad::log::{self, Also};
+use lunetad::log::{self, Process};
 use lunetad::{folder, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
@@ -28,7 +28,7 @@ fn main() -> ExitCode {
     // What lunetad says from here on goes in luneta's log too, with when and
     // its pid, and so does a panic. The log holds nothing open between its
     // lines, for `close_inherited` to close.
-    let unkept = log::start("lunetad", Also::Stderr).err();
+    let unkept = log::start(Process::Lunetad).err();
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         log::panicked(panic);

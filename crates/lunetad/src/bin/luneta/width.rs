@@ -14,8 +14,9 @@ use crate::state;
 
 pub struct Width {
     columns: u16,
-    /// The file it is kept in. Without one, it is this luneta's alone.
-    file: Option<PathBuf>,
+    /// The file it is kept in, or why there is none: it is then this
+    /// luneta's alone.
+    file: Result<PathBuf, state::Unset>,
 }
 
 impl Width {
@@ -24,8 +25,8 @@ impl Width {
     /// could not.
     pub fn kept() -> (Self, Option<String>) {
         match state::path("width") {
-            Some(file) => Width::within(file),
-            None => (Width { columns: sidebar::COLUMNS, file: None }, None),
+            Ok(file) => Width::within(file),
+            Err(unset) => (Width { columns: sidebar::COLUMNS, file: Err(unset) }, None),
         }
     }
 
@@ -44,7 +45,7 @@ impl Width {
             Ok(columns) => (columns, None),
             Err(error) => (sidebar::COLUMNS, Some(format!("{}: {error}", file.display()))),
         };
-        (Width { columns, file: Some(file) }, unread)
+        (Width { columns, file: Ok(file) }, unread)
     }
 
     /// How many columns the sidebar takes open, where the terminal has twice
@@ -65,9 +66,7 @@ impl Width {
     /// file's, as the ledger's moments are, so that no luneta that starts
     /// meanwhile reads it halfway written.
     pub fn keep(&self) -> Result<(), String> {
-        let Some(file) = &self.file else {
-            return Err("neither XDG_STATE_HOME nor HOME is set, to keep it in".to_owned());
-        };
+        let file = self.file.as_ref().map_err(ToString::to_string)?;
         let folder = file.parent().expect("a file of `state::path` is in a folder");
         let unfinished = folder.join(format!("width.{}", state::unfinished()));
         fs::create_dir_all(folder)
@@ -101,7 +100,7 @@ mod tests {
     /// half of it, as `host` draws it.
     #[test]
     fn a_drag_stays_between_the_narrowest_and_half_the_terminal() {
-        let mut width = Width { columns: sidebar::COLUMNS, file: None };
+        let mut width = Width { columns: sidebar::COLUMNS, file: Err(state::Unset) };
         let narrowest = sidebar::NARROWEST;
         for (column, terminal, columns) in
             [(3, 120, narrowest), (100, 120, 60), (59, 120, 60), (20, 24, narrowest)]

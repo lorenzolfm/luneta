@@ -1039,7 +1039,8 @@ sidebar, in `$XDG_STATE_HOME/luneta`, or `~/.local/state/luneta` (on macOS
 too), which outlives a reboot: a line for each, with when, in UTC, and which
 process said it, as `2026-10-29T14:03:12.481Z luneta[4123] zellij did not take
 its client there`. Once it is 1 MiB, it moves to `luneta.log.1`, in the place
-of the one before.
+of the one before, where its folder lets it be locked and moved; where not, it
+grows on, and says why in it.
 It lives as long as zellij does, not as long as a client is attached: once
 zellij has had no session for 30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A

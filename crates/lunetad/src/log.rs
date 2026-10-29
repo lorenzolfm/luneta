@@ -15,15 +15,17 @@
 //! log's name: another that found it full too, and takes the lock after,
 //! finds another file by that name, and moves nothing. One that finds the
 //! lock taken writes its line where it is, which is in `luneta.log.1` once
-//! moved: no line is lost to a move.
+//! moved: no line is lost to a move. Where the folder does not let the log
+//! be locked or moved, it grows on, and says why in it.
 
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,7 +35,8 @@ use crate::state;
 pub const NAME: &str = "luneta.log";
 
 /// How long the log grows before it moves to `.1` for another: the two hold
-/// twice this at the most, and a line.
+/// twice this at the most, and the lines written as it moves, where the
+/// folder lets it be locked and moved.
 pub const MAX: u64 = 1024 * 1024;
 
 /// The most of what happened that a line says, in bytes, and a character
@@ -43,40 +46,50 @@ const SAID_MAX: usize = 4096;
 /// What this process says, once it has started the log.
 static STARTED: OnceLock<Started> = OnceLock::new();
 
-/// Where else a process says what happens to it, besides the log.
+/// Which of luneta's processes says what happens to it, as each line names
+/// it, and where else it says it.
 #[derive(Clone, Copy)]
-pub enum Also {
-    /// Nowhere: luneta's stderr is the terminal the sidebar draws on.
-    Nowhere,
-    /// On its stderr, after its name: lunetad's, which luneta keeps in
-    /// `lunetad.log` beside the socket, and reads back of a daemon that does
-    /// not start.
-    Stderr,
+pub enum Process {
+    /// The sidebar, which says it in the log alone: its stderr is the
+    /// terminal it draws on.
+    Luneta,
+    /// The daemon, which says it on its stderr too, after its name: luneta
+    /// keeps that in `lunetad.log` beside the socket, and reads it back of a
+    /// daemon that does not start.
+    Lunetad,
+}
+
+impl Process {
+    fn name(self) -> &'static str {
+        match self {
+            Process::Luneta => "luneta",
+            Process::Lunetad => "lunetad",
+        }
+    }
 }
 
 /// A process that says what happens to it.
 struct Started {
-    process: &'static str,
-    also: Also,
+    process: Process,
     /// None where there is no log to write in.
     log: Option<Log>,
 }
 
-/// Has what `process` says from here on go in the log, and `also`. Where
-/// there is no log to write in, it goes `also` alone, and the error says why.
-/// Only the first start counts.
-pub fn start(process: &'static str, also: Also) -> Result<(), String> {
+/// Has what `process` says from here on go in the log, and where else it
+/// says it. Where there is no log to write in, it goes there alone, and the
+/// error says why. Only the first start counts.
+pub fn start(process: Process) -> Result<(), String> {
     let log = match state::path(NAME) {
-        Some(path) => {
+        Ok(path) => {
             Log::open(path.clone(), process).map_err(|error| format!("{}: {error}", path.display()))
         },
-        None => Err("neither XDG_STATE_HOME nor HOME is set, to keep it in".to_owned()),
+        Err(unset) => Err(unset.to_string()),
     };
     let (log, why) = match log {
         Ok(log) => (Some(log), Ok(())),
         Err(why) => (None, Err(why)),
     };
-    let _ = STARTED.set(Started { process, also, log });
+    let _ = STARTED.set(Started { process, log });
     why
 }
 
@@ -91,9 +104,9 @@ pub fn say(what: &str) {
         // A line that does not go in has nowhere left to say so.
         let _ = log.write(what, SystemTime::now());
     }
-    match started.also {
-        Also::Nowhere => {},
-        Also::Stderr => eprintln!("{}: {what}", started.process),
+    match started.process {
+        Process::Luneta => {},
+        Process::Lunetad => eprintln!("lunetad: {what}"),
     }
 }
 
@@ -113,51 +126,71 @@ pub fn panicked(panic: &PanicHookInfo<'_>) {
 }
 
 /// The log at a path, as a process writes it.
-pub struct Log {
+struct Log {
     path: PathBuf,
     /// The process, as each line names it: its name and its pid, as
     /// `luneta[4123]`.
     who: String,
+    /// Whether this process has said why the log does not move, once full.
+    unmoved: AtomicBool,
 }
 
 impl Log {
     /// The log at `path`, for `process` to write in, made where it is not
     /// yet, with its folder.
-    pub fn open(path: PathBuf, process: &str) -> io::Result<Log> {
+    fn open(path: PathBuf, process: Process) -> io::Result<Log> {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder)?;
         }
         opened(&path)?;
-        Ok(Log { path, who: format!("{process}[{}]", std::process::id()) })
+        let who = format!("{}[{}]", process.name(), std::process::id());
+        Ok(Log { path, who, unmoved: AtomicBool::new(false) })
     }
 
     /// Writes that `what` happened at `now`, at the end of the log, or of a
     /// new one where it is full.
-    pub fn write(&self, what: &str, now: SystemTime) -> io::Result<()> {
-        let line = format!("{} {} {}\n", utc(now), self.who, said(what));
+    fn write(&self, what: &str, now: SystemTime) -> io::Result<()> {
         let mut file = opened(&self.path)?;
         if file.metadata()?.len() >= MAX {
-            file = self.moved(file);
+            file = self.moved(file, now);
         }
-        file.write_all(line.as_bytes())
+        file.write_all(self.line(what, now).as_bytes())
+    }
+
+    /// That `what` happened at `now`, on a line of its own.
+    fn line(&self, what: &str, now: SystemTime) -> String {
+        format!("{} {} {}\n", utc(now), self.who, said(what))
     }
 
     /// Moves the log, `full`, to `.1`, and opens the one in its place, unless
     /// another process moves it now: the line then goes in `full`, which is
     /// in `.1` once moved. Where the log cannot be moved, the line goes in
     /// `full` too: a line kept is worth more than the bound.
-    fn moved(&self, full: File) -> File {
-        if full.try_lock().is_err() {
-            return full;
+    fn moved(&self, full: File, now: SystemTime) -> File {
+        match full.try_lock() {
+            Ok(()) => {},
+            Err(TryLockError::WouldBlock) => return full,
+            Err(TryLockError::Error(error)) => return self.unmoved(full, &error, now),
         }
         // Unless another process has moved it since it was opened, and the
         // file by its name is a new one.
         let named = same_file(&full, &self.path).unwrap_or(false);
-        if named && fs::rename(&self.path, before(&self.path)).is_err() {
-            return full;
+        if named && let Err(error) = fs::rename(&self.path, before(&self.path)) {
+            return self.unmoved(full, &error, now);
         }
         // `full` lets go of its lock as it closes, once the new one is open.
         opened(&self.path).unwrap_or(full)
+    }
+
+    /// `full`, for the line to go in, as it could not be moved for `error`.
+    /// The first time, this process says so in it, at `now`: whoever finds
+    /// the log past `MAX` finds why.
+    fn unmoved(&self, mut full: File, error: &io::Error, now: SystemTime) -> File {
+        if !self.unmoved.swap(true, Ordering::Relaxed) {
+            let why = format!("{NAME} does not move to {NAME}.1: {error}");
+            let _ = full.write_all(self.line(&why, now).as_bytes());
+        }
+        full
     }
 }
 
@@ -243,7 +276,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use super::{Log, MAX, NAME, SAID_MAX, utc};
+    use super::{Log, MAX, NAME, Process, SAID_MAX, utc};
 
     fn at(seconds: u64, millis: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_millis(millis)
@@ -255,7 +288,7 @@ mod tests {
     fn a_line_says_when_which_process_and_what() {
         let state = tempfile::tempdir().unwrap();
         let path = state.path().join("luneta").join(NAME);
-        let log = Log::open(path.clone(), "luneta").unwrap();
+        let log = Log::open(path.clone(), Process::Luneta).unwrap();
         log.write("zellij did not take its client there", at(1_793_282_592, 481)).unwrap();
         log.write("and again", at(1_793_282_593, 7)).unwrap();
         let pid = std::process::id();
@@ -289,7 +322,7 @@ mod tests {
     fn what_is_said_is_one_line_of_its_own() {
         let state = tempfile::tempdir().unwrap();
         let path = state.path().join(NAME);
-        let log = Log::open(path.clone(), "luneta").unwrap();
+        let log = Log::open(path.clone(), Process::Luneta).unwrap();
         log.write("zellij said:\nError: \u{1b}[31mno\u{1b}[0m\n", at(0, 0)).unwrap();
         log.write(&"x".repeat(SAID_MAX * 2), at(0, 0)).unwrap();
         let written = fs::read_to_string(&path).unwrap();
@@ -309,10 +342,29 @@ mod tests {
         fs::write(&moved, "the one before\n").unwrap();
         let full = format!("{}\n", "x".repeat(usize::try_from(MAX).unwrap()));
         fs::write(&path, &full).unwrap();
-        Log::open(path.clone(), "luneta").unwrap().write("past it", at(0, 0)).unwrap();
+        Log::open(path.clone(), Process::Luneta).unwrap().write("past it", at(0, 0)).unwrap();
         assert_eq!(fs::read_to_string(&moved).unwrap(), full);
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.ends_with(" past it\n") && written.lines().count() == 1, "{written}");
+    }
+
+    /// A full log that cannot move, as a folder has the name it would take,
+    /// keeps each line past it, and says why it does not move, once.
+    #[test]
+    fn a_full_log_that_cannot_move_keeps_its_lines_and_says_why_once() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join(NAME);
+        fs::create_dir(state.path().join(format!("{NAME}.1"))).unwrap();
+        let full = format!("{}\n", "x".repeat(usize::try_from(MAX).unwrap()));
+        fs::write(&path, &full).unwrap();
+        let log = Log::open(path.clone(), Process::Luneta).unwrap();
+        log.write("past it", at(0, 0)).unwrap();
+        log.write("and again", at(0, 0)).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let past: Vec<&str> = written[full.len()..].lines().collect();
+        assert_eq!(past.len(), 3, "{past:?}");
+        assert!(past[0].contains(&format!("] {NAME} does not move to {NAME}.1: ")), "{past:?}");
+        assert!(past[1].ends_with("] past it") && past[2].ends_with("] and again"), "{past:?}");
     }
 
     /// Many writers that fill the log together, each with a log of its own,
@@ -328,7 +380,7 @@ mod tests {
         fs::write(&path, &nearly).unwrap();
         thread::scope(|scope| {
             for writer in 0..WRITERS {
-                let log = Log::open(path.clone(), "lunetad").unwrap();
+                let log = Log::open(path.clone(), Process::Lunetad).unwrap();
                 scope.spawn(move || {
                     for line in 0..LINES {
                         log.write(&format!("writer {writer} line {line}"), at(0, 0)).unwrap();
