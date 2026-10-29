@@ -1,7 +1,6 @@
 //! Writes the protocol's service out as Rust, from `proto/` at the root of the
-//! repository. Its messages are `luneta-protocol`'s, which the plugin reads
-//! too, and are not written out again. tonic-prost-build runs `protoc`, which
-//! the flake puts on the `PATH`.
+//! repository. Its messages are `luneta-protocol`'s, and are not written out
+//! again. tonic-prost-build runs `protoc`, which the flake puts on the `PATH`.
 
 fn main() -> std::io::Result<()> {
     tonic_prost_build::configure()

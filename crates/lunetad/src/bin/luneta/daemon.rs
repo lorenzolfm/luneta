@@ -4,19 +4,22 @@
 //! luneta starts the lunetad beside it, which the same build made, or else
 //! the first on the `PATH`. It starts it detached: in a session of its own,
 //! in `/`, with nothing on its stdin and stdout, and its stderr in a log in
-//! the folder. So it holds nothing of luneta's: zellij reads what a plugin's
-//! command says to its end, and a daemon that held luneta's stdout would keep
-//! `luneta watch` from ever answering.
+//! the folder. So it holds nothing of luneta's: a program reads what
+//! `luneta watch` says to its end, and a daemon that held luneta's stdout
+//! would keep it from ever answering.
 //!
 //! Two lunetas that find none in the same moment start one each, and the
 //! folder's lock lets one through. The other ends at once, and both lunetas
 //! reach the one that runs.
 //!
 //! A daemon makes way only for a newer one. Were it to make way for one of
-//! any other version, two lunetas of two versions, each with its lunetad
-//! beside it, would take turns at it for as long as both ask: zellij's
-//! plugin runs a `luneta watch` for each answer, which knows nothing of the
-//! one before it.
+//! any other build, two lunetas of two builds, each with its lunetad beside
+//! it, would take turns at it for as long as both ask: a program that
+//! watches runs a `luneta watch` for each answer, which knows nothing of the
+//! one before it. Newer is of a later release, or of the same one and built
+//! from a commit made later, as the flake stamps its builds of one: every
+//! commit is of one release until the next, and an install of main would
+//! otherwise keep the daemon of the install before it.
 //!
 //! A daemon that reads zellij's sessions in another folder than luneta's
 //! zellij keeps them in, as one started with another `ZELLIJ_SOCKET_DIR`
@@ -41,6 +44,7 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::InfoRequest;
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use lunetad::program;
+use lunetad::release::{self, Build};
 use rustix::process::{Pid, Signal};
 use tonic::transport::Channel;
 
@@ -48,9 +52,6 @@ use crate::commands::causes;
 
 /// The daemon's program, by the name the build gives it.
 const LUNETAD: &str = "lunetad";
-
-/// The version of luneta this is, which the daemons it starts are of too.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How long luneta waits for a daemon to answer that it started, or that
 /// another luneta is starting, and for one to end that it stopped. One that
@@ -101,7 +102,7 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
     // pid again, or one that has ended since it answered, and another
     // listens in its place, which answers next.
     let mut doubted: Option<u32> = None;
-    // The release of the lunetad luneta starts, once asked.
+    // The build of the lunetad luneta starts, once asked.
     let starting = OnceCell::new();
     // Where luneta's zellij keeps its sessions.
     let own = lunetad::zellij_folder();
@@ -112,7 +113,8 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
             Ok(mut daemon) => match daemon.info(InfoRequest {}).await {
                 Ok(info) => {
                     let info = info.into_inner();
-                    let (version, pid) = (info.version, info.pid);
+                    let running = Build::of(&info.version, info.built);
+                    let (version, pid) = (release::spelled(&info.version, info.built), info.pid);
                     // A daemon older than the field says no folder, and is
                     // taken to read luneta's, as before.
                     let reads = info.zellij_folder.map(OsString::from_vec).map(PathBuf::from);
@@ -126,7 +128,7 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
                             reads.display(),
                             own.display()
                         ));
-                    } else if !makes_way(&version, || *starting.get_or_init(release)) {
+                    } else if !makes_way(running, Build::own(), || *starting.get_or_init(build)) {
                         reap(started);
                         return Ok(daemon);
                     } else {
@@ -282,45 +284,29 @@ fn lunetad() -> PathBuf {
     beside.unwrap_or_else(|| PathBuf::from(LUNETAD))
 }
 
-/// A release of luneta and lunetad, by its version, as `0.2.2`. Releases are
-/// ordered, and a daemon makes way for a newer one alone.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Release(u64, u64, u64);
-
-impl Release {
-    /// The release `version` names, or none: a version of luneta's is three
-    /// numbers and no more.
-    fn parse(version: &str) -> Option<Release> {
-        let mut numbers = version.split('.').map(|number| number.parse().ok());
-        match (numbers.next(), numbers.next(), numbers.next(), numbers.next()) {
-            (Some(Some(major)), Some(Some(minor)), Some(Some(patch)), None) => {
-                Some(Release(major, minor, patch))
-            },
-            _ => None,
-        }
-    }
+/// Whether the daemon of the build `running` makes way for the lunetad that
+/// luneta, of the build `own`, starts, of the build `starting` says: only
+/// where that one is newer than it, and luneta too. A daemon as new as luneta
+/// makes way for none, and so luneta asks that lunetad nothing while it is;
+/// and a lunetad that is no newer than the daemon would be stopped in its
+/// turn by the next luneta of the daemon's build. A daemon whose build luneta
+/// cannot read is older than any.
+fn makes_way(
+    running: Option<Build>,
+    own: Option<Build>,
+    starting: impl FnOnce() -> Option<Build>,
+) -> bool {
+    let older = |than: Build| running.is_none_or(|running| running < than);
+    own.is_some_and(older) && starting().is_some_and(older)
 }
 
-/// Whether the daemon of the version `running` makes way for the lunetad
-/// that luneta starts, of the release `starting` says: only where that one
-/// is newer than it, and luneta too. A daemon as new as luneta makes way for
-/// none, and so luneta asks that lunetad nothing while it is; and a lunetad
-/// that is no newer than the daemon would be stopped in its turn by the next
-/// luneta of the daemon's version. A daemon whose version luneta cannot read
-/// is older than any.
-fn makes_way(running: &str, starting: impl FnOnce() -> Option<Release>) -> bool {
-    let running = Release::parse(running);
-    let older = |than: Release| running.is_none_or(|running| running < than);
-    Release::parse(VERSION).is_some_and(older) && starting().is_some_and(older)
-}
-
-/// The release of the lunetad that luneta starts, as it says to `--version`.
-fn release() -> Option<Release> {
+/// The build of the lunetad that luneta starts, as it says to `--version`.
+fn build() -> Option<Build> {
     let mut lunetad = Command::new(lunetad());
     lunetad.arg("--version");
     let said = program::run(&mut lunetad, VERSION_LIMIT).ok()?.answer().ok()?;
     let said = String::from_utf8_lossy(&said);
-    Release::parse(said.trim().strip_prefix(LUNETAD)?.strip_prefix(' ')?)
+    Build::parse(said.trim().strip_prefix(LUNETAD)?.strip_prefix(' ')?)
 }
 
 /// Who listens in the folder, against the pid a daemon said is its own.
@@ -357,5 +343,33 @@ fn stop(pid: u32) -> Result<(), String> {
         // One that has ended since it answered has nothing to stop.
         Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
         Err(error) => Err(format!("{LUNETAD} (pid {pid}) could not be stopped: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A daemon makes way for a lunetad of a newer build alone, which a
+    /// luneta of a newer build starts. Of luneta's own release, as one of
+    /// every commit until the next is, a daemon goes by its stamp: an install
+    /// stops the one the install before it left, and the one a cargo build
+    /// of a checkout started, which has none. A cargo build stops neither.
+    /// The release comes first, and a daemon whose build luneta cannot read
+    /// is older than any.
+    #[test]
+    fn a_daemon_makes_way_for_a_newer_build_alone() {
+        let way = |running, own, starting| {
+            makes_way(Build::parse(running), Build::parse(own), || Build::parse(starting))
+        };
+        assert!(way("0.2.2", "0.2.2+2", "0.2.2+2"));
+        assert!(way("0.2.2+1", "0.2.2+2", "0.2.2+2"));
+        assert!(way("0.2.1+3", "0.2.2+2", "0.2.2+2"));
+        assert!(way("0.0", "0.2.2", "0.2.2"));
+        assert!(!way("0.2.2+2", "0.2.2+2", "0.2.2+2"));
+        assert!(!way("0.2.2+2", "0.2.2", "0.2.2"));
+        assert!(!way("0.2.3+1", "0.2.2+2", "0.2.2+2"));
+        assert!(!way("0.2.2+1", "0.2.2+2", "0.2.2+1"));
+        assert!(!way("0.2.2+1", "0.2.2+2", "0.0"));
     }
 }

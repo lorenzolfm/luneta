@@ -1,9 +1,9 @@
-//! What luneta's daemon and its zellij plugin both read: the protocol the
-//! daemon answers in, as `proto/luneta/v1` defines it, and what `git status`
-//! says of a work tree, which the daemon asks git and the plugin reads back
-//! from the protocol. The pull request gh finds of a branch is here too,
-//! which only the daemon asks gh. So are Claude Code's session files the
-//! daemon cannot read, as a delete counts them in either.
+//! What luneta's daemon and its clients both read: the protocol the daemon
+//! answers in, as `proto/luneta/v1` defines it, and what `git status` says of
+//! a work tree, which the daemon asks git and its clients read back from the
+//! protocol. The pull request gh finds of a branch is here too, which only
+//! the daemon asks gh. So are Claude Code's session files the daemon cannot
+//! read, as a delete counts them.
 
 pub mod git;
 pub mod github;

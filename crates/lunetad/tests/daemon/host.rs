@@ -605,7 +605,7 @@ pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
 }
 
 /// How `command` ended and what it wrote, once it has ended and what it
-/// writes to has closed, as zellij reads what a plugin's command says: a
+/// writes to has closed, as a program reads what `luneta watch` says: a
 /// process it left running that held either would keep it from ever
 /// answering.
 pub fn answered(command: &mut Command) -> Output {

@@ -19,6 +19,7 @@ mod metadata;
 mod panes;
 mod process;
 pub mod program;
+pub mod release;
 mod shells;
 mod watch;
 mod zellij;

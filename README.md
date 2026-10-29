@@ -1,23 +1,21 @@
 <h1 align="center">luneta</h1>
 
 <p align="center">
-  <em>A telescope-style picker for <a href="https://zellij.dev">zellij</a>.<br>
+  <em><a href="https://zellij.dev">zellij</a> beside a sidebar of every session and agent, with a telescope-style picker over it.<br>
   Type a few characters, press <code>Enter</code>, and you are there.</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/lorenzolfm/luneta/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/lorenzolfm/luneta?style=flat-square"></a>
   <a href="#license"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
   <img alt="zellij 0.45.0" src="https://img.shields.io/badge/zellij-0.45.0-brightgreen?style=flat-square">
 </p>
 
 <!--
   MEDIA SLOT — hero.gif
-  Record with `vhs docs/media/hero.tape` (nix shell nixpkgs#vhs), after a
-  `dev install`. The tapes press real keys against the installed .wasm, so what
-  lands in a GIF is the plugin and not a mock: they assume zoxide, eza, luneta
-  and lunetad on the PATH, a populated zoxide database, a running Claude Code
-  agent, and a Nerd Font.
+  Record with `vhs docs/media/hero.tape` (nix shell nixpkgs#vhs). The tapes
+  press real keys against luneta, so what lands in a GIF is luneta and not a
+  mock: they assume zoxide, eza, luneta and lunetad on the PATH, a populated
+  zoxide database, a running Claude Code agent, and a Nerd Font.
   Then point the <img> below at docs/media/hero.gif.
 -->
 <p align="center"><img src="docs/media/sessions.png" alt="the session picker: live and dead sessions on the left, the highlighted session's focused pane on the right" width="900"></p>
@@ -26,7 +24,8 @@
 
 ## What is luneta
 
-A replacement for zellij's default session picker, with sessions, agents and directories tabs.
+zellij in your terminal, beside a sidebar of every session and agent, and a
+picker over it with sessions, agents and directories tabs.
 
 * Create, hop between and delete sessions
 * Jump to the agent that is waiting for you
@@ -91,10 +90,10 @@ guess, `Del` leaves it alone and
 says so: the agent names a session that is still running, but its pane turned
 up in another, matched by its id and directory alone.
 
-Needs `luneta` and `lunetad` on the server's `PATH`
-([building from source](#building-from-source)): the list is what lunetad,
-luneta's daemon, finds. Without them, the list says why it has no agents, and
-the other two lists work exactly as before.
+The list is what lunetad, luneta's daemon, finds, which luneta starts where
+none runs ([building from source](#building-from-source)). While it does not
+answer, the list says why it has no agents, and the other two lists work
+without it.
 
 Agent support, today:
 
@@ -134,8 +133,8 @@ and what each does, as which-key does in neovim.
 ╰─────────────────────────────────────────╯
 ```
 
-Your key opens the menu floating at the bottom right of the tab, for the pane
-you are in. `c` opens the group you named Claude, and `t` starts Claude Code on
+`Alt a` opens the menu floating at the bottom right of zellij's side, for the
+pane zellij is on. `c` opens its Claude group, and `t` starts Claude Code on
 `/thermo-nuclear-review` in a pane of its own, beside that pane in its tab, and
 in the directory it works in, which the border over the keys names. For
 `/thermo-nuclear-review` that is the point: it reviews the branch checked out
@@ -154,7 +153,7 @@ What a key starts on is the first message of the session, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
 
-Your keys are for the few skills you run all the time. For any other, `/` at
+The Claude group's keys are for a few skills, built in. For any other, `/` at
 the top of the menu searches every skill the pane's directory can run: what you
 type narrows the list, fuzzily, by a skill's name and by what it says it does,
 the skills whose names match first, and `Enter` starts an agent on the one
@@ -196,8 +195,7 @@ Claude Code, and the ones it brings from claude.ai, are not where luneta looks,
 and the list leaves them out. It is made again each time `/` opens it, which
 takes a moment, mostly `claude plugin list`'s.
 
-Every menu has luneta's own New group too, under `n`, with nothing to
-configure, which opens where the pane you are in works: `n p` your shell in a
+The New group, under `n`, opens where the pane works: `n p` your shell in a
 pane of its own beside that pane, `n t` a tab of its session, and `n s` a
 session, which you go to. The session is named as the picker's directories
 name that directory, `luneta-main` for a worktree of `luneta`, with a `-2`
@@ -213,20 +211,8 @@ when a session has that name.
 ╰──────────────────────────╯
 ```
 
-Every menu has luneta's own Delete group too, under `d`, with nothing to
-configure: `d d` closes the pane you are in, and `d s` kills its session. In a
-tab with a floating pane, the menu takes the floating focus from the pane you
-were in as it opens, and zellij then says the pane under it has the focus, so
-luneta cannot tell which you came from. There `d d` closes neither and says
-so, and goes on doing so once the floating pane closes; `d s` still kills the
-session. A pane that is the last in its tab to hold it open closes the tab
-with it, floating panes and all; a pane another was opened in place of keeps
-the tab open, since zellij brings that pane back. The session you are in is
-killed once you are in another, the newest, which the picker lists first; with
-no other session to go to, the menu says so and kills nothing. Closing the
-last pane that holds a session's only tab open would end the session, so
-`d d` there deletes the session, as `d s` does: it asks as for the session,
-and the session you are in goes once you are in another.
+The Delete group, under `d`, closes the pane with `d d`, and deletes its
+session with `d s`, as [luneta's sidebar](#luneta-in-your-terminal) tells.
 
 When what a key deletes would end an agent that is busy or waiting on you, the
 menu asks first, and says what goes:
@@ -250,7 +236,7 @@ work. While the daemon does not answer, or cannot tell which session the
 process of a file it cannot read runs in, luneta cannot tell, and asks every
 time, saying why.
 
-Needs `claude` on the server's `PATH`, and `git` for the branch.
+Needs `claude` on the zellij server's `PATH`, and `git` for the branch.
 
 ### Brief
 
@@ -307,8 +293,7 @@ pane. luneta runs `claude` itself, so it needs `claude` on its own `PATH`.
 
 ### luneta in your terminal
 
-luneta is turning inside out: from a plugin in zellij to a program that runs
-zellij. Type `luneta` in a terminal, and zellij runs in it beside luneta's
+Type `luneta` in a terminal, and zellij runs in it beside luneta's
 sidebar: every live session, the panes in it, and what the agent in each pane
 is doing.
 
@@ -352,14 +337,13 @@ zellij sees them, whichever of the two has the keys:
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
 line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
 and a shell ends on `Ctrl d`. zellij's default config binds `Ctrl b` to tmux
-mode and `Ctrl q` to quit, and the plugin's [binds](#bind-keys) take `Ctrl j`,
-`Ctrl a` and `Ctrl d` already. luneta takes all seven first: if you use those,
+mode and `Ctrl q` to quit. luneta takes all seven first: if you use those,
 bind them to other keys, in zellij's config or in Claude Code's
 `~/.claude/keybindings.json`.
 
-The picker floats over zellij's side, as the plugin's does over a tab. Its
-sessions are the one zellij is in, then the others that run, newest first,
-and under them those zellij keeps to bring back; its agents are as the
+The picker floats over zellij's side. Its sessions are the one zellij is in,
+then the others that run, newest first, and under them those zellij keeps to
+bring back; its agents are as the
 [agents](#agents) tab lists them, and its directories as the
 [directories](#directories) tab does, luneta running zoxide and eza itself.
 `Tab` goes from one list to the next, what you type narrows all three, and the
@@ -680,11 +664,6 @@ sidebar's only: zellij's tabs keep theirs. The sessions' colours are kept in
 the same file, by the session rather than its name, so a renamed one keeps its
 own, and given up once the daemon has not listed a session for 10 seconds.
 
-The plugin's picker opens in a zellij luneta doesn't run, from the keys you
-bind it to; in the one it runs, luneta takes `Ctrl j`, `Ctrl a` and `Ctrl d`
-first, and opens its own. The plugin's floating menu works in either, from the
-key you bind it to; `Alt a` opens luneta's own.
-
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not
 `Enter`; what zellij copies, as OSC 52; and the session zellij is in, by the
@@ -840,134 +819,32 @@ any `claude -p` does, so `claude --resume` lists it there.
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), and the issue of a link you paste there |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
-| `luneta` and [`lunetad`](#building-from-source), side by side | optional | the agents, in the agent list, the menu, luneta's sidebar and the brief |
 | the [hook](#hook-the-shell) in fish | optional | a command's spinner in luneta's sidebar, and how it ended |
 
-The session list needs nothing but zellij. The optional tools are looked up by
-name on the `PATH` of the zellij **server**, which is inherited from whatever
-started it — on a long-lived session that can be older than your shell profile.
-The font is not looked up: it is the terminal's you attach from, which over SSH
-is the one on your own machine, not the server.
+The sessions need nothing but zellij. The optional tools are looked up by
+name on the `PATH` luneta starts with, which the daemon it starts has too, but
+for the `claude` the menu starts an agent on: that runs in a pane, on the
+`PATH` of the zellij **server**, which is inherited from whatever started it —
+on a long-lived session that can be older than your shell profile. The font is
+not looked up: it is the terminal's you run luneta in, which over SSH is the
+one on your own machine, not the server.
 
 ### Install
 
-```kdl
-plugins {
-    // ...
-    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm"
-}
-```
-
-Zellij will prompt once for `RunCommands`, `ReadApplicationState`,
-`ChangeApplicationState` and `OpenTerminalsOrPlugins`. `RunCommands` is how
-luneta reaches `zoxide`, `eza`, `git`, `zellij` and `luneta`, and how
-the [menu](#menu) starts `claude`; `OpenTerminalsOrPlugins` is how the menu
-opens your shell beside a pane.
-Every mode asks for all four, since zellij keeps one grant for a plugin.
-
-<details>
-<summary><strong>Prefer to verify the bytes first?</strong></summary>
-
-Zellij does not check a checksum, a signature or an attestation on a plugin it
-downloads — it fetches the URL and runs the bytes. Every release ships a
-`SHA256SUMS` and a keyless build provenance attestation, so you can download,
-check, and install from disk instead:
+`luneta` and `lunetad` are one package of the flake, and go on the `PATH` side
+by side:
 
 ```sh
-v=0.2.2
-gh release download "v$v" -R lorenzolfm/luneta -p 'luneta-*.wasm' -p SHA256SUMS
-sha256sum -c SHA256SUMS
-gh attestation verify "luneta-$v.wasm" -R lorenzolfm/luneta
-install -m 0644 "luneta-$v.wasm" ~/.local/share/zellij/plugins/luneta.wasm
+nix build github:lorenzolfm/luneta   # -> result/bin/luneta, result/bin/lunetad
 ```
 
-`sha256sum -c` proves the bytes are complete. `gh attestation verify` proves where
-they came from: built by `ci.yml`, at that commit, in this repo, on a GitHub
-runner. Then point `config.kdl` at the `file:` path instead of the URL.
+On NixOS, add the flake to your inputs, and its package to your system's:
 
-</details>
-
-### Bind keys
-
-Bind one key to open luneta and use `Tab` to cycle between the tabs, or bind separate keys that open the agents and directories tabs directly.
-
-```kdl
-keybinds {
-    normal {
-        bind "Ctrl j" {
-            LaunchOrFocusPlugin "luneta" {
-                floating true
-                move_to_focused_tab true
-            }
-            SwitchToMode "normal"
-        }
-        bind "Ctrl a" {
-            LaunchOrFocusPlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-                floating true
-                move_to_focused_tab true
-            }
-            MessagePlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-                name "screen"
-                payload "agents"
-            }
-            SwitchToMode "normal"
-        }
-        bind "Ctrl d" {
-            LaunchOrFocusPlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-                floating true
-                move_to_focused_tab true
-            }
-            MessagePlugin "https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-                name "screen"
-                payload "dirs"
-            }
-            SwitchToMode "normal"
-        }
-    }
-}
+```nix
+environment.systemPackages = [ luneta.packages.${pkgs.stdenv.hostPlatform.system}.lunetad ];
 ```
 
-### Open the menu
-
-The menu is the plugin in `mode "menu"`. Its keys are a `menu`, a node to a
-key: a key's one string is what it starts an agent on, or, with keys inside
-it, the name of the group they make. At the top of the menu, `/`, `n` and `d`
-are luneta's, for its search, its New group and its Delete group, and a menu
-that gives one of them a key of yours says so. Give them to the alias:
-
-```kdl
-plugins {
-    luneta location="https://github.com/lorenzolfm/luneta/releases/download/v0.2.2/luneta-0.2.2.wasm" {
-        menu {
-            c "Claude" {
-                t "/thermo-nuclear-review"
-                m "/make-illegal-states-unrepresentable"
-                s "/tigerstyle"
-            }
-        }
-    }
-}
-
-keybinds {
-    normal {
-        bind "Alt m" {
-            LaunchOrFocusPlugin "luneta" {
-                floating true
-                move_to_focused_tab true
-                mode "menu"
-            }
-            SwitchToMode "normal"
-        }
-    }
-}
-```
-
-A key is one character, pressed bare. The key that opens the menu needs a
-modifier: zellij hands a bare `m` to the pane you are in. A menu luneta cannot
-read says what is wrong with it where its keys would be, and closes on any key.
-
-A `mode` luneta does not know does nothing but say so, in its pane if it has
-one and in zellij's log.
+Then type `luneta` in a terminal. It needs nothing in zellij's config.
 
 ### Hook the shell
 
@@ -1093,7 +970,8 @@ one's number.
 
 ## Usage
 
-Press your key, type, press `Enter`.
+`Ctrl j` opens the picker on the sessions, `Ctrl a` on the agents and `Ctrl d`
+on the directories. Type, press `Enter`.
 
 | key | does |
 |---|---|
@@ -1101,12 +979,12 @@ Press your key, type, press `Enter`.
 | `↓` / `↑` | move the highlight |
 | `Enter` | act on the highlighted row — the prompt says which action |
 | `Tab` / `Shift-Tab` | next / previous list, keeping the search term |
-| `Ctrl-r` | rename the session you are in |
-| `Del` | kill a live session, or delete a dead one; close an agent's pane, and its tab once nothing else holds it open |
+| `Ctrl-r` | rename the highlighted session |
+| `Del` | delete a live session, or let go of a dead one; close an agent's pane, and its tab once nothing else holds it open |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
 
-In the menu, for the pane you opened it from:
+`Alt a` opens the menu, for the pane zellij is on:
 
 | key | does |
 |---|---|
@@ -1125,49 +1003,31 @@ In the menu, for the pane you opened it from:
 
 ## Building from source
 
-Only if you would rather not install a downloaded `.wasm`.
+```sh
+nix develop               # or: direnv allow, once
+cargo build -p lunetad    # -> target/debug/luneta, target/debug/lunetad
+```
+
+The flake pins the rust toolchain, and puts `protoc` on the `PATH` for the
+build scripts that write the protocol out. For what the flake ships — every
+dependency at the revision `Cargo.lock` names, built in a sandbox, no devshell
+and no checkout needed:
 
 ```sh
-nix develop          # or: direnv allow, once
-dev install          # builds and installs to ~/.local/share/zellij/plugins/luneta.wasm
+nix build github:lorenzolfm/luneta   # -> result/bin/luneta, result/bin/lunetad
 ```
 
-The flake pins the rust toolchain with `wasm32-wasip1` added; a system rustc
-without that target fails with `error[E0463]: can't find crate for 'std'`.
+The flake builds on `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`. On
+any other system, build with cargo instead, on the toolchain
+`rust-toolchain.toml` names and with `protoc` on the `PATH`.
 
-For the artifact a release ships — every dependency at the revision `Cargo.lock`
-names, built in a sandbox, no devshell and no checkout needed:
-
-```sh
-nix build github:lorenzolfm/luneta   # -> result/luneta.wasm
-```
-
-The flake builds on `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`. A
-release is the `x86_64-linux` build; the others work the same, but are not the
-same bytes, as the paths a build runs in are written into the `.wasm`. On any
-other system, build with cargo instead, on the toolchain `rust-toolchain.toml`
-names and with `protoc` on the `PATH`, for the daemon's protocol the plugin
-reads: `cargo build --release --target wasm32-wasip1` writes
-`target/wasm32-wasip1/release/luneta-plugin.wasm`, which you install as
-`~/.local/share/zellij/plugins/luneta.wasm`.
-
-Then point `config.kdl` at `file:` instead of the release URL:
-
-```kdl
-plugins {
-    luneta location="file:~/.local/share/zellij/plugins/luneta.wasm"
-}
-```
-
-`nix build .#lunetad` builds `lunetad`, the daemon that holds what luneta
-knows of a host, and `luneta`: zellij beside a sidebar, as
+`lunetad` is the daemon that holds what luneta knows of a host, and `luneta`
+is zellij beside a sidebar, as
 [luneta in your terminal](#luneta-in-your-terminal) has it, and with a command,
 the CLI that talks to the daemon
-([#95](https://github.com/lorenzolfm/luneta/issues/95)). With `luneta` on the
-zellij server's `PATH`, the picker takes where each pane works and the agents
-from the daemon, through `luneta watch`, as they change, and the menu asks the
-daemon once as it opens. Without it, the picker has no agents, and says why; it
-asks the daemon again every few seconds.
+([#95](https://github.com/lorenzolfm/luneta/issues/95)). `luneta watch` writes
+the host out as the protocol encodes it, each time it changes, for a program
+to read.
 
 Nothing has to start the daemon, or run it as a service: `luneta` and `luneta
 watch` start `lunetad` when none answers, as zellij and tmux start their
@@ -1177,8 +1037,16 @@ beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
 It lives as long as zellij does, not as long as a client is attached: once
 zellij has had no session for 30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A
-newer one they keep, so that two versions in use at once never take turns at
+newer one they keep, so that two builds in use at once never take turns at
 it: after a rollback, the newer daemon runs on until zellij's last session ends.
+Older is of an earlier release, or of the same one and built from a commit
+made before theirs, as the flake stamps each build of a commit: every commit
+is of one release until the next. A cargo build has no stamp, and nor has the
+flake's build of a tree with changes not yet committed, so either keeps the
+daemon an install of its release started, and an install stops one either
+started. `luneta info` says the stamp after the release, as
+`0.2.2+1793301121`, and so do `luneta --version` and `lunetad --version` of
+their own.
 One that reads zellij's sessions in another folder than their zellij keeps
 them in, as one started with another `ZELLIJ_SOCKET_DIR` does, they neither
 ask nor stop, and say so: one of theirs in its place would leave out the
@@ -1189,8 +1057,8 @@ works on, with its pull request; none of the three starts one, and nor does
 `luneta close`, which says it cannot tell the agents it would end while none
 runs. The commands an agent [drives luneta](#tell-an-agent) with ask zellij
 itself. The daemon asks
-`zellij`, `git` and `gh` on its `PATH`, which is the zellij server's when the
-plugin started it.
+`zellij`, `git` and `gh` on its `PATH`, which is the `PATH` of the luneta that
+started it.
 
 ## License
 

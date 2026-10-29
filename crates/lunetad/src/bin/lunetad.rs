@@ -8,12 +8,12 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::process::ExitCode;
 
 use clap::Parser;
-use lunetad::{folder, Claim, Refusal};
+use lunetad::{folder, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
 /// The luneta daemon of this host, for this user.
 #[derive(Parser)]
-#[command(version)]
+#[command(version = release::SAID.as_str())]
 struct Args {
     /// Run in a session of its own, away from the terminal of whatever
     /// started it, as luneta starts it: so that the terminal closing does
@@ -68,11 +68,11 @@ fn main() -> ExitCode {
 }
 
 /// Closes the files lunetad was handed open past its stdio. luneta hands on
-/// whatever was open to it, and zellij's server leaves each pane's terminal
-/// open to the commands its plugins run, as `luneta watch`. A daemon that
-/// held a pane's terminal would keep the kernel from hanging it up: once a
-/// server ended without a word to its panes, as one that crashes does, what
-/// ran in them would run on for as long as the daemon did.
+/// whatever was open to it, and what runs luneta may leave more open: zellij's
+/// server leaves each pane's terminal open to the commands its plugins run. A
+/// daemon that held a pane's terminal would keep the kernel from hanging it
+/// up: once a server ended without a word to its panes, as one that crashes
+/// does, what ran in them would run on for as long as the daemon did.
 ///
 /// A file comes through an exec only where it lacks close-on-exec, which
 /// what std opens has, so that these are all that are closed.

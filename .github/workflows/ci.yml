@@ -1,18 +1,13 @@
-# Build on every PR, and release on a tag.
+# Lint and test on every PR, and on main once a PR lands.
 #
-# One workflow, not two, for the reason CI builds through the flake and not through
-# a toolchain action: the build is written down once. A separate release pipeline
-# would differ from the one that PRs run, and the difference would appear as a tag
-# that fails after the code is merged.
-#
-# The `release` job therefore does not build. It takes the artifact that `build`
-# produced, so the bytes in a release are the bytes a PR check passed, and the bytes
-# the provenance attestation covers.
+# CI builds through the flake and not through a toolchain action, so that the build
+# is written down once: the rust it builds with and how cargo is run are the
+# flake's, as they are in the devshell.
 #
 # Actions are pinned by commit SHA, not by tag. `@v7` is a ref that the repo of the
 # action can move at any time, so a tag pin trusts every future commit of that repo.
-# Whatever runs here can put bytes in front of users under our name. The comment
-# after each SHA is a label for a person; the SHA is the pin.
+# Whatever runs here runs with this repo's token. The comment after each SHA is a
+# label for a person; the SHA is the pin.
 
 name: ci
 
@@ -20,20 +15,15 @@ on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
 
-# Read-only by default. Only `release` widens this, and only for what it must.
 permissions:
   contents: read
 
 jobs:
-  build:
-    # The asset is wasm, which runs wherever zellij does, so one runner builds it.
-    # The daemon, which is built for each system, has a job of its own below.
+  clippy:
+    # One runner, x86_64 Linux, so what is behind `cfg(target_os = "macos")`
+    # goes unlinted.
     runs-on: ubuntu-latest
-
-    outputs:
-      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -62,90 +52,39 @@ jobs:
       # Before main saves, the store is collected down to what this job built and
       # what built it, which keep-outputs keeps alive behind the `result` links.
       # Without it each store would carry every build before it.
-      #
-      # Not on a tag. The bytes the attestation covers are built in the tag's run,
-      # and not pulled from a cache another run wrote.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
-        if: github.ref_type != 'tag'
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'src/**', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'examples/**', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
 
-      # Through the flake and not through a toolchain action, so that CI builds with
-      # the rust the flake pins (1.95.0, the channel the rust-toolchain.toml of
-      # zellij names) and the version is written down in one place.
-      #
-      # `nix build .#luneta` and not `nix run .#dev -- build`: the asset a tag ships
-      # is built from the dependency revisions Cargo.lock names, fetched by hash into
-      # a sandbox with no network, so the bytes the attestation covers do not depend
-      # on what cargo happened to resolve on the runner. `dev build` stays the
-      # development loop; both run the same cargo invocation.
-      #
-      # This step also checks that the crate compiles for wasm32-wasip1, which a
-      # build for the host target does not check. The unit tests are host-target and
-      # are not part of it.
-      - name: Build
-        run: nix build .#luneta
-
-      # The step above never touches `dev`: `packages` is a lazy attrset and nothing
-      # in `luneta` reaches it, so a `dev` that does not build evaluates fine and CI
-      # goes green. `nix flake check` is no backstop either — it evaluates the
-      # derivation without building it. Build it, so that writeShellApplication runs
-      # shellcheck over the recipes. A broken `dev` breaks `nix develop`, which is
-      # the way the README tells a contributor to build.
-      #
-      # `--no-link`, so that `result` stays the wasm the next step stages.
+      # Nothing else reaches `dev`: `packages` is a lazy attrset, so a `dev` that does
+      # not build evaluates fine and CI goes green. `nix flake check` is no backstop
+      # either — it evaluates the derivation without building it. Build it, so that
+      # writeShellApplication runs shellcheck over the recipes. A broken `dev` breaks
+      # `nix develop`, which is the way the README tells a contributor to build.
       - name: Build the dev CLI
         run: nix build --no-link .#dev
 
-      # `dev clippy`'s two runs, as the flake's checks make them in the sandbox,
-      # against the dependencies the builds compiled, so that clippy compiles none of
-      # them again. Through the flake and not a bare `cargo clippy`, for the reason
-      # the build above goes through it: the invocation is written down once
-      # (`clippyRuns` in flake.nix), and the rust this lints with is the one the
-      # flake pins rather than whatever the runner image ships. The lint set itself
-      # lives in Cargo.toml and clippy.toml.
+      # `dev clippy`'s run, as the flake's check makes it in the sandbox, against the
+      # dependencies the daemon's build compiles, so that clippy compiles none of
+      # them again. Through the flake and not a bare `cargo clippy`: the invocation
+      # is written down once (`clippyRun` in flake.nix), and the rust this lints with
+      # is the one the flake pins rather than whatever the runner image ships. The
+      # lint set itself lives in Cargo.toml and clippy.toml.
       #
-      # It is the only step that reaches the tests and the profiling example, which
-      # `nix build .#luneta` filters out of its source and never sees.
-      #
-      # x86_64-linux by name, the system this job runs on. `--out-link`, so that
-      # `result` stays the wasm the next step stages, and so that the store keeps
-      # the daemon's dependencies for the cache to save.
+      # x86_64-linux by name, the system this job runs on. `--out-link`, so that the
+      # store keeps the daemon's dependencies for the cache to save.
       - name: Clippy
-        run: >-
-          nix build -L --out-link clippy
-          .#checks.x86_64-linux.clippy-plugin
-          .#checks.x86_64-linux.clippy-daemon
-
-      # Out of the read-only store and under a stable name, so the upload and the
-      # release job can both name the file without knowing a store path.
-      - name: Stage the artifact
-        run: install -m0644 result/luneta.wasm luneta.wasm
-
-      # From the derivation, which reads Cargo.toml, so the version the release
-      # checks against the tag is the one the built bytes were stamped with.
-      - name: Read the version
-        id: version
-        run: |
-          set -euo pipefail
-          version="$(nix eval --raw .#luneta.version)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: luneta-wasm
-          path: luneta.wasm
-          if-no-files-found: error
+        run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
 
   # The daemon on each system it runs on: x86_64 and arm64 Linux, and an Apple
-  # Silicon Mac. Through the flake, for the reason `build` goes through it, and
-  # each runner tests the process backend of its own system: `/proc` on Linux,
-  # sysinfo on macOS. On Linux the derivation runs the tests in its sandbox. On
-  # macOS the sandbox will not run `/bin/ps`, which the tests read a process's
-  # start from as Claude Code does, so they run through the devshell instead.
+  # Silicon Mac. Through the flake, as the rest of CI goes, and each runner
+  # tests the process backend of its own system: `/proc` on Linux, sysinfo on
+  # macOS. On Linux the derivation runs the tests in its sandbox. On macOS the
+  # sandbox will not run `/bin/ps`, which the tests read a process's start
+  # from as Claude Code does, so they run through the devshell instead.
   #
   # Native runners, and no cross build: nix does not build for darwin from
   # Linux, and the arm64 Linux runner is free on a public repository.
@@ -166,11 +105,11 @@ jobs:
             experimental-features = nix-command flakes
             keep-outputs = true
 
-      # The nix store, as in `build`. The job and the system are in the key, as each
+      # The nix store, as in `clippy`. The job and the system are in the key, as each
       # runner builds the daemon for a system of its own.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'src/**', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'examples/**', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -178,11 +117,11 @@ jobs:
       # The Mac's tests build outside the sandbox, so the nix store holds nothing
       # of theirs: their `target/` is cached on its own, with the crates cargo
       # downloads for it. It holds the dependencies, and luneta's crates compile on
-      # each run. As in `build`, main saves and a PR restores.
+      # each run. As in `clippy`, main saves and a PR restores.
       #
       # Its key is what cargo builds the dependencies from: the lockfiles, which
-      # name them, the manifests, which turn on their features, and flake.nix,
-      # which names the rust. main saves only on a miss, so a change the key left
+      # name them, the manifests, which turn on their features, and flake.nix and
+      # rust-toolchain.toml, which name the rust. main saves only on a miss, so a change the key left
       # out would hit the `target/` from before it and never save another, and
       # every run after would compile what changed again. A feature of rustix's,
       # turned on in a manifest, leaves Cargo.lock as it was.
@@ -199,7 +138,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             target/
-          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix') }}
+          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml') }}
 
       # `--locked`, so that the tests build against what Cargo.lock names, as
       # the derivation does. Not incremental, which is for one tree's edits in a row:
@@ -224,69 +163,3 @@ jobs:
 
       - name: Build the daemon, and on Linux test it
         run: nix build -L .#lunetad
-
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write # create the release, attach the assets
-      id-token: write # OIDC identity the attestation is signed against
-      attestations: write # record the provenance attestation
-
-    steps:
-      # The tag names the asset, and zellij caches against the asset name. A tag that
-      # disagrees with Cargo.toml would thus release a build under the wrong version,
-      # and the release is public before anyone finds the error.
-      - name: Check the tag agrees with Cargo.toml
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          crate="${{ needs.build.outputs.version }}"
-          if [ "$tag" != "$crate" ]; then
-            echo "::error::tag v$tag does not match Cargo.toml version $crate"
-            exit 1
-          fi
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: luneta-wasm
-
-      # The version must be in the filename, and not in the tag directory alone. The
-      # downloader of zellij caches a remote plugin by the last path segment of the
-      # URL, and returns immediately if that file exists. It reads no ETag and no
-      # timestamp, and never fetches again (zellij-utils downloader.rs:88-92). A
-      # release named `luneta.wasm` would hold every user at the first build they
-      # downloaded, with no way to give them a correction.
-      - name: Name the asset after the version
-        run: cp luneta.wasm "luneta-${{ needs.build.outputs.version }}.wasm"
-
-      # The `sha256sum -c SHA256SUMS` format, in one file that covers every asset.
-      #
-      # This proves only that the download is complete and not corrupted. It is not a
-      # defence against a change of the bytes: anyone who can replace the asset can
-      # replace this file beside it. The attestation below says where the bytes came
-      # from.
-      - name: Checksums
-        run: |
-          set -euo pipefail
-          sha256sum "luneta-${{ needs.build.outputs.version }}.wasm" > SHA256SUMS
-          cat SHA256SUMS
-
-      # Keyless, through the OIDC identity of the runner. There is no private key to
-      # guard, to rotate, or to lose. The claim is stronger than a signature: not that
-      # somebody with a key signed these bytes, but that these bytes came out of this
-      # workflow, at this commit, in this repo, on a GitHub runner.
-      #
-      #   gh attestation verify luneta-<version>.wasm -R lorenzolfm/luneta
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
-        with:
-          subject-path: luneta-${{ needs.build.outputs.version }}.wasm
-
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
-        with:
-          files: |
-            luneta-${{ needs.build.outputs.version }}.wasm
-            SHA256SUMS
-          generate_release_notes: true

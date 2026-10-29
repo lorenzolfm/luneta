@@ -1,6 +1,6 @@
 //! The skills a pane's directory can run, for the menu's search: each a
 //! `SKILL.md`, a command or a workflow, where Claude Code finds them for that
-//! directory. The plugin's finder, come over whole.
+//! directory.
 //!
 //! Claude Code names the skills it would run only as it starts a session:
 //! `claude -p` with `--output-format stream-json` says them in the `init` it
@@ -687,9 +687,9 @@ mod tests {
         );
     }
 
-    /// The finder runs as the plugin's does, on a directory of skills of its
-    /// own: yours are left out by a `CLAUDE_CONFIG_DIR` with none, and the
-    /// plugins by a `PATH` with no `claude` on it.
+    /// The finder runs on a directory of skills of its own: yours are left
+    /// out by a `CLAUDE_CONFIG_DIR` with none, and the plugins by a `PATH`
+    /// with no `claude` on it.
     #[test]
     fn the_finder_finds_the_skills_of_a_directory_and_those_above_it() {
         let Ok(scratch) = tempfile::tempdir() else {
@@ -717,6 +717,73 @@ mod tests {
             panic!("sh");
         };
         assert_eq!(found(&said.stdout), [skill("near", "Near.")]);
+    }
+
+    /// What the finder finds in `LUNETA_SKILLS_DIR`, or in this directory,
+    /// against the slash commands Claude Code says it has there, in the
+    /// `init` that `claude -p` prints first. Each skill the finder names is
+    /// one of them, and each of them is one the finder found, but for those
+    /// Claude Code brings itself, which the menu leaves out: what it has with
+    /// none of your settings, skills or plugins, in a directory of none, and
+    /// the skills it brings from claude.ai, in the namespaces it keeps for
+    /// them. The finder looks where Claude Code looks, as far as luneta knows,
+    /// and only this says when a Claude Code looks elsewhere.
+    #[test]
+    #[ignore = "starts `claude`: run it with `dev skills [dir]`"]
+    fn the_finder_finds_what_claude_code_runs() {
+        use std::collections::BTreeSet;
+        use std::path::Path;
+        use std::process::Stdio;
+
+        /// The slash commands of the `init` of `claude -p` in `dir`, with
+        /// `args`, on a model that is none, so that nothing reaches one. Out
+        /// of the panes luneta places agents in, and of a Claude Code
+        /// session this may run in, but for where yours keeps its config.
+        fn commands(dir: &Path, args: &[&str]) -> BTreeSet<String> {
+            let mut claude = Command::new("claude");
+            for (key, _) in std::env::vars() {
+                let session = key.starts_with("CLAUDE") && key != "CLAUDE_CONFIG_DIR";
+                if session || key.starts_with("ZELLIJ") || key.starts_with("LUNETA") {
+                    claude.env_remove(key);
+                }
+            }
+            let said = claude
+                .current_dir(dir)
+                .args(["-p", "x", "--output-format", "stream-json", "--verbose"])
+                .args(["--model", "luneta-no-such-model"])
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .expect("claude");
+            let init = String::from_utf8_lossy(&said.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|event| event["subtype"] == "init")
+                .expect("claude -p said its init");
+            let names = init["slash_commands"].as_array().into_iter().flatten();
+            names.filter_map(serde_json::Value::as_str).map(str::to_owned).collect()
+        }
+
+        let dir = std::env::var("LUNETA_SKILLS_DIR").unwrap_or_else(|_| ".".to_owned());
+        let finder = Command::new("sh").args(["-c", FIND, "sh", &dir]).output().expect("sh");
+        let luneta: BTreeSet<String> =
+            found(&finder.stdout).iter().map(|skill| skill.name.to_string()).collect();
+
+        let none = tempfile::tempdir().expect("a directory");
+        let own = commands(none.path(), &["--setting-sources", "local"]);
+
+        let there = commands(Path::new(&dir), &[]);
+        let synced = ["anthropic-skills:", "claude-ai:"];
+        let brought =
+            |name: &&String| own.contains(*name) || synced.iter().any(|at| name.starts_with(at));
+        let finder_alone: Vec<&String> = luneta.difference(&there).collect();
+        let claude_alone: Vec<&String> =
+            there.difference(&luneta).filter(|name| !brought(name)).collect();
+        assert!(
+            finder_alone.is_empty() && claude_alone.is_empty(),
+            "in {dir}, the finder alone finds {finder_alone:?}, and Claude Code alone runs \
+             {claude_alone:?}"
+        );
     }
 
     fn names(search: &Search) -> Vec<&str> {

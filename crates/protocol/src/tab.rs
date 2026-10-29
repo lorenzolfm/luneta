@@ -1,6 +1,5 @@
-//! A tab's name, as zellij lists it: the plugin hears it from zellij, and the
-//! daemon's clients from the daemon. Both read it here, so that the two find
-//! the same tabs named.
+//! A tab's name, as zellij lists it, and the daemon's clients have it from
+//! the daemon.
 
 /// The name of a tab, if someone gave it one: zellij names a tab `Tab #N`
 /// until then.

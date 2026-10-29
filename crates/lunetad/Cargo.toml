@@ -6,9 +6,9 @@ description = "The luneta daemon, and luneta: zellij beside a sidebar of the hos
 
 # The daemon and its CLI are one package, as they share all there is so far:
 # the transport, and where the daemon listens. The protocol's messages are
-# `luneta-protocol`'s, which the plugin reads too. With no command, the CLI is
-# luneta itself, zellij beside a sidebar, and the dependencies for that are
-# the CLI's alone: the daemon's binary links none of them.
+# `luneta-protocol`'s. With no command, the CLI is luneta itself, zellij beside
+# a sidebar, and the dependencies for that are the CLI's alone: the daemon's
+# binary links none of them.
 [[bin]]
 name = "lunetad"
 path = "src/bin/lunetad.rs"
@@ -29,8 +29,8 @@ clap = { version = "4.6.6", features = ["derive"] }
 # Sets luneta's terminal's modes. What `input` reads of it are crossterm's keys
 # and mouse, which `keys` and the sidebar take.
 crossterm = "0.29.0"
-# The sidebar's search scores its rows as the plugin's does: skim's scorer, at
-# the version the plugin pins.
+# The sidebar's search scores its rows with skim's scorer, as the picker's and
+# the menu's do.
 fuzzy-matcher = { version = "0.3.7", default-features = false }
 # `connect` hands tonic a Unix socket of its own making, so that a path is a
 # path and never has to survive being spelled as a URI.

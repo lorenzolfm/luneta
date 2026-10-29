@@ -16,7 +16,7 @@ use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse, Version, WatchRequest,
 };
-use lunetad::{folder, Claim};
+use lunetad::{folder, release, Claim};
 use prost::Message as _;
 use rustix::process::{Pid, Signal};
 use tokio_stream::wrappers::UnixListenerStream;
@@ -34,7 +34,8 @@ const OLDER: &str = "0.0.1";
 const NEWER: &str = "99.0.0";
 
 /// Set, it has the test binary, run again, stand in for a daemon in the
-/// folder it names, of the version that `STAND_IN_VERSION` says.
+/// folder it names, of the build that `STAND_IN_VERSION` spells, as
+/// `lunetad --version` says one.
 const STAND_IN: &str = "LUNETA_TEST_STAND_IN_FOLDER";
 
 const STAND_IN_VERSION: &str = "LUNETA_TEST_STAND_IN_VERSION";
@@ -302,7 +303,50 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()));
     assert_ne!(pid(&current), older.pid());
     let said = info(host.vars());
-    assert!(said.starts_with(&format!("lunetad {} ", env!("CARGO_PKG_VERSION"))), "{said}");
+    let current = release::spelled(release::VERSION, release::BUILT);
+    assert!(said.starts_with(&format!("lunetad {current} ")), "{said}");
+}
+
+/// A daemon of luneta's own release, as one of every commit until the next
+/// is, goes by when its commit was made, where the flake stamped it. One
+/// stamped after luneta, as a luneta from before an install finds running,
+/// it keeps. A stamped luneta stops one stamped before it, as an install
+/// does the daemon the install before it left running. A luneta with no
+/// stamp, as a cargo build of a checkout is, keeps that one too: an install
+/// is newer than any build of a checkout of its release. The flake's build
+/// of a commit's tests is stamped and a cargo run of them is not, and CI
+/// runs both.
+#[test]
+fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
+    let stamped = |built| release::spelled(release::VERSION, Some(built));
+
+    let later = Host::new();
+    let mut after = stand_in(&later, &stamped(u64::MAX), None, None);
+    assert_eq!(pid(&watch(&later, Path::new(LUNETA))), after.pid());
+    assert_eq!(after.ended_within(Duration::ZERO), None);
+
+    let host = Host::new();
+    let mut before = stand_in(&host, &stamped(0), None, None);
+    let reached = pid(&watch(&host, Path::new(LUNETA)));
+    if release::BUILT.is_some() {
+        let _daemon = Detached { host: &host, pid: reached };
+        assert!(before.ended_within(Duration::from_secs(5)).is_some(), "the stamped daemon runs on");
+        assert_ne!(reached, before.pid());
+    } else {
+        assert_eq!(reached, before.pid());
+        assert_eq!(before.ended_within(Duration::ZERO), None);
+    }
+}
+
+/// luneta says its build to `--version` as lunetad does, stamp and all, so
+/// that either says which install it is of.
+#[test]
+fn luneta_and_lunetad_say_their_build_alike() {
+    for (program, name) in [(LUNETA, "luneta"), (LUNETAD, "lunetad")] {
+        let said = Command::new(program).arg("--version").output().unwrap();
+        assert!(said.status.success(), "{name} --version failed");
+        assert_eq!(String::from_utf8_lossy(&said.stdout), format!("{name} {}\n", *release::SAID));
+    }
 }
 
 /// lunetas that find an older daemon in the same moment, as the sidebars of
@@ -399,9 +443,9 @@ fn luneta_watch_neither_asks_nor_stops_a_daemon_of_another_zellij_folder() {
     assert_eq!(pid(&watch(&host, Path::new(LUNETA))), newer.pid());
 }
 
-/// Starts the stand-in for a daemon of `version` in the host's folder, and
-/// waits for it to answer. It says that `says` is its pid, and that it reads
-/// zellij's sessions in `reads`, if given.
+/// Starts the stand-in for a daemon of the build `version` spells in the
+/// host's folder, and waits for it to answer. It says that `says` is its pid,
+/// and that it reads zellij's sessions in `reads`, if given.
 fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>) -> Running {
     let mut command = Command::new(env::current_exe().unwrap());
     command
@@ -431,7 +475,11 @@ fn stand_in_lunetad() {
     let Some(folder) = env::var_os(STAND_IN) else {
         return;
     };
-    let version = env::var(STAND_IN_VERSION).unwrap();
+    let said = env::var(STAND_IN_VERSION).unwrap();
+    let (version, built) = match said.split_once('+') {
+        Some((version, built)) => (version.to_owned(), Some(built.parse().unwrap())),
+        None => (said, None),
+    };
     let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
     let reads = env::var_os(STAND_IN_READS).map(PathBuf::from);
     let claim = Claim::take(Path::new(&folder)).unwrap();
@@ -439,7 +487,7 @@ fn stand_in_lunetad() {
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(claim.socket()).unwrap();
         tonic::transport::Server::builder()
-            .add_service(DaemonServer::new(StandIn { version, pid, reads }))
+            .add_service(DaemonServer::new(StandIn { version, built, pid, reads }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
@@ -448,6 +496,8 @@ fn stand_in_lunetad() {
 
 struct StandIn {
     version: String,
+    /// The stamp it says it was built with, if it says one.
+    built: Option<u64>,
     /// The pid it says it has.
     pid: u32,
     /// The folder it says it reads zellij's sessions in, if it says one.
@@ -457,9 +507,9 @@ struct StandIn {
 #[tonic::async_trait]
 impl Daemon for StandIn {
     async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
-        let (version, pid) = (self.version.clone(), self.pid);
+        let (version, built, pid) = (self.version.clone(), self.built, self.pid);
         let zellij_folder = self.reads.as_ref().map(|reads| reads.as_os_str().as_bytes().to_vec());
-        let info = InfoResponse { version, pid, zellij_folder, ..InfoResponse::default() };
+        let info = InfoResponse { version, built, pid, zellij_folder, ..InfoResponse::default() };
         Ok(Response::new(info))
     }
 
