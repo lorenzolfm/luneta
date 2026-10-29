@@ -53,7 +53,7 @@ use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
-use crate::menu;
+use crate::menu::{self, Choice};
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
@@ -61,7 +61,7 @@ use crate::picker::{self, List, Picked, Picker};
 use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
-use crate::spots::{Drawn, Spot};
+use crate::spots::{Burst, Drawn, Hit};
 use crate::width::Width;
 use crate::zellij::{self, After, Arrival, Closes, Refuge, SessionName, Tab};
 
@@ -158,10 +158,6 @@ const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTR
 /// The key that opens the picker over zellij, on the directories.
 const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
 
-/// How soon a second click on the cell of a first makes a double click of the
-/// two, as desktops have it by default.
-const DOUBLE_CLICK: Duration = Duration::from_millis(500);
-
 /// Where the keys are: with a side, or with a box over zellij, which has them
 /// and the mouse until it closes, when that side has them again.
 #[derive(Debug)]
@@ -244,9 +240,9 @@ enum Held {
     /// what another luneta dragged meanwhile stays.
     Edge { dragged: bool },
     /// A press luneta took for itself: one that closed a box over zellij, as
-    /// the menu or a brief, one on a spot, or the second click of a double
-    /// click that is none. What it drags, and its release, go nowhere, as
-    /// zellij heard no press of it.
+    /// the menu or a brief, one on a spot, or one of a burst of clicks that
+    /// is none. What it drags, and its release, go nowhere, as zellij heard
+    /// no press of it.
     Taken,
 }
 
@@ -464,12 +460,12 @@ struct App {
     /// Whether the window luneta's terminal is in has the focus. The sidebar
     /// sees you in a pane only while it does.
     focused: bool,
-    /// When and where a click on the sidebar collapsed opened it, or pressed
-    /// a spot, where the second click of a double click comes, onto what that
-    /// drew there.
-    opener: Option<(Instant, Position)>,
+    /// The clicks on the cell of one that opened the sidebar collapsed, or
+    /// pressed a spot, that come fast after it, onto what that drew there.
+    burst: Option<Burst>,
     /// What has the mouse drew last: the box over zellij, where one is, or
-    /// else the sidebar, with the spots on its menu or legend.
+    /// else the sidebar, with the spots on its menu or legend, which a click
+    /// goes to while it has the mouse still.
     drawn: Drawn,
     /// Where the mouse was last, for the spot under it to be lit.
     pointer: Option<Position>,
@@ -691,8 +687,8 @@ fn run_in(
         // Until the terminal says otherwise. One that never tells a program
         // of its window's focus has you in it all along.
         focused: true,
-        opener: None,
-        drawn: Drawn::default(),
+        burst: None,
+        drawn: Drawn::Nothing,
         pointer: None,
         cursor: None,
         colours,
@@ -1126,27 +1122,30 @@ impl App {
             self.zellij_mouse(mouse);
             return;
         }
-        // The second click of a double click is no click on what its first
-        // drew under it: on the row a click on the sidebar collapsed opened
-        // there, it would fold a session, or take zellij to a pane; on the
-        // entry that took the place of a group a click opened, it would press
-        // that entry's key, as a delete's; and on zellij, where a click closed
+        // A click of a burst on one cell is no click on what its first drew
+        // under it: on the row a click on the sidebar collapsed opened there,
+        // it would fold a session, or take zellij to a pane; on the entry
+        // that took the place of a group a click opened, it would press that
+        // entry's key, as a delete's, and the next click the key of the entry
+        // that took its place in turn; and on zellij, where a click closed
         // the box over it, it would click there.
-        let opener = if down { self.opener.take() } else { None };
-        if opener.is_some_and(|(when, was)| was == at && when.elapsed() < DOUBLE_CLICK) {
-            self.held = Held::Taken;
-            return;
+        if down {
+            if self.burst.as_mut().is_some_and(|burst| burst.takes(at, Instant::now())) {
+                self.held = Held::Taken;
+                return;
+            }
+            self.burst = None;
         }
         // A click on a spot of what has the mouse, and the keys, does what the
         // spot says, and nothing else.
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(spot) = self.drawn.spots.at(at).copied()
+            && let Some(hit) = self.drawn.at(at)
         {
             self.let_go();
             self.sidebar.let_go();
             self.held = Held::Taken;
-            self.opener = Some((Instant::now(), at));
-            self.spot(spot);
+            self.burst = Some(Burst::new(at, Instant::now()));
+            self.hit(hit);
             return;
         }
         let wheel = match mouse.kind {
@@ -1155,15 +1154,15 @@ impl App {
             _ => None,
         };
         // The wheel over the skills the menu's search finds moves its cursor.
-        let on_skills = !matches!(self.focus.over, Some(Over::Picker(_)))
-            && matches!(self.drawn.spots.at(at), Some(Spot::Row(_)));
-        if let Some(by) = wheel.filter(|_| on_skills) {
-            self.sidebar.scroll_menu(by);
+        if let Some(by) = wheel
+            && let Some(Hit::Menu(menu, Choice::Skill(_))) = self.drawn.at(at)
+        {
+            self.sidebar.scroll_menu(menu, by);
             return;
         }
         // The picker takes the mouse: the wheel moves its highlight, and a
         // click off its box closes it, and does nothing else.
-        let off = !self.drawn.area.contains(at);
+        let off = !self.drawn.boxed().is_some_and(|area| area.contains(at));
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
             match (mouse.kind, wheel) {
                 (_, Some(by)) => picker.scroll(by),
@@ -1243,7 +1242,7 @@ impl App {
         if self.focus.side == Side::Collapsed {
             if down {
                 self.give(Focus::on(Side::Zellij));
-                self.opener = Some((Instant::now(), at));
+                self.burst = Some(Burst::new(at, Instant::now()));
             }
             return;
         }
@@ -1264,23 +1263,33 @@ impl App {
         self.follow(asked);
     }
 
-    /// Does what a click on `spot` does: presses its key, where the keys are,
-    /// with what has the mouse, as a box over zellij has both, and the
-    /// sidebar both while it shows its menu or its legend; or picks the row
-    /// of the list it is on: the picker's, or the skills the menu's search
-    /// finds.
-    fn spot(&mut self, spot: Spot) {
-        match spot {
-            Spot::Key(key) => self.key(&key),
-            Spot::Row(at) => {
-                if let Some(Over::Picker(picker)) = &mut self.focus.over {
-                    let did = picker.pick(at);
+    /// Does what a click on a spot does, where what drew it has the mouse
+    /// still: presses its key, the legend's, the menu's or the picker's, or
+    /// picks the skill the menu's search finds, or the picker's row, as
+    /// `Enter` does on it. A spot of what closed since it drew, or gave way
+    /// to another, does nothing, as what zellij answers a menu closed does:
+    /// what was drawn last is what the click was on, but what came since,
+    /// with it as luneta drew the next frame, can have changed what it does.
+    fn hit(&mut self, hit: Hit) {
+        match hit {
+            Hit::Legend(key) if self.focus.over.is_none() => {
+                let asked = self.sidebar.legend_key(&key, SystemTime::now());
+                self.follow(asked);
+            },
+            Hit::Menu(menu, choice) if matches!(self.focus.over, None | Some(Over::Menu)) => {
+                let asked = self.sidebar.chose(menu, choice, SystemTime::now());
+                self.follow(asked);
+            },
+            Hit::Picker(number, pick) => {
+                if let Some(Over::Picker(picker)) = &mut self.focus.over
+                    && picker.number() == number
+                {
+                    let did = picker.click(pick);
                     self.picked(did);
-                } else {
-                    let asked = self.sidebar.pick(at);
-                    self.follow(asked);
                 }
             },
+            // A box opened over what drew it since.
+            Hit::Legend(_) | Hit::Menu(..) => {},
         }
     }
 
@@ -1761,7 +1770,7 @@ impl App {
             let buffer = frame.buffer_mut();
             let beside = if collapsed {
                 self.sidebar.draw_collapsed(buffer, sidebar, now);
-                Drawn::default()
+                Drawn::Nothing
             } else {
                 self.sidebar.draw(buffer, sidebar, now)
             };
@@ -1771,16 +1780,16 @@ impl App {
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
                     briefing.draw(buffer, zellij);
-                    Drawn::default()
+                    Drawn::Nothing
                 },
                 Some(Over::Ask(ask)) => {
                     ask.draw(buffer, zellij);
-                    Drawn::default()
+                    Drawn::Nothing
                 },
                 Some(Over::Picker(picker)) => picker.draw(buffer, zellij, now),
                 Some(Over::Note(note)) => {
                     menu::draw_note(buffer, zellij, note);
-                    Drawn::default()
+                    Drawn::Nothing
                 },
                 Some(Over::Menu) => {
                     let floating = self.sidebar.floating();
@@ -1789,7 +1798,7 @@ impl App {
                 None => beside,
             };
             if let Some(pointer) = self.pointer {
-                drawn.spots.light(buffer, pointer);
+                drawn.light(buffer, pointer);
             }
             // zellij's cursor shows while zellij has the keys, under no box.
             if self.focus.zellij()

@@ -42,7 +42,7 @@ use crate::brief::{self, Asking};
 use crate::drive::Turn;
 use crate::gruvbox;
 use crate::host::Event;
-use crate::menu::{self, Target};
+use crate::menu::{self, Hint, Target};
 use crate::sidebar::{self, ACCENT};
 use crate::zellij::{self, Pane};
 
@@ -305,9 +305,9 @@ impl Ask {
             return;
         };
         let mut lines = self.lines(inner);
-        let keys: &[(&str, &str)] = match self.turn {
-            Some(_) => &[("<ESC>", "Close")],
-            None => &[("<ENTER>", "Send"), ("<ESC>", "Close")],
+        let keys: &[(Hint, &str)] = match self.turn {
+            Some(_) => &[(Hint::Esc, "Close")],
+            None => &[(Hint::Enter, "Send"), (Hint::Esc, "Close")],
         };
         let footer = [Line::default(), menu::keys_line(inner, keys)];
         let lines_room = room.saturating_sub(footer.len());

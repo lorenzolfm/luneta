@@ -40,8 +40,8 @@ use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::pull::{At, Kind, Link, Ready};
 use crate::sidebar::{self, ACCENT, LIT, NAME, Place, TAG};
-use crate::skills::{Search, Skills};
-use crate::spots::{Drawn, Spot, Spots};
+use crate::skills::{Name, Search, Skills};
+use crate::spots::{Drawn, Spots};
 use crate::zellij::SessionName;
 
 /// The key that opens the search over the skills, at the top of the menu, and
@@ -704,6 +704,15 @@ pub enum Done {
     Ask(Target),
 }
 
+/// What a click on a spot of the menu does: presses the key of an entry, or
+/// one the line of keys names, or picks the skill so named of those its
+/// search finds, as `Enter` does with the cursor on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Key(KeyEvent),
+    Skill(Name),
+}
+
 /// The menu at the bottom of the sidebar, for the row highlighted when it
 /// opened, or floating over zellij, for the pane zellij was on.
 pub struct Menu {
@@ -988,13 +997,13 @@ impl Menu {
         }
     }
 
-    /// What a click on the skill `at` of those that match in the search box
-    /// does: what `Enter` does with the cursor on it. Nothing where no skill
-    /// is there now, nor while the keys do nothing but close the menu.
-    pub fn pick(mut self, at: usize) -> Did {
+    /// What a click on the skill called `name` in the search box does: what
+    /// `Enter` does with the cursor on it. Nothing where it matches no more,
+    /// nor while the keys do nothing but close the menu.
+    pub fn pick(mut self, name: &Name) -> Did {
         if let Stage::Choosing(keys) = &mut self.stage
             && let Some(search) = &mut keys.search
-            && search.select(at)
+            && search.select(name)
         {
             return self.key(&KeyEvent::from(KeyCode::Enter));
         }
@@ -1016,7 +1025,7 @@ impl Menu {
     /// where the pane works, what the menu shows under it, and the keys that
     /// go back and close under them. Short of room, what it shows goes first,
     /// then the rule. And the spots on those lines, as `Shown::lines` says.
-    pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots) {
+    pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
         self.shown(width, room.saturating_sub(2)).lines(width, room)
     }
 
@@ -1024,7 +1033,10 @@ impl Menu {
     /// as `float` does. The search box takes the most columns, so that it
     /// keeps its width as you type.
     pub fn draw(&self, buffer: &mut Buffer, over: Rect) -> Drawn {
-        float(buffer, over, self.searching(), |width, body_room| self.shown(width, body_room))
+        let floated =
+            float(buffer, over, self.searching(), |width, body_room| self.shown(width, body_room));
+        let drawn = |(area, spots)| Drawn::Menu { number: self.number, area: Some(area), spots };
+        floated.map_or(Drawn::Nothing, drawn)
     }
 
     /// Whether the search box over the skills is open.
@@ -1051,7 +1063,7 @@ impl Menu {
             Stage::Pull { link, step: Step::Pulling(_) } => {
                 let making = format!("Making a worktree of {}…", link.tab());
                 let body = wrap(&making, width, Style::new().fg(NAME));
-                (link.tab(), link.repository(), body, keyed(width, &[("<ESC>", "Close")]))
+                (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Pull {
                 link,
@@ -1059,28 +1071,29 @@ impl Menu {
             } => {
                 let entries = Pull::ALL.map(|pull| Entry::Pull(pull, link.kind()));
                 if matches!(step, Step::Choosing) {
-                    spots = entry_spots(&entries, width);
+                    spots = entry_spots(&entries, width).map(Choice::Key);
                 }
                 let body = entries.iter().map(|entry| entry_line(entry, inner)).collect();
-                (link.tab(), link.repository(), body, keyed(width, &[("<ESC>", "Close")]))
+                (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
                 if let Some(search) = &keys.search {
-                    let moves = [("<↓↑>", "Move"), ("<ENTER>", "Start"), ("<ESC>", "Back")];
+                    let moves =
+                        [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Esc, "Back")];
                     let (body, skills) = search_lines(search, width, body_room);
                     if choosing {
                         spots = skills;
                     }
                     (SEARCH_TITLE.to_owned(), right, body, keyed(width, &moves))
                 } else {
-                    let back: &[(&str, &str)] = if keys.open.is_empty() {
-                        &[("<ESC>", "Close")]
+                    let back: &[(Hint, &str)] = if keys.open.is_empty() {
+                        &[(Hint::Esc, "Close")]
                     } else {
-                        &[("<BS>", "Back"), ("<ESC>", "Close")]
+                        &[(Hint::Backspace, "Back"), (Hint::Esc, "Close")]
                     };
                     if choosing {
-                        spots = entry_spots(keys.entries(), width);
+                        spots = entry_spots(keys.entries(), width).map(Choice::Key);
                     }
                     let body = keys.entries().iter().map(|entry| entry_line(entry, inner));
                     (title(keys), right, body.collect(), keyed(width, back))
@@ -1090,7 +1103,10 @@ impl Menu {
                 title(keys),
                 right,
                 wrap(asks, width, Style::new().fg(NAME)),
-                keyed(width, &[("<y>", "Yes"), ("<BS>", "Back"), ("<ESC>", "Close")]),
+                keyed(
+                    width,
+                    &[(Hint::Char('y'), "Yes"), (Hint::Backspace, "Back"), (Hint::Esc, "Close")],
+                ),
             ),
         };
         Shown { title, right, body, spots, footer, keys }
@@ -1105,9 +1121,9 @@ struct Shown {
     title: String,
     right: String,
     body: Vec<Line<'static>>,
-    spots: Spots,
+    spots: Spots<Choice>,
     footer: Line<'static>,
-    keys: Spots,
+    keys: Spots<KeyEvent>,
 }
 
 impl Shown {
@@ -1127,7 +1143,7 @@ impl Shown {
     /// shows under it, and the keys under them. Short of room, what it shows
     /// goes first, then the rule. And the spots on the lines that show, by
     /// their place among them.
-    fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots) {
+    fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
         let Shown { title, right, body, spots, footer, keys } = self;
         let mut lines = Vec::with_capacity(room);
         if room >= 2 {
@@ -1137,7 +1153,7 @@ impl Shown {
         lines.extend(body.into_iter().take(room.saturating_sub(2)));
         let mut spots = spots.first(lines.len() - ruled).down(ruled);
         if room >= 1 {
-            spots.extend(keys.down(lines.len()));
+            spots.extend(keys.map(Choice::Key).down(lines.len()));
             lines.push(footer);
         }
         (lines, spots)
@@ -1148,26 +1164,24 @@ impl Shown {
 /// for, floating at the bottom right of `over`, zellij's side: in a box as
 /// wide as that takes, or the `widest` the box can be, within `FLOATING`,
 /// and as tall as its lines, the rule over them its top. Says where the box
-/// is, and the spots in it.
+/// is, and the spots in it, where it had the room for one.
 fn float(
     buffer: &mut Buffer,
     over: Rect,
     widest: bool,
     shown: impl Fn(usize, usize) -> Shown,
-) -> Drawn {
+) -> Option<(Rect, Spots<Choice>)> {
     let (fewest, most) = FLOATING;
     let most = most.min(usize::from(over.width.saturating_sub(2)));
     // The rule is the box's top, and its bottom takes a line of its own.
     let room = usize::from(over.height.saturating_sub(1));
     if most == 0 || room < 2 {
-        return Drawn::default();
+        return None;
     }
     let inner =
         if widest { most } else { shown(most, room - 2).takes().clamp(fewest.min(most), most) };
     let (lines, spots) = shown(inner, room - 2).lines(inner, room);
-    let Some((rule, rest)) = lines.split_first() else {
-        return Drawn::default();
-    };
+    let (rule, rest) = lines.split_first()?;
     // Both fit `over`, as `inner` and `lines` were made to.
     let width = u16::try_from(inner + 2).unwrap_or(over.width);
     let height = u16::try_from(lines.len() + 1).unwrap_or(over.height);
@@ -1175,7 +1189,7 @@ fn float(
     boxed(buffer, area, rule, rest);
     // The lines go between the box's sides, from its top down.
     let inside = Rect::new(area.x + 1, area.y, width - 2, height - 1);
-    Drawn { area, spots: spots.placed(inside) }
+    Some((area, spots.placed(inside)))
 }
 
 /// Draws `note` floating at the bottom right of `over`, where the menu over
@@ -1187,7 +1201,7 @@ pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
         right: String::new(),
         body: wrap(note, width, Style::new().fg(sidebar::ERROR)),
         spots: Spots::default(),
-        footer: keys_line(width, &[("<any key>", "Close")]),
+        footer: keys_line(width, &[(Hint::AnyKey, "Close")]),
         keys: Spots::default(),
     });
 }
@@ -1249,7 +1263,7 @@ fn title(keys: &Keys) -> String {
 /// most: under a rule, the keys the top of the sidebar takes, as `Top::of`
 /// leaves them to the menu, and the sidebar's command, each with what it
 /// does. Each is a spot that presses its key, by its line among them.
-pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots) {
+pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     let keys = Keys::legend();
     let mut lines = Vec::with_capacity(room);
     if room == 0 {
@@ -1264,10 +1278,10 @@ pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots) {
 
 /// A spot on the line of each of `entries`, `width` wide, one to a line, that
 /// presses its key.
-fn entry_spots(entries: &[Entry], width: usize) -> Spots {
+fn entry_spots(entries: &[Entry], width: usize) -> Spots<KeyEvent> {
     let mut spots = Spots::default();
     for (line, entry) in entries.iter().enumerate() {
-        spots.add(line, 0..width, Spot::Key(KeyEvent::from(KeyCode::Char(entry.key()))));
+        spots.add(line, 0..width, KeyEvent::from(KeyCode::Char(entry.key())));
     }
     spots
 }
@@ -1328,79 +1342,99 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A key a line of keys names, as `<ESC>`, `<y>` or `<Ctrl r>`, or what
+/// takes more than one, as `<↓↑>` or `<any key>`, which no click presses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hint {
+    Esc,
+    Backspace,
+    Enter,
+    Tab,
+    Delete,
+    Char(char),
+    Ctrl(char),
+    /// The arrows down and up.
+    Moves,
+    AnyKey,
+    AnyOtherKey,
+}
+
+impl Hint {
+    /// How a line of keys names it.
+    fn label(self) -> String {
+        match self {
+            Hint::Esc => "<ESC>".to_owned(),
+            Hint::Backspace => "<BS>".to_owned(),
+            Hint::Enter => "<ENTER>".to_owned(),
+            Hint::Tab => "<TAB>".to_owned(),
+            Hint::Delete => "<Del>".to_owned(),
+            Hint::Char(c) => format!("<{c}>"),
+            Hint::Ctrl(c) => format!("<Ctrl {c}>"),
+            Hint::Moves => "<↓↑>".to_owned(),
+            Hint::AnyKey => "<any key>".to_owned(),
+            Hint::AnyOtherKey => "<any other key>".to_owned(),
+        }
+    }
+
+    /// The key a click on it presses: none for what takes more than one.
+    fn key(self) -> Option<KeyEvent> {
+        let (code, modifiers) = match self {
+            Hint::Esc => (KeyCode::Esc, KeyModifiers::NONE),
+            Hint::Backspace => (KeyCode::Backspace, KeyModifiers::NONE),
+            Hint::Enter => (KeyCode::Enter, KeyModifiers::NONE),
+            Hint::Tab => (KeyCode::Tab, KeyModifiers::NONE),
+            Hint::Delete => (KeyCode::Delete, KeyModifiers::NONE),
+            Hint::Char(c) => (KeyCode::Char(c), KeyModifiers::NONE),
+            Hint::Ctrl(c) => (KeyCode::Char(c), KeyModifiers::CONTROL),
+            Hint::Moves | Hint::AnyKey | Hint::AnyOtherKey => return None,
+        };
+        Some(KeyEvent::new(code, modifiers))
+    }
+}
+
 /// The keys that go back and close, and what each does, in as many words as
 /// `width` has room for: all of them, or else the keys alone.
-pub fn keys_line(width: usize, keys: &[(&str, &str)]) -> Line<'static> {
+pub fn keys_line(width: usize, keys: &[(Hint, &str)]) -> Line<'static> {
     keyed(width, keys).0
 }
 
 /// The line of `keys` that `keys_line` draws, and on it a spot for each key
-/// that names one a click can press, as `named` says: the key, and the words
-/// after it that say what it does.
-pub fn keyed(width: usize, keys: &[(&str, &str)]) -> (Line<'static>, Spots) {
-    let spelled = |sep: &str| keys.iter().map(|(key, does)| format!("{key}{sep}{does}")).collect();
-    let bare: Vec<String> = keys.iter().map(|(key, _)| (*key).to_owned()).collect();
-    // Each key, with what it does or alone, and what goes between two.
-    let candidates: [(Vec<String>, &str); 5] = [
-        (spelled(" - "), ", "),
-        (spelled(" "), "  "),
-        (spelled(" "), " "),
-        (bare.clone(), "/"),
-        (bare, ""),
-    ];
-    let room = width.saturating_sub(1);
-    let fits = candidates.iter().position(|(each, joiner)| each.join(joiner).width() <= room);
-    let fallback = candidates.len() - 1;
-    let Some((each, joiner)) = candidates.into_iter().nth(fits.unwrap_or(fallback)) else {
-        return (Line::default(), Spots::default());
+/// a click can press: the key, and the words after it that say what it does.
+pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEvent>) {
+    let labels: Vec<String> = keys.iter().map(|(hint, _)| hint.label()).collect();
+    let spelled = |sep: &str| -> Vec<String> {
+        let each = labels.iter().zip(keys);
+        each.map(|(label, (_, does))| format!("{label}{sep}{does}")).collect()
     };
+    // Each key, with what it does or alone, and what goes between two; or
+    // else the keys alone, run together.
+    let candidates: [(Vec<String>, &str); 4] =
+        [(spelled(" - "), ", "), (spelled(" "), "  "), (spelled(" "), " "), (labels.clone(), "/")];
+    let room = width.saturating_sub(1);
+    let fits = |(each, joiner): &(Vec<String>, &str)| each.join(joiner).width() <= room;
+    let (each, joiner) =
+        candidates.into_iter().find(fits).unwrap_or_else(|| (labels.clone(), ""));
     let dim = Style::new().add_modifier(Modifier::DIM);
     // Each key in the accent, and the words between them dimmed.
     let mut spans = vec![Span::raw(" ")];
     let mut spots = Spots::default();
     let mut column = 1;
-    for (at, (shown, (key, _))) in each.iter().zip(keys).enumerate() {
+    for (at, ((shown, label), (hint, _))) in each.iter().zip(&labels).zip(keys).enumerate() {
         if at > 0 {
             spans.push(Span::styled(joiner.to_owned(), dim));
             column += joiner.width();
         }
-        spans.push(Span::styled((*key).to_owned(), Style::new().fg(ACCENT)));
-        let words = &shown[key.len()..];
+        spans.push(Span::styled(label.clone(), Style::new().fg(ACCENT)));
+        let words = &shown[label.len()..];
         if !words.is_empty() {
             spans.push(Span::styled(words.to_owned(), dim));
         }
-        if let Some(pressed) = named(key) {
-            spots.add(0, column..column + shown.width(), Spot::Key(pressed));
+        if let Some(pressed) = hint.key() {
+            spots.add(0, column..column + shown.width(), pressed);
         }
         column += shown.width();
     }
     (Line::from(spans), spots)
-}
-
-/// The key a line of keys names as `key`, as `<ESC>`, `<y>` or `<Ctrl r>`,
-/// which a click on it presses: none for one that names more than a key, as
-/// `<↓↑>` or `<any key>`.
-fn named(key: &str) -> Option<KeyEvent> {
-    let named = key.strip_prefix('<')?.strip_suffix('>')?;
-    let (named, modifiers) = match named.strip_prefix("Ctrl ") {
-        Some(named) => (named, KeyModifiers::CONTROL),
-        None => (named, KeyModifiers::NONE),
-    };
-    let code = match named {
-        "ESC" => KeyCode::Esc,
-        "BS" => KeyCode::Backspace,
-        "ENTER" => KeyCode::Enter,
-        "TAB" => KeyCode::Tab,
-        "Del" => KeyCode::Delete,
-        _ => {
-            let mut chars = named.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => KeyCode::Char(c),
-                _ => return None,
-            }
-        },
-    };
-    Some(KeyEvent::new(code, modifiers))
 }
 
 /// The search box over the skills, in at most `room` lines `width` wide: what
@@ -1409,7 +1443,11 @@ fn named(key: &str) -> Option<KeyEvent> {
 /// that says why there are none. It keeps the lines the skills found fill,
 /// however many of them match, so the menu keeps its size as you type. Each
 /// skill shown is a spot that picks it, by its line among them.
-fn search_lines(search: &Search, width: usize, room: usize) -> (Vec<Line<'static>>, Spots) {
+fn search_lines(
+    search: &Search,
+    width: usize,
+    room: usize,
+) -> (Vec<Line<'static>>, Spots<Choice>) {
     let mut spots = Spots::default();
     let Some(list) = room.checked_sub(1) else {
         return (Vec::new(), spots);
@@ -1438,7 +1476,7 @@ fn search_lines(search: &Search, width: usize, room: usize) -> (Vec<Line<'static
         let start = (selected + 1).saturating_sub(list);
         let shown = search.found().enumerate().skip(start).take(list);
         for (at, (skill, hits)) in shown {
-            spots.add(lines.len(), 0..width, Spot::Row(at));
+            spots.add(lines.len(), 0..width, Choice::Skill(skill.name.clone()));
             let name = skill.name.to_string();
             lines.push(skill_line(&name, &skill.description, hits, at == selected, width));
         }
@@ -1486,7 +1524,8 @@ mod tests {
     use crate::close::{self, Deletes, Doing, Seat, Subject};
     use crate::pull::{At, Link, Ready};
     use crate::sidebar::Listed;
-    use crate::skills::{Name, Skill};
+    use crate::skills::Skill;
+    use crate::spots::Hit;
     use crate::zellij::Closes;
 
     fn listed() -> Listed {
@@ -1747,50 +1786,59 @@ mod tests {
     fn a_click_on_a_skill_starts_an_agent_on_it_as_enter_does() {
         let (mut menu, _) = stays(opened(pane_row(), Some('/')));
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
+        let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
         // The rule, what is typed, then the skills.
         let (_, spots) = menu.lines(31, 6);
         assert_eq!(spots.at(Position::new(4, 1)), None);
-        assert_eq!(spots.at(Position::new(4, 2)), Some(&Spot::Row(0)));
-        assert_eq!(spots.at(Position::new(30, 3)), Some(&Spot::Row(1)));
+        assert_eq!(spots.at(Position::new(4, 2)), Some(&Choice::Skill(skill("code-review"))));
+        assert_eq!(spots.at(Position::new(30, 3)), Some(&Choice::Skill(skill("tigerstyle"))));
         menu.scroll(1);
         let lit: Vec<_> = menu.lines(31, 6).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [None, Some(LIT)]);
-        // A skill no longer there picks nothing.
-        let (menu, wants) = stays(menu.pick(2));
+        // A skill that no longer matches picks nothing, not the one in its
+        // place.
+        let (menu, _) = stays(menu.key(&char('g')));
+        let (menu, wants) = stays(menu.pick(&skill("code-review")));
         assert_eq!(wants, Wants::Nothing);
-        let (menu, wants) = stays(menu.pick(0));
+        let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        let (menu, wants) = stays(menu.pick(&skill("code-review")));
         let command = claude("/code-review", Some("feat/menu"));
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
         assert!(menu.opening());
         // Waiting on zellij, the menu takes no click on a skill.
         assert_eq!(menu.lines(31, 6).1.at(Position::new(4, 3)), None);
-        let (_, wants) = stays(menu.pick(1));
+        let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
         assert_eq!(wants, Wants::Nothing);
     }
 
     /// Each key a line of keys names is a spot, with the words after it,
-    /// that presses the key it names, in the words the line has room for; a
-    /// key that names more than a key is none.
+    /// that presses the key it names, in the words the line has room for;
+    /// what takes more than a key is none.
     #[test]
     fn a_click_on_a_key_a_line_of_keys_names_presses_it() {
-        let keys = [("<↓↑>", "Move"), ("<ENTER>", "Start"), ("<Ctrl r>", "Rename")];
+        let keys = [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Ctrl('r'), "Rename")];
         let (line, spots) = keyed(50, &keys);
         assert_eq!(line.to_string(), " <↓↑> - Move, <ENTER> - Start, <Ctrl r> - Rename");
         let at = |x| spots.at(Position::new(x, 0)).copied();
         assert_eq!(at(1), None);
-        assert_eq!([at(14), at(28)], [Some(pressed(KeyCode::Enter)); 2]);
+        assert_eq!([at(14), at(28)], [Some(KeyEvent::from(KeyCode::Enter)); 2]);
         assert_eq!(at(29), None);
-        let rename = Some(Spot::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        let rename = Some(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!([at(31), at(47)], [rename, rename]);
         assert_eq!(at(48), None);
-        // Short of room, the keys alone.
-        let (line, spots) = keyed(12, &[("<y>", "Yes"), ("<Del>", "Delete")]);
+        // Short of room, the keys alone; and with less, run together.
+        let yes_or_delete = [(Hint::Char('y'), "Yes"), (Hint::Delete, "Delete")];
+        let (line, spots) = keyed(12, &yes_or_delete);
         assert_eq!(line.to_string(), " <y>/<Del>");
         let at = |x| spots.at(Position::new(x, 0)).copied();
-        let (yes, delete) = (Some(pressed(KeyCode::Char('y'))), Some(pressed(KeyCode::Delete)));
+        let yes = Some(KeyEvent::from(KeyCode::Char('y')));
+        let delete = Some(KeyEvent::from(KeyCode::Delete));
         assert_eq!([at(3), at(4), at(5)], [yes, None, delete]);
-        assert_eq!(keyed(30, &[("<any key>", "Close")]).1, Spots::default());
+        assert_eq!(keyed(9, &yes_or_delete).0.to_string(), " <y><Del>");
+        let any = [(Hint::AnyKey, "Close"), (Hint::AnyOtherKey, "No")];
+        assert_eq!(keyed(40, &any).0.to_string(), " <any key> - Close, <any other key> - No");
+        assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
     /// What closing pane 4 of `luneta` does, as zellij says what it closes,
@@ -1959,17 +2007,20 @@ mod tests {
     }
 
     /// The spot a click on `text` hits, of the menu floating over zellij's
-    /// side, 50 by 10 past 10 columns of the sidebar's.
-    fn clicked(menu: &Menu, text: &str) -> Option<Spot> {
+    /// side, 50 by 10 past 10 columns of the sidebar's: the menu's own.
+    fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
         let drawn = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10));
         let at = drawn_at(&buffer, text).expect("drawn");
-        assert!(drawn.area.contains(at), "{text:?} is in the box");
-        drawn.spots.at(at).copied()
+        assert!(drawn.boxed().is_some_and(|area| area.contains(at)), "{text:?} is in the box");
+        drawn.at(at).map(|hit| match hit {
+            Hit::Menu(number, choice) if number == menu.number() => choice,
+            hit => panic!("{hit:?} is not the menu's"),
+        })
     }
 
-    fn pressed(code: KeyCode) -> Spot {
-        Spot::Key(KeyEvent::from(code))
+    fn pressed(code: KeyCode) -> Choice {
+        Choice::Key(KeyEvent::from(code))
     }
 
     /// Each entry of the menu floating over zellij is a spot where it is
@@ -2003,6 +2054,9 @@ mod tests {
         assert_eq!(clicked(&menu, "<y>"), Some(pressed(KeyCode::Char('y'))));
         assert_eq!(clicked(&menu, "Close the pane?"), None);
     }
+
+    /// What went wrong with the menu over zellij floats where it did, in a
+    /// box as wide as what it says takes, over the key that closes it.
     #[test]
     fn a_note_floats_where_the_menu_does() {
         let note = "menu: luneta does not know yet which pane zellij is on; try again in a moment";

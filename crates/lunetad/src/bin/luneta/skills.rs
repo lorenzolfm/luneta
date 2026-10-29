@@ -479,14 +479,14 @@ impl Search {
         popped
     }
 
-    /// Puts the cursor on the skill `at` among those that match, and says
-    /// whether one is there.
-    pub fn select(&mut self, at: usize) -> bool {
-        let there = at < self.found.len();
-        if there {
+    /// Puts the cursor on the skill called `name`, where it is among those
+    /// that match, and says whether it is.
+    pub fn select(&mut self, name: &Name) -> bool {
+        let at = self.found().position(|(skill, _)| skill.name == *name);
+        if let Some(at) = at {
             self.selected = at;
         }
-        there
+        at.is_some()
     }
 
     /// Moves the cursor `by` skills down, or up, and no further than the ends.
