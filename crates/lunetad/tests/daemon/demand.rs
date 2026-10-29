@@ -314,7 +314,8 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
 /// does the daemon the install before it left running. A luneta with no
 /// stamp, as a cargo build of a checkout is, keeps that one too: an install
 /// is newer than any build of a checkout of its release. The flake's build
-/// of the tests is stamped and a cargo run of them is not, and CI runs both.
+/// of a commit's tests is stamped and a cargo run of them is not, and CI
+/// runs both.
 #[test]
 fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     let stamped = |built| release::spelled(release::VERSION, Some(built));
@@ -334,6 +335,17 @@ fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     } else {
         assert_eq!(reached, before.pid());
         assert_eq!(before.ended_within(Duration::ZERO), None);
+    }
+}
+
+/// luneta says its build to `--version` as lunetad does, stamp and all, so
+/// that either says which install it is of.
+#[test]
+fn luneta_and_lunetad_say_their_build_alike() {
+    for (program, name) in [(LUNETA, "luneta"), (LUNETAD, "lunetad")] {
+        let said = Command::new(program).arg("--version").output().unwrap();
+        assert!(said.status.success(), "{name} --version failed");
+        assert_eq!(String::from_utf8_lossy(&said.stdout), format!("{name} {}\n", *release::SAID));
     }
 }
 

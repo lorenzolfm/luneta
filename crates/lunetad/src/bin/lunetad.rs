@@ -6,20 +6,14 @@ use std::fs;
 use std::io;
 use std::os::fd::{BorrowedFd, RawFd};
 use std::process::ExitCode;
-use std::sync::LazyLock;
 
 use clap::Parser;
 use lunetad::{folder, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
-/// This build, as `--version` says it after the name: luneta asks it of the
-/// lunetad it would start, to tell whether that one is newer than the daemon
-/// that runs.
-static SAID: LazyLock<String> = LazyLock::new(|| release::spelled(release::VERSION, release::BUILT));
-
 /// The luneta daemon of this host, for this user.
 #[derive(Parser)]
-#[command(version = SAID.as_str())]
+#[command(version = release::SAID.as_str())]
 struct Args {
     /// Run in a session of its own, away from the terminal of whatever
     /// started it, as luneta starts it: so that the terminal closing does

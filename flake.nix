@@ -57,8 +57,10 @@
           );
 
           # The source is filtered to what cargo reads, so editing the README or a tape
-          # is a cache hit rather than a rebuild. luneta's skill is in it for the ask
-          # box, which tells its agent the skill.
+          # is a cache hit for the dependencies and for clippy rather than a rebuild.
+          # Not for `lunetad`, which is stamped with when its commit was made, and so
+          # builds and tests again on each commit, whatever it changed. luneta's skill
+          # is in it for the ask box, which tells its agent the skill.
           cargoFiles = pkgs.lib.fileset.unions [
             ./crates
             ./proto
@@ -120,13 +122,6 @@
             // {
               cargoArtifacts = daemonDeps;
 
-              # When the commit this builds was made, which luneta orders two builds of one
-              # release by: every commit is of one release until the next, and a luneta
-              # replaces only a daemon older than it. Here and not in `daemon`, which the
-              # dependencies' derivation shares: a stamp there would build every crate in
-              # Cargo.lock again on each commit.
-              LUNETA_BUILT = toString self.lastModified;
-
               # The protocol's crate too: what the daemon reads of git is read there,
               # and tested there.
               cargoTestExtraArgs = "-p luneta-protocol";
@@ -138,6 +133,19 @@
                 mainProgram = "lunetad";
                 platforms = systems;
               };
+            }
+            # When the commit this builds was made, which luneta orders two builds of one
+            # release by: every commit is of one release until the next, and a luneta
+            # replaces only a daemon older than it. Here and not in `daemon`, which the
+            # dependencies' derivation shares: a stamp there would build every crate in
+            # Cargo.lock again on each commit.
+            #
+            # Only for a commit, which `self.rev` names. A tree with changes not yet
+            # committed has its HEAD's time, and a path its newest file's, neither of
+            # which says when what is built was made: built from either, it is unstamped,
+            # as a cargo build of a checkout is.
+            // pkgs.lib.optionalAttrs (self ? rev) {
+              LUNETA_BUILT = toString self.lastModified;
             }
           );
 

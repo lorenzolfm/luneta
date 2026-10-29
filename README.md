@@ -93,7 +93,7 @@ up in another, matched by its id and directory alone.
 The list is what lunetad, luneta's daemon, finds, which luneta starts where
 none runs ([building from source](#building-from-source)). While it does not
 answer, the list says why it has no agents, and the other two lists work
-exactly as before.
+without it.
 
 Agent support, today:
 
@@ -1040,11 +1040,13 @@ as an upgrade leaves running, they stop, and start their own in its place. A
 newer one they keep, so that two builds in use at once never take turns at
 it: after a rollback, the newer daemon runs on until zellij's last session ends.
 Older is of an earlier release, or of the same one and built from a commit
-made before theirs, as the flake stamps each build it makes: every commit is
-of one release until the next. A cargo build has no stamp, so it keeps the
-daemon an install of its release started, and an install stops one a cargo
-build started. `luneta info` and `lunetad --version` say the stamp after the
-release, as `0.2.2+1793301121`.
+made before theirs, as the flake stamps each build of a commit: every commit
+is of one release until the next. A cargo build has no stamp, and nor has the
+flake's build of a tree with changes not yet committed, so either keeps the
+daemon an install of its release started, and an install stops one either
+started. `luneta info` says the stamp after the release, as
+`0.2.2+1793301121`, and so do `luneta --version` and `lunetad --version` of
+their own.
 One that reads zellij's sessions in another folder than their zellij keeps
 them in, as one started with another `ZELLIJ_SOCKET_DIR` does, they neither
 ask nor stop, and say so: one of theirs in its place would leave out the

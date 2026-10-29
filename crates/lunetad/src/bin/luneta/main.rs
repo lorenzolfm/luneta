@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use lunetad::folder;
+use lunetad::{folder, release};
 
 use crate::commands::Command;
 use crate::zellij::SessionName;
@@ -45,7 +45,10 @@ use crate::zellij::SessionName;
 /// in each pane is doing. With a command, ask lunetad, the daemon of this
 /// host, instead, or have zellij open, move or close something.
 #[derive(Parser)]
-#[command(version, args_conflicts_with_subcommands = true)]
+// Named, or clap would name it for its package, and `--version` would say
+// `lunetad`.
+#[command(name = "luneta", version = release::SAID.as_str())]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// The session to attach to, made if none runs by that name. Without
     /// one, the session named for this directory, as the picker names it.

@@ -17,9 +17,9 @@
 //! it, would take turns at it for as long as both ask: a program that
 //! watches runs a `luneta watch` for each answer, which knows nothing of the
 //! one before it. Newer is of a later release, or of the same one and built
-//! from a commit made later, as the flake stamps its builds: every commit is
-//! of one release until the next, and an install of main would otherwise
-//! keep the daemon of the install before it.
+//! from a commit made later, as the flake stamps its builds of one: every
+//! commit is of one release until the next, and an install of main would
+//! otherwise keep the daemon of the install before it.
 //!
 //! A daemon that reads zellij's sessions in another folder than luneta's
 //! zellij keeps them in, as one started with another `ZELLIJ_SOCKET_DIR`

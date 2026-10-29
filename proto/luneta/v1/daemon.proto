@@ -312,9 +312,10 @@ message InfoResponse {
   // named none, and from a daemon older than this field.
   optional bytes claude_folder = 5;
   // When the commit it was built from was made, in seconds since the epoch,
-  // as the flake stamps each build of its own. Absent from a cargo build of a
-  // checkout, and from a daemon older than this field: either is older than
-  // any stamped build of its `version`. `version` stays the release alone, as
+  // as the flake stamps each build of a commit. Absent from a cargo build of a
+  // checkout, from the flake's build of a tree with changes not yet committed,
+  // and from a daemon older than this field: each is older than any stamped
+  // build of its `version`. `version` stays the release alone, as
   // a client older than this field reads it.
   optional uint64 built = 6;
 }

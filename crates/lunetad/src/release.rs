@@ -3,12 +3,15 @@
 //! it. Every commit is of one release until the next, so it is the stamp that
 //! tells an install from the one before it.
 
+use std::sync::LazyLock;
+
 /// The release this is of, as Cargo.toml names it.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// When the commit this was built from was made, in seconds since the epoch,
-/// as the flake stamps each build of its own in `LUNETA_BUILT`. None for a
-/// cargo build of a checkout. A stamp that is no number fails the build: the
+/// as the flake stamps each build of a commit in `LUNETA_BUILT`. None for a
+/// cargo build of a checkout, and for the flake's build of a tree with
+/// changes not yet committed. A stamp that is no number fails the build: the
 /// const panics as it is evaluated, which is as rustc compiles it.
 pub const BUILT: Option<u64> = match option_env!("LUNETA_BUILT") {
     Some(seconds) => match u64::from_str_radix(seconds, 10) {
@@ -17,6 +20,11 @@ pub const BUILT: Option<u64> = match option_env!("LUNETA_BUILT") {
     },
     None => None,
 };
+
+/// This build, as `lunetad --version` and `luneta --version` say it after the
+/// name: luneta asks it of the lunetad it would start, to tell whether that
+/// one is newer than the daemon that runs.
+pub static SAID: LazyLock<String> = LazyLock::new(|| spelled(VERSION, BUILT));
 
 /// A release of luneta and lunetad, by its version, as `0.2.2`. Releases are
 /// ordered.
@@ -97,7 +105,7 @@ mod tests {
         for built in [None, Some(1793301121)] {
             assert_eq!(Build::parse(&spelled("0.2.2", built)), Build::of("0.2.2", built));
         }
-        assert_eq!(Build::parse(&spelled(VERSION, BUILT)), Build::own());
+        assert_eq!(Build::parse(&SAID), Build::own());
         assert_eq!(Build::parse("0.2.2+"), None);
         assert_eq!(Build::parse("0.2.2+x"), None);
         assert_eq!(Build::parse("0.2+1"), None);
