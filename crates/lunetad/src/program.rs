@@ -7,14 +7,16 @@
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::io::Errno;
-use rustix::process::{self, Pid, Signal};
+use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions};
 
-/// How often a program that runs is looked at, to see whether it has ended.
+/// How often whether a program is still wanted is asked, while it runs, where
+/// it is wanted only for a while; and on macOS, whether one that stopped has
+/// ended, until it goes on.
 const LOOK: Duration = Duration::from_millis(5);
 
 /// The most of what a program says that the daemon reads. `git status` says a
@@ -55,7 +57,7 @@ impl Ran {
 /// longer than that. An error when it could not be started, or what it said
 /// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let ran = run_while(command, limit, || true)?;
+    let ran = running(command, limit, None, Kills::Program)?;
     Ok(ran.expect("a program wanted all along is never given up"))
 }
 
@@ -67,7 +69,7 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
 /// typed there. With none, it fails, and says why. What it started, as git
 /// does that wt runs, would run on once it is killed.
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let ran = running(alone(command), limit, &|| true, Kills::Group)?;
+    let ran = running(alone(command), limit, None, Kills::Group)?;
     Ok(ran.expect("a program wanted all along is never given up"))
 }
 
@@ -79,7 +81,7 @@ pub fn run_while(
     limit: Duration,
     wanted: impl Fn() -> bool,
 ) -> io::Result<Option<Ran>> {
-    running(command, limit, &wanted, Kills::Program)
+    running(command, limit, Some(&wanted), Kills::Program)
 }
 
 /// What of a program is killed, as it is stuck or no longer wanted.
@@ -92,11 +94,12 @@ enum Kills {
     Group,
 }
 
-/// Runs `command`, as `run_while` does, and kills of it what `kills` says.
+/// Runs `command`, as `run_while` does, where it is `wanted` only for a
+/// while, or else as `run` does, and kills of it what `kills` says.
 fn running(
     command: &mut Command,
     limit: Duration,
-    wanted: &dyn Fn() -> bool,
+    wanted: Option<&dyn Fn() -> bool>,
     kills: Kills,
 ) -> io::Result<Option<Ran>> {
     let deadline = Instant::now() + limit;
@@ -104,12 +107,11 @@ fn running(
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = read(child.stdout.take().expect("its stdout is piped"))?;
     let stderr = read(child.stderr.take().expect("its stderr is piped"))?;
+    let ended = ends(&child)?;
+    let left = || deadline.saturating_duration_since(Instant::now());
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
         let stuck = Instant::now() >= deadline;
-        if stuck || !wanted() {
+        if stuck || wanted.is_some_and(|wanted| !wanted()) {
             // One that ended just now is not waited for yet, and takes the
             // signal all the same.
             match kills {
@@ -119,9 +121,17 @@ fn running(
             child.wait()?;
             return Ok(stuck.then_some(Ran::Stuck));
         }
-        thread::sleep(LOOK);
+        // Heard from as it ends, or at its deadline, and where it is wanted
+        // only for a while, each `LOOK` besides, to ask whether it still is.
+        let look = if wanted.is_some() { left().min(LOOK) } else { left() };
+        match ended.recv_timeout(look) {
+            Ok(end) => break end.and_then(|()| child.wait())?,
+            Err(RecvTimeoutError::Timeout) => {},
+            Err(RecvTimeoutError::Disconnected) => {
+                unreachable!("the thread that waits for a program says how that went")
+            },
+        }
     };
-    let left = || deadline.saturating_duration_since(Instant::now());
     let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
     else {
         // What it started holds its stdout open still.
@@ -155,23 +165,52 @@ fn kill_group(child: &Child) -> io::Result<()> {
     }
 }
 
+/// Says once `child` has ended, from a thread of its own, or why that could
+/// not be told. It is left for `child` to be waited for: until then, its pid
+/// is not let go, and the kill at its deadline can name no other process.
+fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
+    let pid = Pid::from_child(child);
+    let ended = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
+    in_thread(move || {
+        loop {
+            match process::waitid(WaitId::Pid(pid), ended) {
+                Err(Errno::INTR) => {},
+                // macOS says so of one that stopped too, each time it is
+                // asked until it goes on, where Linux waits for its end: it
+                // is asked again each `LOOK` meanwhile.
+                Ok(Some(status)) if status.stopped() || status.trapped() => thread::sleep(LOOK),
+                waited => return waited.map(drop).map_err(io::Error::from),
+            }
+        }
+    })
+}
+
 /// What comes out of `pipe` until it closes, read in a thread of its own and
 /// handed over in one piece, or why it could not all be read.
 fn read(mut pipe: impl Read + Send + 'static) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
-    let (said, heard) = mpsc::sync_channel(1);
-    thread::Builder::new().name("program".to_owned()).spawn(move || {
+    in_thread(move || {
         let mut all = Vec::new();
         let read = (&mut pipe).take(SAID_MAX).read_to_end(&mut all);
         // What it says past the most is read and let go, so that it is not
         // kept waiting.
         let past = read.and_then(|_| io::copy(&mut pipe, &mut io::sink()));
-        let all = match past {
+        match past {
             Ok(0) => Ok(all),
             Ok(_) => Err(io::Error::other(format!("it said more than {SAID_MAX} bytes"))),
             Err(error) => Err(error),
-        };
+        }
+    })
+}
+
+/// What `work` comes to, worked out in a thread of its own and handed over
+/// once it is done.
+fn in_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<Receiver<T>> {
+    let (said, heard) = mpsc::sync_channel(1);
+    thread::Builder::new().name("program".to_owned()).spawn(move || {
         // One that stopped waiting has no use for it.
-        let _ = said.send(all);
+        let _ = said.send(work());
     })?;
     Ok(heard)
 }
@@ -199,6 +238,32 @@ mod tests {
         assert!(error.to_string().contains("said more than"), "{error}");
     }
 
+    /// A program is heard from as it ends, about as soon as std's own `output`
+    /// hears from it, which waits for its pipes and its end with no timer: no
+    /// look each few milliseconds holds its answer up.
+    #[test]
+    fn a_program_is_heard_from_as_it_ends() {
+        // A busy machine holds a round up, and never hurries one, so the
+        // quickest quarter says the most of how soon it is heard from.
+        let quick = |mut took: Vec<Duration>| {
+            took.sort();
+            took[took.len() / 4]
+        };
+        let (mut ran, mut output) = (Vec::new(), Vec::new());
+        // Turn about, so that a machine busy for a while slows both alike.
+        for _ in 0..21 {
+            let asked = Instant::now();
+            let said = run(&mut Command::new("true"), Duration::from_secs(10)).unwrap().answer();
+            ran.push(asked.elapsed());
+            assert_eq!(said, Ok(Vec::new()));
+            let asked = Instant::now();
+            assert!(Command::new("true").output().unwrap().status.success());
+            output.push(asked.elapsed());
+        }
+        let (ran, output) = (quick(ran), quick(output));
+        assert!(ran < output + Duration::from_millis(2), "{ran:?} against {output:?}");
+    }
+
     /// A program that does not end in its time is killed and waited for, so
     /// that it holds the daemon up no longer than that.
     #[test]
@@ -217,6 +282,18 @@ mod tests {
         let wanted = || asked.elapsed() < Duration::from_millis(200);
         let ran = run_while(Command::new("sleep").arg("10"), Duration::from_secs(10), wanted);
         assert!(ran.unwrap().is_none());
+        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
+    }
+
+    /// A program that stopped is stuck once its time is up, and killed, as
+    /// one that runs on is: macOS says it ended, though it can still go on.
+    #[test]
+    fn a_program_that_stopped_is_stuck() {
+        let asked = Instant::now();
+        let mut stops = Command::new("sh");
+        stops.args(["-c", "kill -STOP $$"]);
+        let ran = run(&mut stops, Duration::from_millis(200)).unwrap();
+        assert!(matches!(ran, Ran::Stuck));
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
