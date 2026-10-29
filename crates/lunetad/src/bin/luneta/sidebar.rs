@@ -13,11 +13,12 @@
 //!
 //! The rows go oldest session first, until you move them, and each session's
 //! panes in the order of their tabs, a bracket down the left joining those of
-//! a tab that holds more than one, in a colour of the tab's own: `v` selects
-//! the highlighted row's session, `j` and `k` grow the selection, and `J` and
-//! `K` move the sessions it holds, as a visual selection does in vim; and the
-//! mouse drags a session by its row. The order is kept for every luneta, and
-//! the next.
+//! a tab that holds more than one. Each session has a colour of its own, as a
+//! browser's group of tabs has, which its name sits on and its brackets are
+//! drawn in. `v` selects the highlighted row's session, `j` and `k` grow the
+//! selection, and `J` and `K` move the sessions it holds, as a visual
+//! selection does in vim; and the mouse drags a session by its row. The order
+//! and the colours are kept for every luneta, and the next.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU64;
@@ -48,7 +49,7 @@ use crate::icons;
 use crate::ledger::{self, Key};
 use crate::menu::{self, Command, Did, Done, Menu, Opens, Target, Top, Wants};
 use crate::news::News;
-use crate::order::Order;
+use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Listing, Live, Seated, Shown};
 use crate::pull::{Link, Ready, Worked};
@@ -85,19 +86,6 @@ const EDGE: &str = "│";
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
-/// The colours of the brackets, a tab's by its id, as a browser colours its
-/// groups of tabs: zellij keeps a tab's id as it moves and as tabs before it
-/// close, so the tab keeps its colour, and two tabs opened one after the other
-/// never share one. No bracket is red, which says what went wrong. No two
-/// neighbours here are alike either, for tabs that go round them.
-const TABS: [Color; 6] = [
-    gruvbox::BLUE,
-    gruvbox::YELLOW,
-    gruvbox::PURPLE,
-    gruvbox::AQUA,
-    gruvbox::ORANGE,
-    gruvbox::GREEN,
-];
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -108,7 +96,8 @@ pub const SCROLL: Duration = Duration::from_millis(60);
 /// The colour of what wants you: an agent that waits for you, and the session
 /// luneta's zellij is in; and of the sidebar's title while it has the keys.
 pub const ACCENT: Color = gruvbox::PURPLE;
-/// The colour of the session luneta's zellij is in.
+/// The colour of a session's name where it has no colour of its own, as in
+/// the picker.
 pub const NAME: Color = gruvbox::AQUA;
 /// The colour of an agent at work, and of the search's `/`.
 pub const TAG: Color = gruvbox::YELLOW;
@@ -441,6 +430,8 @@ enum Row {
         under: Under,
         /// Whether luneta's zellij is in it.
         here: bool,
+        /// Its colour, which its name sits on.
+        colour: Color,
         /// How many of its agents wait for you, whether one of its panes has
         /// the dot, and whether one is at work.
         waiting: usize,
@@ -461,7 +452,7 @@ enum Row {
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
         /// Where it sits among the panes listed of its tab, if it shares it,
-        /// and the colour of that tab's bracket.
+        /// and the colour of its session, which the bracket is drawn in.
         bracket: Option<(Bracket, Color)>,
     },
 }
@@ -842,6 +833,9 @@ impl Sidebar {
         }
         let live = self.live();
         self.news.listed(live.as_ref(), at);
+        if self.order.listed(live.as_ref(), at) {
+            self.rebuild();
+        }
     }
 
     /// The sessions that run, as the daemon lists them now, or none where its
@@ -1229,6 +1223,17 @@ impl Sidebar {
         let pull_requests = pull_requests(host);
         let (mut sessions, unlisted) = oldest_first(&host.sessions);
         self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+        let mut running: Vec<ledger::Session> =
+            sessions.iter().map(|(listed, _)| listed.kept).collect();
+        // What the daemon said last, while it does not answer, can list a
+        // session that has ended since, whose colour another luneta gave up.
+        // A colour kept takes up the order as another luneta left it, which
+        // the rows go in.
+        if self.away.is_none() && self.order.colour_sessions(&running) {
+            self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+            running = sessions.iter().map(|(listed, _)| listed.kept).collect();
+        }
+        let colours = self.order.colours(&running);
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
             Some(Search::Empty) | None => (None, false),
@@ -1245,7 +1250,7 @@ impl Sidebar {
                 best = Some((at, fit));
             }
         };
-        for (listed, session) in sessions {
+        for ((listed, session), colour) in sessions.into_iter().zip(colours) {
             let mut panes: Vec<_> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
             panes.sort_by_key(|pane| (pane.tab, pane.id));
             let agent = |pane: u32| agents.get(&(session.name.as_str(), pane)).copied();
@@ -1296,10 +1301,10 @@ impl Sidebar {
             let named = finder.as_ref().and_then(|finder| finder.session(listed.name.as_str()));
             // A search looks inside a folded session too.
             let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
-            // The rows of the panes listed, by their tab, its position and its
-            // id, each made once its bracket is known: it joins the panes
-            // listed of a tab, as a search can leave some of them out.
-            let mut shown: BTreeMap<(u32, Option<u32>), Vec<_>> = BTreeMap::new();
+            // The rows of the panes listed, by their tab, each made once its
+            // bracket is known: it joins the panes listed of a tab, as a
+            // search can leave some of them out.
+            let mut shown: BTreeMap<u32, Vec<_>> = BTreeMap::new();
             for (pane, Shows { marked, ran, unread }) in listing.into_iter().zip(by_pane) {
                 let cwd = pane.cwd.as_deref();
                 let checkout = cwd.and_then(|cwd| {
@@ -1343,7 +1348,7 @@ impl Sidebar {
                     checkout,
                     bracket,
                 };
-                shown.entry((pane.tab, pane.tab_id)).or_default().push((row, found));
+                shown.entry(pane.tab).or_default().push((row, found));
             }
             if finder.is_some() && named.is_none() && shown.is_empty() {
                 continue;
@@ -1355,11 +1360,13 @@ impl Sidebar {
             } else {
                 Under::Empty
             };
+            let colour = hue(colour);
             let head = rows.len();
             rows.push(Row::Session {
                 session: listed.clone(),
                 under,
                 here: here.as_deref() == Some(listed.name.as_str()),
+                colour,
                 waiting,
                 dot: dots > 0,
                 busy: busy > 0,
@@ -1368,11 +1375,8 @@ impl Sidebar {
             // by its name hands the highlight on to. With none, its row hands it
             // on to its first pane.
             let mut lead: Option<(usize, Fit)> = None;
-            for ((_, id), of_tab) in shown {
+            for of_tab in shown.into_values() {
                 let count = of_tab.len();
-                // A daemon older than `tab_id` does not say which tab it is:
-                // its bracket stays grey, as every bracket was.
-                let colour = id.map_or(gruvbox::GREY, |id| TABS[id as usize % TABS.len()]);
                 for (at, (row, found)) in of_tab.into_iter().enumerate() {
                     if let Some(found) = found {
                         weigh(rows.len(), found);
@@ -3073,24 +3077,22 @@ pub fn frame(now: SystemTime) -> usize {
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
-        Row::Session { session, under, here, waiting, dot, busy } => {
+        Row::Session { session, under, here, colour, waiting, dot, busy } => {
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
-            let name_style = if *here {
-                Style::new().fg(NAME).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().add_modifier(Modifier::BOLD)
-            };
+            // The name sits on the session's colour, with a space either side,
+            // as a browser draws the name of a group of tabs.
+            let chip = Style::new().fg(gruvbox::BG0).bg(*colour);
             let name = cut(session.name.as_str(), width.saturating_sub(4 + reserve + 1));
             let rule = width.saturating_sub(3 + name.width() + 1 + reserve + 1);
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(if folded { FOLDED } else { UNFOLDED }, dim),
-                Span::raw(" "),
-                Span::styled(name, name_style),
-                Span::raw(" "),
+                Span::styled(" ", chip),
+                Span::styled(name, chip.add_modifier(Modifier::BOLD)),
+                Span::styled(" ", chip),
                 Span::styled(RULE.repeat(rule), rule_style),
             ];
             if let Some(badge) = badge {
@@ -3159,6 +3161,19 @@ fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<S
     None
 }
 
+/// What a session's colour is drawn in, as a browser colours its groups of
+/// tabs: its name sits on it, and the brackets of its tabs are drawn in it.
+fn hue(colour: Colour) -> Color {
+    match colour {
+        Colour::Blue => gruvbox::BLUE,
+        Colour::Yellow => gruvbox::YELLOW,
+        Colour::Purple => gruvbox::PURPLE,
+        Colour::Aqua => gruvbox::AQUA,
+        Colour::Orange => gruvbox::ORANGE,
+        Colour::Green => gruvbox::GREEN,
+    }
+}
+
 /// The first column of a pane's lines: `HERE_MARK` on the pane luneta's
 /// zellij is on, `here`.
 fn margin(here: bool) -> Span<'static> {
@@ -3171,7 +3186,7 @@ fn margin(here: bool) -> Span<'static> {
 
 /// The column after a pane's mark, on its line `at` of the `height` it
 /// takes: the bracket that joins it to the panes of its tab, where it sits
-/// among them as it `sits`, in its tab's colour, or else blank.
+/// among them as it `sits`, in its session's colour, or else blank.
 fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'static> {
     let Some((sits, colour)) = bracket else {
         return Span::raw(" ");
@@ -3394,12 +3409,15 @@ mod tests {
     }
 
     /// Holds each cell of `buffer` to gruvbox's colours, on one of
-    /// `backgrounds`: a colour named at a call site, as `Color::Red`, or a
+    /// `backgrounds`, or on a session's colour in gruvbox's background, as a
+    /// session's name is: a colour named at a call site, as `Color::Red`, or a
     /// line drawn without `fg1`, would be the terminal's.
     fn in_gruvbox(buffer: &Buffer, backgrounds: &[Color]) {
         for cell in buffer.content() {
             assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
-            assert!(backgrounds.contains(&cell.bg), "{:?} on {:?}", cell.symbol(), cell.bg);
+            let named = Colour::ALL.map(hue).contains(&cell.bg) && cell.fg == gruvbox::BG0;
+            let on = backgrounds.contains(&cell.bg) || named;
+            assert!(on, "{:?} on {:?}", cell.symbol(), cell.bg);
         }
     }
 
@@ -3519,34 +3537,98 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
     }
 
-    /// A tab's bracket is in a colour of the tab's own, by the id zellij gave
-    /// it, which the tab keeps as a tab before it closes and its position goes
-    /// down. A daemon older than the id does not say it, and the brackets it
-    /// lists stay grey, rather than all in the first tab's colour.
+    /// Each session has a colour of its own, which its name sits on, with a
+    /// space either side, and which the brackets of its tabs are drawn in. It
+    /// keeps it as a session before it ends, as it is renamed, and while the
+    /// daemon's list may leave it out; and once it has ended, the next to
+    /// start takes it.
     #[test]
-    fn a_tab_keeps_its_colour_as_a_tab_before_it_closes() {
-        let colours = |sidebar: &mut Sidebar, lines: usize| {
-            let buffer = drawn(sidebar, true, 32, 24);
-            (1..=lines).map(|line| buffer[(1, (HEADER + line) as u16)].fg).collect::<Vec<_>>()
+    fn a_session_has_a_colour_of_its_own_and_keeps_it() {
+        // The backgrounds of `count` cells of the line `line` of the rows,
+        // from the column `from` on, and the colour of its bracket.
+        let backgrounds = |buffer: &Buffer, line: usize, from: u16, count: u16| {
+            (from..from + count).map(|x| buffer[(x, (HEADER + line) as u16)].bg).collect::<Vec<_>>()
         };
-        let three = (0..6).map(|id| pane(id + 1, id / 2, "/w/a", "less")).collect();
+        let bracket = |buffer: &Buffer, line: usize| buffer[(1, (HEADER + line) as u16)].fg;
+        // The sessions `named`, each of a tab of two panes, by their names
+        // and starts, as a daemon lists them that could not read
+        // `unread_sockets` of zellij's folder.
+        let listing = |named: &[(&str, i64)], unread_sockets| {
+            let shared = || vec![pane(1, 0, "/w/a", "less"), pane(2, 0, "/w/a", "less")];
+            let sessions = named.iter().map(|(name, at)| session(name, *at, shared()));
+            Host { unread_sockets, ..host(sessions.collect(), Vec::new()) }
+        };
+        // The colours the names of the first `count` sessions sit on.
+        let names = |sidebar: &mut Sidebar, count: usize| {
+            let buffer = drawn(sidebar, false, 32, 20);
+            (0..count).map(|at| backgrounds(&buffer, at * 3, 3, 1)[0]).collect::<Vec<_>>()
+        };
         let mut sidebar = Sidebar::default();
-        sidebar.heard(host(vec![session("s", 10, three)], Vec::new()));
-        let (b, y, p) = (gruvbox::BLUE, gruvbox::YELLOW, gruvbox::PURPLE);
-        assert_eq!(colours(&mut sidebar, 6), [b, b, y, y, p, p]);
+        sidebar.heard(listing(&[("a", 1), ("b", 2), ("c", 3)], Some(0)));
+        let buffer = drawn(&mut sidebar, false, 32, 16);
+        let (b, y, p, a) = (gruvbox::BLUE, gruvbox::YELLOW, gruvbox::PURPLE, gruvbox::AQUA);
+        assert_eq!(backgrounds(&buffer, 0, 1, 5), [Color::Reset, b, b, b, Color::Reset]);
+        assert_eq!(buffer[(3, HEADER as u16)].fg, gruvbox::BG0);
+        assert_eq!([bracket(&buffer, 1), bracket(&buffer, 2)], [b, b]);
+        assert_eq!(backgrounds(&buffer, 3, 3, 1), [y]);
+        assert_eq!([bracket(&buffer, 4), bracket(&buffer, 5)], [y, y]);
+        assert_eq!(backgrounds(&buffer, 6, 3, 1), [p]);
 
-        // The first tab closed: the other two are at 0 and 1 now.
-        let closed = |tab_id: fn(u32) -> Option<u32>| {
-            let in_tab = |id: u32| Pane {
-                tab_id: tab_id(id / 2),
-                ..pane(id + 1, id / 2 - 1, "/w/a", "less")
-            };
-            host(vec![session("s", 10, (2..6).map(in_tab).collect())], Vec::new())
+        // The daemon leaves a out of lists it could not read all of zellij's
+        // folder for, as d starts, for longer than `GONE`: a keeps its
+        // colour, and d takes one no other has.
+        sidebar.heard(listing(&[("b", 2), ("c", 3), ("d", 4)], Some(1)));
+        tick(&mut sidebar, 160_000);
+        tick(&mut sidebar, 175_000);
+        sidebar.heard(listing(&[("a", 1), ("b", 2), ("c", 3), ("d", 4)], Some(0)));
+        tick(&mut sidebar, 176_000);
+        assert_eq!(names(&mut sidebar, 4), [b, y, p, a]);
+
+        // b is renamed e, and keeps its colour. a ends, and gives its up once
+        // the daemon has not listed it for `GONE`, for f to take.
+        sidebar.heard(listing(&[("e", 2), ("c", 3), ("d", 4)], Some(0)));
+        tick(&mut sidebar, 180_000);
+        tick(&mut sidebar, 190_000);
+        sidebar.heard(listing(&[("e", 2), ("c", 3), ("d", 4), ("f", 5)], Some(0)));
+        assert_eq!(names(&mut sidebar, 4), [y, p, a, b]);
+        assert_eq!(bracket(&drawn(&mut sidebar, false, 32, 20), 10), b);
+    }
+
+    /// While the daemon does not answer, what it said last gives no colour to
+    /// keep: a session it lists may have ended since, and another luneta
+    /// given its colour up.
+    #[test]
+    fn a_list_that_stands_gives_no_colour_to_keep() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let order = Order::within(file.clone());
+        let mut sidebar = Sidebar::new(Folds::default(), News::default(), order);
+        sidebar.heard(host(vec![session("a", 1, Vec::new())], Vec::new()));
+        sidebar.lost("lunetad does not answer".to_owned());
+        std::fs::write(&file, r#"{"sessions": []}"#).unwrap();
+        sidebar.reorder();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"sessions": []}"#);
+    }
+
+    /// A colour kept for a session that starts takes up a move another
+    /// luneta made, which this one has yet to hear of, and the rows go in it
+    /// then, rather than once something else builds them again.
+    #[test]
+    fn a_colour_kept_takes_up_a_move_made_elsewhere() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let order = Order::within(file.clone());
+        let mut sidebar = Sidebar::new(Folds::default(), News::default(), order);
+        let listing = |named: &[(&str, i64)]| {
+            let sessions = named.iter().map(|(name, at)| session(name, *at, Vec::new()));
+            host(sessions.collect(), Vec::new())
         };
-        sidebar.heard(closed(Some));
-        assert_eq!(colours(&mut sidebar, 4), [y, y, p, p]);
-        sidebar.heard(closed(|_| None));
-        assert_eq!(colours(&mut sidebar, 4), [gruvbox::GREY; 4]);
+        sidebar.heard(listing(&[("a", 1), ("b", 2)]));
+        Order::within(file).keep_sessions(vec!["b".to_owned(), "a".to_owned()]);
+        sidebar.heard(listing(&[("a", 1), ("b", 2), ("c", 3)]));
+        assert_eq!(rows_shown(&mut sidebar), [" ▾ b", " ▾ a", " ▾ c"]);
+        sidebar.reorder();
+        assert_eq!(rows_shown(&mut sidebar), [" ▾ b", " ▾ a", " ▾ c"]);
     }
 
     /// The first line says `luneta`, in the accent, the word bold, while the

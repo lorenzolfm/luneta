@@ -377,9 +377,11 @@ in each, in the order of their tabs, and what the agent in each pane is doing,
 with the branch under it, all as [`lunetad`](#building-from-source) says:
 luneta starts the daemon when none runs, and the sidebar says so at its bottom
 while it does not answer. A bracket, `╭`, `│` and `╰`, down the column after
-`▌` joins the panes of a tab that holds more than one, in a colour of the
-tab's own, as a browser colours its groups of tabs. `j` and `k` move, `gg` and
-`Home` go to the first row, `G` and `End` to the last,
+`▌` joins the panes of a tab that holds more than one. Each session has a
+colour of its own, as a browser's group of tabs has, which its name sits on and
+its brackets are drawn in: a session takes the first that no other has as it
+starts, and keeps it until it ends, renamed too, the same in every luneta. `j`
+and `k` move, `gg` and `Home` go to the first row, `G` and `End` to the last,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
 too, `u` marks a pane read or unread, and `Esc` goes back to zellij. The session
 zellij is in has its rule in
@@ -660,7 +662,9 @@ versions with sockets of their own can each run, move together. A move is made
 to the order as it is kept then, so it undoes none that another luneta made,
 heard or not. A session the order does not have
 goes after those it has, as a new session always went last. The order is the
-sidebar's only: zellij's tabs keep theirs.
+sidebar's only: zellij's tabs keep theirs. The sessions' colours are kept in
+the same file, by the session rather than its name, so a renamed one keeps its
+own, and given up once the daemon has not listed a session for 10 seconds.
 
 The plugin's picker opens in a zellij luneta doesn't run, from the keys you
 bind it to; in the one it runs, luneta takes `Ctrl j`, `Ctrl a` and `Ctrl d`

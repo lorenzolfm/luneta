@@ -4,6 +4,8 @@
 
 use ratatui::style::Color;
 
+/// The background gruvbox's own, which text on a colour is drawn in.
+pub const BG0: Color = Color::Rgb(0x28, 0x28, 0x28);
 /// Text with no colour of its own.
 pub const FG1: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
 /// The softer of the highlight's two backgrounds.
@@ -23,5 +25,5 @@ pub const GREY: Color = Color::Rgb(0x92, 0x83, 0x74);
 /// Every colour the sidebar draws in, which its tests hold each cell to: a
 /// colour named at a call site, as `Color::Red`, would be the terminal's.
 #[cfg(test)]
-pub const ALL: [Color; 11] =
-    [FG1, BG1, BG2, RED, GREEN, YELLOW, BLUE, PURPLE, AQUA, ORANGE, GREY];
+pub const ALL: [Color; 12] =
+    [BG0, FG1, BG1, BG2, RED, GREEN, YELLOW, BLUE, PURPLE, AQUA, ORANGE, GREY];
