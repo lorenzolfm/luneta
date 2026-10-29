@@ -44,7 +44,7 @@ use crate::menu;
 use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, LIT, Listed, Mark, NAME, Place};
 use crate::zellij::{self, Closes, Exited, SessionName};
 
-/// What the rule over the box, and the rule over the list, name it.
+/// What the rule over the box names it.
 const TITLE: &str = "luneta";
 
 /// How long the highlight stays on a row before the preview asks zellij for
@@ -733,7 +733,7 @@ impl Picker {
             let body = self.body(inner, rows.saturating_sub(notes.len()), now);
             let count = count(self.rows().at, self.rows().rows.len());
             let lines = anchored(notes, body, rows);
-            framed(buffer, results, TITLE, &count, lines);
+            framed(buffer, results, self.list.title(), &count, lines);
         }
         if let Some(preview) = layout.preview {
             self.draw_preview(buffer, preview, now);
@@ -1862,7 +1862,7 @@ mod tests {
     /// and `Enter` makes a session of a name no row has, but of one zellij
     /// refuses, or of yours, or on the agents or the directories, which `Tab`
     /// goes to one after the other, and back to the sessions, and `Shift Tab`
-    /// the other way round.
+    /// the other way round, the rule over the list naming each.
     #[test]
     fn what_is_typed_narrows_the_list_and_enter_makes_a_session_no_row_has() {
         let listing = Listing {
@@ -1883,9 +1883,11 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(new));
         let titled = |picker: &Picker, title: &str| {
             let buffer = drawn(picker);
-            let rule = format!("─ {title} ─");
-            text(&buffer, buffer.area).iter().any(|line| line.contains(&rule))
+            let (results, _) = parts();
+            let rule = Rect::new(results.x - 1, results.y - 1, results.width + 2, 1);
+            text(&buffer, rule)[0].starts_with(&format!("┌─ {title} ─"))
         };
+        assert!(titled(&picker, "Sessions"));
         for title in ["Agents", "Directories"] {
             press(&mut picker, KeyCode::Tab);
             assert!(titled(&picker, title), "{title}");
