@@ -65,7 +65,7 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     let (said, agreed) = planned(&asked);
     let (here, there) = (here.pid(), there.pid());
     let plan = format!(
-        "kill session play: 1 agent\n  \
+        "delete session play: 1 agent\n  \
          play:1  idle     {there:>7}  there-name\n\
          close pane work:2: 1 agent, 1 busy\n  \
          work:2  busy     {here:>7}  here-name  (this runs here)\n"
@@ -77,7 +77,8 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     let told = luneta(&host, ("work", 2), &["close", "work:2", "play", "--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     assert_eq!(String::from_utf8(told.stdout).unwrap(), plan);
-    let closed = ["kill-session play", "--session work action close-pane --pane-id terminal_2"];
+    let closed =
+        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
 }
 
@@ -153,12 +154,13 @@ fn a_close_closes_what_it_is_given_in_a_session_together() {
 
     let given = ["close", "work:2", "play:1", "work:3", "play", "work:2"];
     let (said, agreed) = planned(&luneta(&host, ("work", 4), &given));
-    let plan = format!("kill session play: {UNTOLD}\nclose the tab of work:2, work:3: {UNTOLD}\n");
+    let plan =
+        format!("delete session play: {UNTOLD}\nclose the tab of work:2, work:3: {UNTOLD}\n");
     assert_eq!(said, plan);
 
     let told = luneta(&host, ("work", 4), &[&given[..], &["--yes", &agreed]].concat());
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    let closed = ["kill-session play", "--session work action close-tab-by-id 0"];
+    let closed = ["delete-session --force play", "--session work action close-tab-by-id 0"];
     assert_eq!(host.lists.closed(), closed);
 }
 
@@ -184,7 +186,7 @@ fn a_close_closes_only_the_plan_it_was_told_yes_to() {
     // session's only tab open.
     host.lists.list("work", &json!([listed(2, "claude", tab, Some("/w"))]));
     let (now, _) = planned(&close(&["--yes", &agreed]));
-    assert_eq!(now, format!("kill session work: {UNTOLD}\n"));
+    assert_eq!(now, format!("delete session work: {UNTOLD}\n"));
 
     host.lists.list("work", &both);
     drop(work);
@@ -278,11 +280,12 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     let (said, agreed) = planned(&asked(&host, &[box_pane], &["close", "work:2", "play"]));
     assert_eq!(
         said,
-        format!("kill session play: {UNTOLD}\nclose pane work:2: {UNTOLD}\n")
+        format!("delete session play: {UNTOLD}\nclose pane work:2: {UNTOLD}\n")
     );
     let told = asked(&host, &[box_pane], &["close", "work:2", "play", "--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    let closed = ["kill-session play", "--session work action close-pane --pane-id terminal_2"];
+    let closed =
+        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
 
     let unseated = asked(&host, &[("LUNETA_TURN", "00000000000000aa")], &["close", "work:3"]);
@@ -439,15 +442,15 @@ fn a_close_takes_the_session_it_runs_in_last_by_the_name_it_has_now() {
     let close = |yes: &[&str]| luneta(&host, ("work", 2), &[&given[..], yes].concat());
     let (said, agreed) = planned(&close(&[]));
     let plan = format!(
-        "kill session play: no agent\n\
-         kill session fix: 1 agent, 1 busy\n  \
+        "delete session play: no agent\n\
+         delete session fix: 1 agent, 1 busy\n  \
          fix:2 (named work)  busy     {:>7}  here-name  (this runs here)\n",
         here.pid()
     );
     assert_eq!(said, plan);
     let told = close(&["--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    assert_eq!(host.lists.closed(), ["kill-session play", "kill-session fix"]);
+    assert_eq!(host.lists.closed(), ["delete-session --force play", "delete-session --force fix"]);
 }
 
 /// What holds the pane a close runs in goes last, as the agent that ran it
@@ -472,4 +475,72 @@ fn a_close_leaves_what_holds_its_pane_where_anything_before_it_failed() {
     assert!(why.contains("zellij refused to close anything of play"), "{why}");
     assert!(why.contains("did not close pane work:2"), "{why}");
     assert!(host.lists.closed().is_empty());
+}
+
+/// zellij keeps nothing of a session in its first second, and fails to
+/// delete a session that young once it has killed it: the close takes it
+/// for deleted. A session zellij finds nothing of, as one that ended since
+/// the plan, is not deleted, and what holds the pane the close runs in stays.
+#[test]
+fn a_close_deletes_a_session_zellij_kills_though_it_kept_nothing_of_it() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    let _fix = UnixListener::bind(host.contract().join("fix")).unwrap();
+    let tab = (0, "Tab #1");
+    let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
+    host.lists.list("work", &work);
+    host.lists.unkept("play");
+    host.lists.gone("fix");
+
+    let given = ["close", "work:2", "play", "fix"];
+    let close = |yes: &[&str]| luneta(&host, ("work", 2), &[&given[..], yes].concat());
+    let (_, agreed) = planned(&close(&[]));
+    let told = close(&["--yes", &agreed]);
+    let why = String::from_utf8_lossy(&told.stderr);
+    assert_eq!(told.status.code(), Some(1), "{why}");
+    assert!(why.contains(r#"Session: "fix" not found."#), "{why}");
+    assert!(!why.contains(r#""play""#), "{why}");
+    assert!(why.contains("did not close pane work:2"), "{why}");
+    assert_eq!(host.lists.closed(), ["delete-session --force play"]);
+}
+
+/// zellij takes away what it keeps of a session before the session's server
+/// has ended, and the server's writer can write it anew meanwhile, which
+/// zellij would bring the session back with: the close lets go of it again
+/// once the server has ended.
+#[test]
+fn a_close_lets_go_again_of_what_the_server_of_a_session_it_deletes_writes_anew() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    host.lists.rewrites("play");
+
+    let close = |yes: &[&str]| luneta(&host, ("work", 2), &[&["close", "play"][..], yes].concat());
+    let (_, agreed) = planned(&close(&[]));
+    let told = close(&["--yes", &agreed]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    assert_eq!(host.lists.closed(), ["delete-session --force play", "delete-session play"]);
+}
+
+/// A session made by the name of one a close deletes, as the close goes, is
+/// another than the one it was told yes to, which zellij would kill all the
+/// same: it stays.
+#[test]
+fn a_close_leaves_a_session_made_by_the_name_of_one_it_deletes_as_it_goes() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _away = UnixListener::bind(host.contract().join("away")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    // A close deletes the sessions it is given in the order of their names.
+    host.lists.renews("away", "play");
+
+    let given = ["close", "away", "play"];
+    let close = |yes: &[&str]| luneta(&host, ("work", 2), &[&given[..], yes].concat());
+    let (_, agreed) = planned(&close(&[]));
+    let told = close(&["--yes", &agreed]);
+    let why = String::from_utf8_lossy(&told.stderr);
+    assert_eq!(told.status.code(), Some(1), "{why}");
+    assert!(why.contains(r#""play" is a session made since, which stays"#), "{why}");
+    assert_eq!(host.lists.closed(), ["delete-session --force away"]);
 }

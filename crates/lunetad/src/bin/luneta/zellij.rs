@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::Sender;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::Client;
@@ -579,8 +579,9 @@ fn started(session: &str, patience: Duration) -> Option<SystemTime> {
 pub enum After {
     /// Open this, for the menu numbered so, as `open` does.
     Open(u64, Open),
-    /// Kill the session the client left, which it was in.
-    Kill(String),
+    /// Kill the session the client left, which it was in, the one that
+    /// started at `started`, and delete it.
+    Kill { session: String, started: SystemTime },
 }
 
 impl After {
@@ -588,7 +589,7 @@ impl After {
     fn when(&self) -> String {
         match self {
             After::Open(..) => "when zellij's client is there, and opens nothing".to_owned(),
-            After::Kill(session) => {
+            After::Kill { session, .. } => {
                 format!("when zellij's client has left \"{session}\", which stays")
             },
         }
@@ -609,8 +610,10 @@ impl After {
             },
             // A zellij of its own kills it: one run as the client's would
             // wait on the session it ends.
-            (After::Kill(session), true) => kill(&session, events),
-            (After::Kill(session), false) => {
+            (After::Kill { session, started }, true) => {
+                kill(&session, started, events);
+            },
+            (After::Kill { session, .. }, false) => {
                 let _ = events.send(Event::Notice(format!("\"{session}\" stays")));
             },
         }
@@ -835,9 +838,18 @@ pub fn close_tab(session: &str, tab: u32, events: &Sender<Event>) {
     run(tab_closer(session, tab), None, events);
 }
 
-/// Kills `session`, which luneta's client is not in, on a thread of its own.
-pub fn kill(session: &str, events: &Sender<Event>) {
-    run(killer(session), None, events);
+/// Kills `session`, the one that started at `started`, and deletes it, on a
+/// thread of its own, as `killed` does: the thread, for luneta to wait for
+/// as it ends.
+pub fn kill(session: &str, started: SystemTime, events: &Sender<Event>) -> JoinHandle<()> {
+    let session = session.to_owned();
+    let events = events.clone();
+    thread::spawn(move || {
+        if let Err(why) = killed(&session, started) {
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
+        }
+    })
 }
 
 /// Closes the terminal `pane` of `session`, and says why not when zellij
@@ -852,10 +864,90 @@ pub fn tab_closed(session: &str, tab: u32) -> Result<(), String> {
     done(tab_closer(session, tab))
 }
 
-/// Kills `session`, and says why not when zellij did not. A client in it
-/// ends with it: luneta's own takes it to another session.
-pub fn killed(session: &str) -> Result<(), String> {
-    done(killer(session))
+/// What `delete-session --force` says as it kills a session that runs:
+/// `assert_dead_session` in zellij-utils 0.45.1's `sessions.rs` says it, on
+/// stdout, of one it finds a server of.
+const KILLING: &str = "will be force killed and deleted";
+
+/// How `delete-session` ends where zellij keeps nothing of the session:
+/// `delete_session` in the same file ends so where it finds no folder of the
+/// session to take away.
+const UNKEPT: i32 = 2;
+
+/// How long the server of a session zellij killed has to take its socket
+/// away: it does within milliseconds.
+const GOING: Duration = Duration::from_secs(1);
+
+/// How long a server goes on once its socket is gone, and its writer with
+/// it, which writes what zellij keeps of the session anew where it finds it
+/// gone: a few milliseconds, measured, and far less than this.
+const SETTLING: Duration = Duration::from_millis(100);
+
+/// Kills `session`, the one that started at `started`, and deletes it, so
+/// that zellij keeps nothing to bring it back with, and says why not when it
+/// did not. A client in it ends with it: luneta's own takes it to another
+/// session. A session that took its name since is another, which zellij
+/// would kill all the same: it stays. zellij first keeps anything of a
+/// session a second after it starts: it kills a younger one all the same,
+/// and fails to delete what it does not keep.
+///
+/// zellij takes away what it keeps before the server has ended, and the
+/// server's writer can write it anew, so it is gone only once the server
+/// is, as `settled` waits for: a luneta, or a `luneta close` in a pane of
+/// the session, that ends with the session may not be there by then.
+pub fn killed(session: &str, started: SystemTime) -> Result<(), String> {
+    let folder = lunetad::zellij_folder();
+    if running_in(&folder)?.iter().any(|(name, at)| name == session && *at != started) {
+        return Err(format!("\"{session}\" is a session made since, which stays"));
+    }
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.args(["delete-session", "--force", session]);
+    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
+    let unkept = matches!(&ran, program::Ran::Ended { status, stdout, .. }
+        if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
+    if !unkept {
+        ran.answer().map_err(|why| format!("zellij: {why}"))?;
+    }
+    settled(session, started, &folder)
+}
+
+/// Waits for the server of `session`, the one that started at `started`, to
+/// end, once zellij has killed it, and has zellij let go again of what its
+/// writer wrote of it meanwhile. What zellij keeps of a session that took
+/// the name since is that one's, and stays. How zellij ends says too little:
+/// it drops the word to the server that it fails to send, and ends well
+/// where it fails to take away what it keeps, but for finding none. What is
+/// in `folder`, zellij's sockets, and in its folder of what it keeps, says.
+fn settled(session: &str, started: SystemTime, folder: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + GOING;
+    while running_in(folder)?.iter().any(|(name, at)| name == session && *at == started) {
+        if Instant::now() >= deadline {
+            return Err(format!("zellij did not kill \"{session}\""));
+        }
+        thread::sleep(ENDING_LOOK);
+    }
+    thread::sleep(SETTLING);
+    let kept = lunetad::zellij_info_folder().is_some_and(|info| info.join(session).exists());
+    if kept && running_in(folder)?.iter().all(|(name, _)| name != session) {
+        return deleted(session);
+    }
+    Ok(())
+}
+
+/// The sessions that run, each by its name and when it started, as their
+/// sockets in `folder` say now; or why luneta cannot tell them, as a
+/// session's socket could be in what it cannot read.
+fn running_in(folder: &Path) -> Result<Vec<(String, SystemTime)>, String> {
+    lunetad::zellij_sessions(folder).ok_or_else(|| {
+        let folder = folder.display();
+        format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")
+    })
+}
+
+/// The sessions that run, as `running_in` says of zellij's folder.
+pub fn running() -> Result<Vec<(String, SystemTime)>, String> {
+    running_in(&lunetad::zellij_folder())
 }
 
 /// What `list-sessions` says where no session runs, nor ended to be brought
@@ -988,13 +1080,6 @@ fn tab_closer(session: &str, tab: u32) -> Command {
     command
 }
 
-/// zellij, to kill `session`.
-fn killer(session: &str) -> Command {
-    let mut command = Command::new("zellij");
-    command.args(["kill-session", session]);
-    command
-}
-
 /// Has `command`, a zellij, do what it was asked, and says why not when it
 /// did not.
 fn done(mut command: Command) -> Result<(), String> {
@@ -1077,7 +1162,7 @@ pub fn named() -> Option<Vec<String>> {
 /// luneta cannot read the folder they are in. A zellij of another contract
 /// keeps them elsewhere, and none is kept here.
 fn kept() -> Option<Vec<String>> {
-    let entries = match fs::read_dir(lunetad::zellij_session_info()?) {
+    let entries = match fs::read_dir(lunetad::zellij_info_folder()?) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(Vec::new()),
         Err(_) => return None,

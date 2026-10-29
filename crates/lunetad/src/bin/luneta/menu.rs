@@ -9,7 +9,7 @@
 //! the menu would. `c` opens the Claude group, a key for each of a few skills, which
 //! starts an agent on it there. `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in. `d`
-//! opens the Delete group, which closes the pane or kills its session, and
+//! opens the Delete group, which closes the pane or deletes its session, and
 //! asks first when that would end an agent at work. `b` opens the Brief group,
 //! which briefs you on every session, the row's session, or the agent in its
 //! pane. The plugin's menu reads its keys for skills from its configuration;
@@ -250,7 +250,7 @@ enum Entry {
     Start { key: char, prompt: &'static str },
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
-    /// A key of the Delete group: closes the pane the menu is for, or kills
+    /// A key of the Delete group: closes the pane the menu is for, or deletes
     /// its session.
     Close { key: char, scope: Scope },
     /// A key of the Brief group: briefs you on what the agents it covers are
@@ -290,7 +290,7 @@ enum Pressed {
     Start(String),
     /// Opens a pane, a tab or a session.
     New(New),
-    /// Closes the pane the menu is for, or kills its session, by `key`.
+    /// Closes the pane the menu is for, or deletes its session, by `key`.
     Delete { key: char, scope: Scope },
     /// Asks for a brief of what the scope covers.
     Brief(brief::Scope),
@@ -316,7 +316,7 @@ impl Keys {
     /// which opens the ask box, and the Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `n p`, `n t` and `n s` open a pane, a tab and a
     /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
-    /// kills its session, and `b z`, `b s` and `b h` brief you on every
+    /// deletes its session, and `b z`, `b s` and `b h` brief you on every
     /// session, its session and what the menu is for.
     fn new(row: Scope) -> Self {
         let start = |(key, prompt)| Entry::Start { key, prompt };
@@ -1416,8 +1416,9 @@ mod tests {
     /// What closing pane 4 of `luneta` does, as zellij says what it closes,
     /// with `agents` at work there.
     fn plan(closes: Closes, agents: Vec<(u32, Doing)>) -> Result<Plan, String> {
+        let session = listed();
         let subject = Subject {
-            session: "luneta",
+            session: &session,
             seat: Seat::Elsewhere,
             deletes: Deletes::Pane { pane: 4, closes },
             agents: Ok(agents),
@@ -1434,7 +1435,7 @@ mod tests {
         assert_eq!(menu.planning(), Some(4));
         let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
         assert_eq!(done, Done::Act(Act::Pane { session: "luneta".to_owned(), pane: 4 }));
-        // On a session's row, `d d` kills the session, which zellij need not
+        // On a session's row, `d d` deletes the session, which zellij need not
         // say anything of first.
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
@@ -1492,14 +1493,16 @@ mod tests {
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('s')));
         let elo = Place::Session(Listed::new("elo", SystemTime::UNIX_EPOCH));
+        let session = listed();
         let subject = Subject {
-            session: "luneta",
+            session: &session,
             seat: Seat::In,
             deletes: Deletes::Session,
             agents: Ok(Vec::new()),
             refuge: Some(elo.clone()),
         };
-        let leave = Act::Leave { session: "luneta".to_owned(), to: elo };
+        let started = session.started();
+        let leave = Act::Leave { session: "luneta".to_owned(), started, to: elo };
         assert_eq!(closed(menu.planned(close::plan(&subject))), Done::Act(leave));
     }
 

@@ -170,6 +170,16 @@ impl Listed {
         Some(Listed { name, kept })
     }
 
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// When its server made its socket, which tells it from a session that
+    /// takes its name once it has ended.
+    pub fn started(&self) -> SystemTime {
+        self.kept.started()
+    }
+
     /// Its pane `pane`, as the news keeps it.
     fn key(&self, pane: u32) -> Key {
         Key { session: self.kept, pane }
@@ -236,7 +246,8 @@ impl Place {
         }
     }
 
-    fn listed(&self) -> &Listed {
+    /// Its session.
+    pub fn listed(&self) -> &Listed {
         match self {
             Place::Session(session) | Place::Pane { session, .. } => session,
         }
@@ -944,7 +955,7 @@ impl Sidebar {
     }
 
     /// luneta takes its zellij out of the session it is in, to `place` in
-    /// another, and kills that session once it has left it, which the
+    /// another, and deletes that session once it has left it, which the
     /// sidebar says until then. A look to ask zellij for once it is there.
     pub fn leaving(&mut self, place: &Place) -> Option<Look> {
         self.goes(place, true)
@@ -1817,7 +1828,7 @@ impl Sidebar {
             },
             Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
             Wants::Plan(Scope::Session) => {
-                let plan = self.plan(target.place.session(), Deletes::Session);
+                let plan = self.plan(target.place.listed(), Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -1832,15 +1843,16 @@ impl Sidebar {
         self.menu_did(menu.planned(plan))
     }
 
-    /// What deleting what `deletes` deletes of `session` does, as the
+    /// What deleting what `deletes` deletes of `listed` does, as the
     /// sidebar knows the host now: for the menu, and for the picker.
-    pub fn plan(&self, session: &str, deletes: Deletes) -> Result<Plan, String> {
-        close::plan(&self.subject(session, deletes))
+    pub fn plan(&self, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
+        close::plan(&self.subject(listed, deletes))
     }
 
-    /// What the delete is for, as the sidebar knows it: `session`, where
+    /// What the delete is for, as the sidebar knows it: `listed`, where
     /// luneta's zellij is, and what it `deletes`.
-    fn subject<'a>(&'a self, session: &'a str, deletes: Deletes) -> Subject<'a> {
+    fn subject<'a>(&'a self, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
+        let session = listed.name();
         let seat = match (self.going(), self.here()) {
             (None, Some(here)) if here == session => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
@@ -1865,7 +1877,7 @@ impl Sidebar {
             let mut others = sessions.into_iter().map(|(listed, _)| listed);
             refuge = others.rfind(|listed| listed.name.as_str() != session);
         }
-        Subject { session, seat, deletes, agents, refuge: refuge.map(Place::Session) }
+        Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
     }
 
     /// Asks for a brief of what `scope` covers, by `place`, the row the menu
@@ -1959,7 +1971,9 @@ impl Sidebar {
                 place.session() == session && panes.contains(&at)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
-            (Act::Kill(session) | Act::Leave { session, .. }, _) => place.session() == session,
+            (Act::Kill { session, .. } | Act::Leave { session, .. }, _) => {
+                place.session() == session
+            },
         };
         if let Some(gone) = self.cursor.clone().filter(|cursor| takes(cursor)) {
             let at = self.cursor_index().unwrap_or(0);
@@ -2003,7 +2017,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let plan = match closes {
-            Ok(closes) => self.plan(target.place.session(), Deletes::Pane { pane, closes }),
+            Ok(closes) => self.plan(target.place.listed(), Deletes::Pane { pane, closes }),
             Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
@@ -5224,9 +5238,10 @@ mod tests {
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13..15], [" Kill session older? 1 agent,", " 1 waiting"]);
+        assert_eq!(lines[13..15], [" Delete session older? 1", " agent, 1 waiting"]);
         let to = Place::Session(listed("newer", 20));
-        let leave = Act::Leave { session: "older".to_owned(), to };
+        let started = listed("older", 10).started();
+        let leave = Act::Leave { session: "older".to_owned(), started, to };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
         assert!(sidebar.menu.is_none());
     }
@@ -5298,7 +5313,8 @@ mod tests {
         sidebar.titled("newer | fish".to_owned());
         type_in(&mut sidebar, "d");
         let to = Place::Session(listed("older", 10));
-        let leave = Act::Leave { session: "newer".to_owned(), to };
+        let started = listed("newer", 20).started();
+        let leave = Act::Leave { session: "newer".to_owned(), started, to };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
     }
 

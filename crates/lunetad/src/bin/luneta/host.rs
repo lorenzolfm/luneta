@@ -22,6 +22,7 @@ use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::term::ClipboardType;
@@ -415,6 +416,10 @@ struct App {
     /// The directory luneta started in, which zellij's client runs in.
     dir: PathBuf,
     ended: bool,
+    /// What kills and deletes the sessions luneta's keys delete, which
+    /// luneta waits for as it ends: it ends with its only session, which
+    /// zellij lets go of only once the session's server has ended.
+    deleting: Vec<JoinHandle<()>>,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
@@ -591,8 +596,14 @@ fn run_in(
         _watching: watching,
         dir: dir.to_owned(),
         ended: false,
+        deleting: Vec::new(),
     };
-    run_loop(terminal, &mut app, inbox)?;
+    let ran = run_loop(terminal, &mut app, inbox);
+    for deleting in app.deleting.drain(..) {
+        // What a thread that panicked left undone stays so.
+        let _ = deleting.join();
+    }
+    ran?;
     Ok(app.failure())
 }
 
@@ -1160,11 +1171,15 @@ impl App {
             Asked::Delete(act) => match act {
                 Act::Pane { session, pane } => zellij::close_pane(&session, pane, &self.events),
                 Act::Tab { session, tab, .. } => zellij::close_tab(&session, tab, &self.events),
-                Act::Kill(session) => zellij::kill(&session, &self.events),
+                Act::Kill { session, started } => {
+                    self.deleting.retain(|deleting| !deleting.is_finished());
+                    self.deleting.push(zellij::kill(&session, started, &self.events));
+                },
                 // The plan found zellij's client in `session`, and on its
                 // way nowhere, as the key was pressed.
-                Act::Leave { session, to } => {
-                    self.go_from(&session, &to, Some(After::Kill(session.clone())));
+                Act::Leave { session, started, to } => {
+                    let after = After::Kill { session: session.clone(), started };
+                    self.go_from(&session, &to, Some(after));
                 },
             },
             Asked::Open { menu, open } => zellij::open(menu, open, &self.events),
@@ -1218,8 +1233,9 @@ impl App {
                     self.picked(did);
                 }
             },
-            Picked::Delete(Act::Leave { session, to }) => {
-                self.go_from(&session, &to, Some(After::Kill(session.clone())));
+            Picked::Delete(Act::Leave { session, started, to }) => {
+                let after = After::Kill { session: session.clone(), started };
+                self.go_from(&session, &to, Some(after));
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Delete(act) => self.follow(Asked::Delete(act)),
@@ -1268,7 +1284,7 @@ impl App {
         let then = match &after {
             // The session it leaves ends once it has left it, which the
             // sidebar says until then.
-            Some(After::Kill(_)) => self.sidebar.leaving(place),
+            Some(After::Kill { .. }) => self.sidebar.leaving(place),
             Some(After::Open(..)) | None => self.sidebar.went(place),
         };
         self.client.hosted.send(zellij::NUDGE);

@@ -63,13 +63,13 @@ pub enum Command {
         #[arg(value_parser = drive::address)]
         to: Address,
     },
-    /// Close panes and kill sessions, as the menu's Delete group does. The
+    /// Close panes and delete sessions, as the menu's Delete group does. The
     /// panes of a session close together: a tab goes once nothing left holds
     /// it open, and the session once all its tabs do. Without `--yes`, say
     /// what would go and which agents with it, and the plan to tell `--yes`,
     /// and close nothing.
     Close {
-        /// Each `<session>` to kill, or `<session>:<pane>` to close.
+        /// Each `<session>` to delete, or `<session>:<pane>` to close.
         #[arg(required = true, value_parser = drive::address)]
         what: Vec<Address>,
         /// Close them, while what would go is still the plan said as `PLAN`.

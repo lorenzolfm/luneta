@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, and close panes or kill sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, or close sessions, tabs or panes, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, and close panes or delete sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, or close sessions, tabs or panes, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -65,9 +65,10 @@ luneta close <session>[:<pane>]... [--yes <plan>]
 - `close` takes a pane's tab along when nothing else holds the tab open, and
   the session when that was its only tab. The panes of a session given
   together close together: give every pane of a tab and the tab closes. It
-  kills a session given by name. It closes running sessions only. What holds
-  your pane goes last, and not at all if anything before it failed to close,
-  so that you're still there to tell the user.
+  deletes a session given by name: kills it, and zellij keeps nothing of it to
+  resurrect. It closes running sessions only. What holds your pane goes last,
+  and not at all if anything before it failed to close, so that you're still
+  there to tell the user.
 
 ## Start an agent
 
@@ -121,7 +122,7 @@ It closes nothing, prints what would go and which agents end with it, and
 exits 3. Its last line, on stderr, names the plan:
 
 ```text
-kill session bipa: 1 agent, 1 busy
+delete session bipa: 1 agent, 1 busy
   bipa:0  busy     3602051  cipher-6d
 close pane luneta:12: no agent
 luneta: closed nothing; run it again with --yes 9c41d07e3b2a5f18 to close what it says
@@ -139,7 +140,7 @@ new plan and ask again. Exit 1 means something failed.
 - If the plan says `luneta cannot tell which agents it ends`, tell the user
   that and why, as it says: any agent could end with it.
 - "All sessions" means the running ones in `luneta sessions`. Leave out the
-  session `luneta here` names unless the user says so. Killing it ends you
+  session `luneta here` names unless the user says so. Deleting it ends you
   too: `(this runs here)` marks your own line in the plan, and luneta closes
   it last.
 - Close only what the user named or plainly meant. Never sweep up "idle"
