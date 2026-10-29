@@ -69,13 +69,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    // Once lunetad runs, so that the first thing one that does not start
-    // says is why, which luneta reads back.
-    if let Some(why) = unkept {
-        log::say(&format!("what goes wrong is kept in no log: {why}"));
-    }
     let socket = claim.socket().to_owned();
-    if let Err(error) = runtime.block_on(lunetad::serve(claim)) {
+    if let Err(error) = runtime.block_on(lunetad::serve(claim, unkept)) {
         log::say(&format!("{}: {error}", socket.display()));
         return ExitCode::FAILURE;
     }

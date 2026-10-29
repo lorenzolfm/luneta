@@ -178,6 +178,21 @@ fn lunetad_says_in_lunetas_log_when_and_which_daemon() {
     assert_eq!((when.len(), date(10), date(23)), (24, Some(b'T'), Some(b'Z')), "{when}");
 }
 
+/// A daemon with no log to write in, as one with no home, that does not
+/// start says first why it does not, which luneta reads back: here, that its
+/// socket's path is longer than one can be.
+#[test]
+fn lunetad_with_no_log_says_first_why_it_does_not_start() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("r".repeat(110));
+    fs::create_dir(&runtime).unwrap();
+    let (ended, said) = start(Vars::runtime(&runtime)).err().unwrap();
+    assert!(!ended.success());
+    let socket = runtime.join(SOCKET);
+    let first = said.lines().next().unwrap_or_default();
+    assert!(first.starts_with(&format!("lunetad: {}: ", socket.display())), "{said}");
+}
+
 /// `luneta info`, `agents` and `sessions` say that no daemon runs, as `tmux
 /// ls` says that no server does, and start none: in a folder no daemon has
 /// made yet, and in one that a daemon that crashed left its socket in.

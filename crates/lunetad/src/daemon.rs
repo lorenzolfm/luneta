@@ -123,10 +123,12 @@ impl Claim {
 /// Listens on the claim's socket and answers there until zellij has had no
 /// session for `ALONE`. It says on stderr that it listens once it does, which
 /// is how whoever started it can tell that it is ready: by then it has read
-/// what runs, and answers with all of it. As it ends, it answers what it was
-/// asked already, and no more, and waits for its clients to go for `DRAIN`
-/// at the most.
-pub async fn serve(claim: Claim) -> io::Result<()> {
+/// what runs, and answers with all of it. Then it says `unkept`, why what goes
+/// wrong is kept in no log, where it is not: not before, so that the first
+/// thing one that does not start says is why, which luneta reads back. As it
+/// ends, it answers what it was asked already, and no more, and waits for its
+/// clients to go for `DRAIN` at the most.
+pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     // One wake-up is all a thread that asks on a sweep needs, however many
     // changes made it.
@@ -145,6 +147,9 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     log::say(&format!("listening on {}", claim.socket.display()));
+    if let Some(why) = unkept {
+        log::say(&format!("what goes wrong is kept in no log: {why}"));
+    }
     let host = Host { started: SystemTime::now(), sockets, claude_folder, core };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
