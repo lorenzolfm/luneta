@@ -1210,9 +1210,10 @@ impl Sidebar {
     }
 
     /// Whether a spinner turns: the rule along the top has one while an agent
-    /// on the rows is at work, and so does the sidebar collapsed.
+    /// on the rows is at work, and so does the sidebar collapsed; and the
+    /// menu has one while what a key of it waits on is at work.
     pub fn turning(&self) -> bool {
-        self.counts.busy > 0
+        self.counts.busy > 0 || self.menu.as_ref().is_some_and(Menu::turning)
     }
 
     /// Makes the rows again from what the daemon said last.
@@ -2523,7 +2524,7 @@ impl Sidebar {
         let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width, frame));
-        let (notes, spotted) = self.notes(width, height);
+        let (notes, spotted) = self.notes(width, height, frame);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
         let highlight = self.highlight();
@@ -2705,8 +2706,8 @@ impl Sidebar {
     /// else the legend while the sidebar has the focus.
     /// The menu and the legend leave the rows a line. And what has the mouse
     /// there, the menu or the legend, with the spots on it by their line among
-    /// the notes.
-    fn notes(&self, width: usize, height: usize) -> (Vec<Line<'static>>, Drawn) {
+    /// the notes. A spinner on the menu shows `frame`.
+    fn notes(&self, width: usize, height: usize, frame: usize) -> (Vec<Line<'static>>, Drawn) {
         let mut notes = Vec::new();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -2749,7 +2750,7 @@ impl Sidebar {
         let above = notes.len();
         let (lines, spotted) = match self.bottom() {
             Bottom::Menu(menu) => {
-                let (lines, spots) = menu.lines(width, room);
+                let (lines, spots) = menu.lines(width, room, frame);
                 let spots = spots.down(above);
                 (lines, Drawn::Menu { number: menu.number(), area: None, spots })
             },

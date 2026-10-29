@@ -726,7 +726,7 @@ fn run_loop(
             WAITING_LOOK
         } else if app.sidebar.scrolling() {
             sidebar::SCROLL
-        } else if app.sidebar.turning() {
+        } else if app.turning() {
             sidebar::SPIN
         } else {
             TICK
@@ -872,6 +872,17 @@ impl App {
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
             picker.listed(listing);
         }
+    }
+
+    /// Whether a spinner turns: on the sidebar, or in the box over zellij
+    /// while what it waits on is at work.
+    fn turning(&self) -> bool {
+        let over = match &self.focus.over {
+            Some(Over::Brief(briefing)) => briefing.turning(),
+            Some(Over::Ask(ask)) => ask.turning(),
+            Some(Over::Menu | Over::Picker(_) | Over::Note(_)) | None => false,
+        };
+        over || self.sidebar.turning()
     }
 
     /// When the picker asks zellij for what its preview shows, while it is
@@ -1780,11 +1791,11 @@ impl App {
             // the sidebar.
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
-                    briefing.draw(buffer, zellij);
+                    briefing.draw(buffer, zellij, now);
                     Drawn::Nothing
                 },
                 Some(Over::Ask(ask)) => {
-                    ask.draw(buffer, zellij);
+                    ask.draw(buffer, zellij, now);
                     Drawn::Nothing
                 },
                 Some(Over::Picker(picker)) => picker.draw(buffer, zellij, now),
@@ -1794,7 +1805,7 @@ impl App {
                 },
                 Some(Over::Menu) => {
                     let floating = self.sidebar.floating();
-                    floating.map(|menu| menu.draw(buffer, zellij)).unwrap_or_default()
+                    floating.map(|menu| menu.draw(buffer, zellij, now)).unwrap_or_default()
                 },
                 None => beside,
             };

@@ -732,20 +732,27 @@ impl Briefing {
         self.written.is_some()
     }
 
-    /// Draws it in a box over `over`, zellij's columns, as `boxed` does. The
-    /// rule along its top says what it is a brief of, and once it is written,
-    /// when it was asked. Under it, what the model wrote, or why it wrote
-    /// nothing, or that it is asked, and then the keys that close it. What
-    /// the box has no room for is cut, its last line a `…`.
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect) {
+    /// Whether its spinner turns: until it is written.
+    pub fn turning(&self) -> bool {
+        self.written.is_none()
+    }
+
+    /// Draws it in a box over `over`, zellij's columns, at `now`, as `boxed`
+    /// does. The rule along its top says what it is a brief of, and once it
+    /// is written, when it was asked. Under it, what the model wrote, or why
+    /// it wrote nothing, or that it is asked, after a spinner that turns, and
+    /// then the keys that close it. What the box has no room for is cut, its
+    /// last line a `…`.
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
         let Some((inner, room)) = room(over) else {
             return;
         };
         let dim = Style::new().add_modifier(Modifier::DIM);
         let (mut lines, keys, at) = match &self.written {
             None => {
-                let asking = Line::styled(format!(" Asking {MODEL}…"), dim);
-                (vec![asking], (Hint::Esc, "Close"), None)
+                let asking = format!("Asking {MODEL}…");
+                let asking = menu::waiting(&asking, inner, dim, sidebar::frame(now));
+                (asking, (Hint::Esc, "Close"), None)
             },
             Some(Written { at, said }) => {
                 let lines = match said {
@@ -1068,7 +1075,7 @@ Its transcript is unknown: Claude Code names none for it.
         for row in area.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
-        briefing.draw(&mut buffer, area);
+        briefing.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
             assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
@@ -1093,7 +1100,7 @@ Its transcript is unknown: Claude Code names none for it.
                 "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
                 "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
                 "zzz┌─ Brief of every session ─────────────────────────────────┐zzz",
-                "zzz│ Asking haiku…                                            │zzz",
+                "zzz│ ⠋ Asking haiku…                                          │zzz",
                 "zzz│                                                          │zzz",
                 "zzz│ <ESC> - Close                                            │zzz",
                 "zzz└──────────────────────────────────────────────────────────┘zzz",

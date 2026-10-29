@@ -265,8 +265,9 @@ sidebar's keys. A folded session's agents are among them.
 | `b` `h` | the agent in the row's pane, in a few lines; on a session's row, its session |
 
 The brief shows in a box over zellij, which has the keys and the mouse until
-it closes: while the model writes, `Esc` gives it up, `claude` with it, and any
-other key waits, and once it shows, any key or a click closes it, leaving the
+it closes: while the model writes, the box says `⠋ Asking haiku…`, the
+spinner turning, `Esc` gives it up, `claude` with it, and any other key waits,
+and once it shows, any key or a click closes it, leaving the
 sidebar the keys and the highlight where it was. The rule along the box's top
 says when you asked. Nothing is kept: each key asks again, so a brief costs
 only when you ask for one. With no agent to brief you on, the sidebar says so
@@ -519,8 +520,10 @@ pull request's repository on GitHub, by GitHub's name or, by ssh, another your
 ssh config gives it, so a fork's clone with the repository it forks among its
 remotes is one. wt makes the worktree only in a clone wt made:
 in one git made, it would make it in the clone's `.git`. The menu waits while
-wt fetches, and says why when it makes nothing; with no clone wt made, it says
-to `wt clone` one first. A paste while zellij has the keys stays zellij's.
+wt fetches, and then while zellij opens the tab, saying what it waits on after
+a spinner that turns, as `⠋ Making a worktree of #123…`, and says why when it
+makes nothing; with no clone wt made, it says to `wt clone` one first. A paste
+while zellij has the keys stays zellij's.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named
@@ -799,8 +802,9 @@ key of the turn before in `LUNETA_TURN_BEFORE`, and a plan is of the key of its
 turn. Where luneta cannot tell which pane you are in, a close in the box closes
 nothing, as it could take yours first. `Enter` sends,
 and `Esc` closes the box, giving up a turn the agent is at, `claude` with it.
-While a turn runs, no other key does anything. The mouse does nothing while the
-box is open. Nothing is kept: the next `a` starts afresh.
+While a turn runs, the box says `⠋ Asking sonnet…` under what the agent did so
+far, the spinner turning, and no other key does anything. The mouse does
+nothing while the box is open. Nothing is kept: the next `a` starts afresh.
 
 The agent runs in safe mode, so none of your hooks, `CLAUDE.md` or MCP servers
 come into it, and in Claude Code's `dontAsk` permission mode, with Bash its only
