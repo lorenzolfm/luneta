@@ -75,8 +75,10 @@ enum Command {
         /// A directory of the repository.
         #[arg(long, value_name = "DIR")]
         repo: String,
-        /// The branch, or the link of a pull request on GitHub.
-        branch: String,
+        /// The branch, or the link of a pull request on GitHub, with or
+        /// without its `https://`.
+        #[arg(value_parser = pull::Of::parse, value_name = "BRANCH")]
+        of: pull::Of,
     },
 }
 
@@ -96,7 +98,7 @@ fn main() -> ExitCode {
     };
     let command = match command {
         // It asks no lunetad, and so needs no folder to find one in.
-        Command::Worktree { repo, branch } => return pull::make(&repo, &branch),
+        Command::Worktree { repo, of } => return pull::make(&repo, &of),
         Command::Asked(command) => command,
     };
     match folder {

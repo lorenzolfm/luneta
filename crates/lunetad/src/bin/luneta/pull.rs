@@ -109,11 +109,7 @@ impl Link {
     /// or a comment on it, with or without `https://`. None for any other
     /// text.
     pub fn parse(text: &str) -> Option<Link> {
-        let text = text.trim();
-        let rest = text.strip_prefix("https://").or_else(|| text.strip_prefix("http://"));
-        let rest = rest.unwrap_or(text);
-        let rest = rest.strip_prefix("www.").unwrap_or(rest);
-        let rest = rest.strip_prefix(GITHUB)?.strip_prefix('/')?;
+        let rest = on_github(text)?;
         let path = rest.split(['?', '#']).next().unwrap_or_default();
         let mut parts = path.split('/');
         let (owner, name) = (parts.next()?, parts.next()?);
@@ -146,10 +142,13 @@ impl Link {
         }
     }
 
-    /// What `wt add` takes for it: a pull request's link, for wt to find its
-    /// branch, or an issue's branch.
-    fn wt(&self) -> String {
-        self.branch().unwrap_or_else(|| self.url())
+    /// What `luneta worktree` makes the worktree of for it: the pull request,
+    /// for wt to find its branch, or an issue's branch.
+    fn wt(&self) -> Of {
+        match self.branch() {
+            Some(branch) => Of::Branch(branch),
+            None => Of::Pull(self.clone()),
+        }
     }
 
     /// What its tab is named, and the menu calls it: `#123`.
@@ -189,6 +188,61 @@ impl Link {
 impl fmt::Display for Link {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}#{}", self.repository(), self.number)
+    }
+}
+
+/// What `text` names on GitHub, after its host and a `/`, where it is an
+/// address there, with or without `https://` or `www.`, but for the space
+/// around it.
+fn on_github(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let rest = text.strip_prefix("https://").or_else(|| text.strip_prefix("http://"));
+    let rest = rest.unwrap_or(text);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    rest.strip_prefix(GITHUB)?.strip_prefix('/')
+}
+
+/// What `luneta worktree` makes the worktree of: a pull request, whose
+/// branch wt finds by its link, or a branch, by its name. git takes a link
+/// without its `https://` for a branch's name, and wt, which tells a link by
+/// its `://`, would make a new branch of that name, with none of the pull
+/// request's commits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Of {
+    Pull(Link),
+    Branch(String),
+}
+
+impl Of {
+    /// What `text` names: a pull request, where it is one's link as
+    /// `Link::parse` takes one, or else a branch, by any name but an address
+    /// on GitHub or another link. Not an issue's link: luneta's paste makes
+    /// its branch, from the default branch of its repository as GitHub has
+    /// it, before it has the worktree made.
+    pub fn parse(text: &str) -> Result<Of, String> {
+        let Some(link) = Link::parse(text) else {
+            if text.contains("://") || on_github(text).is_some() {
+                return Err(format!("{} is no pull request's link on {GITHUB}", text.trim()));
+            }
+            return Ok(Of::Branch(text.to_owned()));
+        };
+        match link.wt() {
+            Of::Branch(branch) => {
+                Err(format!("{link} is an issue: make the worktree of its branch, {branch}"))
+            },
+            pull @ Of::Pull(_) => Ok(pull),
+        }
+    }
+}
+
+impl fmt::Display for Of {
+    /// As wt takes it: a pull request's link in full, which wt tells from a
+    /// branch by its `://`, or the branch.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Of::Pull(link) => f.write_str(&link.url()),
+            Of::Branch(branch) => f.write_str(branch),
+        }
     }
 }
 
@@ -264,14 +318,24 @@ impl Remote {
     }
 }
 
+/// How a repository is laid out, as git says by its `core.bare`: bare, as wt
+/// clones one, with its worktrees beside its hidden `.bare`, or in it; or
+/// with a work tree, as git clones one, in whose `.git` wt would make the
+/// worktree, and luneta has it make none. Or git did not say, as where it
+/// did not answer in time, which is neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    Wt,
+    Git,
+    Unsaid,
+}
+
 /// A repository that is the pull request's: `by` which of its remotes, and
-/// whether it is `bare`, as wt clones one, with its worktrees beside its
-/// hidden `.bare`, or in it. Of one git cloned, wt would make the worktree in
-/// its `.git`, and luneta has it make none there.
+/// how it is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Repository {
     by: Remote,
-    bare: bool,
+    layout: Layout,
 }
 
 /// How the repository `dir` is in is the pull request `link`'s, if it is,
@@ -282,7 +346,7 @@ fn repository(
     ssh_host: impl FnMut(&str) -> Option<String>,
 ) -> Option<Repository> {
     let remote = remote(&remotes_in(dir)?, link, ssh_host)?;
-    Some(Repository { by: Remote::of(&remote), bare: bare(dir) })
+    Some(Repository { by: Remote::of(&remote), layout: layout(dir) })
 }
 
 /// The name of the remote of `listed` that is of the pull request `link`'s
@@ -424,7 +488,7 @@ fn found(
     }
     let mut session: Option<(bool, Remote, usize)> = None;
     for (at, it) in worked.iter().enumerate() {
-        let Some(Repository { by, bare: true }) = repository_of(&it.dir) else {
+        let Some(Repository { by, layout: Layout::Wt }) = repository_of(&it.dir) else {
             continue;
         };
         let rank = (!it.here, by, at);
@@ -467,16 +531,23 @@ fn clone(
 
 /// Why no clone of `link`'s repository is for `wt add`, as what luneta has
 /// `seen` of each directory it looked in says: there is none, or one git
-/// cloned, in whose `.git` wt would make the worktree.
+/// cloned, in whose `.git` wt would make the worktree, or one git did not say
+/// how it is laid out.
 fn no_clone(link: &Link, seen: &HashMap<String, Option<Repository>>) -> String {
     let repository = link.repository();
-    let by_git = seen.iter().filter(|(_, it)| it.is_some_and(|it| !it.bare));
-    match by_git.map(|(dir, _)| dir).min() {
-        Some(dir) => format!(
+    let laid_out = move |layout: Layout| {
+        let dirs = seen.iter().filter(move |(_, it)| it.is_some_and(|it| it.layout == layout));
+        dirs.map(|(dir, _)| dir).min()
+    };
+    match (laid_out(Layout::Git), laid_out(Layout::Unsaid)) {
+        (Some(dir), _) => format!(
             "{dir} is in a clone of {repository} that git made, and wt would make the worktree \
              in its .git; wt clone it first"
         ),
-        None => format!(
+        (None, Some(dir)) => {
+            format!("git did not say whether {dir}, of {repository}, is in a clone wt made")
+        },
+        (None, None) => format!(
             "no session works in {repository}, nor does zoxide know a clone of it; wt clone it \
              first"
         ),
@@ -492,7 +563,7 @@ fn cloned(
 ) -> Option<usize> {
     let mut best: Option<(Remote, usize)> = None;
     for (at, dir) in dirs.iter().enumerate() {
-        if let Some(Repository { by, bare: true }) = repository_of(dir) {
+        if let Some(Repository { by, layout: Layout::Wt }) = repository_of(dir) {
             best = Some(best.map_or((by, at), |was| was.min((by, at))));
             if by == Remote::Origin {
                 break;
@@ -524,11 +595,15 @@ fn remotes_in(dir: &str) -> Option<String> {
     String::from_utf8(ran.answer().ok()?).ok()
 }
 
-/// Whether the repository `dir` is in is bare, as git says.
-fn bare(dir: &str) -> bool {
+/// How the repository `dir` is in is laid out, as git says.
+fn layout(dir: &str) -> Layout {
     let mut git = Command::new("git");
     lunetad::local_git(git.args(["-C", dir, "config", "--type=bool", "--get", "core.bare"]));
-    said(&mut git).as_deref() == Some("true")
+    match said(&mut git).as_deref() {
+        Some("true") => Layout::Wt,
+        Some("false") => Layout::Git,
+        _ => Layout::Unsaid,
+    }
 }
 
 /// The branch checked out in `dir`, as `git status` names it: its ref
@@ -612,7 +687,7 @@ fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     let luneta =
         env::current_exe().map_err(|error| format!("luneta cannot tell where it is: {error}"))?;
     let mut luneta = Command::new(luneta);
-    lunetad::local_git(luneta.args(["worktree", "--repo", dir, &link.wt()]));
+    lunetad::local_git(luneta.args(["worktree", "--repo", dir, &link.wt().to_string()]));
     // It fetches across the network, by ssh as like as not.
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
@@ -633,15 +708,15 @@ fn worktree(dir: &str, link: &Link) -> Result<String, String> {
     }
 }
 
-/// Makes a worktree of `branch`, or of the pull request it is the link of, in
-/// the repository `repo` is a directory of, as `wt add` does, by wt's own
-/// code, and prints where it is, or where one of the branch is already, on
-/// stdout, where nothing else is: wt prints nothing there, and has git print
-/// on stderr. Or prints why it made none, after `WHY`, on stderr, after what
-/// wt and git say there as they go. In a repository git cloned it makes
-/// none: wt would make it in its `.git`.
-pub fn make(repo: &str, branch: &str) -> ExitCode {
-    match made(repo, branch) {
+/// Makes a worktree `of` a branch or a pull request, in the repository `repo`
+/// is a directory of, as `wt add` does, by wt's own code, and prints where it
+/// is, or where one of the branch is already, on stdout, where nothing else
+/// is: wt prints nothing there, and has git print on stderr. Or prints why it
+/// made none, after `WHY`, on stderr, after what wt and git say there as they
+/// go. In a repository git cloned it makes none: wt would make it in its
+/// `.git`.
+pub fn make(repo: &str, of: &Of) -> ExitCode {
+    match made(repo, of) {
         Ok(worktree) => {
             println!("{}", worktree.display());
             ExitCode::SUCCESS
@@ -654,17 +729,30 @@ pub fn make(repo: &str, branch: &str) -> ExitCode {
 }
 
 /// Where `make` made the worktree, or found one of the branch, or why it
-/// made none.
-fn made(repo: &str, branch: &str) -> Result<PathBuf, String> {
+/// made none. Where a variable tells git where a repository is, it makes
+/// none: wt's git would read the repository it names, and `layout`'s the
+/// one `repo` is in, so that the clone luneta sees wt cloned may not be the
+/// one wt makes the worktree in.
+fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
+    let named = lunetad::GIT_REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
+    if let Some(name) = named {
+        return Err(format!("{name} is set, and git would take another repository for {repo}'s"));
+    }
     let wt_add = |error| format!("wt add: {error:#}");
     let found = Repo::discover(Some(Path::new(repo))).map_err(wt_add)?;
-    if !bare(repo) {
-        return Err(format!(
-            "{repo} is in a clone git made, and wt would make the worktree in its .git; wt \
-             clone it first"
-        ));
+    match layout(repo) {
+        Layout::Wt => {},
+        Layout::Git => {
+            return Err(format!(
+                "{repo} is in a clone git made, and wt would make the worktree in its .git; wt \
+                 clone it first"
+            ));
+        },
+        Layout::Unsaid => {
+            return Err(format!("git did not say whether {repo} is in a clone wt made"));
+        },
     }
-    let made = add::run(&found, branch, None, Fetch::Lazy).map_err(wt_add)?;
+    let made = add::run(&found, &of.to_string(), None, Fetch::Lazy).map_err(wt_add)?;
     Ok(made.path().to_owned())
 }
 
@@ -692,8 +780,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Found, Kind, Link, Remote, Repository, Worked, base, cloned, failure, found, no_clone,
-        remote,
+        Found, Kind, Layout, Link, Of, Remote, Repository, Worked, base, cloned, failure, found,
+        no_clone, remote,
     };
     use crate::sidebar::Listed;
 
@@ -713,11 +801,15 @@ mod tests {
 
     /// A repository wt cloned, that is the pull request's `by` a remote.
     fn by_wt(by: Remote) -> Repository {
-        Repository { by, bare: true }
+        Repository { by, layout: Layout::Wt }
     }
 
     /// One git cloned, that is the pull request's by its origin.
-    const BY_GIT: Repository = Repository { by: Remote::Origin, bare: false };
+    const BY_GIT: Repository = Repository { by: Remote::Origin, layout: Layout::Git };
+
+    /// One that is the pull request's by its origin, where git did not say
+    /// how it is laid out.
+    const UNSAID: Repository = Repository { by: Remote::Origin, layout: Layout::Unsaid };
 
     fn issue() -> Link {
         Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link")
@@ -756,12 +848,12 @@ mod tests {
             assert_eq!(pulled(text), None, "{text:?}");
         }
         assert_eq!(link().tab(), "#2736");
-        assert_eq!(link().wt(), "https://github.com/cashubtc/cdk/pull/2736");
+        assert_eq!(link().wt(), Of::Pull(link()));
     }
 
     /// An issue's link names it as a pull request's does, but for `issues`:
-    /// the agent takes it, and `wt add` the branch luneta has it make, or
-    /// find where a paste made it before. It is the pull request of its
+    /// the agent takes it, and `luneta worktree` the branch luneta has it
+    /// make, or find where a paste made it before. It is the pull request of its
     /// number, as GitHub counts the two in one sequence.
     #[test]
     fn a_link_is_of_an_issue_or_of_a_page_of_one() {
@@ -776,10 +868,45 @@ mod tests {
         assert_eq!(issue().to_string(), "cashubtc/cdk#2736");
         assert_eq!(issue().url(), "https://github.com/cashubtc/cdk/issues/2736");
         assert_eq!(issue().tab(), "#2736");
-        assert_eq!(issue().wt(), "issue-2736");
+        assert_eq!(issue().wt(), Of::Branch("issue-2736".to_owned()));
         // GitHub has one #2736 of cdk, of whichever page a link is.
         assert!(issue().is(&link()));
         assert_eq!(Link::parse("https://github.com/cashubtc/cdk/issues/0"), None);
+    }
+
+    /// `luneta worktree` takes a pull request's link as a paste does, with
+    /// no `https://` too, and hands wt the link in full, which wt tells from
+    /// a branch by its `://`: git would take the link with none for a
+    /// branch's name, and wt would make a new branch of it, with none of the
+    /// pull request's commits. An issue's link is no branch's, nor is any
+    /// other address.
+    #[test]
+    fn a_pull_request_s_link_is_one_with_no_scheme_and_no_address_is_a_branch() {
+        let handed = |text: &str| Of::parse(text).map(|of| of.to_string());
+        for text in [
+            "github.com/cashubtc/cdk/pull/2736",
+            "https://github.com/cashubtc/cdk/pull/2736/files",
+        ] {
+            assert_eq!(Of::parse(text), Ok(Of::Pull(link())), "{text:?}");
+            assert_eq!(handed(text), Ok(link().url()), "{text:?}");
+        }
+        assert_eq!(handed("feat/of"), Ok("feat/of".to_owned()));
+        assert_eq!(
+            Of::parse("github.com/cashubtc/cdk/issues/2736"),
+            Err("cashubtc/cdk#2736 is an issue: make the worktree of its branch, issue-2736"
+                .to_owned())
+        );
+        for text in [
+            "github.com/cashubtc/cdk/discussions/1",
+            "www.github.com/cashubtc",
+            "https://gitlab.com/cashubtc/cdk/-/merge_requests/1",
+        ] {
+            assert_eq!(
+                Of::parse(text),
+                Err(format!("{text} is no pull request's link on github.com")),
+                "{text:?}"
+            );
+        }
     }
 
     /// ssh's config gives GitHub another name, `github-work`, as its `Host`
@@ -885,24 +1012,28 @@ mod tests {
 
     /// Of the directories zoxide knows, the clone wt made that is the pull
     /// request's by its origin goes first, or else the first by another
-    /// remote. One git cloned is none, by any remote.
+    /// remote. One git cloned is none, by any remote, nor is one git did not
+    /// say how it is laid out.
     #[test]
     fn a_clone_is_the_first_by_its_origin_or_else_by_another_remote() {
-        let dirs = ["/a", "/git", "/fork/main", "/b", "/upstream", "/fork"].map(str::to_owned);
+        let dirs = ["/a", "/git", "/unsaid", "/fork/main", "/b", "/upstream", "/fork"]
+            .map(str::to_owned);
         let remotes = |dir: &str| match dir {
             "/fork/main" | "/fork" => Some(by_wt(Remote::Other)),
             "/upstream" => Some(by_wt(Remote::Origin)),
             "/git" => Some(BY_GIT),
+            "/unsaid" => Some(UNSAID),
             _ => None,
         };
-        assert_eq!(cloned(&dirs, remotes), Some(4));
-        assert_eq!(cloned(&dirs[..4], remotes), Some(2));
-        assert_eq!(cloned(&dirs[..2], remotes), None);
+        assert_eq!(cloned(&dirs, remotes), Some(5));
+        assert_eq!(cloned(&dirs[..5], remotes), Some(3));
+        assert_eq!(cloned(&dirs[..3], remotes), None);
     }
 
     /// With no clone for `wt add`, luneta says to have wt clone one, and
     /// names one git made where it saw one, as wt would make the worktree in
-    /// its `.git`.
+    /// its `.git`; or else one git did not say how it is laid out, which it
+    /// takes for neither.
     #[test]
     fn with_no_clone_for_wt_luneta_says_of_one_git_made() {
         let seen = |seen: &[(&str, Option<Repository>)]| -> HashMap<String, Option<Repository>> {
@@ -913,10 +1044,19 @@ mod tests {
             "no session works in cashubtc/cdk, nor does zoxide know a clone of it; wt clone it \
              first"
         );
+        let by_git = "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make \
+                      the worktree in its .git; wt clone it first";
         assert_eq!(
             no_clone(&link(), &seen(&[("/dots", None), ("/w/cdk/src", Some(BY_GIT))])),
-            "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make the \
-             worktree in its .git; wt clone it first"
+            by_git
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/a/cdk", Some(UNSAID)), ("/w/cdk/src", Some(BY_GIT))])),
+            by_git
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/dots", None), ("/a/cdk", Some(UNSAID))])),
+            "git did not say whether /a/cdk, of cashubtc/cdk, is in a clone wt made"
         );
     }
 

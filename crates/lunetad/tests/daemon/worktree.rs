@@ -28,8 +28,29 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// `luneta worktree` of `branch`, in the repository `dir` is a directory of.
 fn worktree(dir: &Path, branch: &str) -> Output {
+    worktree_with(dir, branch, None)
+}
+
+/// `luneta worktree` of `branch`, in the repository `dir` is a directory of,
+/// with a variable that tells git where a repository is, `named`, where
+/// there is one, and none but it.
+fn worktree_with(dir: &Path, branch: &str, named: Option<(&str, &Path)>) -> Output {
     let mut luneta = Vars::default().command(LUNETA);
+    lunetad::local_git(&mut luneta);
+    if let Some((name, repository)) = named {
+        luneta.env(name, repository);
+    }
     luneta.arg("worktree").arg("--repo").arg(dir).arg(branch).output().unwrap()
+}
+
+/// A clone as wt makes one, of a repository it makes beside it, `up`, with
+/// the repository bare in `.bare` and `main` checked out beside it, at
+/// `clone`.
+fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
+    origin(up);
+    let (up, bare) = (up.display().to_string(), clone.join(".bare"));
+    git(scratch, &["clone", "-q", "--bare", &up, &bare.display().to_string()]);
+    git(&bare, &["worktree", "add", "-q", "../main", "main"]);
 }
 
 /// A repository with a commit on `main`, and a branch `feat`, at `dir`.
@@ -51,9 +72,7 @@ fn a_worktree_is_made_beside_the_others_and_said_alone_on_stdout() {
     // temporary folder is through a link.
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let (up, clone) = (scratch.join("up"), scratch.join("clone"));
-    origin(&up);
-    git(&scratch, &["clone", "-q", "--bare", &up.display().to_string(), "clone/.bare"]);
-    git(&clone.join(".bare"), &["worktree", "add", "-q", "../main", "main"]);
+    cloned_as_wt(&scratch, &up, &clone);
 
     let made = worktree(&clone.join("main"), "feat");
     let stderr = String::from_utf8_lossy(&made.stderr);
@@ -89,4 +108,48 @@ fn in_a_clone_git_made_none_is_made_and_why_comes_last_on_stderr() {
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
     assert!(!plain.join(".git").join("feat").exists());
+}
+
+/// Where a variable tells git where a repository is, wt's git would read the
+/// one it names, and the clone luneta sees wt made may not be the one wt
+/// makes the worktree in: here, in the `.git` of a clone git made. luneta
+/// makes none, and says why last on stderr.
+#[test]
+fn with_git_told_of_another_repository_none_is_made() {
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone, plain) = (scratch.join("up"), scratch.join("clone"), scratch.join("plain"));
+    cloned_as_wt(&scratch, &up, &clone);
+    git(&scratch, &["clone", "-q", &up.display().to_string(), "plain"]);
+
+    let main = clone.join("main");
+    let refused = worktree_with(&main, "feat", Some(("GIT_DIR", &plain.join(".git"))));
+    assert!(!refused.status.success());
+    assert_eq!(refused.stdout, b"");
+    let why = format!(
+        "luneta: GIT_DIR is set, and git would take another repository for {}'s",
+        main.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
+    assert!(!plain.join(".git").join("feat").exists());
+    assert!(!clone.join("feat").exists());
+}
+
+/// An issue's link with no `https://`, which git would take for a branch's
+/// name, as wt would make a new branch of, is refused as `luneta worktree`
+/// is asked, and no worktree is made.
+#[test]
+fn a_link_with_no_scheme_is_no_branch_s_name() {
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("clone"));
+    cloned_as_wt(&scratch, &up, &clone);
+
+    let refused = worktree(&clone.join("main"), "github.com/o/n/issues/14");
+    assert!(!refused.status.success());
+    assert_eq!(refused.stdout, b"");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let why = "o/n#14 is an issue: make the worktree of its branch, issue-14";
+    assert!(stderr.contains(why), "{stderr}");
+    assert!(!clone.join("github.com-o-n-issues-14").exists());
 }
