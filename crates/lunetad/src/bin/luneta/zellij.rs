@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -46,6 +47,10 @@ const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
 /// What names the pane a zellij command runs in, in its variables, which
 /// zellij opens a pane beside.
 const PANE_VAR: &str = "ZELLIJ_PANE_ID";
+
+/// What names your shell, in luneta's variables, as in those of the zellij
+/// it starts, which runs it where its config names no other.
+const SHELL_VAR: &str = "SHELL";
 
 /// What names the pane you asked luneta's ask box from, in the variables of
 /// the agent it runs, which runs in no pane: the pane luneta's zellij was on
@@ -757,6 +762,20 @@ fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, Str
 /// Opens `tab` in `session`, as `opening` does, and says its id, and the
 /// panes of the session with it in.
 fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
+    let said = answered(&mut new_tab(session, tab, env::var_os(SHELL_VAR).as_deref()))?;
+    let Ok(tab) = said.trim().parse::<u32>() else {
+        return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
+    };
+    Ok((tab, laid(session)?))
+}
+
+/// The zellij that opens `tab` in `session`. A tab with no command of its
+/// own runs `shell`, your shell, as its command, and closes as it ends, as a
+/// pane of zellij's own shell does: zellij starts a command in the tab's
+/// `--cwd`, but its own shell where the session's template for a tab says,
+/// and the template of a session zellij brought back says the directory the
+/// session was in. Where `shell` says none, zellij starts its own.
+fn new_tab(session: &str, tab: &Tab, shell: Option<&OsStr>) -> Command {
     let Tab { cwd, name, command: runs } = tab;
     let mut command = Command::new("zellij");
     quiet(&mut command);
@@ -764,12 +783,10 @@ fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
     command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
     if !runs.is_empty() {
         command.arg("--").args(runs);
+    } else if let Some(shell) = shell.filter(|shell| !shell.is_empty()) {
+        command.args(["--close-on-exit", "--"]).arg(shell);
     }
-    let said = answered(&mut command)?;
-    let Ok(tab) = said.trim().parse::<u32>() else {
-        return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
-    };
-    Ok((tab, laid(session)?))
+    command
 }
 
 /// What `command`, a zellij of `quiet`'s, said on its stdout as it did what
@@ -1721,6 +1738,29 @@ mod tests {
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 3..], ["zellij", "attach", "elo"]);
+    }
+
+    /// A tab with no command runs your shell as one, which zellij starts in
+    /// the tab's directory also in a session it brought back, and closes as
+    /// it ends; zellij's own shell where luneta knows none. A command runs as
+    /// it is.
+    #[test]
+    fn a_tab_with_no_command_runs_your_shell_as_one() {
+        let opened = |command: &[&str], shell: Option<&str>| {
+            let command = command.iter().map(|arg| (*arg).to_owned()).collect();
+            let tab = Tab { cwd: "/w/n/feat".to_owned(), name: Some("#5".to_owned()), command };
+            let new_tab = new_tab("n", &tab, shell.map(OsStr::new));
+            let args = new_tab.get_args().map(|arg| arg.to_string_lossy().into_owned());
+            args.collect::<Vec<_>>()
+        };
+        let mut opens = vec!["--session", "n", "action", "new-tab", "--no-focus"];
+        opens.extend(["--cwd", "/w/n/feat", "--name", "#5"]);
+        let fish = [&opens[..], &["--close-on-exit", "--", "/bin/fish"]].concat();
+        assert_eq!(opened(&[], Some("/bin/fish")), fish);
+        let claude = [&opens[..], &["--", "claude", "go"]].concat();
+        assert_eq!(opened(&["claude", "go"], Some("/bin/fish")), claude);
+        assert_eq!(opened(&[], Some("")), opens);
+        assert_eq!(opened(&[], None), opens);
     }
 
     /// luneta tries the sessions for one to go on in as the picker lists
