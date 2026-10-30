@@ -216,13 +216,18 @@ pub enum Of {
 impl Of {
     /// What `text` names: a pull request, where it is one's link as
     /// `Link::parse` takes one, or else a branch, by any name but an address
-    /// on GitHub or another link. Not an issue's link: luneta's paste makes
-    /// its branch, from the default branch of its repository as GitHub has
-    /// it, before it has the worktree made.
+    /// on GitHub or another link, or one with a `-` first, which git gives no
+    /// branch: wt hands the name to `git fetch`, which would take it for an
+    /// option, and with `--upload-pack` run a command of the name's. Not an
+    /// issue's link: luneta's paste makes its branch, from the default branch
+    /// of its repository as GitHub has it, before it has the worktree made.
     pub fn parse(text: &str) -> Result<Of, String> {
         let Some(link) = Link::parse(text) else {
             if text.contains("://") || on_github(text).is_some() {
                 return Err(format!("{} is no pull request's link on {GITHUB}", text.trim()));
+            }
+            if text.starts_with('-') {
+                return Err(format!("{text} is no branch's name: git starts none with -"));
             }
             return Ok(Of::Branch(text.to_owned()));
         };
