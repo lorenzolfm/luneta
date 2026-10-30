@@ -23,7 +23,8 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
 use crate::host::{
-    answered, eventually, folder_in, info, start, Host, Running, Vars, LUNETA, LUNETAD, SOCKET,
+    answered, eventually, folder_in, info, install, script, start, Host, Running, Vars, LUNETA,
+    LUNETAD, SOCKET,
 };
 
 /// The version of the stand-in for a daemon an upgrade left running.
@@ -96,23 +97,6 @@ fn stop(pid: u32) {
 /// What the daemons that luneta started wrote in their log.
 fn log(host: &Host) -> String {
     fs::read_to_string(host.folder().join(folder::LOG)).unwrap()
-}
-
-/// Puts a program at `to`, a copy of `from`. A process of its own writes it,
-/// so that the test's never holds it open to write: a process that another
-/// test starts meanwhile would take that along until it runs its program,
-/// and until then the copy would not run, as its file is busy.
-fn install(from: &Path, to: &Path) {
-    let mut install = Command::new("install");
-    let installed = install.args(["-m", "755"]).arg(from).arg(to).status().unwrap();
-    assert!(installed.success(), "{} was not installed at {}", from.display(), to.display());
-}
-
-/// Writes a shell script at `path`.
-fn script(path: &Path, text: &str) {
-    let draft = path.with_extension("draft");
-    fs::write(&draft, format!("#!/bin/sh\n{text}")).unwrap();
-    install(&draft, path);
 }
 
 /// A copy of `luneta` in a folder of its own, where nothing is beside it.

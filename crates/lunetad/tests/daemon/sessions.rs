@@ -666,6 +666,33 @@ fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
     shows_at_once(&host, &cwd, "a branch checked out in it", switched, on("other"));
 }
 
+/// A `.git` folder in a directory of a work tree that does not read, as one
+/// another user made there, is passed by as git passes it by: the work tree
+/// is watched all the same, and an edit beside it shows at once.
+#[test]
+fn a_git_folder_that_does_not_read_leaves_the_work_tree_it_is_in_watched() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    let (top, src) = (tree.path(), tree.path().join("src"));
+    assert!(git(top, &["init", "-q", "-b", "main"]));
+    fs::create_dir(&src).unwrap();
+    commit(top, "src/lib.rs", "start\n");
+    let unread = src.join(".git");
+    let mode = |mode| fs::set_permissions(&unread, Permissions::from_mode(mode)).unwrap();
+    fs::create_dir(&unread).unwrap();
+    mode(0o000);
+    let cwd = src.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says how the tree stands", || checkout(&host, &cwd));
+
+    let modified = |it: &Checkout| it.changes.unwrap_or_default().modified == 1;
+    let edited = || fs::write(src.join("lib.rs"), "edited\n").unwrap();
+    shows_at_once(&host, &cwd, "an edit beside it", edited, modified);
+    mode(0o755);
+}
+
 /// A directory that moves into a work tree, in the place of one git tracks
 /// that moved away, is watched as one made anew there is: an edit in it shows
 /// at once.
