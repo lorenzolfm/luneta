@@ -7,7 +7,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lunetad::api::shell::{Doing, Ended, Going, Stopped};
+use lunetad::api::shell::{ended, Doing, Ended, Going, Stopped};
 use lunetad::api::{self, Front};
 use prost_types::{Duration, Timestamp};
 use rustix::fs::{Mode, OFlags};
@@ -100,7 +100,7 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
     let tty = terminal.path.display();
     say(&host, "work", 1, started, &format!("going {started} {tty} cargo build"));
     say(&host, "work", 2, started, &format!("ended {started} 101 41873 cargo test"));
-    say(&host, "work", 3, started, &format!("ended {started} - 7120 make"));
+    say(&host, "work", 3, started, &format!("ended {started} fg 7120 make"));
     say(&host, "work", 4, started, &format!("stopped {started} nvim"));
     say(&host, "work", 5, started, &format!("going {started} /dev/luneta-gone sleep 30"));
     let writing = host.runtime.path().join(format!("luneta/commands/work/6.{started}.new"));
@@ -124,13 +124,13 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
             doing(Doing::Ended(Ended {
                 command: "cargo test".to_owned(),
                 at,
-                status: Some(101),
+                ending: Some(ended::Ending::Status(101)),
                 took: took(41, 873),
             })),
             doing(Doing::Ended(Ended {
                 command: "make".to_owned(),
                 at,
-                status: None,
+                ending: Some(ended::Ending::Resumed(ended::Resumed {})),
                 took: took(7, 120),
             })),
             doing(Doing::Stopped(Stopped { command: "nvim".to_owned(), at })),

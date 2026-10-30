@@ -59,6 +59,7 @@ use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
 use crate::picker::{self, List, Picked, Picker};
+use crate::printed::{self, Printed};
 use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
@@ -100,6 +101,9 @@ pub enum Event {
     /// Where the key of the menu numbered `menu`, for a pull request or an
     /// issue, goes, with the worktree made, or why luneta found nothing.
     Pulled { menu: u64, ready: Result<Ready, String> },
+    /// What the pane of the menu numbered `menu` printed after its last
+    /// command's line, as luneta kept it, or why it kept nothing.
+    Printed { menu: u64, printed: Result<Printed, String> },
     /// What came of the brief numbered `number`.
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
@@ -832,6 +836,10 @@ impl App {
                 let asked = self.sidebar.pulled(menu, ready);
                 self.follow(asked);
             },
+            Event::Printed { menu, printed } => {
+                let asked = self.sidebar.printed(menu, printed);
+                self.follow(asked);
+            },
             Event::Briefed { number, written } => {
                 if let Some(Over::Brief(briefing)) = &mut self.focus.over
                     && briefing.number() == number
@@ -1396,6 +1404,9 @@ impl App {
             },
             Asked::Pull { menu, link, worked } => pull::prepare(menu, link, worked, &self.events),
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
+            Asked::Printed { menu, session, pane, ended } => {
+                printed::read(menu, &session, pane, ended, &self.events);
+            },
             Asked::Brief(brief) => {
                 self.briefs += 1;
                 let folder = self.claude_folder.clone();

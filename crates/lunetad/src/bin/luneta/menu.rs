@@ -7,7 +7,9 @@
 //! row's pane can run, for an agent to start on the one you pick, beside that
 //! pane. `a` opens the ask box, for an agent to do what you say in words, as
 //! the menu would. `c` opens the Claude group, a key for each of a few skills, which
-//! starts an agent on it there. `n` opens the New group: your shell beside the
+//! starts an agent on it there, and `f` and `e`, which start one on what the
+//! command a shell ran last printed, to fix what went wrong or explain it.
+//! `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in. `d`
 //! opens the Delete group, which closes the pane or deletes its session, and
 //! asks first when that would end an agent at work. `b` opens the Brief group,
@@ -31,6 +33,8 @@
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use luneta_protocol::said::Said;
+use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -40,8 +44,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::printed::Printed;
 use crate::pull::{At, Kind, Link, Ready};
-use crate::sidebar::{self, ACCENT, LIT, Mark, NAME, Place, TAG};
+use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::SessionName;
@@ -263,6 +268,58 @@ impl New {
     }
 }
 
+/// A key of the Claude group that starts an agent on what the command a
+/// shell ran last printed, beside its pane: to fix what went wrong, or to
+/// explain it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Last {
+    Fix,
+    Explain,
+}
+
+impl Last {
+    /// Each, in the order the Claude group shows them, after its skills.
+    const ALL: [Last; 2] = [Last::Fix, Last::Explain];
+
+    const fn key(self) -> char {
+        match self {
+            Last::Fix => 'f',
+            Last::Explain => 'e',
+        }
+    }
+
+    /// What the menu says the key does.
+    const fn does(self) -> &'static str {
+        match self {
+            Last::Fix => "fix the last command",
+            Last::Explain => "explain the last command",
+        }
+    }
+
+    /// What the agent is asked, before it is told of the command.
+    const fn asks(self) -> &'static str {
+        match self {
+            Last::Fix => "Fix this.",
+            Last::Explain => "Explain this.",
+        }
+    }
+}
+
+/// No key of the Claude group's skills is one of `Last`'s, which would hide
+/// it.
+const _: () = {
+    let mut at = 0;
+    while at < Last::ALL.len() {
+        let mut skill = 0;
+        while skill < SKILL_KEYS.len() {
+            let alike = SKILL_KEYS[skill].0 == Last::ALL[at].key();
+            assert!(!alike, "two keys alike in the Claude group");
+            skill += 1;
+        }
+        at += 1;
+    }
+};
+
 /// What a key of the menu for a pull request or an issue does, in a tab of
 /// the session that works in its repository, or where its branch is checked
 /// out. The menu for a link of either kind has each, and the link's kind
@@ -315,6 +372,9 @@ enum Entry {
     Group { key: char, name: &'static str, entries: Vec<Entry> },
     /// A key of the Claude group: starts an agent on the prompt, a skill.
     Start { key: char, prompt: &'static str },
+    /// A key of the Claude group: starts an agent on what the command the
+    /// pane's shell ran last printed.
+    Last(Last),
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
     /// A key of the Delete group: closes the pane the menu is for, or deletes
@@ -340,6 +400,7 @@ impl Entry {
         match self {
             Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
             Entry::New(new) => new.key(),
+            Entry::Last(last) => last.key(),
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
             Entry::Pull(pull, kind) => pull.key(*kind),
@@ -359,6 +420,8 @@ enum Pressed {
     Search,
     /// Starts an agent on the prompt.
     Start(String),
+    /// Starts an agent on what the pane's shell printed last.
+    Last(Last),
     /// Opens a pane, a tab or a session.
     New(New),
     /// Closes the pane the menu is for, or deletes its session, by `key`.
@@ -385,7 +448,8 @@ struct Keys {
 impl Keys {
     /// The menu's keys: `/`, which opens the search over the skills, `a`,
     /// which opens the ask box, and the Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
-    /// agent on a skill, `n p`, `n t` and `n s` open a pane, a tab and a
+    /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
+    /// last, `n p`, `n t` and `n s` open a pane, a tab and a
     /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
     /// deletes its session, and `b z`, `b s` and `b h` brief you on every
     /// session, its session and what the menu is for.
@@ -397,7 +461,11 @@ impl Keys {
             Entry::Group {
                 key: SKILLS,
                 name: SKILLS_NAME,
-                entries: SKILL_KEYS.into_iter().map(start).collect(),
+                entries: SKILL_KEYS
+                    .into_iter()
+                    .map(start)
+                    .chain(Last::ALL.map(Entry::Last))
+                    .collect(),
             },
             Entry::Group {
                 key: NEW,
@@ -486,6 +554,7 @@ impl Keys {
         };
         match &entries[at] {
             Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
+            Entry::Last(last) => return Pressed::Last(*last),
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
             Entry::Brief(scope) => return Pressed::Brief(*scope),
@@ -584,39 +653,157 @@ struct Delete {
     scope: Scope,
 }
 
-/// What the menu is for: the row highlighted as it opened, the directory
-/// its pane works in, or its agent while zellij has not said, and the branch
-/// checked out there, as the daemon last said. A session's row has neither,
-/// having no pane.
+/// What the menu is for: the row highlighted as it opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Target {
-    pub place: Place,
+pub enum Target {
+    /// A session's row, which has no pane.
+    Session(Listed),
+    Pane(PaneRow),
+}
+
+/// A pane's row, as the menu is for it: the directory the pane works in, or
+/// its agent while zellij has not said, the branch checked out there, and
+/// what its shell said it ran last, as the daemon last said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneRow {
+    pub session: Listed,
+    pub pane: u32,
     pub cwd: Option<String>,
     pub branch: Option<String>,
+    pub ran: Ran,
+}
+
+/// What the shell in the pane of the menu's row said last through luneta's
+/// hook, as the daemon passed it on: a key that starts an agent on what its
+/// last command printed takes one that ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ran {
+    /// Nothing: no shell with the hook runs in the pane, or one that has run
+    /// nothing yet.
+    Untold,
+    /// What this luneta cannot read: what a daemon newer than its own says,
+    /// or a command of no words, which the protocol never sends.
+    Unknown,
+    /// A command it runs still.
+    Going(Said),
+    /// A job it stopped, with `Ctrl z`, which waits to be brought back.
+    Stopped(Said),
+    /// The command it ran last, which ended.
+    Ended(Ended),
+}
+
+/// The command a shell ran last, which ended: as `ending` says, where the
+/// shell can say how, at `at`, to the second, which tells it from another
+/// run of the same command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ended {
+    pub command: Said,
+    pub ending: Option<Ending>,
+    pub at: SystemTime,
 }
 
 impl Target {
+    /// The row, as the sidebar places it.
+    pub fn place(&self) -> Place {
+        match self {
+            Target::Session(session) => Place::Session(session.clone()),
+            Target::Pane(row) => Place::Pane { session: row.session.clone(), pane: row.pane },
+        }
+    }
+
+    /// Its session.
+    pub fn listed(&self) -> &Listed {
+        match self {
+            Target::Session(session) | Target::Pane(PaneRow { session, .. }) => session,
+        }
+    }
+
+    /// The directory its pane works in, where the daemon has said it.
+    pub fn cwd(&self) -> Option<&str> {
+        match self {
+            Target::Session(_) => None,
+            Target::Pane(row) => row.cwd.as_deref(),
+        }
+    }
+
+    /// The branch checked out where its pane works.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            Target::Session(_) => None,
+            Target::Pane(row) => row.branch.as_deref(),
+        }
+    }
+
     /// What luneta's Delete group deletes on the row: its pane, or on a
     /// session's row, its session.
     fn deletes(&self) -> Scope {
-        self.place.pane().map_or(Scope::Session, Scope::Pane)
+        match self {
+            Target::Session(_) => Scope::Session,
+            Target::Pane(row) => Scope::Pane(row.pane),
+        }
     }
 
     /// The pane a key starts an agent or opens a pane beside, and the
-    /// directory it works in, where a tab or a session opens too, or why
-    /// there is none: a session's row has no pane, and a pane the daemon has
-    /// said no directory of yet, nor of an agent in it, opens nothing, rather
-    /// than wherever zellij runs.
+    /// directory it works in, or why there is none: a session's row has no
+    /// pane.
     fn beside(&self) -> Result<(u32, String), String> {
-        let Some(pane) = self.place.pane() else {
-            return Err(NO_ROW_PANE.to_owned());
-        };
+        match self {
+            Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
+            Target::Pane(row) => row.beside(),
+        }
+    }
+
+    /// What a key that starts an agent on what the pane's shell printed
+    /// last starts it on, beside the pane, in the directory it works in, or
+    /// why it starts none: a session's row has no pane.
+    fn ended(&self) -> Result<(u32, String, Ended), String> {
+        match self {
+            Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
+            Target::Pane(row) => row.ended(),
+        }
+    }
+}
+
+impl PaneRow {
+    /// The pane a key starts an agent or opens a pane beside, and the
+    /// directory it works in, where a tab or a session opens too, or why
+    /// there is none: a pane the daemon has said no directory of yet, nor of
+    /// an agent in it, opens nothing, rather than wherever zellij runs.
+    fn beside(&self) -> Result<(u32, String), String> {
         let Some(cwd) = self.cwd.clone() else {
             return Err(format!(
-                "menu: luneta does not know yet where pane {pane} works; try again in a moment"
+                "menu: luneta does not know yet where pane {} works; try again in a moment",
+                self.pane
             ));
         };
-        Ok((pane, cwd))
+        Ok((self.pane, cwd))
+    }
+
+    /// What a key that starts an agent on what the pane's shell printed
+    /// last starts it on, beside the pane, in the directory it works in, or
+    /// why it starts none: the shell must be at its prompt, after a command
+    /// whose end its hook said.
+    fn ended(&self) -> Result<(u32, String, Ended), String> {
+        let (beside, cwd) = self.beside()?;
+        match &self.ran {
+            Ran::Ended(ended) => Ok((beside, cwd, ended.clone())),
+            Ran::Going(command) => Err(format!(
+                "menu: pane {beside} runs `{}` still, and what it prints is not over",
+                command.as_str()
+            )),
+            Ran::Stopped(command) => Err(format!(
+                "menu: `{}` is stopped in pane {beside}, and not over; bring it back with `fg`",
+                command.as_str()
+            )),
+            Ran::Unknown => Err(format!(
+                "menu: what pane {beside}'s shell ran is in words this luneta cannot read, as a \
+                 newer lunetad's"
+            )),
+            Ran::Untold => Err(format!(
+                "menu: pane {beside} has said of no command it ran last; that takes a shell with \
+                 luneta's hook, at its prompt"
+            )),
+        }
     }
 }
 
@@ -634,6 +821,22 @@ fn claude(prompt: &str, branch: Option<&str>) -> Vec<String> {
         });
     }
     command.push(prompt.to_owned());
+    command
+}
+
+/// Claude Code on `prompt`, let read `file`, where there is one, with no
+/// question asked: luneta keeps what a shell printed outside the directory
+/// the agent works in, where Claude Code asks first. A rule names a path
+/// from the root with another `/` before it.
+fn claude_reading(prompt: String, file: Option<&str>) -> Vec<String> {
+    let mut command = vec![CLAUDE.to_owned()];
+    if let Some(file) = file {
+        command.push("--allowedTools".to_owned());
+        command.push(format!("Read(/{file})"));
+        // The flag takes every word after it as another tool, up to this.
+        command.push("--".to_owned());
+    }
+    command.push(prompt);
     command
 }
 
@@ -678,6 +881,9 @@ pub enum Wants {
     /// luneta to find where a key of the menu for the pull request or the
     /// issue goes, and to have its worktree made, for `pulled`.
     Pull(Link),
+    /// luneta to keep what the shell in `pane` printed after the line
+    /// `ended` was typed on, for `printed`.
+    Printed { pane: u32, ended: Ended },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, for luneta
@@ -738,6 +944,10 @@ enum Stage {
     /// zellij opens what a key asked for, for luneta to take its client
     /// there. Keys do nothing but close the menu.
     Opening(Keys),
+    /// The key `last` waits for luneta to keep what the pane's shell
+    /// printed after `ended`, for an agent on it beside the pane `beside`,
+    /// in `cwd`. Keys do nothing but close the menu.
+    Reading { keys: Keys, last: Last, beside: u32, cwd: String, ended: Ended },
     /// The menu for the pull request or the issue `link`, which a paste
     /// opened, at `step`. Once luneta has found where its keys go, its target
     /// is there.
@@ -824,6 +1034,7 @@ impl Menu {
             | Stage::Choosing(_)
             | Stage::Asking { .. }
             | Stage::Opening(_)
+            | Stage::Reading { .. }
             | Stage::Pull { .. } => None,
         }
     }
@@ -844,6 +1055,11 @@ impl Menu {
             Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
             _ => None,
         }
+    }
+
+    /// Whether a key waits for luneta to keep what the pane's shell printed.
+    pub fn reading(&self) -> bool {
+        matches!(self.stage, Stage::Reading { .. })
     }
 
     /// Whether a key of the menu for a pull request or an issue waits for
@@ -874,9 +1090,16 @@ impl Menu {
                 },
                 Pressed::Start(prompt) => match target.beside() {
                     Ok((beside, cwd)) => {
-                        let command = claude(&prompt, target.branch.as_deref());
+                        let command = claude(&prompt, target.branch());
                         let opens = Opens::Pane { beside, command };
                         stays(Stage::Opening(keys), Wants::Open { cwd, opens })
+                    },
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                Pressed::Last(last) => match target.ended() {
+                    Ok((beside, cwd, ended)) => {
+                        let wants = Wants::Printed { pane: beside, ended: ended.clone() };
+                        stays(Stage::Reading { keys, last, beside, cwd, ended }, wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -897,11 +1120,13 @@ impl Menu {
                     stays(Stage::Planning { keys, delete, agreed: None }, Wants::Plan(scope))
                 },
                 Pressed::Brief(scope) => {
-                    Did::Closed(Done::Brief { scope, place: target.place.clone() })
+                    Did::Closed(Done::Brief { scope, place: target.place() })
                 },
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
-            Stage::Planning { .. } | Stage::Opening(_) | Stage::Pull { .. } if closes(key) => {
+            Stage::Planning { .. } | Stage::Opening(_) | Stage::Reading { .. } | Stage::Pull { .. }
+                if closes(key) =>
+            {
                 Did::Closed(Done::Nothing)
             },
             // `Backspace` goes out of the menu from its first group, and the
@@ -918,9 +1143,10 @@ impl Menu {
                 },
                 None => stays(Stage::Pull { link, step: Step::Choosing }, Wants::Nothing),
             },
-            stage @ (Stage::Planning { .. } | Stage::Opening(_) | Stage::Pull { .. }) => {
-                stays(stage, Wants::Nothing)
-            },
+            stage @ (Stage::Planning { .. }
+            | Stage::Opening(_)
+            | Stage::Reading { .. }
+            | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
                 Answer::Yes => {
                     let planning = Stage::Planning { keys, delete, agreed: Some(plan) };
@@ -984,8 +1210,9 @@ impl Menu {
                 claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
             },
         };
-        let opening = |place: Place, opens: Opens| {
-            let target = Target { place, cwd: Some(worktree.clone()), branch: branch.clone() };
+        let opening = |session: Listed, pane: u32, opens: Opens| {
+            let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Untold);
+            let target = Target::Pane(PaneRow { session, pane, cwd, branch, ran });
             let stage = Stage::Pull { link: link.clone(), step: Step::Waiting(Wait::Opening) };
             Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
         };
@@ -994,11 +1221,11 @@ impl Menu {
                 Did::Closed(Done::Go(Place::Pane { session, pane }))
             },
             (At::There { session, pane }, Pull::Agent) => {
-                opening(Place::Pane { session, pane }, Opens::Pane { beside: pane, command })
+                opening(session, pane, Opens::Pane { beside: pane, command })
             },
             (At::Session { session, pane }, _) => {
                 let opens = Opens::Tab { name: Some(link.tab()), command };
-                opening(Place::Pane { session, pane }, opens)
+                opening(session, pane, opens)
             },
             (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
@@ -1007,6 +1234,43 @@ impl Menu {
                 Did::Stays(Menu { number, target, stage }, wants)
             },
         }
+    }
+
+    /// What the shell of the menu's row ran, as the daemon says it now: one
+    /// may have ended, or begun, since the menu opened.
+    pub fn reran(&mut self, ran: Ran) {
+        if let Target::Pane(row) = &mut self.target {
+            row.ran = ran;
+        }
+    }
+
+    /// What the key that waits on what the pane's shell printed does, now
+    /// that luneta kept it, as `printed` says, or why it kept nothing: opens
+    /// an agent on it beside the pane, and waits for zellij to open it. One
+    /// that the shell ran another command since, as the daemon says, or
+    /// went, kept what that printed, or some of it, and opens none. One run
+    /// in the moment before the daemon heard of it goes unseen.
+    pub fn printed(self, printed: Result<Printed, String>) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Reading { keys, last, beside, cwd, ended } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
+        let printed = match printed {
+            Ok(printed) => printed,
+            Err(why) => {
+                return Did::Closed(Done::Wrong(format!("menu: what pane {beside} printed: {why}")));
+            },
+        };
+        if !matches!(&target, Target::Pane(PaneRow { ran: Ran::Ended(now), .. }) if *now == ended) {
+            return Did::Closed(Done::Wrong(format!(
+                "menu: pane {beside}'s shell went on as luneta read what `{}` printed; ask again",
+                ended.command.as_str()
+            )));
+        }
+        let prompt = printed.prompt(last.asks(), &ended);
+        let opens = Opens::Pane { beside, command: claude_reading(prompt, printed.file()) };
+        let stage = Stage::Opening(keys);
+        Did::Stays(Menu { number, target, stage }, Wants::Open { cwd, opens })
     }
 
     /// Fills the search box with what the finder said, while it is open.
@@ -1076,9 +1340,10 @@ impl Menu {
     /// Whether the search box over the skills is open.
     fn searching(&self) -> bool {
         match &self.stage {
-            Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
-                keys.search.is_some()
-            },
+            Stage::Choosing(keys)
+            | Stage::Planning { keys, .. }
+            | Stage::Opening(keys)
+            | Stage::Reading { keys, .. } => keys.search.is_some(),
             Stage::Asking { .. } | Stage::Pull { .. } => false,
         }
     }
@@ -1093,7 +1358,7 @@ impl Menu {
     /// the spinner at `frame`.
     fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
-        let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
+        let right = self.target.cwd().map(sidebar::short_cwd).unwrap_or_default();
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { link, step } => {
@@ -1109,7 +1374,10 @@ impl Menu {
                 };
                 (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
-            Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
+            Stage::Choosing(keys)
+            | Stage::Planning { keys, .. }
+            | Stage::Opening(keys)
+            | Stage::Reading { keys, .. } => {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
                 if let Some(search) = &keys.search {
                     let moves =
@@ -1377,6 +1645,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
             spans.push(Span::styled(GROUP, Style::new().fg(TAG)));
         },
         Entry::Start { prompt, .. } => spans.push(does(prompt)),
+        Entry::Last(last) => spans.push(does(last.does())),
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
         Entry::Brief(scope) => spans.push(does(scope.does())),
@@ -1568,6 +1837,7 @@ mod tests {
 
     use super::*;
     use crate::close::{self, Deletes, Doing, Seat, Subject};
+    use crate::printed::Kept;
     use crate::pull::{At, Link, Ready};
     use crate::sidebar::Listed;
     use crate::skills::Skill;
@@ -1578,16 +1848,26 @@ mod tests {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
     }
 
-    fn pane_row() -> Target {
-        Target {
-            place: Place::Pane { session: listed(), pane: 4 },
+    fn said(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
+    fn row() -> PaneRow {
+        PaneRow {
+            session: listed(),
+            pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
+            ran: Ran::Untold,
         }
     }
 
+    fn pane_row() -> Target {
+        Target::Pane(row())
+    }
+
     fn session_row() -> Target {
-        Target { place: Place::Session(listed()), cwd: None, branch: None }
+        Target::Session(listed())
     }
 
     fn char(key: char) -> KeyEvent {
@@ -1715,6 +1995,8 @@ mod tests {
                 " t  /thermo-nuclear-review",
                 " m  /make-illegal-states-unrep…",
                 " s  /tigerstyle",
+                " f  fix the last command",
+                " e  explain the last command",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
@@ -1724,6 +2006,118 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command: command.to_vec() };
         assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
         assert!(menu.opening());
+    }
+
+    /// The command a row's shell ran last: `cargo test`, which failed.
+    fn cargo_test() -> Ended {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
+        Ended { command: said("cargo test"), ending: Some(Ending::Exited(101)), at }
+    }
+
+    /// A row whose shell said the command it ran last ended.
+    fn ended_row() -> Target {
+        Target::Pane(PaneRow { ran: Ran::Ended(cargo_test()), ..row() })
+    }
+
+    /// What luneta kept once the row's shell went on, as the daemon says,
+    /// to another command, or to another run of the same, or went, is not
+    /// what the key was pressed on, and opens no agent. A command that
+    /// ended while the menu was open is one a key starts an agent on.
+    #[test]
+    fn a_key_for_the_last_command_holds_to_the_run_it_was_pressed_on() {
+        let went = |ran: Ran| {
+            let (menu, _) = stays(opened(ended_row(), Some('c')));
+            let (mut menu, _) = stays(menu.key(&char('f')));
+            menu.reran(ran);
+            closed(menu.printed(Ok(Printed::Nothing)))
+        };
+        let why =
+            "menu: pane 4's shell went on as luneta read what `cargo test` printed; ask again";
+        let again = Ended { at: cargo_test().at + Duration::from_secs(5), ..cargo_test() };
+        for ran in [Ran::Going(said("ls")), Ran::Ended(again), Ran::Untold] {
+            assert_eq!(went(ran), Done::Wrong(why.to_owned()));
+        }
+
+        let busy = Target::Pane(PaneRow { ran: Ran::Going(said("cargo test")), ..row() });
+        let (mut menu, _) = stays(opened(busy, Some('c')));
+        menu.reran(Ran::Ended(cargo_test()));
+        let (_, wants) = stays(menu.key(&char('f')));
+        assert_eq!(wants, Wants::Printed { pane: 4, ended: cargo_test() });
+    }
+
+    /// `c f` and `c e` have luneta keep what the command the row's shell ran
+    /// last printed, and once it is kept, start an agent on it beside the
+    /// pane, in its directory, let read the file it is kept in: to fix what
+    /// went wrong, or to explain it. Keys do nothing meanwhile but close the
+    /// menu.
+    #[test]
+    fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
+        let (menu, _) = stays(opened(ended_row(), Some('c')));
+        let (menu, wants) = stays(menu.key(&char('e')));
+        assert_eq!(wants, Wants::Printed { pane: 4, ended: cargo_test() });
+        assert!(menu.reading());
+        let (menu, wants) = stays(menu.key(&char('e')));
+        assert_eq!(wants, Wants::Nothing);
+        let file = "/run/luneta/printed/1.txt".to_owned();
+        let kept = Kept { file, lines: 3, left_out: 0 };
+        let printed = Printed::After(kept);
+        let (menu, wants) = stays(menu.printed(Ok(printed)));
+        let prompt = "Explain this. In my shell, `cargo test` ended with exit status 101. What it \
+                      printed is in /run/luneta/printed/1.txt.";
+        let read = "Read(//run/luneta/printed/1.txt)";
+        let command = ["claude", "--allowedTools", read, "--", prompt];
+        let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
+        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
+        assert!(menu.opening());
+
+        // Nothing printed leaves the agent no file to read.
+        let (menu, _) = stays(opened(ended_row(), Some('c')));
+        let (menu, _) = stays(menu.key(&char('f')));
+        let (_, wants) = stays(menu.printed(Ok(Printed::Nothing)));
+        let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
+                      nothing.";
+        let command = vec!["claude".to_owned(), prompt.to_owned()];
+        let opens = Opens::Pane { beside: 4, command };
+        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
+
+        let (menu, _) = stays(opened(ended_row(), Some('c')));
+        let (menu, _) = stays(menu.key(&char('f')));
+        let done = closed(menu.printed(Err("zellij: no such pane".to_owned())));
+        assert_eq!(done, Done::Wrong("menu: what pane 4 printed: zellij: no such pane".to_owned()));
+    }
+
+    /// Only a shell at its prompt, after a command its hook said the end of,
+    /// has a last command to start an agent on. The menu says why it starts
+    /// none on another.
+    #[test]
+    fn a_key_for_the_last_command_needs_a_shell_at_its_prompt_after_one() {
+        let refused = |target: Target| {
+            let (menu, _) = stays(opened(target, Some('c')));
+            match closed(menu.key(&char('f'))) {
+                Done::Wrong(why) => why,
+                done => panic!("it did {done:?}"),
+            }
+        };
+        let ran = |ran| Target::Pane(PaneRow { ran, ..row() });
+        assert_eq!(
+            refused(ran(Ran::Going(said("make")))),
+            "menu: pane 4 runs `make` still, and what it prints is not over"
+        );
+        assert_eq!(
+            refused(ran(Ran::Stopped(said("vim")))),
+            "menu: `vim` is stopped in pane 4, and not over; bring it back with `fg`"
+        );
+        assert_eq!(
+            refused(ran(Ran::Untold)),
+            "menu: pane 4 has said of no command it ran last; that takes a shell with luneta's \
+             hook, at its prompt"
+        );
+        assert_eq!(
+            refused(ran(Ran::Unknown)),
+            "menu: what pane 4's shell ran is in words this luneta cannot read, as a newer \
+             lunetad's"
+        );
+        assert_eq!(refused(session_row()), NO_ROW_PANE);
     }
 
     /// `a` closes the menu for the sidebar to open the ask box, for the row
@@ -1761,7 +2155,7 @@ mod tests {
             ('h', brief::Scope::Highlighted),
         ] {
             let (menu, _) = stays(opened(pane_row(), Some('b')));
-            let place = pane_row().place;
+            let place = pane_row().place();
             assert_eq!(closed(menu.key(&char(key))), Done::Brief { scope, place }, "{key}");
         }
     }
@@ -1770,7 +2164,7 @@ mod tests {
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
         let (menu, _) = stays(opened(session_row(), Some('n')));
         assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_ROW_PANE.to_owned()));
-        let unknown = Target { cwd: None, ..pane_row() };
+        let unknown = Target::Pane(PaneRow { cwd: None, ..row() });
         let (menu, _) = stays(opened(unknown, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where pane 4 works")));
@@ -2032,16 +2426,18 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('c')));
         let zellij = "z".repeat(7);
         let rule = format!("─ Claude {} luneta/main ─", "─".repeat(18));
-        assert_eq!(floated(drawing(&menu), 50, 7)[1..], [
+        assert_eq!(floated(drawing(&menu), 50, 9)[1..], [
             format!("{zellij}┌{rule}┐"),
             format!("{zellij}│{:<41}│", " t  /thermo-nuclear-review"),
             format!("{zellij}│{:<41}│", " m  /make-illegal-states-unrepresentable"),
             format!("{zellij}│{:<41}│", " s  /tigerstyle"),
+            format!("{zellij}│{:<41}│", " f  fix the last command"),
+            format!("{zellij}│{:<41}│", " e  explain the last command"),
             format!("{zellij}│{:<41}│", " <BS> - Back, <ESC> - Close"),
             format!("{zellij}└{}┘", "─".repeat(41)),
         ]);
         // Narrower than the keys take, the box is as wide as zellij's side.
-        let narrow = floated(drawing(&menu), 30, 7);
+        let narrow = floated(drawing(&menu), 30, 9);
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
 
@@ -2196,7 +2592,7 @@ mod tests {
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
             assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
             assert!(menu.opening());
-            assert_eq!(menu.target().place, Place::Pane { session: other.clone(), pane: 7 });
+            assert_eq!(menu.target().place(), Place::Pane { session: other.clone(), pane: 7 });
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
@@ -2206,7 +2602,7 @@ mod tests {
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
         assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
-        assert_eq!(menu.target().place, place);
+        assert_eq!(menu.target().place(), place);
     }
 
     /// A paste of an issue's link opens the menu for the issue, named for it,

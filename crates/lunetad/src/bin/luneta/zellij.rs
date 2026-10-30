@@ -866,6 +866,17 @@ fn laid(session: &str) -> Result<Vec<Laid>, String> {
         .map_err(|error| format!("zellij listed panes that do not read: {error}"))
 }
 
+/// The text of the terminal `pane` of `session`, its scrollback with it, as
+/// zellij dumps it: a line for each line written to it, however many rows it
+/// wraps over, with no styles and no spaces at its end.
+pub fn dump(session: &str, pane: u32) -> Result<String, String> {
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.args(["--session", session, "action", "dump-screen", "--full", "--pane-id"]);
+    command.arg(pane.to_string());
+    answered(&mut command)
+}
+
 /// What closing the terminal `pane` closes among `laid`, the panes of its
 /// session, or why it closes nothing: it is gone.
 fn closing(laid: &[Laid], pane: u32) -> Result<Closes, String> {

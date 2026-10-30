@@ -12,8 +12,9 @@
 //! ```
 //!
 //! with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>`
-//! in milliseconds, `<status>` `-` where the shell cannot say it, as fish
-//! cannot after `fg`, and `stopped` for a job stopped with `Ctrl z`. The
+//! in milliseconds, `<status>` the exit status, `fg` where `fg` brought the
+//! job back, after which fish cannot say it, or `-` where the shell cannot
+//! say it, and `stopped` for a job stopped with `Ctrl z`. The
 //! session is named as it was when the shell started, which a rename leaves
 //! behind, as it leaves an agent's.
 //!
@@ -34,6 +35,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use luneta_protocol::said::Said;
+use luneta_protocol::shell::Ending;
 use rustix::fs::{Mode, OFlags};
 use rustix::termios::LocalModes;
 
@@ -83,9 +85,9 @@ pub enum Doing {
     /// It runs `command`, since `since`, and the command in front of its
     /// terminal does as `front` says.
     Going { command: Said, since: SystemTime, front: Front },
-    /// It ran `command`, for as long as `took`, and it ended at `at` with
-    /// `status`, if the shell could say it.
-    Ended { command: Said, at: SystemTime, status: Option<i32>, took: Duration },
+    /// It ran `command`, for as long as `took`, and it ended at `at` as
+    /// `ending` says, if the shell could say it.
+    Ended { command: Said, at: SystemTime, ending: Option<Ending>, took: Duration },
     /// It stopped the job that runs `command`, which waits to be brought back.
     Stopped { command: Said, at: SystemTime },
 }
@@ -132,10 +134,10 @@ impl Shell {
                 since: Some((*since).into()),
                 front: front.to_api().into(),
             }),
-            Doing::Ended { command, at, status, took } => Told::Ended(Ended {
+            Doing::Ended { command, at, ending, took } => Told::Ended(Ended {
                 command: command.as_str().to_owned(),
                 at: Some((*at).into()),
-                status: *status,
+                ending: ending.map(Ending::to_api),
                 took: Some((*took).try_into().expect("the milliseconds of a u64 fit a Duration")),
             }),
             Doing::Stopped { command, at } => Told::Stopped(Stopped {
@@ -181,13 +183,14 @@ impl Line {
             "ended" => {
                 let (status, rest) = rest.split_once(' ')?;
                 let (took, rest) = rest.split_once(' ')?;
-                let status = match status {
+                let ending = match status {
                     "-" => None,
-                    status => Some(status.parse().ok()?),
+                    "fg" => Some(Ending::Resumed),
+                    status => Some(Ending::Exited(status.parse().ok()?)),
                 };
                 let took = Duration::from_millis(took.parse().ok()?);
                 let command = command(rest)?;
-                Some(Line::Whole(Doing::Ended { command, at: moment, status, took }))
+                Some(Line::Whole(Doing::Ended { command, at: moment, ending, took }))
             },
             "stopped" => Some(Line::Whole(Doing::Stopped { command: command(rest)?, at: moment })),
             _ => None,
@@ -531,12 +534,18 @@ mod tests {
             Some(Line::Whole(Doing::Ended {
                 command: said("cargo test"),
                 at: at(1_760_900_042),
-                status: Some(101),
+                ending: Some(Ending::Exited(101)),
                 took: Duration::from_millis(41_873),
             }))
         );
-        let fg = Line::read("ended 1760900050 - 7120 cargo test");
-        assert!(matches!(fg, Some(Line::Whole(Doing::Ended { status: None, .. }))), "{fg:?}");
+        let untold = Line::read("ended 1760900050 - 7120 cargo test");
+        let ended = |line: Option<Line>| match line {
+            Some(Line::Whole(Doing::Ended { ending, .. })) => ending,
+            line => panic!("{line:?}"),
+        };
+        assert_eq!(ended(untold), None);
+        let fg = Line::read("ended 1760900050 fg 7120 cargo test");
+        assert_eq!(ended(fg), Some(Ending::Resumed));
         assert_eq!(
             Line::read("stopped 1760900045 cargo test"),
             Some(Line::Whole(Doing::Stopped { command: said("cargo test"), at: at(1_760_900_045) }))
@@ -640,7 +649,8 @@ mod tests {
         };
         let read = Shells::new(folder.path()).read_by(ending);
         let took = Duration::from_millis(1500);
-        let doing = Doing::Ended { command: said("make"), at: at(102), status: Some(0), took };
+        let ending = Some(Ending::Exited(0));
+        let doing = Doing::Ended { command: said("make"), at: at(102), ending, took };
         let shell = Shell { named: "work".to_owned(), pane: 1, started: at(100), doing };
         assert_eq!(read, [shell]);
     }

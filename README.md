@@ -128,6 +128,8 @@ and what each does, as which-key does in neovim.
 │ t  /thermo-nuclear-review               │
 │ m  /make-illegal-states-unrepresentable │
 │ s  /tigerstyle                          │
+│ f  fix the last command                 │
+│ e  explain the last command             │
 │                                         │
 │ <BS> - Back, <ESC> - Close              │
 ╰─────────────────────────────────────────╯
@@ -153,12 +155,42 @@ What a key starts on is the first message of the session, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
 
-The Claude group's keys are for a few skills, built in. For any other, `/` at
-the top of the menu searches every skill the pane's directory can run: what you
-type narrows the list, fuzzily, by a skill's name and by what it says it does,
-the skills whose names match first, and `Enter` starts an agent on the one
-highlighted, beside the pane, as a key does. `↓` and `↑` move; `Esc` goes back
-to the keys, and so does `Backspace` once there is nothing to take back.
+The Claude group's `f` and `e` start an agent beside a shell on the command it
+ran last, to fix what went wrong, or to explain it: on its command line and its
+exit status, which [the shell's hook](#hook-the-shell) says, and on what it
+printed, from the line it was run on to the prompt the shell waits at, and
+nothing before. luneta has zellij dump the pane, its scrollback with it, and
+keeps what the command printed in a file of its own, its last 2000 lines at
+most, in the folder `printed` of luneta's, which the agent is let read with no
+question asked:
+
+```text
+Fix this. In my shell, `cargo test` ended with exit status 101. What it printed
+is in /run/user/1000/luneta/printed/1793317274015320011-4127-0.txt.
+```
+
+The key takes a shell at its prompt, with the hook: in a pane whose command runs
+still, or is stopped, or that runs no shell with the hook, the menu says why it
+starts none, and so it does where the shell goes on to another command as luneta
+reads what the last one printed. Of a job brought back with `fg`, the file holds
+what it printed after the `fg`, as the hook says. Where the pane no longer shows
+the line the command was run on, as after a `clear`, or once it scrolled out of
+what zellij keeps, the file holds all the pane shows, and the agent is told so.
+luneta takes the last line that holds the command after a word for the line it
+was run on, and a line the command printed may hold it so, as `Error: make
+failed` holds `make`. Where nothing follows that line, the file holds all the
+pane shows, and the agent is told it may be such a line; where more does, the
+file starts after it, too late. Of a prompt of more than one line, the lines
+before the one the shell waits on end the file, as luneta cannot tell them from
+what the command printed. A file goes once it is a day old, as luneta keeps
+another.
+
+The Claude group's other keys are for a few skills, built in. For any other,
+`/` at the top of the menu searches every skill the pane's directory can run:
+what you type narrows the list, fuzzily, by a skill's name and by what it says
+it does, the skills whose names match first, and `Enter` starts an agent on the
+one highlighted, beside the pane, as a key does. `↓` and `↑` move; `Esc` goes
+back to the keys, and so does `Backspace` once there is nothing to take back.
 
 ```text
 ╭─ Skills ─────────────────────────────────────── luneta/main ─╮
@@ -921,7 +953,7 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     function __luneta_ended --on-event fish_postexec
         set -l s $status
         # `fg` says 0 however the job it brought back ended.
-        string match -qr '^\s*fg(\s|$)' -- $argv[1]; and set s -
+        string match -qr '^\s*fg(\s|$)' -- $argv[1]; and set s fg
         # `Ctrl z` stops the job, and gives the prompt back with a status of 0.
         set -l job (jobs --last --group)
         if set -q job[1]; and not contains -- $job $__luneta_jobs
@@ -957,9 +989,10 @@ stopped <at> <command>
 ```
 
 with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
-milliseconds, `<status>` the exit status, or `-` where the shell cannot say it,
-as fish cannot after `fg`, `<tty>` the path `tty` prints, the command on one
-line, and `stopped` for a job stopped with `Ctrl z`. The sidebar has them from
+milliseconds, `<status>` the exit status, `fg` where `fg` brought the job
+back, after which fish cannot say it, or `-` where the shell cannot say it,
+`<tty>` the path `tty` prints, the command on one line, and `stopped` for a job
+stopped with `Ctrl z`. The sidebar has them from
 lunetad, which keeps its socket in the same folder: it reads a file as it
 changes, and the terminal of each command that runs every second, through `ps`
 on its `PATH`.
