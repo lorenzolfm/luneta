@@ -49,9 +49,13 @@ const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
 const PANE_VAR: &str = "ZELLIJ_PANE_ID";
 
 /// What names your shell, in luneta's variables, as in those of the zellij
-/// it starts, which runs it where its config names no other. A tab luneta
-/// opens with no command runs it even where zellij's config names another,
-/// its `default_shell`; a pane luneta opens with none runs that one.
+/// it starts, which runs it where its config names no other. What runs luneta
+/// can name another there: Claude Code names bash in it for each command an
+/// agent runs, `luneta open tab` among them. So a tab luneta opens with no
+/// command runs the shell the user database names yours, as login starts it,
+/// and the one this names only where the database names none. It runs it
+/// even where zellij's config names another, its `default_shell`; a pane
+/// luneta opens with none runs that one.
 const SHELL_VAR: &str = "SHELL";
 
 /// The shell zellij runs where `SHELL_VAR` names none.
@@ -767,7 +771,8 @@ fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, Str
 /// Opens `tab` in `session`, as `opening` does, and says its id, and the
 /// panes of the session with it in.
 fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
-    let said = answered(&mut new_tab(session, tab, &shell(env::var_os(SHELL_VAR))))?;
+    let shell = shell(login_shell(), env::var_os(SHELL_VAR));
+    let said = answered(&mut new_tab(session, tab, &shell))?;
     let Ok(tab) = said.trim().parse::<u32>() else {
         return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
     };
@@ -794,10 +799,19 @@ fn new_tab(session: &str, tab: &Tab, shell: &OsStr) -> Command {
     command
 }
 
-/// Your shell, as `named`, what `SHELL_VAR` says, names it, or, where it
-/// names none, unset or empty, the one zellij runs then.
-fn shell(named: Option<OsString>) -> OsString {
-    named.filter(|shell| !shell.is_empty()).unwrap_or_else(|| NO_SHELL.into())
+/// Your shell: `login`, the one the user database names yours, or, where it
+/// names none, `named`, the one `SHELL_VAR` says, or, where neither names
+/// one, unset or empty, the one zellij runs then.
+fn shell(login: Option<OsString>, named: Option<OsString>) -> OsString {
+    let some = |shell: &OsString| !shell.is_empty();
+    login.filter(some).or_else(|| named.filter(some)).unwrap_or_else(|| NO_SHELL.into())
+}
+
+/// The shell the user database names yours, the one login starts, or none
+/// where it has no entry for you.
+fn login_shell() -> Option<OsString> {
+    let you = uzers::get_user_by_uid(rustix::process::getuid().as_raw())?;
+    Some(uzers::os::unix::UserExt::shell(&you).as_os_str().to_owned())
 }
 
 /// What `command`, a zellij of `quiet`'s, said on its stdout as it did what
@@ -1771,13 +1785,18 @@ mod tests {
         assert_eq!(opened(&["claude", "go"]), claude);
     }
 
-    /// Your shell is the one `SHELL_VAR` names, and where it names none,
-    /// unset or empty, `/bin/sh`, the one zellij runs then.
+    /// Your shell is the one the user database names, over the one
+    /// `SHELL_VAR` names, as Claude Code names bash there for an agent's
+    /// commands; that one where the database names none; and where neither
+    /// names one, unset or empty, `/bin/sh`, the one zellij runs then.
     #[test]
-    fn your_shell_is_the_one_zellij_runs_where_none_is_named() {
-        assert_eq!(shell(Some("/bin/fish".into())), "/bin/fish");
-        assert_eq!(shell(Some(OsString::new())), "/bin/sh");
-        assert_eq!(shell(None), "/bin/sh");
+    fn your_shell_is_the_one_the_user_database_names() {
+        let (fish, bash) = (|| Some("/bin/fish".into()), || Some("/bin/bash".into()));
+        assert_eq!(shell(fish(), bash()), "/bin/fish");
+        assert_eq!(shell(None, bash()), "/bin/bash");
+        assert_eq!(shell(Some(OsString::new()), bash()), "/bin/bash");
+        assert_eq!(shell(None, Some(OsString::new())), "/bin/sh");
+        assert_eq!(shell(None, None), "/bin/sh");
     }
 
     /// luneta tries the sessions for one to go on in as the picker lists
