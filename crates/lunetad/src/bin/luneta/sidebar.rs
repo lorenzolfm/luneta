@@ -32,6 +32,7 @@ use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
+use luneta_protocol::shell::Ending;
 use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::shell::Doing;
@@ -365,10 +366,10 @@ impl Marked {
                 if Duration::try_from(ended.took?).ok()? < LONG {
                     return None;
                 }
-                let mark = match ended.status {
-                    Some(0) => Mark::Passed,
-                    Some(_) => Mark::Failed,
-                    None => Mark::Ran,
+                let mark = match ended.ending.as_ref().map(Ending::of_api) {
+                    Some(Ending::Exited(0)) => Mark::Passed,
+                    Some(Ending::Exited(_)) => Mark::Failed,
+                    Some(Ending::Resumed) | None => Mark::Ran,
                 };
                 (mark, told(ended.at)?, ended.command.as_str())
             },
@@ -438,7 +439,8 @@ fn ran(shell: &Shell) -> Ran {
 fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<menu::Ended> {
     let command = Said::new(ended.command.clone())?;
     let at = SystemTime::try_from(ended.at?).ok()?;
-    Some(menu::Ended { command, status: ended.status, at })
+    let ending = ended.ending.as_ref().map(Ending::of_api);
+    Some(menu::Ended { command, ending, at })
 }
 
 /// When the command going in `shell` will have run for `LONG`.
@@ -604,7 +606,7 @@ pub enum Asked {
     Find { menu: u64, cwd: String },
     /// Keep what the shell in the pane `pane` of `session` printed after the
     /// line `command` was last run on, for the menu numbered `menu`.
-    Printed { menu: u64, session: String, pane: u32, command: Said },
+    Printed { menu: u64, session: String, pane: u32, ended: menu::Ended },
     /// Have the model write this brief, and show it.
     Brief(Brief),
     /// Open the ask box, for this row.
@@ -1977,9 +1979,7 @@ impl Sidebar {
                 }
             },
             Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
-            Wants::Printed { pane, command } => {
-                Asked::Printed { menu: number, session, pane, command }
-            },
+            Wants::Printed { pane, ended } => Asked::Printed { menu: number, session, pane, ended },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
@@ -3465,7 +3465,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::LazyLock;
 
-    use lunetad::api::shell::{Ended, Going, Stopped};
+    use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, Clients, Pane, Panes, UnreadFile, Version, Zellij};
     use prost_types::Timestamp;
 
@@ -4609,7 +4609,8 @@ mod tests {
         let (seconds, nanos) = ((millis / 1000).into(), millis % 1000 * 1_000_000);
         let took = Some(prost_types::Duration { seconds, nanos });
         let at = Some(Timestamp { seconds: 130, nanos: 0 });
-        Doing::Ended(Ended { command: command.to_owned(), at, status, took })
+        let ending = status.map(ended::Ending::Status);
+        Doing::Ended(Ended { command: command.to_owned(), at, ending, took })
     }
 
     /// What a shell said it ran is read as it comes from the daemon: a
@@ -4620,7 +4621,7 @@ mod tests {
         let said = |doing| ran(&Shell { doing: Some(doing) });
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("make".to_owned()).unwrap();
-        let make = Ran::Ended(menu::Ended { command, status: Some(2), at });
+        let make = Ran::Ended(menu::Ended { command, ending: Some(Ending::Exited(2)), at });
         assert_eq!(said(ended("make", Some(2), 10)), make);
         assert_eq!(said(ended("", Some(0), 10)), Ran::Unknown);
         let Doing::Ended(untimed) = ended("make", Some(2), 10) else {
@@ -5491,8 +5492,10 @@ mod tests {
         type_in(&mut sidebar, "gg");
         assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("s", 10), pane: 1 }));
         type_in(&mut sidebar, "c");
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("cargo test".to_owned()).unwrap();
-        let printed = Asked::Printed { menu: 1, session: "s".to_owned(), pane: 1, command };
+        let failed = menu::Ended { command, ending: Some(Ending::Exited(101)), at };
+        let printed = Asked::Printed { menu: 1, session: "s".to_owned(), pane: 1, ended: failed };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         let nothing = || Ok(Printed { from: printed::From::Command, kept: None });
         assert_eq!(sidebar.printed(2, nothing()), Asked::Nothing);
@@ -5519,7 +5522,8 @@ mod tests {
         };
         sidebar.heard(shells(ended("make", Some(2), 3000)));
         let command = Said::new("make".to_owned()).unwrap();
-        let printed = Asked::Printed { menu: 3, session: "s".to_owned(), pane: 2, command };
+        let make = menu::Ended { command, ending: Some(Ending::Exited(2)), at };
+        let printed = Asked::Printed { menu: 3, session: "s".to_owned(), pane: 2, ended: make };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         sidebar.heard(shells(going("make", 200, Front::Working)));
         assert_eq!(sidebar.printed(3, nothing()), Asked::Nothing);

@@ -172,11 +172,19 @@ message Shell {
     string command = 1;
     // When it ended. Always there.
     google.protobuf.Timestamp at = 2;
-    // Its exit status. Absent where the shell cannot say it, as fish cannot
-    // after `fg`.
-    optional int32 status = 3;
+    // How it ended. Neither where the shell cannot say. `status` was an
+    // `optional int32` of the same number, which reads the same.
+    oneof ending {
+      // Its exit status.
+      int32 status = 3;
+      // `fg` brought it back, and the shell cannot say its exit status, as
+      // fish cannot after `fg`. The line typed was `fg`, not `command`.
+      Resumed resumed = 5;
+    }
     // How long it ran, to the millisecond. Always there.
     google.protobuf.Duration took = 4;
+
+    message Resumed {}
   }
 
   // A job it stopped, with `Ctrl z`, which waits to be brought back.

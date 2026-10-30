@@ -35,6 +35,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
+use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -692,13 +693,13 @@ pub enum Ran {
     Ended(Ended),
 }
 
-/// The command a shell ran last, which ended: with its exit status where
-/// the shell can say it, at `at`, to the second, which tells it from
-/// another run of the same command.
+/// The command a shell ran last, which ended: as `ending` says, where the
+/// shell can say how, at `at`, to the second, which tells it from another
+/// run of the same command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ended {
     pub command: Said,
-    pub status: Option<i32>,
+    pub ending: Option<Ending>,
     pub at: SystemTime,
 }
 
@@ -882,8 +883,8 @@ pub enum Wants {
     /// issue goes, and to have its worktree made, for `pulled`.
     Pull(Link),
     /// luneta to keep what the shell in `pane` printed after the line
-    /// `command` was last run on, for `printed`.
-    Printed { pane: u32, command: Said },
+    /// `ended` was typed on, for `printed`.
+    Printed { pane: u32, ended: Ended },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, for luneta
@@ -1098,7 +1099,7 @@ impl Menu {
                 },
                 Pressed::Last(last) => match target.ended() {
                     Ok((beside, cwd, ended)) => {
-                        let wants = Wants::Printed { pane: beside, command: ended.command.clone() };
+                        let wants = Wants::Printed { pane: beside, ended: ended.clone() };
                         stays(Stage::Reading { keys, last, beside, cwd, ended }, wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
@@ -1267,8 +1268,7 @@ impl Menu {
                 ended.command.as_str()
             )));
         }
-        let Ended { command, status, .. } = ended;
-        let prompt = printed.prompt(last.asks(), command.as_str(), status);
+        let prompt = printed.prompt(last.asks(), &ended);
         let opens = Opens::Pane { beside, command: claude_reading(prompt, printed.file()) };
         let stage = Stage::Opening(keys);
         Did::Stays(Menu { number, target, stage }, Wants::Open { cwd, opens })
@@ -2013,7 +2013,7 @@ mod tests {
     /// The command a row's shell ran last: `cargo test`, which failed.
     fn cargo_test() -> Ended {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
-        Ended { command: said("cargo test"), status: Some(101), at }
+        Ended { command: said("cargo test"), ending: Some(Ending::Exited(101)), at }
     }
 
     /// A row whose shell said the command it ran last ended.
@@ -2043,7 +2043,7 @@ mod tests {
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
-        assert_eq!(wants, Wants::Printed { pane: 4, command: said("cargo test") });
+        assert_eq!(wants, Wants::Printed { pane: 4, ended: cargo_test() });
     }
 
     /// `c f` and `c e` have luneta keep what the command the row's shell ran
@@ -2055,7 +2055,7 @@ mod tests {
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
-        assert_eq!(wants, Wants::Printed { pane: 4, command: said("cargo test") });
+        assert_eq!(wants, Wants::Printed { pane: 4, ended: cargo_test() });
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);

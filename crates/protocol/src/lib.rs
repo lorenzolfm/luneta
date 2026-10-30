@@ -3,11 +3,13 @@
 //! a work tree, which the daemon asks git and its clients read back from the
 //! protocol. The pull request gh finds of a branch is here too, which only
 //! the daemon asks gh. So are Claude Code's session files the daemon cannot
-//! read, as a delete counts them.
+//! read, as a delete counts them, and how a command a shell ran ended, as
+//! its hook says.
 
 pub mod git;
 pub mod github;
 pub mod said;
+pub mod shell;
 pub mod tab;
 pub mod unread;
 
