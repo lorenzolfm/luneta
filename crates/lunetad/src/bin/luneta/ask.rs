@@ -193,7 +193,7 @@ impl Ask {
     pub fn new(number: u64, target: &Target, dir: &Path) -> Self {
         Ask {
             number,
-            cwd: target.cwd.as_ref().map_or_else(|| dir.to_owned(), PathBuf::from),
+            cwd: target.cwd().map_or_else(|| dir.to_owned(), PathBuf::from),
             highlighted: highlighted(target),
             session: None,
             turned: None,
@@ -387,13 +387,14 @@ fn plain(text: &str) -> String {
 /// What the agent is told of `target`, the row highlighted as the box
 /// opened, for words that point at it.
 fn highlighted(target: &Target) -> String {
-    let session = target.place.session();
-    let row = match target.place.pane() {
+    let place = target.place();
+    let session = place.session();
+    let row = match place.pane() {
         Some(pane) => format!("pane {session}:{pane}"),
         None => format!("session {session}"),
     };
-    let cwd = target.cwd.as_ref().map(|cwd| format!(", in {cwd}")).unwrap_or_default();
-    let branch = target.branch.as_ref().map(|branch| format!(", on branch {branch}"));
+    let cwd = target.cwd().map(|cwd| format!(", in {cwd}")).unwrap_or_default();
+    let branch = target.branch().map(|branch| format!(", on branch {branch}"));
     let row = format!("{row}{cwd}{}", branch.unwrap_or_default());
     format!(
         "The row highlighted in luneta's sidebar as they opened the box is {row}: \"this\" or \
@@ -647,20 +648,21 @@ mod tests {
 
     use super::*;
     use crate::drive::{BEFORE_VAR, TURN_VAR};
-    use crate::menu::Ran;
-    use crate::sidebar::{Listed, Place};
+    use crate::menu::{PaneRow, Ran};
+    use crate::sidebar::Listed;
 
     fn listed() -> Listed {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
     }
 
     fn pane_row() -> Target {
-        Target {
-            place: Place::Pane { session: listed(), pane: 4 },
+        Target::Pane(PaneRow {
+            session: listed(),
+            pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
             ran: Ran::Untold,
-        }
+        })
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -870,8 +872,7 @@ mod tests {
         assert!(var(&first, TURN_VAR).is_some_and(|key| key.is_some()));
         assert_eq!(var(&first, BEFORE_VAR), Some(None));
 
-        let session =
-            Target { place: Place::Session(listed()), cwd: None, branch: None, ran: Ran::Untold };
+        let session = Target::Session(listed());
         let ask = Ask::new(2, &session, Path::new("/w"));
         let turn = Turn { key: 255, before: Some(10) };
         let next = claude(&ask.cwd, Some("7c22"), None, &ask.highlighted, turn);

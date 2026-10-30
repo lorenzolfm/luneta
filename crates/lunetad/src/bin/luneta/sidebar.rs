@@ -48,7 +48,9 @@ use crate::folds::Folds;
 use crate::gruvbox;
 use crate::icons;
 use crate::ledger::{self, Key};
-use crate::menu::{self, Choice, Command, Did, Done, Menu, Opens, Ran, Target, Top, Wants};
+use crate::menu::{
+    self, Choice, Command, Did, Done, Menu, Opens, PaneRow, Ran, Target, Top, Wants,
+};
 use crate::news::News;
 use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
@@ -1780,25 +1782,30 @@ impl Sidebar {
         self.rows.iter().any(|row| row.place() == place).then(|| self.target_at(place))
     }
 
-    /// What the menu is for, as it opens on `place`: the place, the directory
-    /// its pane works in, or its agent, as its row says it, the branch
+    /// What the menu is for, as it opens on `place`: for a pane, the
+    /// directory it works in, or its agent, as its row says it, the branch
     /// checked out there, and what its shell said it ran last. A session has
     /// none of them, having no pane.
     fn target_at(&self, place: Place) -> Target {
-        let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
+        let (session, pane) = match place {
+            Place::Session(session) => return Target::Session(session),
+            Place::Pane { session, pane } => (session, pane),
+        };
+        let shown = self.pane_of(&session, pane);
         let agents = self.host.as_ref().map(|host| seated(&host.agents, &host.sessions));
-        let cwd = pane.and_then(|pane| {
-            match agents.as_ref()?.get(&(place.session(), pane.id)) {
-                Some(agent) => Some(agent_dir(agent, pane).to_owned()),
-                None => pane.cwd.clone(),
+        let cwd = shown.and_then(|shown| {
+            match agents.as_ref()?.get(&(session.name.as_str(), shown.id)) {
+                Some(agent) => Some(agent_dir(agent, shown).to_owned()),
+                None => shown.cwd.clone(),
             }
         });
         let trees = self.host.iter().flat_map(|host| &host.work_trees);
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
-        let doing = pane.and_then(|pane| pane.shell.as_ref()?.doing.as_ref());
+        let branch = checkout.map(|checkout| checkout.branch);
+        let doing = shown.and_then(|shown| shown.shell.as_ref()?.doing.as_ref());
         let ran = doing.map_or(Ran::Untold, ran);
-        Target { cwd, branch: checkout.map(|checkout| checkout.branch), place, ran }
+        Target::Pane(PaneRow { session, pane, cwd, branch, ran })
     }
 
     /// Opens the menu for the pane luneta's zellij is on, on its first group,
@@ -1917,7 +1924,7 @@ impl Sidebar {
         };
         let (number, target) = (menu.number(), menu.target().clone());
         self.menu = Some(menu);
-        let session = target.place.session().to_owned();
+        let session = target.place().session().to_owned();
         match wants {
             Wants::Nothing => Asked::Nothing,
             Wants::Skills(cwd) => Asked::Find { menu: number, cwd },
@@ -1933,7 +1940,7 @@ impl Sidebar {
                 if self.going().is_none() && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, open }
                 } else {
-                    Asked::OpenThere { menu: number, place: target.place, open }
+                    Asked::OpenThere { menu: number, place: target.place(), open }
                 }
             },
             Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
@@ -1945,7 +1952,7 @@ impl Sidebar {
             },
             Wants::Plan(Scope::Pane(pane)) => Asked::Closes { menu: number, session, pane },
             Wants::Plan(Scope::Session) => {
-                let plan = self.plan(target.place.listed(), Deletes::Session);
+                let plan = self.plan(target.listed(), Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -2181,7 +2188,7 @@ impl Sidebar {
             },
         };
         let Some(made) = waiting.making() else {
-            let session = waiting.target().place.listed().clone();
+            let session = waiting.target().listed().clone();
             return Asked::Go(Place::Pane { session, pane });
         };
         let sessions = self.host.as_ref().map(|host| oldest_first(&host.sessions).0);
@@ -2204,7 +2211,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let plan = match closes {
-            Ok(closes) => self.plan(target.place.listed(), Deletes::Pane { pane, closes }),
+            Ok(closes) => self.plan(target.listed(), Deletes::Pane { pane, closes }),
             Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
@@ -5505,12 +5512,13 @@ mod tests {
         sidebar.focus(Keys::Menu { lent: true });
         assert_eq!(standing(&mut sidebar), lent);
         let target = sidebar.floating().map(Menu::target).cloned();
-        assert_eq!(target, Some(Target {
-            place: Place::Pane { session: listed("older", 10), pane: 1 },
+        assert_eq!(target, Some(Target::Pane(PaneRow {
+            session: listed("older", 10),
+            pane: 1,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             ran: Ran::Untold,
-        }));
+        })));
 
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());
         let tab = Tab { cwd: cwd.clone(), name: None, command: vec![] };

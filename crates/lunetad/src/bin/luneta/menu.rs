@@ -45,7 +45,7 @@ use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::printed::Printed;
 use crate::pull::{At, Kind, Link, Ready};
-use crate::sidebar::{self, ACCENT, LIT, Mark, NAME, Place, TAG};
+use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::SessionName;
@@ -652,13 +652,21 @@ struct Delete {
     scope: Scope,
 }
 
-/// What the menu is for: the row highlighted as it opened, the directory
-/// its pane works in, or its agent while zellij has not said, and the branch
-/// checked out there, as the daemon last said. A session's row has neither,
-/// having no pane.
+/// What the menu is for: the row highlighted as it opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Target {
-    pub place: Place,
+pub enum Target {
+    /// A session's row, which has no pane.
+    Session(Listed),
+    Pane(PaneRow),
+}
+
+/// A pane's row, as the menu is for it: the directory the pane works in, or
+/// its agent while zellij has not said, the branch checked out there, and
+/// what its shell said it ran last, as the daemon last said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneRow {
+    pub session: Listed,
+    pub pane: u32,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub ran: Ran,
@@ -670,7 +678,7 @@ pub struct Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ran {
     /// Nothing: no shell with the hook runs in the pane, or one that has run
-    /// nothing yet, or the row is a session's.
+    /// nothing yet.
     Untold,
     /// A command it runs still.
     Going(String),
@@ -693,27 +701,80 @@ struct Ended {
 }
 
 impl Target {
+    /// The row, as the sidebar places it.
+    pub fn place(&self) -> Place {
+        match self {
+            Target::Session(session) => Place::Session(session.clone()),
+            Target::Pane(row) => Place::Pane { session: row.session.clone(), pane: row.pane },
+        }
+    }
+
+    /// Its session.
+    pub fn listed(&self) -> &Listed {
+        match self {
+            Target::Session(session) | Target::Pane(PaneRow { session, .. }) => session,
+        }
+    }
+
+    /// The directory its pane works in, where the daemon has said it.
+    pub fn cwd(&self) -> Option<&str> {
+        match self {
+            Target::Session(_) => None,
+            Target::Pane(row) => row.cwd.as_deref(),
+        }
+    }
+
+    /// The branch checked out where its pane works.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            Target::Session(_) => None,
+            Target::Pane(row) => row.branch.as_deref(),
+        }
+    }
+
     /// What luneta's Delete group deletes on the row: its pane, or on a
     /// session's row, its session.
     fn deletes(&self) -> Scope {
-        self.place.pane().map_or(Scope::Session, Scope::Pane)
+        match self {
+            Target::Session(_) => Scope::Session,
+            Target::Pane(row) => Scope::Pane(row.pane),
+        }
     }
 
     /// The pane a key starts an agent or opens a pane beside, and the
-    /// directory it works in, where a tab or a session opens too, or why
-    /// there is none: a session's row has no pane, and a pane the daemon has
-    /// said no directory of yet, nor of an agent in it, opens nothing, rather
-    /// than wherever zellij runs.
+    /// directory it works in, or why there is none: a session's row has no
+    /// pane.
     fn beside(&self) -> Result<(u32, String), String> {
-        let Some(pane) = self.place.pane() else {
-            return Err(NO_ROW_PANE.to_owned());
-        };
+        match self {
+            Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
+            Target::Pane(row) => row.beside(),
+        }
+    }
+
+    /// What a key that starts an agent on what the pane's shell printed
+    /// last starts it on, or why it starts none: a session's row has no
+    /// pane.
+    fn ended(&self) -> Result<Ended, String> {
+        match self {
+            Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
+            Target::Pane(row) => row.ended(),
+        }
+    }
+}
+
+impl PaneRow {
+    /// The pane a key starts an agent or opens a pane beside, and the
+    /// directory it works in, where a tab or a session opens too, or why
+    /// there is none: a pane the daemon has said no directory of yet, nor of
+    /// an agent in it, opens nothing, rather than wherever zellij runs.
+    fn beside(&self) -> Result<(u32, String), String> {
         let Some(cwd) = self.cwd.clone() else {
             return Err(format!(
-                "menu: luneta does not know yet where pane {pane} works; try again in a moment"
+                "menu: luneta does not know yet where pane {} works; try again in a moment",
+                self.pane
             ));
         };
-        Ok((pane, cwd))
+        Ok((self.pane, cwd))
     }
 
     /// What a key that starts an agent on what the pane's shell printed
@@ -1023,7 +1084,7 @@ impl Menu {
                 },
                 Pressed::Start(prompt) => match target.beside() {
                     Ok((beside, cwd)) => {
-                        let command = claude(&prompt, target.branch.as_deref());
+                        let command = claude(&prompt, target.branch());
                         let opens = Opens::Pane { beside, command };
                         stays(Stage::Opening(keys), Wants::Open { cwd, opens })
                     },
@@ -1054,7 +1115,7 @@ impl Menu {
                     stays(Stage::Planning { keys, delete, agreed: None }, Wants::Plan(scope))
                 },
                 Pressed::Brief(scope) => {
-                    Did::Closed(Done::Brief { scope, place: target.place.clone() })
+                    Did::Closed(Done::Brief { scope, place: target.place() })
                 },
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
@@ -1144,9 +1205,9 @@ impl Menu {
                 claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
             },
         };
-        let opening = |place: Place, opens: Opens| {
+        let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Untold);
-            let target = Target { place, cwd, branch, ran };
+            let target = Target::Pane(PaneRow { session, pane, cwd, branch, ran });
             let stage = Stage::Pull { link: link.clone(), step: Step::Waiting(Wait::Opening) };
             Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
         };
@@ -1155,11 +1216,11 @@ impl Menu {
                 Did::Closed(Done::Go(Place::Pane { session, pane }))
             },
             (At::There { session, pane }, Pull::Agent) => {
-                opening(Place::Pane { session, pane }, Opens::Pane { beside: pane, command })
+                opening(session, pane, Opens::Pane { beside: pane, command })
             },
             (At::Session { session, pane }, _) => {
                 let opens = Opens::Tab { name: Some(link.tab()), command };
-                opening(Place::Pane { session, pane }, opens)
+                opening(session, pane, opens)
             },
             (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
@@ -1276,7 +1337,7 @@ impl Menu {
     /// the spinner at `frame`.
     fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
-        let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
+        let right = self.target.cwd().map(sidebar::short_cwd).unwrap_or_default();
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { link, step } => {
@@ -1767,17 +1828,22 @@ mod tests {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
     }
 
-    fn pane_row() -> Target {
-        Target {
-            place: Place::Pane { session: listed(), pane: 4 },
+    fn row() -> PaneRow {
+        PaneRow {
+            session: listed(),
+            pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             ran: Ran::Untold,
         }
     }
 
+    fn pane_row() -> Target {
+        Target::Pane(row())
+    }
+
     fn session_row() -> Target {
-        Target { place: Place::Session(listed()), cwd: None, branch: None, ran: Ran::Untold }
+        Target::Session(listed())
     }
 
     fn char(key: char) -> KeyEvent {
@@ -1921,7 +1987,7 @@ mod tests {
     /// A row whose shell said the command it ran last ended.
     fn ended_row() -> Target {
         let ran = Ran::Ended { command: "cargo test".to_owned(), status: Some(101) };
-        Target { ran, ..pane_row() }
+        Target::Pane(PaneRow { ran, ..row() })
     }
 
     /// `c f` and `c e` have luneta keep what the command the row's shell ran
@@ -1977,7 +2043,7 @@ mod tests {
                 done => panic!("it did {done:?}"),
             }
         };
-        let ran = |ran| Target { ran, ..pane_row() };
+        let ran = |ran| Target::Pane(PaneRow { ran, ..row() });
         assert_eq!(
             refused(ran(Ran::Going("make".to_owned()))),
             "menu: pane 4 runs `make` still, and what it prints is not over"
@@ -1991,7 +2057,7 @@ mod tests {
             "menu: pane 4 has said of no command it ran last; that takes a shell with luneta's \
              hook, at its prompt"
         );
-        assert_eq!(refused(Target { place: session_row().place, ..ended_row() }), NO_ROW_PANE);
+        assert_eq!(refused(session_row()), NO_ROW_PANE);
     }
 
     /// `a` closes the menu for the sidebar to open the ask box, for the row
@@ -2029,7 +2095,7 @@ mod tests {
             ('h', brief::Scope::Highlighted),
         ] {
             let (menu, _) = stays(opened(pane_row(), Some('b')));
-            let place = pane_row().place;
+            let place = pane_row().place();
             assert_eq!(closed(menu.key(&char(key))), Done::Brief { scope, place }, "{key}");
         }
     }
@@ -2038,7 +2104,7 @@ mod tests {
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
         let (menu, _) = stays(opened(session_row(), Some('n')));
         assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_ROW_PANE.to_owned()));
-        let unknown = Target { cwd: None, ..pane_row() };
+        let unknown = Target::Pane(PaneRow { cwd: None, ..row() });
         let (menu, _) = stays(opened(unknown, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where pane 4 works")));
@@ -2466,7 +2532,7 @@ mod tests {
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
             assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
             assert!(menu.opening());
-            assert_eq!(menu.target().place, Place::Pane { session: other.clone(), pane: 7 });
+            assert_eq!(menu.target().place(), Place::Pane { session: other.clone(), pane: 7 });
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
@@ -2476,7 +2542,7 @@ mod tests {
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
         assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
-        assert_eq!(menu.target().place, place);
+        assert_eq!(menu.target().place(), place);
     }
 
     /// A paste of an issue's link opens the menu for the issue, named for it,
