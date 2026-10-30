@@ -4,7 +4,6 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -83,6 +82,23 @@ impl<'a> Vars<'a> {
     }
 }
 
+/// Puts a program at `to`, a copy of `from`. A process of its own writes it,
+/// so that the test's never holds it open to write: a process that another
+/// test starts meanwhile would take that along until it runs its program,
+/// and until then the copy would not run, as its file is busy.
+pub fn install(from: &Path, to: &Path) {
+    let mut install = Command::new("install");
+    let installed = install.args(["-m", "755"]).arg(from).arg(to).status().unwrap();
+    assert!(installed.success(), "{} was not installed at {}", from.display(), to.display());
+}
+
+/// Writes a shell script at `path`.
+pub fn script(path: &Path, text: &str) {
+    let draft = path.with_extension("draft");
+    fs::write(&draft, format!("#!/bin/sh\n{text}")).unwrap();
+    install(&draft, path);
+}
+
 /// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
 /// lists the panes of a session as a test has it: what it wrote with `list`.
 /// It lists the session's clients too, as the test wrote them with `clients`,
@@ -106,9 +122,8 @@ impl FakeZellij {
     pub fn new() -> Self {
         let zellij = FakeZellij { bin: tempfile::tempdir().unwrap() };
         fs::create_dir(zellij.panes()).unwrap();
-        let script = format!(
-            r#"#!/bin/sh
-asked="$*"
+        let text = format!(
+            r#"asked="$*"
 session="$2"
 [ "$1" = --session ] && shift 2
 [ "$1" = delete-session ] && session="${{3:-$2}}"
@@ -189,8 +204,7 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
             panes = zellij.panes().display()
         );
         let path = zellij.bin().join("zellij");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        script(&path, &text);
         zellij
     }
 
@@ -320,9 +334,8 @@ impl FakeGh {
     fn new(bin: &Path) -> Self {
         let gh = FakeGh { pulls: bin.join("pulls") };
         fs::create_dir(&gh.pulls).unwrap();
-        let script = format!(
-            r#"#!/bin/sh
-if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
+        let text = format!(
+            r#"if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
@@ -341,8 +354,7 @@ exec cat "{pulls}/$branch.json"
             pulls = gh.pulls.display()
         );
         let path = bin.join("gh");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        script(&path, &text);
         gh
     }
 
@@ -386,9 +398,8 @@ impl NotedGit {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let git = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|it| it.is_file());
         let noted = NotedGit { notes: bin.join("statuses") };
-        let script = format!(
-            r#"#!/bin/sh
-for arg; do
+        let text = format!(
+            r#"for arg; do
     if [ "$arg" = status ]; then
         echo "$*" >> "{notes}"
         break
@@ -400,8 +411,7 @@ exec "{git}" "$@"
             git = git.expect("git is on the PATH").display()
         );
         let path = bin.join("git");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        script(&path, &text);
         // Run once here, and not first in the daemon's first ask: macOS looks
         // a program over the first time it runs, which took that ask a quarter
         // of a second more, and the daemon rests from a directory as long as
