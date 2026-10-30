@@ -10,6 +10,7 @@ mod close;
 mod commands;
 mod daemon;
 mod dirs;
+mod due;
 mod drive;
 mod folds;
 mod gruvbox;

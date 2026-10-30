@@ -28,6 +28,8 @@
 //! where every key is the menu's. While the sidebar has the focus and no menu
 //! is open, the legend at its bottom lists the keys it takes there.
 
+use std::time::SystemTime;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -39,7 +41,7 @@ use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::pull::{At, Kind, Link, Ready};
-use crate::sidebar::{self, ACCENT, LIT, NAME, Place, TAG};
+use crate::sidebar::{self, ACCENT, LIT, Mark, NAME, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::SessionName;
@@ -747,15 +749,33 @@ enum Stage {
 enum Step {
     /// Its keys wait for one.
     Choosing,
+    /// A key waits, on what it says after a spinner that turns. Keys do
+    /// nothing but close the menu.
+    Waiting(Wait),
+}
+
+/// What a key of the menu for a pull request or an issue waits on.
+enum Wait {
     /// The key `pull` waits for luneta to find where it goes, and for `wt
-    /// add` to make the worktree. Keys do nothing but close the menu.
+    /// add` to make the worktree.
     Pulling(Pull),
     /// zellij opens what the key asked for, for luneta to take its client
-    /// there. Keys do nothing but close the menu.
+    /// there.
     Opening,
     /// zellij makes this session, and opens a tab of it, for luneta to take
-    /// its client there. Keys do nothing but close the menu.
+    /// its client there.
     Making(SessionName),
+}
+
+impl Wait {
+    /// What luneta waits on for the pull request or the issue `link`.
+    fn doing(&self, link: &Link) -> String {
+        match self {
+            Wait::Pulling(_) => format!("Making a worktree of {}…", link.tab()),
+            Wait::Opening => format!("Opening {}…", link.tab()),
+            Wait::Making(session) => format!("Making session {session}…"),
+        }
+    }
 }
 
 impl Menu {
@@ -812,7 +832,8 @@ impl Menu {
     pub fn opening(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Opening(_) | Stage::Pull { step: Step::Opening | Step::Making(_), .. }
+            Stage::Opening(_)
+                | Stage::Pull { step: Step::Waiting(Wait::Opening | Wait::Making(_)), .. }
         )
     }
 
@@ -820,7 +841,7 @@ impl Menu {
     /// waits for it to open a tab of it.
     pub fn making(&self) -> Option<&SessionName> {
         match &self.stage {
-            Stage::Pull { step: Step::Making(session), .. } => Some(session),
+            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
             _ => None,
         }
     }
@@ -828,7 +849,7 @@ impl Menu {
     /// Whether a key of the menu for a pull request or an issue waits for
     /// luneta to find where it goes.
     pub fn pulling(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Pulling(_), .. })
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
     }
 
     /// What `key` does to the menu, and what that leaves the sidebar to do.
@@ -893,7 +914,7 @@ impl Menu {
             Stage::Pull { link, step: Step::Choosing } => match Pull::pressed(key, link.kind()) {
                 Some(pull) => {
                     let wants = Wants::Pull(link.clone());
-                    stays(Stage::Pull { link, step: Step::Pulling(pull) }, wants)
+                    stays(Stage::Pull { link, step: Step::Waiting(Wait::Pulling(pull)) }, wants)
                 },
                 None => stays(Stage::Pull { link, step: Step::Choosing }, Wants::Nothing),
             },
@@ -947,7 +968,7 @@ impl Menu {
     /// it.
     pub fn pulled(self, ready: Result<Ready, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Pull { link, step: Step::Pulling(pull) } = stage else {
+        let Stage::Pull { link, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let Ready { at, worktree, branch } = match ready {
@@ -965,7 +986,7 @@ impl Menu {
         };
         let opening = |place: Place, opens: Opens| {
             let target = Target { place, cwd: Some(worktree.clone()), branch: branch.clone() };
-            let stage = Stage::Pull { link: link.clone(), step: Step::Opening };
+            let stage = Stage::Pull { link: link.clone(), step: Step::Waiting(Wait::Opening) };
             Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
         };
         match (at, pull) {
@@ -982,7 +1003,7 @@ impl Menu {
             (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
-                let stage = Stage::Pull { link, step: Step::Making(name) };
+                let stage = Stage::Pull { link, step: Step::Waiting(Wait::Making(name)) };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
         }
@@ -1025,18 +1046,31 @@ impl Menu {
     /// where the pane works, what the menu shows under it, and the keys that
     /// go back and close under them. Short of room, what it shows goes first,
     /// then the rule. And the spots on those lines, as `Shown::lines` says.
-    pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
-        self.shown(width, room.saturating_sub(2)).lines(width, room)
+    /// A spinner that turns shows `frame`.
+    pub fn lines(
+        &self,
+        width: usize,
+        room: usize,
+        frame: usize,
+    ) -> (Vec<Line<'static>>, Spots<Choice>) {
+        self.shown(width, room.saturating_sub(2), frame).lines(width, room)
     }
 
     /// Draws the menu floating at the bottom right of `over`, zellij's side,
-    /// as `float` does. The search box takes the most columns, so that it
-    /// keeps its width as you type.
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect) -> Drawn {
-        let floated =
-            float(buffer, over, self.searching(), |width, body_room| self.shown(width, body_room));
+    /// at `now`, as `float` does. The search box takes the most columns, so
+    /// that it keeps its width as you type.
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
+        let frame = sidebar::frame(now);
+        let shown = |width, body_room| self.shown(width, body_room, frame);
+        let floated = float(buffer, over, self.searching(), shown);
         let drawn = |(area, spots)| Drawn::Menu { number: self.number, area: Some(area), spots };
         floated.map_or(Drawn::Nothing, drawn)
+    }
+
+    /// Whether its spinner turns: while a key of the menu for a pull request
+    /// or an issue waits for its worktree, and then for zellij to open it.
+    pub fn turning(&self) -> bool {
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(_), .. })
     }
 
     /// Whether the search box over the skills is open.
@@ -1054,26 +1088,25 @@ impl Menu {
     /// is named for it, and says its repository where another says where its
     /// pane works. An entry, or a skill, is a spot for a click only while the
     /// keys choose, as they do nothing else but close the menu once a key
-    /// opens something, or deletes.
-    fn shown(&self, width: usize, body_room: usize) -> Shown {
+    /// opens something, or deletes. Once a key of the menu for a pull request
+    /// or an issue is pressed, it shows what luneta waits on for it, after
+    /// the spinner at `frame`.
+    fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
         let right = self.target.cwd.as_deref().map(sidebar::short_cwd).unwrap_or_default();
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
-            Stage::Pull { link, step: Step::Pulling(_) } => {
-                let making = format!("Making a worktree of {}…", link.tab());
-                let body = wrap(&making, width, Style::new().fg(NAME));
-                (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
-            },
-            Stage::Pull {
-                link,
-                step: step @ (Step::Choosing | Step::Opening | Step::Making(_)),
-            } => {
-                let entries = Pull::ALL.map(|pull| Entry::Pull(pull, link.kind()));
-                if matches!(step, Step::Choosing) {
-                    spots = entry_spots(&entries, width).map(Choice::Key);
-                }
-                let body = entries.iter().map(|entry| entry_line(entry, inner)).collect();
+            Stage::Pull { link, step } => {
+                let body = match step {
+                    Step::Choosing => {
+                        let entries = Pull::ALL.map(|pull| Entry::Pull(pull, link.kind()));
+                        spots = entry_spots(&entries, width).map(Choice::Key);
+                        entries.iter().map(|entry| entry_line(entry, inner)).collect()
+                    },
+                    Step::Waiting(wait) => {
+                        waiting(&wait.doing(link), width, Style::new().fg(NAME), frame)
+                    },
+                };
                 (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Choosing(keys) | Stage::Planning { keys, .. } | Stage::Opening(keys) => {
@@ -1250,6 +1283,19 @@ pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
         lines.push(line);
     }
     let lines = lines.into_iter().flat_map(|line| sidebar::wrapped(&line, width, style));
+    lines.collect()
+}
+
+/// What luneta waits on, `doing`, wrapped as `wrap` wraps it, after the
+/// spinner at `frame`, the one a busy agent has: the lines after the first
+/// start under its first word.
+pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Line<'static>> {
+    let (spinner, turning) = Mark::Busy.glyph(frame);
+    let lines = wrap(doing, width.saturating_sub(2), style).into_iter().enumerate();
+    let lines = lines.map(|(at, line)| {
+        let before = if at == 0 { Span::styled(spinner.clone(), turning) } else { Span::raw(" ") };
+        Line::from(vec![Span::raw(" "), before, Span::styled(line.to_string(), style)])
+    });
     lines.collect()
 }
 
@@ -1516,7 +1562,7 @@ fn skill_line(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use ratatui::layout::Position;
 
@@ -1578,7 +1624,7 @@ mod tests {
         let (menu, wants) = stays(opened(pane_row(), Some('n')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             [
                 "─ New ─────────── luneta/main ─",
                 " p  new pane",
@@ -1607,7 +1653,7 @@ mod tests {
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(pane_row(), None));
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
@@ -1621,7 +1667,7 @@ mod tests {
         );
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
-        assert_eq!(text(&menu.lines(31, 9).0)[0], "─ luneta ──────── luneta/main ─");
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[0], "─ luneta ──────── luneta/main ─");
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
         // A key the menu has not opens none.
         assert!(Menu::open(1, pane_row(), Some('x')).is_none());
@@ -1663,7 +1709,7 @@ mod tests {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             [
                 "─ Claude ──────── luneta/main ─",
                 " t  /thermo-nuclear-review",
@@ -1700,7 +1746,7 @@ mod tests {
     fn the_brief_group_briefs_you_by_the_row_the_menu_is_for() {
         let (menu, _) = stays(opened(session_row(), Some('b')));
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             [
                 "─ Brief ───────────────────────",
                 " z  Every session",
@@ -1757,17 +1803,17 @@ mod tests {
         let (mut menu, wants) = stays(menu.key(&char('/')));
         assert_eq!(wants, Wants::Skills("/w/luneta/main".to_owned()));
         assert_eq!(
-            text(&menu.lines(31, 6).0)[..3],
+            text(&menu.lines(31, 6, 0).0)[..3],
             ["─ Skills ──────── luneta/main ─", " /_", " finding skills…"]
         );
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
         // The one the cursor is on is lit, as the sidebar's row is while it
         // has the focus, which it has while the search is open.
-        let lit: Vec<_> = menu.lines(31, 6).0[2..4].iter().map(|line| line.style.bg).collect();
+        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [Some(LIT), None]);
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
-        assert_eq!(text(&menu.lines(31, 6).0)[..3], [
+        assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
             "─ Skills ──────── luneta/main ─".to_owned(),
             " /ti_".to_owned(),
             " /tigerstyle  tigerstyle it".to_owned(),
@@ -1788,12 +1834,12 @@ mod tests {
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
         // The rule, what is typed, then the skills.
-        let (_, spots) = menu.lines(31, 6);
+        let (_, spots) = menu.lines(31, 6, 0);
         assert_eq!(spots.at(Position::new(4, 1)), None);
         assert_eq!(spots.at(Position::new(4, 2)), Some(&Choice::Skill(skill("code-review"))));
         assert_eq!(spots.at(Position::new(30, 3)), Some(&Choice::Skill(skill("tigerstyle"))));
         menu.scroll(1);
-        let lit: Vec<_> = menu.lines(31, 6).0[2..4].iter().map(|line| line.style.bg).collect();
+        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [None, Some(LIT)]);
         // A skill that no longer matches picks nothing, not the one in its
         // place.
@@ -1807,7 +1853,7 @@ mod tests {
         assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
         assert!(menu.opening());
         // Waiting on zellij, the menu takes no click on a skill.
-        assert_eq!(menu.lines(31, 6).1.at(Position::new(4, 3)), None);
+        assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
         assert_eq!(wants, Wants::Nothing);
     }
@@ -1883,7 +1929,7 @@ mod tests {
         let (menu, wants) = stays(menu.planned(plan(Closes::Pane, busy())));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             [
                 "─ Delete ──────── luneta/main ─",
                 " Close the pane? 1 agent, 1",
@@ -1901,14 +1947,14 @@ mod tests {
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(plan(tab(), at_work)));
         assert_eq!(wants, Wants::Nothing);
-        let asking = text(&menu.lines(31, 9).0);
+        let asking = text(&menu.lines(31, 9, 0).0);
         assert_eq!(asking[1..3], [" Close its tab? 2 agents, 1", " busy, 1 waiting"]);
         // The tab is the same, but its other agent went to work as you read.
         let (menu, _) = stays(menu.key(&char('y')));
         let busier = || vec![(4, Doing::Busy), (5, Doing::Busy)];
         let (menu, wants) = stays(menu.planned(plan(tab(), busier())));
         assert_eq!(wants, Wants::Nothing);
-        assert_eq!(text(&menu.lines(31, 9).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let act = Act::Tab { session: "luneta".to_owned(), tab: 2, panes: vec![4, 5] };
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(act));
@@ -1958,6 +2004,11 @@ mod tests {
         (0..height).map(row).collect()
     }
 
+    /// Draws `menu` floating over zellij, its spinner at its first frame.
+    fn drawing(menu: &Menu) -> impl FnOnce(&mut Buffer, Rect) -> Drawn + '_ {
+        move |buffer, over| menu.draw(buffer, over, UNIX_EPOCH)
+    }
+
     /// The menu over zellij floats at the bottom right of zellij's side, in
     /// a box as wide as the keys of the group open and the rule over them
     /// take, and as tall as its lines.
@@ -1965,7 +2016,7 @@ mod tests {
     fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
         let menu = Menu::new(1, pane_row());
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
-        assert_eq!(floated(|buffer, over| menu.draw(buffer, over), 50, 10), [
+        assert_eq!(floated(drawing(&menu), 50, 10), [
             "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
@@ -1981,7 +2032,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('c')));
         let zellij = "z".repeat(7);
         let rule = format!("─ Claude {} luneta/main ─", "─".repeat(18));
-        assert_eq!(floated(|buffer, over| menu.draw(buffer, over), 50, 7)[1..], [
+        assert_eq!(floated(drawing(&menu), 50, 7)[1..], [
             format!("{zellij}┌{rule}┐"),
             format!("{zellij}│{:<41}│", " t  /thermo-nuclear-review"),
             format!("{zellij}│{:<41}│", " m  /make-illegal-states-unrepresentable"),
@@ -1990,7 +2041,7 @@ mod tests {
             format!("{zellij}└{}┘", "─".repeat(41)),
         ]);
         // Narrower than the keys take, the box is as wide as zellij's side.
-        let narrow = floated(|buffer, over| menu.draw(buffer, over), 30, 7);
+        let narrow = floated(drawing(&menu), 30, 7);
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
 
@@ -2010,7 +2061,7 @@ mod tests {
     /// side, 50 by 10 past 10 columns of the sidebar's: the menu's own.
     fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
-        let drawn = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10));
+        let drawn = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10), UNIX_EPOCH);
         let at = drawn_at(&buffer, text).expect("drawn");
         assert!(drawn.boxed().is_some_and(|area| area.contains(at)), "{text:?} is in the box");
         drawn.at(at).map(|hit| match hit {
@@ -2088,13 +2139,14 @@ mod tests {
 
     /// A paste opens the menu for the pull request, named for it, with its
     /// repository where another menu says where its pane works. A key waits
-    /// for luneta to find where it goes and to make the worktree, and does
-    /// nothing else meanwhile, but close the menu.
+    /// for luneta to find where it goes and to make the worktree, and says
+    /// so after a spinner that turns, and does nothing else meanwhile, but
+    /// close the menu.
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
         let menu = Menu::pull(1, pane_row(), link());
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " w  worktree",
@@ -2104,12 +2156,15 @@ mod tests {
         );
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
+        assert!(!menu.turning());
         let (menu, wants) = stays(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(link()));
         assert_eq!(
-            text(&menu.lines(31, 9).0),
-            ["─ #2736 ──────── cashubtc/cdk ─", " Making a worktree of #2736…", " <ESC> - Close"]
+            text(&menu.lines(31, 9, 0).0),
+            ["─ #2736 ──────── cashubtc/cdk ─", " ⠋ Making a worktree of #2736…", " <ESC> - Close"]
         );
+        assert_eq!(text(&menu.lines(31, 9, 3).0)[1], " ⠸ Making a worktree of #2736…");
+        assert!(menu.turning());
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         assert!(menu.pulling());
@@ -2142,6 +2197,8 @@ mod tests {
             assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
             assert!(menu.opening());
             assert_eq!(menu.target().place, Place::Pane { session: other.clone(), pane: 7 });
+            assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
+            assert!(menu.turning());
         }
         let there = || At::There { session: other.clone(), pane: 9 };
         let place = Place::Pane { session: other.clone(), pane: 9 };
@@ -2161,7 +2218,7 @@ mod tests {
         let issue = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let menu = Menu::pull(1, pane_row(), issue.clone());
         assert_eq!(
-            text(&menu.lines(31, 9).0),
+            text(&menu.lines(31, 9, 0).0),
             ["─ #2736 ──────── cashubtc/cdk ─", " w  worktree", " t  tackle", " <ESC> - Close"]
         );
         let (menu, wants) = stays(menu.key(&char('r')));
@@ -2184,7 +2241,8 @@ mod tests {
     }
 
     /// Where no session works in the repository, luneta makes one in its
-    /// clone, and the menu waits for zellij to make it and open the tab.
+    /// clone, and the menu waits for zellij to make it and open the tab, and
+    /// says so.
     #[test]
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
@@ -2203,6 +2261,8 @@ mod tests {
         );
         assert!(menu.opening());
         assert_eq!(menu.making(), Some(&name));
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
+        assert!(menu.turning());
         // Why luneta found nothing closes the menu, and says so.
         let why = "no session works in cashubtc/cdk".to_owned();
         assert_eq!(

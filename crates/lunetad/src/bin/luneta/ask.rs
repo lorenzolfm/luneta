@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::program;
@@ -40,6 +40,7 @@ use serde_json::Value;
 
 use crate::brief::{self, Asking};
 use crate::drive::Turn;
+use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::menu::{self, Hint, Target};
@@ -238,7 +239,7 @@ impl Ask {
     /// Hands what you typed to the agent, on a thread of its own, for you in
     /// the pane `here`, if luneta can tell it, as `told` tells it, and takes
     /// it from what you are typing. What the turn hears comes back on
-    /// `events`.
+    /// `events`, and how it ended, as `Due` does.
     pub fn send(&mut self, here: Option<&Pane>, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
@@ -252,13 +253,19 @@ impl Ask {
         let message = told(here, &words);
         self.talk.push(Said::You(words));
         let (number, events) = (self.number, events.clone());
+        // How the turn ended, or else that it ended with no answer.
+        let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
+            let ended = ended.unwrap_or_else(|why| Err(format!("ask: {why}")));
+            Event::Heard { number, heard: Heard::Ended(ended) }
+        });
         self.turn = Some(Asking::on_thread(move |wanted| {
-            let hear = |heard| {
+            let hear = |step| {
                 // luneta is on its way out.
-                let _ = events.send(Event::Heard { number, heard });
+                let _ = events.send(Event::Heard { number, heard: Heard::Step(step) });
             };
-            if let Some(ended) = talk(claude, &message, wanted, &|step| hear(Heard::Step(step))) {
-                hear(Heard::Ended(ended));
+            // Given up, it is owed to a box that is gone.
+            if let Some(ended) = talk(claude, &message, wanted, &hear) {
+                due.pay(Ok(ended));
             }
         }));
     }
@@ -295,16 +302,22 @@ impl Ask {
         }
     }
 
-    /// Draws it in a box over `over`, zellij's columns, as `brief::boxed`
-    /// does. The rule along its top says where the agent works. Under it, the
-    /// talk so far, and then what you type, or that the agent is at a turn,
-    /// and the keys. Where the box has no room for the talk, its start goes,
-    /// its first line a `…`.
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect) {
+    /// Whether its spinner turns: while the agent is at a turn.
+    pub fn turning(&self) -> bool {
+        self.turn.is_some()
+    }
+
+    /// Draws it in a box over `over`, zellij's columns, at `now`, as
+    /// `brief::boxed` does. The rule along its top says where the agent
+    /// works. Under it, the talk so far, and then what you type, or that the
+    /// agent is at a turn, after a spinner that turns, and the keys. Where
+    /// the box has no room for the talk, its start goes, its first line a
+    /// `…`.
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
         let Some((inner, room)) = brief::room(over) else {
             return;
         };
-        let mut lines = self.lines(inner);
+        let mut lines = self.lines(inner, sidebar::frame(now));
         let keys: &[(Hint, &str)] = match self.turn {
             Some(_) => &[(Hint::Esc, "Close")],
             None => &[(Hint::Enter, "Send"), (Hint::Esc, "Close")],
@@ -324,9 +337,10 @@ impl Ask {
     }
 
     /// The talk, on lines `inner` wide, and what you type under it, or that
-    /// the agent is at a turn. Each of your turns has a blank line before it.
-    /// A command Claude Code denied the agent is in red, after a `✗`.
-    fn lines(&self, inner: usize) -> Vec<Line<'static>> {
+    /// the agent is at a turn, after the spinner at `frame`. Each of your
+    /// turns has a blank line before it. A command Claude Code denied the
+    /// agent is in red, after a `✗`.
+    fn lines(&self, inner: usize, frame: usize) -> Vec<Line<'static>> {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
         let mut lines = Vec::new();
@@ -352,7 +366,7 @@ impl Ask {
             }
         }
         if self.turn.is_some() {
-            lines.push(Line::styled(format!(" Asking {MODEL}…"), dim));
+            lines.extend(menu::waiting(&format!("Asking {MODEL}…"), inner, dim, frame));
             return lines;
         }
         if !self.talk.is_empty() {
@@ -664,7 +678,7 @@ mod tests {
         for row in area.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
-        ask.draw(&mut buffer, area);
+        ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
             assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
@@ -734,15 +748,17 @@ mod tests {
         assert_eq!(
             lines[8..12],
             [
-                "│ Asking sonnet…                                 │",
+                "│ ⠋ Asking sonnet…                               │",
                 "│                                                │",
                 "│ <ESC> - Close                                  │",
                 "└────────────────────────────────────────────────┘",
             ]
         );
+        assert!(ask.turning());
 
         ask.heard(Heard::Step(Step::Denied("toolu_2".to_owned())));
         ask.heard(Heard::Ended(Ok(())));
+        assert!(!ask.turning());
         asked[3] = "│   ✗ touch elo                                  │";
         typed(&mut ask, "yes");
         let lines = shown(&ask, 50, 12);

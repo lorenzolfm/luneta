@@ -21,6 +21,7 @@ use lunetad::api::Client;
 use lunetad::{clients, program};
 use serde::Deserialize;
 
+use crate::due::Due;
 use crate::host::{Event, Nudged};
 use crate::own::{Before, Look, Looked};
 
@@ -452,8 +453,7 @@ pub fn go(
         (then, None) => then.map(Then::Look),
         // Nothing would say when the client is there.
         (_, Some(after)) => {
-            // luneta is on its way out.
-            let _ = events.send(Event::Notice(format!("luneta cannot tell {}", after.when())));
+            after.untold(events);
             return;
         },
     };
@@ -464,9 +464,9 @@ pub fn go(
 /// session it makes, `to`, that starts in `cwd`, or where the client
 /// started, and then takes the look `then`, if any, for the client's arrival
 /// there, after which it opens the tab `tab` there, if any, for the menu
-/// numbered so. A session that runs under that name is where it goes, and
-/// `cwd` goes unused; one that ended, which zellij kept to bring back, comes
-/// back as it was: `makes` says first whether zellij would make it.
+/// owed what it opens. A session that runs under that name is where it goes,
+/// and `cwd` goes unused; one that ended, which zellij kept to bring back,
+/// comes back as it was: `makes` says first whether zellij would make it.
 ///
 /// Unless zellij's sockets say one runs by that name, as they do not of one
 /// the sidebar names, zellij makes it, and must take the client there before
@@ -479,7 +479,7 @@ pub fn start(
     to: &SessionName,
     cwd: Option<&str>,
     then: Option<Look>,
-    tab: Option<(u64, Tab)>,
+    tab: Option<(Due<u32>, Tab)>,
     events: &Sender<Event>,
 ) -> Option<Arrival> {
     let mut command = Command::new("zellij");
@@ -490,11 +490,11 @@ pub fn start(
     match (then, tab) {
         (Some(look), tab) if runs(&to.0) != Some(true) => {
             run(command, Some(Then::Made(look.number)), when, events);
-            let after = tab.map(|(menu, tab)| Pending::new(menu, tab, to, asked, events));
+            let after = tab.map(|(owed, tab)| Pending::new(owed, tab, to, asked, events));
             Some(Arrival { look, before: Before::Made, after })
         },
         (Some(look), tab) => {
-            let after = tab.map(|(menu, tab)| After::tab(menu, to, tab));
+            let after = tab.map(|(owed, tab)| After::tab(owed, to, tab));
             run(command, Some(Then::Arrive(look, after)), when, events);
             None
         },
@@ -503,11 +503,8 @@ pub fn start(
             None
         },
         // Nothing would say when the client is there.
-        (None, Some((menu, tab))) => {
-            let after = After::tab(menu, to, tab);
-            // luneta is on its way out.
-            let _ = events.send(Event::Notice(format!("luneta cannot tell {}", after.when())));
-            after.done(false, events);
+        (None, Some((owed, tab))) => {
+            After::tab(owed, to, tab).untold(events);
             None
         },
     }
@@ -619,27 +616,32 @@ fn started(session: &str, patience: Duration) -> Option<SystemTime> {
 
 /// What luneta has zellij do once its client has come to the session a go
 /// takes it to.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum After {
-    /// Open this, for the menu numbered so, as `open` does.
-    Open(u64, Open),
+    /// Open this, as `open` does, for the menu owed what it opens: told once
+    /// done, or else as it is dropped undone.
+    Open(Due<u32>, Open),
     /// Kill the session the client left, which it was in, the one that
     /// started at `started`, and delete it.
     Kill { session: String, started: SystemTime },
 }
 
 impl After {
-    /// Open `tab` in `session`, for the menu numbered `menu`.
-    fn tab(menu: u64, session: &SessionName, tab: Tab) -> Self {
-        After::Open(menu, Open::Tab { session: session.to_string(), tab })
+    /// Open `tab` in `session`, for the menu `owed` what it opens.
+    fn tab(owed: Due<u32>, session: &SessionName, tab: Tab) -> Self {
+        After::Open(owed, Open::Tab { session: session.to_string(), tab })
     }
 
-    /// What waits on the client's arrival, as a sentence about it ends.
-    fn when(&self) -> String {
+    /// Says that nothing would tell when the client is there, so that it is
+    /// not done: to the menu owed what it opens, or as a notice.
+    fn untold(self, events: &Sender<Event>) {
         match self {
-            After::Open(..) => "when zellij's client is there, and opens nothing".to_owned(),
+            After::Open(owed, _) => {
+                owed.pay(Err("luneta cannot tell when zellij's client is there".to_owned()));
+            },
             After::Kill { session, .. } => {
-                format!("when zellij's client has left \"{session}\", which stays")
+                let when = format!("when zellij's client has left \"{session}\", which stays");
+                // luneta is on its way out.
+                let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
             },
         }
     }
@@ -648,15 +650,11 @@ impl After {
     /// come.
     fn done(self, came: bool, events: &Sender<Event>) {
         match (self, came) {
-            (After::Open(menu, open), came) => {
-                let opened = if came {
-                    opening(&open)
-                } else {
-                    Err("zellij did not take its client there".to_owned())
-                };
-                // luneta is on its way out.
-                let _ = events.send(Event::Opened { menu, opened });
-            },
+            (After::Open(owed, open), came) => owed.pay(if came {
+                opening(&open)
+            } else {
+                Err("zellij did not take its client there".to_owned())
+            }),
             // A zellij of its own kills it: one run as the client's would
             // wait on the session it ends.
             (After::Kill { session, started }, true) => {
@@ -693,14 +691,16 @@ pub struct Tab {
 
 /// Opens `open`, on a thread of its own, for the menu numbered `menu`, with
 /// no client moved, and hands back the terminal it opened, for luneta to take
-/// its client to, or why it opened none.
+/// its client to, or why it opened none, as `owed` does.
 pub fn open(menu: u64, open: Open, events: &Sender<Event>) {
-    let events = events.clone();
-    thread::spawn(move || {
-        let opened = opening(&open);
-        // luneta is on its way out.
-        let _ = events.send(Event::Opened { menu, opened });
-    });
+    let owed = owed(menu, events);
+    thread::spawn(move || owed.pay(opening(&open)));
+}
+
+/// What the menu numbered `menu` is owed, as it waits on zellij to open what
+/// a key asked for: the terminal it opened, or why none, as `Due` says.
+pub fn owed(menu: u64, events: &Sender<Event>) -> Due<u32> {
+    Due::new(events, move |opened| Event::Opened { menu, opened })
 }
 
 /// How long zellij has to open a pane or a tab, or to list a session's
@@ -1305,11 +1305,11 @@ impl Arrival {
 }
 
 /// The tab that waits on luneta's client's arrival in `to`, a session zellij
-/// makes for it, for the menu numbered so. It opens once: as the client
-/// comes, or else as luneta stops waiting on it, however it stops, as it
-/// drops it, so that the menu hears either way.
+/// makes for it, for the menu owed what it opens. It opens once: as the
+/// client comes, or else as luneta stops waiting on it, however it stops, as
+/// it drops it, so that the menu hears either way.
 pub struct Pending {
-    tab: Option<(u64, Tab)>,
+    tab: Option<(Due<u32>, Tab)>,
     to: SessionName,
     /// When luneta asked zellij to make `to`: as zellij's sockets did not say
     /// one ran by that name, which one that did by then would have.
@@ -1319,13 +1319,13 @@ pub struct Pending {
 
 impl Pending {
     fn new(
-        menu: u64,
+        owed: Due<u32>,
         tab: Tab,
         to: &SessionName,
         asked: SystemTime,
         events: &Sender<Event>,
     ) -> Self {
-        Pending { tab: Some((menu, tab)), to: to.clone(), asked, events: events.clone() }
+        Pending { tab: Some((owed, tab)), to: to.clone(), asked, events: events.clone() }
     }
 
     /// Opens the tab, now that the client is there, in place of the tabs
@@ -1333,20 +1333,16 @@ impl Pending {
     /// beside them where it did not, as `made` says; or says why not when it
     /// did not come.
     fn done(mut self, came: bool) {
-        let Some((menu, tab)) = self.tab.take() else {
+        let Some((owed, tab)) = self.tab.take() else {
             return;
         };
         match came.then(|| self.made()) {
-            Some(Ok(())) => {
-                let opened = alone(&self.to, &tab, &self.events);
-                // luneta is on its way out.
-                let _ = self.events.send(Event::Opened { menu, opened });
-            },
+            Some(Ok(())) => owed.pay(alone(&self.to, &tab, &self.events)),
             Some(Err(why)) => {
                 let _ = self.events.send(Event::Notice(why));
-                After::tab(menu, &self.to, tab).done(true, &self.events);
+                After::tab(owed, &self.to, tab).done(true, &self.events);
             },
-            None => After::tab(menu, &self.to, tab).done(false, &self.events),
+            None => After::tab(owed, &self.to, tab).done(false, &self.events),
         }
     }
 
@@ -1369,8 +1365,8 @@ impl Pending {
 impl Drop for Pending {
     /// luneta stopped waiting on the client, and did not hear it come.
     fn drop(&mut self) {
-        if let Some((menu, tab)) = self.tab.take() {
-            After::tab(menu, &self.to, tab).done(false, &self.events);
+        if let Some((owed, tab)) = self.tab.take() {
+            After::tab(owed, &self.to, tab).done(false, &self.events);
         }
     }
 }
@@ -1943,7 +1939,8 @@ mod tests {
         };
         let tab =
             Tab { cwd: "/w/cdk/feat".to_owned(), name: Some("#5".to_owned()), command: Vec::new() };
-        let pending = || Pending::new(7, tab.clone(), &to, SystemTime::now(), &events);
+        let pending =
+            || Pending::new(owed(7, &events), tab.clone(), &to, SystemTime::now(), &events);
         drop(pending());
         pending().done(false);
         let heard: Vec<Event> = heard.try_iter().collect();
@@ -1951,5 +1948,23 @@ mod tests {
         for event in heard {
             assert!(matches!(event, Event::Opened { menu: 7, opened: Err(_) }));
         }
+    }
+
+    /// Where nothing would tell luneta its client came, what a menu waited
+    /// to open there is not opened, and the menu hears why, once: it closes,
+    /// rather than wait for good.
+    #[test]
+    fn a_menu_hears_that_luneta_cannot_tell_when_to_open_what_it_waits_on() {
+        let (events, heard) = std::sync::mpsc::channel();
+        let Ok(to) = SessionName::parse("cdk") else {
+            panic!("a name zellij takes");
+        };
+        let tab = Tab { cwd: "/w/cdk/feat".to_owned(), name: None, command: Vec::new() };
+        After::tab(owed(7, &events), &to, tab).untold(&events);
+        let heard: Vec<Event> = heard.try_iter().collect();
+        let [Event::Opened { menu: 7, opened: Err(why) }] = &heard[..] else {
+            panic!("the menu alone hears, once");
+        };
+        assert_eq!(why, "luneta cannot tell when zellij's client is there");
     }
 }

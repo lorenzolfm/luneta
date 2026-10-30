@@ -49,6 +49,7 @@ use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChang
 use crate::ask::{Ask, Heard, Keyed};
 use crate::brief::{self, Briefing, Written};
 use crate::close::Act;
+use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
@@ -726,7 +727,7 @@ fn run_loop(
             WAITING_LOOK
         } else if app.sidebar.scrolling() {
             sidebar::SCROLL
-        } else if app.sidebar.turning() {
+        } else if app.turning() {
             sidebar::SPIN
         } else {
             TICK
@@ -872,6 +873,17 @@ impl App {
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
             picker.listed(listing);
         }
+    }
+
+    /// Whether a spinner turns: on the sidebar, or in the box over zellij
+    /// while what it waits on is at work.
+    fn turning(&self) -> bool {
+        let over = match &self.focus.over {
+            Some(Over::Brief(briefing)) => briefing.turning(),
+            Some(Over::Ask(ask)) => ask.turning(),
+            Some(Over::Menu | Over::Picker(_) | Over::Note(_)) | None => false,
+        };
+        over || self.sidebar.turning()
     }
 
     /// When the picker asks zellij for what its preview shows, while it is
@@ -1364,7 +1376,8 @@ impl App {
             },
             Asked::Open { menu, open } => zellij::open(menu, open, &self.events),
             Asked::OpenThere { menu, place, open } => {
-                if !self.go(&place, Some(After::Open(menu, open))) {
+                let owed = zellij::owed(menu, &self.events);
+                if !self.go(&place, Some(After::Open(owed, open))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1376,7 +1389,8 @@ impl App {
             // there with it.
             Asked::Make { menu, session, cwd, tab_cwd, name, command } => {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                if !self.make(&session, &cwd, Some((menu, tab))) {
+                let owed = zellij::owed(menu, &self.events);
+                if !self.make(&session, &cwd, Some((owed, tab))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1477,11 +1491,16 @@ impl App {
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
     /// `cwd`, or where the client started, or brings back, where zellij kept
-    /// one that ended, and opens `tab` there once it is, for the menu
-    /// numbered so. Where zellij makes it, its server cannot bear being asked
+    /// one that ended, and opens `tab` there once it is, for the menu owed
+    /// what it opens. Where zellij makes it, its server cannot bear being asked
     /// anything before it takes the client: luneta asks for the client's
     /// arrival there once zellij titles its terminal in it. Whether it went.
-    fn start(&mut self, session: &SessionName, cwd: Option<&str>, tab: Option<(u64, Tab)>) -> bool {
+    fn start(
+        &mut self,
+        session: &SessionName,
+        cwd: Option<&str>,
+        tab: Option<(Due<u32>, Tab)>,
+    ) -> bool {
         let Some(nudged) = self.nudge() else {
             return false;
         };
@@ -1497,7 +1516,7 @@ impl App {
     /// says why zellij would make none, but take it to one that has the name,
     /// before the sidebar takes the client for one on its way there. Whether
     /// it went.
-    fn make(&mut self, session: &SessionName, cwd: &str, tab: Option<(u64, Tab)>) -> bool {
+    fn make(&mut self, session: &SessionName, cwd: &str, tab: Option<(Due<u32>, Tab)>) -> bool {
         match zellij::makes(session) {
             Ok(()) => self.start(session, Some(cwd), tab),
             Err(why) => {
@@ -1780,11 +1799,11 @@ impl App {
             // the sidebar.
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
-                    briefing.draw(buffer, zellij);
+                    briefing.draw(buffer, zellij, now);
                     Drawn::Nothing
                 },
                 Some(Over::Ask(ask)) => {
-                    ask.draw(buffer, zellij);
+                    ask.draw(buffer, zellij, now);
                     Drawn::Nothing
                 },
                 Some(Over::Picker(picker)) => picker.draw(buffer, zellij, now),
@@ -1794,7 +1813,7 @@ impl App {
                 },
                 Some(Over::Menu) => {
                     let floating = self.sidebar.floating();
-                    floating.map(|menu| menu.draw(buffer, zellij)).unwrap_or_default()
+                    floating.map(|menu| menu.draw(buffer, zellij, now)).unwrap_or_default()
                 },
                 None => beside,
             };
