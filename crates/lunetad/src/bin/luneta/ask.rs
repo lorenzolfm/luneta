@@ -85,7 +85,7 @@ const ALLOWED: [&str; 14] = [
     "Bash(gh issue list:*)",
     "Bash(gh pr view:*)",
     "Bash(gh pr list:*)",
-    "Bash(wt add:*)",
+    "Bash(luneta worktree:*)",
     "Bash(git worktree add:*)",
     "Bash(git worktree list:*)",
 ];
@@ -103,8 +103,8 @@ const SYSTEM: &str = "You run in luneta's ask box. The user typed what they want
     line or two on what you did, and where. Run one command in each call to Bash, with \
     nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
     sessions, agents, open, go and close, zoxide query, gh issue view and list, gh pr view \
-    and list, wt add, and git worktree add and list. Claude Code denies any other. A pane \
-    you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
+    and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
+    pane you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
     with no other option of claude's: luneta refuses any other command. You cannot wait for \
     the user in the middle of a turn: to ask them anything, as the skill has you ask before \
     a close, or which of two things they meant, end your turn with the question. Their \

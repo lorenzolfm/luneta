@@ -18,3 +18,5 @@ mod host;
 mod sessions;
 #[cfg(test)]
 mod shells;
+#[cfg(test)]
+mod worktree;

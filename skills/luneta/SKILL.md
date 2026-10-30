@@ -91,8 +91,9 @@ Agents working in parallel on one repository each need a worktree of their
 own, or they edit the same files:
 
 1. Read each issue (`gh issue view <n>`) for a short branch name, such as `issue-42`.
-2. Make a worktree per branch with the repository's own tool. Use `wt add <branch>`
-   when `wt` is on the PATH, which puts it beside the others. Otherwise use
+2. Make a worktree per branch with `luneta worktree --repo <dir> <branch>`, where
+   `<dir>` is any directory of the repository. It puts the worktree beside the
+   others and prints where. It refuses a clone that git made; there, use
    `git worktree add ../<branch> -b <branch>`.
 3. Open a tab per worktree in the user's session, named for the branch, with
    `claude --name <branch> "<prompt>"` in it.
@@ -102,8 +103,8 @@ own, or they edit the same files:
 ### A skill on a PR
 
 Find the pane whose branch is the PR's in `luneta sessions` and open a pane
-beside it. If no pane has the branch, make a worktree for the PR (`wt add <PR
-link>` takes a link), then open a tab there.
+beside it. If no pane has the branch, make a worktree for the PR (`luneta
+worktree --repo <dir> <PR link>` takes a link), then open a tab there.
 
 ## New session to work on X
 

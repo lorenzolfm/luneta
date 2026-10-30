@@ -10,31 +10,35 @@
 //! knows. A repository is the pull request's where any of its remotes is the
 //! repository on GitHub the link is of: a fork's clone has the repository it
 //! forks among its remotes, and that is the one its pull requests are of.
-//! `wt add` makes the worktree, and says where it is, or where one of the
-//! pull request's branch is already, in a repository wt cloned: in one git
-//! cloned, wt would make it in its `.git`. An issue's branch is `issue-123`,
-//! so a second paste of the link finds the first's worktree. Where neither
-//! the repository nor origin has it yet, luneta makes it from the default
-//! branch of the issue's repository as GitHub has it then, by the remote
-//! that is of it: wt would make it from origin's, as the repository last
-//! fetched it, and a fork's clone has the fork for its origin. gh says first
-//! that GitHub has an issue of its number, and no pull request: a link can
-//! say an issue of any number, and luneta would make a branch of each. A
-//! pane that has the pull request's branch checked out, as the daemon says
-//! by its page, or that works in the worktree `wt add` says, is where a key
-//! goes instead of a new tab.
+//! wt's code makes the worktree, as `wt add` does, and says where it is, or
+//! where one of the pull request's branch is already, in a repository wt
+//! cloned: in one git cloned, wt would make it in its `.git`. luneta has it
+//! in its own program, which it runs as `luneta worktree`, and needs no `wt`
+//! on the `PATH`. An issue's branch is `issue-123`, so a second paste of the
+//! link finds the first's worktree. Where neither the repository nor origin
+//! has it yet, luneta makes it from the default branch of the issue's
+//! repository as GitHub has it then, by the remote that is of it: wt would
+//! make it from origin's, as the repository last fetched it, and a fork's
+//! clone has the fork for its origin. gh says first that GitHub has an issue
+//! of its number, and no pull request: a link can say an issue of any number,
+//! and luneta would make a branch of each. A pane that has the pull request's
+//! branch checked out, as the daemon says by its page, or that works in the
+//! worktree wt's code says, is where a key goes instead of a new tab.
 
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
 use std::fs;
 use std::num::NonZeroU32;
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
 use lunetad::program::{self, Ran};
+use wt::cmd::add::{self, Fetch};
+use wt::repo::Repo;
 
 use crate::dirs;
 use crate::due::Due;
@@ -45,7 +49,7 @@ use crate::zellij::{self, SessionName};
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
 
-/// How long `wt add` has to make a worktree, as it fetches the pull
+/// How long `luneta worktree` has to make a worktree, as wt fetches the pull
 /// request's branch, or git to ask a remote of an issue's branch, or to fetch
 /// the branch it is made from: across the network, which takes a while of a
 /// large repository.
@@ -62,6 +66,11 @@ const ASKING: Duration = Duration::from_secs(30);
 /// The remote of the repository a clone was cloned from, as git names it:
 /// a branch wt makes goes there.
 const ORIGIN: &str = "origin";
+
+/// What `luneta worktree` starts the line with that says why it made no
+/// worktree, on stderr, after what wt and git say there as they go, as
+/// luneta's commands say why they failed.
+const WHY: &str = "luneta: ";
 
 /// A pull request or an issue on GitHub, as its link names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -334,8 +343,8 @@ pub struct Ready {
 
 /// Finds where a key of the menu numbered `menu` goes for the pull request
 /// or the issue `link`, among the panes the sidebar knows, `worked`, and has
-/// `wt add` make the worktree, on a thread of its own, and hands back what it
-/// found, or why it found nothing, as `Due` does.
+/// `luneta worktree` make the worktree, on a thread of its own, and hands back
+/// what it found, or why it found nothing, as `Due` does.
 pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event>) {
     let due = Due::new(events, move |ready| Event::Pulled { menu, ready });
     thread::spawn(move || due.pay(ready(&link, &worked)));
@@ -591,28 +600,72 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-/// Has `wt add` make a worktree of the pull request or the issue `link` in
-/// the repository `dir` is in, and says where it is, or where one of its
-/// branch is already: the last line wt prints, as the real path of the
-/// directory it names. Or why it made none, as wt says it.
+/// Has luneta make a worktree of the pull request or the issue `link` in the
+/// repository `dir` is in, as `luneta worktree` does, and says where it is,
+/// or where one of its branch is already: the line it prints, as the real
+/// path of the directory it names. Or why it made none, as it says. A
+/// program of its own, and not a thread of the sidebar's: wt says on stderr
+/// how it goes, and has git say it there too, which in the sidebar is the
+/// terminal luneta draws; and alone, as git may ask for a passphrase on the
+/// terminal of its session.
 fn worktree(dir: &str, link: &Link) -> Result<String, String> {
-    let mut wt = Command::new("wt");
-    lunetad::local_git(wt.args(["add", "--repo", dir, &link.wt()]));
+    let luneta =
+        env::current_exe().map_err(|error| format!("luneta cannot tell where it is: {error}"))?;
+    let mut luneta = Command::new(luneta);
+    lunetad::local_git(luneta.args(["worktree", "--repo", dir, &link.wt()]));
     // It fetches across the network, by ssh as like as not.
-    let ran = program::run_alone(&mut wt, MAKING)
-        .map_err(|error| format!("wt add could not be run: {error}"))?;
+    let ran = program::run_alone(&mut luneta, MAKING)
+        .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
-            let said = printed.lines().map(str::trim).rfind(|line| !line.is_empty());
-            let said = said.ok_or_else(|| "wt add said no worktree".to_owned())?;
-            directory(said).ok_or_else(|| format!("wt add said {said}, which is no directory"))
+            let said = printed.strip_suffix('\n').filter(|said| !said.is_empty());
+            let said = said.ok_or_else(|| "luneta worktree said no worktree".to_owned())?;
+            directory(said)
+                .ok_or_else(|| format!("luneta worktree said {said}, which is no directory"))
         },
-        Ran::Ended { status, stderr, .. } => {
-            Err(failure(&String::from_utf8_lossy(&stderr)).unwrap_or(format!("wt add: {status}")))
-        },
-        Ran::Stuck => Err(format!("wt add took longer than {} minutes", MAKING.as_secs() / 60)),
+        Ran::Ended { status, stderr, .. } => Err(failure(&String::from_utf8_lossy(&stderr))
+            .unwrap_or(format!("luneta worktree: {status}"))),
+        Ran::Stuck => Err(format!(
+            "the worktree took longer than {} minutes to make",
+            MAKING.as_secs() / 60
+        )),
     }
+}
+
+/// Makes a worktree of `branch`, or of the pull request it is the link of, in
+/// the repository `repo` is a directory of, as `wt add` does, by wt's own
+/// code, and prints where it is, or where one of the branch is already, on
+/// stdout, where nothing else is: wt prints nothing there, and has git print
+/// on stderr. Or prints why it made none, after `WHY`, on stderr, after what
+/// wt and git say there as they go. In a repository git cloned it makes
+/// none: wt would make it in its `.git`.
+pub fn make(repo: &str, branch: &str) -> ExitCode {
+    match made(repo, branch) {
+        Ok(worktree) => {
+            println!("{}", worktree.display());
+            ExitCode::SUCCESS
+        },
+        Err(why) => {
+            eprintln!("{WHY}{why}");
+            ExitCode::FAILURE
+        },
+    }
+}
+
+/// Where `make` made the worktree, or found one of the branch, or why it
+/// made none.
+fn made(repo: &str, branch: &str) -> Result<PathBuf, String> {
+    let wt_add = |error| format!("wt add: {error:#}");
+    let found = Repo::discover(Some(Path::new(repo))).map_err(wt_add)?;
+    if !bare(repo) {
+        return Err(format!(
+            "{repo} is in a clone git made, and wt would make the worktree in its .git; wt \
+             clone it first"
+        ));
+    }
+    let made = add::run(&found, branch, None, Fetch::Lazy).map_err(wt_add)?;
+    Ok(made.path().to_owned())
 }
 
 /// The real path of the directory `path` names, where it names one, as the
@@ -622,12 +675,13 @@ fn directory(path: &str) -> Option<String> {
     real.into_os_string().into_string().ok()
 }
 
-/// What wt said as it failed, on stderr after what it said of its progress:
-/// the lines from its last that starts with `wt: `, which says why, on one.
+/// Why `luneta worktree` made no worktree, as it says on stderr after what wt
+/// and git say there as they go: the lines from its last that starts with
+/// `WHY`, on one, as what wt says can take more than one.
 fn failure(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
-    let why = lines.iter().rposition(|line| line.starts_with("wt: "))?;
-    Some(format!("wt add: {}", lines[why..].join(", ").trim_start_matches("wt: ")))
+    let why = lines.iter().rposition(|line| line.starts_with(WHY))?;
+    lines[why..].join(", ").strip_prefix(WHY).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -919,13 +973,16 @@ mod tests {
         assert_eq!(git(&clone, &["rev-parse", "--verify", "-q", "refs/heads/issue-7"]), None);
     }
 
+    /// Why `luneta worktree` made no worktree is what it says last on stderr,
+    /// after `luneta: `, on one line, though wt says it on two, after what wt
+    /// and git say there as they go.
     #[test]
-    fn wt_s_failure_is_its_last_word_after_its_progress() {
+    fn why_no_worktree_was_made_comes_last_after_what_wt_says_as_it_goes() {
         let stderr = "  pull       #2736 (asking origin for its branch)\n\
-                      wt: wt cannot fetch origin/feat\n  run git fetch origin feat to see why\n";
+                      luneta: wt add: wt cannot fetch origin/feat\n  run git fetch origin feat\n";
         assert_eq!(
             failure(stderr).as_deref(),
-            Some("wt add: wt cannot fetch origin/feat, run git fetch origin feat to see why")
+            Some("wt add: wt cannot fetch origin/feat, run git fetch origin feat")
         );
         assert_eq!(failure("  pull  #1\n"), None);
     }
