@@ -7,14 +7,16 @@
 //! file is written, made or taken away. Those folders are watched, and the
 //! directories of the work tree that hold a path git tracks, but none that
 //! holds only what git ignores, as a `target` that a build writes in all
-//! along. Where the work tree is, and which folders git keeps it in, git is
-//! asked each time, as `git init` can make a directory of one a work tree of
-//! its own, and git can come to keep one in other folders. A directory is
-//! asked about again as its work tree changes, once git has rested from it
-//! for as long as it took over it, and once git has rested from it for a
-//! sweep besides, for what changes with no word to a watched folder: a file
-//! in a directory new to git, or a work tree across the network. One
-//! directory at a time, and one git has said nothing of yet first.
+//! along. A directory in no work tree is watched for a `.git` to come in it,
+//! as `git init` or `git clone` makes one. Where the work tree is, and which
+//! folders git keeps it in, git is asked each time, as `git init` can make a
+//! directory of one a work tree of its own, and git can come to keep one in
+//! other folders. A directory is asked about again as its work tree changes,
+//! once git has rested from it for as long as it took over it, and once git
+//! has rested from it for a sweep besides, for what changes with no word to a
+//! watched folder: a file in a directory new to git, or a work tree across
+//! the network. One directory at a time, and one git has said nothing of yet
+//! first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
@@ -281,18 +283,53 @@ fn watcher(
             Word::Dirs => came_or_went.store(true, Ordering::SeqCst),
             Word::Change => {},
         }
-        heard.store(true, Ordering::SeqCst);
-        match wake.try_send(()) {
-            // A full channel holds a wake-up already, and one that no one
-            // hears is the thread's that has ended.
-            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
-        }
+        hear(&heard, &wake);
     };
     // No link is followed under what is watched with all under it: one among
     // the refs could lead anywhere, as to `/`, and each directory there would
     // take a watch of the kernel's.
     let config = notify::Config::default().with_follow_symlinks(false);
     let mut watcher = RecommendedWatcher::new(handler, config)?;
+    add(&mut watcher, paths)?;
+    Ok(watcher)
+}
+
+/// A watcher of `dir`, which git placed in no work tree, and of the `.git` in
+/// it too where `git` says that one is there, that sets `heard`, and wakes the
+/// thread on `wake`, as a `.git` comes in `dir` or git writes in it.
+fn beginning(
+    dir: &Path,
+    git: bool,
+    heard: Arc<AtomicBool>,
+    wake: SyncSender<()>,
+) -> notify::Result<RecommendedWatcher> {
+    let handler = move |event: notify::Result<Event>| {
+        if event.is_ok_and(|event| !watch::worth_a_read(&event, of_git)) {
+            return;
+        }
+        hear(&heard, &wake);
+    };
+    let mut watcher = notify::recommended_watcher(handler)?;
+    let mut paths = BTreeMap::from([(dir.to_owned(), RecursiveMode::NonRecursive)]);
+    if git {
+        paths.insert(dir.join(".git"), RecursiveMode::NonRecursive);
+    }
+    add(&mut watcher, &paths)?;
+    Ok(watcher)
+}
+
+/// Whether `path` is a `.git`, or is in one: by the names, as a watcher on
+/// macOS names a path by where it really is.
+fn of_git(path: &Path) -> bool {
+    path.ancestors().take(2).any(|path| path.file_name() == Some(OsStr::new(".git")))
+}
+
+/// Has `watcher` watch each of `paths` as its mode says, but for any that
+/// went since it was found.
+fn add(
+    watcher: &mut RecommendedWatcher,
+    paths: &BTreeMap<PathBuf, RecursiveMode>,
+) -> notify::Result<()> {
     let mut adding = watcher.paths_mut();
     for (path, mode) in paths {
         match adding.add(path, *mode) {
@@ -302,8 +339,17 @@ fn watcher(
             Err(error) => return Err(error),
         }
     }
-    adding.commit()?;
-    Ok(watcher)
+    adding.commit()
+}
+
+/// Sets `heard`, and wakes the thread on `wake`.
+fn hear(heard: &AtomicBool, wake: &SyncSender<()>) {
+    heard.store(true, Ordering::SeqCst);
+    match wake.try_send(()) {
+        // A full channel holds a wake-up already, and one that no one hears
+        // is the thread's that has ended.
+        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
+    }
 }
 
 /// A work tree that a pane works in, as it is watched.
@@ -402,6 +448,73 @@ impl Tree {
     }
 }
 
+/// A directory that git placed in no work tree, as it is watched for one to
+/// begin there: for a `.git` that `git init` or `git clone` makes in it, and
+/// in that `.git` once it is there, as git makes the folder first and writes
+/// the rest in it after, and asked about before the folder is whole, the
+/// directory is still in none.
+struct Outside {
+    /// Set as a `.git` comes in the directory or changes, and taken as the
+    /// directory is due again.
+    heard: Arc<AtomicBool>,
+    /// Whether the `.git` in the directory was there when it began to be
+    /// watched, and so is watched too.
+    git: bool,
+    /// The watcher, or why there is none, which leaves the directory to the
+    /// sweep.
+    watching: Result<RecommendedWatcher, String>,
+}
+
+impl Outside {
+    /// `dir`, which git placed in no work tree, watched, and whether anew:
+    /// `before` as it is, where it watches and the `.git` in `dir` has not
+    /// come or gone since; else watched anew, with what it heard before kept,
+    /// and waking the thread on `wake`. What goes wrong, `troubles` says.
+    fn watch(
+        dir: &Path,
+        before: Option<Outside>,
+        wake: &SyncSender<()>,
+        troubles: &mut Troubles,
+    ) -> (Outside, bool) {
+        let git = dir.join(".git").is_dir();
+        let heard = match before {
+            Some(outside) if outside.watching.is_ok() && outside.git == git => {
+                return (outside, false);
+            },
+            // The watcher before lets go of its watches first.
+            Some(Outside { heard, watching, .. }) => {
+                drop(watching);
+                heard
+            },
+            None => Arc::default(),
+        };
+        let watching = beginning(dir, git, heard.clone(), wake.clone())
+            .map_err(|error| format!("{} is read on the sweep alone: {error}", dir.display()));
+        if let Err(trouble) = &watching {
+            troubles.say(trouble.clone());
+        }
+        (Outside { heard, git, watching }, true)
+    }
+}
+
+/// Where git placed a directory it was asked about, and so what wakes it.
+enum Placed {
+    /// In the work tree with this top, which `trees` watches.
+    In(PathBuf),
+    /// In none that git would say, as of a directory in no repository.
+    Outside(Outside),
+}
+
+impl Placed {
+    /// The top of the work tree it is in, if any.
+    fn top(&self) -> Option<&Path> {
+        match self {
+            Placed::In(top) => Some(top),
+            Placed::Outside(_) => None,
+        }
+    }
+}
+
 /// Where git stands with a directory it has been asked about.
 struct Asked {
     /// When git was done with it last.
@@ -411,8 +524,8 @@ struct Asked {
     /// Whether its work tree changed since, or git placed it in another as
     /// it was asked.
     changed: bool,
-    /// The top of the work tree git placed it in then, if any.
-    top: Option<PathBuf>,
+    /// Where git placed it then.
+    placed: Placed,
     /// What went wrong then, if anything did.
     trouble: Option<String>,
 }
@@ -429,36 +542,43 @@ impl Asked {
 
     /// Whether git placed it in the work tree with this top.
     fn within(&self, top: &Path) -> bool {
-        self.top.as_deref() == Some(top)
+        self.placed.top() == Some(top)
     }
 }
 
-/// Asks git where the work tree that `dir` is in is, and how it stands. The
-/// work tree is watched first, so that a change while git reads it is heard.
-/// What to watch hangs on where the work tree is, so git is asked that before
-/// it is watched; where it is watched anew, git is asked again after, as `dir`
-/// could have come to be in another unheard in between: one that `git init`
-/// makes in `dir` can be whole by the time its folder is watched. The top
-/// of the work tree, which `trees` has, where `dir` is in one; what git said;
-/// and whether git placed `dir` elsewhere since, which has it due again.
+/// Asks git where the work tree that `dir` is in is, and how it stands. What
+/// wakes `dir` is watched first, so that a change while git reads it is
+/// heard: its work tree, or `dir` itself where it is in none, as `before`
+/// watched it where it was in none then too. What to watch hangs on where the
+/// work tree is, so git is asked that before it is watched; where it is
+/// watched anew, git is asked again after, as `dir` could have come to be in
+/// another unheard in between: one that `git init` makes in `dir` can be
+/// whole by the time its folder is watched. Where git placed `dir`, with the
+/// work tree in `trees` where it is in one; what git said; and whether git
+/// placed `dir` elsewhere since, which has it due again.
 fn ask(
     dir: &str,
+    before: Option<Placed>,
     trees: &mut HashMap<PathBuf, Tree>,
     wake: &SyncSender<()>,
     troubles: &mut Troubles,
-) -> (Option<PathBuf>, Result<WorkTree, String>, bool) {
-    let (top, anew) = match place(dir) {
-        Some(place) => {
-            let top = place.top.clone();
-            let (tree, anew) = Tree::watch(trees.remove(&top), place, wake, troubles);
-            trees.insert(top.clone(), tree);
-            (Some(top), anew)
-        },
-        None => (None, false),
+) -> (Placed, Result<WorkTree, String>, bool) {
+    let (placed, anew) = if let Some(place) = place(dir) {
+        let top = place.top.clone();
+        let (tree, anew) = Tree::watch(trees.remove(&top), place, wake, troubles);
+        trees.insert(top.clone(), tree);
+        (Placed::In(top), anew)
+    } else {
+        let before = match before {
+            Some(Placed::Outside(outside)) => Some(outside),
+            Some(Placed::In(_)) | None => None,
+        };
+        let (outside, anew) = Outside::watch(Path::new(dir), before, wake, troubles);
+        (Placed::Outside(outside), anew)
     };
     let said = status(dir);
-    let moved = anew && place(dir).map(|place| place.top) != top;
-    (top, said, moved)
+    let moved = anew && place(dir).map(|place| place.top).as_deref() != placed.top();
+    (placed, said, moved)
 }
 
 /// Asks git how the work tree stands in each directory a pane works in, in a
@@ -492,6 +612,13 @@ pub fn follow(
                     within.for_each(|was| was.changed = true);
                 }
             }
+            for was in asked.values_mut() {
+                if let Placed::Outside(outside) = &was.placed
+                    && outside.heard.swap(false, Ordering::SeqCst)
+                {
+                    was.changed = true;
+                }
+            }
             let now = Instant::now();
             let due = |dir: &&String| asked.get(*dir).is_none_or(|was| was.due(sweep) <= now);
             let mut due: Vec<String> = dirs.iter().filter(due).cloned().collect();
@@ -499,10 +626,11 @@ pub fn follow(
             due.sort_by_key(|dir| asked.get(dir).map(|was| was.due(sweep)));
             for dir in due {
                 let started = Instant::now();
-                let (top, said, moved) = ask(&dir, &mut trees, &wake, &mut troubles);
+                let before = asked.remove(&dir).map(|was| was.placed);
+                let (placed, said, moved) = ask(&dir, before, &mut trees, &wake, &mut troubles);
                 let (took, ended) = (started.elapsed(), Instant::now());
                 let trouble = said.as_ref().err().cloned();
-                asked.insert(dir.clone(), Asked { ended, took, changed: moved, top, trouble });
+                asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
                 match said {
                     Ok(tree) => {
                         if core.send(core::Command::WorkTree { dir, tree }).is_err() {
@@ -521,8 +649,12 @@ pub fn follow(
             // What went wrong with one that git rests from has not gone right
             // since, and is not said again.
             let asking = asked.values().filter_map(|was| was.trouble.clone());
+            let outside = asked.values().filter_map(|was| match &was.placed {
+                Placed::Outside(outside) => outside.watching.as_ref().err().cloned(),
+                Placed::In(_) => None,
+            });
             let watching = trees.values().filter_map(|tree| tree.watching.trouble().cloned());
-            for trouble in asking.chain(watching) {
+            for trouble in asking.chain(outside).chain(watching) {
                 troubles.say(trouble);
             }
             troubles.done();

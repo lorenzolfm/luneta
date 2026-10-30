@@ -666,6 +666,32 @@ fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
     shows_at_once(&host, &cwd, "a branch checked out in it", switched, on("other"));
 }
 
+/// A directory in no work tree that becomes one, as `git init` makes one
+/// there, is watched as that one from then on: the work tree shows at once,
+/// and so does a branch checked out in it, which writes nothing but the
+/// `HEAD` in its own git folder.
+#[test]
+fn git_says_at_once_as_a_work_tree_begins_where_there_was_none() {
+    let host = Host::new();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says the directory is in no work tree", || {
+        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+        (tree.stands == Some(Stands::Outside(Outside {}))).then_some(())
+    });
+
+    let on = |name: &'static str| {
+        move |it: &Checkout| matches!(&it.head, Some(Head::Branch(branch)) if branch.name == name)
+    };
+    let made = || assert!(git(dir.path(), &["init", "-q", "-b", "first"]));
+    shows_at_once(&host, &cwd, "a work tree made where there was none", made, on("first"));
+    let switched = || assert!(git(dir.path(), &["switch", "-q", "-c", "other"]));
+    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on("other"));
+}
+
 /// A directory that moves into a work tree, in the place of one git tracks
 /// that moved away, is watched as one made anew there is: an edit in it shows
 /// at once.
