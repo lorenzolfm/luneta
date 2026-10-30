@@ -31,6 +31,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::github::{PullRequest, State};
+use luneta_protocol::said::Said;
 use luneta_protocol::tab;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::shell::Doing;
@@ -419,13 +420,19 @@ fn told(at: Option<impl TryInto<SystemTime>>) -> Option<SystemTime> {
     at?.try_into().ok()?.checked_add(Duration::from_millis(999))
 }
 
-/// What a shell with luneta's hook doing `doing` ran, for the menu.
-fn ran(doing: &Doing) -> Ran {
-    match doing {
-        Doing::Going(going) => Ran::Going(going.command.clone()),
-        Doing::Stopped(stopped) => Ran::Stopped(stopped.command.clone()),
-        Doing::Ended(ended) => Ran::Ended { command: ended.command.clone(), status: ended.status },
-    }
+/// What `shell`, a shell with luneta's hook, said it ran, for the menu.
+fn ran(shell: &Shell) -> Ran {
+    let said = |command: &String| Said::new(command.clone());
+    let ran = match shell.doing.as_ref() {
+        Some(Doing::Going(going)) => said(&going.command).map(Ran::Going),
+        Some(Doing::Stopped(stopped)) => said(&stopped.command).map(Ran::Stopped),
+        Some(Doing::Ended(ended)) => {
+            said(&ended.command).map(|command| Ran::Ended { command, status: ended.status })
+        },
+        // A daemon newer than this luneta's.
+        None => None,
+    };
+    ran.unwrap_or(Ran::Unknown)
 }
 
 /// When the command going in `shell` will have run for `LONG`.
@@ -591,7 +598,7 @@ pub enum Asked {
     Find { menu: u64, cwd: String },
     /// Keep what the shell in the pane `pane` of `session` printed after the
     /// line `command` was last run on, for the menu numbered `menu`.
-    Printed { menu: u64, session: String, pane: u32, command: String },
+    Printed { menu: u64, session: String, pane: u32, command: Said },
     /// Have the model write this brief, and show it.
     Brief(Brief),
     /// Open the ask box, for this row.
@@ -1803,8 +1810,7 @@ impl Sidebar {
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
         let branch = checkout.map(|checkout| checkout.branch);
-        let doing = shown.and_then(|shown| shown.shell.as_ref()?.doing.as_ref());
-        let ran = doing.map_or(Ran::Untold, ran);
+        let ran = shown.and_then(|shown| shown.shell.as_ref()).map_or(Ran::Untold, ran);
         Target::Pane(PaneRow { session, pane, cwd, branch, ran })
     }
 
@@ -3432,7 +3438,6 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::LazyLock;
 
-    use luneta_protocol::said::Said;
     use lunetad::api::shell::{Ended, Going, Stopped};
     use lunetad::api::{self, Clients, Pane, Panes, UnreadFile, Version, Zellij};
     use prost_types::Timestamp;
@@ -4580,6 +4585,19 @@ mod tests {
         Doing::Ended(Ended { command: command.to_owned(), at, status, took })
     }
 
+    /// What a shell said it ran is read as it comes from the daemon: a
+    /// command of no words, which lunetad never sends, and a shell that says
+    /// nothing this luneta knows, as a newer lunetad's would, are unknown.
+    #[test]
+    fn what_a_shell_said_it_ran_is_read_as_it_comes() {
+        let said = |doing| ran(&Shell { doing: Some(doing) });
+        let command = Said::new("make".to_owned()).unwrap();
+        assert_eq!(said(ended("make", Some(2), 10)), Ran::Ended { command, status: Some(2) });
+        assert_eq!(said(ended("", Some(0), 10)), Ran::Unknown);
+        assert_eq!(said(going("", 100, Front::Working)), Ran::Unknown);
+        assert_eq!(ran(&Shell { doing: None }), Ran::Unknown);
+    }
+
     /// A command in a shell has an agent's marks, its row named for it: the
     /// spinner while it works, the dot of an agent that waits for you while
     /// it waits for you to type, and once it ends, how it ended, with the dot
@@ -5440,7 +5458,7 @@ mod tests {
         type_in(&mut sidebar, "gg");
         assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("s", 10), pane: 1 }));
         type_in(&mut sidebar, "c");
-        let command = "cargo test".to_owned();
+        let command = Said::new("cargo test".to_owned()).unwrap();
         let printed = Asked::Printed { menu: 1, session: "s".to_owned(), pane: 1, command };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         let nothing = || Ok(Printed { from: printed::From::Command, kept: None });

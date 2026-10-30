@@ -1405,7 +1405,7 @@ impl App {
             Asked::Pull { menu, link, worked } => pull::prepare(menu, link, worked, &self.events),
             Asked::Find { menu, cwd } => skills::find(menu, &cwd, &self.events),
             Asked::Printed { menu, session, pane, command } => {
-                printed::read(menu, &session, pane, &command, &self.events);
+                printed::read(menu, &session, pane, command.as_str(), &self.events);
             },
             Asked::Brief(brief) => {
                 self.briefs += 1;

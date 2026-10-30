@@ -34,6 +34,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use luneta_protocol::said::Said;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -680,13 +681,16 @@ pub enum Ran {
     /// Nothing: no shell with the hook runs in the pane, or one that has run
     /// nothing yet.
     Untold,
+    /// What this luneta cannot read: what a daemon newer than its own says,
+    /// or a command of no words, which the protocol never sends.
+    Unknown,
     /// A command it runs still.
-    Going(String),
+    Going(Said),
     /// A job it stopped, with `Ctrl z`, which waits to be brought back.
-    Stopped(String),
+    Stopped(Said),
     /// The command it ran last, which ended, with its exit status where the
     /// shell can say it.
-    Ended { command: String, status: Option<i32> },
+    Ended { command: Said, status: Option<i32> },
 }
 
 /// What a key that starts an agent on what a shell's last command printed
@@ -696,7 +700,7 @@ pub enum Ran {
 struct Ended {
     beside: u32,
     cwd: String,
-    command: String,
+    command: Said,
     status: Option<i32>,
 }
 
@@ -787,11 +791,16 @@ impl PaneRow {
                 Ok(Ended { beside, cwd, command: command.clone(), status: *status })
             },
             Ran::Going(command) => Err(format!(
-                "menu: pane {beside} runs `{command}` still, and what it prints is not over"
+                "menu: pane {beside} runs `{}` still, and what it prints is not over",
+                command.as_str()
             )),
             Ran::Stopped(command) => Err(format!(
-                "menu: `{command}` is stopped in pane {beside}, and not over; bring it back with \
-                 `fg`"
+                "menu: `{}` is stopped in pane {beside}, and not over; bring it back with `fg`",
+                command.as_str()
+            )),
+            Ran::Unknown => Err(format!(
+                "menu: what pane {beside}'s shell ran is in words this luneta cannot read, as a \
+                 newer lunetad's"
             )),
             Ran::Untold => Err(format!(
                 "menu: pane {beside} has said of no command it ran last; that takes a shell with \
@@ -877,7 +886,7 @@ pub enum Wants {
     Pull(Link),
     /// luneta to keep what the shell in `pane` printed after the line
     /// `command` was last run on, for `printed`.
-    Printed { pane: u32, command: String },
+    Printed { pane: u32, command: Said },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, for luneta
@@ -1246,7 +1255,7 @@ impl Menu {
                 return Did::Closed(Done::Wrong(format!("menu: what pane {beside} printed: {why}")));
             },
         };
-        let prompt = printed.prompt(last.asks(), &command, status);
+        let prompt = printed.prompt(last.asks(), command.as_str(), status);
         let opens = Opens::Pane { beside, command: claude_reading(prompt, printed.file()) };
         let stage = Stage::Opening(keys);
         Did::Stays(Menu { number, target, stage }, Wants::Open { cwd, opens })
@@ -1828,6 +1837,10 @@ mod tests {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
     }
 
+    fn said(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
     fn row() -> PaneRow {
         PaneRow {
             session: listed(),
@@ -1986,7 +1999,7 @@ mod tests {
 
     /// A row whose shell said the command it ran last ended.
     fn ended_row() -> Target {
-        let ran = Ran::Ended { command: "cargo test".to_owned(), status: Some(101) };
+        let ran = Ran::Ended { command: said("cargo test"), status: Some(101) };
         Target::Pane(PaneRow { ran, ..row() })
     }
 
@@ -1999,7 +2012,7 @@ mod tests {
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
-        assert_eq!(wants, Wants::Printed { pane: 4, command: "cargo test".to_owned() });
+        assert_eq!(wants, Wants::Printed { pane: 4, command: said("cargo test") });
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);
@@ -2045,17 +2058,22 @@ mod tests {
         };
         let ran = |ran| Target::Pane(PaneRow { ran, ..row() });
         assert_eq!(
-            refused(ran(Ran::Going("make".to_owned()))),
+            refused(ran(Ran::Going(said("make")))),
             "menu: pane 4 runs `make` still, and what it prints is not over"
         );
         assert_eq!(
-            refused(ran(Ran::Stopped("vim".to_owned()))),
+            refused(ran(Ran::Stopped(said("vim")))),
             "menu: `vim` is stopped in pane 4, and not over; bring it back with `fg`"
         );
         assert_eq!(
             refused(ran(Ran::Untold)),
             "menu: pane 4 has said of no command it ran last; that takes a shell with luneta's \
              hook, at its prompt"
+        );
+        assert_eq!(
+            refused(ran(Ran::Unknown)),
+            "menu: what pane 4's shell ran is in words this luneta cannot read, as a newer \
+             lunetad's"
         );
         assert_eq!(refused(session_row()), NO_ROW_PANE);
     }
