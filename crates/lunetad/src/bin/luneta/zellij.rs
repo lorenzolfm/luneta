@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -46,6 +47,19 @@ const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
 /// What names the pane a zellij command runs in, in its variables, which
 /// zellij opens a pane beside.
 const PANE_VAR: &str = "ZELLIJ_PANE_ID";
+
+/// What names your shell, in luneta's variables, as in those of the zellij
+/// it starts, which runs it where its config names no other. What runs luneta
+/// can name another there: Claude Code names bash in it for each command an
+/// agent runs, `luneta open tab` among them. So a tab luneta opens with no
+/// command runs the shell the user database names yours, as login starts it,
+/// and the one this names only where the database names none. It runs it
+/// even where zellij's config names another, its `default_shell`; a pane
+/// luneta opens with none runs that one.
+const SHELL_VAR: &str = "SHELL";
+
+/// The shell zellij runs where `SHELL_VAR` names none.
+const NO_SHELL: &str = "/bin/sh";
 
 /// What names the pane you asked luneta's ask box from, in the variables of
 /// the agent it runs, which runs in no pane: the pane luneta's zellij was on
@@ -757,19 +771,47 @@ fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, Str
 /// Opens `tab` in `session`, as `opening` does, and says its id, and the
 /// panes of the session with it in.
 fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
+    let shell = shell(login_shell(), env::var_os(SHELL_VAR));
+    let said = answered(&mut new_tab(session, tab, &shell))?;
+    let Ok(tab) = said.trim().parse::<u32>() else {
+        return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
+    };
+    Ok((tab, laid(session)?))
+}
+
+/// The zellij that opens `tab` in `session`. A tab with no command of its
+/// own runs `shell`, your shell, as its command, and closes as it ends, as a
+/// pane of zellij's own shell does: zellij starts a command in the tab's
+/// `--cwd`, but its own shell where the session's template for a tab says,
+/// and the template of a session zellij brought back says the directory the
+/// session was in.
+fn new_tab(session: &str, tab: &Tab, shell: &OsStr) -> Command {
     let Tab { cwd, name, command: runs } = tab;
     let mut command = Command::new("zellij");
     quiet(&mut command);
     command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
     command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
-    if !runs.is_empty() {
+    if runs.is_empty() {
+        command.args(["--close-on-exit", "--"]).arg(shell);
+    } else {
         command.arg("--").args(runs);
     }
-    let said = answered(&mut command)?;
-    let Ok(tab) = said.trim().parse::<u32>() else {
-        return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
-    };
-    Ok((tab, laid(session)?))
+    command
+}
+
+/// Your shell: `login`, the one the user database names yours, or, where it
+/// names none, `named`, the one `SHELL_VAR` says, or, where neither names
+/// one, unset or empty, the one zellij runs then.
+fn shell(login: Option<OsString>, named: Option<OsString>) -> OsString {
+    let some = |shell: &OsString| !shell.is_empty();
+    login.filter(some).or_else(|| named.filter(some)).unwrap_or_else(|| NO_SHELL.into())
+}
+
+/// The shell the user database names yours, the one login starts, or none
+/// where it has no entry for you.
+fn login_shell() -> Option<OsString> {
+    let you = uzers::get_user_by_uid(rustix::process::getuid().as_raw())?;
+    Some(uzers::os::unix::UserExt::shell(&you).as_os_str().to_owned())
 }
 
 /// What `command`, a zellij of `quiet`'s, said on its stdout as it did what
@@ -1721,6 +1763,40 @@ mod tests {
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 3..], ["zellij", "attach", "elo"]);
+    }
+
+    /// A tab with no command runs your shell as one, which zellij starts in
+    /// the tab's directory also in a session it brought back, and closes as
+    /// it ends. A command runs as it is.
+    #[test]
+    fn a_tab_with_no_command_runs_your_shell_as_one() {
+        let opened = |command: &[&str]| {
+            let command = command.iter().map(|arg| (*arg).to_owned()).collect();
+            let tab = Tab { cwd: "/w/n/feat".to_owned(), name: Some("#5".to_owned()), command };
+            let new_tab = new_tab("n", &tab, OsStr::new("/bin/fish"));
+            let args = new_tab.get_args().map(|arg| arg.to_string_lossy().into_owned());
+            args.collect::<Vec<_>>()
+        };
+        let mut opens = vec!["--session", "n", "action", "new-tab", "--no-focus"];
+        opens.extend(["--cwd", "/w/n/feat", "--name", "#5"]);
+        let fish = [&opens[..], &["--close-on-exit", "--", "/bin/fish"]].concat();
+        assert_eq!(opened(&[]), fish);
+        let claude = [&opens[..], &["--", "claude", "go"]].concat();
+        assert_eq!(opened(&["claude", "go"]), claude);
+    }
+
+    /// Your shell is the one the user database names, over the one
+    /// `SHELL_VAR` names, as Claude Code names bash there for an agent's
+    /// commands; that one where the database names none; and where neither
+    /// names one, unset or empty, `/bin/sh`, the one zellij runs then.
+    #[test]
+    fn your_shell_is_the_one_the_user_database_names() {
+        let (fish, bash) = (|| Some("/bin/fish".into()), || Some("/bin/bash".into()));
+        assert_eq!(shell(fish(), bash()), "/bin/fish");
+        assert_eq!(shell(None, bash()), "/bin/bash");
+        assert_eq!(shell(Some(OsString::new()), bash()), "/bin/bash");
+        assert_eq!(shell(None, Some(OsString::new())), "/bin/sh");
+        assert_eq!(shell(None, None), "/bin/sh");
     }
 
     /// luneta tries the sessions for one to go on in as the picker lists
