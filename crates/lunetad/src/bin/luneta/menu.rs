@@ -688,20 +688,18 @@ pub enum Ran {
     Going(Said),
     /// A job it stopped, with `Ctrl z`, which waits to be brought back.
     Stopped(Said),
-    /// The command it ran last, which ended, with its exit status where the
-    /// shell can say it.
-    Ended { command: Said, status: Option<i32> },
+    /// The command it ran last, which ended.
+    Ended(Ended),
 }
 
-/// What a key that starts an agent on what a shell's last command printed
-/// starts it on: beside the pane `beside`, in the directory `cwd`, the
-/// command `command`, which ended with `status`.
+/// The command a shell ran last, which ended: with its exit status where
+/// the shell can say it, at `at`, to the second, which tells it from
+/// another run of the same command.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Ended {
-    beside: u32,
-    cwd: String,
-    command: Said,
-    status: Option<i32>,
+pub struct Ended {
+    pub command: Said,
+    pub status: Option<i32>,
+    pub at: SystemTime,
 }
 
 impl Target {
@@ -756,9 +754,9 @@ impl Target {
     }
 
     /// What a key that starts an agent on what the pane's shell printed
-    /// last starts it on, or why it starts none: a session's row has no
-    /// pane.
-    fn ended(&self) -> Result<Ended, String> {
+    /// last starts it on, beside the pane, in the directory it works in, or
+    /// why it starts none: a session's row has no pane.
+    fn ended(&self) -> Result<(u32, String, Ended), String> {
         match self {
             Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
             Target::Pane(row) => row.ended(),
@@ -782,14 +780,13 @@ impl PaneRow {
     }
 
     /// What a key that starts an agent on what the pane's shell printed
-    /// last starts it on, or why it starts none: the shell must be at its
-    /// prompt, after a command whose end its hook said.
-    fn ended(&self) -> Result<Ended, String> {
+    /// last starts it on, beside the pane, in the directory it works in, or
+    /// why it starts none: the shell must be at its prompt, after a command
+    /// whose end its hook said.
+    fn ended(&self) -> Result<(u32, String, Ended), String> {
         let (beside, cwd) = self.beside()?;
         match &self.ran {
-            Ran::Ended { command, status } => {
-                Ok(Ended { beside, cwd, command: command.clone(), status: *status })
-            },
+            Ran::Ended(ended) => Ok((beside, cwd, ended.clone())),
             Ran::Going(command) => Err(format!(
                 "menu: pane {beside} runs `{}` still, and what it prints is not over",
                 command.as_str()
@@ -948,9 +945,9 @@ enum Stage {
     /// there. Keys do nothing but close the menu.
     Opening(Keys),
     /// The key `last` waits for luneta to keep what the pane's shell
-    /// printed, for an agent on it as `ended` says. Keys do nothing but
-    /// close the menu.
-    Reading { keys: Keys, last: Last, ended: Ended },
+    /// printed after `ended`, for an agent on it beside the pane `beside`,
+    /// in `cwd`. Keys do nothing but close the menu.
+    Reading { keys: Keys, last: Last, beside: u32, cwd: String, ended: Ended },
     /// The menu for the pull request or the issue `link`, which a paste
     /// opened, at `step`. Once luneta has found where its keys go, its target
     /// is there.
@@ -1100,10 +1097,9 @@ impl Menu {
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 Pressed::Last(last) => match target.ended() {
-                    Ok(ended) => {
-                        let wants =
-                            Wants::Printed { pane: ended.beside, command: ended.command.clone() };
-                        stays(Stage::Reading { keys, last, ended }, wants)
+                    Ok((beside, cwd, ended)) => {
+                        let wants = Wants::Printed { pane: beside, command: ended.command.clone() };
+                        stays(Stage::Reading { keys, last, beside, cwd, ended }, wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1240,21 +1236,38 @@ impl Menu {
         }
     }
 
+    /// What the shell of the menu's row ran, as the daemon says it now: one
+    /// may have ended, or begun, since the menu opened.
+    pub fn reran(&mut self, ran: Ran) {
+        if let Target::Pane(row) = &mut self.target {
+            row.ran = ran;
+        }
+    }
+
     /// What the key that waits on what the pane's shell printed does, now
     /// that luneta kept it, as `printed` says, or why it kept nothing: opens
-    /// an agent on it beside the pane, and waits for zellij to open it.
+    /// an agent on it beside the pane, and waits for zellij to open it. One
+    /// that the shell ran another command since, as the daemon says, or
+    /// went, kept what that printed, or some of it, and opens none. One run
+    /// in the moment before the daemon heard of it goes unseen.
     pub fn printed(self, printed: Result<Printed, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Reading { keys, last, ended } = stage else {
+        let Stage::Reading { keys, last, beside, cwd, ended } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
-        let Ended { beside, cwd, command, status } = ended;
         let printed = match printed {
             Ok(printed) => printed,
             Err(why) => {
                 return Did::Closed(Done::Wrong(format!("menu: what pane {beside} printed: {why}")));
             },
         };
+        if !matches!(&target, Target::Pane(PaneRow { ran: Ran::Ended(now), .. }) if *now == ended) {
+            return Did::Closed(Done::Wrong(format!(
+                "menu: pane {beside}'s shell went on as luneta read what `{}` printed; ask again",
+                ended.command.as_str()
+            )));
+        }
+        let Ended { command, status, .. } = ended;
         let prompt = printed.prompt(last.asks(), command.as_str(), status);
         let opens = Opens::Pane { beside, command: claude_reading(prompt, printed.file()) };
         let stage = Stage::Opening(keys);
@@ -1997,10 +2010,40 @@ mod tests {
         assert!(menu.opening());
     }
 
+    /// The command a row's shell ran last: `cargo test`, which failed.
+    fn cargo_test() -> Ended {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
+        Ended { command: said("cargo test"), status: Some(101), at }
+    }
+
     /// A row whose shell said the command it ran last ended.
     fn ended_row() -> Target {
-        let ran = Ran::Ended { command: said("cargo test"), status: Some(101) };
-        Target::Pane(PaneRow { ran, ..row() })
+        Target::Pane(PaneRow { ran: Ran::Ended(cargo_test()), ..row() })
+    }
+
+    /// What luneta kept once the row's shell went on, as the daemon says,
+    /// to another command, or to another run of the same, or went, is not
+    /// what the key was pressed on, and opens no agent. A command that
+    /// ended while the menu was open is one a key starts an agent on.
+    #[test]
+    fn a_key_for_the_last_command_holds_to_the_run_it_was_pressed_on() {
+        let went = |ran: Ran| {
+            let (menu, _) = stays(opened(ended_row(), Some('c')));
+            let (mut menu, _) = stays(menu.key(&char('f')));
+            menu.reran(ran);
+            closed(menu.printed(Ok(Printed { from: From::Command, kept: None })))
+        };
+        let why = "menu: pane 4's shell went on as luneta read what `cargo test` printed; ask again";
+        let again = Ended { at: cargo_test().at + Duration::from_secs(5), ..cargo_test() };
+        for ran in [Ran::Going(said("ls")), Ran::Ended(again), Ran::Untold] {
+            assert_eq!(went(ran), Done::Wrong(why.to_owned()));
+        }
+
+        let busy = Target::Pane(PaneRow { ran: Ran::Going(said("cargo test")), ..row() });
+        let (mut menu, _) = stays(opened(busy, Some('c')));
+        menu.reran(Ran::Ended(cargo_test()));
+        let (_, wants) = stays(menu.key(&char('f')));
+        assert_eq!(wants, Wants::Printed { pane: 4, command: said("cargo test") });
     }
 
     /// `c f` and `c e` have luneta keep what the command the row's shell ran

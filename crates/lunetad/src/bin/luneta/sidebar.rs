@@ -426,13 +426,19 @@ fn ran(shell: &Shell) -> Ran {
     let ran = match shell.doing.as_ref() {
         Some(Doing::Going(going)) => said(&going.command).map(Ran::Going),
         Some(Doing::Stopped(stopped)) => said(&stopped.command).map(Ran::Stopped),
-        Some(Doing::Ended(ended)) => {
-            said(&ended.command).map(|command| Ran::Ended { command, status: ended.status })
-        },
+        Some(Doing::Ended(ended)) => ended_last(ended).map(Ran::Ended),
         // A daemon newer than this luneta's.
         None => None,
     };
     ran.unwrap_or(Ran::Unknown)
+}
+
+/// The command a shell said it ran last, which ended, for the menu. None of
+/// one with no words, or with no moment it ended, which lunetad always says.
+fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<menu::Ended> {
+    let command = Said::new(ended.command.clone())?;
+    let at = SystemTime::try_from(ended.at?).ok()?;
+    Some(menu::Ended { command, status: ended.status, at })
 }
 
 /// When the command going in `shell` will have run for `LONG`.
@@ -828,6 +834,7 @@ impl Sidebar {
             self.own.heard(listed.as_deref(), Instant::now());
         }
         self.rebuild();
+        self.reran();
         look
     }
 
@@ -1810,8 +1817,28 @@ impl Sidebar {
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
         let branch = checkout.map(|checkout| checkout.branch);
-        let ran = shown.and_then(|shown| shown.shell.as_ref()).map_or(Ran::Untold, ran);
+        let ran = self.ran_in(&session, pane);
         Target::Pane(PaneRow { session, pane, cwd, branch, ran })
+    }
+
+    /// What the shell in the pane `pane` of `session` said it ran last, as
+    /// the daemon passed it on.
+    fn ran_in(&self, session: &Listed, pane: u32) -> Ran {
+        let shell = self.pane_of(session, pane).and_then(|shown| shown.shell.as_ref());
+        shell.map_or(Ran::Untold, ran)
+    }
+
+    /// The open menu's row is a pane's whose shell may have ended a
+    /// command, or begun one, since the menu opened, as the daemon says now:
+    /// the menu has what it ran from it.
+    fn reran(&mut self) {
+        let Some(Target::Pane(row)) = self.menu.as_ref().map(Menu::target) else {
+            return;
+        };
+        let ran = self.ran_in(&row.session, row.pane);
+        if let Some(menu) = &mut self.menu {
+            menu.reran(ran);
+        }
     }
 
     /// Opens the menu for the pane luneta's zellij is on, on its first group,
@@ -4591,9 +4618,15 @@ mod tests {
     #[test]
     fn what_a_shell_said_it_ran_is_read_as_it_comes() {
         let said = |doing| ran(&Shell { doing: Some(doing) });
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("make".to_owned()).unwrap();
-        assert_eq!(said(ended("make", Some(2), 10)), Ran::Ended { command, status: Some(2) });
+        let make = Ran::Ended(menu::Ended { command, status: Some(2), at });
+        assert_eq!(said(ended("make", Some(2), 10)), make);
         assert_eq!(said(ended("", Some(0), 10)), Ran::Unknown);
+        let Doing::Ended(untimed) = ended("make", Some(2), 10) else {
+            panic!("an end");
+        };
+        assert_eq!(said(Doing::Ended(Ended { at: None, ..untimed })), Ran::Unknown);
         assert_eq!(said(going("", 100, Front::Working)), Ran::Unknown);
         assert_eq!(ran(&Shell { doing: None }), Ran::Unknown);
     }
@@ -5474,6 +5507,24 @@ mod tests {
         type_in(&mut sidebar, "jcf");
         assert!(sidebar.menu.is_none());
         let why = "menu: pane 2 runs `make` still, and what it prints is not over";
+        assert_eq!(sidebar.notice.as_deref(), Some(why));
+
+        // The menu has what the row's shell ran as the daemon says it now: a
+        // command that ends while it is open is one to start an agent on, and
+        // one the shell goes on from as luneta reads it starts none.
+        type_in(&mut sidebar, "c");
+        let shells = |busy: Doing| {
+            let failed = in_shell(1, ended("cargo test", Some(101), 3000));
+            host(vec![session("s", 10, vec![failed, in_shell(2, busy)])], Vec::new())
+        };
+        sidebar.heard(shells(ended("make", Some(2), 3000)));
+        let command = Said::new("make".to_owned()).unwrap();
+        let printed = Asked::Printed { menu: 3, session: "s".to_owned(), pane: 2, command };
+        assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
+        sidebar.heard(shells(going("make", 200, Front::Working)));
+        assert_eq!(sidebar.printed(3, nothing()), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        let why = "menu: pane 2's shell went on as luneta read what `make` printed; ask again";
         assert_eq!(sidebar.notice.as_deref(), Some(why));
     }
 
