@@ -649,8 +649,8 @@ mod tests {
         };
         let read = Shells::new(folder.path()).read_by(ending);
         let took = Duration::from_millis(1500);
-        let doing =
-            Doing::Ended { command: said("make"), at: at(102), ending: Some(Ending::Exited(0)), took };
+        let ending = Some(Ending::Exited(0));
+        let doing = Doing::Ended { command: said("make"), at: at(102), ending, took };
         let shell = Shell { named: "work".to_owned(), pane: 1, started: at(100), doing };
         assert_eq!(read, [shell]);
     }

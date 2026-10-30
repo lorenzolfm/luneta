@@ -176,9 +176,14 @@ reads what the last one printed. Of a job brought back with `fg`, the file holds
 what it printed after the `fg`, as the hook says. Where the pane no longer shows
 the line the command was run on, as after a `clear`, or once it scrolled out of
 what zellij keeps, the file holds all the pane shows, and the agent is told so.
-Of a prompt of more than one line, the lines before the one the shell waits on
-end the file, as luneta cannot tell them from what the command printed. A file
-goes once it is a day old, as luneta keeps another.
+luneta takes the last line that holds the command after a word for the line it
+was run on, and a line the command printed may hold it so, as `Error: make
+failed` holds `make`. Where nothing follows that line, the file holds all the
+pane shows, and the agent is told it may be such a line; where more does, the
+file starts after it, too late. Of a prompt of more than one line, the lines
+before the one the shell waits on end the file, as luneta cannot tell them from
+what the command printed. A file goes once it is a day old, as luneta keeps
+another.
 
 The Claude group's other keys are for a few skills, built in. For any other,
 `/` at the top of the menu searches every skill the pane's directory can run:

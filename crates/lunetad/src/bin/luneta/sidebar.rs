@@ -1979,7 +1979,9 @@ impl Sidebar {
                 }
             },
             Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
-            Wants::Printed { pane, ended } => Asked::Printed { menu: number, session, pane, ended },
+            Wants::Printed { pane, ended } => {
+                Asked::Printed { menu: number, session, pane, ended }
+            },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
@@ -3471,7 +3473,6 @@ mod tests {
 
     use super::*;
     use crate::own::Before;
-    use crate::printed;
     use crate::pull::At;
     use crate::spots::Hit;
 
@@ -5495,9 +5496,10 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("cargo test".to_owned()).unwrap();
         let failed = menu::Ended { command, ending: Some(Ending::Exited(101)), at };
-        let printed = Asked::Printed { menu: 1, session: "s".to_owned(), pane: 1, ended: failed };
+        let printed =
+            Asked::Printed { menu: 1, session: "s".to_owned(), pane: 1, ended: failed };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
-        let nothing = || Ok(Printed { from: printed::From::Command, kept: None });
+        let nothing = || Ok(Printed::Nothing);
         assert_eq!(sidebar.printed(2, nothing()), Asked::Nothing);
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
@@ -5523,7 +5525,8 @@ mod tests {
         sidebar.heard(shells(ended("make", Some(2), 3000)));
         let command = Said::new("make".to_owned()).unwrap();
         let make = menu::Ended { command, ending: Some(Ending::Exited(2)), at };
-        let printed = Asked::Printed { menu: 3, session: "s".to_owned(), pane: 2, ended: make };
+        let printed =
+            Asked::Printed { menu: 3, session: "s".to_owned(), pane: 2, ended: make };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         sidebar.heard(shells(going("make", 200, Front::Working)));
         assert_eq!(sidebar.printed(3, nothing()), Asked::Nothing);

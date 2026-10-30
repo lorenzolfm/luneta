@@ -1839,7 +1839,7 @@ mod tests {
 
     use super::*;
     use crate::close::{self, Deletes, Doing, Seat, Subject};
-    use crate::printed::{From, Kept};
+    use crate::printed::Kept;
     use crate::pull::{At, Link, Ready};
     use crate::sidebar::Listed;
     use crate::skills::Skill;
@@ -2031,9 +2031,10 @@ mod tests {
             let (menu, _) = stays(opened(ended_row(), Some('c')));
             let (mut menu, _) = stays(menu.key(&char('f')));
             menu.reran(ran);
-            closed(menu.printed(Ok(Printed { from: From::Command, kept: None })))
+            closed(menu.printed(Ok(Printed::Nothing)))
         };
-        let why = "menu: pane 4's shell went on as luneta read what `cargo test` printed; ask again";
+        let why =
+            "menu: pane 4's shell went on as luneta read what `cargo test` printed; ask again";
         let again = Ended { at: cargo_test().at + Duration::from_secs(5), ..cargo_test() };
         for ran in [Ran::Going(said("ls")), Ran::Ended(again), Ran::Untold] {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
@@ -2061,7 +2062,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let file = PathBuf::from("/run/luneta/printed/1.txt");
         let kept = Kept { file, lines: 3, left_out: 0 };
-        let printed = Printed { from: From::Command, kept: Some(kept) };
+        let printed = Printed::After(kept);
         let (menu, wants) = stays(menu.printed(Ok(printed)));
         let prompt = "Explain this. In my shell, `cargo test` ended with exit status 101. What it \
                       printed is in /run/luneta/printed/1.txt.";
@@ -2074,7 +2075,7 @@ mod tests {
         // Nothing printed leaves the agent no file to read.
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, _) = stays(menu.key(&char('f')));
-        let (_, wants) = stays(menu.printed(Ok(Printed { from: From::Command, kept: None })));
+        let (_, wants) = stays(menu.printed(Ok(Printed::Nothing)));
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
