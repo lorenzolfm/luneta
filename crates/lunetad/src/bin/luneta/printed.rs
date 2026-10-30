@@ -10,7 +10,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -33,6 +33,11 @@ const KEPT: Duration = Duration::from_hours(24);
 
 /// The folder the files are kept in, in luneta's.
 const FOLDER: &str = "printed";
+
+/// What a rule of Claude Code's reads as more than a path, as gitignore
+/// does, or as where the rule ends: a file whose path holds one is not let
+/// read by a rule that names it.
+const PATTERN: [char; 7] = ['*', '?', '[', ']', '\\', '(', ')'];
 
 /// How many files this luneta has kept, which tells apart the names of
 /// those it keeps in the same moment.
@@ -62,8 +67,8 @@ pub enum Printed<T = Kept> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kept {
     /// Its path, with every link in it followed, as the agent's leave to read
-    /// it names it.
-    pub file: PathBuf,
+    /// it names it: text, with nothing in it a rule reads as a pattern.
+    pub file: String,
     /// How many lines it holds, and how many came before them, left out.
     pub lines: usize,
     pub left_out: usize,
@@ -106,18 +111,15 @@ impl Printed {
             } else {
                 format!("the last {lines} of the {} lines my screen has", lines + left_out)
             };
-            format!("{} holds {holds}", file.display())
+            format!("{file} holds {holds}")
         };
         let printed = match self {
             Printed::After(Kept { file, left_out: 0, .. }) => {
-                format!("What it printed{after} is in {}.", file.display())
+                format!("What it printed{after} is in {file}.")
             },
             Printed::After(Kept { file, lines, left_out }) => {
                 let of = lines + left_out;
-                format!(
-                    "The last {lines} of the {of} lines it printed{after} are in {}.",
-                    file.display()
-                )
+                format!("The last {lines} of the {of} lines it printed{after} are in {file}.")
             },
             Printed::Nothing => format!("It printed nothing{after}."),
             Printed::Unsure(kept) => format!(
@@ -135,7 +137,7 @@ impl Printed {
     }
 
     /// The file the agent is let read, where there is one.
-    pub fn file(&self) -> Option<&Path> {
+    pub fn file(&self) -> Option<&str> {
         match self {
             Printed::After(kept) | Printed::Unsure(kept) | Printed::Top(Some(kept)) => {
                 Some(&kept.file)
@@ -269,22 +271,32 @@ fn keep(runtime: &Path, cut: Printed<Tail<'_>>, now: SystemTime) -> Result<Print
 
 /// Writes `tail` in a file of its own, for this user alone, in the folder
 /// `FOLDER` of luneta's folder `runtime`, made as the daemon makes it, and
-/// takes away those kept there `KEPT` before `now`.
+/// takes away those kept there `KEPT` before `now`. None where the folder's
+/// path, with every link in it followed, is not text, or holds what a rule
+/// of Claude Code's reads as a pattern: no rule would let the agent read it.
 fn write(runtime: &Path, tail: &Tail<'_>, now: SystemTime) -> Result<Kept, String> {
     let Tail { lines, left_out } = tail;
     let folder = folder::make(runtime).and_then(|_| folder::make(&runtime.join(FOLDER)));
     let folder = folder.map_err(|refusal| refusal.to_string())?;
+    let found = fs::canonicalize(folder.path());
+    let found = found.map_err(|error| format!("{}: {error}", folder.path().display()))?;
+    let found = found.into_os_string().into_string();
+    let found = found.map_err(|found| format!("{} is not text", Path::new(&found).display()))?;
+    if let Some(pattern) = found.chars().find(|c| PATTERN.contains(c)) {
+        return Err(format!(
+            "{found} holds `{pattern}`, which a rule of Claude Code's reads as more than a path"
+        ));
+    }
     sweep(folder.path(), now);
     let since = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let count = FILES.fetch_add(1, Ordering::Relaxed);
-    let path = folder.path().join(format!("{since}-{}-{count}.txt", std::process::id()));
-    let failed = |error: io::Error| format!("{}: {error}", path.display());
+    let file = format!("{found}/{since}-{}-{count}.txt", std::process::id());
+    let failed = |error: io::Error| format!("{file}: {error}");
     let mut text = lines.join("\n");
     text.push('\n');
-    let mut file =
-        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(failed)?;
-    file.write_all(text.as_bytes()).map_err(failed)?;
-    let file = fs::canonicalize(&path).map_err(failed)?;
+    let mut written =
+        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file).map_err(failed)?;
+    written.write_all(text.as_bytes()).map_err(failed)?;
     Ok(Kept { file, lines: lines.len(), left_out: *left_out })
 }
 
@@ -438,6 +450,7 @@ mod tests {
         let Printed::Top(Some(Kept { file, lines: 2, left_out: 3 })) = &first else {
             panic!("kept {first:?}");
         };
+        let file = Path::new(file);
         assert_eq!(file.parent(), Some(folder.as_path()));
         assert_eq!(fs::read_to_string(file).expect("the file"), "one\ntwo\n");
         let mode = |path: &Path| fs::metadata(path).expect("there").permissions().mode() & 0o777;
@@ -456,13 +469,31 @@ mod tests {
         assert!(young.exists() && file.exists());
     }
 
+    /// A file whose path holds what a rule of Claude Code's reads as a
+    /// pattern, as gitignore does, or as where the rule ends, is one no rule
+    /// would let the agent read, nor that one alone: luneta keeps none there.
+    #[test]
+    fn a_file_no_rule_names_alone_is_not_kept() {
+        let root = tempfile::tempdir().expect("a folder");
+        let tail = || Printed::After(Tail { lines: vec!["error"], left_out: 0 });
+        for named in ["lune[ta", "lune*ta", "lune(ta)"] {
+            let runtime = root.path().join(named).join("luneta");
+            fs::create_dir_all(runtime.parent().expect("a parent")).expect("made");
+            let refused = keep(&runtime, tail(), SystemTime::now()).expect_err("refused");
+            let says = "`, which a rule of Claude Code's reads as more than a path";
+            assert!(refused.ends_with(says), "{refused}");
+            let kept = fs::read_dir(runtime.join(FOLDER)).expect("the folder").count();
+            assert_eq!(kept, 0, "{named}");
+        }
+    }
+
     /// The agent is told what the command was and how it ended, and where
     /// what it printed is, or that it printed nothing, and how much of it
     /// that is; or, where luneta is not sure where it starts, or found no
     /// line it was run on, where all the screen is.
     #[test]
     fn the_agent_is_told_the_command_how_it_ended_and_where_what_it_printed_is() {
-        let file = PathBuf::from("/run/luneta/printed/1.txt");
+        let file = "/run/luneta/printed/1.txt".to_owned();
         let kept = |lines, left_out| Kept { file: file.clone(), lines, left_out };
         let failed = ended("cargo test", Some(Ending::Exited(101)));
         let told = |printed: Printed| printed.prompt("Fix this.", &failed);

@@ -30,7 +30,6 @@
 //! where every key is the menu's. While the sidebar has the focus and no menu
 //! is open, the legend at its bottom lists the keys it takes there.
 
-use std::path::Path;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -829,11 +828,11 @@ fn claude(prompt: &str, branch: Option<&str>) -> Vec<String> {
 /// question asked: luneta keeps what a shell printed outside the directory
 /// the agent works in, where Claude Code asks first. A rule names a path
 /// from the root with another `/` before it.
-fn claude_reading(prompt: String, file: Option<&Path>) -> Vec<String> {
+fn claude_reading(prompt: String, file: Option<&str>) -> Vec<String> {
     let mut command = vec![CLAUDE.to_owned()];
     if let Some(file) = file {
         command.push("--allowedTools".to_owned());
-        command.push(format!("Read(/{})", file.display()));
+        command.push(format!("Read(/{file})"));
         // The flag takes every word after it as another tool, up to this.
         command.push("--".to_owned());
     }
@@ -1832,7 +1831,6 @@ fn skill_line(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use ratatui::layout::Position;
@@ -2060,7 +2058,7 @@ mod tests {
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);
-        let file = PathBuf::from("/run/luneta/printed/1.txt");
+        let file = "/run/luneta/printed/1.txt".to_owned();
         let kept = Kept { file, lines: 3, left_out: 0 };
         let printed = Printed::After(kept);
         let (menu, wants) = stays(menu.printed(Ok(printed)));
