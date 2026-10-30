@@ -196,7 +196,8 @@ fn tracked(top: &Path, listed: &[u8]) -> Option<BTreeSet<PathBuf>> {
 /// work tree's `HEAD` and index, and the repository's packed refs and config;
 /// the repository's refs, each in a file under `refs`, the stashes' among
 /// them, or in the tables in `reftable`, where the work tree keeps its `HEAD`
-/// too; and the directories. Only those there now.
+/// too; the directories; and a `.git` folder in any of them, as `git init`
+/// makes one there. Only those there now.
 fn watched(place: &Place, tracked: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, RecursiveMode> {
     use RecursiveMode::{NonRecursive, Recursive};
     let folders = [&place.own, &place.common].map(|folder| (folder.clone(), NonRecursive));
@@ -209,7 +210,13 @@ fn watched(place: &Place, tracked: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, Recu
         (place.own.join("reftable"), NonRecursive),
     ];
     let dirs = tracked.iter().map(|dir| (dir.clone(), NonRecursive));
-    folders.into_iter().chain(refs).chain(dirs).filter(|(path, _)| path.is_dir()).collect()
+    // git writes the folder of a work tree that `git init` makes in a
+    // directory of this one in pieces, and asked about before the folder is
+    // whole, the directory is still in this work tree. Nothing else changes
+    // as git makes it whole.
+    let made = tracked.iter().map(|dir| (dir.join(".git"), NonRecursive));
+    let all = folders.into_iter().chain(refs).chain(dirs).chain(made);
+    all.filter(|(path, _)| path.is_dir()).collect()
 }
 
 /// The index at `path` as it stands: the file it is, its size, and when it
