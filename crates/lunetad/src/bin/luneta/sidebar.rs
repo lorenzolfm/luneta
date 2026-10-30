@@ -48,11 +48,12 @@ use crate::folds::Folds;
 use crate::gruvbox;
 use crate::icons;
 use crate::ledger::{self, Key};
-use crate::menu::{self, Choice, Command, Did, Done, Menu, Opens, Target, Top, Wants};
+use crate::menu::{self, Choice, Command, Did, Done, Menu, Opens, Ran, Target, Top, Wants};
 use crate::news::News;
 use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Listing, Live, Seated, Shown};
+use crate::printed::Printed;
 use crate::pull::{Link, Ready, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::Drawn;
@@ -416,6 +417,15 @@ fn told(at: Option<impl TryInto<SystemTime>>) -> Option<SystemTime> {
     at?.try_into().ok()?.checked_add(Duration::from_millis(999))
 }
 
+/// What a shell with luneta's hook doing `doing` ran, for the menu.
+fn ran(doing: &Doing) -> Ran {
+    match doing {
+        Doing::Going(going) => Ran::Going(going.command.clone()),
+        Doing::Stopped(stopped) => Ran::Stopped(stopped.command.clone()),
+        Doing::Ended(ended) => Ran::Ended { command: ended.command.clone(), status: ended.status },
+    }
+}
+
 /// When the command going in `shell` will have run for `LONG`.
 fn long_at(shell: &Shell) -> Option<SystemTime> {
     match shell.doing.as_ref()? {
@@ -577,6 +587,9 @@ pub enum Asked {
     Pull { menu: u64, link: Link, worked: Vec<Worked> },
     /// Find the skills that `cwd` can run, for the menu numbered `menu`.
     Find { menu: u64, cwd: String },
+    /// Keep what the shell in the pane `pane` of `session` printed after the
+    /// line `command` was last run on, for the menu numbered `menu`.
+    Printed { menu: u64, session: String, pane: u32, command: String },
     /// Have the model write this brief, and show it.
     Brief(Brief),
     /// Open the ask box, for this row.
@@ -1768,8 +1781,9 @@ impl Sidebar {
     }
 
     /// What the menu is for, as it opens on `place`: the place, the directory
-    /// its pane works in, or its agent, as its row says it, and the branch
-    /// checked out there. A session has neither, having no pane.
+    /// its pane works in, or its agent, as its row says it, the branch
+    /// checked out there, and what its shell said it ran last. A session has
+    /// none of them, having no pane.
     fn target_at(&self, place: Place) -> Target {
         let pane = place.pane().and_then(|pane| self.pane_of(place.listed(), pane));
         let agents = self.host.as_ref().map(|host| seated(&host.agents, &host.sessions));
@@ -1782,7 +1796,9 @@ impl Sidebar {
         let trees = self.host.iter().flat_map(|host| &host.work_trees);
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
-        Target { cwd, branch: checkout.map(|checkout| checkout.branch), place }
+        let doing = pane.and_then(|pane| pane.shell.as_ref()?.doing.as_ref());
+        let ran = doing.map_or(Ran::Untold, ran);
+        Target { cwd, branch: checkout.map(|checkout| checkout.branch), place, ran }
     }
 
     /// Opens the menu for the pane luneta's zellij is on, on its first group,
@@ -1921,6 +1937,9 @@ impl Sidebar {
                 }
             },
             Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
+            Wants::Printed { pane, command } => {
+                Asked::Printed { menu: number, session, pane, command }
+            },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
@@ -1949,6 +1968,16 @@ impl Sidebar {
             return Asked::Nothing;
         };
         self.menu_did(waiting.pulled(ready))
+    }
+
+    /// luneta kept what the pane of the menu numbered `menu` printed, as
+    /// `printed` says, or why it kept nothing: the menu goes on, while it
+    /// waits on it.
+    pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
+        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.reading()) else {
+            return Asked::Nothing;
+        };
+        self.menu_did(waiting.printed(printed))
     }
 
     /// Every pane the daemon says a directory of, in the order of the rows,
@@ -3403,6 +3432,7 @@ mod tests {
 
     use super::*;
     use crate::own::Before;
+    use crate::printed;
     use crate::pull::At;
     use crate::spots::Hit;
 
@@ -5388,6 +5418,40 @@ mod tests {
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), Asked::Open { menu: 1, open: pane });
     }
 
+    /// The menu on a shell's row is for the command its shell said it ran
+    /// last: `c f` has luneta keep what that printed, and once kept, opens
+    /// an agent on it beside the pane. One kept for a menu that closed since
+    /// goes nowhere. On a shell whose command runs still, the menu says why
+    /// it starts none.
+    #[test]
+    fn the_menu_on_a_shell_s_row_starts_an_agent_on_its_last_command() {
+        let mut sidebar = Sidebar::default();
+        let failed = in_shell(1, ended("cargo test", Some(101), 3000));
+        let busy = in_shell(2, going("make", 100, Front::Working));
+        sidebar.heard(host(vec![session("s", 10, vec![failed, busy])], Vec::new()));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "gg");
+        assert_eq!(sidebar.cursor, Some(Place::Pane { session: listed("s", 10), pane: 1 }));
+        type_in(&mut sidebar, "c");
+        let command = "cargo test".to_owned();
+        let printed = Asked::Printed { menu: 1, session: "s".to_owned(), pane: 1, command };
+        assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
+        let nothing = || Ok(Printed { from: printed::From::Command, kept: None });
+        assert_eq!(sidebar.printed(2, nothing()), Asked::Nothing);
+        let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
+                      nothing.";
+        let command = vec!["claude".to_owned(), prompt.to_owned()];
+        let cwd = "/w/luneta/main".to_owned();
+        let open = Open::Pane { session: "s".to_owned(), beside: 1, cwd, command };
+        assert_eq!(sidebar.printed(1, nothing()), Asked::Open { menu: 1, open });
+        assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
+
+        type_in(&mut sidebar, "jcf");
+        assert!(sidebar.menu.is_none());
+        let why = "menu: pane 2 runs `make` still, and what it prints is not over";
+        assert_eq!(sidebar.notice.as_deref(), Some(why));
+    }
+
     /// The menu floats over zellij for the pane luneta's zellij is on,
     /// wherever the highlight is, and in a folded session too, and the
     /// sidebar stands meanwhile as it does under a brief. Its keys open beside
@@ -5445,6 +5509,7 @@ mod tests {
             place: Place::Pane { session: listed("older", 10), pane: 1 },
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
+            ran: Ran::Untold,
         }));
 
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());

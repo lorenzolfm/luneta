@@ -25,6 +25,7 @@ mod news;
 mod order;
 mod own;
 mod picker;
+mod printed;
 mod pull;
 mod sidebar;
 mod skills;

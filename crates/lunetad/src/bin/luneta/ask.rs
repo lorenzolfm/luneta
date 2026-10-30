@@ -647,6 +647,7 @@ mod tests {
 
     use super::*;
     use crate::drive::{BEFORE_VAR, TURN_VAR};
+    use crate::menu::Ran;
     use crate::sidebar::{Listed, Place};
 
     fn listed() -> Listed {
@@ -658,6 +659,7 @@ mod tests {
             place: Place::Pane { session: listed(), pane: 4 },
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
+            ran: Ran::Untold,
         }
     }
 
@@ -868,7 +870,8 @@ mod tests {
         assert!(var(&first, TURN_VAR).is_some_and(|key| key.is_some()));
         assert_eq!(var(&first, BEFORE_VAR), Some(None));
 
-        let session = Target { place: Place::Session(listed()), cwd: None, branch: None };
+        let session =
+            Target { place: Place::Session(listed()), cwd: None, branch: None, ran: Ran::Untold };
         let ask = Ask::new(2, &session, Path::new("/w"));
         let turn = Turn { key: 255, before: Some(10) };
         let next = claude(&ask.cwd, Some("7c22"), None, &ask.highlighted, turn);
