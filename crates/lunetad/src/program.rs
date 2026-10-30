@@ -300,25 +300,27 @@ mod tests {
     /// look each few milliseconds holds its answer up.
     #[test]
     fn a_program_is_heard_from_as_it_ends() {
-        // A busy machine holds a round up, and never hurries one, so the
-        // quickest quarter says the most of how soon it is heard from.
-        let quick = |mut took: Vec<Duration>| {
-            took.sort();
-            took[took.len() / 4]
-        };
-        let (mut ran, mut output) = (Vec::new(), Vec::new());
-        // Turn about, so that a machine busy for a while slows both alike.
-        for _ in 0..21 {
-            let asked = Instant::now();
-            let said = run(&mut Command::new("true"), Duration::from_secs(10)).unwrap().answer();
-            ran.push(asked.elapsed());
-            assert_eq!(said, Ok(Vec::new()));
-            let asked = Instant::now();
-            assert!(Command::new("true").output().unwrap().status.success());
-            output.push(asked.elapsed());
-        }
-        let (ran, output) = (quick(ran), quick(output));
-        assert!(ran < output + Duration::from_millis(2), "{ran:?} against {output:?}");
+        // How much longer `run` took than `output`, or none, in rounds of one
+        // of each back to back, so that a machine busy for a while slows both
+        // alike.
+        let mut behind: Vec<Duration> = (0..61)
+            .map(|_| {
+                let asked = Instant::now();
+                let said = run(&mut Command::new("true"), Duration::from_secs(10)).unwrap();
+                let ran = asked.elapsed();
+                assert_eq!(said.answer(), Ok(Vec::new()));
+                let asked = Instant::now();
+                assert!(Command::new("true").output().unwrap().status.success());
+                ran.saturating_sub(asked.elapsed())
+            })
+            .collect();
+        // A busy machine holds up some rounds of either, where a look would
+        // hold up each round of `run`, until `LOOK` is up: so in the fifth of
+        // rounds it was least behind in, it is level with `output` but for the
+        // threads it starts.
+        behind.sort();
+        let least = behind[behind.len() / 5];
+        assert!(least < Duration::from_millis(1), "{least:?} behind, of {behind:?}");
     }
 
     /// A program a signal kills, rather than its deadline, is heard from as
