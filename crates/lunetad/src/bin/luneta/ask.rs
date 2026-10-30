@@ -85,7 +85,7 @@ const ALLOWED: [&str; 14] = [
     "Bash(gh issue list:*)",
     "Bash(gh pr view:*)",
     "Bash(gh pr list:*)",
-    "Bash(wt add:*)",
+    "Bash(luneta worktree:*)",
     "Bash(git worktree add:*)",
     "Bash(git worktree list:*)",
 ];
@@ -103,8 +103,8 @@ const SYSTEM: &str = "You run in luneta's ask box. The user typed what they want
     line or two on what you did, and where. Run one command in each call to Bash, with \
     nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
     sessions, agents, open, go and close, zoxide query, gh issue view and list, gh pr view \
-    and list, wt add, and git worktree add and list. Claude Code denies any other. A pane \
-    you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
+    and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
+    pane you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
     with no other option of claude's: luneta refuses any other command. You cannot wait for \
     the user in the middle of a turn: to ask them anything, as the skill has you ask before \
     a close, or which of two things they meant, end your turn with the question. Their \
@@ -429,7 +429,9 @@ fn told(here: Option<&Pane>, words: &str) -> String {
 /// tool, and `ALLOWED` all it runs but what your own settings allow: not
 /// what those of the directory it runs in do, which a repository brings. It
 /// has no zellij in its environment, so that the daemon places it in no
-/// pane. The `luneta` it runs is this one, and its closes know the turn.
+/// pane, nor what tells git where a repository is, so that the git it runs,
+/// and `luneta worktree`, find one by the directory they run in. The
+/// `luneta` it runs is this one, and its closes know the turn.
 fn claude(
     cwd: &Path,
     resumed: Option<&str>,
@@ -451,6 +453,7 @@ fn claude(
     for name in LEFT_OUT {
         claude.env_remove(name);
     }
+    lunetad::local_git(&mut claude);
     match here {
         Some(here) => claude.env(zellij::ASKED_VAR, here.to_string()),
         None => claude.env_remove(zellij::ASKED_VAR),
@@ -831,9 +834,10 @@ mod tests {
     /// safe mode, with the permission rules of your settings alone, no tool
     /// but Bash and nothing it may run but `ALLOWED`, and the words go on
     /// its stdin, as `--allowedTools` takes every word after it. It has no
-    /// zellij in its environment, and the pane you are in in luneta's, where
-    /// luneta can tell it, and the turn it is at. A turn after the first
-    /// goes on with the session the first said.
+    /// zellij in its environment, nor what tells git where a repository is,
+    /// and the pane you are in in luneta's, where luneta can tell it, and the
+    /// turn it is at. A turn after the first goes on with the session the
+    /// first said.
     #[test]
     fn the_agent_runs_where_the_row_is_for_the_pane_you_are_in() {
         let args = |command: &Command| -> Vec<String> {
@@ -865,7 +869,7 @@ mod tests {
         let unseated = told(None, "close it");
         assert!(unseated.starts_with("[luneta: it cannot tell which pane the user is in"), "{unseated}");
         assert!(unseated.ends_with("]\n\nclose it"), "{unseated}");
-        for name in LEFT_OUT {
+        for name in LEFT_OUT.into_iter().chain(lunetad::GIT_REPOSITORY_VARS) {
             assert_eq!(var(&first, name), Some(None), "{name}");
         }
         assert_eq!(var(&first, zellij::ASKED_VAR), Some(Some("luneta:2".to_owned())));

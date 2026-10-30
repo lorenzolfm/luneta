@@ -57,7 +57,7 @@ const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
 
 /// The variables that tell git where a repository is, in the place of the
 /// directory it runs in.
-const REPOSITORY_VARS: [&str; 6] = [
+pub const REPOSITORY_VARS: [&str; 6] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",

@@ -30,6 +30,6 @@ pub use claude::folder as claude_folder;
 pub use client::{connect, listening};
 pub use daemon::{serve, Claim};
 pub use folder::Refusal;
-pub use git::local as local_git;
+pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use metadata::folder as zellij_info_folder;
 pub use zellij::{folder as zellij_folder, running as zellij_sessions, SPOKEN as ZELLIJ_CONTRACT};

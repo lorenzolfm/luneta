@@ -540,10 +540,11 @@ closing it gives the keys back where the menu took them from, as a brief does.
 
 A pull request's link, pasted while the sidebar has the keys or in the menu
 over zellij, opens the menu for that pull request instead. `w` makes a
-worktree of it with [`wt add`](https://github.com/lorenzolfm/wt) and opens a
-tab there, named `#123`, in the session that works in its repository: the one
-zellij is in, or else another, or else a session luneta makes in a clone of it
-that zoxide knows, named as the picker's directories name it. `r` does the
+worktree of it as [`wt add`](https://github.com/lorenzolfm/wt) does, with wt's
+own code, which luneta is built with, and opens a tab there, named `#123`, in
+the session that works in its repository: the one zellij is in, or else
+another, or else a session luneta makes in a clone of it that zoxide knows,
+named as the picker's directories name it. `r` does the
 same and starts Claude Code in the tab on `/thermo-nuclear-review` and the
 link, named for the skill and the branch. Where a pane has the pull request's
 branch checked out already, `w` takes zellij there, and `r` starts the agent
@@ -841,10 +842,11 @@ nothing while the box is open. Nothing is kept: the next `a` starts afresh.
 The agent runs in safe mode, so none of your hooks, `CLAUDE.md` or MCP servers
 come into it, and in Claude Code's `dontAsk` permission mode, with Bash its only
 tool. It may run `luneta here`, `sessions`, `agents`, `open`, `go` and `close`,
-`zoxide query`, `gh issue` and `gh pr` `view` and `list`, `wt add`, and `git
-worktree add` and `list`, and what the permission rules of your own Claude Code
-settings let it. Those of the directory it runs in don't come into it, as a
-repository can bring its own. Claude Code denies it anything else, any command
+`zoxide query`, `gh issue` and `gh pr` `view` and `list`, `luneta worktree`,
+which makes a worktree as the sidebar's paste does, and `git worktree add` and
+`list`, and what the permission rules of your own Claude Code settings let it.
+Those of the directory it runs in don't come into it, as a repository can
+bring its own. Claude Code denies it anything else, any command
 run inside another, as with `$(…)`, and any that reads a variable or sets one,
 so the turn's keys stay out of its reach. A pane or a tab it opens runs your
 shell, or Claude Code as `claude [--name <name>] [<prompt>]`: in the box, `luneta
@@ -864,7 +866,7 @@ any `claude -p` does, so `claude --resume` lists it there.
 | [`claude`](https://claude.com/claude-code) | optional | the menu, the brief and the ask box |
 | `git` | optional | the branch in the name of an agent the menu starts |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's or issue's repository that no session works in |
-| [`wt`](https://github.com/lorenzolfm/wt) | optional | a worktree of a pull request or an issue you paste in [luneta's sidebar](#luneta-in-your-terminal) |
+| [`wt`](https://github.com/lorenzolfm/wt) | optional | the clone a worktree of a pull request or an issue you paste in [luneta's sidebar](#luneta-in-your-terminal) is made in, which `wt clone` makes, and the links of the files git ignores there, which wt's hook makes. luneta makes the worktree with wt's code, which it is built with, so `wt` needn't be on the `PATH` |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), and the issue of a link you paste there |

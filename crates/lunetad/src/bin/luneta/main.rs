@@ -38,10 +38,9 @@ mod zellij;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use lunetad::{folder, release};
 
-use crate::commands::Command;
 use crate::zellij::SessionName;
 
 /// zellij, beside a sidebar of every session on this host and what the agent
@@ -60,6 +59,29 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// What luneta does with a command, in the place of zellij: what the CLI asks
+/// lunetad, or has zellij do, or a worktree, which needs neither.
+#[derive(Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Asked(commands::Command),
+    /// Make a worktree of a branch, or of a pull request by its link, in a
+    /// repository `wt clone` made, as `wt add` does, and print where it is, or
+    /// where one of the branch is already. luneta makes the worktree of a
+    /// link pasted in its sidebar so, with wt's code, and no `wt` on the
+    /// `PATH`. Why it made none comes last on stderr, after `luneta: `.
+    #[command(hide = true)]
+    Worktree {
+        /// A directory of the repository.
+        #[arg(long, value_name = "DIR")]
+        repo: String,
+        /// The branch, or the link of a pull request on GitHub, with or
+        /// without its `https://`.
+        #[arg(value_parser = pull::Of::parse, value_name = "BRANCH")]
+        of: pull::Of,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let folder: Result<PathBuf, String> = folder::find()
@@ -73,6 +95,11 @@ fn main() -> ExitCode {
             },
         };
         return host::run(session, folder);
+    };
+    let command = match command {
+        // It asks no lunetad, and so needs no folder to find one in.
+        Command::Worktree { repo, of } => return pull::make(&repo, &of),
+        Command::Asked(command) => command,
     };
     match folder {
         Ok(folder) => commands::run(&command, &folder),

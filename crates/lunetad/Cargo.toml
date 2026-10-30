@@ -62,6 +62,10 @@ tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tower = { version = "0.5.3", features = ["util"] }
 unicode-width = { version = "0.2.2", default-features = false }
+# Makes the worktree of a pull request or an issue pasted in the sidebar, as
+# `wt add` does: wt's own code, of a commit of its, so that no `wt` need be on
+# the `PATH`, and what wt says of it is luneta's to read, in its own types.
+wt = { git = "https://github.com/lorenzolfm/wt", rev = "b6b4887d69f10b5c48c760c6f8d56fc2654a6c47" }
 
 # What a process's environment and start are, on macOS. Linux has `/proc` and
 # needs nothing.
