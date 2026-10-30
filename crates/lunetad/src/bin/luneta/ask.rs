@@ -40,6 +40,7 @@ use serde_json::Value;
 
 use crate::brief::{self, Asking};
 use crate::drive::Turn;
+use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::menu::{self, Hint, Target};
@@ -238,7 +239,7 @@ impl Ask {
     /// Hands what you typed to the agent, on a thread of its own, for you in
     /// the pane `here`, if luneta can tell it, as `told` tells it, and takes
     /// it from what you are typing. What the turn hears comes back on
-    /// `events`.
+    /// `events`, and how it ended, as `Due` does.
     pub fn send(&mut self, here: Option<&Pane>, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
@@ -252,13 +253,19 @@ impl Ask {
         let message = told(here, &words);
         self.talk.push(Said::You(words));
         let (number, events) = (self.number, events.clone());
+        // How the turn ended, or else that it ended with no answer.
+        let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
+            let ended = ended.unwrap_or_else(|why| Err(format!("ask: {why}")));
+            Event::Heard { number, heard: Heard::Ended(ended) }
+        });
         self.turn = Some(Asking::on_thread(move |wanted| {
-            let hear = |heard| {
+            let hear = |step| {
                 // luneta is on its way out.
-                let _ = events.send(Event::Heard { number, heard });
+                let _ = events.send(Event::Heard { number, heard: Heard::Step(step) });
             };
-            if let Some(ended) = talk(claude, &message, wanted, &|step| hear(Heard::Step(step))) {
-                hear(Heard::Ended(ended));
+            // Given up, it is owed to a box that is gone.
+            if let Some(ended) = talk(claude, &message, wanted, &hear) {
+                due.pay(Ok(ended));
             }
         }));
     }
@@ -747,9 +754,11 @@ mod tests {
                 "└────────────────────────────────────────────────┘",
             ]
         );
+        assert!(ask.turning());
 
         ask.heard(Heard::Step(Step::Denied("toolu_2".to_owned())));
         ask.heard(Heard::Ended(Ok(())));
+        assert!(!ask.turning());
         asked[3] = "│   ✗ touch elo                                  │";
         typed(&mut ask, "yes");
         let lines = shown(&ask, 50, 12);

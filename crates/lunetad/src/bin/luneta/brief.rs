@@ -28,6 +28,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use serde_json::Value;
 
+use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::menu::{self, Hint};
@@ -582,25 +583,28 @@ pub struct Written {
 /// Asks for `brief`, numbered `number`, on a thread of its own: reads the end
 /// of each transcript it covers in `claude_folder`, the folder the daemon
 /// reads Claude Code's sessions in, has the model write the brief, and hands
-/// back what it wrote, or why it wrote nothing. The briefing that shows it
-/// gives it up as it goes, the model with it.
+/// back what it wrote, or why it wrote nothing, as `Due` does. The briefing
+/// that shows it gives it up as it goes, the model with it.
 pub fn ask(
     number: u64,
     brief: Brief,
     claude_folder: Option<PathBuf>,
     events: &Sender<Event>,
 ) -> Briefing {
-    let events = events.clone();
     let title = brief.title().to_owned();
+    let due = Due::new(events, move |written: Result<Written, String>| {
+        let unanswered = |why| Written { at: None, said: Err(format!("brief: {why}")) };
+        Event::Briefed { number, written: written.unwrap_or_else(unanswered) }
+    });
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
         let projects = claude_folder.map(|folder| folder.join("projects"));
         let ends = projects.map(|projects| brief.ends(&projects)).unwrap_or_default();
+        // Given up, it is owed to a briefing that is gone.
         let Some(said) = write(&brief.prompt(&ends, SystemTime::now()), wanted) else {
             return;
         };
-        // luneta is on its way out.
-        let _ = events.send(Event::Briefed { number, written: Written { at, said } });
+        due.pay(Ok(Written { at, said }));
     });
     Briefing { number, title, written: None, _asking: asking }
 }
@@ -1111,6 +1115,7 @@ Its transcript is unknown: Claude Code names none for it.
         assert!(!briefing.closes(&key(KeyCode::Char('j'))));
         assert!(!briefing.clicked());
         assert!(briefing.closes(&key(KeyCode::Esc)));
+        assert!(briefing.turning());
 
         let said = "You have 2 sessions open:\n- luneta: the brief\tis back\x1b[31m\n\n- elo: no agents";
         briefing.written(Written { at: Some("18:42".to_owned()), said: Ok(said.to_owned()) });
@@ -1129,6 +1134,7 @@ Its transcript is unknown: Claude Code names none for it.
         );
         assert!(briefing.closes(&key(KeyCode::Char('j'))));
         assert!(briefing.clicked());
+        assert!(!briefing.turning());
     }
 
     /// What the box has no room for is cut, with the keys that close it

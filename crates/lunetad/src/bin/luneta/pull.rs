@@ -37,6 +37,7 @@ use std::time::Duration;
 use lunetad::program::{self, Ran};
 
 use crate::dirs;
+use crate::due::Due;
 use crate::host::Event;
 use crate::sidebar::Listed;
 use crate::zellij::{self, SessionName};
@@ -334,14 +335,10 @@ pub struct Ready {
 /// Finds where a key of the menu numbered `menu` goes for the pull request
 /// or the issue `link`, among the panes the sidebar knows, `worked`, and has
 /// `wt add` make the worktree, on a thread of its own, and hands back what it
-/// found, or why it found nothing.
+/// found, or why it found nothing, as `Due` does.
 pub fn prepare(menu: u64, link: Link, worked: Vec<Worked>, events: &Sender<Event>) {
-    let events = events.clone();
-    thread::spawn(move || {
-        let ready = ready(&link, &worked);
-        // luneta is on its way out.
-        let _ = events.send(Event::Pulled { menu, ready });
-    });
+    let due = Due::new(events, move |ready| Event::Pulled { menu, ready });
+    thread::spawn(move || due.pay(ready(&link, &worked)));
 }
 
 /// Where a key goes for `link`, as `prepare` says.

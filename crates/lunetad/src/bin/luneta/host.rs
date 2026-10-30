@@ -49,6 +49,7 @@ use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChang
 use crate::ask::{Ask, Heard, Keyed};
 use crate::brief::{self, Briefing, Written};
 use crate::close::Act;
+use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
@@ -1375,7 +1376,8 @@ impl App {
             },
             Asked::Open { menu, open } => zellij::open(menu, open, &self.events),
             Asked::OpenThere { menu, place, open } => {
-                if !self.go(&place, Some(After::Open(menu, open))) {
+                let owed = zellij::owed(menu, &self.events);
+                if !self.go(&place, Some(After::Open(owed, open))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1387,7 +1389,8 @@ impl App {
             // there with it.
             Asked::Make { menu, session, cwd, tab_cwd, name, command } => {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                if !self.make(&session, &cwd, Some((menu, tab))) {
+                let owed = zellij::owed(menu, &self.events);
+                if !self.make(&session, &cwd, Some((owed, tab))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1488,11 +1491,16 @@ impl App {
 
     /// Takes zellij's client to a session it makes, `session`, that starts in
     /// `cwd`, or where the client started, or brings back, where zellij kept
-    /// one that ended, and opens `tab` there once it is, for the menu
-    /// numbered so. Where zellij makes it, its server cannot bear being asked
+    /// one that ended, and opens `tab` there once it is, for the menu owed
+    /// what it opens. Where zellij makes it, its server cannot bear being asked
     /// anything before it takes the client: luneta asks for the client's
     /// arrival there once zellij titles its terminal in it. Whether it went.
-    fn start(&mut self, session: &SessionName, cwd: Option<&str>, tab: Option<(u64, Tab)>) -> bool {
+    fn start(
+        &mut self,
+        session: &SessionName,
+        cwd: Option<&str>,
+        tab: Option<(Due<u32>, Tab)>,
+    ) -> bool {
         let Some(nudged) = self.nudge() else {
             return false;
         };
@@ -1508,7 +1516,7 @@ impl App {
     /// says why zellij would make none, but take it to one that has the name,
     /// before the sidebar takes the client for one on its way there. Whether
     /// it went.
-    fn make(&mut self, session: &SessionName, cwd: &str, tab: Option<(u64, Tab)>) -> bool {
+    fn make(&mut self, session: &SessionName, cwd: &str, tab: Option<(Due<u32>, Tab)>) -> bool {
         match zellij::makes(session) {
             Ok(()) => self.start(session, Some(cwd), tab),
             Err(why) => {
