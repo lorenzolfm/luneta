@@ -113,7 +113,7 @@ fn watcher(
 /// folder cannot, or the reads that follow a change would make changes of
 /// their own; nor can a change at paths that `wanted` does not take. One that
 /// names no path could be of anything.
-fn worth_a_read(event: &Event, wanted: fn(&Path) -> bool) -> bool {
+pub fn worth_a_read(event: &Event, wanted: fn(&Path) -> bool) -> bool {
     if event.kind.is_access() {
         return false;
     }
