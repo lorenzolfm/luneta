@@ -749,26 +749,31 @@ enum Stage {
 enum Step {
     /// Its keys wait for one.
     Choosing,
+    /// A key waits, on what it says after a spinner that turns. Keys do
+    /// nothing but close the menu.
+    Waiting(Wait),
+}
+
+/// What a key of the menu for a pull request or an issue waits on.
+enum Wait {
     /// The key `pull` waits for luneta to find where it goes, and for `wt
-    /// add` to make the worktree. Keys do nothing but close the menu.
+    /// add` to make the worktree.
     Pulling(Pull),
     /// zellij opens what the key asked for, for luneta to take its client
-    /// there. Keys do nothing but close the menu.
+    /// there.
     Opening,
     /// zellij makes this session, and opens a tab of it, for luneta to take
-    /// its client there. Keys do nothing but close the menu.
+    /// its client there.
     Making(SessionName),
 }
 
-impl Step {
-    /// What luneta waits on for the pull request or the issue `link`, once
-    /// a key is pressed. None while the keys wait for one.
-    fn doing(&self, link: &Link) -> Option<String> {
+impl Wait {
+    /// What luneta waits on for the pull request or the issue `link`.
+    fn doing(&self, link: &Link) -> String {
         match self {
-            Step::Choosing => None,
-            Step::Pulling(_) => Some(format!("Making a worktree of {}…", link.tab())),
-            Step::Opening => Some(format!("Opening {}…", link.tab())),
-            Step::Making(session) => Some(format!("Making session {session}…")),
+            Wait::Pulling(_) => format!("Making a worktree of {}…", link.tab()),
+            Wait::Opening => format!("Opening {}…", link.tab()),
+            Wait::Making(session) => format!("Making session {session}…"),
         }
     }
 }
@@ -827,7 +832,8 @@ impl Menu {
     pub fn opening(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Opening(_) | Stage::Pull { step: Step::Opening | Step::Making(_), .. }
+            Stage::Opening(_)
+                | Stage::Pull { step: Step::Waiting(Wait::Opening | Wait::Making(_)), .. }
         )
     }
 
@@ -835,7 +841,7 @@ impl Menu {
     /// waits for it to open a tab of it.
     pub fn making(&self) -> Option<&SessionName> {
         match &self.stage {
-            Stage::Pull { step: Step::Making(session), .. } => Some(session),
+            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
             _ => None,
         }
     }
@@ -843,7 +849,7 @@ impl Menu {
     /// Whether a key of the menu for a pull request or an issue waits for
     /// luneta to find where it goes.
     pub fn pulling(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Pulling(_), .. })
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
     }
 
     /// What `key` does to the menu, and what that leaves the sidebar to do.
@@ -908,7 +914,7 @@ impl Menu {
             Stage::Pull { link, step: Step::Choosing } => match Pull::pressed(key, link.kind()) {
                 Some(pull) => {
                     let wants = Wants::Pull(link.clone());
-                    stays(Stage::Pull { link, step: Step::Pulling(pull) }, wants)
+                    stays(Stage::Pull { link, step: Step::Waiting(Wait::Pulling(pull)) }, wants)
                 },
                 None => stays(Stage::Pull { link, step: Step::Choosing }, Wants::Nothing),
             },
@@ -962,7 +968,7 @@ impl Menu {
     /// it.
     pub fn pulled(self, ready: Result<Ready, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Pull { link, step: Step::Pulling(pull) } = stage else {
+        let Stage::Pull { link, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let Ready { at, worktree, branch } = match ready {
@@ -980,7 +986,7 @@ impl Menu {
         };
         let opening = |place: Place, opens: Opens| {
             let target = Target { place, cwd: Some(worktree.clone()), branch: branch.clone() };
-            let stage = Stage::Pull { link: link.clone(), step: Step::Opening };
+            let stage = Stage::Pull { link: link.clone(), step: Step::Waiting(Wait::Opening) };
             Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
         };
         match (at, pull) {
@@ -997,7 +1003,7 @@ impl Menu {
             (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
-                let stage = Stage::Pull { link, step: Step::Making(name) };
+                let stage = Stage::Pull { link, step: Step::Waiting(Wait::Making(name)) };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
         }
@@ -1064,7 +1070,7 @@ impl Menu {
     /// Whether its spinner turns: while a key of the menu for a pull request
     /// or an issue waits for its worktree, and then for zellij to open it.
     pub fn turning(&self) -> bool {
-        matches!(&self.stage, Stage::Pull { step, .. } if !matches!(step, Step::Choosing))
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(_), .. })
     }
 
     /// Whether the search box over the skills is open.
@@ -1091,12 +1097,15 @@ impl Menu {
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { link, step } => {
-                let body = if let Some(doing) = step.doing(link) {
-                    waiting(&doing, width, Style::new().fg(NAME), frame)
-                } else {
-                    let entries = Pull::ALL.map(|pull| Entry::Pull(pull, link.kind()));
-                    spots = entry_spots(&entries, width).map(Choice::Key);
-                    entries.iter().map(|entry| entry_line(entry, inner)).collect()
+                let body = match step {
+                    Step::Choosing => {
+                        let entries = Pull::ALL.map(|pull| Entry::Pull(pull, link.kind()));
+                        spots = entry_spots(&entries, width).map(Choice::Key);
+                        entries.iter().map(|entry| entry_line(entry, inner)).collect()
+                    },
+                    Step::Waiting(wait) => {
+                        waiting(&wait.doing(link), width, Style::new().fg(NAME), frame)
+                    },
                 };
                 (link.tab(), link.repository(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
@@ -2253,6 +2262,7 @@ mod tests {
         assert!(menu.opening());
         assert_eq!(menu.making(), Some(&name));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
+        assert!(menu.turning());
         // Why luneta found nothing closes the menu, and says so.
         let why = "no session works in cashubtc/cdk".to_owned();
         assert_eq!(
