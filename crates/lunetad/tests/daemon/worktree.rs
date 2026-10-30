@@ -154,11 +154,11 @@ fn a_link_with_no_scheme_is_no_branch_s_name() {
     assert!(!clone.join("github.com-o-n-issues-14").exists());
 }
 
-/// A name with a `-` first, which git gives no branch, is refused as `luneta
-/// worktree` is asked, after a `--` as the agent can put one: wt would hand
-/// it to `git fetch`, which would take it for an option, and with
-/// `--upload-pack` run a command of the name's, as it does where origin is a
-/// path, as here.
+/// A name with a `-` first, which git gives no branch, after a `--` as the
+/// agent can put one, makes no worktree and runs nothing: wt refuses it, as
+/// git would take it for an option, and with `--upload-pack` run a command of
+/// the name's, as it does where origin is a path, as here. wt has refused it
+/// since lorenzolfm/wt#18, and luneta is built with a wt as new.
 #[test]
 fn a_name_with_a_dash_first_is_no_branch_s_and_runs_nothing() {
     let scratch = tempfile::tempdir().unwrap();
@@ -172,6 +172,6 @@ fn a_name_with_a_dash_first_is_no_branch_s_and_runs_nothing() {
     assert_eq!(refused.stdout, b"");
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(!ran.exists(), "{stderr}");
-    let why = format!("{option} is no branch's name: git starts none with -");
-    assert!(stderr.contains(&why), "{stderr}");
+    let why = format!("luneta: wt add: {option} is not a valid branch name");
+    assert_eq!(stderr.lines().last(), Some(why.as_str()));
 }
