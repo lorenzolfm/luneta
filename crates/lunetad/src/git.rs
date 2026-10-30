@@ -265,6 +265,14 @@ fn word(event: &notify::Result<Event>, watched: &BTreeMap<PathBuf, RecursiveMode
     }
 }
 
+/// Whether `error` is of a path the user may not read.
+fn denied(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::Io(error) => error.kind() == io::ErrorKind::PermissionDenied,
+        _ => false,
+    }
+}
+
 /// A watcher of `paths` that sets `heard`, and wakes the thread on `wake`, as
 /// anything changes there that a read could find, and sets `came_or_went` too
 /// as a directory could have come or gone.
@@ -299,6 +307,9 @@ fn watcher(
             Ok(()) => {},
             // One that went since it was found.
             Err(error) if watch::missing(&error) => {},
+            // A `.git` folder that does not read, as one another user made:
+            // git passes it by, and finds no work tree in it.
+            Err(error) if path.ends_with(".git") && denied(&error) => {},
             Err(error) => return Err(error),
         }
     }
