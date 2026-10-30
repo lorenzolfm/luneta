@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use luneta_protocol::shell::Ending;
 use lunetad::folder;
 
+use crate::due::Due;
 use crate::host::Event;
 use crate::menu::Ended;
 use crate::zellij;
@@ -149,17 +150,18 @@ impl Printed {
 
 /// Has zellij dump the terminal `pane` of `session`, and keeps what it
 /// printed after the line the command that `ended` was last typed on, for
-/// the menu numbered `menu`.
+/// the menu numbered `menu`, on a thread of its own, and hands back what it
+/// kept, or why it kept nothing, as `Due` does.
 pub fn read(menu: u64, session: &str, pane: u32, ended: Ended, events: &Sender<Event>) {
-    let (session, events) = (session.to_owned(), events.clone());
+    let session = session.to_owned();
+    let due = Due::new(events, move |printed| Event::Printed { menu, printed });
     thread::spawn(move || {
         let printed = zellij::dump(&session, pane).and_then(|dump| {
             let runtime = folder::find()
                 .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
             keep(&runtime, cut(&dump, typed(&ended)), SystemTime::now())
         });
-        // luneta is on its way out.
-        let _ = events.send(Event::Printed { menu, printed });
+        due.pay(printed);
     });
 }
 
