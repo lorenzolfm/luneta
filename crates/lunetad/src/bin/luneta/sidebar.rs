@@ -2172,6 +2172,16 @@ impl Sidebar {
         }
     }
 
+    /// What the menu for a pasted link is for, as it opens on the highlighted
+    /// row: on another machine's session or pane, that machine's header, as
+    /// the link's keys go to this machine's sessions, whatever the row.
+    fn link_target(&mut self) -> Option<Target> {
+        let Some(Spot::Remote(destination, _)) = &self.cursor else {
+            return self.target();
+        };
+        Some(Target::Machine(Machine::Remote(destination.clone())))
+    }
+
     /// Says in the notes that `destination`'s rows are only for looking.
     fn only_looking(&mut self, destination: &Destination) {
         self.notice = Some(format!(
@@ -2242,15 +2252,19 @@ impl Sidebar {
     /// Opens the menu for the pull request or the issue `text` is the link
     /// of, if it is one, in the place of the menu open, over zellij or at the
     /// bottom of the sidebar, or else at the bottom, for the row highlighted.
-    /// Other text does nothing, as a paste did before.
+    /// Other text does nothing, as a paste did before. What is pasted in the
+    /// box for a machine's destination goes in it, a link too.
     pub fn paste(&mut self, text: &str) {
+        if self.menu.as_mut().is_some_and(|menu| menu.paste(text)) {
+            return;
+        }
         let Some(link) = Link::parse(text) else {
             return;
         };
         self.notice = None;
         let target = match &self.menu {
             Some(menu) => Some(menu.target().clone()),
-            None => self.target(),
+            None => self.link_target(),
         };
         let Some(target) = target else {
             if self.cursor.is_none() {
@@ -6846,7 +6860,9 @@ mod tests {
     /// Another machine's rows are only for looking: `Enter`, a click, the
     /// menu, `v` and the mouse that would move its session go nowhere, and
     /// the notes say why. `u` takes the dot from its pane as from this
-    /// machine's.
+    /// machine's. A link pasted on its row opens the menu for the link, on
+    /// its machine's header, as the link's keys go to this machine's
+    /// sessions.
     #[test]
     fn another_machine_s_rows_are_only_for_looking() {
         let mut sidebar = fresh();
@@ -6889,6 +6905,27 @@ mod tests {
         type_in(&mut sidebar, "u");
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[8], "   ✓ \u{ec82} fix                  1m");
+
+        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        let header = Target::Machine(Machine::Remote(nixos()));
+        assert_eq!(sidebar.menu.as_ref().map(Menu::target), Some(&header));
+    }
+
+    /// What is pasted in the box `n m` opens goes in it, on one line, and a
+    /// link too, rather than opening the menu for the link.
+    #[test]
+    fn what_is_pasted_in_the_box_for_a_machine_goes_in_it() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        type_in(&mut sidebar, "nm");
+        sidebar.paste("me@vps\n");
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Ssh("me@vps".parse().unwrap()));
+        let link = "https://github.com/lorenzolfm/luneta/pull/5";
+        type_in(&mut sidebar, "nm");
+        sidebar.paste(link);
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Ssh(link.parse().unwrap()));
     }
 
     /// The header of a machine lunetad does not reach says why in the notes

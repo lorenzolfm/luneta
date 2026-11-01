@@ -1216,6 +1216,17 @@ impl Menu {
         matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
     }
 
+    /// Types `text`, pasted, on one line, in the box for a machine's
+    /// destination, and says whether that is open to type it in.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let Stage::Ssh { typed, wrong, .. } = &mut self.stage else {
+            return false;
+        };
+        typed.extend(text.chars().filter(|c| !c.is_control()));
+        *wrong = None;
+        true
+    }
+
     /// What `key` does to the menu, and what that leaves the sidebar to do.
     /// What a key opens, it opens beside the pane of the menu's row, in the
     /// directory it works in, and the menu waits for zellij to say it has,

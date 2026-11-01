@@ -1017,9 +1017,10 @@ impl App {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
             // A pull request's or an issue's link pasted with the sidebar's
-            // keys, or in the menu over zellij, opens the menu for it. zellij
-            // keeps every paste it has the keys for, links too, for the
-            // agents in it.
+            // keys, or in the menu over zellij, opens the menu for it, and
+            // what is pasted in the menu's box for a machine's destination
+            // goes in it. zellij keeps every paste it has the keys for, links
+            // too, for the agents in it.
             Input::Paste(text) => match &mut self.focus.over {
                 Some(Over::Ask(ask)) => ask.paste(&text),
                 Some(Over::Picker(picker)) => picker.paste(&text),
