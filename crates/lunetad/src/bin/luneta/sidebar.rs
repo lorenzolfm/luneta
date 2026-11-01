@@ -2882,23 +2882,28 @@ impl Sidebar {
     }
 
     /// A click at `at`, on luneta's terminal. One on a machine's header folds
-    /// it the other way, wherever on the line it is.
+    /// it the other way, wherever on the line it is, but while a search is
+    /// typed.
     fn click(&mut self, at: Position, area: Rect) -> Asked {
         let Some(index) = self.line_of(at.y, area).and_then(|line| self.row_at(line)) else {
             return Asked::Take;
         };
         let row = &self.rows[index];
         let spot = row.spot();
+        // What is typed shows the rows it finds whatever the folds, so there
+        // a fold would show only once the search closes. An empty search
+        // keeps them.
+        let typed = matches!(self.search, Some(Search::Typed { .. }));
         if matches!(row, Row::Machine { .. }) {
-            self.cursor = Some(spot);
-            self.toggle();
+            if !typed {
+                self.cursor = Some(spot);
+                self.toggle();
+            }
             return Asked::Take;
         }
         if matches!(row, Row::Session { .. }) {
-            // What is typed shows the panes it finds whatever the folds, so
-            // there the triangle is the name's. An empty search keeps them.
+            // There the triangle is the name's.
             let on_triangle = at.x.saturating_sub(area.x) <= 2;
-            let typed = matches!(self.search, Some(Search::Typed { .. }));
             if on_triangle && !typed {
                 self.cursor = Some(spot);
                 self.toggle();
@@ -4861,7 +4866,8 @@ mod tests {
     }
 
     /// A search with nothing typed keeps the folds, and the triangle folds as
-    /// it does without one. Once something is typed, it is the name's.
+    /// it does without one. Once something is typed, it is the name's, and a
+    /// machine's header folds nothing.
     #[test]
     fn a_click_on_the_triangle_folds_until_a_search_is_typed() {
         let mut sidebar = two_sessions();
@@ -4877,6 +4883,8 @@ mod tests {
         screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(!folded(&sidebar, "older"));
+        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Take);
+        assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
     }
 
     /// A session zellij has yet to list the panes of stands in for them, as a
