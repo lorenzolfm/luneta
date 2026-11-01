@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use lunetad::api::remote::Reached;
-use lunetad::api::{self, WatchRequest};
+use lunetad::api::remote::{self, Reached};
+use lunetad::api::WatchRequest;
 
 use crate::demand::Detached;
 use crate::host::{eventually, script, start, Host, Vars, LUNETA};
@@ -105,7 +105,11 @@ fn hosts(host: &Host, text: &str) {
 
 /// The host of the machine `host`'s daemon watches as `destination`, once
 /// it has reached it and `wanted` takes what it says.
-fn reached(host: &Host, destination: &str, wanted: impl Fn(&api::Host) -> bool) -> api::Host {
+fn reached(
+    host: &Host,
+    destination: &str,
+    wanted: impl Fn(&remote::Host) -> bool,
+) -> remote::Host {
     eventually(&format!("{destination} is reached as wanted"), || {
         let remote = host.host().remotes.into_iter().find(|it| it.destination == destination)?;
         match remote.reached? {
@@ -115,8 +119,8 @@ fn reached(host: &Host, destination: &str, wanted: impl Fn(&api::Host) -> bool) 
     })
 }
 
-/// The names of the sessions of `host`, in order.
-fn names(host: &api::Host) -> Vec<&str> {
+/// The names of the sessions of the machine `host`, in order.
+fn names(host: &remote::Host) -> Vec<&str> {
     let mut names: Vec<&str> = host.sessions.iter().map(|it| it.name.as_str()).collect();
     names.sort_unstable();
     names
@@ -131,8 +135,8 @@ fn ended(pid: u32) -> bool {
 }
 
 /// A daemon watches each machine its hosts file names, in the file's order,
-/// through ssh: one whose daemon answers, with that daemon's host, without
-/// its version, as it changes, and one ssh cannot reach, with why.
+/// through ssh: one whose daemon answers, with that daemon's host, as it
+/// changes, and one ssh cannot reach, with why.
 /// `luneta sessions` lists the sessions of each under it.
 #[test]
 fn a_daemon_says_each_machine_its_hosts_file_names() {
@@ -147,7 +151,6 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
 
     let first = reached(&here, "far", |far| !far.sessions.is_empty());
     assert_eq!(names(&first), ["work"]);
-    assert_eq!(first.version, None);
     let _play = far.serve("play");
     reached(&here, "far", |far| names(far) == ["play", "work"]);
 
@@ -210,9 +213,9 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
 }
 
 /// Two daemons that watch each other come to rest: each says the other's
-/// host without its remotes and its version, which would else change each
-/// time the other's does, and the other's each time it does, for as long as
-/// both ran.
+/// host as a machine's, which has neither the other's remotes nor its
+/// version, which would else change each time the other's does, and the
+/// other's each time it does, for as long as both ran.
 #[test]
 fn two_daemons_that_watch_each_other_come_to_rest() {
     let here = Host::new();
@@ -223,9 +226,8 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
     hosts(&far, "here\n");
     let _here = start(here.vars()).unwrap();
     let _far = start(far.vars()).unwrap();
-    let far_said = reached(&here, "far", |_| true);
+    reached(&here, "far", |_| true);
     reached(&far, "here", |_| true);
-    assert!(far_said.remotes.is_empty());
 
     // The daemon answers with the host as it was once it has not changed
     // for 4 seconds.

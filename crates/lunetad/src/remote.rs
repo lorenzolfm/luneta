@@ -5,10 +5,11 @@
 //! daemon on its socket, and what its daemon says comes in the host this one
 //! says. A thread whose machine leaves the file ends, and its ssh with it.
 //!
-//! A machine's host comes without its own remotes, and without its version.
-//! Two daemons that each watch the other would otherwise change their hosts
-//! for as long as both ran: each change to one is a change to the other's
-//! remotes, and so to its version, which is a change to the first one's.
+//! A machine's host comes as a `Remote.Host`, which has neither remotes of
+//! its own nor a version. Two daemons that each watch the other would
+//! otherwise change their hosts for as long as both ran: each change to one
+//! is a change to the other's remotes, and so to its version, which is a
+//! change to the first one's.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -79,9 +80,8 @@ impl fmt::Display for Destination {
 pub enum Reached {
     /// Nothing yet: the first ssh to it runs.
     Reaching,
-    /// Its host, as its daemon last said it, without its version and its own
-    /// remotes.
-    Host(api::Host),
+    /// Its host, as its daemon last said it.
+    Host(remote::Host),
     /// Nothing, since its daemon last answered, or since the watch began.
     Unreached { since: SystemTime, why: String },
 }
@@ -243,7 +243,29 @@ async fn watched(destination: Destination, core: SyncSender<Command>) {
             continue;
         }
         after = Some(version);
-        let host = api::Host { version: None, remotes: Vec::new(), ..host };
+        // Each field by name, and no `..`: a field the host gains does not
+        // build here until it is said whether a machine's host has it too,
+        // which one that changes with each daemon must not.
+        let api::Host {
+            version: _,
+            sessions,
+            work_trees,
+            agents,
+            unread,
+            pull_requests,
+            unread_sockets,
+            unread_files,
+            remotes: _,
+        } = host;
+        let host = remote::Host {
+            sessions,
+            work_trees,
+            agents,
+            unread,
+            pull_requests,
+            unread_sockets,
+            unread_files,
+        };
         if !told(&core, &destination, Reached::Host(host)) {
             return;
         }

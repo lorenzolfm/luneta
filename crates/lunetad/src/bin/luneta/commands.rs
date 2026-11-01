@@ -17,7 +17,7 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::remote::Reached;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, Host, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Session, Status,
+    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Session, Status,
     UnreadFile, Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::folder::SOCKET;
@@ -242,13 +242,13 @@ pub fn unread(unread: Unread) -> String {
 /// or why it has none.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
-    sessions_of(&host, "");
+    sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "");
     for remote in &host.remotes {
         let machine = &remote.destination;
         match &remote.reached {
             Some(Reached::Host(host)) => {
                 println!("{machine}/");
-                sessions_of(host, "  ");
+                sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "  ");
             },
             Some(Reached::Reaching(_)) => println!("{machine}/  (reaching it)"),
             Some(Reached::Unreached(unreached)) => {
@@ -265,10 +265,16 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// The sessions of `host`, as `sessions` says them, each line led by
+/// The `sessions` of a host, with what it says of the `work_trees` and the
+/// `pull_requests` of their panes, as `sessions` says them, each line led by
 /// `indent`.
-fn sessions_of(host: &Host, indent: &str) {
-    let mut sessions: Vec<&Session> = host.sessions.iter().collect();
+fn sessions_of(
+    sessions: &[Session],
+    work_trees: &[WorkTree],
+    pull_requests: &[PullRequest],
+    indent: &str,
+) {
+    let mut sessions: Vec<&Session> = sessions.iter().collect();
     sessions.sort_by(|a, b| a.name.cmp(&b.name));
     for session in sessions {
         let Some(panes) = &session.panes else {
@@ -282,12 +288,12 @@ fn sessions_of(host: &Host, indent: &str) {
                 println!("{indent}  {at}  -");
                 continue;
             };
-            let Some(tree) = host.work_trees.iter().find(|tree| tree.dir == cwd) else {
+            let Some(tree) = work_trees.iter().find(|tree| tree.dir == cwd) else {
                 println!("{indent}  {at}  {cwd}");
                 continue;
             };
             let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
-            let pull_request = host.pull_requests.iter().find(|it| it.dir == cwd);
+            let pull_request = pull_requests.iter().find(|it| it.dir == cwd);
             let pulled = pull_request.map(|it| {
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });

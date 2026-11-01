@@ -40,8 +40,7 @@ message Version {
 }
 
 message Host {
-  // Always there in a daemon's answer: a client that finds none has an answer
-  // that does not read. Never there in a host that comes in a `Remote`.
+  // Always there: a client that finds none has an answer that does not read.
   Version version = 1;
   // The sessions that run, in no order a client can count on.
   repeated Session sessions = 2;
@@ -64,8 +63,7 @@ message Host {
   // The session files `unread` counts, as `ListAgentsResponse` has them.
   repeated UnreadFile unread_files = 8;
   // The other machines the daemon watches, as luneta's hosts file names them,
-  // in its order. Always empty in a host that comes in a `Remote`: the
-  // machines that machine's daemon watches are none of this one's.
+  // in its order.
   repeated Remote remotes = 9;
 }
 
@@ -80,14 +78,28 @@ message Remote {
   oneof reached {
     // The first ssh to it runs, which takes 10 seconds at the most.
     Reaching reaching = 2;
-    // Its host, as its daemon last said, without a version: a change only
-    // to its version, as one only to its own `remotes` makes, is no change
-    // to the host it comes in.
+    // Its host, as its daemon last said: `Remote.Host`, the inner scope's.
     Host host = 3;
     Unreached unreached = 4;
   }
 
   message Reaching {}
+
+  // A machine's host, as its daemon says it, but for its version, and for
+  // the machines that daemon watches, which are its own. Two daemons that
+  // watch each other would else never rest: a change to one would be a
+  // change to the other's remotes, and so to its version, and so to the
+  // first one's remotes. The numbers are `luneta.v1.Host`'s, so that a field
+  // of the one reads as the same field of the other.
+  message Host {
+    repeated Session sessions = 2;
+    repeated WorkTree work_trees = 3;
+    repeated Agent agents = 4;
+    uint32 unread = 5;
+    repeated PullRequest pull_requests = 6;
+    optional uint32 unread_sockets = 7;
+    repeated UnreadFile unread_files = 8;
+  }
 
   // What the daemon has of a machine that its daemon does not answer for:
   // ssh failed to reach it, or its daemon, or the connection broke and a
