@@ -5,6 +5,7 @@
 
 mod answers;
 mod ask;
+mod bridge;
 mod brief;
 mod close;
 mod commands;

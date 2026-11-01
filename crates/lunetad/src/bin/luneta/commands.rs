@@ -24,12 +24,14 @@ use lunetad::release;
 use prost::Message as _;
 use tonic::transport::Channel;
 
+use crate::bridge;
 use crate::daemon::{self, Reach};
 use crate::drive::{self, Address, Agreed, Opening};
 
-/// What the CLI asks lunetad, and what it has zellij do. Only `watch` starts
-/// a lunetad where none runs, as a program reads the host by it: the rest say
-/// that none does, or, for `close`, that it cannot tell the agents.
+/// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
+/// `bridge` start a lunetad where none runs, as a program reads the host by
+/// them: the rest say that none does, or, for `close`, that it cannot tell the
+/// agents.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -48,6 +50,13 @@ pub enum Command {
         #[arg(long, value_parser = version)]
         after: Option<Version>,
     },
+    /// Hand on what comes on stdin to lunetad's socket, and what comes on the
+    /// socket to stdout, until either end hangs up, for a client on another
+    /// host to ask it through ssh. lunetad is started where none runs, and
+    /// again where an older one does, and once it answers, `lunetad` and a
+    /// newline go to stdout before anything it says.
+    #[command(hide = true)]
+    Bridge,
     /// Say which pane this runs in, as `<session>:<pane>`, by the name its
     /// session has now: zellij's variables keep the name it had as the pane
     /// opened, and lunetad follows a rename.
@@ -94,6 +103,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Agents => ask(folder, Reach::Running, agents),
         Command::Sessions => ask(folder, Reach::Running, sessions),
         Command::Watch { after } => ask(folder, Reach::Current, |daemon| watch(daemon, *after)),
+        Command::Bridge => bridge::run(folder),
         Command::Here => drive::here(folder),
         Command::Open { what } => drive::open(what, folder),
         Command::Go { to } => drive::go(to, folder),
@@ -129,7 +139,7 @@ where
 }
 
 /// A runtime for the CLI's one thread, or why there is none.
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
+pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
     let built = tokio::runtime::Builder::new_current_thread().enable_all().build();
     built.map_err(|error| format!("no runtime: {error}"))
 }
