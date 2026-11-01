@@ -4,10 +4,14 @@
 //!
 //! The file is written whole, under a name of its writer's own, before it
 //! takes its own, so that lunetad never reads it halfway written. A line
-//! that names no machine stays as it was, for you to mend.
+//! that names no machine stays as it was, for you to mend. A luneta changes
+//! it under the lock of `hosts.lock`, beside it, from the read to the write,
+//! so that of two that change it at once, the second changes what the first
+//! wrote. An editor takes no lock: a file you save that you opened before a
+//! luneta changed it leaves out what that luneta changed.
 
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind};
 use std::path::Path;
 
 use lunetad::{Destination, HOSTS_FILE, HOSTS_MAX};
@@ -64,44 +68,63 @@ fn file() -> Result<std::path::PathBuf, String> {
 }
 
 fn add_to(file: &Path, destination: &Destination) -> Result<Added, String> {
-    let mut text = read(file)?;
-    let mut named: Vec<Destination> = Vec::new();
-    for machine in text.lines().filter_map(|line| line.parse::<Destination>().ok()) {
-        if !named.contains(&machine) {
-            named.push(machine);
+    changed(file, |text| {
+        let named = lunetad::hosts_named(text, |_| {});
+        if named.machines.contains(destination) {
+            return Ok((Added::Already, None));
         }
-    }
-    if named.contains(destination) {
-        return Ok(Added::Already);
-    }
-    if named.len() >= HOSTS_MAX {
-        return Err(format!(
-            "{} names {HOSTS_MAX} machines, as many as lunetad watches",
-            file.display()
-        ));
-    }
-    if !text.is_empty() && !text.ends_with('\n') {
+        if named.machines.len() >= HOSTS_MAX {
+            return Err(format!(
+                "{} names {HOSTS_MAX} machines, as many as lunetad watches",
+                file.display()
+            ));
+        }
+        let mut text = text.to_owned();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&destination.to_string());
         text.push('\n');
-    }
-    text.push_str(&destination.to_string());
-    text.push('\n');
-    write(file, &text)?;
-    Ok(Added::Named)
+        Ok((Added::Named, Some(text)))
+    })
 }
 
 fn forget_in(file: &Path, destination: &Destination) -> Result<bool, String> {
-    let text = read(file)?;
-    let names = |line: &&str| line.parse::<Destination>().is_ok_and(|it| it == *destination);
-    if !text.lines().any(|line| names(&line)) {
-        return Ok(false);
+    changed(file, |text| {
+        let names = |line: &&str| line.parse::<Destination>().is_ok_and(|it| it == *destination);
+        if !text.lines().any(|line| names(&line)) {
+            return Ok((false, None));
+        }
+        let mut kept = String::new();
+        for line in text.lines().filter(|line| !names(line)) {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        Ok((true, Some(kept)))
+    })
+}
+
+/// Changes the file at `file` as `change` says of what it says now, and
+/// says what `change` did: with a text, the file says that from then on.
+/// The lock is held from the read to the write, by every luneta that
+/// changes the file. It is a file of its own, as the file itself is
+/// renamed over as it is written, which a lock on it would not outlast.
+/// lunetad reads the file without it: each write leaves it whole.
+fn changed<T>(
+    file: &Path,
+    change: impl FnOnce(&str) -> Result<(T, Option<String>), String>,
+) -> Result<T, String> {
+    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let failed = |error: io::Error| format!("{}: {error}", file.display());
+    fs::create_dir_all(folder).map_err(failed)?;
+    let lock = File::create(folder.join(format!("{HOSTS_FILE}.lock"))).map_err(failed)?;
+    // Let go of as `lock` closes.
+    lock.lock().map_err(failed)?;
+    let (done, text) = change(&read(file)?)?;
+    if let Some(text) = text {
+        write(file, &text)?;
     }
-    let mut kept = String::new();
-    for line in text.lines().filter(|line| !names(line)) {
-        kept.push_str(line);
-        kept.push('\n');
-    }
-    write(file, &kept)?;
-    Ok(true)
+    Ok(done)
 }
 
 /// What the file at `file` says: nothing, where there is no file.
@@ -113,14 +136,11 @@ fn read(file: &Path) -> Result<String, String> {
     }
 }
 
-/// Writes `text` to `file` whole, under a name of this luneta's own first,
-/// in a folder made where there is none.
+/// Writes `text` to `file` whole, under a name of this luneta's own first.
 fn write(file: &Path, text: &str) -> Result<(), String> {
     let folder = file.parent().expect("a file of `state::path` is in a folder");
     let unfinished = folder.join(format!("{HOSTS_FILE}.{}", state::unfinished()));
-    let written = fs::create_dir_all(folder)
-        .and_then(|()| fs::write(&unfinished, text))
-        .and_then(|()| fs::rename(&unfinished, file));
+    let written = fs::write(&unfinished, text).and_then(|()| fs::rename(&unfinished, file));
     if written.is_err() {
         // What is left of it, if anything, names no machines either way.
         let _ = fs::remove_file(&unfinished);
@@ -130,6 +150,9 @@ fn write(file: &Path, text: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
     use super::*;
 
     fn machine(name: &str) -> Destination {
@@ -151,8 +174,32 @@ mod tests {
         assert_eq!(forget_in(&file, &machine("me@vps")), Ok(true));
         assert_eq!(forget_in(&file, &machine("me@vps")), Ok(false));
         assert_eq!(fs::read_to_string(&file).unwrap(), "nixos\n-oops\npi\n");
-        let leftovers = fs::read_dir(file.parent().unwrap()).unwrap().count();
-        assert_eq!(leftovers, 1, "no file is left halfway written");
+        let mut left = fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["hosts", "hosts.lock"], "no file is left halfway written");
+    }
+
+    /// Machines added at once, as by lunetas on one host, are each added to
+    /// the file as another left it: none is lost to a write made after it.
+    #[test]
+    fn machines_added_at_once_are_each_kept() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("luneta").join(HOSTS_FILE);
+        let start = Barrier::new(HOSTS_MAX);
+        thread::scope(|scope| {
+            for n in 0..HOSTS_MAX {
+                let (file, start) = (&file, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    assert_eq!(add_to(file, &machine(&format!("host-{n}"))), Ok(Added::Named));
+                });
+            }
+        });
+        let named = lunetad::hosts_named(&fs::read_to_string(&file).unwrap(), |_| {});
+        assert_eq!(named.machines.len(), HOSTS_MAX);
     }
 
     /// No machine is added past the most lunetad watches: it would leave

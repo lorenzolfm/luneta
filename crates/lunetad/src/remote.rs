@@ -265,9 +265,9 @@ pub fn follow(core: SyncSender<Command>, kept: Receiver<bool>, sweep: Duration) 
     watch::watch("hosts", dir, RecursiveMode::NonRecursive, wanted, sweep, read, tell)
 }
 
-/// What the file at `path` names: no machine where there is no file, and a
-/// blank line names none either. None for a file that does not read. What
-/// is wrong with it, `troubles` says.
+/// What the file at `path` names, as `named_by` reads it: no machine where
+/// there is no file. None for a file that does not read. What is wrong with
+/// it, `troubles` says.
 fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -277,6 +277,15 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
             return None;
         },
     };
+    Some(named_by(&text, |what| troubles.say(format!("{}: {what}", path.display()))))
+}
+
+/// What `text`, as the hosts file has it, names: the machines, in its order,
+/// each once, and `HOSTS_MAX` at the most. A blank line names none. A line
+/// that is no destination, and a machine past the most, is left out, and
+/// `trouble` told of it. luneta reads the file by this too, before it
+/// writes it, so that it counts the machines as the daemon does.
+pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
     let mut seen = HashSet::new();
     let mut named = Named::default();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -286,7 +295,7 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
             },
             Ok(_) => {},
             Err(why) => {
-                troubles.say(format!("{}: {why}, and is left out", path.display()));
+                trouble(format!("{why}, and is left out"));
                 named.unread = named.unread.saturating_add(1);
             },
         }
@@ -295,10 +304,10 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
         let past: Vec<String> = named.machines.drain(HOSTS_MAX..).map(|it| it.0).collect();
         let many = u32::try_from(past.len()).unwrap_or(u32::MAX);
         named.unread = named.unread.saturating_add(many);
-        let (file, max, past) = (path.display(), HOSTS_MAX, past.join(", "));
-        troubles.say(format!("{file} names more than {max}: {past} are left out"));
+        let past = past.join(", ");
+        trouble(format!("{past} are left out, as the daemon watches {HOSTS_MAX} at the most"));
     }
-    Some(named)
+    named
 }
 
 /// Watches `destination` from a thread of its own, until what this returns

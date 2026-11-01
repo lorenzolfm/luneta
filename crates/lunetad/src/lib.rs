@@ -33,5 +33,5 @@ pub use daemon::{serve, Claim};
 pub use folder::Refusal;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use metadata::folder as zellij_info_folder;
-pub use remote::{Destination, FILE as HOSTS_FILE, HOSTS_MAX};
+pub use remote::{named_by as hosts_named, Destination, FILE as HOSTS_FILE, HOSTS_MAX};
 pub use zellij::{folder as zellij_folder, running as zellij_sessions, SPOKEN as ZELLIJ_CONTRACT};
