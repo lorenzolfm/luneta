@@ -104,7 +104,9 @@ message Remote {
   // What the daemon has of a machine that its daemon does not answer for:
   // ssh failed to reach it, or its daemon, or the connection broke and a
   // new ssh failed too. ssh is run again after a while, and longer each
-  // time it fails, up to 30 seconds.
+  // time it fails, up to 30 seconds. Or the daemon could not start watching
+  // it, which it tries again each time it reads the hosts file, every 2
+  // seconds at the least.
   message Unreached {
     // Since when: its daemon's last answer, or, where it has had none, since
     // the daemon began to watch it. Always there.
@@ -130,6 +132,9 @@ message Remote {
       // connection broke, or its daemon answered with an error, or with what
       // this one does not read.
       Lost lost = 7;
+      // The daemon could not start a thread to watch it from, nor a
+      // runtime, as one out of processes or files cannot.
+      Unwatched unwatched = 8;
     }
 
     message Unstarted {}
@@ -147,6 +152,8 @@ message Remote {
     message Silent {}
 
     message Lost {}
+
+    message Unwatched {}
   }
 }
 

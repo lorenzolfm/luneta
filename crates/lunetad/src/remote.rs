@@ -11,7 +11,7 @@
 //! is a change to the other's remotes, and so to its version, which is a
 //! change to the first one's.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
@@ -20,7 +20,7 @@ use std::io::{self, ErrorKind};
 use std::iter;
 use std::path::Path;
 use std::process::Command as Process;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -122,6 +122,8 @@ pub enum Stopped {
     Silent,
     /// ssh reached lunetad there, and what came after did not do.
     Lost,
+    /// The daemon could not start a thread to watch it from, nor a runtime.
+    Unwatched,
 }
 
 impl Stopped {
@@ -145,6 +147,7 @@ impl Stopped {
             Stopped::Said => unreached::Stopped::Said(unreached::Said {}),
             Stopped::Silent => unreached::Stopped::Silent(unreached::Silent {}),
             Stopped::Lost => unreached::Stopped::Lost(unreached::Lost {}),
+            Stopped::Unwatched => unreached::Stopped::Unwatched(unreached::Unwatched {}),
         }
     }
 }
@@ -174,35 +177,52 @@ pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
         troubles.done();
         named
     };
-    // The machines the core was told of last, in the file's order, and what
-    // ends the watch of each that is watched.
+    // The machines the core was told of last, in the file's order, what ends
+    // the watch of each that a thread watches, and since when each that none
+    // does has gone without one.
     let mut told: Vec<Destination> = Vec::new();
     let mut watched: Vec<(Destination, oneshot::Sender<()>)> = Vec::new();
+    let mut unwatched: HashMap<Destination, SystemTime> = HashMap::new();
+    let mut unwatchable = Troubles::default();
     let tell = move |named: Option<Vec<Destination>>| {
         // A file that does not read leaves the machines as they were.
-        let Some(named) = named else {
-            return true;
-        };
-        if named == told {
-            return true;
+        if let Some(named) = named
+            && named != told
+        {
+            if core.send(Command::Hosts(named.clone())).is_err() {
+                return false;
+            }
+            // The core no longer takes in what the thread of one that went
+            // says.
+            watched.retain(|(destination, _)| named.contains(destination));
+            unwatched.retain(|destination, _| named.contains(destination));
+            told = named;
         }
-        if core.send(Command::Hosts(named.clone())).is_err() {
-            return false;
-        }
-        // The core no longer takes in what the thread of one that went says.
-        watched.retain(|(destination, _)| named.contains(destination));
-        for destination in &named {
+        // One whose watch did not start is unreached, and its watch is
+        // started again on each read, until one does.
+        for destination in &told {
             if watched.iter().any(|(watched, _)| watched == destination) {
                 continue;
             }
             match watch(destination.clone(), core.clone()) {
-                Ok(ends) => watched.push((destination.clone(), ends)),
-                // The core has it as one it is reaching, until the file
-                // changes.
-                Err(error) => log::say(&format!("{destination} is not watched: {error}")),
+                Ok(ends) => {
+                    unwatched.remove(destination);
+                    watched.push((destination.clone(), ends));
+                },
+                Err(error) => {
+                    unwatchable.say(format!("{destination} is not watched: {error}"));
+                    let since = unwatched.entry(destination.clone());
+                    let since = *since.or_insert_with(SystemTime::now);
+                    let why = format!("it is not watched: {error}");
+                    let reached = Reached::Unreached { since, why, stopped: Stopped::Unwatched };
+                    let destination = destination.clone();
+                    if core.send(Command::Remote { destination, reached }).is_err() {
+                        return false;
+                    }
+                },
             }
         }
-        told = named;
+        unwatchable.done();
         true
     };
     let wanted = |path: &Path| path.file_name() == Some(OsStr::new(FILE));
@@ -239,18 +259,21 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Vec<Destination>> {
 }
 
 /// Watches `destination` from a thread of its own, until what this returns
-/// is dropped.
+/// is dropped, once the thread has the runtime it watches on. It makes that
+/// itself, and drops it: the first read is made on the daemon's own runtime,
+/// where another one dropped would panic.
 fn watch(destination: Destination, core: SyncSender<Command>) -> io::Result<oneshot::Sender<()>> {
     let (ends, ending) = oneshot::channel();
+    let (built, building) = mpsc::sync_channel(1);
     thread::Builder::new().name(format!("remote {destination}")).spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
-        let runtime = match runtime {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
-                log::say(&format!("{destination} is not watched: no runtime: {error}"));
+                let _ = built.send(Err(error));
                 return;
             },
         };
+        let _ = built.send(Ok(()));
         // What runs on the runtime goes with it as the thread ends: the
         // connection to the machine's daemon, and its ssh, killed as it goes.
         runtime.block_on(async move {
@@ -258,6 +281,9 @@ fn watch(destination: Destination, core: SyncSender<Command>) -> io::Result<ones
             let _ = ending.await;
         });
     })?;
+    // One that ended before it said so panicked.
+    let ended = |_| io::Error::other("its thread ended before it had a runtime");
+    building.recv().map_err(ended)??;
     Ok(ends)
 }
 
