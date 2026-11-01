@@ -124,8 +124,9 @@ fn luneta_bridge_starts_a_daemon_where_none_runs() {
 }
 
 /// A client through a command that reaches no daemon is told why: that it
-/// ended first, as a shell with no luneta does, or what it said first, as a
-/// login shell that prints does.
+/// ended first, as a shell with no luneta does, what it said first, as a
+/// login shell that prints does, or that it said nothing in time, as ssh
+/// does that waits on a host that does not answer.
 #[test]
 fn a_client_is_told_why_a_command_reached_no_daemon() {
     unbridged(sh("exit 127"), |why| {
@@ -134,6 +135,7 @@ fn a_client_is_told_why_a_command_reached_no_daemon() {
     unbridged(sh("echo hello; exec sleep 10"), |why| {
         matches!(why, Unbridged::Said(said) if said == "hello\n")
     });
+    unbridged(sh("exec sleep 60"), |why| matches!(why, Unbridged::Silent));
 }
 
 /// `luneta bridge` ends as either end hangs up: the client, as its stdin

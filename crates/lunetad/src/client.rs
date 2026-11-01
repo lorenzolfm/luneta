@@ -13,6 +13,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::time::{timeout_at, Instant};
 use tonic::transport::{Channel, Endpoint, Error, Uri};
 use tower::service_fn;
 
@@ -83,16 +84,17 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
 /// killed as the connection goes: one that ends is made afresh for the next
 /// question, and so is one that stalls, once the daemon has been `QUIET` on
 /// it and answers no ping. A connection is made once the command says
-/// `BRIDGED`, and why one is not is an `Unbridged`, among the error's
-/// sources. Its stderr is the caller's.
+/// `BRIDGED`, within `REACH`, and why one is not is an `Unbridged`, among the
+/// error's sources. Its stderr is the caller's.
 pub async fn through<F>(mut command: F) -> Result<DaemonClient<Channel>, Error>
 where
     F: FnMut() -> std::process::Command + Send + 'static,
 {
-    // Pinged between questions too, so that a stalled way is not found by the
+    // No `connect_timeout`: a command gets `REACH` from `Piped::bridged`,
+    // which says why it reached none by then, where tonic's would not. And
+    // pinged between questions too, so that a stalled way is not found by the
     // next question, which would wait on it.
     let channel = Endpoint::from_static("http://lunetad")
-        .connect_timeout(REACH)
         .timeout(ANSWER_THROUGH)
         .http2_keep_alive_interval(QUIET)
         .keep_alive_timeout(ROUND_TRIP)
@@ -117,6 +119,9 @@ pub enum Unbridged {
     Ended(ExitStatus),
     /// It said something else first, as a login shell that prints does.
     Said(String),
+    /// It said nothing within `REACH`, and ran on, as ssh does that waits on
+    /// a host that does not answer.
+    Silent,
 }
 
 impl fmt::Display for Unbridged {
@@ -125,6 +130,9 @@ impl fmt::Display for Unbridged {
             Unbridged::Io(error) => write!(f, "{error}"),
             Unbridged::Ended(ended) => write!(f, "it ended before it reached lunetad ({ended})"),
             Unbridged::Said(said) => write!(f, "it said {said:?} before it reached lunetad"),
+            Unbridged::Silent => {
+                write!(f, "it neither reached lunetad nor ended in {}s", REACH.as_secs())
+            },
         }
     }
 }
@@ -154,10 +162,11 @@ struct Piped {
 }
 
 impl Piped {
-    /// `command`, spawned, once it has said `BRIDGED`. Its stderr is the
-    /// caller's, whatever `command` said of it: a pipe of it that none read
-    /// would hold the command up once it was full.
+    /// `command`, spawned, once it has said `BRIDGED`, within `REACH`. Its
+    /// stderr is the caller's, whatever `command` said of it: a pipe of it
+    /// that none read would hold the command up once it was full.
     async fn bridged(command: std::process::Command) -> Result<Self, Unbridged> {
+        let deadline = Instant::now() + REACH;
         let mut command = tokio::process::Command::from(command);
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         let mut child = command.kill_on_drop(true).spawn()?;
@@ -166,10 +175,20 @@ impl Piped {
         };
         let mut stdout = BufReader::new(stdout);
         let mut said = Vec::new();
-        (&mut stdout).take(SAID_MAX).read_until(b'\n', &mut said).await?;
+        let mut line = (&mut stdout).take(SAID_MAX);
+        let heard = line.read_until(b'\n', &mut said);
+        // What it said by then is what it said, with no newline to end it
+        // too, as a prompt that waits for an answer says it.
+        if let Ok(heard) = timeout_at(deadline, heard).await {
+            heard?;
+        }
         match said.as_slice() {
             BRIDGED => Ok(Piped { stdout, stdin, _child: child }),
-            [] => Err(Unbridged::Ended(child.wait().await?)),
+            // It ended its stdout, and itself, or else runs on without it.
+            [] => match timeout_at(deadline, child.wait()).await {
+                Ok(ended) => Err(Unbridged::Ended(ended?)),
+                Err(_) => Err(Unbridged::Silent),
+            },
             said => Err(Unbridged::Said(String::from_utf8_lossy(said).into_owned())),
         }
     }
