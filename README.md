@@ -170,10 +170,11 @@ is in /run/user/1000/luneta/printed/1793317274015320011-4127-0.txt.
 ```
 
 The key takes a shell at its prompt, with the hook: in a pane whose command runs
-still, or is stopped, or that runs no shell with the hook, the menu says why it
-starts none, and so it does where the shell goes on to another command as luneta
-reads what the last one printed. Of a job brought back with `fg`, the file holds
-what it printed after the `fg`, as the hook says. Where the pane no longer shows
+still, or is stopped, or whose shell has run nothing yet, or that runs no shell
+with the hook, the menu says why it starts none, and so it does where the shell
+goes on to another command as luneta reads what the last one printed. Of a job
+brought back with `fg`, the file holds what it printed after the `fg`, as the
+hook says. Where the pane no longer shows
 the line the command was run on, as after a `clear`, or once it scrolled out of
 what zellij keeps, the file holds all the pane shows, and the agent is told so.
 luneta takes the last line that holds the command after a word for the line it
@@ -971,17 +972,20 @@ lunetad never reads half of one. Another shell can be hooked to write the same
 line, which is one of
 
 ```text
+ready
 going <since> <tty> <command>
 ended <at> <status> <took> <command>
 stopped <at> <command>
 ```
 
-with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
-milliseconds, `<status>` the exit status, `fg` where `fg` brought the job
-back, after which fish cannot say it, or `-` where the shell cannot say it,
-`<tty>` the path `tty` prints, the command on one line, and `stopped` for a job
-stopped with `Ctrl z`. A line lunetad cannot read, as a hook older or newer
-than it writes, it says in luneta's log, by its file. The sidebar has them from
+with `ready` from the shell's first prompt until it runs a command, so that a
+pane with no file runs no shell with the hook, `<started>`, `<since>` and
+`<at>` in seconds since the epoch, `<took>` in milliseconds, `<status>` the
+exit status, `fg` where `fg` brought the job back, after which fish cannot say
+it, or `-` where the shell cannot say it, `<tty>` the path `tty` prints, the
+command on one line, and `stopped` for a job stopped with `Ctrl z`. A line
+lunetad cannot read, as a hook older or newer than it writes, it says in
+luneta's log, by its file. The sidebar has them from
 lunetad, which keeps its socket in the same folder: it reads a file as it
 changes, and the terminal of each command that runs every second, through `ps`
 on its `PATH`.

@@ -62,4 +62,9 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     function __luneta_gone --on-event fish_exit
         rm -f $__luneta_file
     end
+
+    # Hooked from its first prompt: a pane with no file runs no shell with the
+    # hook, rather than one that has run nothing yet. A `source` in a shell
+    # hooked already keeps what it said.
+    test -e $__luneta_file; or __luneta_say ready
 end

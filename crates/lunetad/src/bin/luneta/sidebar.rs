@@ -431,7 +431,7 @@ impl Marked {
                 };
                 (mark, told(ended.at)?, ended.command.as_str())
             },
-            Doing::Stopped(_) => return None,
+            Doing::Stopped(_) | Doing::Ready(_) => return None,
         };
         Some((Marked { mark, since: Some(since) }, command))
     }
@@ -486,6 +486,7 @@ fn ran(shell: &Shell) -> Ran {
         Some(Doing::Going(going)) => said(&going.command).map(Ran::Going),
         Some(Doing::Stopped(stopped)) => said(&stopped.command).map(Ran::Stopped),
         Some(Doing::Ended(ended)) => ended_last(ended).map(Ran::Ended),
+        Some(Doing::Ready(_)) => Some(Ran::Ready),
         // A daemon newer than this luneta's.
         None => None,
     };
@@ -505,7 +506,7 @@ fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<menu::Ended> {
 fn long_at(shell: &Shell) -> Option<SystemTime> {
     match shell.doing.as_ref()? {
         Doing::Going(going) => told(going.since)?.checked_add(LONG),
-        Doing::Ended(_) | Doing::Stopped(_) => None,
+        Doing::Ended(_) | Doing::Stopped(_) | Doing::Ready(_) => None,
     }
 }
 
@@ -2219,7 +2220,7 @@ impl Sidebar {
     /// the daemon passed it on.
     fn ran_in(&self, session: &Listed, pane: u32) -> Ran {
         let shell = self.pane_of(session, pane).and_then(|shown| shown.shell.as_ref());
-        shell.map_or(Ran::Untold, ran)
+        shell.map_or(Ran::Unhooked, ran)
     }
 
     /// The open menu's row is a pane's whose shell may have ended a
@@ -5186,6 +5187,7 @@ mod tests {
         assert_eq!(said(Doing::Ended(Ended { at: None, ..untimed })), Ran::Unknown);
         assert_eq!(said(going("", 100, Front::Working)), Ran::Unknown);
         assert_eq!(ran(&Shell { doing: None }), Ran::Unknown);
+        assert_eq!(said(Doing::Ready(api::shell::Ready {})), Ran::Ready);
     }
 
     /// A command in a shell has an agent's marks, its row named for it: the
@@ -5194,7 +5196,8 @@ mod tests {
     /// of what you have yet to see. The rule along the top counts them with
     /// the agents. One that takes the terminal
     /// over has no mark while you use it, nor has a job stopped, nor one that
-    /// ended within a second. The hook counts whole seconds, and a command is
+    /// ended within a second, nor a shell that has run nothing yet. The hook
+    /// counts whole seconds, and a command is
     /// dated to the last moment of its second. The icon goes by what zellij
     /// says runs in the pane, as for any other: here a shell's, `\u{e795}`,
     /// and neovim's, `\u{e6ae}`.
@@ -5220,12 +5223,13 @@ mod tests {
                     in_shell(6, ended("cargo run", None, 7_000)),
                     in_shell(7, ended("ls", Some(0), 20)),
                     in_shell(8, stopped),
+                    in_shell(9, Doing::Ready(api::shell::Ready {})),
                 ],
             )],
             Vec::new(),
         ));
         assert_eq!(
-            screen(&mut sidebar, false, 32, 13),
+            screen(&mut sidebar, false, 32, 14),
             [
                 "─ luneta ──────────────────────",
                 "─ 1 session ──────── ●1 •3 ⠋1 ─",
@@ -5238,6 +5242,7 @@ mod tests {
                 "  •✓ \u{e795} cargo test          29s",
                 "  •✗ \u{e795} cargo clippy        29s",
                 "  •$ \u{e795} cargo run           29s",
+                "     \u{e795} luneta/main",
                 "     \u{e795} luneta/main",
                 "     \u{e795} luneta/main",
             ]
@@ -6161,7 +6166,7 @@ mod tests {
             pane: 1,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
-            ran: Ran::Untold,
+            ran: Ran::Unhooked,
         })));
 
         let (older, cwd) = ("older".to_owned(), "/w/luneta/main".to_owned());

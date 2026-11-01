@@ -667,7 +667,7 @@ mod tests {
             pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
-            ran: Ran::Untold,
+            ran: Ran::Unhooked,
         })
     }
 
