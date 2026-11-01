@@ -2348,7 +2348,7 @@ dependencies = [
 [[package]]
 name = "wt"
 version = "0.3.0"
-source = "git+https://github.com/lorenzolfm/wt?rev=b6b4887d69f10b5c48c760c6f8d56fc2654a6c47#b6b4887d69f10b5c48c760c6f8d56fc2654a6c47"
+source = "git+https://github.com/lorenzolfm/wt?rev=eb50a4794b7989398751d47ed58ea80697248701#eb50a4794b7989398751d47ed58ea80697248701"
 dependencies = [
  "anyhow",
  "clap",
