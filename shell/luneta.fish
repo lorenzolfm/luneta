@@ -47,6 +47,9 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
 
     function __luneta_ended --on-event fish_postexec
         set -l s $status
+        # The `source` that hooked the shell ran before `fish_preexec` was
+        # there, so nothing says what it ran: what the shell said stands.
+        set -q __luneta_command; or return
         # `fg` says 0 however the job it brought back ended.
         string match -qr '^\s*fg(\s|$)' -- $argv[1]; and set s fg
         # `Ctrl z` stops the job, and gives the prompt back with a status of 0.
