@@ -5,9 +5,11 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::num::NonZeroU16;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +28,7 @@ use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, N
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use rustix::fs::{Mode, OFlags};
 use rustix::termios::{self, LocalModes};
 
 use crate::host::Event;
@@ -131,6 +134,12 @@ pub struct Hosted {
     /// luneta's end of the terminal, which says the modes the program set
     /// the terminal to.
     modes: File,
+    /// The program's end of the terminal, which luneta holds open, so that
+    /// the terminal hangs up only as luneta lets it go. A program that writes
+    /// as it ends, at once, as ssh does that reaches no machine, would else
+    /// hang it up before alacritty has read what it wrote, which alacritty
+    /// drops where it cannot lock the screen at once.
+    _far: File,
     size: Size,
     /// The listener's, which `draw` clears.
     drew: Arc<AtomicBool>,
@@ -156,6 +165,7 @@ impl Hosted {
         };
         let pty = tty::new(&options, size.into(), 0)?;
         let modes = pty.file().try_clone()?;
+        let far = far_end(pty.file())?;
         let drew = Arc::new(AtomicBool::new(false));
         let listener = Listener { events, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
@@ -175,7 +185,7 @@ impl Hosted {
         let reader = EventLoop::new(Arc::clone(&screen), listener, pty, drain_on_exit, false)?;
         let pty = reader.channel();
         reader.spawn();
-        Ok(Hosted { screen, pty, modes, size, drew })
+        Ok(Hosted { screen, pty, modes, _far: far, size, drew })
     }
 
     pub fn size(&self) -> Size {
@@ -259,6 +269,15 @@ impl Drop for Hosted {
         // The reader is gone with the program already.
         let _ = self.pty.send(Msg::Shutdown);
     }
+}
+
+/// The program's end of the terminal whose end `near` is, opened as no
+/// terminal of luneta's own, and for none of what luneta runs to inherit.
+fn far_end(near: &File) -> io::Result<File> {
+    let path = rustix::pty::ptsname(near, Vec::new())?;
+    let path = Path::new(OsStr::from_bytes(path.as_bytes()));
+    let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
+    Ok(File::from(rustix::fs::open(path, flags, Mode::empty())?))
 }
 
 /// Draws `screen` into `area` of `buffer`, and says where its cursor is on
@@ -492,6 +511,35 @@ mod tests {
             })
             .collect();
         assert_eq!(answers, ["\x1b]11;rgb:1e1e/1e1e/2e2e\x07", "\x1b[?6c"]);
+    }
+
+    /// What a program says as it fails at once, as ssh does that reaches no
+    /// machine, reads as its terminal's text once the terminal closed, though
+    /// luneta had its screen locked as it ended, as luneta drawing it does.
+    #[test]
+    fn what_a_program_says_as_it_fails_at_once_is_its_text() {
+        let (events, inbox) = mpsc::channel();
+        let size = Size {
+            columns: NonZeroU16::new(40).unwrap(),
+            lines: NonZeroU16::new(4).unwrap(),
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let args = vec!["-c".to_owned(), "echo 'ssh: no such machine' >&2; exit 255".to_owned()];
+        let hosted =
+            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, events).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let drawing = hosted.screen.lock();
+        // Long enough for the program to have ended.
+        thread::sleep(Duration::from_millis(300));
+        drop(drawing);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Event::Hosted(Said::Ended) = inbox.recv_timeout(left).unwrap() {
+                break;
+            }
+        }
+        assert_eq!(hosted.text(), "ssh: no such machine");
     }
 
     /// What `/bin/sh` shows as it ends, run with `stty` first in a terminal
