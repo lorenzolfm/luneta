@@ -541,8 +541,8 @@ impl Daemon for StandIn {
     }
 }
 
-/// The daemon ends once zellij has had no session for 30 seconds, and not
-/// before. It ends well, says why, and takes its socket with it. A client
+/// The daemon ends once zellij has had no session, and no client has watched
+/// it, for 30 seconds, and not before. It ends well, says why, and takes its socket with it. A client
 /// that holds a connection and never says anything does not keep it: the
 /// daemon waits for its clients to go for 5 seconds at the most. The test
 /// waits it out.
@@ -567,4 +567,26 @@ fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
     assert!(!host.runtime.path().join(SOCKET).exists());
     let said = daemon.said_after(Duration::from_secs(1));
     assert!(said.iter().any(|line| line.contains("no session for 30s")), "{said:?}");
+}
+
+/// The daemon runs on while a client watches it, however long zellij has had
+/// no session: a luneta asks again as soon as it is answered, on this machine
+/// or, through `luneta bridge`, on another. The test watches it for longer
+/// than it would run on alone.
+#[test]
+fn the_daemon_runs_on_while_a_client_watches_it() {
+    let host = Host::new();
+    let mut daemon = start(host.vars()).unwrap();
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let watched = Instant::now() + Duration::from_secs(36);
+    runtime.block_on(async {
+        let mut watching = lunetad::connect(&folder).await.unwrap();
+        let mut after = None;
+        while Instant::now() < watched {
+            let host = watching.watch(WatchRequest { after }).await.expect("the daemon ended");
+            after = host.into_inner().version;
+        }
+    });
+    assert_eq!(daemon.ended_within(Duration::ZERO), None);
 }

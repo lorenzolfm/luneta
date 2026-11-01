@@ -1087,8 +1087,9 @@ watch` start `lunetad` when none answers, as zellij and tmux start their
 servers. They start the `lunetad` beside them, which the same build made, or
 else the first on the `PATH`, detached, with what it says in `lunetad.log`
 beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
-It lives as long as zellij does, not as long as a client is attached: once
-zellij has had no session for 30 seconds, it ends. A daemon older than them,
+It lives as long as zellij has a session, or a client watches it, as a
+luneta does: once zellij has had no session, and nothing has watched it, for
+30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A
 newer one they keep, so that two builds in use at once never take turns at
 it: after a rollback, the newer daemon runs on until zellij's last session ends.
