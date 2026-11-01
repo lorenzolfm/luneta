@@ -126,6 +126,15 @@
               # and tested there.
               cargoTestExtraArgs = "-p luneta-protocol";
 
+              # fish's hook, where fish looks for a package's: NixOS and nix-darwin
+              # link the folder of every system package into one that fish reads, so
+              # that installing luneta hooks the shell, as the menu's `c f` and `c e`
+              # need. A path of its own, outside `src`, so that editing it builds no
+              # crate again.
+              postInstall = ''
+                install -Dm444 ${./shell/luneta.fish} $out/share/fish/vendor_conf.d/luneta.fish
+              '';
+
               meta = {
                 description = "The luneta daemon, and the CLI that talks to it";
                 homepage = "https://github.com/lorenzolfm/luneta";

@@ -1,22 +1,24 @@
 //! The shells adapter: what the shell in each pane says through luneta's hook,
 //! and what the terminal of a command it runs says the command does.
 //!
-//! The hook (the README's "Hook the shell") keeps a file for each shell,
+//! The hook (`shell/luneta.fish`) keeps a file for each shell,
 //! `commands/<session>/<pane>.<started>` in luneta's folder, which is the
 //! daemon's own, and moves into it, whole, a line of one of
 //!
 //! ```text
+//! ready
 //! going <since> <tty> <command>
 //! ended <at> <status> <took> <command>
 //! stopped <at> <command>
 //! ```
 //!
-//! with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>`
-//! in milliseconds, `<status>` the exit status, `fg` where `fg` brought the
-//! job back, after which fish cannot say it, or `-` where the shell cannot
-//! say it, and `stopped` for a job stopped with `Ctrl z`. The
-//! session is named as it was when the shell started, which a rename leaves
-//! behind, as it leaves an agent's.
+//! with `ready` from the shell's first prompt until it runs a command,
+//! `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
+//! milliseconds, `<status>` the exit status, `fg` where `fg` brought the job
+//! back, after which fish cannot say it, or `-` where the shell cannot say
+//! it, and `stopped` for a job stopped with `Ctrl z`. A pane with no file
+//! runs no shell with the hook. The session is named as it was when the
+//! shell started, which a rename leaves behind, as it leaves an agent's.
 //!
 //! What a command going does, its line does not say: it works, or waits for
 //! you to type, or has the terminal to itself, as an editor does. Its terminal
@@ -82,6 +84,8 @@ pub struct Shell {
 /// What a shell said last, each time to the second it said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Doing {
+    /// It is at its prompt, and has run nothing yet.
+    Ready,
     /// It runs `command`, since `since`, and the command in front of its
     /// terminal does as `front` says.
     Going { command: Said, since: SystemTime, front: Front },
@@ -127,8 +131,9 @@ impl Shell {
 
     #[must_use]
     pub fn to_api(&self) -> api::Shell {
-        use api::shell::{Doing as Told, Ended, Going, Stopped};
+        use api::shell::{Doing as Told, Ended, Going, Ready, Stopped};
         let doing = match &self.doing {
+            Doing::Ready => Told::Ready(Ready {}),
             Doing::Going { command, since, front } => Told::Going(Going {
                 command: command.as_str().to_owned(),
                 since: Some((*since).into()),
@@ -170,6 +175,9 @@ enum Line {
 
 impl Line {
     fn read(line: &str) -> Option<Self> {
+        if line == "ready" {
+            return Some(Line::Whole(Doing::Ready));
+        }
         let (word, rest) = line.split_once(' ')?;
         let (secs, rest) = rest.split_once(' ')?;
         let moment = UNIX_EPOCH.checked_add(Duration::from_secs(secs.parse().ok()?))?;
@@ -453,9 +461,18 @@ impl Shells {
                         continue;
                     },
                 };
-                if let Some(line) = Line::read(&text) {
-                    lines.push(((named.clone(), pane, started), line));
-                }
+                let Some(line) = Line::read(&text) else {
+                    // A hook older or newer than this lunetad wrote it: a
+                    // copy in fish's config, which the package's does not
+                    // replace, or a shell that started before luneta was
+                    // installed again. Its shell reads as one with no hook,
+                    // so the log says why. Not the line: its command is
+                    // what someone typed.
+                    let why = "a line this lunetad cannot read, as an older or a newer hook's";
+                    self.troubles.say(format!("{}: {why}", path.display()));
+                    continue;
+                };
+                lines.push(((named.clone(), pane, started), line));
             }
         }
         lines
@@ -521,6 +538,7 @@ mod tests {
 
     #[test]
     fn a_line_reads_as_the_hook_writes_it() {
+        assert_eq!(Line::read("ready"), Some(Line::Whole(Doing::Ready)));
         assert_eq!(
             Line::read("going 1760900000 /dev/pts/3 cargo build --release"),
             Some(Line::Going {
@@ -552,6 +570,8 @@ mod tests {
         );
         for wrong in [
             "",
+            "ready ",
+            "ready 12",
             "going",
             "going 12 /dev/pts/3",
             "going 12 /dev/pts/3 ",

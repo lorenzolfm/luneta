@@ -237,8 +237,9 @@ message Pane {
   // `Pane #1`: it is the glyph that tells an agent's. zellij keeps the last
   // title a program gave, so an agent's can outlast it.
   Titled titled = 6;
-  // What its shell says through luneta's hook. Absent for a shell without the
-  // hook, and for one that has said nothing yet.
+  // What its shell says through luneta's hook. Absent where no shell with the
+  // hook runs: one with a hook as new as `ready` says that from its first
+  // prompt, and one with an older hook says nothing until it runs a command.
   Shell shell = 7;
   // The id zellij gave its tab, which stays the tab's as it moves and as tabs
   // before it close, where `tab` does not. Absent from a daemon older than
@@ -254,15 +255,16 @@ message Titled {
   optional string topic = 1;
 }
 
-// What a shell with luneta's hook said last: the command it runs, or the one it
-// ran last and how that ended. The hook counts whole seconds, so each time
-// here is the second it said.
+// What a shell with luneta's hook said last: the command it runs, the one it
+// ran last and how that ended, or that it has run none yet. The hook counts
+// whole seconds, so each time here is the second it said.
 message Shell {
   // One of these, always: a client that finds none has a newer daemon's.
   oneof doing {
     Going going = 1;
     Ended ended = 2;
     Stopped stopped = 3;
+    Ready ready = 4;
   }
 
   // A command it runs.
@@ -301,6 +303,9 @@ message Shell {
     // When it stopped. Always there.
     google.protobuf.Timestamp at = 2;
   }
+
+  // At its prompt, and it has run nothing yet.
+  message Ready {}
 }
 
 // What the command in front of a terminal does, by how the terminal takes keys

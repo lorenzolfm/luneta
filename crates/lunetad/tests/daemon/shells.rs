@@ -7,7 +7,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lunetad::api::shell::{ended, Doing, Ended, Going, Stopped};
+use lunetad::api::shell::{ended, Doing, Ended, Going, Ready, Stopped};
 use lunetad::api::{self, Front};
 use prost_types::{Duration, Timestamp};
 use rustix::fs::{Mode, OFlags};
@@ -52,6 +52,7 @@ fn command(shell: &api::Shell) -> &str {
         Doing::Going(going) => &going.command,
         Doing::Ended(ended) => &ended.command,
         Doing::Stopped(stopped) => &stopped.command,
+        Doing::Ready(_) => "",
     }
 }
 
@@ -86,12 +87,14 @@ impl Terminal {
 /// Each pane has what its shell said last: a command it runs, which its
 /// terminal says works, asks, or has the terminal to itself, as the terminal
 /// comes to say with no word from the shell; a command that ended, and how;
-/// a job stopped. A command going on a terminal that is gone is no pane's,
-/// and a file the hook is still writing says nothing yet.
+/// a job stopped; a shell that has run nothing yet. A command going on a
+/// terminal that is gone is no pane's, and a file the hook is still writing
+/// says nothing yet. A line this lunetad cannot read, as a newer hook's, is
+/// no pane's either, and the log says whose file it is.
 #[test]
 fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
     let host = Host::new();
-    let panes: Vec<_> = (1..=6).map(at_home).collect();
+    let panes: Vec<_> = (1..=8).map(at_home).collect();
     host.zellij.list("work", &json!(panes));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
@@ -105,10 +108,12 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
     say(&host, "work", 5, started, &format!("going {started} /dev/luneta-gone sleep 30"));
     let writing = host.runtime.path().join(format!("luneta/commands/work/6.{started}.new"));
     fs::write(writing, format!("ended {started} 0 2000 true\n")).unwrap();
+    say(&host, "work", 7, started, &format!("went {started} make"));
+    say(&host, "work", 8, started, "ready");
 
     let said = eventually("the shells of work's panes have said", || {
         let shells = shells(&host, "work")?;
-        shells[..4].iter().all(Option::is_some).then_some(shells)
+        (shells[..4].iter().all(Option::is_some) && shells[7].is_some()).then_some(shells)
     });
     let at = Some(Timestamp { seconds: i64::try_from(started).unwrap(), nanos: 0 });
     let doing = |doing| Some(api::Shell { doing: Some(doing) });
@@ -136,8 +141,16 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
             doing(Doing::Stopped(Stopped { command: "nvim".to_owned(), at })),
             None,
             None,
+            None,
+            doing(Doing::Ready(Ready {})),
         ]
     );
+    let unread = host.runtime.path().join(format!("luneta/commands/work/7.{started}"));
+    let log = host.home.path().join(".local/state/luneta/luneta.log");
+    let unread = format!("{}: a line this lunetad cannot read", unread.display());
+    eventually("the log says which file lunetad cannot read", || {
+        fs::read_to_string(&log).ok()?.contains(&unread).then_some(())
+    });
 
     let modes = [
         (false, false, Front::Interactive),

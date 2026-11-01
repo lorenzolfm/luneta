@@ -772,9 +772,11 @@ pub struct PaneRow {
 /// last command printed takes one that ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ran {
-    /// Nothing: no shell with the hook runs in the pane, or one that has run
-    /// nothing yet.
-    Untold,
+    /// No shell with the hook runs in the pane: one with it says it is ready
+    /// from its first prompt.
+    Unhooked,
+    /// A shell with the hook, at its prompt, that has run nothing yet.
+    Ready,
     /// What this luneta cannot read: what a daemon newer than its own says,
     /// or a command of no words, which the protocol never sends.
     Unknown,
@@ -914,9 +916,10 @@ impl PaneRow {
                 "menu: what pane {pane}'s shell ran is in words this luneta cannot read, as a \
                  newer lunetad's"
             )),
-            Ran::Untold => Err(format!(
-                "menu: pane {pane} has said of no command it ran last; that takes a shell with \
-                 luneta's hook, at its prompt"
+            Ran::Ready => Err(format!("menu: pane {pane}'s shell has run nothing yet")),
+            Ran::Unhooked => Err(format!(
+                "menu: pane {pane} runs no shell with luneta's hook; a fish started since the \
+                 hook was installed has it"
             )),
         }
     }
@@ -1398,7 +1401,7 @@ impl Menu {
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
-            let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Untold);
+            let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
             let target = Target::Pane(PaneRow { session: session.clone(), pane, cwd, branch, ran });
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { link: link.clone(), step };
@@ -2064,7 +2067,7 @@ mod tests {
             pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
-            ran: Ran::Untold,
+            ran: Ran::Unhooked,
         }
     }
 
@@ -2247,7 +2250,7 @@ mod tests {
         let why =
             "menu: pane 4's shell went on as luneta read what `cargo test` printed; ask again";
         let again = Ended { at: cargo_test().at + Duration::from_secs(5), ..cargo_test() };
-        for ran in [Ran::Going(said("ls")), Ran::Ended(again), Ran::Untold] {
+        for ran in [Ran::Going(said("ls")), Ran::Ended(again), Ran::Ready, Ran::Unhooked] {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
@@ -2320,10 +2323,11 @@ mod tests {
             refused(ran(Ran::Stopped(said("vim")))),
             "menu: `vim` is stopped in pane 4, and not over; bring it back with `fg`"
         );
+        assert_eq!(refused(ran(Ran::Ready)), "menu: pane 4's shell has run nothing yet");
         assert_eq!(
-            refused(ran(Ran::Untold)),
-            "menu: pane 4 has said of no command it ran last; that takes a shell with luneta's \
-             hook, at its prompt"
+            refused(ran(Ran::Unhooked)),
+            "menu: pane 4 runs no shell with luneta's hook; a fish started since the hook was \
+             installed has it"
         );
         assert_eq!(
             refused(ran(Ran::Unknown)),
