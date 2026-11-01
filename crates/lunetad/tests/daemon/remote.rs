@@ -418,3 +418,50 @@ fn what_each_ssh_to_a_machine_says_again_is_said_once() {
     let lines = said.iter().filter(|line| line.contains(unresolved)).count();
     assert_eq!(lines, 1, "{said:?}");
 }
+
+/// `luneta ssh` adds a machine to the hosts file, after the machines it
+/// names, and says that lunetad reaches it once one runs; and where one
+/// runs, how its first ssh there went: reached, or not, and why, and it
+/// fails then. A machine the file names already stays named once.
+#[test]
+fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "nowhere\n");
+    let ssh_to = |destination: &str| {
+        let output = here.vars().command(LUNETA).args(["ssh", destination]).output().unwrap();
+        let said = String::from_utf8(output.stdout).unwrap();
+        (output.status.success(), said, String::from_utf8(output.stderr).unwrap())
+    };
+
+    let (ok, said, _) = ssh_to("far");
+    assert!(ok);
+    assert!(said.starts_with("far: added to luneta's hosts file\nfar: lunetad reaches it once"));
+    let file = here.home.path().join(".local/state/luneta/hosts");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "nowhere\nfar\n");
+
+    let _here = start(here.vars()).unwrap();
+    let (ok, said, _) = ssh_to("far");
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(ok, "{said}");
+    assert_eq!(lines[0], "far: luneta's hosts file names it already");
+    assert!(lines[1].starts_with("far: reached, "), "{said}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "nowhere\nfar\n");
+
+    let (ok, said, stderr) = ssh_to("elsewhere");
+    assert!(!ok);
+    assert_eq!(said, "elsewhere: added to luneta's hosts file\n");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(lines[0].starts_with("luneta: elsewhere: unreached: "), "{stderr}");
+    let log = here.home.path().join(".local/state/luneta/luneta.log");
+    assert_eq!(lines[1], format!("luneta: what ssh said of it is in {}", log.display()));
+    // What ssh said is heard on a thread of its own, as the daemon tells of
+    // its end.
+    let said = "elsewhere: ssh: Could not resolve hostname elsewhere";
+    eventually("what ssh said is in the log", || {
+        fs::read_to_string(&log).ok().filter(|logged| logged.contains(said))
+    });
+}

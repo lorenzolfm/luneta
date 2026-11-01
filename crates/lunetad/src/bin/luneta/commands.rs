@@ -6,7 +6,7 @@ use std::future::Future;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
 use luneta_protocol::github::{self, State};
@@ -22,18 +22,19 @@ use lunetad::api::{
 };
 use lunetad::folder::SOCKET;
 pub use lunetad::log::causes;
-use lunetad::release;
+use lunetad::{release, Destination};
 use prost::Message as _;
 use tonic::transport::Channel;
 
 use crate::bridge;
 use crate::daemon::{self, Reach};
 use crate::drive::{self, Address, Agreed, Opening};
+use crate::machines::{self, Added};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
 /// `bridge` start a lunetad where none runs, as a program reads the host by
 /// them: the rest say that none does, or, for `close`, that it cannot tell the
-/// agents.
+/// agents, or, for `ssh`, that it reaches the machine once one runs.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -59,6 +60,16 @@ pub enum Command {
     /// newline go to stdout before anything it says.
     #[command(hide = true)]
     Bridge,
+    /// Have lunetad watch another machine through ssh, as the sidebar's
+    /// `n m` does: add it to luneta's hosts file, and say how the first ssh
+    /// to it goes, where lunetad runs. lunetad's ssh asks you nothing, so a
+    /// machine whose host key ssh has yet to know is reached once you have
+    /// run `ssh` to it yourself.
+    Ssh {
+        /// What ssh takes for a destination: a Tailscale name, a `Host` of
+        /// your ssh config, or `me@vps`.
+        destination: Destination,
+    },
     /// Say which pane this runs in, as `<session>:<pane>`, by the name its
     /// session has now: zellij's variables keep the name it had as the pane
     /// opened, and lunetad follows a rename.
@@ -106,6 +117,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Sessions => ask(folder, Reach::Running, sessions),
         Command::Watch { after } => ask(folder, Reach::Current, |daemon| watch(daemon, *after)),
         Command::Bridge => bridge::run(folder),
+        Command::Ssh { destination } => ssh(destination, folder),
         Command::Here => drive::here(folder),
         Command::Open { what } => drive::open(what, folder),
         Command::Go { to } => drive::go(to, folder),
@@ -138,6 +150,85 @@ where
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Adds `destination` to luneta's hosts file, and says how lunetad's first
+/// ssh to it goes, where one runs: it fails where that does.
+fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
+    match machines::add(destination) {
+        Ok(Added::Named) => println!("{destination}: added to luneta's hosts file"),
+        Ok(Added::Already) => println!("{destination}: luneta's hosts file names it already"),
+        Err(why) => {
+            eprintln!("luneta: {why}");
+            return ExitCode::FAILURE;
+        },
+    }
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(why) => {
+            eprintln!("luneta: {why}");
+            return ExitCode::FAILURE;
+        },
+    };
+    let daemon = match runtime.block_on(daemon::reach(folder, Reach::Running)) {
+        Ok(daemon) => daemon,
+        Err(why) => {
+            println!("{destination}: lunetad reaches it once it runs: {why}");
+            return ExitCode::SUCCESS;
+        },
+    };
+    match runtime.block_on(first_reach(daemon, destination)) {
+        Ok(Some(Reached::Host(host))) => {
+            let sessions = match host.sessions.len() {
+                1 => "1 session".to_owned(),
+                n => format!("{n} sessions"),
+            };
+            println!("{destination}: reached, {sessions}");
+            ExitCode::SUCCESS
+        },
+        Ok(Some(Reached::Unreached(unreached))) => {
+            let log = lunetad::state::path(lunetad::log::NAME);
+            let log = log.map_or_else(|_| lunetad::log::NAME.to_owned(), |log| {
+                log.display().to_string()
+            });
+            eprintln!("luneta: {destination}: unreached: {}", unreached.why);
+            eprintln!("luneta: what ssh said of it is in {log}");
+            ExitCode::FAILURE
+        },
+        Ok(Some(Reached::Reaching(_)) | None) => {
+            println!("{destination}: lunetad reaches it still; `luneta sessions` says how it went");
+            ExitCode::SUCCESS
+        },
+        Err(error) => {
+            eprintln!("luneta: {}: {}", folder.join(SOCKET).display(), causes(&*error));
+            ExitCode::FAILURE
+        },
+    }
+}
+
+/// What lunetad has of `destination` once its first ssh there reached it or
+/// failed: none where that takes longer than the most ssh is given, and the
+/// hosts file a sweep or two to be read again.
+async fn first_reach(
+    mut daemon: DaemonClient<Channel>,
+    destination: &Destination,
+) -> Result<Option<Reached>, Box<dyn Error>> {
+    let deadline = tokio::time::Instant::now() + lunetad::REACH + Duration::from_secs(5);
+    let spelled = destination.to_string();
+    let mut after = None;
+    loop {
+        let asked = daemon.watch(WatchRequest { after, kept: None });
+        let Ok(host) = tokio::time::timeout_at(deadline, asked).await else {
+            return Ok(None);
+        };
+        let host = host?.into_inner();
+        let named = host.remotes.into_iter().find(|remote| remote.destination == spelled);
+        match named.and_then(|remote| remote.reached) {
+            // Not read yet, or not reached yet, or a newer daemon's.
+            None | Some(Reached::Reaching(_)) => after = host.version,
+            reached => return Ok(reached),
+        }
+    }
 }
 
 /// A runtime for the CLI's one thread, or why there is none.

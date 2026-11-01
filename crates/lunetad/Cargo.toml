@@ -47,7 +47,8 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # so that it never becomes the daemon's own. And the ticks of a second, and
 # the time since the boot, which a process's start on Linux is counted in.
 # And a session of its own for what luneta runs that may ask on a terminal.
-rustix = { version = "1.1.4", features = ["fs", "param", "process", "termios", "time"] }
+# And the host's name, which the sidebar calls this machine by.
+rustix = { version = "1.1.4", features = ["fs", "param", "process", "system", "termios", "time"] }
 # Tells luneta's terminal's reader of a resize, as crossterm's did. Already in
 # the tree by way of crossterm.
 signal-hook = "0.3.18"

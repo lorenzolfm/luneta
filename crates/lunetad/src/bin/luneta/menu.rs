@@ -10,12 +10,14 @@
 //! starts an agent on it there, and `f` and `e`, which start one on what the
 //! command a shell ran last printed, to fix what went wrong or explain it.
 //! `n` opens the New group: your shell beside the
-//! pane, a tab of its session, or a session, in the directory it works in. `d`
+//! pane, a tab of its session, or a session, in the directory it works in, or
+//! a machine for lunetad to watch through ssh, by what you type ssh to it. `d`
 //! opens the Delete group, which closes the pane or deletes its session, and
-//! asks first when that would end an agent at work. `b` opens the Brief group,
-//! which briefs you on every session, the row's session, or the agent in its
-//! pane. luneta has no configuration to read keys for skills from, and the
-//! Claude group's are its own.
+//! asks first when that would end an agent at work, and on a machine's header
+//! forgets the machine. `b` opens the Brief group, which briefs you on every
+//! session, the row's session, or the agent in its pane. luneta has no
+//! configuration to read keys for skills from, and the Claude group's are its
+//! own.
 //!
 //! A pull request's link pasted with the sidebar's keys, or in the menu,
 //! opens it for that pull request instead: `w` makes a worktree of it, in a
@@ -34,6 +36,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
+use lunetad::Destination;
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -44,6 +47,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::machines::Machine;
 use crate::printed::Printed;
 use crate::pull::{At, Kind, Link, Ready};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, Place, TAG};
@@ -95,10 +99,15 @@ const DELETE_SESSION: char = 's';
 const BRIEF: char = 'b';
 const BRIEF_NAME: &str = "Brief";
 
+/// What the key of the Delete group that forgets a machine says it does.
+const FORGET_DOES: &str = "forget the machine";
+
 /// What the rule over the menu's first group, and over the legend, names
-/// them, and the sidebar's first line; and what it names the search box.
+/// them, and the sidebar's first line; and what it names the search box, and
+/// the box a machine's destination is typed in.
 pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
+const SSH_TITLE: &str = "ssh";
 
 /// What follows a group's name: it opens, as a folded session does.
 const GROUP: &str = "▸";
@@ -122,6 +131,20 @@ const CLAUDE: &str = "claude";
 /// lists none of the session's panes: folded, or with none to list.
 const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor a directory to \
                            open in; highlight a pane, unfolding its session first if it is folded";
+
+/// What the menu says of such a key on a machine's header.
+const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open beside, nor a \
+                               directory to open in; highlight a pane, unfolding the machine first \
+                               if it is folded";
+
+/// What the menu says of the key that forgets a machine, on this one's
+/// header.
+const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets only the others";
+
+/// What the menu says of a key of the Brief group on another machine's
+/// header.
+const REMOTE_BRIEF: &str = "menu: luneta briefs you on this machine's agents alone, as it reads \
+                            their transcripts here";
 
 /// A key of the sidebar's own that does more than move the highlight or fold
 /// a session. The legend lists each before the menu's keys, and a key of the
@@ -244,17 +267,21 @@ pub enum New {
     Tab,
     /// A session, named for the directory, as the picker's directories are.
     Session,
+    /// A machine for lunetad to watch through ssh, by its destination, typed
+    /// in a box: on any row.
+    Machine,
 }
 
 impl New {
     /// Each, in the order the New group shows them.
-    const ALL: [New; 3] = [New::Pane, New::Tab, New::Session];
+    const ALL: [New; 4] = [New::Pane, New::Tab, New::Session, New::Machine];
 
     const fn key(self) -> char {
         match self {
             New::Pane => 'p',
             New::Tab => 't',
             New::Session => 's',
+            New::Machine => 'm',
         }
     }
 
@@ -264,6 +291,7 @@ impl New {
             New::Pane => "new pane",
             New::Tab => "new tab",
             New::Session => "new session",
+            New::Machine => "new machine",
         }
     }
 }
@@ -378,8 +406,10 @@ enum Entry {
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
     /// A key of the Delete group: closes the pane the menu is for, or deletes
-    /// its session.
-    Close { key: char, scope: Scope },
+    /// its session, `session`.
+    Close { key: char, session: Listed, scope: Scope },
+    /// The key of the Delete group on a machine's header: forgets the machine.
+    Forget(Machine),
     /// A key of the Brief group: briefs you on what the agents it covers are
     /// doing.
     Brief(brief::Scope),
@@ -399,6 +429,7 @@ impl Entry {
     fn key(&self) -> char {
         match self {
             Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
+            Entry::Forget(_) => DELETE_ROW,
             Entry::New(new) => new.key(),
             Entry::Last(last) => last.key(),
             Entry::Brief(scope) => scope.key(),
@@ -424,8 +455,11 @@ enum Pressed {
     Last(Last),
     /// Opens a pane, a tab or a session.
     New(New),
-    /// Closes the pane the menu is for, or deletes its session, by `key`.
-    Delete { key: char, scope: Scope },
+    /// Closes the pane the menu is for, or deletes its session, `session`,
+    /// by `key`.
+    Delete { key: char, session: Listed, scope: Scope },
+    /// Forgets the machine the menu is for.
+    Forget(Machine),
     /// Asks for a brief of what the scope covers.
     Brief(brief::Scope),
     /// Opens the ask box.
@@ -450,10 +484,12 @@ impl Keys {
     /// which opens the ask box, and the Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
     /// last, `n p`, `n t` and `n s` open a pane, a tab and a
-    /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
-    /// deletes its session, and `b z`, `b s` and `b h` brief you on every
-    /// session, its session and what the menu is for.
-    fn new(row: Scope) -> Self {
+    /// session, and `n m` the box for a machine's destination, `d d` deletes
+    /// what the menu is for, as `removes` says, and `d s` deletes its
+    /// session, or on a machine's header `d d` alone forgets the machine, and
+    /// `b z`, `b s` and `b h` brief you on every session, its session and
+    /// what the menu is for.
+    fn new(removes: Removes) -> Self {
         let start = |(key, prompt)| Entry::Start { key, prompt };
         let root = vec![
             Entry::Search,
@@ -475,10 +511,13 @@ impl Keys {
             Entry::Group {
                 key: DELETE,
                 name: DELETE_NAME,
-                entries: vec![
-                    Entry::Close { key: DELETE_ROW, scope: row },
-                    Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
-                ],
+                entries: match removes {
+                    Removes::Row { session, scope } => vec![
+                        Entry::Close { key: DELETE_ROW, session: session.clone(), scope },
+                        Entry::Close { key: DELETE_SESSION, session, scope: Scope::Session },
+                    ],
+                    Removes::Machine(machine) => vec![Entry::Forget(machine)],
+                },
             },
             Entry::Group {
                 key: BRIEF,
@@ -496,7 +535,7 @@ impl Keys {
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
-        root.extend(Keys::new(Scope::Session).root.into_iter().filter(shown));
+        root.extend(Keys::new(Removes::Machine(Machine::Local)).root.into_iter().filter(shown));
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -556,7 +595,10 @@ impl Keys {
             Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
             Entry::Last(last) => return Pressed::Last(*last),
             Entry::New(new) => return Pressed::New(*new),
-            Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
+            Entry::Close { key, session, scope } => {
+                return Pressed::Delete { key: *key, session: session.clone(), scope: *scope };
+            },
+            Entry::Forget(machine) => return Pressed::Forget(machine.clone()),
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
@@ -620,6 +662,47 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
     }
 }
 
+/// What the box for a machine's destination says under what is typed, until
+/// `Enter` finds it is none.
+const SSH_HINT: &str = "what you type ssh to it: a Tailscale name, a Host of your ssh config, or \
+                        me@vps";
+
+/// What a key did in the box for a machine's destination.
+enum Typed {
+    Typing,
+    Enter,
+    /// Back to the keys: `Esc`, or `Backspace` with nothing typed.
+    Back,
+    Close,
+}
+
+/// What `key` does in the box for a machine's destination, with `typed` in
+/// it, as in the search box: a character types, `Backspace` takes one back,
+/// and `Enter` adds the machine. `Esc` goes back to the keys, and so does
+/// `Backspace` once there is nothing to take back; `Ctrl c` closes the menu.
+fn ssh_key(key: &KeyEvent, typed: &mut String) -> Typed {
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        return Typed::Close;
+    }
+    if !bare(key) {
+        return Typed::Typing;
+    }
+    match key.code {
+        KeyCode::Esc => Typed::Back,
+        KeyCode::Backspace if typed.is_empty() => Typed::Back,
+        KeyCode::Backspace => {
+            typed.pop();
+            Typed::Typing
+        },
+        KeyCode::Enter => Typed::Enter,
+        KeyCode::Char(c) => {
+            typed.push(c);
+            Typed::Typing
+        },
+        _ => Typed::Typing,
+    }
+}
+
 /// What a key says to a delete key that asks before it goes ahead.
 #[derive(Debug, PartialEq, Eq)]
 enum Answer {
@@ -646,11 +729,20 @@ fn answer(key: &KeyEvent, asked: char) -> Answer {
 }
 
 /// A key of the Delete group: the key, which goes ahead pressed again once
-/// it asks, and what it deletes.
-#[derive(Clone, Copy, Debug)]
+/// it asks, and what it deletes, of `session`.
+#[derive(Clone, Debug)]
 struct Delete {
     key: char,
+    session: Listed,
     scope: Scope,
+}
+
+/// What the Delete group's keys take away: on a session's row or a pane's,
+/// the pane or the session, of `session`; on a machine's header, the
+/// machine, from those luneta lists.
+enum Removes {
+    Row { session: Listed, scope: Scope },
+    Machine(Machine),
 }
 
 /// What the menu is for: the row highlighted as it opened.
@@ -659,6 +751,8 @@ pub enum Target {
     /// A session's row, which has no pane.
     Session(Listed),
     Pane(PaneRow),
+    /// A machine's header, which has neither a session nor a pane.
+    Machine(Machine),
 }
 
 /// A pane's row, as the menu is for it: the directory the pane works in, or
@@ -703,25 +797,10 @@ pub struct Ended {
 }
 
 impl Target {
-    /// The row, as the sidebar places it.
-    pub fn place(&self) -> Place {
-        match self {
-            Target::Session(session) => Place::Session(session.clone()),
-            Target::Pane(row) => Place::Pane { session: row.session.clone(), pane: row.pane },
-        }
-    }
-
-    /// Its session.
-    pub fn listed(&self) -> &Listed {
-        match self {
-            Target::Session(session) | Target::Pane(PaneRow { session, .. }) => session,
-        }
-    }
-
     /// The directory its pane works in, where the daemon has said it.
     pub fn cwd(&self) -> Option<&str> {
         match self {
-            Target::Session(_) => None,
+            Target::Session(_) | Target::Machine(_) => None,
             Target::Pane(row) => row.cwd.as_deref(),
         }
     }
@@ -729,39 +808,74 @@ impl Target {
     /// The branch checked out where its pane works.
     pub fn branch(&self) -> Option<&str> {
         match self {
-            Target::Session(_) => None,
+            Target::Session(_) | Target::Machine(_) => None,
             Target::Pane(row) => row.branch.as_deref(),
         }
     }
 
-    /// What luneta's Delete group deletes on the row: its pane, or on a
-    /// session's row, its session.
-    fn deletes(&self) -> Scope {
+    /// What luneta's Delete group takes away on the row: its pane, or on a
+    /// session's row, its session; or on a machine's header, the machine.
+    fn removes(&self) -> Removes {
         match self {
-            Target::Session(_) => Scope::Session,
-            Target::Pane(row) => Scope::Pane(row.pane),
+            Target::Session(session) => {
+                Removes::Row { session: session.clone(), scope: Scope::Session }
+            },
+            Target::Pane(row) => {
+                Removes::Row { session: row.session.clone(), scope: Scope::Pane(row.pane) }
+            },
+            Target::Machine(machine) => Removes::Machine(machine.clone()),
         }
     }
 
-    /// The pane a key starts an agent or opens a pane beside, and the
-    /// directory it works in, or why there is none: a session's row has no
-    /// pane.
-    fn beside(&self) -> Result<(u32, String), String> {
+    /// The pane a key starts an agent or opens a pane beside, or why there
+    /// is none: a session's row has no pane, nor a machine's header.
+    fn beside(&self) -> Result<Beside, String> {
         match self {
             Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
             Target::Pane(row) => row.beside(),
+            Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
         }
     }
 
     /// What a key that starts an agent on what the pane's shell printed
-    /// last starts it on, beside the pane, in the directory it works in, or
-    /// why it starts none: a session's row has no pane.
-    fn ended(&self) -> Result<(u32, String, Ended), String> {
+    /// last starts it on, beside the pane, or why it starts none: a
+    /// session's row has no pane, nor a machine's header.
+    fn ended(&self) -> Result<(Beside, Ended), String> {
         match self {
             Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
             Target::Pane(row) => row.ended(),
+            Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
         }
     }
+
+    /// What a key of the Brief group briefs you on, as `scope` says, by the
+    /// row: on this machine's header, every session, as every agent it can
+    /// brief you on is of this machine's; on another's, why it can not.
+    fn brief(&self, scope: brief::Scope) -> Done {
+        let briefed = match (self, scope) {
+            (Target::Machine(Machine::Remote(_)), _) => {
+                return Done::Wrong(REMOTE_BRIEF.to_owned());
+            },
+            (Target::Machine(Machine::Local), _) | (_, brief::Scope::Every) => Briefed::Every,
+            (Target::Pane(row), brief::Scope::Highlighted) => {
+                Briefed::Agent(row.session.name().clone(), row.pane)
+            },
+            (
+                Target::Session(session) | Target::Pane(PaneRow { session, .. }),
+                brief::Scope::Session | brief::Scope::Highlighted,
+            ) => Briefed::Session(session.name().clone()),
+        };
+        Done::Brief(briefed)
+    }
+}
+
+/// A pane's row, as a key opens what it opens beside the pane: its session,
+/// the pane, and the directory it works in, where a tab or a session opens
+/// too.
+struct Beside {
+    session: Listed,
+    pane: u32,
+    cwd: String,
 }
 
 impl PaneRow {
@@ -769,38 +883,39 @@ impl PaneRow {
     /// directory it works in, where a tab or a session opens too, or why
     /// there is none: a pane the daemon has said no directory of yet, nor of
     /// an agent in it, opens nothing, rather than wherever zellij runs.
-    fn beside(&self) -> Result<(u32, String), String> {
+    fn beside(&self) -> Result<Beside, String> {
         let Some(cwd) = self.cwd.clone() else {
             return Err(format!(
                 "menu: luneta does not know yet where pane {} works; try again in a moment",
                 self.pane
             ));
         };
-        Ok((self.pane, cwd))
+        Ok(Beside { session: self.session.clone(), pane: self.pane, cwd })
     }
 
     /// What a key that starts an agent on what the pane's shell printed
     /// last starts it on, beside the pane, in the directory it works in, or
     /// why it starts none: the shell must be at its prompt, after a command
     /// whose end its hook said.
-    fn ended(&self) -> Result<(u32, String, Ended), String> {
-        let (beside, cwd) = self.beside()?;
+    fn ended(&self) -> Result<(Beside, Ended), String> {
+        let beside = self.beside()?;
+        let pane = beside.pane;
         match &self.ran {
-            Ran::Ended(ended) => Ok((beside, cwd, ended.clone())),
+            Ran::Ended(ended) => Ok((beside, ended.clone())),
             Ran::Going(command) => Err(format!(
-                "menu: pane {beside} runs `{}` still, and what it prints is not over",
+                "menu: pane {pane} runs `{}` still, and what it prints is not over",
                 command.as_str()
             )),
             Ran::Stopped(command) => Err(format!(
-                "menu: `{}` is stopped in pane {beside}, and not over; bring it back with `fg`",
+                "menu: `{}` is stopped in pane {pane}, and not over; bring it back with `fg`",
                 command.as_str()
             )),
             Ran::Unknown => Err(format!(
-                "menu: what pane {beside}'s shell ran is in words this luneta cannot read, as a \
+                "menu: what pane {pane}'s shell ran is in words this luneta cannot read, as a \
                  newer lunetad's"
             )),
             Ran::Untold => Err(format!(
-                "menu: pane {beside} has said of no command it ran last; that takes a shell with \
+                "menu: pane {pane} has said of no command it ran last; that takes a shell with \
                  luneta's hook, at its prompt"
             )),
         }
@@ -873,17 +988,19 @@ pub enum Wants {
     /// The skills that `cwd` can run, for the search box.
     Skills(String),
     /// What the delete key deletes planned, for `planned`: for a pane, once
-    /// zellij has said what closing it closes.
-    Plan(Scope),
-    /// zellij to open what `opens` says, in `cwd`, for luneta to take its
-    /// client there.
-    Open { cwd: String, opens: Opens },
+    /// zellij has said what closing it closes: of `session`.
+    Plan { session: Listed, scope: Scope },
+    /// zellij to open what `opens` says, in `cwd`, in `session`, for luneta
+    /// to take its client there: from its pane `pane`, the menu's row's,
+    /// which it takes the client to first, for a tab of a session it is
+    /// not in.
+    Open { session: Listed, pane: u32, cwd: String, opens: Opens },
     /// luneta to find where a key of the menu for the pull request or the
     /// issue goes, and to have its worktree made, for `pulled`.
     Pull(Link),
-    /// luneta to keep what the shell in `pane` printed after the line
-    /// `ended` was typed on, for `printed`.
-    Printed { pane: u32, ended: Ended },
+    /// luneta to keep what the shell in the pane `pane` of `session` printed
+    /// after the line `ended` was typed on, for `printed`.
+    Printed { session: Listed, pane: u32, ended: Ended },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, for luneta
@@ -905,11 +1022,25 @@ pub enum Done {
     /// Have zellij do what a delete key planned: for the session luneta's
     /// zellij is in, once it has left it.
     Act(Act),
-    /// Brief you on what the agents `scope` covers are doing, by `place`, the
-    /// row the menu was for.
-    Brief { scope: brief::Scope, place: Place },
+    /// Brief you on what the agents it covers are doing.
+    Brief(Briefed),
     /// Open the ask box, for the row the menu was for.
     Ask(Target),
+    /// Have lunetad watch the machine ssh reaches by this destination.
+    Ssh(Destination),
+    /// Have lunetad stop watching this machine.
+    Forget(Destination),
+}
+
+/// What a key of the Brief group briefs you on, by the row the menu was for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Briefed {
+    /// Every session's agents.
+    Every,
+    /// The agents of a session.
+    Session(SessionName),
+    /// The agent in the pane of a session.
+    Agent(SessionName, u32),
 }
 
 /// What a click on a spot of the menu does: presses the key of an entry, or
@@ -941,17 +1072,29 @@ enum Stage {
     /// A delete key that asks before it goes ahead: what it would do, and
     /// what it asks.
     Asking { keys: Keys, delete: Delete, plan: Plan, asks: String },
-    /// zellij opens what a key asked for, for luneta to take its client
-    /// there. Keys do nothing but close the menu.
-    Opening(Keys),
+    /// zellij opens what a key asked for, in `session`, for luneta to take
+    /// its client there. Keys do nothing but close the menu.
+    Opening { keys: Keys, session: Listed },
     /// The key `last` waits for luneta to keep what the pane's shell
-    /// printed after `ended`, for an agent on it beside the pane `beside`,
-    /// in `cwd`. Keys do nothing but close the menu.
-    Reading { keys: Keys, last: Last, beside: u32, cwd: String, ended: Ended },
+    /// printed after `ended`, for an agent on it beside the pane. Keys do
+    /// nothing but close the menu.
+    Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     /// The menu for the pull request or the issue `link`, which a paste
     /// opened, at `step`. Once luneta has found where its keys go, its target
     /// is there.
     Pull { link: Link, step: Step },
+    /// The box `n m` opens, with what is typed in it for ssh to reach a
+    /// machine by, and why that is no destination, once `Enter` found it is
+    /// not, until the next key.
+    Ssh { keys: Keys, typed: String, wrong: Option<String> },
+}
+
+/// Where a menu waits for zellij to open what a key asked for: in a session
+/// lunetad lists, or in one zellij makes for it, by its name.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Opening<'a> {
+    In(&'a Listed),
+    Made(&'a SessionName),
 }
 
 /// How far the menu for a pull request or an issue is, with its keys, `w`
@@ -969,9 +1112,9 @@ enum Wait {
     /// The key `pull` waits for luneta to find where it goes, and for `wt
     /// add` to make the worktree.
     Pulling(Pull),
-    /// zellij opens what the key asked for, for luneta to take its client
-    /// there.
-    Opening,
+    /// zellij opens what the key asked for, in this session, for luneta to
+    /// take its client there.
+    Opening(Listed),
     /// zellij makes this session, and opens a tab of it, for luneta to take
     /// its client there.
     Making(SessionName),
@@ -982,7 +1125,7 @@ impl Wait {
     fn doing(&self, link: &Link) -> String {
         match self {
             Wait::Pulling(_) => format!("Making a worktree of {}…", link.tab()),
-            Wait::Opening => format!("Opening {}…", link.tab()),
+            Wait::Opening(_) => format!("Opening {}…", link.tab()),
             Wait::Making(session) => format!("Making session {session}…"),
         }
     }
@@ -994,7 +1137,7 @@ impl Menu {
     /// group leaves the sidebar to do. None, and no menu, for a key the menu
     /// has not.
     pub fn open(number: u64, target: Target, key: Option<char>) -> Option<Did> {
-        let keys = Keys::new(target.deletes());
+        let keys = Keys::new(target.removes());
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
@@ -1007,7 +1150,7 @@ impl Menu {
 
     /// The menu numbered `number` for `target`, on its first group.
     pub fn new(number: u64, target: Target) -> Menu {
-        let keys = Keys::new(target.deletes());
+        let keys = Keys::new(target.removes());
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
@@ -1026,34 +1169,39 @@ impl Menu {
     }
 
     /// The pane a delete key waits on, for zellij to say what closing it
-    /// closes. A session's is planned at once.
-    pub fn planning(&self) -> Option<u32> {
+    /// closes, and its session. A session's is planned at once.
+    pub fn planning(&self) -> Option<(&Listed, u32)> {
         match &self.stage {
-            Stage::Planning { delete: Delete { scope: Scope::Pane(pane), .. }, .. } => Some(*pane),
+            Stage::Planning { delete: Delete { session, scope: Scope::Pane(pane), .. }, .. } => {
+                Some((session, *pane))
+            },
             Stage::Planning { .. }
             | Stage::Choosing(_)
             | Stage::Asking { .. }
-            | Stage::Opening(_)
+            | Stage::Opening { .. }
             | Stage::Reading { .. }
-            | Stage::Pull { .. } => None,
+            | Stage::Pull { .. }
+            | Stage::Ssh { .. } => None,
         }
     }
 
-    /// Whether the menu waits for zellij to open what a key asked for.
-    pub fn opening(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Opening(_)
-                | Stage::Pull { step: Step::Waiting(Wait::Opening | Wait::Making(_)), .. }
-        )
-    }
-
-    /// The session zellij makes for what a key asked for, while the menu
-    /// waits for it to open a tab of it.
-    pub fn making(&self) -> Option<&SessionName> {
+    /// Where the menu waits for zellij to open what a key asked for, while
+    /// it does.
+    pub fn opening(&self) -> Option<Opening<'_>> {
         match &self.stage {
-            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
-            _ => None,
+            Stage::Opening { session, .. }
+            | Stage::Pull { step: Step::Waiting(Wait::Opening(session)), .. } => {
+                Some(Opening::In(session))
+            },
+            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => {
+                Some(Opening::Made(session))
+            },
+            Stage::Choosing(_)
+            | Stage::Planning { .. }
+            | Stage::Asking { .. }
+            | Stage::Reading { .. }
+            | Stage::Pull { .. }
+            | Stage::Ssh { .. } => None,
         }
     }
 
@@ -1066,6 +1214,17 @@ impl Menu {
     /// luneta to find where it goes.
     pub fn pulling(&self) -> bool {
         matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
+    }
+
+    /// Types `text`, pasted, on one line, in the box for a machine's
+    /// destination, and says whether that is open to type it in.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let Stage::Ssh { typed, wrong, .. } = &mut self.stage else {
+            return false;
+        };
+        typed.extend(text.chars().filter(|c| !c.is_control()));
+        *wrong = None;
+        true
     }
 
     /// What `key` does to the menu, and what that leaves the sidebar to do.
@@ -1082,49 +1241,76 @@ impl Menu {
                 Pressed::Close => Did::Closed(Done::Nothing),
                 Pressed::Moved | Pressed::Nothing => stays(Stage::Choosing(keys), Wants::Nothing),
                 Pressed::Search => match target.beside() {
-                    Ok((_, cwd)) => {
+                    Ok(Beside { cwd, .. }) => {
                         keys.search = Some(Search::new());
                         stays(Stage::Choosing(keys), Wants::Skills(cwd))
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 Pressed::Start(prompt) => match target.beside() {
-                    Ok((beside, cwd)) => {
+                    Ok(Beside { session, pane, cwd }) => {
                         let command = claude(&prompt, target.branch());
-                        let opens = Opens::Pane { beside, command };
-                        stays(Stage::Opening(keys), Wants::Open { cwd, opens })
+                        let opens = Opens::Pane { beside: pane, command };
+                        let stage = Stage::Opening { keys, session: session.clone() };
+                        stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 Pressed::Last(last) => match target.ended() {
-                    Ok((beside, cwd, ended)) => {
-                        let wants = Wants::Printed { pane: beside, ended: ended.clone() };
-                        stays(Stage::Reading { keys, last, beside, cwd, ended }, wants)
+                    Ok((beside, ended)) => {
+                        let (session, pane) = (beside.session.clone(), beside.pane);
+                        let wants = Wants::Printed { session, pane, ended: ended.clone() };
+                        stays(Stage::Reading { keys, last, beside, ended }, wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                Pressed::New(new) => match (target.beside(), new) {
-                    (Err(reason), _) => Did::Closed(Done::Wrong(reason)),
-                    (Ok((beside, cwd)), New::Pane) => {
-                        let opens = Opens::Pane { beside, command: Vec::new() };
-                        stays(Stage::Opening(keys), Wants::Open { cwd, opens })
+                // A machine is added from any row: it needs no pane.
+                Pressed::New(new) => match (new, target.beside()) {
+                    (New::Machine, _) => {
+                        let stage = Stage::Ssh { keys, typed: String::new(), wrong: None };
+                        stays(stage, Wants::Nothing)
                     },
-                    (Ok((_, cwd)), New::Tab) => {
+                    (_, Err(reason)) => Did::Closed(Done::Wrong(reason)),
+                    (New::Pane, Ok(Beside { session, pane, cwd })) => {
+                        let opens = Opens::Pane { beside: pane, command: Vec::new() };
+                        let stage = Stage::Opening { keys, session: session.clone() };
+                        stays(stage, Wants::Open { session, pane, cwd, opens })
+                    },
+                    (New::Tab, Ok(Beside { session, pane, cwd })) => {
                         let opens = Opens::Tab { name: None, command: Vec::new() };
-                        stays(Stage::Opening(keys), Wants::Open { cwd, opens })
+                        let stage = Stage::Opening { keys, session: session.clone() };
+                        stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
-                    (Ok((_, cwd)), New::Session) => Did::Closed(Done::Start(cwd)),
+                    (New::Session, Ok(Beside { cwd, .. })) => Did::Closed(Done::Start(cwd)),
                 },
-                Pressed::Delete { key, scope } => {
-                    let delete = Delete { key, scope };
-                    stays(Stage::Planning { keys, delete, agreed: None }, Wants::Plan(scope))
+                Pressed::Delete { key, session, scope } => {
+                    let wants = Wants::Plan { session: session.clone(), scope };
+                    let delete = Delete { key, session, scope };
+                    stays(Stage::Planning { keys, delete, agreed: None }, wants)
                 },
-                Pressed::Brief(scope) => {
-                    Did::Closed(Done::Brief { scope, place: target.place() })
+                Pressed::Forget(Machine::Remote(destination)) => {
+                    Did::Closed(Done::Forget(destination))
                 },
+                Pressed::Forget(Machine::Local) => Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned())),
+                Pressed::Brief(scope) => Did::Closed(target.brief(scope)),
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
-            Stage::Planning { .. } | Stage::Opening(_) | Stage::Reading { .. } | Stage::Pull { .. }
+            Stage::Ssh { keys, mut typed, .. } => match ssh_key(key, &mut typed) {
+                Typed::Close => Did::Closed(Done::Nothing),
+                Typed::Back => stays(Stage::Choosing(keys), Wants::Nothing),
+                Typed::Typing => stays(Stage::Ssh { keys, typed, wrong: None }, Wants::Nothing),
+                Typed::Enter => match typed.parse::<Destination>() {
+                    Ok(destination) => Did::Closed(Done::Ssh(destination)),
+                    Err(why) => {
+                        let wrong = Some(format!("not a destination: {why}"));
+                        stays(Stage::Ssh { keys, typed, wrong }, Wants::Nothing)
+                    },
+                },
+            },
+            Stage::Planning { .. }
+            | Stage::Opening { .. }
+            | Stage::Reading { .. }
+            | Stage::Pull { .. }
                 if closes(key) =>
             {
                 Did::Closed(Done::Nothing)
@@ -1144,13 +1330,14 @@ impl Menu {
                 None => stays(Stage::Pull { link, step: Step::Choosing }, Wants::Nothing),
             },
             stage @ (Stage::Planning { .. }
-            | Stage::Opening(_)
+            | Stage::Opening { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
                 Answer::Yes => {
-                    let planning = Stage::Planning { keys, delete, agreed: Some(plan) };
-                    stays(planning, Wants::Plan(delete.scope))
+                    let session = delete.session.clone();
+                    let wants = Wants::Plan { session, scope: delete.scope };
+                    stays(Stage::Planning { keys, delete, agreed: Some(plan) }, wants)
                 },
                 Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
                 Answer::Close => Did::Closed(Done::Nothing),
@@ -1212,9 +1399,11 @@ impl Menu {
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Untold);
-            let target = Target::Pane(PaneRow { session, pane, cwd, branch, ran });
-            let stage = Stage::Pull { link: link.clone(), step: Step::Waiting(Wait::Opening) };
-            Did::Stays(Menu { number, target, stage }, Wants::Open { cwd: worktree.clone(), opens })
+            let target = Target::Pane(PaneRow { session: session.clone(), pane, cwd, branch, ran });
+            let step = Step::Waiting(Wait::Opening(session.clone()));
+            let stage = Stage::Pull { link: link.clone(), step };
+            let cwd = worktree.clone();
+            Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
         };
         match (at, pull) {
             (At::There { session, pane }, Pull::Worktree) => {
@@ -1252,25 +1441,26 @@ impl Menu {
     /// in the moment before the daemon heard of it goes unseen.
     pub fn printed(self, printed: Result<Printed, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Reading { keys, last, beside, cwd, ended } = stage else {
+        let Stage::Reading { keys, last, beside: Beside { session, pane, cwd }, ended } = stage
+        else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let printed = match printed {
             Ok(printed) => printed,
             Err(why) => {
-                return Did::Closed(Done::Wrong(format!("menu: what pane {beside} printed: {why}")));
+                return Did::Closed(Done::Wrong(format!("menu: what pane {pane} printed: {why}")));
             },
         };
         if !matches!(&target, Target::Pane(PaneRow { ran: Ran::Ended(now), .. }) if *now == ended) {
             return Did::Closed(Done::Wrong(format!(
-                "menu: pane {beside}'s shell went on as luneta read what `{}` printed; ask again",
+                "menu: pane {pane}'s shell went on as luneta read what `{}` printed; ask again",
                 ended.command.as_str()
             )));
         }
         let prompt = printed.prompt(last.asks(), &ended);
-        let opens = Opens::Pane { beside, command: claude_reading(prompt, printed.file()) };
-        let stage = Stage::Opening(keys);
-        Did::Stays(Menu { number, target, stage }, Wants::Open { cwd, opens })
+        let opens = Opens::Pane { beside: pane, command: claude_reading(prompt, printed.file()) };
+        let stage = Stage::Opening { keys, session: session.clone() };
+        Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
     }
 
     /// Fills the search box with what the finder said, while it is open.
@@ -1342,8 +1532,10 @@ impl Menu {
         match &self.stage {
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }
-            | Stage::Opening(keys)
+            | Stage::Opening { keys, .. }
             | Stage::Reading { keys, .. } => keys.search.is_some(),
+            // It keeps its width as you type too.
+            Stage::Ssh { .. } => true,
             Stage::Asking { .. } | Stage::Pull { .. } => false,
         }
     }
@@ -1376,7 +1568,7 @@ impl Menu {
             },
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }
-            | Stage::Opening(keys)
+            | Stage::Opening { keys, .. }
             | Stage::Reading { keys, .. } => {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
                 if let Some(search) = &keys.search {
@@ -1409,6 +1601,19 @@ impl Menu {
                     &[(Hint::Char('y'), "Yes"), (Hint::Backspace, "Back"), (Hint::Esc, "Close")],
                 ),
             ),
+            Stage::Ssh { typed, wrong, .. } => {
+                let typed = sidebar::tail(&format!("{typed}_"), width.saturating_sub(2));
+                let mut body = vec![Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(typed, Style::new().fg(ACCENT)),
+                ])];
+                match wrong {
+                    Some(wrong) => body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED))),
+                    None => body.extend(wrap(SSH_HINT, width, Style::new().fg(NAME))),
+                }
+                let keys = [(Hint::Enter, "Add"), (Hint::Esc, "Back")];
+                (SSH_TITLE.to_owned(), String::new(), body, keyed(width, &keys))
+            },
         };
         Shown { title, right, body, spots, footer, keys }
     }
@@ -1648,6 +1853,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Last(last) => spans.push(does(last.does())),
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
+        Entry::Forget(_) => spans.push(does(FORGET_DOES)),
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
         Entry::Pull(pull, kind) => spans.push(does(pull.does(*kind))),
@@ -1874,6 +2080,12 @@ mod tests {
         KeyEvent::from(KeyCode::Char(key))
     }
 
+    /// What a key on `row()` wants opened: `opens`, from its pane, in the
+    /// directory it works in.
+    fn beside_row(opens: Opens) -> Wants {
+        Wants::Open { session: listed(), pane: 4, cwd: "/w/luneta/main".to_owned(), opens }
+    }
+
     fn opened(target: Target, key: Option<char>) -> Did {
         Menu::open(1, target, key).expect("a key of the menu")
     }
@@ -1910,18 +2122,19 @@ mod tests {
                 " p  new pane",
                 " t  new tab",
                 " s  new session",
+                " m  new machine",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
         let (menu, wants) = stays(menu.key(&char('p')));
         let cwd = "/w/luneta/main".to_owned();
         let opens = Opens::Pane { beside: 4, command: Vec::new() };
-        assert_eq!(wants, Wants::Open { cwd: cwd.clone(), opens });
-        assert!(menu.opening());
+        assert_eq!(wants, Wants::Open { session: listed(), pane: 4, cwd: cwd.clone(), opens });
+        assert!(menu.opening().is_some());
         // Keys do nothing while zellij opens it, but close the menu.
         let (menu, wants) = stays(menu.key(&char('p')));
         assert_eq!(wants, Wants::Nothing);
-        assert!(menu.opening());
+        assert!(menu.opening().is_some());
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
 
         // luneta goes to a new session itself.
@@ -2004,8 +2217,8 @@ mod tests {
         let named = "thermo-nuclear-review: feat/menu";
         let command = ["claude", "--name", named, "/thermo-nuclear-review"].map(str::to_owned);
         let opens = Opens::Pane { beside: 4, command: command.to_vec() };
-        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
-        assert!(menu.opening());
+        assert_eq!(wants, beside_row(opens));
+        assert!(menu.opening().is_some());
     }
 
     /// The command a row's shell ran last: `cargo test`, which failed.
@@ -2042,7 +2255,7 @@ mod tests {
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
-        assert_eq!(wants, Wants::Printed { pane: 4, ended: cargo_test() });
+        assert_eq!(wants, Wants::Printed { session: listed(), pane: 4, ended: cargo_test() });
     }
 
     /// `c f` and `c e` have luneta keep what the command the row's shell ran
@@ -2054,7 +2267,7 @@ mod tests {
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
-        assert_eq!(wants, Wants::Printed { pane: 4, ended: cargo_test() });
+        assert_eq!(wants, Wants::Printed { session: listed(), pane: 4, ended: cargo_test() });
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);
@@ -2067,8 +2280,8 @@ mod tests {
         let read = "Read(//run/luneta/printed/1.txt)";
         let command = ["claude", "--allowedTools", read, "--", prompt];
         let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
-        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
-        assert!(menu.opening());
+        assert_eq!(wants, beside_row(opens));
+        assert!(menu.opening().is_some());
 
         // Nothing printed leaves the agent no file to read.
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -2078,7 +2291,7 @@ mod tests {
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
         let opens = Opens::Pane { beside: 4, command };
-        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
+        assert_eq!(wants, beside_row(opens));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, _) = stays(menu.key(&char('f')));
@@ -2149,15 +2362,95 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        for (key, scope) in [
-            ('z', brief::Scope::Every),
-            ('s', brief::Scope::Session),
-            ('h', brief::Scope::Highlighted),
+        let luneta = || listed().name().clone();
+        for (row, key, briefed) in [
+            (pane_row(), 'z', Briefed::Every),
+            (pane_row(), 's', Briefed::Session(luneta())),
+            (pane_row(), 'h', Briefed::Agent(luneta(), 4)),
+            (session_row(), 'h', Briefed::Session(luneta())),
         ] {
-            let (menu, _) = stays(opened(pane_row(), Some('b')));
-            let place = pane_row().place();
-            assert_eq!(closed(menu.key(&char(key))), Done::Brief { scope, place }, "{key}");
+            let (menu, _) = stays(opened(row, Some('b')));
+            assert_eq!(closed(menu.key(&char(key))), Done::Brief(briefed), "{key}");
         }
+    }
+
+    fn local_header() -> Target {
+        Target::Machine(Machine::Local)
+    }
+
+    fn remote_header() -> Target {
+        Target::Machine(Machine::Remote("me@vps".parse().unwrap()))
+    }
+
+    /// `n m` opens a box, on any row, for what ssh reaches a machine by: a
+    /// character types, `Backspace` takes one back, and `Enter` adds the
+    /// machine, once what is typed is a destination, and else says why it
+    /// is not, until the next key. `Esc` goes back to the keys, and so does
+    /// `Backspace` with nothing typed.
+    #[test]
+    fn n_m_opens_a_box_for_a_machine_s_destination() {
+        for target in [pane_row(), session_row(), local_header(), remote_header()] {
+            let (menu, wants) = stays(opened(target, Some('n')));
+            let (menu, _) = stays(menu.key(&char('m')));
+            assert_eq!(wants, Wants::Nothing);
+            let menu = "me x".chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0);
+            let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
+            assert_eq!(
+                text(&menu.lines(31, 9, 0).0),
+                [
+                    "─ ssh ─────────────────────────",
+                    " me x_",
+                    " not a destination: \"me x\" is",
+                    " more than one word",
+                    " <ENTER> - Add, <ESC> - Back",
+                ]
+            );
+            let menu = (0..2).fold(menu, |menu, _| {
+                stays(menu.key(&KeyEvent::from(KeyCode::Backspace))).0
+            });
+            let (menu, _) = stays(menu.key(&char('@')));
+            let (menu, _) = stays(menu.key(&char('v')));
+            let lines = text(&menu.lines(31, 9, 0).0);
+            assert_eq!(lines[1..3], [" me@v_", " what you type ssh to it: a"]);
+            let added = closed(menu.key(&KeyEvent::from(KeyCode::Enter)));
+            assert_eq!(added, Done::Ssh("me@v".parse().unwrap()));
+        }
+        let (menu, _) = stays(opened(pane_row(), Some('n')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        assert_eq!(title(match &menu.stage {
+            Stage::Choosing(keys) => keys,
+            _ => panic!("back to the keys"),
+        }), NEW_NAME);
+    }
+
+    /// On a machine's header, the Delete group forgets the machine, and on
+    /// this one's says it cannot; the Brief group briefs you on every
+    /// session, from this one's, and on none from another's; and a key that
+    /// opens beside a pane says the header has none.
+    #[test]
+    fn a_machine_s_header_has_the_menu_forget_it() {
+        let (menu, _) = stays(opened(remote_header(), Some('d')));
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0),
+            [
+                "─ Delete ──────────────────────",
+                " d  forget the machine",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(closed(menu.key(&char('d'))), Done::Forget("me@vps".parse().unwrap()));
+        let (menu, _) = stays(opened(local_header(), Some('d')));
+        assert_eq!(closed(menu.key(&char('d'))), Done::Wrong(LOCAL_STAYS.to_owned()));
+
+        for key in ['z', 's', 'h'] {
+            let (menu, _) = stays(opened(local_header(), Some('b')));
+            assert_eq!(closed(menu.key(&char(key))), Done::Brief(Briefed::Every));
+            let (menu, _) = stays(opened(remote_header(), Some('b')));
+            assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_BRIEF.to_owned()));
+        }
+        let (menu, _) = stays(opened(remote_header(), Some('n')));
+        assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_MACHINE_PANE.to_owned()));
     }
 
     #[test]
@@ -2215,8 +2508,8 @@ mod tests {
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = claude("/tigerstyle", Some("feat/menu"));
         let opens = Opens::Pane { beside: 4, command };
-        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
-        assert!(menu.opening());
+        assert_eq!(wants, beside_row(opens));
+        assert!(menu.opening().is_some());
     }
 
     /// Each skill the search box shows is a spot on its line that picks it:
@@ -2244,8 +2537,8 @@ mod tests {
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
         let command = claude("/code-review", Some("feat/menu"));
         let opens = Opens::Pane { beside: 4, command };
-        assert_eq!(wants, Wants::Open { cwd: "/w/luneta/main".to_owned(), opens });
-        assert!(menu.opening());
+        assert_eq!(wants, beside_row(opens));
+        assert!(menu.opening().is_some());
         // Waiting on zellij, the menu takes no click on a skill.
         assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
@@ -2299,15 +2592,15 @@ mod tests {
     fn a_delete_with_no_agent_at_work_to_end_goes_ahead_at_once() {
         let (menu, _) = stays(opened(pane_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
-        assert_eq!(wants, Wants::Plan(Scope::Pane(4)));
-        assert_eq!(menu.planning(), Some(4));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
+        assert_eq!(menu.planning(), Some((&listed(), 4)));
         let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
         assert_eq!(done, Done::Act(Act::Pane { session: "luneta".to_owned(), pane: 4 }));
         // On a session's row, `d d` deletes the session, which zellij need not
         // say anything of first.
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
-        assert_eq!(wants, Wants::Plan(Scope::Session));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Session });
         assert_eq!(menu.planning(), None);
     }
 
@@ -2335,7 +2628,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.planned(plan(Closes::Pane, busy())));
         let (menu, wants) = stays(menu.key(&char('d')));
-        assert_eq!(wants, Wants::Plan(Scope::Pane(4)));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         // Another pane closes with it now: its tab, which it asks of again.
         let tab = || Closes::Tab { id: 2, panes: vec![4, 5] };
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
@@ -2590,19 +2883,23 @@ mod tests {
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-            assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
-            assert!(menu.opening());
-            assert_eq!(menu.target().place(), Place::Pane { session: other.clone(), pane: 7 });
+            let cwd = worktree.clone();
+            assert_eq!(wants, Wants::Open { session: other.clone(), pane: 7, cwd, opens });
+            assert_eq!(menu.opening(), Some(Opening::In(&other)));
+            let Target::Pane(row) = menu.target() else { panic!("not a pane's row") };
+            assert_eq!((&row.session, row.pane), (&other, 7));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
         let there = || At::There { session: other.clone(), pane: 9 };
         let place = Place::Pane { session: other.clone(), pane: 9 };
-        assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(place.clone()));
+        assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
-        assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
-        assert_eq!(menu.target().place(), place);
+        let cwd = worktree.clone();
+        assert_eq!(wants, Wants::Open { session: other.clone(), pane: 9, cwd, opens });
+        let Target::Pane(row) = menu.target() else { panic!("not a pane's row") };
+        assert_eq!((&row.session, row.pane), (&other, 9));
     }
 
     /// A paste of an issue's link opens the menu for the issue, named for it,
@@ -2624,7 +2921,7 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
-            at: At::Session { session: other, pane: 7 },
+            at: At::Session { session: other.clone(), pane: 7 },
             worktree: worktree.clone(),
             branch: Some("issue-2736".to_owned()),
         };
@@ -2632,8 +2929,8 @@ mod tests {
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
         let command = tackle.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        assert_eq!(wants, Wants::Open { cwd: worktree, opens });
-        assert!(menu.opening());
+        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd: worktree, opens });
+        assert!(menu.opening().is_some());
     }
 
     /// Where no session works in the repository, luneta makes one in its
@@ -2655,8 +2952,7 @@ mod tests {
                 command: Vec::new(),
             }
         );
-        assert!(menu.opening());
-        assert_eq!(menu.making(), Some(&name));
+        assert_eq!(menu.opening(), Some(Opening::Made(&name)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
         assert!(menu.turning());
         // Why luneta found nothing closes the menu, and says so.
