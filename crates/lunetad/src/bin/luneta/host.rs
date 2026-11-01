@@ -1,5 +1,5 @@
 //! luneta's own terminal: the sidebar on the left, zellij on the right, and
-//! which of the two has the keys. `Ctrl b` hands them from one to the other,
+//! which of the two has the keys. `Ctrl a` hands them from one to the other,
 //! and a click hands them to the one clicked. `Ctrl q` collapses the sidebar
 //! to what it counts, zellij taking the rest of its columns, and opens it
 //! again, as a click on it does, and `Alt Tab` takes zellij to the next pane
@@ -12,7 +12,7 @@
 //! too, as does what went wrong with what the menu did there: each has the
 //! keys and the mouse until it closes, when the side that had them before has
 //! them again. `Ctrl j` opens the picker in a box there too, on the
-//! sessions, `Ctrl a` on the agents and `Ctrl d` on the directories. What the
+//! sessions, `Ctrl b` on the agents and `Ctrl d` on the directories. What the
 //! mouse drags on zellij stays with zellij under a box too. A click on an
 //! entry of the menu, a key a line of keys names, a skill the menu's search
 //! finds, or a row of the picker, does what its key does, or `Enter` on it,
@@ -141,7 +141,7 @@ const WAITING_MAX: Duration = Duration::from_secs(2);
 const WAITING_LOOK: Duration = Duration::from_millis(50);
 
 /// The key that hands the keys from zellij to the sidebar, and back.
-const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
+const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
 
 /// The key that collapses the sidebar, and opens it again.
 const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
@@ -158,7 +158,7 @@ const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
 const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
 
 /// The key that opens the picker over zellij, on the agents.
-const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
+const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
 
 /// The key that opens the picker over zellij, on the directories.
 const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);

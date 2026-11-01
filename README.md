@@ -354,17 +354,17 @@ where none is left. When zellij fails, luneta ends and says what zellij said.
 zellij's keys are yours as they were, but seven, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
-- `Ctrl b` goes back and forth between zellij and the sidebar. A click goes to
+- `Ctrl a` goes back and forth between zellij and the sidebar. A click goes to
   whichever you click.
 - `Alt Tab` goes to the next pane the sidebar lists, across sessions, and from
   the last back to the first. A folded session lists none of its panes, so it
   goes past them.
 - `Ctrl q` collapses the sidebar to a strip four columns wide, zellij taking
   the rest of its columns, and opens it again, as a click on the strip does.
-  `Ctrl b` opens it too, and goes into it.
+  `Ctrl a` opens it too, and goes into it.
 - `Alt a` opens the [menu](#menu) over zellij, for the pane zellij is on, and
   closes it again.
-- `Ctrl j` opens the picker over zellij, on the sessions, `Ctrl a` on the
+- `Ctrl j` opens the picker over zellij, on the sessions, `Ctrl b` on the
   agents, and `Ctrl d` on the directories.
 
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
@@ -449,7 +449,7 @@ yet to change them.
 `/` searches the rows, fuzzily, as the picker does: a session by its name, a
 pane by its row, its branch, its tab or its directory. What you type shows at
 the bottom where the keys were. The rows left keep their order, and the
-highlight lands on the best match, so `Ctrl b` `/` *a few characters* `Enter`
+highlight lands on the best match, so `Ctrl a` `/` *a few characters* `Enter`
 takes you anywhere. A folded session opens to show the panes found in it, and
 a session found by its name shows all of its panes, the highlight on the one
 that matches best, or else on the first. There `Enter` goes to the highlighted
@@ -1023,7 +1023,7 @@ one's number.
 
 ## Usage
 
-`Ctrl j` opens the picker on the sessions, `Ctrl a` on the agents and `Ctrl d`
+`Ctrl j` opens the picker on the sessions, `Ctrl b` on the agents and `Ctrl d`
 on the directories. Type, press `Enter`.
 
 | key | does |

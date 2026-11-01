@@ -1,7 +1,7 @@
 //! The picker: the sessions on this host, those that run and those zellij
 //! keeps to bring back, the agents in their panes, and the directories you
 //! go to, as zoxide ranks them, in a box floating over zellij's side.
-//! `Ctrl j` opens it on the sessions, `Ctrl a` on the
+//! `Ctrl j` opens it on the sessions, `Ctrl b` on the
 //! agents and `Ctrl d` on the directories, `Tab` goes from one list to the
 //! next, and what you type narrows all three. `Enter` takes zellij to the
 //! session highlighted, bringing back one that ended, or to the pane of the
@@ -866,7 +866,7 @@ impl Picker {
                 self.list = List::Sessions;
                 Picked::Nothing
             },
-            KeyCode::Char('a') if control => {
+            KeyCode::Char('b') if control => {
                 self.list = List::Agents;
                 Picked::Nothing
             },
