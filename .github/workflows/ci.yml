@@ -143,11 +143,16 @@ jobs:
       # `--locked`, so that the tests build against what Cargo.lock names, as
       # the derivation does. Not incremental, which is for one tree's edits in a row:
       # here it would only add to what the cache saves.
+      #
+      # `--profile`, so that the devshell is a root of the nix store and main saves
+      # it with the rest. The store kept only what the daemon's build needs, and
+      # the Mac fetched the rest of the devshell on each run: git, its perl, and
+      # shellcheck. With the build below skipped, it would fetch the rust too.
       - name: Test the daemon outside the sandbox
         if: runner.os == 'macOS'
         env:
           CARGO_INCREMENTAL: 0
-        run: nix develop -c cargo test --locked -p lunetad -p luneta-protocol
+        run: nix develop --profile devshell -c cargo test --locked -p lunetad -p luneta-protocol
 
       - name: Save the tests' target/
         if: >-
@@ -161,5 +166,17 @@ jobs:
             target/
           key: ${{ steps.target.outputs.cache-primary-key }}
 
+      # On the Mac, only where the tests' `target/` missed: where the lockfiles, the
+      # manifests, flake.nix or rust-toolchain.toml changed. The tests above have
+      # compiled luneta's code on the Mac, and the Linux runners build this
+      # derivation from the same source, so what a build here adds is what is the
+      # Mac's own in it: what nixpkgs gives it to build with on darwin, which only
+      # those files change. Built on each run, it compiled luneta's crates a second
+      # time, in release, for nothing the tests had not said.
+      #
+      # A run on main that skips it saves a store without the daemon's
+      # dependencies, so the next run to build it builds them too. Most such runs
+      # change them, and would build them anyway.
       - name: Build the daemon, and on Linux test it
+        if: runner.os != 'macOS' || steps.target.outputs.cache-hit != 'true'
         run: nix build -L .#lunetad
