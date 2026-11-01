@@ -453,9 +453,18 @@ impl Shells {
                         continue;
                     },
                 };
-                if let Some(line) = Line::read(&text) {
-                    lines.push(((named.clone(), pane, started), line));
-                }
+                let Some(line) = Line::read(&text) else {
+                    // A hook older or newer than this lunetad wrote it: a
+                    // copy in fish's config, which the package's does not
+                    // replace, or a shell that started before luneta was
+                    // installed again. Its shell reads as one with no hook,
+                    // so the log says why. Not the line: its command is
+                    // what someone typed.
+                    let why = "a line this lunetad cannot read, as an older or a newer hook's";
+                    self.troubles.say(format!("{}: {why}", path.display()));
+                    continue;
+                };
+                lines.push(((named.clone(), pane, started), line));
             }
         }
         lines

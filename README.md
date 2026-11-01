@@ -980,7 +980,8 @@ with `<started>`, `<since>` and `<at>` in seconds since the epoch, `<took>` in
 milliseconds, `<status>` the exit status, `fg` where `fg` brought the job
 back, after which fish cannot say it, or `-` where the shell cannot say it,
 `<tty>` the path `tty` prints, the command on one line, and `stopped` for a job
-stopped with `Ctrl z`. The sidebar has them from
+stopped with `Ctrl z`. A line lunetad cannot read, as a hook older or newer
+than it writes, it says in luneta's log, by its file. The sidebar has them from
 lunetad, which keeps its socket in the same folder: it reads a file as it
 changes, and the terminal of each command that runs every second, through `ps`
 on its `PATH`.
