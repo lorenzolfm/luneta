@@ -1126,15 +1126,16 @@ must be on the `PATH` of a shell ssh starts there, and ssh must get in with
 no password asked. Its `Watch` says each machine's host with its own, and
 `luneta sessions` lists each machine's sessions under it, after this one's.
 One it can't reach it says so of, and why, and it runs ssh again after a
-while, longer each time, up to 30 seconds. What ssh says goes in
-`lunetad.log`. The daemon it reaches there runs on while this one watches
-it, as it would for a luneta there, but only while this one has a reason of
-its own to run: zellij here has a session, or a luneta watches it. One that
-has none asks the machines it watches nothing, and runs no ssh to them, so
-that two daemons that watch each other end as each would alone. A line ssh
-would take for an option, led by a `-`, or for more than one word, names no
-machine, and so do the lines past the 16th: `luneta sessions` says lunetad
-could not read all of the file, and the log says which.
+while, longer each time, up to 30 seconds. What ssh says goes in the log,
+each line once while each ssh to the machine says it again. The daemon it
+reaches there runs on while this one watches it, as it would for a luneta
+there, but only while this one has a reason of its own to run: zellij here
+has a session, or a luneta watches it. One that has none asks the machines
+it watches nothing, and runs no ssh to them, so that two daemons that watch
+each other end as each would alone. A line ssh would take for an option,
+led by a `-`, or for more than one word, names no machine, and so do the
+lines past the 16th: `luneta sessions` says lunetad could not read all of
+the file, and the log says which.
 
 What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
 wrong in luneta's sidebar, in `$XDG_STATE_HOME/luneta`, or

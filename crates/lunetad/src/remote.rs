@@ -20,12 +20,13 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, BufRead as _, BufReader, ErrorKind, PipeWriter, Read as _};
 use std::iter;
 use std::path::Path;
 use std::process::Command as Process;
 use std::str::FromStr;
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -55,6 +56,14 @@ const HOSTS_MAX: usize = 16;
 /// comes back, shows soon, and long enough that one that is gone for the day
 /// costs an ssh, and a line in the log, only now and then.
 const AGAIN_MAX: Duration = Duration::from_secs(30);
+
+/// The most of a line ssh says on its stderr that the log keeps, in bytes:
+/// what comes after it is said as a line of its own.
+const SAID_MAX: u64 = 4096;
+
+/// How long what an ssh says on its stderr waits to be heard for what the
+/// ssh before it said, so as not to say it again.
+const HEARD_BEFORE: Duration = Duration::from_secs(1);
 
 /// A machine, as ssh is told it: a line of the file, without the white space
 /// around it. One with white space or a control character in it is no
@@ -340,6 +349,7 @@ async fn watched(destination: Destination, core: SyncSender<Command>, mut kept: 
     let mut after = None;
     let mut word = SystemTime::now();
     let mut failures: u32 = 0;
+    let said = Arc::default();
     loop {
         // A question on a connection that broke makes one afresh, with an
         // ssh, which could start the daemon of a machine whose own had just
@@ -351,7 +361,7 @@ async fn watched(destination: Destination, core: SyncSender<Command>, mut kept: 
             return;
         }
         let is_kept = *kept.borrow();
-        let asked = asked(&destination, &mut daemon, after, is_kept).await;
+        let asked = asked(&destination, &mut daemon, after, is_kept, &said).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
             Err((why, stopped)) => {
@@ -414,17 +424,19 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
 /// What the daemon of `destination` answers `Watch` after `after`, and its
 /// version, through the client in `daemon`, made first where there is none,
 /// or why it answers none. It is told whether this daemon is `kept`. One that
-/// failed a question is kept: it makes a connection afresh for the next.
+/// failed a question is kept: it makes a connection afresh for the next. What
+/// ssh says goes in the log as `heard` says it, with what it `said` before.
 async fn asked(
     destination: &Destination,
     daemon: &mut Option<DaemonClient<Channel>>,
     after: Option<api::Version>,
     kept: bool,
+    said: &Arc<Mutex<Said>>,
 ) -> Result<(api::Version, api::Host), (String, Stopped)> {
     let daemon = if let Some(daemon) = daemon {
         daemon
     } else {
-        let reached = client::through(ssh(destination)).await;
+        let reached = client::through(ssh(destination, said)).await;
         daemon.insert(reached.map_err(|error| unreached(&error))?)
     };
     let watched = daemon.watch(api::WatchRequest { after, kept: Some(kept) }).await;
@@ -438,14 +450,80 @@ async fn asked(
 
 /// What runs `luneta bridge` on `destination`, made afresh for each
 /// connection: with no terminal, which would mangle what the daemons say, and
-/// no prompt, which no one would see.
-fn ssh(destination: &Destination) -> impl FnMut() -> Process + Send + 'static {
+/// no prompt, which no one would see. What each says on its stderr goes in
+/// the log as `heard` says it, with what the one before it `said`.
+fn ssh(
+    destination: &Destination,
+    said: &Arc<Mutex<Said>>,
+) -> impl FnMut() -> Process + Send + 'static {
     let destination = destination.0.clone();
+    let said = Arc::clone(said);
     move || {
         let mut ssh = Process::new("ssh");
         ssh.args(["-T", "-o", "BatchMode=yes", &destination, "luneta", "bridge"]);
+        // Where it can't be heard so, it says it on the daemon's stderr, as
+        // its own runs.
+        if let Ok(saying) = heard(&destination, &said) {
+            ssh.stderr(saying);
+        }
         ssh
     }
+}
+
+/// What the ssh runs to a machine said on their stderr.
+#[derive(Default)]
+struct Said {
+    /// The lines of the last one heard to its end.
+    lines: HashSet<String>,
+    /// Hangs up once the last one to run has been heard to its end.
+    last: Option<mpsc::Receiver<()>>,
+}
+
+/// Where an ssh to `destination` says what it says on its stderr: a pipe
+/// that a thread reads until it ends, and says in the log, each line once,
+/// and none that the one before it `said`. An ssh to a machine that stays
+/// unreached runs every `AGAIN_MAX`, and says the same each time.
+fn heard(destination: &str, said: &Arc<Mutex<Said>>) -> io::Result<PipeWriter> {
+    let (heard, saying) = io::pipe()?;
+    let (ends, ended) = mpsc::channel::<()>();
+    let before = locked(said).last.replace(ended);
+    let (destination, said) = (destination.to_owned(), Arc::clone(said));
+    thread::Builder::new().name(format!("ssh {destination}")).spawn(move || {
+        // What the one before said is known once it has been heard to its
+        // end, as it has within moments of the next one's start, or not for
+        // as long as what it left running holds its stderr.
+        if let Some(before) = before {
+            let _ = before.recv_timeout(HEARD_BEFORE);
+        }
+        let mut heard = BufReader::new(heard);
+        let mut line = Vec::new();
+        let mut lines = HashSet::new();
+        // Until whatever holds its other end has ended: ssh, and anything it
+        // left running.
+        loop {
+            line.clear();
+            match (&mut heard).take(SAID_MAX).read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {},
+            }
+            let line = String::from_utf8_lossy(&line).trim_end().to_owned();
+            if line.is_empty() || !lines.insert(line.clone()) {
+                continue;
+            }
+            if !locked(&said).lines.contains(&line) {
+                log::say(&format!("{destination}: {line}"));
+            }
+        }
+        locked(&said).lines = lines;
+        drop(ends);
+    })?;
+    Ok(saying)
+}
+
+/// What `mutex` holds, though a thread panicked as it held it: what is said
+/// of an ssh is no more wrong for it.
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// How long the daemon waits to run ssh again to a machine after `failures`

@@ -23,7 +23,8 @@ use crate::host::{eventually, script, start, Host, Vars, LUNETA};
 /// then, with 255. Nor does it run anything on a terminal, which would mangle
 /// what the daemons say, or where it could ask for a password, which no one
 /// would answer: without `-T` and `BatchMode=yes`, it ends so too. It notes
-/// the pid of each bridge it runs, for `bridges`.
+/// each time it is run to a destination, for `runs`, and the pid of each
+/// bridge it runs, for `bridges`.
 struct FakeSsh {
     to: PathBuf,
 }
@@ -49,6 +50,7 @@ if [ -z "$quiet" ] || [ -z "$batch" ]; then
 fi
 destination="$1"
 shift
+echo run >> "{to}/$destination.runs"
 if [ ! -x "{to}/$destination" ]; then
     echo "ssh: Could not resolve hostname $destination: Name or service not known" >&2
     exit 255
@@ -84,6 +86,12 @@ exec "{to}/$destination"
     /// Has ssh reach `destination` no more, as one that cannot resolve it.
     fn unreaches(&self, destination: &str) {
         fs::remove_file(self.to.join(destination)).unwrap();
+    }
+
+    /// How many times ssh has been run to `destination`.
+    fn runs(&self, destination: &str) -> usize {
+        let runs = fs::read_to_string(self.to.join(format!("{destination}.runs")));
+        runs.unwrap_or_default().lines().count()
     }
 
     /// The pids of the bridges ssh has run to `destination`, in turn.
@@ -388,4 +396,25 @@ fn two_daemons_that_watch_each_other_and_nothing_else_end() {
     assert!(ended.is_some(), "{:?}", far_daemon.said_after(Duration::ZERO));
     assert_eq!(to_far.bridges("far").len(), 1);
     assert_eq!(to_here.bridges("here").len(), 1);
+}
+
+/// What ssh says of a machine it does not reach goes in the log once, while
+/// each ssh to it says it again: one that stays unreached is run again and
+/// again, for as long as the daemon runs.
+#[test]
+fn what_each_ssh_to_a_machine_says_again_is_said_once() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    hosts(&here, "nowhere\n");
+    let mut daemon = start(here.vars()).unwrap();
+    // Watched, so that it is kept, and runs ssh.
+    eventually("ssh runs to nowhere a few times", || {
+        here.host();
+        (ssh.runs("nowhere") >= 3).then_some(())
+    });
+
+    let said = daemon.said_after(Duration::from_secs(1));
+    let unresolved = "nowhere: ssh: Could not resolve hostname nowhere";
+    let lines = said.iter().filter(|line| line.contains(unresolved)).count();
+    assert_eq!(lines, 1, "{said:?}");
 }
