@@ -55,7 +55,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::brief::{self, Brief, Note, Over, SessionId};
+use crate::brief::{Brief, Note, Over, SessionId};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
@@ -64,7 +64,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::Machine;
 use crate::menu::{
-    self, Choice, Command, Did, Done, Menu, Opens, PaneRow, Ran, Target, Top, Wants,
+    self, Briefed, Choice, Command, Did, Done, Menu, Opening, Opens, PaneRow, Ran, Target, Top,
+    Wants,
 };
 use crate::news::News;
 use crate::order::{Colour, Order};
@@ -2323,36 +2324,29 @@ impl Sidebar {
                     Done::Start(cwd) => self.start(&cwd),
                     Done::Go(place) => Asked::Go(place),
                     Done::Act(act) => self.delete(act),
-                    Done::Brief { scope, place } => self.brief(scope, place.as_ref()),
+                    Done::Brief(briefed) => self.brief(briefed),
                     Done::Ask(target) => Asked::Ask(target),
                     Done::Ssh(destination) => Asked::Ssh(destination),
                     Done::Forget(destination) => Asked::Forget(destination),
                 };
             },
         };
-        let (number, target) = (menu.number(), menu.target().clone());
+        let number = menu.number();
         self.menu = Some(menu);
-        // A machine's header has no session, and the menu wants nothing of
-        // one there: what wants a session wants a pane's row, or a session's.
-        let listed = target.listed();
-        let session = listed.map(|listed| listed.name.as_str().to_owned());
         match wants {
             Wants::Nothing => Asked::Nothing,
             Wants::Skills(cwd) => Asked::Find { menu: number, cwd },
-            Wants::Open { cwd, opens: Opens::Pane { beside, command } } => {
-                let Some(session) = session else {
-                    return Asked::Nothing;
-                };
+            Wants::Open { session, cwd, opens: Opens::Pane { beside, command }, .. } => {
+                let session = session.name.as_str().to_owned();
                 Asked::Open { menu: number, open: Open::Pane { session, beside, cwd, command } }
             },
             // A tab needs a client of its session to make room for it. The
             // session luneta's zellij is in has one, and another opens it once
             // luneta's zellij is there: its last client may have left since
             // lunetad listed them.
-            Wants::Open { cwd, opens: Opens::Tab { name, command } } => {
-                let (Some(session), Some(place)) = (session, target.place()) else {
-                    return Asked::Nothing;
-                };
+            Wants::Open { session, pane, cwd, opens: Opens::Tab { name, command } } => {
+                let place = Place::Pane { session, pane };
+                let session = place.session().to_owned();
                 let open = Open::Tab { session: session.clone(), tab: Tab { cwd, name, command } };
                 if self.going().is_none() && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, open }
@@ -2361,26 +2355,19 @@ impl Sidebar {
                 }
             },
             Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
-            Wants::Printed { pane, ended } => {
-                let Some(session) = session else {
-                    return Asked::Nothing;
-                };
+            Wants::Printed { session, pane, ended } => {
+                let session = session.name.as_str().to_owned();
                 Asked::Printed { menu: number, session, pane, ended }
             },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
-            Wants::Plan(Scope::Pane(pane)) => {
-                let Some(session) = session else {
-                    return Asked::Nothing;
-                };
+            Wants::Plan { session, scope: Scope::Pane(pane) } => {
+                let session = session.name.as_str().to_owned();
                 Asked::Closes { menu: number, session, pane }
             },
-            Wants::Plan(Scope::Session) => {
-                let Some(listed) = listed else {
-                    return Asked::Nothing;
-                };
-                let plan = self.plan(listed, Deletes::Session);
+            Wants::Plan { session, scope: Scope::Session } => {
+                let plan = self.plan(&session, Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -2491,15 +2478,13 @@ impl Sidebar {
         Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
     }
 
-    /// Asks for a brief of what `scope` covers, by `place`, the row the menu
-    /// was for: every session, in the rows' order, or the row's session, or
-    /// the agent in the row's pane, and on a session's row, its session. With
-    /// no row, as on this machine's header, every session. An agent is told
-    /// of as its row shows it, a folded session's too, by the name, the
-    /// status and the branch on its row. With no agent there, the sidebar
-    /// says so where the menu was. Every agent it tells of is this
+    /// Asks for a brief of what the menu's row `briefed` it on: every
+    /// session, in the rows' order, or a session, or the agent in a pane. An
+    /// agent is told of as its row shows it, a folded session's too, by the
+    /// name, the status and the branch on its row. With no agent there, the
+    /// sidebar says so where the menu was. Every agent it tells of is this
     /// machine's, whose transcripts it reads.
-    fn brief(&mut self, scope: brief::Scope, place: Option<&Place>) -> Asked {
+    fn brief(&mut self, briefed: Briefed) -> Asked {
         let Some(host) = &self.host else {
             return Asked::Nothing;
         };
@@ -2512,14 +2497,10 @@ impl Sidebar {
         };
         sessions.sort_by_key(|(listed, _)| row(listed));
         let every = || sessions.iter().map(|(listed, _)| listed.name.to_string()).collect();
-        let over = match (scope, place) {
-            (brief::Scope::Every, _) | (_, None) => Over::Sessions(every()),
-            (brief::Scope::Highlighted, Some(Place::Pane { session, pane })) => {
-                Over::Agent(session.name.to_string(), *pane)
-            },
-            (brief::Scope::Session | brief::Scope::Highlighted, Some(place)) => {
-                Over::Session(place.session().to_owned())
-            },
+        let over = match briefed {
+            Briefed::Every => Over::Sessions(every()),
+            Briefed::Session(session) => Over::Session(session.to_string()),
+            Briefed::Agent(session, pane) => Over::Agent(session.to_string(), pane),
         };
         let agents = seated(&host.agents, &host.sessions);
         let trees: HashMap<&str, &lunetad::api::WorkTree> =
@@ -2608,7 +2589,8 @@ impl Sidebar {
     /// session zellij made for it is the one the daemon lists by its name,
     /// as it does by the time zellij opens a tab of it.
     pub fn opened(&mut self, menu: u64, opened: Result<u32, String>) -> Asked {
-        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.opening()) else {
+        let waiting = self.menu.take_if(|it| it.number() == menu && it.opening().is_some());
+        let Some(opening) = waiting.as_ref().and_then(Menu::opening) else {
             return Asked::Nothing;
         };
         let pane = match opened {
@@ -2618,11 +2600,11 @@ impl Sidebar {
                 return Asked::Nothing;
             },
         };
-        let Some(made) = waiting.making() else {
-            let Some(session) = waiting.target().listed().cloned() else {
-                return Asked::Nothing;
-            };
-            return Asked::Go(Place::Pane { session, pane });
+        let made = match opening {
+            Opening::In(session) => {
+                return Asked::Go(Place::Pane { session: session.clone(), pane });
+            },
+            Opening::Made(made) => made,
         };
         let sessions = self.host.as_ref().map(|host| oldest_first(&host.sessions).0);
         let mut named = sessions.into_iter().flatten().filter(|(listed, _)| listed.name == *made);
@@ -2638,16 +2620,13 @@ impl Sidebar {
     /// waits on it.
     pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
         let waiting = self.menu.as_ref().filter(|it| it.number() == menu);
-        let Some((pane, target)) =
-            waiting.and_then(|it| Some((it.planning()?, it.target().clone())))
-        else {
+        let Some((session, pane)) = waiting.and_then(Menu::planning) else {
             return Asked::Nothing;
         };
-        let plan = match (closes, target.listed()) {
-            (Ok(closes), Some(listed)) => self.plan(listed, Deletes::Pane { pane, closes }),
-            (Err(why), _) => Err(format!("menu: nothing closed: {why}")),
-            // A machine's header plans no delete of a pane.
-            (Ok(_), None) => return Asked::Nothing,
+        let session = session.clone();
+        let plan = match closes {
+            Ok(closes) => self.plan(&session, Deletes::Pane { pane, closes }),
+            Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
     }
