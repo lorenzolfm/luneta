@@ -111,9 +111,9 @@ fn moved() -> tempfile::TempDir {
 /// that answers in the folder, as a pid that has ended can be another
 /// process's by then. Left alone, it would end on its own, as the test's
 /// zellij has no session.
-struct Detached<'a> {
-    host: &'a Host,
-    pid: u32,
+pub struct Detached<'a> {
+    pub host: &'a Host,
+    pub pid: u32,
 }
 
 impl Drop for Detached<'_> {

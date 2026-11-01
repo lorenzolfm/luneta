@@ -54,7 +54,9 @@ signal-hook = "0.3.18"
 # Claude Code's session files are JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.53.1", features = ["net", "rt", "sync", "time"] }
+# `process` for a client that reaches the daemon through a command's stdin and
+# stdout, as `ssh <host> luneta bridge`.
+tokio = { version = "1.53.1", features = ["net", "process", "rt", "sync", "time"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }
 # The default features without TLS: the socket is local, and a remote client
 # will come through Tailscale, which encrypts on its own.

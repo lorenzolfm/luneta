@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -535,6 +535,11 @@ impl Running {
 
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Its stdin and stdout, which it was spawned with piped.
+    pub fn piped(&mut self) -> (ChildStdin, ChildStdout) {
+        (self.child.stdin.take().unwrap(), self.child.stdout.take().unwrap())
     }
 
     /// How it ended, if it does within `limit`.

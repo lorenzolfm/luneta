@@ -1,0 +1,109 @@
+//! `luneta bridge`: the daemon of its folder for a client on another host, on
+//! ssh's stdin and stdout, which the client asks as it would on the socket.
+
+use std::io::{Read as _, Write as _};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use lunetad::api::{InfoRequest, WatchRequest};
+
+use crate::demand::Detached;
+use crate::host::{folder_in, start, Host, Running, Vars, LUNETA};
+
+/// How HTTP/2 opens a connection, as a client of the daemon's opens it: the
+/// preface, and settings that change none.
+const OPENING: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+
+/// The type of an HTTP/2 frame of settings, the first a server sends.
+const SETTINGS: u8 = 0x4;
+
+/// What makes a `luneta bridge` to the host's folder, as a client makes one
+/// for each connection.
+fn bridge(host: &Host) -> impl FnMut() -> Command + Send + 'static {
+    let runtime = host.runtime.path().to_owned();
+    let home = host.home.path().to_owned();
+    let sockets = host.sockets.path().to_owned();
+    let bin = host.zellij.bin().to_owned();
+    move || {
+        let vars = Vars {
+            runtime: Some(&runtime),
+            home: Some(&home),
+            zellij: Some(&sockets),
+            bin: Some(&bin),
+            ..Vars::default()
+        };
+        let mut command = vars.command(LUNETA);
+        command.arg("bridge");
+        command
+    }
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+}
+
+/// A client that asks through `luneta bridge` asks the daemon that runs in
+/// its folder, question after question on the one connection, `Watch` among
+/// them.
+#[test]
+fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
+    let host = Host::new();
+    let daemon = start(host.vars()).unwrap();
+    runtime().block_on(async {
+        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        let info = bridged.info(InfoRequest {}).await.unwrap().into_inner();
+        assert_eq!(info.pid, daemon.pid());
+        let watched = bridged.watch(WatchRequest { after: None }).await.unwrap().into_inner();
+        assert_eq!(watched.version.unwrap().pid, daemon.pid());
+    });
+}
+
+/// `luneta bridge` starts a daemon where none runs, as `luneta watch` does,
+/// so that a client on another host reaches one whether or not a luneta
+/// there started it: the one that then answers on the socket.
+#[test]
+fn luneta_bridge_starts_a_daemon_where_none_runs() {
+    let host = Host::new();
+    let pid = runtime().block_on(async {
+        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        bridged.info(InfoRequest {}).await.unwrap().into_inner().pid
+    });
+    let daemon = Detached { host: &host, pid };
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let answering = runtime().block_on(async {
+        let mut socket = lunetad::connect(&folder).await.unwrap();
+        socket.info(InfoRequest {}).await.unwrap().into_inner().pid
+    });
+    assert_eq!(answering, daemon.pid);
+}
+
+/// `luneta bridge` ends as either end hangs up: the client, as its stdin
+/// ends, and the daemon, as its socket does. Until then it hands on what each
+/// says, here the settings the daemon answers a client's opening with.
+#[test]
+fn luneta_bridge_ends_as_either_end_hangs_up() {
+    let host = Host::new();
+    let daemon = start(host.vars()).unwrap();
+    let piped = || {
+        let mut command = bridge(&host)();
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        command
+    };
+
+    let mut left = Running::spawn(&mut piped());
+    let (stdin, _stdout) = left.piped();
+    drop(stdin);
+    let ended = left.ended_within(Duration::from_secs(5)).expect("it outlived its client");
+    assert!(ended.success(), "{ended}");
+
+    let mut bridged = Running::spawn(&mut piped());
+    let (mut stdin, mut stdout) = bridged.piped();
+    stdin.write_all(OPENING).unwrap();
+    let mut frame = [0; 9];
+    stdout.read_exact(&mut frame).unwrap();
+    assert_eq!(frame[3], SETTINGS, "{frame:?}");
+    drop(daemon);
+    let ended = bridged.ended_within(Duration::from_secs(5)).expect("it outlived its daemon");
+    assert!(ended.success(), "{ended}");
+}

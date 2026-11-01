@@ -1,10 +1,17 @@
-//! How a client reaches the daemon.
+//! How a client reaches the daemon: on its socket, or through a command that
+//! reaches it, as `ssh <host> luneta bridge` reaches the daemon of another
+//! host.
 
 use std::io::{self, ErrorKind};
+use std::pin::Pin;
+use std::process::Stdio;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tonic::transport::{Channel, Endpoint, Error, Uri};
 use tower::service_fn;
 
@@ -34,6 +41,82 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
         }))
         .await?;
     Ok(DaemonClient::new(channel))
+}
+
+/// A client of the daemon that the command `command` makes reaches, over the
+/// command's stdin and stdout, as `ssh <host> luneta bridge` reaches the
+/// daemon of `<host>`. Each connection runs a command of its own, which is
+/// killed as the connection goes: one that ends is made afresh for the next
+/// question. Its stderr is the caller's.
+pub async fn through<F>(mut command: F) -> Result<DaemonClient<Channel>, Error>
+where
+    F: FnMut() -> std::process::Command + Send + 'static,
+{
+    // A command that starts has connected: there is no connecting to wait
+    // for, and the first answer waits for what the command reaches.
+    let channel = Endpoint::from_static("http://lunetad")
+        .timeout(ANSWER)
+        .connect_with_connector(service_fn(move |_: Uri| {
+            let command = command();
+            async move { Piped::spawn(command).map(TokioIo::new) }
+        }))
+        .await?;
+    Ok(DaemonClient::new(channel))
+}
+
+/// A connection to the daemon that listens in `folder`, as `connect` makes
+/// one, for what comes on it to be handed on as it comes, as `luneta bridge`
+/// hands it on.
+pub async fn stream(folder: &Folder) -> io::Result<UnixStream> {
+    mine(UnixStream::connect(folder.socket()).await?)
+}
+
+/// A command's stdout and stdin, as the two ways of one connection.
+struct Piped {
+    stdout: ChildStdout,
+    stdin: ChildStdin,
+    // Kept for its kill on drop: the command goes with the connection.
+    _child: Child,
+}
+
+impl Piped {
+    fn spawn(command: std::process::Command) -> io::Result<Self> {
+        let mut command = tokio::process::Command::from(command);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
+            return Err(io::Error::other("a command spawned piped has no pipes"));
+        };
+        Ok(Piped { stdout, stdin, _child: child })
+    }
+}
+
+impl AsyncRead for Piped {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stdout).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for Piped {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stdin).poll_write(context, buffer)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stdin).poll_flush(context)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stdin).poll_shutdown(context)
+    }
 }
 
 /// The pid of the process that listens in `folder`, as the kernel says: in
