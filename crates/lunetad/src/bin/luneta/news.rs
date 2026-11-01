@@ -28,7 +28,7 @@
 //! files are named for sockets that daemon lists, and go with the folder, as
 //! those sockets do.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
@@ -38,17 +38,11 @@ use notify::RecommendedWatcher;
 
 use crate::host::Event;
 use crate::ledger::{Key, Ledger, Session};
+use crate::live::{Lists, Missing};
 use crate::state;
 
 /// How long luneta's zellij stays on a pane before you were there.
 const DWELL: Duration = Duration::from_secs(1);
-
-/// How long the daemon goes without listing a session before what was kept
-/// of it goes: here, and its colour in the order. A rename made while the
-/// daemon reads zellij's folder leaves the session out of one list, and a
-/// luneta can hear of a session after another kept something of it. The
-/// daemon lists it again within its sweep, of two seconds.
-pub const GONE: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct News {
@@ -61,8 +55,8 @@ pub struct News {
     /// own, which no one sets, for how long.
     dwelling: Option<(Key, SystemTime, Instant)>,
     /// Since when the daemon has not listed each session something is kept
-    /// of, by the lists `listed` heard, by luneta's own clock.
-    missing: BTreeMap<Session, Instant>,
+    /// of, by the lists `listed` heard.
+    missing: Missing,
 }
 
 impl News {
@@ -182,35 +176,16 @@ impl News {
     }
 
     /// The daemon lists the sessions of `live` at `at`, by luneta's own
-    /// clock, or none where its list may leave out one that runs. What was
-    /// kept of a session it has not listed for `GONE` goes, for every luneta.
-    pub fn listed(&mut self, live: Option<&BTreeSet<Session>>, at: Instant) {
-        let Some(live) = live else {
-            self.missing.clear();
-            return;
-        };
-        let unlisted: BTreeSet<Session> = self
-            .seen
-            .sessions()
-            .chain(self.unread.sessions())
-            .filter(|session| !live.contains(session))
-            .collect();
-        self.missing.retain(|session, _| unlisted.contains(session));
-        for session in unlisted {
-            self.missing.entry(session).or_insert(at);
-        }
-        let gone: BTreeSet<Session> = self
-            .missing
-            .iter()
-            .filter(|(_, since)| at.duration_since(**since) >= GONE)
-            .map(|(session, _)| *session)
-            .collect();
+    /// clock, or none, as it does not answer. What was kept of a session
+    /// that has ended since, as `Missing` tells, goes, for every luneta.
+    pub fn listed(&mut self, live: Option<&Lists>, at: Instant) {
+        let kept: BTreeSet<Session> = self.seen.sessions().chain(self.unread.sessions()).collect();
+        let gone = self.missing.gone(&kept, live, at);
         if gone.is_empty() {
             return;
         }
         self.seen.forget(&gone);
         self.unread.forget(&gone);
-        self.missing.retain(|session, _| !gone.contains(session));
     }
 
     /// The folders the news is shared through, while it is.
@@ -233,6 +208,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use super::*;
+    use crate::machines::Machine;
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -356,7 +332,12 @@ mod tests {
         dwell(&mut news, Some(pane(1)), at(200));
         dwell(&mut news, Some(pane(1)), at(201));
         news.mark_unread(pane(2), at(201));
-        let (live, other) = (BTreeSet::from([session(10)]), BTreeSet::from([session(20)]));
+        let listing = |session: Session| {
+            let mut live = Lists::default();
+            live.lists(&Machine::Local, [session], true);
+            live
+        };
+        let (live, other) = (listing(session(10)), listing(session(20)));
         news.listed(Some(&other), steady(at(210)));
         news.listed(Some(&live), steady(at(215)));
         news.listed(Some(&other), steady(at(220)));

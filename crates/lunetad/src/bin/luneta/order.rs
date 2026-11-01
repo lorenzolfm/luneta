@@ -40,7 +40,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::host::Event;
 use crate::ledger;
-use crate::news::GONE;
+use crate::live::{Lists, Missing};
 use crate::state;
 
 /// The order as its file has it.
@@ -83,11 +83,11 @@ impl Colour {
 #[derive(Default)]
 pub struct Order {
     kept: Kept,
-    /// The sessions with a colour that the daemon does not list, and since
-    /// when, by luneta's own clock.
-    missing: BTreeMap<ledger::Session, Instant>,
-    /// The sessions this luneta has heard the daemon list, until they are
-    /// gone: one of them holds its colour while the daemon leaves it out.
+    /// Since when the daemon has not listed each session with a colour, or
+    /// heard, by the lists `listed` heard.
+    missing: Missing,
+    /// The sessions this luneta has heard the daemon list, until they have
+    /// ended: one of them holds its colour while the daemon leaves it out.
     /// One it never heard of, as one that ended before it started, holds
     /// none.
     heard: BTreeSet<ledger::Session>,
@@ -208,29 +208,15 @@ impl Order {
     }
 
     /// The daemon lists the sessions of `live` at `at`, by luneta's own
-    /// clock, or none where its list may leave out one that runs. The colour
-    /// of a session it has not listed for `GONE` goes, for every luneta. Says
+    /// clock, or none, as it does not answer. The colour of a session that
+    /// has ended since, as `Missing` tells, goes, for every luneta. Says
     /// whether the order was kept, and so taken up as another luneta left it.
-    pub fn listed(&mut self, live: Option<&BTreeSet<ledger::Session>>, at: Instant) -> bool {
-        let Some(live) = live else {
-            self.missing.clear();
-            return false;
-        };
-        let unlisted: BTreeSet<ledger::Session> =
-            self.kept.colours.keys().filter(|session| !live.contains(session)).copied().collect();
-        self.missing.retain(|session, _| unlisted.contains(session));
-        for session in unlisted {
-            self.missing.entry(session).or_insert(at);
-        }
-        let gone: BTreeSet<ledger::Session> = self
-            .missing
-            .iter()
-            .filter(|(_, since)| at.duration_since(**since) >= GONE)
-            .map(|(session, _)| *session)
-            .collect();
-        self.missing.retain(|session, _| !gone.contains(session));
-        self.heard.retain(|session| live.contains(session) || self.missing.contains_key(session));
-        if gone.is_empty() {
+    pub fn listed(&mut self, live: Option<&Lists>, at: Instant) -> bool {
+        let kept: BTreeSet<ledger::Session> =
+            self.kept.colours.keys().chain(&self.heard).copied().collect();
+        let gone = self.missing.gone(&kept, live, at);
+        self.heard.retain(|session| !gone.contains(session));
+        if !self.kept.colours.keys().any(|session| gone.contains(session)) {
             return false;
         }
         self.keep_read(|kept| kept.colours.retain(|session, _| !gone.contains(session)));
@@ -366,6 +352,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
+    use crate::live::GONE;
+    use crate::machines::Machine;
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -376,6 +364,13 @@ mod tests {
     fn session(secs: u64) -> ledger::Session {
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
         ledger::Session::new(started, NonZeroU64::new(secs).unwrap()).unwrap()
+    }
+
+    /// This machine's list, whole, of the sessions `running`.
+    fn listing(running: &[ledger::Session]) -> Lists {
+        let mut live = Lists::default();
+        live.lists(&Machine::Local, running.iter().copied(), true);
+        live
     }
 
     /// The colours `order` gives `running`, kept for every luneta.
@@ -478,7 +473,7 @@ mod tests {
         let mut order = Order::default();
         assert_eq!(colour(&mut order, &[a, b, c]), [Blue, Yellow, Purple]);
         let start = Instant::now();
-        let listed = BTreeSet::from([b, c]);
+        let listed = listing(&[b, c]);
         order.listed(Some(&listed), start);
         assert!(order.listed(Some(&listed), start + GONE));
         assert_eq!(colour(&mut order, &[c, d, b]), [Purple, Blue, Yellow]);
@@ -499,12 +494,12 @@ mod tests {
         let mut order = Order::default();
         order.colour_sessions(&[a, b]);
         let start = Instant::now();
-        let only_b = BTreeSet::from([b]);
+        let only_b = listing(&[b]);
         order.listed(Some(&only_b), start);
         assert!(!order.listed(None, start + GONE));
         assert!(!order.listed(Some(&only_b), start + GONE));
         assert_eq!(colour(&mut order, &[b, c]), [Yellow, Purple]);
-        assert!(order.listed(Some(&BTreeSet::from([b, c])), start + GONE * 2));
+        assert!(order.listed(Some(&listing(&[b, c])), start + GONE * 2));
         assert_eq!(colour(&mut order, &[b, c, d]), [Yellow, Purple, Blue]);
     }
 
@@ -567,8 +562,8 @@ mod tests {
         let b = session(2);
         assert_eq!(colour(&mut order, &[b]), [Colour::Blue]);
         let start = Instant::now();
-        order.listed(Some(&BTreeSet::from([b])), start);
-        assert!(order.listed(Some(&BTreeSet::from([b])), start + GONE));
+        order.listed(Some(&listing(&[b])), start);
+        assert!(order.listed(Some(&listing(&[b])), start + GONE));
         let text = fs::read_to_string(&file).unwrap();
         let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(kept["colours"], serde_json::json!({"2000000000-2": "blue"}));
@@ -587,8 +582,8 @@ mod tests {
         let [a, b] = [1, 2].map(session);
         assert_eq!(colour(&mut order, &[a, b]), [Colour::Blue, Colour::Yellow]);
         let start = Instant::now();
-        order.listed(Some(&BTreeSet::from([b])), start);
-        assert!(order.listed(Some(&BTreeSet::from([b])), start + GONE));
+        order.listed(Some(&listing(&[b])), start);
+        assert!(order.listed(Some(&listing(&[b])), start + GONE));
         assert_eq!(fs::read_to_string(&file).unwrap(), unread);
         assert!(order.unread().is_some_and(|why| why.contains("order")));
 

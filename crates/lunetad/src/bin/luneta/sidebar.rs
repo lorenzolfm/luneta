@@ -29,7 +29,7 @@
 //! looking, as luneta goes to this one's sessions alone, though their dots
 //! and folds are kept as this one's are.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::path::Path;
@@ -61,6 +61,7 @@ use crate::folds::{Fold, Folds};
 use crate::gruvbox;
 use crate::icons;
 use crate::ledger::{self, Key};
+use crate::live::Lists;
 use crate::machines::Machine;
 use crate::menu::{
     self, Choice, Command, Did, Done, Menu, Opens, PaneRow, Ran, Target, Top, Wants,
@@ -1054,24 +1055,27 @@ impl Sidebar {
         }
     }
 
-    /// The sessions that run, as the daemon lists them now, of every machine,
-    /// or none where its list may leave out one that does: it does not
-    /// answer, and what it said last stands; or it could not read all of
-    /// zellij's folder, or does not say whether it could, as one older than
-    /// the count; or it lists one the news cannot tell from another; or it
-    /// has nothing of a machine, as one it does not reach, or of all of its
-    /// folder, as that machine's daemon says.
-    fn live(&self) -> Option<BTreeSet<ledger::Session>> {
+    /// The sessions that run, as the daemon lists them now, of each machine,
+    /// or none where it does not answer, and what it said last stands. A
+    /// machine's list may leave out one that runs where its daemon could not
+    /// read all of zellij's folder, or does not say whether it could, as one
+    /// older than the count; or it lists one the news cannot tell from
+    /// another; or lunetad has nothing of the machine, as one it does not
+    /// reach.
+    fn live(&self) -> Option<Lists> {
         let host = self.host.as_ref()?;
         if self.away.is_some() {
             return None;
         }
-        let mut live = BTreeSet::new();
-        for (_, seen) in machines(host) {
-            let seen = seen.ok().filter(|seen| seen.unread_sockets == Some(0))?;
-            for session in seen.sessions {
-                live.insert(Listed::of(session)?.kept);
-            }
+        let mut live = Lists::default();
+        for (machine, seen) in machines(host) {
+            let Ok(seen) = seen else {
+                live.lists(&machine, [], false);
+                continue;
+            };
+            let sessions: Vec<Option<Listed>> = seen.sessions.iter().map(Listed::of).collect();
+            let whole = seen.unread_sockets == Some(0) && sessions.iter().all(Option::is_some);
+            live.lists(&machine, sessions.into_iter().flatten().map(|it| it.kept), whole);
         }
         Some(live)
     }
@@ -7016,6 +7020,28 @@ mod tests {
         tick(&mut sidebar, 187_000);
         sidebar.heard(reached(true));
         assert_eq!(row(&mut sidebar), new);
+    }
+
+    /// While lunetad does not reach another machine, what you saw in this
+    /// one's sessions goes as ever, once it has not listed one for `GONE`:
+    /// only that machine's sessions may run unlisted.
+    #[test]
+    fn what_you_saw_here_goes_while_another_machine_is_unreached() {
+        let mut sidebar = fresh();
+        let unreached = |host: Host| Host { remotes: vec![remote("nixos", down(150))], ..host };
+        sidebar.heard(unreached(idle_agent()));
+        sidebar.titled("s | fish".to_owned());
+        let s = |pane| Place::Pane { session: listed("s", 10), pane };
+        sidebar.went(&s(1));
+        tick(&mut sidebar, 160_000);
+        tick(&mut sidebar, 161_000);
+        sidebar.went(&s(3));
+        sidebar.heard(unreached(host(Vec::new(), Vec::new())));
+        tick(&mut sidebar, 173_000);
+        tick(&mut sidebar, 183_000);
+        sidebar.heard(unreached(idle_agent()));
+        let new = "  •✓ \u{ec82} fold                 1m";
+        assert_eq!(agent_row(&mut sidebar, moment(183_500), true), new);
     }
 
     /// The names of the sessions the rows list, in their order.
