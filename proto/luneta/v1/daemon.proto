@@ -62,6 +62,44 @@ message Host {
   optional uint32 unread_sockets = 7;
   // The session files `unread` counts, as `ListAgentsResponse` has them.
   repeated UnreadFile unread_files = 8;
+  // The other machines the daemon watches, as luneta's hosts file names them,
+  // in its order. The daemon of each says its own host, which comes here
+  // without its own `remotes`, and so does a host that comes as one of these.
+  repeated Remote remotes = 9;
+}
+
+// A machine the daemon watches besides its own, through
+// `ssh <destination> luneta bridge`, as it would watch its own daemon on the
+// socket.
+message Remote {
+  // As the hosts file spells it: `nixos`, or `me@vps`. Unique among a host's
+  // `remotes`, never empty, and never led by a `-`.
+  string destination = 1;
+  // One of these, always: a client that finds none has a newer daemon's.
+  oneof reached {
+    // The first ssh to it runs, which takes 10 seconds at the most.
+    Reaching reaching = 2;
+    // Its host, as its daemon last said, without a version: a change only
+    // to its version, as one only to its own `remotes` makes, is no change
+    // to the host it comes in.
+    Host host = 3;
+    Unreached unreached = 4;
+  }
+
+  message Reaching {}
+
+  // What the daemon has of a machine that its daemon does not answer for:
+  // ssh failed to reach it, or its daemon, or the connection broke and a
+  // new ssh failed too. ssh is run again after a while, and longer each
+  // time it fails, up to 30 seconds.
+  message Unreached {
+    // Since when: its daemon's last answer, or, where it has had none, since
+    // the daemon began to watch it. Always there.
+    google.protobuf.Timestamp since = 1;
+    // Why, in words, on one line: what ssh says of it is in the daemon's
+    // log.
+    string why = 2;
+  }
 }
 
 // A zellij session that runs: its server listens on a socket named for it.

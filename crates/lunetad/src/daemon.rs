@@ -38,7 +38,9 @@ use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsR
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::watch::Troubles;
-use crate::{claude, client, git, github, log, metadata, panes, release, shells, watch, zellij};
+use crate::{
+    claude, client, git, github, log, metadata, panes, release, remote, shells, watch, zellij,
+};
 
 /// How often a folder is read again with no word that it changed: for an agent
 /// that crashed, which leaves its file as it was. zellij is asked about each
@@ -155,6 +157,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
+    remote::follow(core.clone(), SWEEP)?;
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));

@@ -21,6 +21,7 @@ mod panes;
 mod process;
 pub mod program;
 pub mod release;
+mod remote;
 mod shells;
 pub mod state;
 mod watch;

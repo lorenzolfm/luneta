@@ -1114,6 +1114,20 @@ itself. The daemon asks
 `zellij`, `git` and `gh` on its `PATH`, which is the `PATH` of the luneta that
 started it.
 
+The daemon watches your other machines too, those named in `hosts` in
+`$XDG_STATE_HOME/luneta` (or `~/.local/state/luneta`), an ssh destination to
+a line, as `nixos` or `me@vps`, which it reads again as you change it
+([#222](https://github.com/lorenzolfm/luneta/issues/222)). It reaches each
+with `ssh -T -o BatchMode=yes <destination> luneta bridge`, which reaches the
+daemon there as `luneta watch` would, started where none runs, and relays
+it, so that ssh does the auth and nothing listens on the network: `luneta`
+must be on the `PATH` of a shell ssh starts there, and ssh must get in with
+no password asked. Its `Watch` says each machine's host with its own, and
+`luneta sessions` lists each machine's sessions under it, after this one's.
+One it can't reach it says so of, and why, and it runs ssh again after a
+while, longer each time, up to 30 seconds. What ssh says goes in
+`lunetad.log`.
+
 What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
 wrong in luneta's sidebar, in `$XDG_STATE_HOME/luneta`, or
 `~/.local/state/luneta` (on macOS too), which outlives a reboot: a line for

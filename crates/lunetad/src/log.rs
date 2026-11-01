@@ -18,6 +18,7 @@
 //! moved: no line is lost to a move. Where the folder does not let the log
 //! be locked or moved, it grows on, and says why in it.
 
+use std::error::Error;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write as _};
@@ -108,6 +109,23 @@ pub fn say(what: &str) {
         Process::Luneta => {},
         Process::Lunetad => eprintln!("lunetad: {what}"),
     }
+}
+
+/// An error and what it came of, on one line. tonic's own says only
+/// "transport error", and why is further down. An error that says what it
+/// came of already is not said twice.
+pub fn causes(error: &dyn Error) -> String {
+    let mut line = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        let said = error.to_string();
+        if !line.ends_with(&said) {
+            line.push_str(": ");
+            line.push_str(&said);
+        }
+        cause = error.source();
+    }
+    line
 }
 
 /// Says in the log that this process panicked, where and why, as `panic`

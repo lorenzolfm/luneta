@@ -28,6 +28,9 @@ zoxide query -l   # the directories the user works in, most used first; `zoxide 
 - "that PR", "this branch": the pane you run in, or the PR you were just
   talking about. `luneta sessions` shows which pane has which branch and PR.
 - "here", "this session": the session `luneta here` names.
+- `luneta sessions` lists the user's other machines' sessions after a
+  `<machine>/` line, indented under it. The verbs don't reach them yet: a
+  session there is none of the ones they act on, even under the same name.
 
 `sessions` and `agents` need lunetad, which luneta starts. The verbs below ask
 zellij themselves and work without it. Only `close` then can't tell which

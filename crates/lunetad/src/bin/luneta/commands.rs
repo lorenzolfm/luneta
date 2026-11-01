@@ -14,12 +14,14 @@ use luneta_protocol::unread::Unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::remote::Reached;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Status, UnreadFile,
-    Version, WatchRequest, WorkTree, Zellij,
+    Agent, Host, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Session, Status,
+    UnreadFile, Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::folder::SOCKET;
+pub use lunetad::log::causes;
 use lunetad::release;
 use prost::Message as _;
 use tonic::transport::Channel;
@@ -235,23 +237,53 @@ pub fn unread(unread: Unread) -> String {
 /// where it works, then what is checked out there and what changed on it, and
 /// the pull request of its branch. A pane zellij says no directory of has `-`
 /// for one, and a directory git has said nothing of yet has nothing after it.
+/// Then each other machine lunetad watches, as its hosts file names it, with
+/// a `/` after it, which no session's name holds, and its sessions under it,
+/// or why it has none.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let mut host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
-    host.sessions.sort_by(|a, b| a.name.cmp(&b.name));
-    for session in &host.sessions {
+    let host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
+    sessions_of(&host, "");
+    for remote in &host.remotes {
+        let machine = &remote.destination;
+        match &remote.reached {
+            Some(Reached::Host(host)) => {
+                println!("{machine}/");
+                sessions_of(host, "  ");
+            },
+            Some(Reached::Reaching(_)) => println!("{machine}/  (reaching it)"),
+            Some(Reached::Unreached(unreached)) => {
+                let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
+                let long = since.and_then(|at| at.elapsed().ok());
+                let long = long.map(|long| format!(" for {}", span(long.as_secs())));
+                let why = &unreached.why;
+                println!("{machine}/  (unreached{}: {why})", long.unwrap_or_default());
+            },
+            // A newer daemon's.
+            None => println!("{machine}/  (does not read)"),
+        }
+    }
+    Ok(())
+}
+
+/// The sessions of `host`, as `sessions` says them, each line led by
+/// `indent`.
+fn sessions_of(host: &Host, indent: &str) {
+    let mut sessions: Vec<&Session> = host.sessions.iter().collect();
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    for session in sessions {
         let Some(panes) = &session.panes else {
-            println!("{}  (no panes listed yet)", session.name);
+            println!("{indent}{}  (no panes listed yet)", session.name);
             continue;
         };
-        println!("{}", session.name);
+        println!("{indent}{}", session.name);
         for pane in &panes.panes {
             let at = format!("{}:{}", pane.tab_name, pane.id);
             let Some(cwd) = pane.cwd.as_deref() else {
-                println!("  {at}  -");
+                println!("{indent}  {at}  -");
                 continue;
             };
             let Some(tree) = host.work_trees.iter().find(|tree| tree.dir == cwd) else {
-                println!("  {at}  {cwd}");
+                println!("{indent}  {at}  {cwd}");
                 continue;
             };
             let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
@@ -260,10 +292,9 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });
             let pulled = pulled.unwrap_or_default();
-            println!("  {at}  {cwd}  {stands}{pulled}");
+            println!("{indent}  {at}  {cwd}  {stands}{pulled}");
         }
     }
-    Ok(())
 }
 
 /// How a work tree stands, in words: its branch, or `detached`, and then how
@@ -326,23 +357,6 @@ async fn watch(
     stdout.write_all(&host.encode_to_vec())?;
     stdout.flush()?;
     Ok(())
-}
-
-/// An error and what it came of, on one line. tonic's own says only
-/// "transport error", and why is further down. An error that says what it
-/// came of already is not said twice.
-pub fn causes(error: &dyn Error) -> String {
-    let mut line = error.to_string();
-    let mut cause = error.source();
-    while let Some(error) = cause {
-        let said = error.to_string();
-        if !line.ends_with(&said) {
-            line.push_str(": ");
-            line.push_str(&said);
-        }
-        cause = error.source();
-    }
-    line
 }
 
 /// `secs` as the two units that say the most of it.
