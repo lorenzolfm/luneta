@@ -29,6 +29,14 @@ service Daemon {
 message WatchRequest {
   // The host as the client last saw it. Absent for a first look.
   Version after = 1;
+  // Left out by a client, as luneta, and set by the daemon of another machine
+  // that watches this one: whether that daemon runs for reasons of its own,
+  // as zellij there has a session, or a client watches it. A daemon runs on
+  // while a client watches it, or a daemon that is kept, but only a client is
+  // a reason of its own, to say to the machines it watches: two daemons that
+  // watched each other would else keep each other running for good, with
+  // nothing else to.
+  optional bool kept = 2;
 }
 
 // A state of the host, as one daemon counts them.
@@ -62,6 +70,106 @@ message Host {
   optional uint32 unread_sockets = 7;
   // The session files `unread` counts, as `ListAgentsResponse` has them.
   repeated UnreadFile unread_files = 8;
+  // The other machines the daemon watches, as luneta's hosts file names them,
+  // in its order.
+  repeated Remote remotes = 9;
+  // How much of luneta's hosts file the daemon could not read a machine
+  // from as it last read it: each line led by a `-`, of more than one word,
+  // or past the 16th, and the file itself, where it did not read, which
+  // leaves `remotes` as it named them before. While there is any, `remotes`
+  // may leave out a machine the file names. The daemon's log says why.
+  // Absent from a daemon older than this field, which watches no machine.
+  optional uint32 unread_hosts = 10;
+}
+
+// A machine the daemon watches besides its own, through
+// `ssh <destination> luneta bridge`, as it would watch its own daemon on the
+// socket.
+message Remote {
+  // As the hosts file spells it: `nixos`, or `me@vps`. Unique among a host's
+  // `remotes`, never empty, and never led by a `-`.
+  string destination = 1;
+  // One of these, always: a client that finds none has a newer daemon's.
+  oneof reached {
+    // The first ssh to it runs, which takes 10 seconds at the most.
+    Reaching reaching = 2;
+    // Its host, as its daemon last said: `Remote.Host`, the inner scope's.
+    Host host = 3;
+    Unreached unreached = 4;
+  }
+
+  message Reaching {}
+
+  // A machine's host, as its daemon says it, but for its version, and for
+  // the machines that daemon watches, which are its own. Two daemons that
+  // watch each other would else never rest: a change to one would be a
+  // change to the other's remotes, and so to its version, and so to the
+  // first one's remotes. The numbers are `luneta.v1.Host`'s, so that a field
+  // of the one reads as the same field of the other.
+  message Host {
+    repeated Session sessions = 2;
+    repeated WorkTree work_trees = 3;
+    repeated Agent agents = 4;
+    uint32 unread = 5;
+    repeated PullRequest pull_requests = 6;
+    optional uint32 unread_sockets = 7;
+    repeated UnreadFile unread_files = 8;
+  }
+
+  // What the daemon has of a machine that its daemon does not answer for:
+  // ssh failed to reach it, or its daemon, or the connection broke and a
+  // new ssh failed too. ssh is run again after a while, and longer each
+  // time it fails, up to 30 seconds. Or the daemon could not start watching
+  // it, which it tries again each time it reads the hosts file, every 2
+  // seconds at the least.
+  message Unreached {
+    // Since when: its daemon's last answer, or, where it has had none, since
+    // the daemon began to watch it. Always there.
+    google.protobuf.Timestamp since = 1;
+    // Why, in words, on one line: what ssh says of it is in the daemon's
+    // log.
+    string why = 2;
+    // What stopped it, in a word: one of these, always. A client that finds
+    // none has a newer daemon's.
+    oneof stopped {
+      // ssh did not start on this machine, or what it said could not be
+      // read.
+      Unstarted unstarted = 3;
+      // ssh ended before it reached lunetad there.
+      Ended ended = 4;
+      // Something there said what is not `luneta bridge`'s word first, as a
+      // login shell that prints does.
+      Said said = 5;
+      // ssh neither reached lunetad there nor ended in 10 seconds, as it
+      // does that waits on a machine that does not answer.
+      Silent silent = 6;
+      // ssh reached lunetad there, and what came after did not do: the
+      // connection broke, or its daemon answered with an error, or with what
+      // this one does not read.
+      Lost lost = 7;
+      // The daemon could not start a thread to watch it from, nor a
+      // runtime, as one out of processes or files cannot.
+      Unwatched unwatched = 8;
+    }
+
+    message Unstarted {}
+
+    message Ended {
+      // Its exit code: 255 where ssh did not get in, 127 where the shell
+      // there found no luneta, and 1 where luneta there could not reach its
+      // daemon, or is older than `luneta bridge`, and takes the word for a
+      // session's name. Absent where a signal ended it.
+      optional int32 code = 1;
+    }
+
+    message Said {}
+
+    message Silent {}
+
+    message Lost {}
+
+    message Unwatched {}
+  }
 }
 
 // A zellij session that runs: its server listens on a socket named for it.

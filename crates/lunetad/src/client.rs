@@ -85,7 +85,8 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
 /// question, and so is one that stalls, once the daemon has been `QUIET` on
 /// it and answers no ping. A connection is made once the command says
 /// `BRIDGED`, within `REACH`, and why one is not is an `Unbridged`, among the
-/// error's sources. Its stderr is the caller's.
+/// error's sources. Its stderr is as `command` has it: the caller's, where it
+/// says nothing of it.
 pub async fn through<F>(mut command: F) -> Result<DaemonClient<Channel>, Error>
 where
     F: FnMut() -> std::process::Command + Send + 'static,
@@ -115,7 +116,7 @@ pub enum Unbridged {
     /// It ended before it said anything: as ssh does that reaches no host
     /// (255), a shell with no luneta (127), and a luneta older than `bridge`,
     /// which takes the word for a session's name and says it has no terminal
-    /// (1). Why is on the caller's stderr.
+    /// (1). Why is on its stderr.
     Ended(ExitStatus),
     /// It said something else first, as a login shell that prints does.
     Said(String),
@@ -163,12 +164,12 @@ struct Piped {
 
 impl Piped {
     /// `command`, spawned, once it has said `BRIDGED`, within `REACH`. Its
-    /// stderr is the caller's, whatever `command` said of it: a pipe of it
-    /// that none read would hold the command up once it was full.
+    /// stderr is as `command` has it: a pipe of it is the caller's to read,
+    /// or it holds the command up once it is full.
     async fn bridged(command: std::process::Command) -> Result<Self, Unbridged> {
         let deadline = Instant::now() + REACH;
         let mut command = tokio::process::Command::from(command);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command.kill_on_drop(true).spawn()?;
         let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
             return Err(io::Error::other("a command spawned piped has no pipes").into());

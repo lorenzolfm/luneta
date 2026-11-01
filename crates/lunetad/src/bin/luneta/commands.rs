@@ -14,12 +14,14 @@ use luneta_protocol::unread::Unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::remote::Reached;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Status, UnreadFile,
-    Version, WatchRequest, WorkTree, Zellij,
+    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Session, Status,
+    UnreadFile, Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::folder::SOCKET;
+pub use lunetad::log::causes;
 use lunetad::release;
 use prost::Message as _;
 use tonic::transport::Channel;
@@ -235,35 +237,74 @@ pub fn unread(unread: Unread) -> String {
 /// where it works, then what is checked out there and what changed on it, and
 /// the pull request of its branch. A pane zellij says no directory of has `-`
 /// for one, and a directory git has said nothing of yet has nothing after it.
+/// Then each other machine lunetad watches, as its hosts file names it, with
+/// a `/` after it, which no session's name holds, and its sessions under it,
+/// or why it has none; and a word that the file names more than these, or
+/// other machines, where lunetad could not read all of it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let mut host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
-    host.sessions.sort_by(|a, b| a.name.cmp(&b.name));
-    for session in &host.sessions {
+    let host = daemon.watch(WatchRequest { after: None, kept: None }).await?.into_inner();
+    sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "");
+    for remote in &host.remotes {
+        let machine = &remote.destination;
+        match &remote.reached {
+            Some(Reached::Host(host)) => {
+                println!("{machine}/");
+                sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "  ");
+            },
+            Some(Reached::Reaching(_)) => println!("{machine}/  (reaching it)"),
+            Some(Reached::Unreached(unreached)) => {
+                let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
+                let long = since.and_then(|at| at.elapsed().ok());
+                let long = long.map(|long| format!(" for {}", span(long.as_secs())));
+                let why = &unreached.why;
+                println!("{machine}/  (unreached{}: {why})", long.unwrap_or_default());
+            },
+            // A newer daemon's.
+            None => println!("{machine}/  (does not read)"),
+        }
+    }
+    if host.unread_hosts.is_some_and(|unread| unread > 0) {
+        println!("(lunetad could not read all of luneta's hosts file: its log says why)");
+    }
+    Ok(())
+}
+
+/// The `sessions` of a host, with what it says of the `work_trees` and the
+/// `pull_requests` of their panes, as `sessions` says them, each line led by
+/// `indent`.
+fn sessions_of(
+    sessions: &[Session],
+    work_trees: &[WorkTree],
+    pull_requests: &[PullRequest],
+    indent: &str,
+) {
+    let mut sessions: Vec<&Session> = sessions.iter().collect();
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    for session in sessions {
         let Some(panes) = &session.panes else {
-            println!("{}  (no panes listed yet)", session.name);
+            println!("{indent}{}  (no panes listed yet)", session.name);
             continue;
         };
-        println!("{}", session.name);
+        println!("{indent}{}", session.name);
         for pane in &panes.panes {
             let at = format!("{}:{}", pane.tab_name, pane.id);
             let Some(cwd) = pane.cwd.as_deref() else {
-                println!("  {at}  -");
+                println!("{indent}  {at}  -");
                 continue;
             };
-            let Some(tree) = host.work_trees.iter().find(|tree| tree.dir == cwd) else {
-                println!("  {at}  {cwd}");
+            let Some(tree) = work_trees.iter().find(|tree| tree.dir == cwd) else {
+                println!("{indent}  {at}  {cwd}");
                 continue;
             };
             let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
-            let pull_request = host.pull_requests.iter().find(|it| it.dir == cwd);
+            let pull_request = pull_requests.iter().find(|it| it.dir == cwd);
             let pulled = pull_request.map(|it| {
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });
             let pulled = pulled.unwrap_or_default();
-            println!("  {at}  {cwd}  {stands}{pulled}");
+            println!("{indent}  {at}  {cwd}  {stands}{pulled}");
         }
     }
-    Ok(())
 }
 
 /// How a work tree stands, in words: its branch, or `detached`, and then how
@@ -321,28 +362,11 @@ async fn watch(
     mut daemon: DaemonClient<Channel>,
     after: Option<Version>,
 ) -> Result<(), Box<dyn Error>> {
-    let host = daemon.watch(WatchRequest { after }).await?.into_inner();
+    let host = daemon.watch(WatchRequest { after, kept: None }).await?.into_inner();
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&host.encode_to_vec())?;
     stdout.flush()?;
     Ok(())
-}
-
-/// An error and what it came of, on one line. tonic's own says only
-/// "transport error", and why is further down. An error that says what it
-/// came of already is not said twice.
-pub fn causes(error: &dyn Error) -> String {
-    let mut line = error.to_string();
-    let mut cause = error.source();
-    while let Some(error) = cause {
-        let said = error.to_string();
-        if !line.ends_with(&said) {
-            line.push_str(": ");
-            line.push_str(&said);
-        }
-        cause = error.source();
-    }
-    line
 }
 
 /// `secs` as the two units that say the most of it.

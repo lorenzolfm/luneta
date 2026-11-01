@@ -1087,11 +1087,13 @@ watch` start `lunetad` when none answers, as zellij and tmux start their
 servers. They start the `lunetad` beside them, which the same build made, or
 else the first on the `PATH`, detached, with what it says in `lunetad.log`
 beside its socket, in `$XDG_RUNTIME_DIR/luneta` (`$TMPDIR/luneta` on macOS).
-It lives as long as zellij does, not as long as a client is attached: once
-zellij has had no session for 30 seconds, it ends. A daemon older than them,
+It lives as long as zellij has a session, or a client watches it, as a
+luneta does: once zellij has had no session, and nothing has watched it, for
+30 seconds, it ends. A daemon older than them,
 as an upgrade leaves running, they stop, and start their own in its place. A
 newer one they keep, so that two builds in use at once never take turns at
-it: after a rollback, the newer daemon runs on until zellij's last session ends.
+it: after a rollback, the newer daemon runs on until zellij's last session
+ends, and no luneta watches it.
 Older is of an earlier release, or of the same one and built from a commit
 made before theirs, as the flake stamps each build of a commit: every commit
 is of one release until the next. A cargo build has no stamp, and nor has the
@@ -1112,6 +1114,28 @@ runs. The commands an agent [drives luneta](#tell-an-agent) with ask zellij
 itself. The daemon asks
 `zellij`, `git` and `gh` on its `PATH`, which is the `PATH` of the luneta that
 started it.
+
+The daemon watches your other machines too, those named in `hosts` in
+`$XDG_STATE_HOME/luneta` (or `~/.local/state/luneta`), an ssh destination to
+a line, as `nixos` or `me@vps`, which it reads again as you change it
+([#222](https://github.com/lorenzolfm/luneta/issues/222)). It reaches each
+with `ssh -T -o BatchMode=yes <destination> luneta bridge`, which reaches the
+daemon there as `luneta watch` would, started where none runs, and relays
+it, so that ssh does the auth and nothing listens on the network: `luneta`
+must be on the `PATH` of a shell ssh starts there, and ssh must get in with
+no password asked. Its `Watch` says each machine's host with its own, and
+`luneta sessions` lists each machine's sessions under it, after this one's.
+One it can't reach it says so of, and why, and it runs ssh again after a
+while, longer each time, up to 30 seconds. What ssh says goes in the log,
+each line once while each ssh to the machine says it again. The daemon it
+reaches there runs on while this one watches it, as it would for a luneta
+there, but only while this one has a reason of its own to run: zellij here
+has a session, or a luneta watches it. One that has none asks the machines
+it watches nothing, and runs no ssh to them, so that two daemons that watch
+each other end as each would alone. A line ssh would take for an option,
+led by a `-`, or for more than one word, names no machine, and so do the
+lines past the 16th: `luneta sessions` says lunetad could not read all of
+the file, and the log says which.
 
 What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
 wrong in luneta's sidebar, in `$XDG_STATE_HOME/luneta`, or

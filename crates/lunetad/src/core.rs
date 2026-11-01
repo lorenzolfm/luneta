@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
+use std::mem;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use crate::claude::Scan;
 use crate::clients::Client;
 use crate::github::Found;
 use crate::panes::{self, Pane};
+use crate::remote::{Destination, Named, Reached};
 use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
 
@@ -37,6 +39,10 @@ pub enum Command {
     PullRequests(BTreeMap<String, Found>),
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
+    /// What the hosts file names now.
+    Hosts(Named),
+    /// What the watch of `destination` has of it now.
+    Remote { destination: Destination, reached: Reached },
     /// Asks for the sessions zellij can be asked about, for their panes.
     Sessions(oneshot::Sender<Vec<Addressed>>),
     /// Asks for the directories the panes work in, for git to be asked about.
@@ -123,6 +129,11 @@ struct Known {
     /// What the shells with the hook last said, each in the session it
     /// started in.
     shells: Vec<Shell>,
+    /// What the daemon has of each other machine the hosts file names, in its
+    /// order.
+    remotes: Vec<(Destination, Reached)>,
+    /// How much of the hosts file named no machine as it was last read.
+    unread_hosts: u32,
     /// How many words have been said of the sessions: one as zellij could
     /// first be asked about each by its name, and one each time a shell in one
     /// says a new line, or goes.
@@ -147,6 +158,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         trees: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
         shells: Vec::new(),
+        remotes: Vec::new(),
+        unread_hosts: 0,
         words: 0,
         told: HashMap::new(),
         host: api::Host::default(),
@@ -202,6 +215,15 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if known.heard(now) {
                     wake(&wakes.panes);
                 }
+            },
+            Command::Hosts(now) => known.named(now),
+            Command::Remote { destination, reached } => {
+                // One the file no longer names, since its watch heard it.
+                let Some((_, was)) = known.remotes.iter_mut().find(|(it, _)| *it == destination)
+                else {
+                    continue;
+                };
+                *was = reached;
             },
             Command::Sessions(answer) => {
                 let sessions = known.addressed().into_iter().map(|(id, name)| Addressed {
@@ -293,6 +315,24 @@ impl Known {
         }
         self.shells = now;
         !told.is_empty()
+    }
+
+    /// Takes in what the hosts file names now. A machine it named before
+    /// keeps what the daemon has of it, and one new to it is one the daemon
+    /// is reaching.
+    fn named(&mut self, now: Named) {
+        // `remote::named` names each once.
+        let unique: HashSet<&Destination> = now.machines.iter().collect();
+        assert_eq!(unique.len(), now.machines.len(), "a machine is named twice");
+        self.unread_hosts = now.unread;
+        let mut before = mem::take(&mut self.remotes);
+        for destination in now.machines {
+            let reached = match before.iter().position(|(was, _)| *was == destination) {
+                Some(at) => before.swap_remove(at).1,
+                None => Reached::Reaching,
+            };
+            self.remotes.push((destination, reached));
+        }
     }
 
     /// Says a word of `session`, which zellij can be asked about.
@@ -443,6 +483,8 @@ impl Known {
             .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
             .map(|(dir, found)| found.pull_request.to_api(dir))
             .collect();
+        let remotes =
+            self.remotes.iter().map(|(destination, reached)| reached.to_api(destination)).collect();
         api::Host {
             version: None,
             sessions,
@@ -452,6 +494,8 @@ impl Known {
             pull_requests,
             unread_sockets: Some(self.unread_sockets),
             unread_files,
+            remotes,
+            unread_hosts: Some(self.unread_hosts),
         }
     }
 
