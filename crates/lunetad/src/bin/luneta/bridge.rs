@@ -19,14 +19,31 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use lunetad::BRIDGED;
+use tokio::time::timeout;
 
 use crate::commands;
 use crate::daemon::{self, Reach};
 
 /// How much luneta hands on at once, at the most.
 const BUFFER: usize = 64 * 1024;
+
+/// How long luneta has to reach the daemon, before it gives up and says why
+/// on stderr, which the client has: a client on another host waits `REACH`
+/// for it, and for ssh's handshake before it, and hears nothing of why from a
+/// luneta it gave up on first. Longer than luneta waits for a daemon it
+/// starts, so that it says why that one did not start instead.
+const REACHING: Duration = Duration::from_secs(6);
+
+// luneta asks `lunetad --version` on its one thread as it reaches the daemon,
+// which holds up the wait past `REACHING` for as long as it takes, at the
+// most.
+const _: () = assert!(daemon::START.as_millis() < REACHING.as_millis());
+const _: () = assert!(
+    REACHING.as_millis() + daemon::VERSION_LIMIT.as_millis() < lunetad::REACH.as_millis()
+);
 
 /// Reaches the daemon in `folder`, and hands on between it and luneta's stdin
 /// and stdout until either end hangs up. What goes wrong goes to stderr, as
@@ -45,11 +62,15 @@ pub fn run(folder: &Path) -> ExitCode {
 }
 
 /// A connection to the daemon in the folder at `path`, started where none
-/// runs, or in the place of an older one.
+/// runs, or in the place of an older one, within `REACHING`.
 fn reached(path: &Path) -> Result<UnixStream, String> {
     let runtime = commands::runtime()?;
     let socket = runtime.block_on(async {
-        let (folder, _) = daemon::reached(path, Reach::Current).await?;
+        // A daemon luneta started by then runs on, detached, as it would
+        // once luneta ended.
+        let reaching = timeout(REACHING, daemon::reached(path, Reach::Current)).await;
+        let late = |_| format!("no lunetad answered in {}s", REACHING.as_secs());
+        let (folder, _) = reaching.map_err(late)??;
         let socket = lunetad::stream(&folder).await;
         socket.map_err(|error| format!("{}: {error}", folder.socket().display()))
     })?;

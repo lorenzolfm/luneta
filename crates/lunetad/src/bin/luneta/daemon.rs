@@ -56,11 +56,7 @@ const LUNETAD: &str = "lunetad";
 /// How long luneta waits for a daemon to answer that it started, or that
 /// another luneta is starting, and for one to end that it stopped. One that
 /// starts reads what runs before it answers, which takes it a moment.
-const START: Duration = Duration::from_secs(5);
-
-// A client on another host waits `REACH` for `luneta bridge` to reach the
-// daemon so, and for ssh's handshake before it.
-const _: () = assert!(START.as_millis() < lunetad::REACH.as_millis());
+pub const START: Duration = Duration::from_secs(5);
 
 /// How often luneta looks again while it waits.
 const LOOK: Duration = Duration::from_millis(20);
@@ -73,7 +69,7 @@ const LOG_MAX: u64 = 1024 * 1024;
 const SAID_MAX: u64 = 4096;
 
 /// How long `lunetad --version` has to answer.
-const VERSION_LIMIT: Duration = Duration::from_secs(2);
+pub const VERSION_LIMIT: Duration = Duration::from_secs(2);
 
 /// Which daemon luneta wants.
 #[derive(Clone, Copy, PartialEq, Eq)]
