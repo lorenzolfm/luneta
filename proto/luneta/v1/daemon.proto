@@ -29,6 +29,14 @@ service Daemon {
 message WatchRequest {
   // The host as the client last saw it. Absent for a first look.
   Version after = 1;
+  // Left out by a client, as luneta, and set by the daemon of another machine
+  // that watches this one: whether that daemon runs for reasons of its own,
+  // as zellij there has a session, or a client watches it. A daemon runs on
+  // while a client watches it, or a daemon that is kept, but only a client is
+  // a reason of its own, to say to the machines it watches: two daemons that
+  // watched each other would else keep each other running for good, with
+  // nothing else to.
+  optional bool kept = 2;
 }
 
 // A state of the host, as one daemon counts them.

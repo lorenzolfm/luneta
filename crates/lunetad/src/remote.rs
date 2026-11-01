@@ -9,7 +9,11 @@
 //! its own nor a version. Two daemons that each watch the other would
 //! otherwise change their hosts for as long as both ran: each change to one
 //! is a change to the other's remotes, and so to its version, which is a
-//! change to the first one's.
+//! change to the first one's. And each machine's daemon is asked only while
+//! this one is kept, runs for reasons of its own, which the question says,
+//! and which only then keeps that one running too: two that each watch the
+//! other would else keep each other running for good, or start each other
+//! again through the bridge as each ended.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -27,6 +31,7 @@ use std::time::{Duration, SystemTime};
 
 use notify::RecursiveMode;
 use tokio::sync::oneshot;
+use tokio::sync::watch::Receiver;
 use tonic::transport::Channel;
 
 use crate::api::daemon_client::DaemonClient;
@@ -174,11 +179,12 @@ fn unreached(error: &(dyn Error + 'static)) -> (String, Stopped) {
 }
 
 /// Watches each machine the file names, from a thread of its own, and tells
-/// the core what its daemon says, or why it says nothing. The file is read
-/// once before this returns, and the core told which machines it names: the
-/// daemon's first answer has each, as one it is reaching. Then it is read
-/// again as it changes, and at least every `sweep`.
-pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
+/// the core what its daemon says, or why it says nothing, as `watched` asks
+/// it, while `kept` says whether this daemon runs for reasons of its own. The
+/// file is read once before this returns, and the core told which machines it
+/// names: the daemon's first answer has each, as one it is reaching. Then it
+/// is read again as it changes, and at least every `sweep`.
+pub fn follow(core: SyncSender<Command>, kept: Receiver<bool>, sweep: Duration) -> io::Result<()> {
     let file = match state::path(FILE) {
         Ok(file) => file,
         Err(unset) => {
@@ -225,7 +231,7 @@ pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
             if watched.iter().any(|(watched, _)| watched == destination) {
                 continue;
             }
-            match watch(destination.clone(), core.clone()) {
+            match watch(destination.clone(), core.clone(), kept.clone()) {
                 Ok(ends) => {
                     unwatched.remove(destination);
                     watched.push((destination.clone(), ends));
@@ -290,7 +296,11 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
 /// is dropped, once the thread has the runtime it watches on. It makes that
 /// itself, and drops it: the first read is made on the daemon's own runtime,
 /// where another one dropped would panic.
-fn watch(destination: Destination, core: SyncSender<Command>) -> io::Result<oneshot::Sender<()>> {
+fn watch(
+    destination: Destination,
+    core: SyncSender<Command>,
+    kept: Receiver<bool>,
+) -> io::Result<oneshot::Sender<()>> {
     let (ends, ending) = oneshot::channel();
     let (built, building) = mpsc::sync_channel(1);
     thread::Builder::new().name(format!("remote {destination}")).spawn(move || {
@@ -305,7 +315,7 @@ fn watch(destination: Destination, core: SyncSender<Command>) -> io::Result<ones
         // What runs on the runtime goes with it as the thread ends: the
         // connection to the machine's daemon, and its ssh, killed as it goes.
         runtime.block_on(async move {
-            tokio::spawn(watched(destination, core));
+            tokio::spawn(watched(destination, core, kept));
             let _ = ending.await;
         });
     })?;
@@ -321,14 +331,28 @@ fn watch(destination: Destination, core: SyncSender<Command>) -> io::Result<ones
 /// last said stands meanwhile, as where the machine's daemon makes way for a
 /// newer one. Where that fails too, the core is told that the machine is
 /// unreached, and ssh is run again after a while, longer each time it fails.
-async fn watched(destination: Destination, core: SyncSender<Command>) {
+/// It asks only while `kept` says that this daemon runs for reasons of its
+/// own, which each question says, and which only then keeps that one running
+/// too.
+async fn watched(destination: Destination, core: SyncSender<Command>, mut kept: Receiver<bool>) {
     let mut daemon = None;
     // The host as last told, as its daemon versions it.
     let mut after = None;
     let mut word = SystemTime::now();
     let mut failures: u32 = 0;
     loop {
-        let (version, host) = match asked(&destination, &mut daemon, after).await {
+        // A question on a connection that broke makes one afresh, with an
+        // ssh, which could start the daemon of a machine whose own had just
+        // ended, through its `luneta bridge`. Two daemons that watched each
+        // other, and that nothing else kept, would else start each other's
+        // again, for good.
+        if kept.wait_for(|kept| *kept).await.is_err() {
+            // This daemon ends.
+            return;
+        }
+        let is_kept = *kept.borrow();
+        let asked = asked(&destination, &mut daemon, after, is_kept).await;
+        let (version, host) = match asked {
             Ok(answered) => answered,
             Err((why, stopped)) => {
                 failures = failures.saturating_add(1);
@@ -389,12 +413,13 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
 
 /// What the daemon of `destination` answers `Watch` after `after`, and its
 /// version, through the client in `daemon`, made first where there is none,
-/// or why it answers none. One that failed a question is kept: it makes a
-/// connection afresh for the next.
+/// or why it answers none. It is told whether this daemon is `kept`. One that
+/// failed a question is kept: it makes a connection afresh for the next.
 async fn asked(
     destination: &Destination,
     daemon: &mut Option<DaemonClient<Channel>>,
     after: Option<api::Version>,
+    kept: bool,
 ) -> Result<(api::Version, api::Host), (String, Stopped)> {
     let daemon = if let Some(daemon) = daemon {
         daemon
@@ -402,7 +427,7 @@ async fn asked(
         let reached = client::through(ssh(destination)).await;
         daemon.insert(reached.map_err(|error| unreached(&error))?)
     };
-    let watched = daemon.watch(api::WatchRequest { after }).await;
+    let watched = daemon.watch(api::WatchRequest { after, kept: Some(kept) }).await;
     let host = watched.map_err(|status| unreached(&status))?.into_inner();
     // One with no version would be asked after again at once, as a first
     // look, for as long as it answers so.

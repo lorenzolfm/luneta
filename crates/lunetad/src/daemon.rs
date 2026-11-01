@@ -9,15 +9,23 @@
 //!
 //! A daemon lives as long as zellij has a session, or a client watches it:
 //! once zellij has had no session, and no client has watched it, for `ALONE`,
-//! it ends. So a luneta that watches it keeps it, as it would not if every
-//! session were on another machine, and so does a luneta on another machine,
-//! through `luneta bridge`, which would else reach a daemon that ended every
-//! `ALONE`, and started again for it. It takes its socket away first, while
-//! it still holds the folder, so that a luneta that comes for it then finds
-//! none there, and starts the next.
+//! it ends. It takes its socket away first, while it still holds the folder,
+//! so that a luneta that comes for it then finds none there, and starts the
+//! next.
+//!
+//! So a luneta that watches it keeps it, as it would not if every session
+//! were on another machine. So does the daemon of another machine that
+//! watches this one through `luneta bridge`, which would else reach a daemon
+//! that ended every `ALONE`, and started again for it: but only while that
+//! one is kept, as its `WatchRequest` says, as zellij there has a session, or
+//! a client watches it. And a daemon that is not kept asks the machines it
+//! watches nothing, which could start their daemons again through the
+//! bridge. Two daemons that watched each other would else keep each other
+//! running for good, or start each other again, with no one to watch either.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
+use std::mem;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -157,7 +165,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
-    remote::follow(core.clone(), SWEEP)?;
+    remote::follow(core.clone(), watchers.kept.subscribe(), SWEEP)?;
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
@@ -223,7 +231,8 @@ impl Alone {
 /// Has the core told what Claude Code's files in `claude_folder`, the shells'
 /// files in luneta's `folder` and zellij's sockets in `sockets` say, as they
 /// change, and says on `end` once zellij has had no session, and none of the
-/// `watchers` has watched the host, for `ALONE`.
+/// `watchers` has watched the host, for `ALONE`. Each look has them say
+/// whether the daemon is kept.
 fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
@@ -263,9 +272,10 @@ fn follow(
     let tell = move |scan: zellij::Scan| {
         // Looked at on each look, whether zellij has a session or not, so that
         // only a client that asked since the look before counts.
-        let watched = watchers.looked();
-        let unwatched = scan.alone() && !watched;
-        if alone.saw(unwatched, Instant::now()) >= ALONE
+        let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
+        let kept = !scan.alone() || clients;
+        watchers.kept.send_if_modified(|was| mem::replace(was, kept) != kept);
+        if alone.saw(!kept && !daemons, Instant::now()) >= ALONE
             && let Some(end) = end.take()
         {
             let secs = ALONE.as_secs();
@@ -280,34 +290,64 @@ fn follow(
     watch::watch("zellij", sockets, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
 }
 
-/// Whether clients watch the host: one waits on `Watch` now, or one has
-/// asked since the daemon last looked. A luneta asks again as soon as it is
-/// answered, and so is always one or the other, on this machine or another.
+/// Who watches the host: clients, as luneta, and the daemons of other
+/// machines that watch this one and run for reasons of their own, each as its
+/// `WatchRequest` says. A daemon that does not is no one: two daemons that
+/// watched each other would else keep each other running for good.
 #[derive(Default)]
 struct Watchers {
+    clients: Watching,
+    daemons: Watching,
+    /// Whether the daemon is kept: runs for reasons of its own, as zellij has
+    /// a session, or a client watches it, as it last looked, or a client has
+    /// come since. Only a daemon that is kept runs ssh to the machines it
+    /// watches, and keeps their daemons running.
+    kept: tokio::sync::watch::Sender<bool>,
+}
+
+impl Watchers {
+    /// Counts one that waits on `Watch`, until what this returns is dropped,
+    /// as `kept`, of its `WatchRequest`, says who it is: a client, where it
+    /// says nothing, and else the daemon of another machine, which is no one
+    /// where it runs for no reason of its own.
+    fn waits(&self, kept: Option<bool>) -> Option<Waits<'_>> {
+        let watching = match kept {
+            None => &self.clients,
+            Some(true) => &self.daemons,
+            Some(false) => return None,
+        };
+        watching.asked.store(true, Ordering::Relaxed);
+        watching.waiting.fetch_add(1, Ordering::Relaxed);
+        // A client keeps the daemon at once, so that it need not wait for
+        // the next look for the machines the daemon watches to be reached.
+        if kept.is_none() {
+            self.kept.send_if_modified(|was| !mem::replace(was, true));
+        }
+        Some(Waits(watching))
+    }
+}
+
+/// Whether some watch the host: one waits on `Watch` now, or one has asked
+/// since the daemon last looked. A luneta asks again as soon as it is
+/// answered, and so is always one or the other, on this machine or another,
+/// and so is a daemon that watches this machine from another.
+#[derive(Default)]
+struct Watching {
     waiting: AtomicUsize,
     asked: AtomicBool,
 }
 
-impl Watchers {
-    /// Counts a client that waits on `Watch`, until what this returns is
-    /// dropped.
-    fn waits(&self) -> Waits<'_> {
-        self.asked.store(true, Ordering::Relaxed);
-        self.waiting.fetch_add(1, Ordering::Relaxed);
-        Waits(self)
-    }
-
-    /// Whether a client watches the host. The next look counts only those
-    /// that ask after this one.
+impl Watching {
+    /// Whether one watches the host. The next look counts only those that
+    /// ask after this one.
     fn looked(&self) -> bool {
         let asked = self.asked.swap(false, Ordering::Relaxed);
         asked || self.waiting.load(Ordering::Relaxed) > 0
     }
 }
 
-/// A client that waits on `Watch`.
-struct Waits<'a>(&'a Watchers);
+/// One that waits on `Watch`.
+struct Waits<'a>(&'a Watching);
 
 impl Drop for Waits<'_> {
     fn drop(&mut self) {
@@ -351,8 +391,9 @@ impl Daemon for Host {
         &self,
         request: Request<api::WatchRequest>,
     ) -> Result<Response<api::Host>, Status> {
-        let _waits = self.watchers.waits();
-        let after = request.into_inner().after;
+        let request = request.into_inner();
+        let _waits = self.watchers.waits(request.kept);
+        let after = request.after;
         let watched = match timeout(WATCH, self.watched(after)).await {
             Ok(watched) => watched,
             // It waited out its time, with the host as it was.

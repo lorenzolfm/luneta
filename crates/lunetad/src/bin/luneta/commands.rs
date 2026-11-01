@@ -242,7 +242,7 @@ pub fn unread(unread: Unread) -> String {
 /// or why it has none; and a word that the file names more than these, or
 /// other machines, where lunetad could not read all of it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
+    let host = daemon.watch(WatchRequest { after: None, kept: None }).await?.into_inner();
     sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "");
     for remote in &host.remotes {
         let machine = &remote.destination;
@@ -362,7 +362,7 @@ async fn watch(
     mut daemon: DaemonClient<Channel>,
     after: Option<Version>,
 ) -> Result<(), Box<dyn Error>> {
-    let host = daemon.watch(WatchRequest { after }).await?.into_inner();
+    let host = daemon.watch(WatchRequest { after, kept: None }).await?.into_inner();
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&host.encode_to_vec())?;
     stdout.flush()?;

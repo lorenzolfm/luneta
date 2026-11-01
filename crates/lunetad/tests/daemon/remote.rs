@@ -316,7 +316,8 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
         loop {
-            let watched = daemon.watch(WatchRequest { after }).await.unwrap().into_inner();
+            let asked = WatchRequest { after, kept: None };
+            let watched = daemon.watch(asked).await.unwrap().into_inner();
             if watched.version.is_some() && watched.version == after {
                 return;
             }
@@ -324,4 +325,67 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
             after = watched.version;
         }
     });
+}
+
+/// Watches `host`'s daemon until `until`, as a luneta does: asks again as
+/// soon as it answers.
+fn watch_until(host: &Host, until: Instant) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let folder = crate::host::folder_in(host.runtime.path()).unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut after = None;
+        while Instant::now() < until {
+            let asked = daemon.watch(WatchRequest { after, kept: None }).await;
+            after = asked.expect("the daemon ended").into_inner().version;
+        }
+    });
+}
+
+/// A daemon that a client keeps keeps the daemons of the machines it watches
+/// running, however long zellij there has had no session, as a client there
+/// would: `luneta bridge` would else start one again each time one ended.
+/// The test watches the one for longer than the other would run on alone.
+#[test]
+fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.reaches("far", far.vars());
+    let mut far_daemon = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    watch_until(&here, Instant::now() + Duration::from_secs(36));
+    assert_eq!(far_daemon.ended_within(Duration::ZERO), None);
+    assert_eq!(ssh.bridges("far").len(), 1);
+}
+
+/// Two daemons that watch each other, which nothing else keeps, end as each
+/// would alone: each says to the other that it runs for no reason of its
+/// own. Nor does either run ssh again as the other ends, which would start
+/// the other's again through its `luneta bridge`, and so on for good. The
+/// test waits it out.
+#[test]
+fn two_daemons_that_watch_each_other_and_nothing_else_end() {
+    let here = Host::new();
+    let far = Host::new();
+    let to_far = FakeSsh::new(here.zellij.bin());
+    to_far.reaches("far", far.vars());
+    let to_here = FakeSsh::new(far.zellij.bin());
+    to_here.reaches("here", here.vars());
+    hosts(&here, "far\n");
+    hosts(&far, "here\n");
+    let mut here_daemon = start(here.vars()).unwrap();
+    let mut far_daemon = start(far.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    reached(&far, "here", |_| true);
+
+    let ended = here_daemon.ended_within(Duration::from_secs(55));
+    assert!(ended.is_some(), "{:?}", here_daemon.said_after(Duration::ZERO));
+    let ended = far_daemon.ended_within(Duration::from_secs(15));
+    assert!(ended.is_some(), "{:?}", far_daemon.said_after(Duration::ZERO));
+    assert_eq!(to_far.bridges("far").len(), 1);
+    assert_eq!(to_here.bridges("here").len(), 1);
 }
