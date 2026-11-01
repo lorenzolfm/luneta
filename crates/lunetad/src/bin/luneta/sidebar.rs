@@ -29,7 +29,7 @@
 //! looking, as luneta goes to this one's sessions alone, though their dots
 //! and folds are kept as this one's are.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::path::Path;
@@ -705,11 +705,16 @@ struct Seen<'a> {
     unread_sockets: Option<u32>,
 }
 
+/// A machine, with what its daemon says of it, or why lunetad has nothing
+/// of it.
+type Told<'a> = (Machine, Result<Seen<'a>, Away>);
+
 /// Each machine lunetad says of, this one first, then the others in the
 /// order of luneta's hosts file, with what its daemon says of it, or why it
-/// says nothing. One whose destination does not read, as lunetad never
-/// sends, is left out.
-fn machines(host: &Host) -> Vec<(Machine, Result<Seen<'_>, Away>)> {
+/// says nothing; and how many it says of that are left out, as lunetad never
+/// sends them, but one of another build might: one whose destination does
+/// not read, and one named a second time.
+fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
     let local = Seen {
         sessions: &host.sessions,
         agents: &host.agents,
@@ -718,9 +723,15 @@ fn machines(host: &Host) -> Vec<(Machine, Result<Seen<'_>, Away>)> {
         unread_sockets: host.unread_sockets,
     };
     let mut machines = vec![(Machine::Local, Ok(local))];
+    let mut named = HashSet::new();
+    let mut left_out = 0;
     for remote in &host.remotes {
-        let Ok(destination) = remote.destination.parse::<Destination>() else {
-            continue;
+        let destination = match remote.destination.parse::<Destination>() {
+            Ok(destination) if named.insert(destination.clone()) => destination,
+            Ok(_) | Err(_) => {
+                left_out += 1;
+                continue;
+            },
         };
         let seen = match &remote.reached {
             Some(Reached::Host(host)) => Ok(Seen {
@@ -742,7 +753,7 @@ fn machines(host: &Host) -> Vec<(Machine, Result<Seen<'_>, Away>)> {
         };
         machines.push((Machine::Remote(destination), seen));
     }
-    machines
+    (machines, left_out)
 }
 
 /// What the sidebar asks of luneta.
@@ -876,6 +887,9 @@ pub struct Sidebar {
     /// the rows leave out, as they tell sessions apart by both, or with a
     /// name zellij refuses.
     unlisted: usize,
+    /// How many machines the daemon says of that the rows leave out, as
+    /// `machines` does.
+    unlisted_machines: usize,
     /// Which client of its session is luneta's zellij, and the pane it is on.
     own: OwnClient,
     keys: Keys,
@@ -1080,7 +1094,7 @@ impl Sidebar {
             return None;
         }
         let mut live = Lists::default();
-        for (machine, seen) in machines(host) {
+        for (machine, seen) in machines(host).0 {
             let Ok(seen) = seen else {
                 live.lists(&machine, [], false);
                 continue;
@@ -1473,7 +1487,7 @@ impl Sidebar {
         let mut due: Option<SystemTime> = None;
         // Each machine, and the sessions of each lunetad lists: this one's
         // in the order you moved them to, and another's oldest first.
-        let machines = machines(host);
+        let (machines, unlisted_machines) = machines(host);
         let mut unlisted = 0;
         let mut sessions: Vec<Vec<(Listed, &Session)>> = machines
             .iter()
@@ -1733,6 +1747,7 @@ impl Sidebar {
         self.rows = rows;
         self.counts = counts;
         self.unlisted = unlisted;
+        self.unlisted_machines = unlisted_machines;
         self.here_key = here_key;
         self.finished = finished;
         self.here_row = here_pane.and_then(|place| self.row_for(&Spot::Local(place)));
@@ -3205,6 +3220,15 @@ impl Sidebar {
             let unlisted = format!(
                 "lunetad: {count} {sessions} with no start or socket, or a name zellij refuses, \
                  not listed"
+            );
+            notes.extend(wrapped(&unlisted, width, error));
+        }
+        if self.unlisted_machines > 0 {
+            let count = self.unlisted_machines;
+            let machines = if count == 1 { "machine" } else { "machines" };
+            let unlisted = format!(
+                "lunetad: {count} {machines} with a destination luneta does not read, or named \
+                 twice, not listed"
             );
             notes.extend(wrapped(&unlisted, width, error));
         }
@@ -6883,6 +6907,30 @@ mod tests {
         type_in(&mut sidebar, "k");
         sidebar.focus(Keys::Zellij);
         assert!(!screen(&mut sidebar, false, 96, 24).contains(&why.to_owned()));
+    }
+
+    /// A machine lunetad names twice, or by what is no destination, as only a
+    /// lunetad of another build might, is listed once, or not, and the notes
+    /// say how many are left out.
+    #[test]
+    fn a_machine_named_twice_or_by_no_destination_is_left_out_and_said() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        host.remotes.push(remote("nixos", down(100)));
+        host.remotes.push(remote("-oProxyCommand=sh", down(100)));
+        sidebar.heard(host);
+        let lines = screen(&mut sidebar, false, 32, 16);
+        let headers = lines.iter().filter(|line| line.starts_with(" ▾ nixos")).count();
+        assert_eq!(headers, 1);
+        assert!(!lines.iter().any(|line| line.contains("ProxyCommand")));
+        assert_eq!(
+            lines[13..],
+            [
+                " lunetad: 2 machines with a de",
+                " stination luneta does not rea",
+                " d, or named twice, not listed",
+            ]
+        );
     }
 
     /// The header of a machine lunetad does not reach has nothing under it
