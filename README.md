@@ -1126,7 +1126,10 @@ no password asked. Its `Watch` says each machine's host with its own, and
 `luneta sessions` lists each machine's sessions under it, after this one's.
 One it can't reach it says so of, and why, and it runs ssh again after a
 while, longer each time, up to 30 seconds. What ssh says goes in
-`lunetad.log`.
+`lunetad.log`. A line ssh would take for an option, led by a `-`, or for
+more than one word, names no machine, and so do the lines past the 16th:
+`luneta sessions` says lunetad could not read all of the file, and the log
+says which.
 
 What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
 wrong in luneta's sidebar, in `$XDG_STATE_HOME/luneta`, or

@@ -65,6 +65,13 @@ message Host {
   // The other machines the daemon watches, as luneta's hosts file names them,
   // in its order.
   repeated Remote remotes = 9;
+  // How much of luneta's hosts file the daemon could not read a machine
+  // from as it last read it: each line led by a `-`, of more than one word,
+  // or past the 16th, and the file itself, where it did not read, which
+  // leaves `remotes` as it named them before. While there is any, `remotes`
+  // may leave out a machine the file names. The daemon's log says why.
+  // Absent from a daemon older than this field, which watches no machine.
+  optional uint32 unread_hosts = 10;
 }
 
 // A machine the daemon watches besides its own, through

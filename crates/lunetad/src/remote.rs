@@ -20,6 +20,7 @@ use std::io::{self, ErrorKind};
 use std::iter;
 use std::path::Path;
 use std::process::Command as Process;
+use std::str::FromStr;
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -53,24 +54,28 @@ const AGAIN_MAX: Duration = Duration::from_secs(30);
 /// A machine, as ssh is told it: a line of the file, without the white space
 /// around it. One with white space or a control character in it is no
 /// destination, as ssh would take it for more than one word, and nor is one
-/// led by a `-`, which ssh would take for an option.
+/// led by a `-`, which ssh would take for an option. One spelled with `parse`
+/// is one the daemon reads from the file, whoever wrote it there.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Destination(String);
 
-impl Destination {
-    /// The destination of `line`, none for a blank one, or why it is none.
-    fn parse(line: &str) -> Result<Option<Destination>, String> {
-        let line = line.trim();
-        if line.is_empty() {
-            return Ok(None);
+impl FromStr for Destination {
+    type Err = String;
+
+    /// The destination `text` spells, without the white space around it, or
+    /// why it spells none.
+    fn from_str(text: &str) -> Result<Destination, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("a destination is not blank".to_owned());
         }
-        if line.starts_with('-') {
-            return Err(format!("{line:?} is led by a '-', which ssh would take for an option"));
+        if text.starts_with('-') {
+            return Err(format!("{text:?} is led by a '-', which ssh would take for an option"));
         }
-        if line.chars().any(|char| char.is_whitespace() || char.is_control()) {
-            return Err(format!("{line:?} is more than one word"));
+        if text.chars().any(|char| char.is_whitespace() || char.is_control()) {
+            return Err(format!("{text:?} is more than one word"));
         }
-        Ok(Some(Destination(line.to_owned())))
+        Ok(Destination(text.to_owned()))
     }
 }
 
@@ -105,6 +110,17 @@ impl Reached {
         };
         api::Remote { destination: destination.0.clone(), reached: Some(reached) }
     }
+}
+
+/// What the hosts file names, as it was last read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Named {
+    /// The machines, in its order, each once, and `HOSTS_MAX` at the most.
+    pub machines: Vec<Destination>,
+    /// How much of it named no machine: each line that is no destination,
+    /// each past the `HOSTS_MAX`th, and the file itself, where it did not
+    /// read.
+    pub unread: u32,
 }
 
 /// What stopped the daemon from reaching a machine, in a word, as a client
@@ -167,6 +183,8 @@ pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
         Ok(file) => file,
         Err(unset) => {
             log::say(&format!("no other machine is watched: {unset}"));
+            // A file there is nowhere to look for is one that does not read.
+            let _ = core.send(Command::Hosts(Named { machines: Vec::new(), unread: 1 }));
             return Ok(());
         },
     };
@@ -177,30 +195,33 @@ pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
         troubles.done();
         named
     };
-    // The machines the core was told of last, in the file's order, what ends
-    // the watch of each that a thread watches, and since when each that none
-    // does has gone without one.
-    let mut told: Vec<Destination> = Vec::new();
+    // What the core was told the file names last, what ends the watch of
+    // each machine that a thread watches, and since when each that none does
+    // has gone without one.
+    let mut told = Named::default();
     let mut watched: Vec<(Destination, oneshot::Sender<()>)> = Vec::new();
     let mut unwatched: HashMap<Destination, SystemTime> = HashMap::new();
     let mut unwatchable = Troubles::default();
-    let tell = move |named: Option<Vec<Destination>>| {
+    let tell = move |named: Option<Named>| {
         // A file that does not read leaves the machines as they were.
-        if let Some(named) = named
-            && named != told
-        {
+        let named = match named {
+            Some(named) => named,
+            None => Named { machines: told.machines.clone(), unread: 1 },
+        };
+        if named != told {
             if core.send(Command::Hosts(named.clone())).is_err() {
                 return false;
             }
             // The core no longer takes in what the thread of one that went
             // says.
-            watched.retain(|(destination, _)| named.contains(destination));
-            unwatched.retain(|destination, _| named.contains(destination));
+            let machines = &named.machines;
+            watched.retain(|(destination, _)| machines.contains(destination));
+            unwatched.retain(|destination, _| machines.contains(destination));
             told = named;
         }
         // One whose watch did not start is unreached, and its watch is
         // started again on each read, until one does.
-        for destination in &told {
+        for destination in &told.machines {
             if watched.iter().any(|(watched, _)| watched == destination) {
                 continue;
             }
@@ -229,29 +250,36 @@ pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
     watch::watch("hosts", dir, RecursiveMode::NonRecursive, wanted, sweep, read, tell)
 }
 
-/// The machines the file at `path` names, in its order, each once and
-/// `HOSTS_MAX` at the most: none where there is no file. None for a file that
-/// does not read. What is wrong with it, `troubles` says.
-fn named(path: &Path, troubles: &mut Troubles) -> Option<Vec<Destination>> {
+/// What the file at `path` names: no machine where there is no file, and a
+/// blank line names none either. None for a file that does not read. What
+/// is wrong with it, `troubles` says.
+fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Some(Vec::new()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Some(Named::default()),
         Err(error) => {
             troubles.say(format!("{}: {error}", path.display()));
             return None;
         },
     };
     let mut seen = HashSet::new();
-    let mut named = Vec::new();
-    for line in text.lines() {
-        match Destination::parse(line) {
-            Ok(Some(destination)) if seen.insert(destination.clone()) => named.push(destination),
+    let mut named = Named::default();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        match line.parse::<Destination>() {
+            Ok(destination) if seen.insert(destination.clone()) => {
+                named.machines.push(destination);
+            },
             Ok(_) => {},
-            Err(why) => troubles.say(format!("{}: {why}, and is left out", path.display())),
+            Err(why) => {
+                troubles.say(format!("{}: {why}, and is left out", path.display()));
+                named.unread = named.unread.saturating_add(1);
+            },
         }
     }
-    if named.len() > HOSTS_MAX {
-        let past: Vec<String> = named.drain(HOSTS_MAX..).map(|it| it.0).collect();
+    if named.machines.len() > HOSTS_MAX {
+        let past: Vec<String> = named.machines.drain(HOSTS_MAX..).map(|it| it.0).collect();
+        let many = u32::try_from(past.len()).unwrap_or(u32::MAX);
+        named.unread = named.unread.saturating_add(many);
         let (file, max, past) = (path.display(), HOSTS_MAX, past.join(", "));
         troubles.say(format!("{file} names more than {max}: {past} are left out"));
     }
@@ -336,6 +364,7 @@ async fn watched(destination: Destination, core: SyncSender<Command>) {
             unread_sockets,
             unread_files,
             remotes: _,
+            unread_hosts: _,
         } = host;
         let host = remote::Host {
             sessions,
@@ -412,33 +441,39 @@ mod tests {
 
     use super::*;
 
-    fn named_in(text: &str) -> Vec<String> {
+    /// The machines `text` names, as the file, and how much of it does not
+    /// read.
+    fn named_in(text: &str) -> (Vec<String>, u32) {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join(FILE);
         fs::write(&file, text).unwrap();
         let named = named(&file, &mut Troubles::default()).unwrap();
-        named.iter().map(ToString::to_string).collect()
+        (named.machines.iter().map(ToString::to_string).collect(), named.unread)
     }
 
     /// A line is a machine, without the white space around it, in the file's
-    /// order and once: a blank line is none, and so is one ssh would take
-    /// for an option, or for more than one word.
+    /// order and once: a blank line is none, and one ssh would take for an
+    /// option, or for more than one word, is none and does not read.
     #[test]
     fn a_line_names_a_machine_once() {
         let text = "nixos\n\n  me@vps \t\nnixos\n-oProxyCommand=sh\nmy vps\nssh://me@vps:22\n";
-        assert_eq!(named_in(text), ["nixos", "me@vps", "ssh://me@vps:22"]);
+        let (named, unread) = named_in(text);
+        assert_eq!(named, ["nixos", "me@vps", "ssh://me@vps:22"]);
+        assert_eq!(unread, 2);
     }
 
-    /// No file names no machine, and a file names `HOSTS_MAX` at the most.
+    /// No file names no machine, and a file names `HOSTS_MAX` at the most:
+    /// the lines past those do not read.
     #[test]
     fn no_file_names_none_and_a_file_names_a_few_at_the_most() {
         let scratch = tempfile::tempdir().unwrap();
         let none = named(&scratch.path().join(FILE), &mut Troubles::default());
-        assert_eq!(none, Some(Vec::new()));
+        assert_eq!(none, Some(Named::default()));
         let many: Vec<String> = (0..HOSTS_MAX + 3).map(|n| format!("host-{n}")).collect();
-        let named = named_in(&many.join("\n"));
+        let (named, unread) = named_in(&many.join("\n"));
         assert_eq!(named.len(), HOSTS_MAX);
         assert_eq!(named.last().unwrap(), &format!("host-{}", HOSTS_MAX - 1));
+        assert_eq!(unread, 3);
     }
 
     /// ssh runs again at once after a first failure, then after a second,

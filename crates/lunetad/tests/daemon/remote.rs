@@ -154,8 +154,10 @@ fn ended(pid: u32) -> bool {
 
 /// A daemon watches each machine its hosts file names, in the file's order,
 /// through ssh: one whose daemon answers, with that daemon's host, as it
-/// changes, and one ssh cannot reach, with why, and that ssh ended so.
-/// `luneta sessions` lists the sessions of each under it.
+/// changes, and one ssh cannot reach, with why, and that ssh ended so. A
+/// line ssh would take for an option names none, and the daemon says that
+/// it could not read it. `luneta sessions` lists the sessions of each
+/// machine under it, and says so too.
 #[test]
 fn a_daemon_says_each_machine_its_hosts_file_names() {
     let here = Host::new();
@@ -164,7 +166,7 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     ssh.reaches("far", far.vars());
     let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
-    hosts(&here, "nowhere\nfar\n");
+    hosts(&here, "nowhere\n-oProxyCommand=sh\nfar\n");
     let _here = start(here.vars()).unwrap();
 
     let first = reached(&here, "far", |far| !far.sessions.is_empty());
@@ -172,7 +174,9 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     let _play = far.serve("play");
     reached(&here, "far", |far| names(far) == ["play", "work"]);
 
-    let remotes = here.host().remotes;
+    let host = here.host();
+    assert_eq!(host.unread_hosts, Some(1));
+    let remotes = host.remotes;
     let order: Vec<&str> = remotes.iter().map(|it| it.destination.as_str()).collect();
     assert_eq!(order, ["nowhere", "far"]);
     match &remotes[0].reached {
@@ -188,7 +192,39 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     let lines: Vec<&str> = said.lines().collect();
     assert!(lines[0].starts_with("nowhere/  (unreached for "), "{said}");
     let far = ["far/", "  play  (no panes listed yet)", "  work  (no panes listed yet)"];
-    assert_eq!(lines[1..], far, "{said}");
+    assert_eq!(lines[1..4], far, "{said}");
+    let unread = "(lunetad could not read all of luneta's hosts file: its log says why)";
+    assert_eq!(lines[4..], [unread], "{said}");
+}
+
+/// A hosts file that does not read leaves the machines it named as they
+/// were, and the daemon says that it could not read it, until it reads
+/// again.
+#[test]
+fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    assert_eq!(here.host().unread_hosts, Some(0));
+
+    // A folder in its place, which no one can read as a file.
+    let file = here.home.path().join(".local/state/luneta/hosts");
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    let host = eventually("the file does not read", || {
+        let host = here.host();
+        (host.unread_hosts == Some(1)).then_some(host)
+    });
+    let machines: Vec<&str> = host.remotes.iter().map(|it| it.destination.as_str()).collect();
+    assert_eq!(machines, ["far"]);
+
+    fs::remove_dir(&file).unwrap();
+    hosts(&here, "far\n");
+    eventually("the file reads", || (here.host().unread_hosts == Some(0)).then_some(()));
 }
 
 /// A machine that leaves the hosts file leaves the daemon's host, and the

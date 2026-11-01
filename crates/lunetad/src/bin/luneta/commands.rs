@@ -239,7 +239,8 @@ pub fn unread(unread: Unread) -> String {
 /// for one, and a directory git has said nothing of yet has nothing after it.
 /// Then each other machine lunetad watches, as its hosts file names it, with
 /// a `/` after it, which no session's name holds, and its sessions under it,
-/// or why it has none.
+/// or why it has none; and a word that the file names more than these, or
+/// other machines, where lunetad could not read all of it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let host = daemon.watch(WatchRequest { after: None }).await?.into_inner();
     sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "");
@@ -261,6 +262,9 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
             // A newer daemon's.
             None => println!("{machine}/  (does not read)"),
         }
+    }
+    if host.unread_hosts.is_some_and(|unread| unread > 0) {
+        println!("(lunetad could not read all of luneta's hosts file: its log says why)");
     }
     Ok(())
 }

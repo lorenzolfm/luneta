@@ -18,7 +18,7 @@ use crate::claude::Scan;
 use crate::clients::Client;
 use crate::github::Found;
 use crate::panes::{self, Pane};
-use crate::remote::{Destination, Reached};
+use crate::remote::{Destination, Named, Reached};
 use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
 
@@ -39,8 +39,8 @@ pub enum Command {
     PullRequests(BTreeMap<String, Found>),
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
-    /// The other machines the hosts file names now, in its order.
-    Hosts(Vec<Destination>),
+    /// What the hosts file names now.
+    Hosts(Named),
     /// What the watch of `destination` has of it now.
     Remote { destination: Destination, reached: Reached },
     /// Asks for the sessions zellij can be asked about, for their panes.
@@ -132,6 +132,8 @@ struct Known {
     /// What the daemon has of each other machine the hosts file names, in its
     /// order.
     remotes: Vec<(Destination, Reached)>,
+    /// How much of the hosts file named no machine as it was last read.
+    unread_hosts: u32,
     /// How many words have been said of the sessions: one as zellij could
     /// first be asked about each by its name, and one each time a shell in one
     /// says a new line, or goes.
@@ -157,6 +159,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         pull_requests: BTreeMap::new(),
         shells: Vec::new(),
         remotes: Vec::new(),
+        unread_hosts: 0,
         words: 0,
         told: HashMap::new(),
         host: api::Host::default(),
@@ -314,15 +317,16 @@ impl Known {
         !told.is_empty()
     }
 
-    /// Takes in the machines the hosts file names now. One it named before
+    /// Takes in what the hosts file names now. A machine it named before
     /// keeps what the daemon has of it, and one new to it is one the daemon
     /// is reaching.
-    fn named(&mut self, now: Vec<Destination>) {
+    fn named(&mut self, now: Named) {
         // `remote::named` names each once.
-        let unique: HashSet<&Destination> = now.iter().collect();
-        assert_eq!(unique.len(), now.len(), "a machine is named twice");
+        let unique: HashSet<&Destination> = now.machines.iter().collect();
+        assert_eq!(unique.len(), now.machines.len(), "a machine is named twice");
+        self.unread_hosts = now.unread;
         let mut before = mem::take(&mut self.remotes);
-        for destination in now {
+        for destination in now.machines {
             let reached = match before.iter().position(|(was, _)| *was == destination) {
                 Some(at) => before.swap_remove(at).1,
                 None => Reached::Reaching,
@@ -491,6 +495,7 @@ impl Known {
             unread_sockets: Some(self.unread_sockets),
             unread_files,
             remotes,
+            unread_hosts: Some(self.unread_hosts),
         }
     }
 
