@@ -113,7 +113,8 @@ pub fn script(path: &Path, text: &str) {
 /// once; and one a test had `unkept` or `gone` as zellij deletes those. As it
 /// deletes one a test had `renews`, another session is made by a name. It
 /// lets go of what it keeps of one with no socket, as of one that ended. It
-/// knows no other command.
+/// notes each go it is asked to take, for `went`, and takes none. It knows no
+/// other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -162,6 +163,10 @@ case "$*" in
             echo "Session: \"$session\" not found." >&2
             exit 2
         fi
+        exit 0
+        ;;
+    "action switch-session "* | "action focus-pane-id "*)
+        echo "$asked" >> "{panes}/went"
         exit 0
         ;;
     "delete-session "*)
@@ -239,6 +244,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// the order it was asked.
     pub fn closed(&self) -> Vec<String> {
         self.lines("closed")
+    }
+
+    /// Where zellij has been asked to take a client, each as its arguments
+    /// were, in the order it was asked.
+    pub fn went(&self) -> Vec<String> {
+        self.lines("went")
     }
 
     /// The lines of the file `name`, none while there is none.

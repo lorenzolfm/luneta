@@ -24,6 +24,72 @@ service Daemon {
   // host is no longer as the client last saw it, and otherwise as soon as the
   // host changes, or after four seconds with the host as it was.
   rpc Watch(WatchRequest) returns (Host);
+  // Has zellij take the client that last typed in a session to another
+  // session, or to a pane, as `zellij action switch-session` and
+  // `focus-pane-id` do. It answers once zellij has taken the action, which
+  // moves the client a moment after, or with what zellij said as it failed.
+  rpc Go(GoRequest) returns (GoResponse);
+  // The clients of a session, as `zellij action list-clients` lists them now.
+  rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
+  // Where a client that ended in one of a few sessions goes on, as its
+  // session went with it: the newest session that answers for its clients.
+  rpc Refuge(RefugeRequest) returns (RefugeResponse);
+}
+
+// The machine a question of zellij's is for: this daemon's own where it is
+// absent, and otherwise one of its `Host.remotes`, by its destination, whose
+// daemon this one hands the question on to, without it, through the bridge
+// it watches that machine on. One it does not reach now is answered as
+// unavailable.
+message On {
+  string destination = 1;
+}
+
+message GoRequest {
+  On on = 1;
+  // The session the client is in, where it typed last.
+  string at = 2;
+  // The session it goes to: `at` itself for a pane of it.
+  string to = 3;
+  // The pane, by its terminal's id. Absent for the session alone, where the
+  // client goes on the pane it last had the focus on.
+  optional uint32 pane = 4;
+}
+
+message GoResponse {}
+
+message ListClientsRequest {
+  On on = 1;
+  string session = 2;
+}
+
+message ListClientsResponse {
+  // By their ids.
+  repeated Client clients = 1;
+}
+
+message RefugeRequest {
+  On on = 1;
+  // The sessions the client may have been in: one, or the two it was on its
+  // way between. Its session went with it where any of them is gone.
+  repeated string seats = 2;
+}
+
+message RefugeResponse {
+  // Whether the client's session went with it, as one of `seats` is gone:
+  // where none is, it runs still, as the client detached, or the daemon
+  // cannot read all of zellij's folder, which could hold it.
+  bool went = 1;
+  // Where it went, the session to go on in. Absent where none answers, and
+  // where it did not go.
+  Refuge refuge = 2;
+}
+
+// A session that runs, and its clients, which are those it has before the
+// client that goes on there comes.
+message Refuge {
+  string session = 1;
+  repeated Client before = 2;
 }
 
 message WatchRequest {

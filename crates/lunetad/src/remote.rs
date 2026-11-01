@@ -17,12 +17,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, ErrorKind, PipeWriter, Read as _};
 use std::iter;
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt as _;
+use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 use std::str::FromStr;
 use std::sync::mpsc::{self, SyncSender};
@@ -64,6 +65,25 @@ const SAID_MAX: u64 = 4096;
 /// How long what an ssh says on its stderr waits to be heard for what the
 /// ssh before it said, so as not to say it again.
 const HEARD_BEFORE: Duration = Duration::from_secs(1);
+
+/// For how long, in seconds, the connection every ssh to a machine shares
+/// stays up once the last of them ended, for the next to take up.
+const SHARED_FOR: u32 = 60;
+
+/// How often, in seconds, the shared connection asks the machine whether it
+/// is there while it hears nothing, and how many it goes without an answer
+/// before it ends: one that stalls ends in this long, as a link does that
+/// went down, and the next ssh makes another.
+const ALIVE_EVERY: u32 = 5;
+const ALIVE_MISSES: u32 = 2;
+
+/// The longest path of a Unix socket, in bytes, on macOS, whose room for one
+/// is shorter than Linux's 108, less its terminating byte.
+const SOCKET_PATH_MAX: usize = 103;
+
+/// How much ssh adds to the path of the shared connection's socket as it
+/// makes it: a dot and 16 characters, which it then renames away.
+const SOCKET_MAKING: usize = 17;
 
 /// A machine, as ssh is told it: a line of the file, without the white space
 /// around it. One with white space or a control character in it is no
@@ -124,6 +144,87 @@ impl Reached {
         };
         api::Remote { destination: destination.0.clone(), reached: Some(reached) }
     }
+}
+
+/// The daemons of the machines this one watches, each through the bridge it
+/// watches it on, while the last question there was answered: for a
+/// client's question of one, which this one hands on.
+#[derive(Default)]
+pub struct Bridges(Mutex<HashMap<Destination, DaemonClient<Channel>>>);
+
+impl Bridges {
+    /// The daemon of `destination`, while this one reaches it.
+    pub fn to(&self, destination: &Destination) -> Option<DaemonClient<Channel>> {
+        locked(&self.0).get(destination).cloned()
+    }
+}
+
+/// `destination`'s daemon in `bridges`, from its watch's first answer to the
+/// last it had, or until the watch stops.
+struct Bridged {
+    bridges: Arc<Bridges>,
+    destination: Destination,
+}
+
+impl Bridged {
+    fn reached(&self, daemon: &DaemonClient<Channel>) {
+        locked(&self.bridges.0).insert(self.destination.clone(), daemon.clone());
+    }
+
+    fn lost(&self) {
+        locked(&self.bridges.0).remove(&self.destination);
+    }
+}
+
+impl Drop for Bridged {
+    fn drop(&mut self) {
+        self.lost();
+    }
+}
+
+/// The options that have an ssh to `destination` share one connection with
+/// every other that luneta and its daemon run to it, on a socket in luneta's
+/// runtime `folder`: the first to run makes it, and leaves it to run in the
+/// background for as long as any uses it, and `SHARED_FOR` after. So a
+/// client of zellij's that luneta runs there through ssh comes up with no
+/// login of its own, and what luneta has the daemon there do goes after the
+/// keys it typed, on the one connection. One that stalls ends, as
+/// `ALIVE_EVERY` says, for the next ssh to make another.
+///
+/// The socket is named for the destination, short, as the path of a Unix
+/// socket must be, and as ssh adds to it as it makes one: macOS's `TMPDIR`,
+/// where the folder is there, leaves no room for ssh's own `%C`. A folder
+/// that leaves no room either has none: each ssh then has a connection of
+/// its own, as ssh with a socket's path too long for it would not run.
+#[must_use]
+pub fn sharing(folder: &Path, destination: &Destination) -> Vec<OsString> {
+    // FNV-1a, which names it alike in every build of luneta and its daemon.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in destination.0.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let name = format!("/ssh-{hash:016x}");
+    let folder = folder.as_os_str().as_bytes();
+    if folder.len() + name.len() + SOCKET_MAKING > SOCKET_PATH_MAX {
+        return Vec::new();
+    }
+    // ssh reads a `%` in the path as one of its own tokens, and `%%` as `%`.
+    let mut path = Vec::new();
+    for &byte in folder {
+        path.extend_from_slice(if byte == b'%' { b"%%" } else { std::slice::from_ref(&byte) });
+    }
+    path.extend_from_slice(name.as_bytes());
+    let mut control = OsString::from("ControlPath=");
+    control.push(OsStr::from_bytes(&path));
+    let options = [
+        OsString::from("ControlMaster=auto"),
+        control,
+        OsString::from(format!("ControlPersist={SHARED_FOR}")),
+        OsString::from(format!("ServerAliveInterval={ALIVE_EVERY}")),
+        OsString::from(format!("ServerAliveCountMax={ALIVE_MISSES}")),
+    ];
+    options.into_iter().flat_map(|option| [OsString::from("-o"), option]).collect()
 }
 
 /// What the hosts file names, as it was last read.
@@ -192,8 +293,16 @@ fn unreached(error: &(dyn Error + 'static)) -> (String, Stopped) {
 /// it, while `kept` says whether this daemon runs for reasons of its own. The
 /// file is read once before this returns, and the core told which machines it
 /// names: the daemon's first answer has each, as one it is reaching. Then it
-/// is read again as it changes, and at least every `sweep`.
-pub fn follow(core: SyncSender<Command>, kept: Receiver<bool>, sweep: Duration) -> io::Result<()> {
+/// is read again as it changes, and at least every `sweep`. Each machine's
+/// daemon is in `bridges` while it is reached, and its ssh shares its
+/// connection, as `sharing` says, on a socket in luneta's runtime `folder`.
+pub fn follow(
+    core: SyncSender<Command>,
+    kept: Receiver<bool>,
+    sweep: Duration,
+    folder: PathBuf,
+    bridges: Arc<Bridges>,
+) -> io::Result<()> {
     let file = match state::path(FILE) {
         Ok(file) => file,
         Err(unset) => {
@@ -240,7 +349,9 @@ pub fn follow(core: SyncSender<Command>, kept: Receiver<bool>, sweep: Duration) 
             if watched.iter().any(|(watched, _)| watched == destination) {
                 continue;
             }
-            match watch(destination.clone(), core.clone(), kept.clone()) {
+            let bridges = Arc::clone(&bridges);
+            let daemon = Bridged { bridges, destination: destination.clone() };
+            match watch(daemon, core.clone(), kept.clone(), folder.clone()) {
                 Ok(ends) => {
                     unwatched.remove(destination);
                     watched.push((destination.clone(), ends));
@@ -310,18 +421,21 @@ pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
     named
 }
 
-/// Watches `destination` from a thread of its own, until what this returns
-/// is dropped, once the thread has the runtime it watches on. It makes that
-/// itself, and drops it: the first read is made on the daemon's own runtime,
-/// where another one dropped would panic.
+/// Watches the machine `bridged` is of from a thread of its own, until what
+/// this returns is dropped, once the thread has the runtime it watches on. It
+/// makes that itself, and drops it: the first read is made on the daemon's
+/// own runtime, where another one dropped would panic. Its ssh shares its
+/// connection on a socket in `folder`.
 fn watch(
-    destination: Destination,
+    bridged: Bridged,
     core: SyncSender<Command>,
     kept: Receiver<bool>,
+    folder: PathBuf,
 ) -> io::Result<oneshot::Sender<()>> {
     let (ends, ending) = oneshot::channel();
     let (built, building) = mpsc::sync_channel(1);
-    thread::Builder::new().name(format!("remote {destination}")).spawn(move || {
+    let name = format!("remote {}", bridged.destination);
+    thread::Builder::new().name(name).spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -333,7 +447,7 @@ fn watch(
         // What runs on the runtime goes with it as the thread ends: the
         // connection to the machine's daemon, and its ssh, killed as it goes.
         runtime.block_on(async move {
-            tokio::spawn(watched(destination, core, kept));
+            tokio::spawn(watched(bridged, core, kept, folder));
             let _ = ending.await;
         });
     })?;
@@ -351,8 +465,15 @@ fn watch(
 /// unreached, and ssh is run again after a while, longer each time it fails.
 /// It asks only while `kept` says that this daemon runs for reasons of its
 /// own, which each question says, and which only then keeps that one running
-/// too.
-async fn watched(destination: Destination, core: SyncSender<Command>, mut kept: Receiver<bool>) {
+/// too. The machine's daemon is in the bridges while its last question was
+/// answered.
+async fn watched(
+    bridged: Bridged,
+    core: SyncSender<Command>,
+    mut kept: Receiver<bool>,
+    folder: PathBuf,
+) {
+    let destination = bridged.destination.clone();
     let mut daemon = None;
     // The host as last told, as its daemon versions it.
     let mut after = None;
@@ -370,10 +491,11 @@ async fn watched(destination: Destination, core: SyncSender<Command>, mut kept: 
             return;
         }
         let is_kept = *kept.borrow();
-        let asked = asked(&destination, &mut daemon, after, is_kept, &said).await;
+        let asked = asked(&destination, &mut daemon, after, is_kept, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
             Err((why, stopped)) => {
+                bridged.lost();
                 failures = failures.saturating_add(1);
                 if failures > 1 || after.is_none() {
                     // Asked afresh once reached again: the host as last told
@@ -388,6 +510,9 @@ async fn watched(destination: Destination, core: SyncSender<Command>, mut kept: 
                 continue;
             },
         };
+        if let Some(daemon) = &daemon {
+            bridged.reached(daemon);
+        }
         failures = 0;
         word = SystemTime::now();
         if after == Some(version) {
@@ -435,17 +560,19 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
 /// or why it answers none. It is told whether this daemon is `kept`. One that
 /// failed a question is kept: it makes a connection afresh for the next. What
 /// ssh says goes in the log as `heard` says it, with what it `said` before.
+/// ssh shares its connection on a socket in `folder`.
 async fn asked(
     destination: &Destination,
     daemon: &mut Option<DaemonClient<Channel>>,
     after: Option<api::Version>,
     kept: bool,
     said: &Arc<Mutex<Said>>,
+    folder: &Path,
 ) -> Result<(api::Version, api::Host), (String, Stopped)> {
     let daemon = if let Some(daemon) = daemon {
         daemon
     } else {
-        let reached = client::through(ssh(destination, said)).await;
+        let reached = client::through(ssh(destination, said, folder)).await;
         daemon.insert(reached.map_err(|error| unreached(&error))?)
     };
     let watched = daemon.watch(api::WatchRequest { after, kept: Some(kept) }).await;
@@ -459,17 +586,21 @@ async fn asked(
 
 /// What runs `luneta bridge` on `destination`, made afresh for each
 /// connection: with no terminal, which would mangle what the daemons say, and
-/// no prompt, which no one would see. What each says on its stderr goes in
-/// the log as `heard` says it, with what the one before it `said`.
+/// no prompt, which no one would see, on the connection it shares, as
+/// `sharing` says, on a socket in `folder`. What each says on its stderr goes
+/// in the log as `heard` says it, with what the one before it `said`.
 fn ssh(
     destination: &Destination,
     said: &Arc<Mutex<Said>>,
+    folder: &Path,
 ) -> impl FnMut() -> Process + Send + 'static {
+    let sharing = sharing(folder, destination);
     let destination = destination.0.clone();
     let said = Arc::clone(said);
     move || {
         let mut ssh = Process::new("ssh");
-        ssh.args(["-T", "-o", "BatchMode=yes", &destination, "luneta", "bridge"]);
+        ssh.args(["-T", "-o", "BatchMode=yes"]).args(&sharing);
+        ssh.args([&destination, "luneta", "bridge"]);
         // Where it can't be heard so, it says it on the daemon's stderr, as
         // its own runs.
         if let Ok(saying) = heard(&destination, &said) {
@@ -586,6 +717,28 @@ mod tests {
         assert_eq!(named.len(), HOSTS_MAX);
         assert_eq!(named.last().unwrap(), &format!("host-{}", HOSTS_MAX - 1));
         assert_eq!(unread, 3);
+    }
+
+    /// Each ssh to a machine shares one socket, another machine's another,
+    /// in luneta's runtime folder, with a `%` there spelled as ssh reads it
+    /// back. A folder as long as macOS's `TMPDIR` has room for it; one that
+    /// leaves ssh none to make it has none, and each ssh runs alone.
+    #[test]
+    fn each_ssh_to_a_machine_shares_a_socket_where_there_is_room_for_one() {
+        let path = |folder: &str, destination: &str| -> Option<String> {
+            let options = sharing(Path::new(folder), &destination.parse().unwrap());
+            let options: Vec<String> =
+                options.into_iter().map(|it| it.into_string().unwrap()).collect();
+            options.iter().find_map(|it| it.strip_prefix("ControlPath=").map(str::to_owned))
+        };
+        let tmpdir = "/var/folders/7k/h0b8qt5x1y9b0b1k1q3j2n5h0000gn/T/luneta";
+        let nixos = path(tmpdir, "nixos").unwrap();
+        assert!(nixos.starts_with(&format!("{tmpdir}/ssh-")), "{nixos}");
+        assert_eq!(path(tmpdir, "nixos"), Some(nixos.clone()));
+        assert_ne!(path(tmpdir, "me@vps"), Some(nixos));
+        let odd = path("/run/user/1000/50%/luneta", "nixos").unwrap();
+        assert!(odd.starts_with("/run/user/1000/50%%/luneta/ssh-"), "{odd}");
+        assert_eq!(path(&format!("/{}", "x".repeat(70)), "nixos"), None);
     }
 
     /// ssh runs again at once after a first failure, then after a second,

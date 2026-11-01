@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse, Version, WatchRequest,
+    self, GoRequest, GoResponse, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse,
+    ListClientsRequest, ListClientsResponse, RefugeRequest, RefugeResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -538,6 +539,21 @@ impl Daemon for StandIn {
     async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
         let version = Version { pid: self.pid, seq: 0 };
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
+    }
+
+    async fn go(&self, _: Request<GoRequest>) -> Result<Response<GoResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn list_clients(
+        &self,
+        _: Request<ListClientsRequest>,
+    ) -> Result<Response<ListClientsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn refuge(&self, _: Request<RefugeRequest>) -> Result<Response<RefugeResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 }
 
