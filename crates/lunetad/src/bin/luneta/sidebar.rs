@@ -517,16 +517,7 @@ enum Row {
         /// What it goes by: this machine's host's name, or another's
         /// destination, as luneta's hosts file spells it.
         name: String,
-        under: Under,
-        /// Why lunetad says nothing of its sessions, while it does not.
-        away: Option<Away>,
-        /// How many of its agents wait for you, whether one of its panes has
-        /// the dot, and whether one is at work.
-        waiting: usize,
-        dot: bool,
-        busy: bool,
-        /// Whether luneta's zellij is in one of its sessions.
-        here: bool,
+        heads: Heads,
     },
     Session {
         machine: Machine,
@@ -619,13 +610,14 @@ impl Row {
 
     /// Whether the highlight stops on it: a pane, or a session that stands in
     /// for its panes, folded or with none to list, and a machine's header
-    /// that stands in for its sessions so. A session's row heads its panes,
-    /// and is no place to go, nor is a machine's header that heads its
-    /// sessions.
+    /// that stands in for its sessions so, or for none lunetad has. A
+    /// session's row heads its panes, and is no place to go, nor is a
+    /// machine's header that heads its sessions.
     fn stops(&self) -> bool {
         match self {
-            Row::Machine { under, .. } | Row::Session { under, .. } => *under != Under::Rows,
-            Row::Pane { .. } => true,
+            Row::Machine { heads: Heads::Sessions { under, .. }, .. }
+            | Row::Session { under, .. } => *under != Under::Rows,
+            Row::Machine { heads: Heads::Away(_), .. } | Row::Pane { .. } => true,
         }
     }
 }
@@ -640,6 +632,25 @@ enum Under {
     Folded,
     /// None, as zellij has listed none, or lunetad has none of the machine.
     Empty,
+}
+
+/// What a machine's header stands over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Heads {
+    /// None of its sessions, as lunetad has none of them to say, for this
+    /// reason.
+    Away(Away),
+    /// Its sessions, as lunetad says them.
+    Sessions {
+        under: Under,
+        /// How many of its agents wait for you, whether one of its panes has
+        /// the dot, and whether one is at work.
+        waiting: usize,
+        dot: bool,
+        busy: bool,
+        /// Whether luneta's zellij is in one of its sessions.
+        here: bool,
+    },
 }
 
 /// Why a machine's header lists none of its sessions: lunetad has none of
@@ -1516,16 +1527,7 @@ impl Sidebar {
                 // A search finds none of its sessions.
                 Err(_) if finder.is_some() => continue,
                 Err(away) => {
-                    rows.push(Row::Machine {
-                        machine,
-                        name,
-                        under: Under::Empty,
-                        away: Some(away),
-                        waiting: 0,
-                        dot: false,
-                        busy: false,
-                        here: false,
-                    });
+                    rows.push(Row::Machine { machine, name, heads: Heads::Away(away) });
                     continue;
                 },
             };
@@ -1535,16 +1537,14 @@ impl Sidebar {
             let head = rows.len();
             // Its header, which takes what its sessions say once they are
             // made.
-            rows.push(Row::Machine {
-                machine: machine.clone(),
-                name: name.clone(),
+            let heads = Heads::Sessions {
                 under: Under::Empty,
-                away: None,
                 waiting: 0,
                 dot: false,
                 busy: false,
                 here: false,
-            });
+            };
+            rows.push(Row::Machine { machine: machine.clone(), name: name.clone(), heads });
             let (mut machine_waiting, mut machine_dot, mut machine_busy) = (0, false, false);
             let mut machine_here = false;
             let agents = seated(reached.agents, reached.sessions);
@@ -1720,16 +1720,14 @@ impl Sidebar {
             } else {
                 Under::Empty
             };
-            rows[head] = Row::Machine {
-                machine,
-                name,
+            let heads = Heads::Sessions {
                 under,
-                away: None,
                 waiting: machine_waiting,
                 dot: machine_dot,
                 busy: machine_busy,
                 here: machine_here,
             };
+            rows[head] = Row::Machine { machine, name, heads };
         }
         self.rows = rows;
         self.counts = counts;
@@ -1844,11 +1842,17 @@ impl Sidebar {
     /// Folds the session of the highlighted row, or unfolds it, or on a
     /// machine's header, the machine. A session's row that is folded already
     /// folds its machine, as `h` goes a level up. The highlight goes to the
-    /// row of what folds.
+    /// row of what folds. The header of a machine lunetad has nothing of has
+    /// nothing under it to fold, and its fold stays as it was, for when
+    /// lunetad has its sessions.
     fn fold(&mut self, folded: bool) {
         let Some(spot) = self.cursor.clone() else {
             return;
         };
+        let away = |row: &Row| matches!(row, Row::Machine { heads: Heads::Away(_), .. });
+        if self.row_of(&spot).is_some_and(|at| away(&self.rows[at])) {
+            return;
+        }
         let machine = spot.machine();
         let session = spot.place().map(|place| place.listed().name.clone()).filter(|session| {
             let up = folded && matches!(spot.place(), Some(Place::Session(_)));
@@ -3283,7 +3287,7 @@ impl Sidebar {
             return None;
         }
         match &self.rows[self.cursor_index()?] {
-            Row::Machine { name, away: Some(Away::Unreached { why, .. }), .. } => {
+            Row::Machine { name, heads: Heads::Away(Away::Unreached { why, .. }), .. } => {
                 Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME))
             },
             Row::Machine { .. } | Row::Session { .. } | Row::Pane { .. } => None,
@@ -3700,7 +3704,7 @@ pub fn frame(now: SystemTime) -> usize {
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
-        Row::Machine { away: Some(away), name, .. } => {
+        Row::Machine { name, heads: Heads::Away(away), .. } => {
             // Dimmed, with nothing under it: what stopped lunetad reaching
             // it, and since when.
             let (word, since) = away.said();
@@ -3717,7 +3721,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 Span::styled(age, dim),
             ])]
         },
-        Row::Machine { name, under, waiting, dot, busy, here, away: None, .. } => {
+        Row::Machine { name, heads: Heads::Sessions { under, waiting, dot, busy, here }, .. } => {
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
@@ -6900,6 +6904,30 @@ mod tests {
         type_in(&mut sidebar, "k");
         sidebar.focus(Keys::Zellij);
         assert!(!screen(&mut sidebar, false, 96, 24).contains(&why.to_owned()));
+    }
+
+    /// The header of a machine lunetad does not reach has nothing under it
+    /// to fold: `h`, `l`, `Space`, `Enter` and a click leave its fold as it
+    /// was, for when lunetad reaches it.
+    #[test]
+    fn an_unreached_machine_s_fold_stays_as_it_was() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "Gk");
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        assert_eq!(sidebar.cursor, Some(Spot::Machine(vps.clone())));
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let area = Rect::new(0, 0, 32, 24);
+        for folded in [false, true] {
+            sidebar.folds.set(Fold::Machine(&vps), folded);
+            type_in(&mut sidebar, "hl ");
+            assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
+            let lines = screen(&mut sidebar, true, area.width, area.height);
+            assert_eq!(lines[9], " ▸ me@vps · unreachable     1m");
+            assert_eq!(click(&mut sidebar, 20, 9, area), Asked::Take);
+            assert_eq!(sidebar.folds.contains(Fold::Machine(&vps)), folded);
+        }
     }
 
     /// `n m` on a row the menu opens on, this machine's or a machine's
