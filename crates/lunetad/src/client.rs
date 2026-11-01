@@ -46,6 +46,16 @@ const ROUND_TRIP: Duration = Duration::from_secs(5);
 /// `ROUND_TRIP`.
 const ANSWER_THROUGH: Duration = ANSWER.saturating_add(ROUND_TRIP);
 
+/// How long a client through a command hears nothing from the daemon before
+/// it pings it, to tell a way that stalled, as ssh's does over a link that
+/// dropped without a word: a ping unanswered for `ROUND_TRIP` closes the
+/// connection, where a question that times out leaves it open, for the next
+/// question to time out on too. Short enough that the connection closes
+/// before a question on it would time out.
+const QUIET: Duration = Duration::from_secs(3);
+
+const _: () = assert!(QUIET.as_millis() + ROUND_TRIP.as_millis() < ANSWER_THROUGH.as_millis());
+
 /// The most of what a command says in the place of `BRIDGED` that a client
 /// keeps, to say so.
 const SAID_MAX: u64 = 4096;
@@ -71,16 +81,22 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
 /// command's stdin and stdout, as `ssh <host> luneta bridge` reaches the
 /// daemon of `<host>`. Each connection runs a command of its own, which is
 /// killed as the connection goes: one that ends is made afresh for the next
-/// question. A connection is made once the command says `BRIDGED`, and why
-/// one is not is an `Unbridged`, among the error's sources. Its stderr is the
-/// caller's.
+/// question, and so is one that stalls, once the daemon has been `QUIET` on
+/// it and answers no ping. A connection is made once the command says
+/// `BRIDGED`, and why one is not is an `Unbridged`, among the error's
+/// sources. Its stderr is the caller's.
 pub async fn through<F>(mut command: F) -> Result<DaemonClient<Channel>, Error>
 where
     F: FnMut() -> std::process::Command + Send + 'static,
 {
+    // Pinged between questions too, so that a stalled way is not found by the
+    // next question, which would wait on it.
     let channel = Endpoint::from_static("http://lunetad")
         .connect_timeout(REACH)
         .timeout(ANSWER_THROUGH)
+        .http2_keep_alive_interval(QUIET)
+        .keep_alive_timeout(ROUND_TRIP)
+        .keep_alive_while_idle(true)
         .connect_with_connector(service_fn(move |_: Uri| {
             let command = command();
             async move { Piped::bridged(command).await.map(TokioIo::new) }

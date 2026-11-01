@@ -80,6 +80,29 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
     });
 }
 
+/// A client through a command that stalls, as ssh's does over a link that
+/// dropped without a word, closes the connection once the daemon answers no
+/// ping on it, and asks the next question through a command made afresh: a
+/// question that times out would leave it open, for the next to time out on.
+#[test]
+fn a_client_makes_a_command_afresh_for_one_that_stalls() {
+    let host = Host::new();
+    let daemon = start(host.vars()).unwrap();
+    // The first says it reached the daemon, and hands on nothing.
+    let mut stalled = Some(sh("echo lunetad; exec sleep 60"));
+    let mut bridge = bridge(&host);
+    let commands = move || match stalled.take() {
+        Some(mut stalled) => stalled(),
+        None => bridge(),
+    };
+    runtime().block_on(async {
+        let mut bridged = lunetad::through(commands).await.unwrap();
+        bridged.info(InfoRequest {}).await.expect_err("a stalled command answered");
+        let info = bridged.info(InfoRequest {}).await.unwrap().into_inner();
+        assert_eq!(info.pid, daemon.pid());
+    });
+}
+
 /// `luneta bridge` starts a daemon where none runs, as `luneta watch` does,
 /// so that a client on another host reaches one whether or not a luneta
 /// there started it: the one that then answers on the socket.
