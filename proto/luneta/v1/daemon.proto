@@ -112,6 +112,41 @@ message Remote {
     // Why, in words, on one line: what ssh says of it is in the daemon's
     // log.
     string why = 2;
+    // What stopped it, in a word: one of these, always. A client that finds
+    // none has a newer daemon's.
+    oneof stopped {
+      // ssh did not start on this machine, or what it said could not be
+      // read.
+      Unstarted unstarted = 3;
+      // ssh ended before it reached lunetad there.
+      Ended ended = 4;
+      // Something there said what is not `luneta bridge`'s word first, as a
+      // login shell that prints does.
+      Said said = 5;
+      // ssh neither reached lunetad there nor ended in 10 seconds, as it
+      // does that waits on a machine that does not answer.
+      Silent silent = 6;
+      // ssh reached lunetad there, and what came after did not do: the
+      // connection broke, or its daemon answered with an error, or with what
+      // this one does not read.
+      Lost lost = 7;
+    }
+
+    message Unstarted {}
+
+    message Ended {
+      // Its exit code: 255 where ssh did not get in, 127 where the shell
+      // there found no luneta, and 1 where luneta there could not reach its
+      // daemon, or is older than `luneta bridge`, and takes the word for a
+      // session's name. Absent where a signal ended it.
+      optional int32 code = 1;
+    }
+
+    message Said {}
+
+    message Silent {}
+
+    message Lost {}
   }
 }
 

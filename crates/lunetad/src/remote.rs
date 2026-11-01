@@ -12,10 +12,12 @@
 //! change to the first one's.
 
 use std::collections::HashSet;
+use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, ErrorKind};
+use std::iter;
 use std::path::Path;
 use std::process::Command as Process;
 use std::sync::mpsc::SyncSender;
@@ -27,11 +29,13 @@ use tokio::sync::oneshot;
 use tonic::transport::Channel;
 
 use crate::api::daemon_client::DaemonClient;
-use crate::api::{self, remote};
+use crate::api::remote::{self, unreached};
+use crate::api;
+use crate::client::{self, Unbridged};
 use crate::core::Command;
 use crate::log::{self, causes};
+use crate::state;
 use crate::watch::{self, Troubles};
-use crate::{client, state};
 
 /// The file, in luneta's state folder.
 const FILE: &str = "hosts";
@@ -83,7 +87,7 @@ pub enum Reached {
     /// Its host, as its daemon last said it.
     Host(remote::Host),
     /// Nothing, since its daemon last answered, or since the watch began.
-    Unreached { since: SystemTime, why: String },
+    Unreached { since: SystemTime, why: String, stopped: Stopped },
 }
 
 impl Reached {
@@ -91,13 +95,63 @@ impl Reached {
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(remote::Reaching {}),
             Reached::Host(host) => remote::Reached::Host(host.clone()),
-            Reached::Unreached { since, why } => remote::Reached::Unreached(remote::Unreached {
-                since: Some((*since).into()),
-                why: why.clone(),
-            }),
+            Reached::Unreached { since, why, stopped } => {
+                remote::Reached::Unreached(remote::Unreached {
+                    since: Some((*since).into()),
+                    why: why.clone(),
+                    stopped: Some(stopped.to_api()),
+                })
+            },
         };
         api::Remote { destination: destination.0.clone(), reached: Some(reached) }
     }
+}
+
+/// What stopped the daemon from reaching a machine, in a word, as a client
+/// would say what to do of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// ssh did not start, or what it said could not be read.
+    Unstarted,
+    /// ssh ended before it reached lunetad there, with its exit code: none
+    /// where a signal ended it.
+    Ended(Option<i32>),
+    /// Something there said what is not the bridge's word first.
+    Said,
+    /// ssh neither reached lunetad there nor ended within `client::REACH`.
+    Silent,
+    /// ssh reached lunetad there, and what came after did not do.
+    Lost,
+}
+
+impl Stopped {
+    /// What stopped the daemon, as the `Unbridged` among the sources of
+    /// `error` says: where there is none, ssh reached lunetad.
+    fn of(error: &(dyn Error + 'static)) -> Stopped {
+        let mut sources = iter::successors(Some(error), |&error| error.source());
+        match sources.find_map(|error| error.downcast_ref::<Unbridged>()) {
+            Some(Unbridged::Io(_)) => Stopped::Unstarted,
+            Some(Unbridged::Ended(ended)) => Stopped::Ended(ended.code()),
+            Some(Unbridged::Said(_)) => Stopped::Said,
+            Some(Unbridged::Silent) => Stopped::Silent,
+            None => Stopped::Lost,
+        }
+    }
+
+    fn to_api(self) -> unreached::Stopped {
+        match self {
+            Stopped::Unstarted => unreached::Stopped::Unstarted(unreached::Unstarted {}),
+            Stopped::Ended(code) => unreached::Stopped::Ended(unreached::Ended { code }),
+            Stopped::Said => unreached::Stopped::Said(unreached::Said {}),
+            Stopped::Silent => unreached::Stopped::Silent(unreached::Silent {}),
+            Stopped::Lost => unreached::Stopped::Lost(unreached::Lost {}),
+        }
+    }
+}
+
+/// Why `error` leaves a machine unreached: in words, and in a word.
+fn unreached(error: &(dyn Error + 'static)) -> (String, Stopped) {
+    (causes(error), Stopped::of(error))
 }
 
 /// Watches each machine the file names, from a thread of its own, and tells
@@ -222,13 +276,13 @@ async fn watched(destination: Destination, core: SyncSender<Command>) {
     loop {
         let (version, host) = match asked(&destination, &mut daemon, after).await {
             Ok(answered) => answered,
-            Err(why) => {
+            Err((why, stopped)) => {
                 failures = failures.saturating_add(1);
                 if failures > 1 || after.is_none() {
                     // Asked afresh once reached again: the host as last told
                     // is no longer what the core has.
                     after = None;
-                    let unreached = Reached::Unreached { since: word, why };
+                    let unreached = Reached::Unreached { since: word, why, stopped };
                     if !told(&core, &destination, unreached) {
                         return;
                     }
@@ -279,26 +333,26 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
 }
 
 /// What the daemon of `destination` answers `Watch` after `after`, and its
-/// version, through the client in `daemon`, made first where there is none.
-/// One that failed a question is kept: it makes a connection afresh for the
-/// next.
+/// version, through the client in `daemon`, made first where there is none,
+/// or why it answers none. One that failed a question is kept: it makes a
+/// connection afresh for the next.
 async fn asked(
     destination: &Destination,
     daemon: &mut Option<DaemonClient<Channel>>,
     after: Option<api::Version>,
-) -> Result<(api::Version, api::Host), String> {
+) -> Result<(api::Version, api::Host), (String, Stopped)> {
     let daemon = if let Some(daemon) = daemon {
         daemon
     } else {
         let reached = client::through(ssh(destination)).await;
-        daemon.insert(reached.map_err(|error| causes(&error))?)
+        daemon.insert(reached.map_err(|error| unreached(&error))?)
     };
     let watched = daemon.watch(api::WatchRequest { after }).await;
-    let host = watched.map_err(|status| causes(&status))?.into_inner();
+    let host = watched.map_err(|status| unreached(&status))?.into_inner();
     // One with no version would be asked after again at once, as a first
     // look, for as long as it answers so.
     let unversioned = "an answer with no version, which this lunetad does not read";
-    let version = host.version.ok_or(unversioned)?;
+    let version = host.version.ok_or_else(|| (unversioned.to_owned(), Stopped::Lost))?;
     Ok((version, host))
 }
 

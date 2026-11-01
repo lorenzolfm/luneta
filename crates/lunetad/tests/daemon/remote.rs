@@ -6,8 +6,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::WatchRequest;
 
@@ -80,6 +81,11 @@ exec "{to}/$destination"
         script(&self.to.join(destination), &text);
     }
 
+    /// Has ssh reach `destination` no more, as one that cannot resolve it.
+    fn unreaches(&self, destination: &str) {
+        fs::remove_file(self.to.join(destination)).unwrap();
+    }
+
     /// The pids of the bridges ssh has run to `destination`, in turn.
     fn bridges(&self, destination: &str) -> Vec<u32> {
         let path = self.to.join(format!("{destination}.bridges"));
@@ -119,6 +125,18 @@ fn reached(
     })
 }
 
+/// What `host`'s daemon has of the machine it watches as `destination`, once
+/// it is unreached.
+fn unreached(host: &Host, destination: &str) -> remote::Unreached {
+    eventually(&format!("{destination} is unreached"), || {
+        let remote = host.host().remotes.into_iter().find(|it| it.destination == destination)?;
+        match remote.reached? {
+            Reached::Unreached(unreached) => Some(unreached),
+            _ => None,
+        }
+    })
+}
+
 /// The names of the sessions of the machine `host`, in order.
 fn names(host: &remote::Host) -> Vec<&str> {
     let mut names: Vec<&str> = host.sessions.iter().map(|it| it.name.as_str()).collect();
@@ -136,7 +154,7 @@ fn ended(pid: u32) -> bool {
 
 /// A daemon watches each machine its hosts file names, in the file's order,
 /// through ssh: one whose daemon answers, with that daemon's host, as it
-/// changes, and one ssh cannot reach, with why.
+/// changes, and one ssh cannot reach, with why, and that ssh ended so.
 /// `luneta sessions` lists the sessions of each under it.
 #[test]
 fn a_daemon_says_each_machine_its_hosts_file_names() {
@@ -159,7 +177,8 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     assert_eq!(order, ["nowhere", "far"]);
     match &remotes[0].reached {
         Some(Reached::Unreached(unreached)) => {
-            assert!(unreached.why.contains("exit status: 255"), "{}", unreached.why);
+            let ended = Stopped::Ended(unreached::Ended { code: Some(255) });
+            assert_eq!(unreached.stopped, Some(ended), "{}", unreached.why);
         },
         other => panic!("nowhere is {other:?}"),
     }
@@ -210,6 +229,29 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
     let _later = far.serve("later");
     reached(&here, "far", |far| names(far) == ["later"]);
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
+}
+
+/// A machine whose daemon ends, where ssh no longer reaches, is unreached
+/// since its daemon last answered, as ssh ended that tried it again.
+#[test]
+fn a_machine_ssh_no_longer_reaches_is_unreached_since_it_last_answered() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.reaches("far", far.vars());
+    let far_daemon = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    ssh.unreaches("far");
+    let gone = SystemTime::now();
+    drop(far_daemon);
+    let unreached = unreached(&here, "far");
+    let ssh_ended = Stopped::Ended(unreached::Ended { code: Some(255) });
+    assert_eq!(unreached.stopped, Some(ssh_ended), "{}", unreached.why);
+    let since = SystemTime::try_from(unreached.since.unwrap()).unwrap();
+    assert!(since <= gone, "unreached since {since:?}, after its daemon ended");
 }
 
 /// Two daemons that watch each other come to rest: each says the other's
