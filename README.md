@@ -957,10 +957,13 @@ system's packages on NixOS and nix-darwin, with `programs.fish.enable`: there,
 installed as above, every fish is hooked, and needs nothing in its config.
 Anywhere else, copy the file to `~/.config/fish/conf.d/luneta.fish`. fish
 reads one file of a name, and yours before the package's, so a copy of your
-own there hooks the shell once, as yours says.
+own there hooks the shell once, as yours says, and the package's never does.
+Where the package's is read, delete a copy made before luneta brought the
+hook: it stays the hook it was then, and one from before `ready` leaves a
+shell that has run nothing yet as one with no hook.
 
 A shell started before the hook was there has none: start it again, or
-`source` the file in it.
+`source` the file in it, after which it is ready.
 
 The hook keeps a file for each shell, of one line, at
 `$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>.<started>`, or under
