@@ -157,6 +157,8 @@ const UNSURE_PANE: &str = "menu: luneta cannot tell yet which of the session's c
                            go to a pane from the sidebar";
 /// zellij has the focus on a plugin's pane.
 const PLUGIN_PANE: &str = "menu: zellij is on a plugin's pane; the menu opens over a terminal's";
+/// zellij's client is on another machine, whose panes have no menu yet.
+const AWAY_PANE: &str = "menu: luneta's zellij is on another machine, whose panes have no menu yet";
 /// The daemon lists more than one session of the name zellij is in.
 const TWIN_SESSIONS: &str = "menu: lunetad lists more than one session of the name zellij is in, \
                              and luneta cannot tell which it is";
@@ -762,8 +764,10 @@ fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
 pub enum Asked {
     /// Nothing: draw again, at most.
     Nothing,
-    /// Take zellij's client there.
+    /// Take zellij's client there, on this machine.
     Go(Place),
+    /// Take zellij's client there, on another machine.
+    GoRemote(Destination, Place),
     /// Take the focus from zellij, as a click on the sidebar does.
     Take,
     /// Give the focus back to zellij.
@@ -872,6 +876,9 @@ pub struct Sidebar {
     /// The session luneta sent its zellij to, until zellij titles luneta's
     /// terminal after.
     sent: Option<Sent>,
+    /// The machine luneta's zellij's client runs on, whose sessions `title`,
+    /// `sent` and `own` are of.
+    on: Machine,
     /// The sessions folded, by name.
     folds: Folds,
     /// What you saw in each pane, and the panes you marked unread.
@@ -1042,7 +1049,7 @@ impl Sidebar {
         if look.is_none()
             && let Some(session) = self.own.session()
         {
-            let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+            let listed = clients(self.on_sessions(), session).map(<[Client]>::to_vec);
             self.own.heard(listed.as_deref(), Instant::now());
         }
         self.rebuild();
@@ -1063,7 +1070,7 @@ impl Sidebar {
     pub fn ticked(&mut self, now: SystemTime, at: Instant, watched: bool) {
         self.hold(at);
         if let Some(session) = self.own.session() {
-            let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+            let listed = clients(self.on_sessions(), session).map(<[Client]>::to_vec);
             let pane = self.own.pane();
             self.own.heard(listed.as_deref(), at);
             if self.own.pane() != pane {
@@ -1215,7 +1222,7 @@ impl Sidebar {
         {
             sent.landed = true;
         }
-        let listed = self.own.session().and_then(|session| clients(self.host.as_ref(), session));
+        let listed = self.own.session().and_then(|session| clients(self.on_sessions(), session));
         let listed = listed.map(<[Client]>::to_vec);
         if self.own.looked(looked, listed.as_deref(), Instant::now()) {
             self.notify("zellij did not take its client to the pane".to_owned());
@@ -1239,7 +1246,7 @@ impl Sidebar {
     /// luneta takes its zellij to `place`, as `went` says, and the session
     /// it leaves for another `ends` once it has left it.
     fn goes(&mut self, place: &Place, ends: bool) -> Option<Look> {
-        let listed = clients(self.host.as_ref(), place.session()).map(<[Client]>::to_vec);
+        let listed = clients(self.on_sessions(), place.session()).map(<[Client]>::to_vec);
         let now = Instant::now();
         let look = self.own.went(place.session(), place.pane(), listed.as_deref(), now);
         if self.here() == Some(place.session()) {
@@ -1301,19 +1308,51 @@ impl Sidebar {
         Some(self.came(&here))
     }
 
+    /// A client of `session` on `machine` takes the place of luneta's
+    /// zellij's: one luneta starts there as it goes to another machine, or
+    /// back, or as the one it had there ended. The machine is where luneta's
+    /// zellij is from now on, and the client is in that session or none, as
+    /// `rejoining` says. What luneta knew of the client before, and the title
+    /// zellij gave its terminal, are another's. A look for zellij there to
+    /// answer once it is there.
+    pub fn swapping(&mut self, machine: &Machine, session: &SessionName) -> Look {
+        self.on = machine.clone();
+        self.title = None;
+        self.own.anew();
+        self.rejoining(session)
+    }
+
     /// luneta's zellij came to `session`, or is back in it, as zellij did not
     /// take it out. A look for zellij to answer once it is there.
     fn came(&mut self, session: &str) -> Look {
-        let listed = clients(self.host.as_ref(), session).map(<[Client]>::to_vec);
+        let listed = clients(self.on_sessions(), session).map(<[Client]>::to_vec);
         self.own.came(session, listed.as_deref(), Instant::now())
     }
 
-    /// Unfolds `session`, of this machine's, and this machine, as luneta's
-    /// zellij goes to it. It goes from the folder whether this luneta has it
-    /// folded or not: another may have folded it since this one last heard.
+    /// Unfolds `session`, of the machine luneta's zellij is on, and that
+    /// machine, as luneta's zellij goes to it. It goes from the folder whether
+    /// this luneta has it folded or not: another may have folded it since
+    /// this one last heard.
     fn unfold(&mut self, session: &SessionName) {
-        self.folds.set(Fold::Machine(&Machine::Local), false);
-        self.folds.set(Fold::Session(&Machine::Local, session), false);
+        self.folds.set(Fold::Machine(&self.on), false);
+        self.folds.set(Fold::Session(&self.on, session), false);
+    }
+
+    /// The sessions the daemon lists of the machine luneta's zellij is on, as
+    /// it last said: none while it says none of that machine.
+    fn on_sessions(&self) -> &[Session] {
+        let Some(host) = &self.host else {
+            return &[];
+        };
+        let Machine::Remote(destination) = &self.on else {
+            return &host.sessions;
+        };
+        let named = destination.to_string();
+        let remote = host.remotes.iter().find(|remote| remote.destination == named);
+        match remote.and_then(|remote| remote.reached.as_ref()) {
+            Some(Reached::Host(host)) => &host.sessions,
+            Some(Reached::Reaching(_) | Reached::Unreached(_)) | None => &[],
+        }
     }
 
     /// The session zellij's client is in: the one luneta sent it to, until
@@ -1327,7 +1366,7 @@ impl Sidebar {
         }
         let title = self.title.as_deref()?;
         let named = |name: &&str| in_session(title, name);
-        let sessions = self.host.iter().flat_map(|host| &host.sessions);
+        let sessions = self.on_sessions().iter();
         sessions
             .map(|session| session.name.as_str())
             .filter(named)
@@ -1335,10 +1374,17 @@ impl Sidebar {
             .or_else(|| Some(title.split_once(" | ").map_or(title, |(session, _)| session)))
     }
 
+    /// The session luneta's zellij is in, as `here` says, while that is one
+    /// of this machine's.
+    fn here_local(&self) -> Option<&str> {
+        self.here().filter(|_| self.on == Machine::Local)
+    }
+
     /// The pane luneta's zellij is on, by its session's name now, while it
-    /// is in a session, on its way to none, and on a pane, not a plugin's.
+    /// is in a session of this machine's, on its way to none, and on a pane,
+    /// not a plugin's.
     pub fn here_pane(&self) -> Option<zellij::Pane> {
-        if self.going().is_some() {
+        if self.going().is_some() || self.on != Machine::Local {
             return None;
         }
         let session = self.here()?;
@@ -1368,8 +1414,7 @@ impl Sidebar {
             Unplaced::Unsure => UNSURE_PANE,
             Unplaced::Plugin => PLUGIN_PANE,
         })?;
-        let host = self.host.as_ref().ok_or(NO_HERE_PANE)?;
-        let (sessions, _) = oldest_first(&host.sessions);
+        let (sessions, _) = oldest_first(self.on_sessions());
         let mut named = sessions.into_iter().filter(|(listed, _)| listed.name.as_str() == here);
         match (named.next(), named.next()) {
             (Some((listed, _)), None) => Ok(Place::Pane { session: listed, pane }),
@@ -1384,9 +1429,9 @@ impl Sidebar {
     /// first, then those of the others newest first, each session's in the
     /// order their panes opened.
     pub fn listing(&self) -> Listing {
-        let here = self.here().map(str::to_owned);
+        let here = self.here_local().map(str::to_owned);
         let mut listing = Listing {
-            here_pane: self.here_place().ok(),
+            here_pane: self.here_place().ok().filter(|_| self.on == Machine::Local),
             away: self.away.clone(),
             ..Listing::default()
         };
@@ -1533,7 +1578,8 @@ impl Sidebar {
             }
         };
         for ((machine, reached), sessions) in machines.into_iter().zip(sessions) {
-            let local = machine == Machine::Local;
+            // The machine luneta's zellij is on, which has its pane.
+            let on = machine == self.on;
             let name = match &machine {
                 Machine::Local => self.this.clone(),
                 Machine::Remote(destination) => destination.to_string(),
@@ -1581,7 +1627,7 @@ impl Sidebar {
                 let mut by_pane: Vec<Shows> = Vec::with_capacity(panes.len());
                 for pane in &panes {
                     let key = listed.key(pane.id);
-                    let here = local && here_key == Some(key);
+                    let here = on && here_key == Some(key);
                     let unread = self.news.is_unread(key);
                     if let Some(agent) = agent(pane.id) {
                         let (agent, done) = agent_marked(&self.news, agent, key, here);
@@ -1621,7 +1667,7 @@ impl Sidebar {
                 machine_waiting += waiting;
                 machine_dot |= dots > 0;
                 machine_busy |= busy > 0;
-                let session_here = local && here.as_deref() == Some(listed.name.as_str());
+                let session_here = on && here.as_deref() == Some(listed.name.as_str());
                 machine_here |= session_here;
                 if !listing_sessions {
                     continue;
@@ -1664,7 +1710,7 @@ impl Sidebar {
                         continue;
                     }
                     let place = Place::Pane { session: listed.clone(), pane: pane.id };
-                    let here = local && here_pane.as_ref() == Some(&place);
+                    let here = on && here_pane.as_ref() == Some(&place);
                     let icon = program.and_then(icons::of);
                     let (machine, session) = (machine.clone(), listed.clone());
                     let row = move |bracket| Row::Pane {
@@ -1751,7 +1797,7 @@ impl Sidebar {
         self.unlisted_machines = unlisted_machines;
         self.here_key = here_key;
         self.finished = finished;
-        self.here_row = here_pane.and_then(|place| self.row_for(&Spot::Local(place)));
+        self.here_row = here_pane.and_then(|place| self.row_for(&Spot::on(&self.on, place)));
         // A selection, and a session lifted, go with the session they
         // started on.
         if let Moving::Selected(session) | Moving::Lifted(Lift { session, .. }) = &self.moving
@@ -1888,9 +1934,10 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// The pane listed after the one luneta's zellij is on, and from the last
-    /// back to the first: where `Alt Tab` goes. None where that pane is the
-    /// only one listed. From a folded session, or a pane no row lists, as a
+    /// The pane listed after the one luneta's zellij is on, of the machine it
+    /// is on, and from the last back to the first: where `Alt Tab` goes, which
+    /// never takes it to another machine. None where that pane is the only
+    /// one listed. From a folded session, or a pane no row lists, as a
     /// plugin's or one luneta is not sure its zellij is on, it is the pane
     /// listed after the session's row, and from a session no row lists, the
     /// first.
@@ -1900,16 +1947,15 @@ impl Sidebar {
             let session = self.here()?;
             self.rows.iter().position(|row| {
                 let named = |listed: &Listed| listed.name.as_str() == session;
-                let local = Machine::Local;
                 matches!(row, Row::Session { machine, session: listed, .. }
-                    if *machine == local && named(listed))
+                    if *machine == self.on && named(listed))
             })
         });
         let from = start.map_or(0, |at| at + 1);
         let count = self.rows.len();
         let (next, place) = (0..count).map(|step| (from + step) % count).find_map(|at| {
             match &self.rows[at] {
-                Row::Pane { machine: Machine::Local, session, pane, .. } => {
+                Row::Pane { machine, session, pane, .. } if *machine == self.on => {
                     Some((at, Place::Pane { session: session.clone(), pane: *pane }))
                 },
                 Row::Machine { .. } | Row::Session { .. } | Row::Pane { .. } => None,
@@ -2159,7 +2205,8 @@ impl Sidebar {
     }
 
     /// What the menu is for, as it opens on the highlighted row: none on
-    /// another machine's session or pane, and the notes say why.
+    /// another machine's session or pane, which has no menu yet, and the
+    /// notes say so.
     fn target(&mut self) -> Option<Target> {
         let spot = self.cursor.clone()?;
         self.row_of(&spot)?;
@@ -2167,7 +2214,7 @@ impl Sidebar {
             Spot::Local(place) => Some(self.target_at(place)),
             Spot::Machine(machine) => Some(Target::Machine(machine)),
             Spot::Remote(destination, _) => {
-                self.only_looking(&destination);
+                self.unmenued(&destination);
                 None
             },
         }
@@ -2183,11 +2230,11 @@ impl Sidebar {
         Some(Target::Machine(Machine::Remote(destination.clone())))
     }
 
-    /// Says in the notes that `destination`'s rows are only for looking.
-    fn only_looking(&mut self, destination: &Destination) {
+    /// Says in the notes that `destination`'s rows have no menu yet.
+    fn unmenued(&mut self, destination: &Destination) {
         self.notice = Some(format!(
-            "{destination}'s rows are only for looking: luneta goes to another machine's \
-             sessions from #219"
+            "{destination}'s rows have no menu yet: Enter goes there, and the menu is this \
+             machine's"
         ));
     }
 
@@ -2244,7 +2291,11 @@ impl Sidebar {
     /// sidebar takes.
     pub fn float_menu(&mut self) -> Result<(), &'static str> {
         self.notice = None;
-        let place = self.here_place().inspect_err(|why| log::say(why))?;
+        let here = self.here_place().and_then(|place| match self.on {
+            Machine::Local => Ok(place),
+            Machine::Remote(_) => Err(AWAY_PANE),
+        });
+        let place = here.inspect_err(|why| log::say(why))?;
         self.menus += 1;
         self.menu = Some(Menu::new(self.menus, self.target_at(place)));
         Ok(())
@@ -2378,7 +2429,7 @@ impl Sidebar {
                 let place = Place::Pane { session, pane };
                 let session = place.session().to_owned();
                 let open = Open::Tab { session: session.clone(), tab: Tab { cwd, name, command } };
-                if self.going().is_none() && self.here() == Some(session.as_str()) {
+                if self.going().is_none() && self.here_local() == Some(session.as_str()) {
                     Asked::Open { menu: number, open }
                 } else {
                     Asked::OpenThere { menu: number, place, open }
@@ -2441,7 +2492,7 @@ impl Sidebar {
         let Some(host) = &self.host else {
             return Vec::new();
         };
-        let here = self.here();
+        let here = self.here_local();
         let agents = seated(&host.agents, &host.sessions);
         let pulls = pull_requests(&host.pull_requests);
         let (mut sessions, _) = oldest_first(&host.sessions);
@@ -2481,9 +2532,12 @@ impl Sidebar {
     /// luneta's zellij is, and what it `deletes`.
     fn subject<'a>(&'a self, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
         let session = listed.name().as_str();
-        let seat = match (self.going(), self.here()) {
+        let seat = match (self.going(), self.here_local()) {
             (None, Some(here)) if here == session => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
+            // In a session of another machine's, which this one's go on
+            // without.
+            (None, None) if self.on != Machine::Local => Seat::Elsewhere,
             (Some(_), _) | (None, None) => Seat::Moving,
         };
         let mut agents = Err(Untold::Away);
@@ -2743,10 +2797,10 @@ impl Sidebar {
         }
     }
 
-    /// Goes to the highlighted row. Going anywhere closes the search, so that
-    /// the sidebar you come back to shows every row. A machine's header is no
-    /// place to go, and folds the other way; and another machine's row says
-    /// in the notes that it is only for looking.
+    /// Goes to the highlighted row, on this machine or another. Going
+    /// anywhere closes the search, so that the sidebar you come back to shows
+    /// every row. A machine's header is no place to go, and folds the other
+    /// way.
     fn go(&mut self) -> Asked {
         let Some(spot) = self.cursor.clone() else {
             return Asked::Nothing;
@@ -2760,9 +2814,9 @@ impl Sidebar {
                 self.toggle();
                 Asked::Nothing
             },
-            Spot::Remote(destination, _) => {
-                self.only_looking(&destination);
-                Asked::Nothing
+            Spot::Remote(destination, place) => {
+                self.close_search();
+                Asked::GoRemote(destination, place)
             },
         }
     }
@@ -2916,8 +2970,6 @@ impl Sidebar {
             }
         }
         self.cursor = Some(spot);
-        // Another machine's row says why it goes nowhere, in the notes the
-        // focus shows.
         match self.go() {
             Asked::Nothing => Asked::Take,
             asked => asked,
@@ -3392,10 +3444,10 @@ pub fn in_session(title: &str, name: &str) -> bool {
     title.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with(" | "))
 }
 
-/// The clients the daemon lists of the session called `name`, unless another
-/// runs under that name too, which it lists none of either.
-fn clients<'a>(host: Option<&'a Host>, name: &str) -> Option<&'a [Client]> {
-    let mut named = host?.sessions.iter().filter(|session| session.name == name);
+/// The clients the daemon lists of the session called `name` of `sessions`,
+/// unless another runs under that name too, which it lists none of either.
+fn clients<'a>(sessions: &'a [Session], name: &str) -> Option<&'a [Client]> {
+    let mut named = sessions.iter().filter(|session| session.name == name);
     let (Some(session), None) = (named.next(), named.next()) else {
         return None;
     };
@@ -6870,14 +6922,14 @@ mod tests {
         assert!(sidebar.folds.contains(Fold::Machine(&machine)));
     }
 
-    /// Another machine's rows are only for looking: `Enter`, a click, the
-    /// menu, `v` and the mouse that would move its session go nowhere, and
-    /// the notes say why. `u` takes the dot from its pane as from this
-    /// machine's. A link pasted on its row opens the menu for the link, on
-    /// its machine's header, as the link's keys go to this machine's
-    /// sessions.
+    /// Another machine's rows go there, as this one's do: `Enter` and a click
+    /// on its pane ask luneta to take its zellij there. They have no menu
+    /// yet, and `v` and the mouse that would move its session move none: the
+    /// notes say why. `u` takes the dot from its pane as from this machine's.
+    /// A link pasted on its row opens the menu for the link, on its machine's
+    /// header, as the link's keys go to this machine's sessions.
     #[test]
-    fn another_machine_s_rows_are_only_for_looking() {
+    fn another_machine_s_rows_go_there_and_have_no_menu() {
         let mut sidebar = fresh();
         let mut host = machines();
         host.remotes[0] = remote(
@@ -6890,14 +6942,15 @@ mod tests {
         sidebar.heard(host);
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "Gkk");
-        let looking = "nixos's rows are only for looking: luneta goes to another machine's \
-                       sessions from #219";
+        let fix = Place::Pane { session: listed("main", 20), pane: 1 };
+        let there = Asked::GoRemote(nixos(), fix);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.notice.as_deref(), Some(looking));
+        assert_eq!(sidebar.key(&enter, moment(160_000)), there);
+        let unmenued =
+            "nixos's rows have no menu yet: Enter goes there, and the menu is this machine's";
         assert_eq!(sidebar.key(&char('m'), moment(160_000)), Asked::Nothing);
         assert!(sidebar.menu.is_none());
-        assert_eq!(sidebar.notice.as_deref(), Some(looking));
+        assert_eq!(sidebar.notice.as_deref(), Some(unmenued));
         type_in(&mut sidebar, "v");
         assert!(matches!(sidebar.moving, Moving::Still));
         let unmoved = "luneta moves only this machine's sessions; nixos's go oldest first";
@@ -6906,9 +6959,7 @@ mod tests {
         let area = Rect::new(0, 0, 32, 24);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[8], "  •✓ \u{ec82} fix                  1m");
-        sidebar.notice = None;
-        assert_eq!(click(&mut sidebar, 10, 8, area), Asked::Take);
-        assert_eq!(sidebar.notice.as_deref(), Some(looking));
+        assert_eq!(click(&mut sidebar, 10, 8, area), there);
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 7), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area), Asked::Take);
@@ -6922,6 +6973,41 @@ mod tests {
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
         let header = Target::Machine(Machine::Remote(nixos()));
         assert_eq!(sidebar.menu.as_ref().map(Menu::target), Some(&header));
+    }
+
+    /// luneta's zellij on another machine, once a client of a session there
+    /// takes the place of its own, is in that machine's session, though this
+    /// one has one of its name: the pane it is on there has the mark, and
+    /// `Alt Tab` goes among that machine's panes, never to this one's. The
+    /// menu over zellij, the picker and the ask box are this machine's, and
+    /// know of no pane luneta's zellij is on.
+    #[test]
+    fn luneta_s_zellij_on_another_machine_is_in_that_machine_s_session() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let panes = vec![pane(1, 0, "/w/b", "claude"), pane(2, 0, "/w/b", "fish")];
+        let agents = vec![agent("main", 1, Status::Idle, Some("fix"))];
+        host.remotes[0] = remote("nixos", up(vec![session("main", 20, panes)], agents));
+        sidebar.heard(host);
+        let look = sidebar.swapping(&Machine::Remote(nixos()), &session_name("main"));
+        assert_eq!(look.session, "main");
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        let before = Some(Before::Listed(Vec::new()));
+        sidebar.looked(Looked { number: look.number, went: None, clients, before });
+        sidebar.titled("main | fix".to_owned());
+
+        let there = |pane| Place::Pane { session: listed("main", 20), pane };
+        assert_eq!(sidebar.here_row, Some(Spot::Remote(nixos(), there(1))));
+        let lines = screen(&mut sidebar, false, 32, 12);
+        assert_eq!(lines[5], "     \u{e795} w/a");
+        assert_eq!(lines[8], "▌╭ ✓ \u{ec82} fix                  1m");
+        assert_eq!(sidebar.next_pane(), Some(there(2)));
+        sidebar.went(&there(2));
+        assert_eq!(sidebar.next_pane(), Some(there(1)));
+        assert_eq!(sidebar.here_pane(), None);
+        assert_eq!(sidebar.float_menu(), Err(AWAY_PANE));
+        let listing = sidebar.listing();
+        assert_eq!((listing.here, listing.here_pane), (None, None));
     }
 
     /// What is pasted in the box `n m` opens goes in it, on one line, and a

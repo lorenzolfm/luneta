@@ -233,6 +233,14 @@ impl OwnClient {
         self.look(went)
     }
 
+    /// luneta's client is another from now on, which takes the place of the
+    /// one before, here or on another machine: where that one was on its way
+    /// to, and the session it left, are no more this one's.
+    pub fn anew(&mut self) {
+        self.going = None;
+        self.left = None;
+    }
+
     /// luneta sends its client to `pane` of `session`, or to `session` alone,
     /// which the daemon `listed` the clients of so, at `now`. In the session
     /// it is in, the client is on that pane until zellij says, which a look,

@@ -19,9 +19,10 @@ use lunetad::{Destination, HOSTS_FILE, HOSTS_MAX};
 use crate::state;
 
 /// A machine the sidebar lists the sessions of.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Machine {
     /// This one, whose daemon luneta asks.
+    #[default]
     Local,
     /// Another, as luneta's hosts file names it, whose daemon this one's
     /// watches through ssh.

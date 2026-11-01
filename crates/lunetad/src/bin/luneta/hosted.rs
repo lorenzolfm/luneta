@@ -91,6 +91,9 @@ impl From<Size> for WindowSize {
 #[derive(Clone)]
 struct Listener {
     events: Sender<Event>,
+    /// The program's number, which what it says carries: luneta counts the
+    /// programs it starts, and goes by what the last says.
+    number: u64,
     /// Whether the program drew since luneta last drew its screen. One
     /// `Said::Drew` stands for all it drew until then, so that luneta's queue
     /// holds one at the most, however fast the program draws.
@@ -123,7 +126,7 @@ impl EventListener for Listener {
             | Emitted::MouseCursorDirty => return,
         };
         // luneta is on its way out.
-        let _ = self.events.send(Event::Hosted(said));
+        let _ = self.events.send(Event::Hosted(self.number, said));
     }
 }
 
@@ -146,12 +149,14 @@ pub struct Hosted {
 }
 
 impl Hosted {
-    /// Starts `program` in a terminal of `size`, in `dir`.
+    /// Starts `program` in a terminal of `size`, in `dir`, as the one
+    /// numbered `number`.
     pub fn start(
         program: String,
         args: Vec<String>,
         dir: &Path,
         size: Size,
+        number: u64,
         events: Sender<Event>,
     ) -> io::Result<Self> {
         // What the program writes as it ends is read before its terminal says
@@ -167,7 +172,7 @@ impl Hosted {
         let modes = pty.file().try_clone()?;
         let far = far_end(pty.file())?;
         let drew = Arc::new(AtomicBool::new(false));
-        let listener = Listener { events, drew: Arc::clone(&drew) };
+        let listener = Listener { events, number, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
         // each pane itself. It asks for the kitty keyboard protocol, which
         // `keys` speaks. Its cursor is the hollow block a program cannot ask
@@ -494,7 +499,7 @@ mod tests {
     #[test]
     fn a_colour_is_answered_where_lunetas_terminal_said_it_and_before_what_it_is() {
         let (events, inbox) = mpsc::channel();
-        let listener = Listener { events, drew: Arc::default() };
+        let listener = Listener { events, number: 1, drew: Arc::default() };
         let mut screen = Term::new(Config::default(), &TermSize::new(4, 1), listener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         // The background, the foreground, the second of the sixteen, and what
@@ -505,8 +510,8 @@ mod tests {
         let answers: Vec<String> = inbox
             .try_iter()
             .filter_map(|event| match event {
-                Event::Hosted(Said::AskedColour(index, spell)) => colours.answer(index, &*spell),
-                Event::Hosted(Said::Answer(answer)) => Some(answer),
+                Event::Hosted(_, Said::AskedColour(index, spell)) => colours.answer(index, &*spell),
+                Event::Hosted(_, Said::Answer(answer)) => Some(answer),
                 _ => None,
             })
             .collect();
@@ -527,7 +532,7 @@ mod tests {
         };
         let args = vec!["-c".to_owned(), "echo 'ssh: no such machine' >&2; exit 255".to_owned()];
         let hosted =
-            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, events).unwrap();
+            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, 1, events).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let drawing = hosted.screen.lock();
         // Long enough for the program to have ended.
@@ -535,7 +540,7 @@ mod tests {
         drop(drawing);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if let Event::Hosted(Said::Ended) = inbox.recv_timeout(left).unwrap() {
+            if let Event::Hosted(_, Said::Ended) = inbox.recv_timeout(left).unwrap() {
                 break;
             }
         }
@@ -559,7 +564,7 @@ mod tests {
         );
         let args = vec!["-c".to_owned(), program];
         let hosted =
-            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, events).unwrap();
+            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, 1, events).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while hosted.text() != "ready" {
             assert!(Instant::now() < deadline, "the program printed {:?}", hosted.text());
@@ -569,7 +574,7 @@ mod tests {
         hosted.send(&b"typed\n"[..]);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if let Event::Hosted(Said::Ended) = inbox.recv_timeout(left).unwrap() {
+            if let Event::Hosted(_, Said::Ended) = inbox.recv_timeout(left).unwrap() {
                 break;
             }
         }

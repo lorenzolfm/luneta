@@ -769,10 +769,23 @@ lunetad runs ssh to it again, every 30 seconds at the longest, and
 are kept one to a line in `$XDG_STATE_HOME/luneta/hosts`, or
 `~/.local/state/luneta/hosts`, which lunetad reads again as it changes.
 
-Another machine's rows are only for looking, for now: `Enter`, the menu and
-moving its sessions come later. `u` marks its panes read, and their dots and
-folds are kept as this machine's are, a folded machine and another machine's
-folded sessions in `$XDG_STATE_HOME/luneta/folded-machines`.
+`Enter` or a click on another machine's session or pane takes you there:
+luneta ends its zellij client and runs `ssh -t <machine> zellij attach
+<session>` in its place, so the machine needs `zellij` on its `PATH` too. That
+ssh goes on the connection lunetad's ssh to the machine shares, a
+`ControlMaster` on a socket in luneta's runtime folder, so you log in to a
+machine once, and any prompt of ssh's shows where zellij does. Between two
+sessions of that machine, zellij there moves the client, as it does here, and
+`Alt Tab` goes among that machine's panes only; a session of this machine's
+attaches here again. Where that ssh fails, as where the machine went away,
+luneta goes back to the session you left, and the notes say what ssh said.
+Where the session there ends, luneta goes on in the newest session of that
+machine's, or of this one's where it has none left.
+
+The menu and moving its sessions come later. `u` marks its panes read, and
+their dots and folds are kept as this machine's are, a folded machine and
+another machine's folded sessions in
+`$XDG_STATE_HOME/luneta/folded-machines`.
 
 ### Tell an agent
 
