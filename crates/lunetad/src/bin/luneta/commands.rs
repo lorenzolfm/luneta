@@ -53,7 +53,8 @@ pub enum Command {
     /// Hand on what comes on stdin to lunetad's socket, and what comes on the
     /// socket to stdout, until either end hangs up, for a client on another
     /// host to ask it through ssh. lunetad is started where none runs, and
-    /// again where an older one does.
+    /// again where an older one does, and once it answers, `lunetad` and a
+    /// newline go to stdout before anything it says.
     #[command(hide = true)]
     Bridge,
     /// Say which pane this runs in, as `<session>:<pane>`, by the name its

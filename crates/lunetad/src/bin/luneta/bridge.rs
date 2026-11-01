@@ -5,6 +5,11 @@
 //! comes on its stdin to the daemon's socket, and what comes on the socket to
 //! its stdout, as it comes. It reads none of it, so that a client and a daemon
 //! of two builds speak to each other as they would on the socket.
+//!
+//! Before it hands on anything, it says on its stdout that it reached the
+//! daemon, with `BRIDGED`: so a client tells a daemon reached from a command
+//! that ended first, as a luneta older than this one does, which takes
+//! `bridge` for the name of a session, or from a login shell that printed.
 
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
@@ -15,7 +20,7 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
 
-use lunetad::folder;
+use lunetad::BRIDGED;
 
 use crate::commands;
 use crate::daemon::{self, Reach};
@@ -44,10 +49,7 @@ pub fn run(folder: &Path) -> ExitCode {
 fn reached(path: &Path) -> Result<UnixStream, String> {
     let runtime = commands::runtime()?;
     let socket = runtime.block_on(async {
-        daemon::reach(path, Reach::Current).await?;
-        // The daemon made the folder as it started, if luneta had not.
-        let folder = folder::open(path).map_err(|refusal| refusal.to_string())?;
-        let folder = folder.ok_or_else(|| format!("{} went as lunetad answered", path.display()))?;
+        let (folder, _) = daemon::reached(path, Reach::Current).await?;
         let socket = lunetad::stream(&folder).await;
         socket.map_err(|error| format!("{}: {error}", folder.socket().display()))
     })?;
@@ -60,20 +62,24 @@ fn reached(path: &Path) -> Result<UnixStream, String> {
     socket.map_err(|error| format!("{}: {error}", path.display()))
 }
 
-/// Hands on what comes from either end to the other, until either hangs up.
-/// What the other has not taken yet then goes nowhere: the one that hung up
-/// would have had it.
+/// Says `BRIDGED`, and hands on what comes from either end to the other,
+/// until either hangs up. What the other has not taken yet then goes nowhere:
+/// the one that hung up would have had it.
 fn handed_on(socket: UnixStream) -> io::Result<()> {
     let mut stdin = File::from(io::stdin().as_fd().try_clone_to_owned()?);
     let mut stdout = File::from(io::stdout().as_fd().try_clone_to_owned()?);
+    if let Err(error) = stdout.write_all(BRIDGED) {
+        return hung_up(error);
+    }
     let mut up = socket.try_clone()?;
     let mut down = socket;
     let (ended, end) = mpsc::channel();
     let ending = ended.clone();
     thread::spawn(move || ending.send(copied(&mut stdin, &mut up)));
     thread::spawn(move || ended.send(copied(&mut down, &mut stdout)));
-    // A thread that panicked sent nothing, and the other one ends.
-    end.recv().unwrap_or(Ok(()))
+    // A thread that panicked sends nothing, and the other one's end is the
+    // bridge's. With both gone so, it failed.
+    end.recv().unwrap_or_else(|_| Err(io::Error::other("both ways of the bridge panicked")))
 }
 
 /// Copies what `from` gives to `to`, until either hangs up: `from` with its

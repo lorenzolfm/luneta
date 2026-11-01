@@ -1,11 +1,13 @@
 //! `luneta bridge`: the daemon of its folder for a client on another host, on
 //! ssh's stdin and stdout, which the client asks as it would on the socket.
 
+use std::error::Error;
 use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use lunetad::api::{InfoRequest, WatchRequest};
+use lunetad::{Unbridged, BRIDGED};
 
 use crate::demand::Detached;
 use crate::host::{folder_in, start, Host, Running, Vars, LUNETA};
@@ -38,8 +40,28 @@ fn bridge(host: &Host) -> impl FnMut() -> Command + Send + 'static {
     }
 }
 
+/// A command that runs `script` in `sh`, as a client makes one for each
+/// connection.
+fn sh(script: &'static str) -> impl FnMut() -> Command + Send + 'static {
+    move || {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+}
+
+/// Asserts that `through` reaches no daemon with `command`, for a reason that
+/// `is`, among the sources of the error it fails with.
+fn unbridged(command: impl FnMut() -> Command + Send + 'static, is: impl Fn(&Unbridged) -> bool) {
+    let error = runtime().block_on(lunetad::through(command)).expect_err("it reached one");
+    let first: &(dyn Error + 'static) = &error;
+    let mut sources = std::iter::successors(Some(first), |&error| error.source());
+    let why = sources.find_map(|error| error.downcast_ref::<Unbridged>());
+    assert!(why.is_some_and(is), "{error:?}");
 }
 
 /// A client that asks through `luneta bridge` asks the daemon that runs in
@@ -78,9 +100,23 @@ fn luneta_bridge_starts_a_daemon_where_none_runs() {
     assert_eq!(answering, daemon.pid);
 }
 
+/// A client through a command that reaches no daemon is told why: that it
+/// ended first, as a shell with no luneta does, or what it said first, as a
+/// login shell that prints does.
+#[test]
+fn a_client_is_told_why_a_command_reached_no_daemon() {
+    unbridged(sh("exit 127"), |why| {
+        matches!(why, Unbridged::Ended(ended) if ended.code() == Some(127))
+    });
+    unbridged(sh("echo hello; exec sleep 10"), |why| {
+        matches!(why, Unbridged::Said(said) if said == "hello\n")
+    });
+}
+
 /// `luneta bridge` ends as either end hangs up: the client, as its stdin
 /// ends, and the daemon, as its socket does. Until then it hands on what each
-/// says, here the settings the daemon answers a client's opening with.
+/// says, here the settings the daemon answers a client's opening with, after
+/// it says it reached the daemon.
 #[test]
 fn luneta_bridge_ends_as_either_end_hangs_up() {
     let host = Host::new();
@@ -100,6 +136,9 @@ fn luneta_bridge_ends_as_either_end_hangs_up() {
     let mut bridged = Running::spawn(&mut piped());
     let (mut stdin, mut stdout) = bridged.piped();
     stdin.write_all(OPENING).unwrap();
+    let mut said = vec![0; BRIDGED.len()];
+    stdout.read_exact(&mut said).unwrap();
+    assert_eq!(said, BRIDGED);
     let mut frame = [0; 9];
     stdout.read_exact(&mut frame).unwrap();
     assert_eq!(frame[3], SETTINGS, "{frame:?}");

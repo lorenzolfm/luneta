@@ -2,14 +2,15 @@
 //! reaches it, as `ssh <host> luneta bridge` reaches the daemon of another
 //! host.
 
+use std::fmt;
 use std::io::{self, ErrorKind};
 use std::pin::Pin;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tonic::transport::{Channel, Endpoint, Error, Uri};
@@ -25,6 +26,29 @@ const CONNECT: Duration = Duration::from_secs(1);
 /// How long a client waits for an answer: a daemon that has none in this time
 /// is stuck. The daemon gives up on a question as soon, too.
 pub const ANSWER: Duration = Duration::from_secs(5);
+
+/// What `luneta bridge` says on its stdout once it has reached the daemon,
+/// before it hands on a byte of the daemon's: what comes before it, or an end
+/// before it, is why a client through it reached none.
+pub const BRIDGED: &[u8] = b"lunetad\n";
+
+/// How long a command has to say `BRIDGED`: ssh's handshake, and a daemon
+/// that `luneta bridge` starts on the other host, which it waits for.
+pub const REACH: Duration = Duration::from_secs(10);
+
+/// The way to the daemon and back through a command, as ssh's: where a socket
+/// takes none, a phone's link can take a second, or more.
+const ROUND_TRIP: Duration = Duration::from_secs(5);
+
+/// How long a client through a command waits for an answer: as long as the
+/// daemon takes to give up on a question, and the way there and back. `Watch`
+/// answers within `ANSWER`, and so within this, by a way that takes less than
+/// `ROUND_TRIP`.
+const ANSWER_THROUGH: Duration = ANSWER.saturating_add(ROUND_TRIP);
+
+/// The most of what a command says in the place of `BRIDGED` that a client
+/// keeps, to say so.
+const SAID_MAX: u64 = 4096;
 
 /// A client of the daemon that listens in `folder`.
 pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
@@ -47,21 +71,54 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
 /// command's stdin and stdout, as `ssh <host> luneta bridge` reaches the
 /// daemon of `<host>`. Each connection runs a command of its own, which is
 /// killed as the connection goes: one that ends is made afresh for the next
-/// question. Its stderr is the caller's.
+/// question. A connection is made once the command says `BRIDGED`, and why
+/// one is not is an `Unbridged`, among the error's sources. Its stderr is the
+/// caller's.
 pub async fn through<F>(mut command: F) -> Result<DaemonClient<Channel>, Error>
 where
     F: FnMut() -> std::process::Command + Send + 'static,
 {
-    // A command that starts has connected: there is no connecting to wait
-    // for, and the first answer waits for what the command reaches.
     let channel = Endpoint::from_static("http://lunetad")
-        .timeout(ANSWER)
+        .connect_timeout(REACH)
+        .timeout(ANSWER_THROUGH)
         .connect_with_connector(service_fn(move |_: Uri| {
             let command = command();
-            async move { Piped::spawn(command).map(TokioIo::new) }
+            async move { Piped::bridged(command).await.map(TokioIo::new) }
         }))
         .await?;
     Ok(DaemonClient::new(channel))
+}
+
+/// Why a command reached no daemon, for a client through it.
+#[derive(Debug)]
+pub enum Unbridged {
+    /// It did not start, or its stdout could not be read.
+    Io(io::Error),
+    /// It ended before it said anything: as ssh does that reaches no host
+    /// (255), a shell with no luneta (127), and a luneta older than `bridge`,
+    /// which takes the word for a session's name and says it has no terminal
+    /// (1). Why is on the caller's stderr.
+    Ended(ExitStatus),
+    /// It said something else first, as a login shell that prints does.
+    Said(String),
+}
+
+impl fmt::Display for Unbridged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unbridged::Io(error) => write!(f, "{error}"),
+            Unbridged::Ended(ended) => write!(f, "it ended before it reached lunetad ({ended})"),
+            Unbridged::Said(said) => write!(f, "it said {said:?} before it reached lunetad"),
+        }
+    }
+}
+
+impl std::error::Error for Unbridged {}
+
+impl From<io::Error> for Unbridged {
+    fn from(error: io::Error) -> Self {
+        Unbridged::Io(error)
+    }
 }
 
 /// A connection to the daemon that listens in `folder`, as `connect` makes
@@ -73,21 +130,32 @@ pub async fn stream(folder: &Folder) -> io::Result<UnixStream> {
 
 /// A command's stdout and stdin, as the two ways of one connection.
 struct Piped {
-    stdout: ChildStdout,
+    // What came after `BRIDGED` with it is the daemon's, and kept for hyper.
+    stdout: BufReader<ChildStdout>,
     stdin: ChildStdin,
     // Kept for its kill on drop: the command goes with the connection.
     _child: Child,
 }
 
 impl Piped {
-    fn spawn(command: std::process::Command) -> io::Result<Self> {
+    /// `command`, spawned, once it has said `BRIDGED`. Its stderr is the
+    /// caller's, whatever `command` said of it: a pipe of it that none read
+    /// would hold the command up once it was full.
+    async fn bridged(command: std::process::Command) -> Result<Self, Unbridged> {
         let mut command = tokio::process::Command::from(command);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true);
-        let mut child = command.spawn()?;
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        let mut child = command.kill_on_drop(true).spawn()?;
         let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
-            return Err(io::Error::other("a command spawned piped has no pipes"));
+            return Err(io::Error::other("a command spawned piped has no pipes").into());
         };
-        Ok(Piped { stdout, stdin, _child: child })
+        let mut stdout = BufReader::new(stdout);
+        let mut said = Vec::new();
+        (&mut stdout).take(SAID_MAX).read_until(b'\n', &mut said).await?;
+        match said.as_slice() {
+            BRIDGED => Ok(Piped { stdout, stdin, _child: child }),
+            [] => Err(Unbridged::Ended(child.wait().await?)),
+            said => Err(Unbridged::Said(String::from_utf8_lossy(said).into_owned())),
+        }
     }
 }
 

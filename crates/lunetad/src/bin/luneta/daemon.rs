@@ -58,6 +58,10 @@ const LUNETAD: &str = "lunetad";
 /// starts reads what runs before it answers, which takes it a moment.
 const START: Duration = Duration::from_secs(5);
 
+// A client on another host waits `REACH` for `luneta bridge` to reach the
+// daemon so, and for ssh's handshake before it.
+const _: () = assert!(START.as_millis() < lunetad::REACH.as_millis());
+
 /// How often luneta looks again while it waits.
 const LOOK: Duration = Duration::from_millis(20);
 
@@ -84,6 +88,14 @@ pub enum Reach {
 /// A client of the daemon in the folder at `path`, as `wanted`, or why there
 /// is none.
 pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, String> {
+    reached(path, wanted).await.map(|(_, daemon)| daemon)
+}
+
+/// `reach`, with the folder at `path` as luneta checked it.
+pub async fn reached(
+    path: &Path,
+    wanted: Reach,
+) -> Result<(Folder, DaemonClient<Channel>), String> {
     let folder = match folder::open(path).map_err(|refusal| refusal.to_string())? {
         Some(folder) => folder,
         None if wanted == Reach::Running => return Err(none_runs(path)),
@@ -109,7 +121,7 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
     loop {
         let why = match lunetad::connect(&folder).await {
             // `Running` starts none, so there is none to reap.
-            Ok(daemon) if wanted == Reach::Running => return Ok(daemon),
+            Ok(daemon) if wanted == Reach::Running => return Ok((folder, daemon)),
             Ok(mut daemon) => match daemon.info(InfoRequest {}).await {
                 Ok(info) => {
                     let info = info.into_inner();
@@ -130,12 +142,12 @@ pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, 
                         ));
                     } else if !makes_way(running, Build::own(), || *starting.get_or_init(build)) {
                         reap(started);
-                        return Ok(daemon);
+                        return Ok((folder, daemon));
                     } else {
                         match listener(&folder, pid).await {
                             Listener::Other if doubted == Some(pid) => {
                                 reap(started);
-                                return Ok(daemon);
+                                return Ok((folder, daemon));
                             },
                             Listener::Other => {
                                 doubted = Some(pid);

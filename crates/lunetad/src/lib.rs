@@ -27,7 +27,7 @@ mod watch;
 mod zellij;
 
 pub use claude::folder as claude_folder;
-pub use client::{connect, listening, stream, through};
+pub use client::{connect, listening, stream, through, Unbridged, BRIDGED, REACH};
 pub use daemon::{serve, Claim};
 pub use folder::Refusal;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
