@@ -333,7 +333,8 @@ is doing.
 ```text
 ─ 2 sessions ───────────── ●1 ─  Zellij (luneta-main)  Tab #1
                                 ╭ Pane #1 ────────────────────
- ▾ luneta-main ──────────── ●1  │~/P/m/luneta/main ➜
+ ▾ mac ════════════════════ ●1  │~/P/m/luneta/main ➜
+ ▾ luneta-main ──────────── ●1  │
    ● fold                   3m  │
      feat/sidebar            !  │
 ▌    luneta/main                │
@@ -391,9 +392,11 @@ renames the highlighted session. `Esc`, or a click off the box, closes it. A
 click on a row does what `Enter` does on it, the wheel moves the highlight,
 and a click on a key the line under the search names presses it, as `<TAB>`.
 
-The sidebar lists every session, oldest first until you move them, the panes
-in each, in the order of their tabs, and what the agent in each pane is doing,
-with the branch under it, all as [`lunetad`](#building-from-source) says:
+The sidebar lists every session, under a header for the machine it runs on,
+as [other machines](#other-machines) says, oldest first until you move them,
+the panes in each, in the order of their tabs, and what the agent in each pane
+is doing, with the branch under it, all as [`lunetad`](#building-from-source)
+says:
 luneta starts the daemon when none runs, and the sidebar says so at its bottom
 while it does not answer. A bracket, `╭`, `│` and `╰`, down the column after
 `▌` joins the panes of a tab that holds more than one. Each session has a
@@ -727,6 +730,49 @@ last typed in it. With
 read that key, and the sidebar takes it somewhere only once you have typed in
 the session it is in.
 
+### Other machines
+
+The sidebar lists your other machines' sessions too, a header over each
+machine's: this one first, by its host's name, and then each machine you
+added, as you typed it. lunetad reaches each one through
+`ssh <machine> luneta bridge`, so ssh does the auth and nothing listens on the
+network, and the machine needs `luneta` on its `PATH`. Add one with `n m` in
+the menu, on a row of this machine's or on any machine's header, and type what
+you type ssh to it: a Tailscale name, a `Host` of your ssh config, or
+`me@vps`. Or from a shell:
+
+```sh
+luneta ssh nixos    # nixos: added to luneta's hosts file
+                    # nixos: reached, 3 sessions
+```
+
+lunetad's ssh asks you nothing, so run `ssh` to a machine yourself once, for
+its host key, before you add it.
+
+```text
+ ▾ mac ═══════════════════════
+ ▾ luneta-main ───────────────
+▌    luneta/main
+ ▾ nixos ══════════════════ ●1
+ ▾ cipher ───────────────── ●1
+   ● ci                     2m
+ ▸ vps · unreachable        3m
+```
+
+A machine folds as a session does: `h` on a folded session folds its machine,
+and a folded machine shows on its header what its sessions want of you, as a
+folded session does its panes'. One lunetad does not reach is a dimmed header
+that says why in a word, and in full at the bottom while it is highlighted;
+lunetad runs ssh to it again, every 30 seconds at the longest, and
+`luneta.log` has what ssh said. `d d` on its header forgets it. The machines
+are kept one to a line in `$XDG_STATE_HOME/luneta/hosts`, or
+`~/.local/state/luneta/hosts`, which lunetad reads again as it changes.
+
+Another machine's rows are only for looking, for now: `Enter`, the menu and
+moving its sessions come later. `u` marks its panes read, and their dots and
+folds are kept as this machine's are, a folded machine and another machine's
+folded sessions in `$XDG_STATE_HOME/luneta/folded-machines`.
+
 ### Tell an agent
 
 `luneta`'s commands open, move and close what the menu does, so the agent you
@@ -1045,6 +1091,7 @@ on the directories. Type, press `Enter`.
 | `n p` | open your shell in a pane beside the pane |
 | `n t` | open a tab of the pane's session |
 | `n s` | start a session where the pane works, and go there |
+| `n m` | add a machine, by what you type ssh to it |
 | `d d` | close the pane |
 | `d s` | kill the pane's session |
 | `y`, or the key again | go ahead with a delete that asked first |

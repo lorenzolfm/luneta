@@ -45,11 +45,11 @@ use crate::state;
 use crate::watch::{self, Troubles};
 
 /// The file, in luneta's state folder.
-const FILE: &str = "hosts";
+pub const FILE: &str = "hosts";
 
 /// The most machines the daemon watches besides its own, a thread and an ssh
 /// to each. The lines past these are left out, and the log says so.
-const HOSTS_MAX: usize = 16;
+pub const HOSTS_MAX: usize = 16;
 
 /// The longest the daemon waits before it runs ssh again to a machine it
 /// failed to reach: short enough that a machine that wakes, or a link that

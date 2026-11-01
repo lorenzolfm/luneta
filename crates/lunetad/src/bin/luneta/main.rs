@@ -21,6 +21,7 @@ mod icons;
 mod input;
 mod keys;
 mod ledger;
+mod machines;
 mod menu;
 mod news;
 mod order;

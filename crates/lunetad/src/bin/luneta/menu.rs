@@ -10,12 +10,14 @@
 //! starts an agent on it there, and `f` and `e`, which start one on what the
 //! command a shell ran last printed, to fix what went wrong or explain it.
 //! `n` opens the New group: your shell beside the
-//! pane, a tab of its session, or a session, in the directory it works in. `d`
+//! pane, a tab of its session, or a session, in the directory it works in, or
+//! a machine for lunetad to watch through ssh, by what you type ssh to it. `d`
 //! opens the Delete group, which closes the pane or deletes its session, and
-//! asks first when that would end an agent at work. `b` opens the Brief group,
-//! which briefs you on every session, the row's session, or the agent in its
-//! pane. luneta has no configuration to read keys for skills from, and the
-//! Claude group's are its own.
+//! asks first when that would end an agent at work, and on a machine's header
+//! forgets the machine. `b` opens the Brief group, which briefs you on every
+//! session, the row's session, or the agent in its pane. luneta has no
+//! configuration to read keys for skills from, and the Claude group's are its
+//! own.
 //!
 //! A pull request's link pasted with the sidebar's keys, or in the menu,
 //! opens it for that pull request instead: `w` makes a worktree of it, in a
@@ -34,6 +36,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
+use lunetad::Destination;
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -44,6 +47,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::machines::Machine;
 use crate::printed::Printed;
 use crate::pull::{At, Kind, Link, Ready};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, Place, TAG};
@@ -95,10 +99,15 @@ const DELETE_SESSION: char = 's';
 const BRIEF: char = 'b';
 const BRIEF_NAME: &str = "Brief";
 
+/// What the key of the Delete group that forgets a machine says it does.
+const FORGET_DOES: &str = "forget the machine";
+
 /// What the rule over the menu's first group, and over the legend, names
-/// them, and the sidebar's first line; and what it names the search box.
+/// them, and the sidebar's first line; and what it names the search box, and
+/// the box a machine's destination is typed in.
 pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
+const SSH_TITLE: &str = "ssh";
 
 /// What follows a group's name: it opens, as a folded session does.
 const GROUP: &str = "▸";
@@ -122,6 +131,20 @@ const CLAUDE: &str = "claude";
 /// lists none of the session's panes: folded, or with none to list.
 const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor a directory to \
                            open in; highlight a pane, unfolding its session first if it is folded";
+
+/// What the menu says of such a key on a machine's header.
+const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open beside, nor a \
+                               directory to open in; highlight a pane, unfolding the machine first \
+                               if it is folded";
+
+/// What the menu says of the key that forgets a machine, on this one's
+/// header.
+const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets only the others";
+
+/// What the menu says of a key of the Brief group on another machine's
+/// header.
+const REMOTE_BRIEF: &str = "menu: luneta briefs you on this machine's agents alone, as it reads \
+                            their transcripts here";
 
 /// A key of the sidebar's own that does more than move the highlight or fold
 /// a session. The legend lists each before the menu's keys, and a key of the
@@ -244,17 +267,21 @@ pub enum New {
     Tab,
     /// A session, named for the directory, as the picker's directories are.
     Session,
+    /// A machine for lunetad to watch through ssh, by its destination, typed
+    /// in a box: on any row.
+    Machine,
 }
 
 impl New {
     /// Each, in the order the New group shows them.
-    const ALL: [New; 3] = [New::Pane, New::Tab, New::Session];
+    const ALL: [New; 4] = [New::Pane, New::Tab, New::Session, New::Machine];
 
     const fn key(self) -> char {
         match self {
             New::Pane => 'p',
             New::Tab => 't',
             New::Session => 's',
+            New::Machine => 'm',
         }
     }
 
@@ -264,6 +291,7 @@ impl New {
             New::Pane => "new pane",
             New::Tab => "new tab",
             New::Session => "new session",
+            New::Machine => "new machine",
         }
     }
 }
@@ -380,6 +408,8 @@ enum Entry {
     /// A key of the Delete group: closes the pane the menu is for, or deletes
     /// its session.
     Close { key: char, scope: Scope },
+    /// The key of the Delete group on a machine's header: forgets the machine.
+    Forget,
     /// A key of the Brief group: briefs you on what the agents it covers are
     /// doing.
     Brief(brief::Scope),
@@ -399,6 +429,7 @@ impl Entry {
     fn key(&self) -> char {
         match self {
             Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
+            Entry::Forget => DELETE_ROW,
             Entry::New(new) => new.key(),
             Entry::Last(last) => last.key(),
             Entry::Brief(scope) => scope.key(),
@@ -426,6 +457,8 @@ enum Pressed {
     New(New),
     /// Closes the pane the menu is for, or deletes its session, by `key`.
     Delete { key: char, scope: Scope },
+    /// Forgets the machine the menu is for.
+    Forget,
     /// Asks for a brief of what the scope covers.
     Brief(brief::Scope),
     /// Opens the ask box.
@@ -450,10 +483,12 @@ impl Keys {
     /// which opens the ask box, and the Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
     /// last, `n p`, `n t` and `n s` open a pane, a tab and a
-    /// session, `d d` deletes what the menu is for, as `row` says, and `d s`
-    /// deletes its session, and `b z`, `b s` and `b h` brief you on every
-    /// session, its session and what the menu is for.
-    fn new(row: Scope) -> Self {
+    /// session, and `n m` the box for a machine's destination, `d d` deletes
+    /// what the menu is for, as `row` says, and `d s` deletes its session, or
+    /// on a machine's header, where `row` is none, `d d` alone forgets the
+    /// machine, and `b z`, `b s` and `b h` brief you on every session, its
+    /// session and what the menu is for.
+    fn new(row: Option<Scope>) -> Self {
         let start = |(key, prompt)| Entry::Start { key, prompt };
         let root = vec![
             Entry::Search,
@@ -475,10 +510,13 @@ impl Keys {
             Entry::Group {
                 key: DELETE,
                 name: DELETE_NAME,
-                entries: vec![
-                    Entry::Close { key: DELETE_ROW, scope: row },
-                    Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
-                ],
+                entries: match row {
+                    Some(row) => vec![
+                        Entry::Close { key: DELETE_ROW, scope: row },
+                        Entry::Close { key: DELETE_SESSION, scope: Scope::Session },
+                    ],
+                    None => vec![Entry::Forget],
+                },
             },
             Entry::Group {
                 key: BRIEF,
@@ -496,7 +534,7 @@ impl Keys {
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
-        root.extend(Keys::new(Scope::Session).root.into_iter().filter(shown));
+        root.extend(Keys::new(Some(Scope::Session)).root.into_iter().filter(shown));
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -557,6 +595,7 @@ impl Keys {
             Entry::Last(last) => return Pressed::Last(*last),
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, scope } => return Pressed::Delete { key: *key, scope: *scope },
+            Entry::Forget => return Pressed::Forget,
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
@@ -620,6 +659,47 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
     }
 }
 
+/// What the box for a machine's destination says under what is typed, until
+/// `Enter` finds it is none.
+const SSH_HINT: &str = "what you type ssh to it: a Tailscale name, a Host of your ssh config, or \
+                        me@vps";
+
+/// What a key did in the box for a machine's destination.
+enum Typed {
+    Typing,
+    Enter,
+    /// Back to the keys: `Esc`, or `Backspace` with nothing typed.
+    Back,
+    Close,
+}
+
+/// What `key` does in the box for a machine's destination, with `typed` in
+/// it, as in the search box: a character types, `Backspace` takes one back,
+/// and `Enter` adds the machine. `Esc` goes back to the keys, and so does
+/// `Backspace` once there is nothing to take back; `Ctrl c` closes the menu.
+fn ssh_key(key: &KeyEvent, typed: &mut String) -> Typed {
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        return Typed::Close;
+    }
+    if !bare(key) {
+        return Typed::Typing;
+    }
+    match key.code {
+        KeyCode::Esc => Typed::Back,
+        KeyCode::Backspace if typed.is_empty() => Typed::Back,
+        KeyCode::Backspace => {
+            typed.pop();
+            Typed::Typing
+        },
+        KeyCode::Enter => Typed::Enter,
+        KeyCode::Char(c) => {
+            typed.push(c);
+            Typed::Typing
+        },
+        _ => Typed::Typing,
+    }
+}
+
 /// What a key says to a delete key that asks before it goes ahead.
 #[derive(Debug, PartialEq, Eq)]
 enum Answer {
@@ -659,6 +739,8 @@ pub enum Target {
     /// A session's row, which has no pane.
     Session(Listed),
     Pane(PaneRow),
+    /// A machine's header, which has neither a session nor a pane.
+    Machine(Machine),
 }
 
 /// A pane's row, as the menu is for it: the directory the pane works in, or
@@ -703,25 +785,30 @@ pub struct Ended {
 }
 
 impl Target {
-    /// The row, as the sidebar places it.
-    pub fn place(&self) -> Place {
+    /// The row, as the sidebar places it, but for a machine's header, which
+    /// is no place.
+    pub fn place(&self) -> Option<Place> {
         match self {
-            Target::Session(session) => Place::Session(session.clone()),
-            Target::Pane(row) => Place::Pane { session: row.session.clone(), pane: row.pane },
+            Target::Session(session) => Some(Place::Session(session.clone())),
+            Target::Pane(row) => {
+                Some(Place::Pane { session: row.session.clone(), pane: row.pane })
+            },
+            Target::Machine(_) => None,
         }
     }
 
-    /// Its session.
-    pub fn listed(&self) -> &Listed {
+    /// Its session, but for a machine's header.
+    pub fn listed(&self) -> Option<&Listed> {
         match self {
-            Target::Session(session) | Target::Pane(PaneRow { session, .. }) => session,
+            Target::Session(session) | Target::Pane(PaneRow { session, .. }) => Some(session),
+            Target::Machine(_) => None,
         }
     }
 
     /// The directory its pane works in, where the daemon has said it.
     pub fn cwd(&self) -> Option<&str> {
         match self {
-            Target::Session(_) => None,
+            Target::Session(_) | Target::Machine(_) => None,
             Target::Pane(row) => row.cwd.as_deref(),
         }
     }
@@ -729,37 +816,55 @@ impl Target {
     /// The branch checked out where its pane works.
     pub fn branch(&self) -> Option<&str> {
         match self {
-            Target::Session(_) => None,
+            Target::Session(_) | Target::Machine(_) => None,
             Target::Pane(row) => row.branch.as_deref(),
         }
     }
 
     /// What luneta's Delete group deletes on the row: its pane, or on a
-    /// session's row, its session.
-    fn deletes(&self) -> Scope {
+    /// session's row, its session. None on a machine's header, where it
+    /// forgets the machine.
+    fn deletes(&self) -> Option<Scope> {
         match self {
-            Target::Session(_) => Scope::Session,
-            Target::Pane(row) => Scope::Pane(row.pane),
+            Target::Session(_) => Some(Scope::Session),
+            Target::Pane(row) => Some(Scope::Pane(row.pane)),
+            Target::Machine(_) => None,
         }
     }
 
     /// The pane a key starts an agent or opens a pane beside, and the
     /// directory it works in, or why there is none: a session's row has no
-    /// pane.
+    /// pane, nor a machine's header.
     fn beside(&self) -> Result<(u32, String), String> {
         match self {
             Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
             Target::Pane(row) => row.beside(),
+            Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
         }
     }
 
     /// What a key that starts an agent on what the pane's shell printed
     /// last starts it on, beside the pane, in the directory it works in, or
-    /// why it starts none: a session's row has no pane.
+    /// why it starts none: a session's row has no pane, nor a machine's
+    /// header.
     fn ended(&self) -> Result<(u32, String, Ended), String> {
         match self {
             Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
             Target::Pane(row) => row.ended(),
+            Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
+        }
+    }
+
+    /// What a key of the Brief group briefs you on, as `scope` says, by the
+    /// row: on this machine's header, every session, as every agent it can
+    /// brief you on is of this machine's; on another's, why it can not.
+    fn brief(&self, scope: brief::Scope) -> Done {
+        match self {
+            Target::Session(_) | Target::Pane(_) => Done::Brief { scope, place: self.place() },
+            Target::Machine(Machine::Local) => {
+                Done::Brief { scope: brief::Scope::Every, place: None }
+            },
+            Target::Machine(Machine::Remote(_)) => Done::Wrong(REMOTE_BRIEF.to_owned()),
         }
     }
 }
@@ -906,10 +1011,15 @@ pub enum Done {
     /// zellij is in, once it has left it.
     Act(Act),
     /// Brief you on what the agents `scope` covers are doing, by `place`, the
-    /// row the menu was for.
-    Brief { scope: brief::Scope, place: Place },
+    /// row the menu was for, which is none on this machine's header, where
+    /// `scope` is every session.
+    Brief { scope: brief::Scope, place: Option<Place> },
     /// Open the ask box, for the row the menu was for.
     Ask(Target),
+    /// Have lunetad watch the machine ssh reaches by this destination.
+    Ssh(Destination),
+    /// Have lunetad stop watching this machine.
+    Forget(Destination),
 }
 
 /// What a click on a spot of the menu does: presses the key of an entry, or
@@ -952,6 +1062,10 @@ enum Stage {
     /// opened, at `step`. Once luneta has found where its keys go, its target
     /// is there.
     Pull { link: Link, step: Step },
+    /// The box `n m` opens, with what is typed in it for ssh to reach a
+    /// machine by, and why that is no destination, once `Enter` found it is
+    /// not, until the next key.
+    Ssh { keys: Keys, typed: String, wrong: Option<String> },
 }
 
 /// How far the menu for a pull request or an issue is, with its keys, `w`
@@ -1035,7 +1149,8 @@ impl Menu {
             | Stage::Asking { .. }
             | Stage::Opening(_)
             | Stage::Reading { .. }
-            | Stage::Pull { .. } => None,
+            | Stage::Pull { .. }
+            | Stage::Ssh { .. } => None,
         }
     }
 
@@ -1103,26 +1218,49 @@ impl Menu {
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                Pressed::New(new) => match (target.beside(), new) {
-                    (Err(reason), _) => Did::Closed(Done::Wrong(reason)),
-                    (Ok((beside, cwd)), New::Pane) => {
+                // A machine is added from any row: it needs no pane.
+                Pressed::New(new) => match (new, target.beside()) {
+                    (New::Machine, _) => {
+                        let stage = Stage::Ssh { keys, typed: String::new(), wrong: None };
+                        stays(stage, Wants::Nothing)
+                    },
+                    (_, Err(reason)) => Did::Closed(Done::Wrong(reason)),
+                    (New::Pane, Ok((beside, cwd))) => {
                         let opens = Opens::Pane { beside, command: Vec::new() };
                         stays(Stage::Opening(keys), Wants::Open { cwd, opens })
                     },
-                    (Ok((_, cwd)), New::Tab) => {
+                    (New::Tab, Ok((_, cwd))) => {
                         let opens = Opens::Tab { name: None, command: Vec::new() };
                         stays(Stage::Opening(keys), Wants::Open { cwd, opens })
                     },
-                    (Ok((_, cwd)), New::Session) => Did::Closed(Done::Start(cwd)),
+                    (New::Session, Ok((_, cwd))) => Did::Closed(Done::Start(cwd)),
                 },
                 Pressed::Delete { key, scope } => {
                     let delete = Delete { key, scope };
                     stays(Stage::Planning { keys, delete, agreed: None }, Wants::Plan(scope))
                 },
-                Pressed::Brief(scope) => {
-                    Did::Closed(Done::Brief { scope, place: target.place() })
+                Pressed::Forget => match &target {
+                    Target::Machine(Machine::Remote(destination)) => {
+                        Did::Closed(Done::Forget(destination.clone()))
+                    },
+                    Target::Machine(Machine::Local) | Target::Session(_) | Target::Pane(_) => {
+                        Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned()))
+                    },
                 },
+                Pressed::Brief(scope) => Did::Closed(target.brief(scope)),
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
+            },
+            Stage::Ssh { keys, mut typed, .. } => match ssh_key(key, &mut typed) {
+                Typed::Close => Did::Closed(Done::Nothing),
+                Typed::Back => stays(Stage::Choosing(keys), Wants::Nothing),
+                Typed::Typing => stays(Stage::Ssh { keys, typed, wrong: None }, Wants::Nothing),
+                Typed::Enter => match typed.parse::<Destination>() {
+                    Ok(destination) => Did::Closed(Done::Ssh(destination)),
+                    Err(why) => {
+                        let wrong = Some(format!("not a destination: {why}"));
+                        stays(Stage::Ssh { keys, typed, wrong }, Wants::Nothing)
+                    },
+                },
             },
             Stage::Planning { .. } | Stage::Opening(_) | Stage::Reading { .. } | Stage::Pull { .. }
                 if closes(key) =>
@@ -1344,6 +1482,8 @@ impl Menu {
             | Stage::Planning { keys, .. }
             | Stage::Opening(keys)
             | Stage::Reading { keys, .. } => keys.search.is_some(),
+            // It keeps its width as you type too.
+            Stage::Ssh { .. } => true,
             Stage::Asking { .. } | Stage::Pull { .. } => false,
         }
     }
@@ -1409,6 +1549,19 @@ impl Menu {
                     &[(Hint::Char('y'), "Yes"), (Hint::Backspace, "Back"), (Hint::Esc, "Close")],
                 ),
             ),
+            Stage::Ssh { typed, wrong, .. } => {
+                let typed = sidebar::tail(&format!("{typed}_"), width.saturating_sub(2));
+                let mut body = vec![Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(typed, Style::new().fg(ACCENT)),
+                ])];
+                match wrong {
+                    Some(wrong) => body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED))),
+                    None => body.extend(wrap(SSH_HINT, width, Style::new().fg(NAME))),
+                }
+                let keys = [(Hint::Enter, "Add"), (Hint::Esc, "Back")];
+                (SSH_TITLE.to_owned(), String::new(), body, keyed(width, &keys))
+            },
         };
         Shown { title, right, body, spots, footer, keys }
     }
@@ -1648,6 +1801,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Last(last) => spans.push(does(last.does())),
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
+        Entry::Forget => spans.push(does(FORGET_DOES)),
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
         Entry::Pull(pull, kind) => spans.push(does(pull.does(*kind))),
@@ -1910,6 +2064,7 @@ mod tests {
                 " p  new pane",
                 " t  new tab",
                 " s  new session",
+                " m  new machine",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
@@ -2158,6 +2313,86 @@ mod tests {
             let place = pane_row().place();
             assert_eq!(closed(menu.key(&char(key))), Done::Brief { scope, place }, "{key}");
         }
+    }
+
+    fn local_header() -> Target {
+        Target::Machine(Machine::Local)
+    }
+
+    fn remote_header() -> Target {
+        Target::Machine(Machine::Remote("me@vps".parse().unwrap()))
+    }
+
+    /// `n m` opens a box, on any row, for what ssh reaches a machine by: a
+    /// character types, `Backspace` takes one back, and `Enter` adds the
+    /// machine, once what is typed is a destination, and else says why it
+    /// is not, until the next key. `Esc` goes back to the keys, and so does
+    /// `Backspace` with nothing typed.
+    #[test]
+    fn n_m_opens_a_box_for_a_machine_s_destination() {
+        for target in [pane_row(), session_row(), local_header(), remote_header()] {
+            let (menu, wants) = stays(opened(target, Some('n')));
+            let (menu, _) = stays(menu.key(&char('m')));
+            assert_eq!(wants, Wants::Nothing);
+            let menu = "me x".chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0);
+            let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
+            assert_eq!(
+                text(&menu.lines(31, 9, 0).0),
+                [
+                    "─ ssh ─────────────────────────",
+                    " me x_",
+                    " not a destination: \"me x\" is",
+                    " more than one word",
+                    " <ENTER> - Add, <ESC> - Back",
+                ]
+            );
+            let menu = (0..2).fold(menu, |menu, _| {
+                stays(menu.key(&KeyEvent::from(KeyCode::Backspace))).0
+            });
+            let (menu, _) = stays(menu.key(&char('@')));
+            let (menu, _) = stays(menu.key(&char('v')));
+            let lines = text(&menu.lines(31, 9, 0).0);
+            assert_eq!(lines[1..3], [" me@v_", " what you type ssh to it: a"]);
+            let added = closed(menu.key(&KeyEvent::from(KeyCode::Enter)));
+            assert_eq!(added, Done::Ssh("me@v".parse().unwrap()));
+        }
+        let (menu, _) = stays(opened(pane_row(), Some('n')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        assert_eq!(title(match &menu.stage {
+            Stage::Choosing(keys) => keys,
+            _ => panic!("back to the keys"),
+        }), NEW_NAME);
+    }
+
+    /// On a machine's header, the Delete group forgets the machine, and on
+    /// this one's says it cannot; the Brief group briefs you on every
+    /// session, from this one's, and on none from another's; and a key that
+    /// opens beside a pane says the header has none.
+    #[test]
+    fn a_machine_s_header_has_the_menu_forget_it() {
+        let (menu, _) = stays(opened(remote_header(), Some('d')));
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0),
+            [
+                "─ Delete ──────────────────────",
+                " d  forget the machine",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(closed(menu.key(&char('d'))), Done::Forget("me@vps".parse().unwrap()));
+        let (menu, _) = stays(opened(local_header(), Some('d')));
+        assert_eq!(closed(menu.key(&char('d'))), Done::Wrong(LOCAL_STAYS.to_owned()));
+
+        for key in ['z', 's', 'h'] {
+            let (menu, _) = stays(opened(local_header(), Some('b')));
+            let every = Done::Brief { scope: brief::Scope::Every, place: None };
+            assert_eq!(closed(menu.key(&char(key))), every);
+            let (menu, _) = stays(opened(remote_header(), Some('b')));
+            assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_BRIEF.to_owned()));
+        }
+        let (menu, _) = stays(opened(remote_header(), Some('n')));
+        assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_MACHINE_PANE.to_owned()));
     }
 
     #[test]
@@ -2592,7 +2827,8 @@ mod tests {
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
             assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
             assert!(menu.opening());
-            assert_eq!(menu.target().place(), Place::Pane { session: other.clone(), pane: 7 });
+            let there = Place::Pane { session: other.clone(), pane: 7 };
+            assert_eq!(menu.target().place(), Some(there));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
@@ -2602,7 +2838,7 @@ mod tests {
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
         assert_eq!(wants, Wants::Open { cwd: worktree.clone(), opens });
-        assert_eq!(menu.target().place(), place);
+        assert_eq!(menu.target().place(), Some(place));
     }
 
     /// A paste of an issue's link opens the menu for the issue, named for it,

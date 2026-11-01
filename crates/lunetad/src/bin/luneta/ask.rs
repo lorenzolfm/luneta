@@ -43,7 +43,8 @@ use crate::drive::Turn;
 use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
-use crate::menu::{self, Hint, Target};
+use crate::machines::Machine;
+use crate::menu::{self, Hint, PaneRow, Target};
 use crate::sidebar::{self, ACCENT};
 use crate::zellij::{self, Pane};
 
@@ -387,11 +388,13 @@ fn plain(text: &str) -> String {
 /// What the agent is told of `target`, the row highlighted as the box
 /// opened, for words that point at it.
 fn highlighted(target: &Target) -> String {
-    let place = target.place();
-    let session = place.session();
-    let row = match place.pane() {
-        Some(pane) => format!("pane {session}:{pane}"),
-        None => format!("session {session}"),
+    let row = match target {
+        Target::Session(listed) => format!("session {}", listed.name()),
+        Target::Pane(PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
+        Target::Machine(Machine::Local) => "the header of this machine".to_owned(),
+        Target::Machine(Machine::Remote(destination)) => {
+            format!("the header of the machine `ssh {destination}` reaches")
+        },
     };
     let cwd = target.cwd().map(|cwd| format!(", in {cwd}")).unwrap_or_default();
     let branch = target.branch().map(|branch| format!(", on branch {branch}"));

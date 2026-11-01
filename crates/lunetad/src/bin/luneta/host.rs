@@ -54,6 +54,7 @@ use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
 use crate::keys;
+use crate::machines::{self, Added};
 use crate::menu::{self, Choice};
 use crate::news::{self, News};
 use crate::order::{self, Order};
@@ -643,10 +644,12 @@ fn run_in(
         Err(why) => News::unshared(why),
     };
     let order = Order::shared();
-    let folds_watched = folds.dir().map(|dir| folds::watch(dir, events.clone())).transpose();
+    let folds_dirs = folds.dirs();
+    let folds_watched =
+        (!folds_dirs.is_empty()).then(|| folds::watch(&folds_dirs, events.clone())).transpose();
     let news_watched = news::watch(&news, events.clone());
     let order_watched = order.file().map(|file| order::watch(file, events.clone())).transpose();
-    let mut sidebar = Sidebar::new(folds, news, order);
+    let mut sidebar = Sidebar::new(folds, news, order, machines::local_name());
     if let Some(why) = unkept {
         sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
     }
@@ -1417,6 +1420,21 @@ impl App {
                 self.asks += 1;
                 let ask = Ask::new(self.asks, &target, &self.dir);
                 self.give(Focus { side: self.focus.side, over: Some(Over::Ask(ask)) });
+            },
+            // lunetad reads the file again as it changes, and its next answer
+            // has the machine, or has it no more.
+            Asked::Ssh(destination) => match machines::add(&destination) {
+                Ok(Added::Named) => {},
+                Ok(Added::Already) => {
+                    let named = format!("ssh: luneta's hosts file names {destination} already");
+                    self.sidebar.notify(named);
+                },
+                Err(why) => self.sidebar.notify(format!("ssh: {why}")),
+            },
+            Asked::Forget(destination) => {
+                if let Err(why) = machines::forget(&destination) {
+                    self.sidebar.notify(format!("forget {destination}: {why}"));
+                }
             },
         }
     }
