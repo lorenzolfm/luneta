@@ -40,7 +40,8 @@ message Version {
 }
 
 message Host {
-  // Always there: a client that finds none has an answer that does not read.
+  // Always there in a daemon's answer: a client that finds none has an answer
+  // that does not read. Never there in a host that comes in a `Remote`.
   Version version = 1;
   // The sessions that run, in no order a client can count on.
   repeated Session sessions = 2;
@@ -63,8 +64,8 @@ message Host {
   // The session files `unread` counts, as `ListAgentsResponse` has them.
   repeated UnreadFile unread_files = 8;
   // The other machines the daemon watches, as luneta's hosts file names them,
-  // in its order. The daemon of each says its own host, which comes here
-  // without its own `remotes`, and so does a host that comes as one of these.
+  // in its order. Always empty in a host that comes in a `Remote`: the
+  // machines that machine's daemon watches are none of this one's.
   repeated Remote remotes = 9;
 }
 
