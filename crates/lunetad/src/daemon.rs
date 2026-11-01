@@ -261,7 +261,10 @@ fn follow(
     let mut alone = Alone::default();
     let mut end = Some(end);
     let tell = move |scan: zellij::Scan| {
-        let unwatched = scan.alone() && !watchers.looked();
+        // Looked at on each look, whether zellij has a session or not, so that
+        // only a client that asked since the look before counts.
+        let watched = watchers.looked();
+        let unwatched = scan.alone() && !watched;
         if alone.saw(unwatched, Instant::now()) >= ALONE
             && let Some(end) = end.take()
         {
