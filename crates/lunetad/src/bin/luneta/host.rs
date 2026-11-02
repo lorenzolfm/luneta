@@ -1969,8 +1969,10 @@ impl App {
         let here = machine == self.sidebar.on();
         // A client that takes the place of luneta's, on another machine than
         // the one it is on, carries no tab, and `zellij::start` opens one on
-        // this machine alone.
+        // this machine alone. The notes say so, as the menu owed the tab
+        // closes once this goes nowhere.
         if let Some((owed, _)) = tab.take_if(|_| !here) {
+            self.sidebar.notify(zellij::TAB_HERE.to_owned());
             owed.pay(Err(zellij::TAB_HERE.to_owned()));
             return false;
         }

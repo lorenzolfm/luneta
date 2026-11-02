@@ -6981,6 +6981,34 @@ mod tests {
         assert_eq!(sidebar.menu.as_ref().map(Menu::target), Some(&header));
     }
 
+    /// A link pasted on another machine's row has luneta make the session it
+    /// opens a tab of on this machine, as its keys go to this machine's
+    /// sessions, and go to that tab here, though the other machine has a
+    /// session of that name.
+    #[test]
+    fn a_link_pasted_on_another_machine_s_row_makes_its_session_here() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let work = vec![session("work", 20, vec![pane(3, 0, "/w/b", "fish")])];
+        host.remotes[0] = remote("nixos", up(work, Vec::new()));
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("work", 20))));
+        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+        let pull = sidebar.key(&char('w'), moment(160_000));
+        assert!(matches!(pull, Asked::Pull { .. }), "{pull:?}");
+        let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("work") };
+        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
+        let make = sidebar.pulled(number, Ok(ready));
+        assert!(matches!(make, Asked::Make { .. }), "{make:?}");
+        if let Some(host) = &mut sidebar.host {
+            host.sessions.push(session("work", 30, vec![pane(1, 0, "/w/n", "fish")]));
+        }
+        let opened = Place::Pane { session: listed("work", 30), pane: 3 };
+        assert_eq!(sidebar.opened(number, Ok(3)), go_here(opened));
+    }
+
     /// luneta's zellij on another machine, once a client of a session there
     /// takes the place of its own, is in that machine's session, though this
     /// one has one of its name: the pane it is on there has the mark, and

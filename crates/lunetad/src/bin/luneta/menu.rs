@@ -1464,6 +1464,9 @@ impl Menu {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { link, step: Step::Waiting(Wait::Making(name)) };
+                // luneta makes the session on this machine, whatever machine's
+                // row the link was pasted on.
+                let target = Target::Machine(Machine::Local);
                 Did::Stays(Menu { number, target, stage }, wants)
             },
         }
