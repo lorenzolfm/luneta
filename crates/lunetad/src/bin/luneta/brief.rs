@@ -5,13 +5,14 @@
 //! works on. The end of its transcript says what it is doing: the title Claude
 //! Code gave it, what you last asked of it, and what it said and ran since.
 //! A key of the menu's Brief group asks for a brief of the agents it covers,
-//! by the row highlighted: luneta reads the end of each one's transcript,
-//! hands it all to `claude -p`, and shows what comes back in a box over
-//! zellij, until a key closes it. Nothing is kept: each key asks again.
+//! by the row highlighted: luneta reads the end of each one's transcript on
+//! the machine it runs on, this one's here and another's through the daemon
+//! there, hands it all to `claude -p` here, and shows what comes back in a
+//! box over zellij, until a key closes it. Nothing is kept: each key asks
+//! again.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File};
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,17 +23,22 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::program::{self, Ran};
+use lunetad::transcripts::{Reading, SessionId, IDS_MAX};
+use lunetad::Destination;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use serde_json::Value;
 
+use crate::away::{self, Away};
 use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
+use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar;
+use crate::zellij::SessionName;
 
 /// The model that writes the brief: a fast one, for a brief in seconds.
 const MODEL: &str = "haiku";
@@ -53,23 +59,10 @@ const GIVING_UP: Duration = Duration::from_millis(100);
 /// the pane they name, as an agent of its own.
 const LEFT_OUT: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
-/// How much of the end of a transcript to look through. A transcript runs to
-/// megabytes, and most of its end is what Claude Code asked of the API and
-/// what a tool answered.
-const WINDOW_BYTES: u64 = 2 * 1024 * 1024;
-
-/// The most of the records `digest` reads that a brief keeps of the ends of
-/// the transcripts it covers, together, each an equal share: enough of each
-/// for the steps the notes tell, and no more for a brief of many agents to
-/// read through.
-const TAILS_BYTES: usize = 512 * 1024;
-
-/// The records of the kinds `digest` reads, by the `type` each names.
-const KINDS: [&str; 4] =
-    [r#""type":"ai-title""#, r#""type":"last-prompt""#, r#""type":"user""#, r#""type":"assistant""#];
-
-/// The most agents a brief tells of.
+/// The most agents a brief tells of: the transcripts of no more than a
+/// reading takes.
 const MAX_NOTES: usize = 32;
+const _: () = assert!(MAX_NOTES <= IDS_MAX);
 
 /// How long a title, a prompt and a step of what an agent did can run in the
 /// notes, in characters.
@@ -139,21 +132,33 @@ impl Scope {
 /// What a brief covers, once the sidebar has found it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Over {
-    /// Every session, in the sidebar's order: one with no agent in it too.
-    Sessions(Vec<String>),
-    /// A session, a line for each agent in it.
-    Session(String),
-    /// The agent in a pane of a session, in a few lines.
-    Agent(String, u32),
+    /// Every session of each machine lunetad reaches, in the sidebar's
+    /// order, one with no agent in it too; and each machine it does not
+    /// reach now, whose sessions are unknown, with what its header says of
+    /// it.
+    Sessions {
+        sessions: Vec<(Machine, SessionName)>,
+        unknown: Vec<(Destination, &'static str)>,
+    },
+    /// Every session of a machine, in the sidebar's order, one with no agent
+    /// in it too.
+    Machine(Machine, Vec<SessionName>),
+    /// A session of a machine, a line for each agent in it.
+    Session(Machine, SessionName),
+    /// The agent in a pane of a session of a machine, in a few lines.
+    Agent(Machine, SessionName, u32),
 }
 
 impl Over {
     /// Whether the brief covers the agent `note` is of.
     fn covers(&self, note: &Note) -> bool {
         match self {
-            Over::Sessions(_) => true,
-            Over::Session(session) => note.session == *session,
-            Over::Agent(session, pane) => note.session == *session && note.pane == *pane,
+            Over::Sessions { .. } => true,
+            Over::Machine(on, _) => note.on == *on,
+            Over::Session(on, session) => note.on == *on && note.session == *session,
+            Over::Agent(on, session, pane) => {
+                note.on == *on && note.session == *session && note.pane == *pane
+            },
         }
     }
 
@@ -161,8 +166,8 @@ impl Over {
     /// agents a brief covers, the more of each.
     fn steps(&self) -> usize {
         match self {
-            Over::Sessions(_) => 4,
-            Over::Session(_) => 8,
+            Over::Sessions { .. } | Over::Machine(..) => 4,
+            Over::Session(..) => 8,
             Over::Agent(..) => 24,
         }
     }
@@ -170,23 +175,14 @@ impl Over {
     /// What the model is asked to write.
     fn ask(&self) -> String {
         match self {
-            Over::Sessions(_) => "Write a first line that says how many sessions the developer \
-                has open, then one line per session, in the order the notes give them, as \
-                \"- <session>: <what is going on there>\". Each line is one short sentence, \
-                under 100 characters. A session with several agents gets one line that covers \
-                them all, with what waits for the developer first, and one with no agent gets \
-                \"- <session>: no agents\". Nothing else. For example:\n\
-                You have 3 sessions open:\n\
-                - cipher: an agent is waiting for CI to finish, to report how it went\n\
-                - luneta: you were folding sessions in the sidebar; it is done and waits for \
-                your review\n\
-                - dotfiles: your nvim config is fixed"
-                .to_owned(),
-            Over::Session(session) => format!(
-                "Write a first line that says how many agents session {session} has, then one \
-                 line per agent, in the order the notes give them, as \"- <agent>: <what it is \
-                 doing, and what it needs from you, if anything>\". Each line is one short \
-                 sentence, under 120 characters. Nothing else."
+            Over::Sessions { unknown, .. } => per_session("open", !unknown.is_empty()),
+            Over::Machine(on, _) => per_session(&format!("open on {}", machine_named(on)), false),
+            Over::Session(on, session) => format!(
+                "Write a first line that says how many agents session {} has, then one line per \
+                 agent, in the order the notes give them, as \"- <agent>: <what it is doing, and \
+                 what it needs from you, if anything>\". Each line is one short sentence, under \
+                 120 characters. Nothing else.",
+                session_on(on, session)
             ),
             Over::Agent(..) => "Write three to five short lines on this one agent: what it was \
                 asked to do, what it has done, where it stands now, and what it needs from you, \
@@ -196,23 +192,54 @@ impl Over {
     }
 }
 
-/// The id Claude Code gives a session, which names its transcript: a UUID's
-/// hex digits and dashes, and nothing that would take the file it names out
-/// of its folder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionId(String);
+/// What the model is asked to write of the sessions the developer has
+/// `open`, a line each, and of machines whose sessions are unknown, where
+/// the notes tell of any: told of none, the model makes one up.
+fn per_session(open: &str, unknown: bool) -> String {
+    let unknown = if unknown {
+        " Where they say the sessions of a machine are unknown, end with a line that says so."
+    } else {
+        ""
+    };
+    format!(
+        "Write a first line that says how many sessions the developer has {open}, then one line \
+         per session, in the order the notes give them, as \"- <session>: <what is going on \
+         there>\". Each line is one short sentence, under 100 characters. A session with \
+         several agents gets one line that covers them all, with what waits for the developer \
+         first, and one with no agent gets \"- <session>: no agents\". The notes name a session \
+         of another machine than this one as \"<session> on <machine>\": name it so.{unknown} \
+         Nothing else. For example:\n\
+         You have 3 sessions open:\n\
+         - cipher: an agent is waiting for CI to finish, to report how it went\n\
+         - luneta: you were folding sessions in the sidebar; it is done and waits for your \
+         review\n\
+         - dotfiles on nixos: your nvim config is fixed"
+    )
+}
 
-impl SessionId {
-    pub fn parse(id: &str) -> Option<Self> {
-        let uuid = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
-        uuid.then(|| SessionId(id.to_owned()))
+/// `session`, of the machine `on`, as the notes name it: by its name, and
+/// its machine's where that is another than this one.
+fn session_on(on: &Machine, session: &SessionName) -> String {
+    match on {
+        Machine::Local => session.to_string(),
+        Machine::Remote(destination) => format!("{session} on {destination}"),
+    }
+}
+
+/// The machine `on`, as the notes name it.
+fn machine_named(on: &Machine) -> String {
+    match on {
+        Machine::Local => "this machine".to_owned(),
+        Machine::Remote(destination) => destination.to_string(),
     }
 }
 
 /// What the sidebar knows of an agent, for the brief.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    pub session: String,
+    /// The machine it runs on, whose daemon reads its transcript.
+    pub on: Machine,
+    pub session: SessionName,
     pub pane: u32,
     /// What the agent's row in the sidebar is named.
     pub name: String,
@@ -236,16 +263,19 @@ pub struct Brief {
 
 impl Brief {
     /// The brief of the agents in `notes` that `over` covers, or what the
-    /// sidebar says when there is none. Two agents a session names alike are
-    /// told apart by their panes, as the agent list tells them apart:
-    /// `luneta/main:4`.
+    /// sidebar says when there is none: one of every session says too of
+    /// the machines whose sessions are unknown, which may have some. Two
+    /// agents a session names alike are told apart by their panes, as the
+    /// agent list tells them apart: `luneta/main:4`.
     pub fn new(over: Over, notes: Vec<Note>) -> Result<Self, String> {
         let mut notes: Vec<Note> =
             notes.into_iter().filter(|note| over.covers(note)).collect();
         let alike: Vec<bool> = notes
             .iter()
             .map(|note| {
-                let named = |other: &&Note| other.session == note.session && other.name == note.name;
+                let named = |other: &&Note| {
+                    other.on == note.on && other.session == note.session && other.name == note.name
+                };
                 notes.iter().filter(named).count() > 1
             })
             .collect();
@@ -256,16 +286,32 @@ impl Brief {
         }
         let Some(first) = notes.first() else {
             return Err(match &over {
-                Over::Sessions(_) => "brief: no agents to brief you on".to_owned(),
-                Over::Session(session) => format!("brief: no agents in {session}"),
+                Over::Sessions { unknown, .. } if unknown.is_empty() => {
+                    "brief: no agents to brief you on".to_owned()
+                },
+                Over::Sessions { unknown, .. } => {
+                    let unknown: Vec<String> =
+                        unknown.iter().map(|(machine, _)| machine.to_string()).collect();
+                    format!(
+                        "brief: no agents to brief you on; lunetad does not reach {} now",
+                        unknown.join(", ")
+                    )
+                },
+                Over::Machine(on, _) => format!("brief: no agents on {}", machine_named(on)),
+                Over::Session(on, session) => {
+                    format!("brief: no agents in {}", session_on(on, session))
+                },
                 Over::Agent(..) => "brief: no agent in this pane".to_owned(),
             });
         };
         let title = match &over {
-            Over::Sessions(_) => "Brief of every session".to_owned(),
-            Over::Session(session) => format!("Brief of {session}"),
+            Over::Sessions { .. } => "Brief of every session".to_owned(),
+            Over::Machine(on, _) => format!("Brief of every session on {}", machine_named(on)),
+            Over::Session(on, session) => format!("Brief of {}", session_on(on, session)),
             // A pane has one agent at the most.
-            Over::Agent(session, _) => format!("Brief of {}, in {session}", first.name),
+            Over::Agent(on, session, _) => {
+                format!("Brief of {}, in {}", first.name, session_on(on, session))
+            },
         };
         Ok(Brief { over, notes, title })
     }
@@ -275,53 +321,90 @@ impl Brief {
         &self.title
     }
 
-    /// The end of each transcript the brief has room for, by its id, each
-    /// its share of `TAILS_BYTES`, as `projects` has them: in a directory
-    /// named for where its session started, which its id alone finds. One
-    /// that is not found there, or does not read, has none.
-    fn ends(&self, projects: &Path) -> HashMap<String, String> {
-        let ids: Vec<&SessionId> = self
-            .notes
-            .iter()
-            .take(MAX_NOTES)
-            .filter_map(|note| note.transcript.as_ref())
-            .collect();
-        let share = TAILS_BYTES / ids.len().max(1);
-        let mut dirs: Vec<PathBuf> = fs::read_dir(projects)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| Some(entry.ok()?.path()))
-            .collect();
-        dirs.sort();
-        let mut ends = HashMap::new();
-        for SessionId(id) in ids {
-            let file = format!("{id}.jsonl");
-            let Some(path) = dirs.iter().map(|dir| dir.join(&file)).find(|path| path.is_file())
-            else {
-                continue;
-            };
-            if let Ok(end) = end(&path, share) {
-                ends.insert(id.clone(), end);
+    /// What the end of its transcript told of each agent the notes have
+    /// room for, in their order, as `read` reads them on the machine each is
+    /// on, each an equal share of what a reading keeps of them all: every
+    /// machine at once, each on a thread of its own, as another's answers
+    /// through two daemons and ssh. Or why it read none: there are more of
+    /// them than a reading takes, as `MAX_NOTES` keeps there from being.
+    fn told(&self, read: &Reads<'_>) -> Result<Vec<Told>, String> {
+        let mut told: Vec<(usize, Told)> = Vec::new();
+        // The place in the notes of each agent with a transcript, and its
+        // id, by its machine.
+        let mut machines: HashMap<&Machine, Vec<(usize, SessionId)>> = HashMap::new();
+        for (at, note) in self.notes.iter().take(MAX_NOTES).enumerate() {
+            match &note.transcript {
+                Some(id) => machines.entry(&note.on).or_default().push((at, id.clone())),
+                None => told.push((at, Told::NoId)),
             }
         }
-        ends
+        let groups = machines.into_iter().map(|(machine, placed)| {
+            let ids = placed.iter().map(|(_, id)| id.clone()).collect();
+            ((machine, placed), ids)
+        });
+        let readings = Reading::shared(groups.collect())?;
+        let steps = self.over.steps();
+        thread::scope(|scope| {
+            let reads: Vec<_> = readings
+                .into_iter()
+                .map(|((machine, placed), reading)| {
+                    (placed, scope.spawn(move || read(machine, &reading)))
+                })
+                .collect();
+            let lost = |_| Err("the thread that read it ended without an answer".to_owned());
+            for (placed, reading) in reads {
+                let read = reading.join().unwrap_or_else(lost);
+                told.extend(placed.into_iter().map(|(at, id)| match &read {
+                    Ok(ends) => match ends.get(&id) {
+                        Some(end) => (at, Told::Read(digest(end, steps))),
+                        None => (at, Told::NotFound),
+                    },
+                    Err(why) => (at, Told::Unread(why.clone())),
+                }));
+            }
+        });
+        told.sort_by_key(|(at, _)| *at);
+        Ok(told.into_iter().map(|(_, told)| told).collect())
     }
 
     /// What the model is asked, with the notes on each agent and what the
-    /// end of its transcript in `ends` says of it, for as many agents as the
-    /// notes have room for, and how many they leave out. How long each has
-    /// been in its status is told as of `now`.
-    fn prompt(&self, ends: &HashMap<String, String>, now: SystemTime) -> String {
+    /// end of its transcript says of it, as `read` reads them, for as many
+    /// agents as the notes have room for, and how many they leave out, and
+    /// the machines whose sessions are unknown; or why it read none, as
+    /// `told` says. How long each has been in its status is told as of the
+    /// time `now` says once they are read.
+    fn prompt(&self, read: &Reads<'_>, now: fn() -> SystemTime) -> Result<String, String> {
+        let transcripts = self.told(read)?;
+        let now = now();
         let mut prompt = self.over.ask();
         prompt.push_str("\n\nThe notes:\n");
-        if let Over::Sessions(sessions) = &self.over {
+        let sessions: Option<Vec<String>> = match &self.over {
+            Over::Sessions { sessions, .. } => {
+                Some(sessions.iter().map(|(on, session)| session_on(on, session)).collect())
+            },
+            Over::Machine(on, sessions) => {
+                Some(sessions.iter().map(|session| session_on(on, session)).collect())
+            },
+            Over::Session(..) | Over::Agent(..) => None,
+        };
+        if let Some(sessions) = sessions {
             prompt.push_str("\nSessions, in order: ");
             prompt.push_str(&sessions.join(", "));
             prompt.push('\n');
         }
+        if let Over::Sessions { unknown, .. } = &self.over
+            && !unknown.is_empty()
+        {
+            let unknown: Vec<String> =
+                unknown.iter().map(|(machine, word)| format!("{machine} ({word})")).collect();
+            prompt.push_str("Machines whose sessions are unknown, as lunetad does not reach them \
+                             now: ");
+            prompt.push_str(&unknown.join(", "));
+            prompt.push('\n');
+        }
         let mut told = 0;
-        for note in self.notes.iter().take(MAX_NOTES) {
-            let written = format!("\n{}", note.written(&self.told(note, ends), now));
+        for (note, transcript) in self.notes.iter().zip(&transcripts) {
+            let written = format!("\n{}", note.written(transcript, now));
             if prompt.len() + written.len() > NOTES_BYTES - LEFT_OUT_BYTES {
                 break;
             }
@@ -332,51 +415,36 @@ impl Brief {
         if !left_out.is_empty() {
             prompt.push_str(&leaves_out(left_out));
         }
-        cut_bytes(prompt, NOTES_BYTES)
-    }
-
-    /// What the end of `note`'s transcript, among `ends`, told of it.
-    fn told(&self, note: &Note, ends: &HashMap<String, String>) -> Told {
-        let Some(SessionId(id)) = &note.transcript else {
-            return Told::NoId;
-        };
-        match ends.get(id) {
-            Some(end) => Told::Read(digest(end, self.over.steps())),
-            None => Told::NotFound,
-        }
+        Ok(cut_bytes(prompt, NOTES_BYTES))
     }
 }
 
-/// The last records of the kinds `digest` reads among the last `WINDOW_BYTES`
-/// of the transcript at `path`, whole ones alone, as many as `share` bytes
-/// have room for. The window starts partway into a record, which is no
-/// record, and partway into a character, which reads as `�`.
-fn end(path: &Path, share: usize) -> io::Result<String> {
-    let mut file = File::open(path)?;
-    let length = file.metadata()?.len();
-    file.seek(SeekFrom::Start(length.saturating_sub(WINDOW_BYTES)))?;
-    let mut window = Vec::new();
-    file.take(WINDOW_BYTES).read_to_end(&mut window)?;
-    let window = String::from_utf8_lossy(&window);
-    let told_of = |record: &&str| KINDS.iter().any(|kind| record.contains(kind));
-    let mut kept: Vec<&str> = Vec::new();
-    let mut taken = 0;
-    for record in window.lines().rev().filter(told_of) {
-        taken += record.len() + 1;
-        if taken > share {
-            break;
-        }
-        kept.push(record);
+/// What reads the ends of transcripts on a machine: the end of each that
+/// `Reading` reads there, by its session's id, or why it read none there.
+type Reads<'a> =
+    dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync + 'a;
+
+/// The ends `reading` reads on the machine `on`: this one's in `projects`,
+/// where the daemon said it reads Claude Code's sessions, or none where it
+/// said nothing; another's as its daemon reads them there, through this
+/// one's, or why it read none.
+fn read(
+    on: &Machine,
+    reading: &Reading,
+    projects: Option<&Path>,
+) -> Result<HashMap<SessionId, String>, String> {
+    match on {
+        Machine::Local => Ok(projects.map(|projects| reading.ends(projects)).unwrap_or_default()),
+        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.ends(reading),
     }
-    kept.reverse();
-    Ok(kept.join("\n"))
 }
 
 /// What the notes say of the agents in `left_out` that they have no room
 /// for, so that a session whose agents they leave out is not taken for one
 /// with none.
 fn leaves_out(left_out: &[Note]) -> String {
-    let mut sessions: Vec<&str> = left_out.iter().map(|note| note.session.as_str()).collect();
+    let mut sessions: Vec<String> =
+        left_out.iter().map(|note| session_on(&note.on, &note.session)).collect();
     sessions.dedup();
     let agents = if left_out.len() == 1 { "agent" } else { "agents" };
     let of = if sessions.len() == 1 { "session" } else { "sessions" };
@@ -392,7 +460,8 @@ impl Note {
     /// The note as the model reads it at `now`, with what its transcript
     /// `told`.
     fn written(&self, told: &Told, now: SystemTime) -> String {
-        let mut lines = vec![format!("Agent \"{}\" in session {}", self.name, self.session)];
+        let session = session_on(&self.on, &self.session);
+        let mut lines = vec![format!("Agent \"{}\" in session {session}", self.name)];
         lines.push(match self.since {
             Some(since) => format!("Status: {}, for {}", self.status, sidebar::age(since, now)),
             None => format!("Status: {}", self.status),
@@ -406,6 +475,7 @@ impl Note {
                 lines.push("Its transcript is unknown: Claude Code names none for it.".to_owned());
             },
             Told::NotFound => lines.push("Its transcript was not found.".to_owned()),
+            Told::Unread(why) => lines.push(format!("Its transcript was not read: {why}")),
             Told::Read(digest) => lines.extend(digest.lines()),
         }
         lines.join("\n") + "\n"
@@ -417,9 +487,13 @@ enum Told {
     /// Claude Code gave no id for its session, or one that names no
     /// transcript.
     NoId,
-    /// No transcript has its id in the folder the daemon reads Claude Code's
-    /// sessions in: one not written yet, or there was no folder to look in.
+    /// No transcript has its id in the folder its machine's daemon reads
+    /// Claude Code's sessions in: one not written yet, or there was no
+    /// folder to look in.
     NotFound,
+    /// Its machine's daemon read no transcript there, for this reason, as
+    /// lunetad does not reach it now, or is older than the question.
+    Unread(String),
     Read(Digest),
 }
 
@@ -581,10 +655,11 @@ pub struct Written {
 }
 
 /// Asks for `brief`, numbered `number`, on a thread of its own: reads the end
-/// of each transcript it covers in `claude_folder`, the folder the daemon
-/// reads Claude Code's sessions in, has the model write the brief, and hands
-/// back what it wrote, or why it wrote nothing, as `Due` does. The briefing
-/// that shows it gives it up as it goes, the model with it.
+/// of each transcript it covers, this machine's in `claude_folder`, the
+/// folder the daemon reads Claude Code's sessions in, and another's through
+/// the daemon there, has the model write the brief, and hands back what it
+/// wrote, or why it wrote nothing, as `Due` does. The briefing that shows it
+/// gives it up as it goes, the model with it.
 pub fn ask(
     number: u64,
     brief: Brief,
@@ -599,10 +674,21 @@ pub fn ask(
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
         let projects = claude_folder.map(|folder| folder.join("projects"));
-        let ends = projects.map(|projects| brief.ends(&projects)).unwrap_or_default();
-        // Given up, it is owed to a briefing that is gone.
-        let Some(said) = write(&brief.prompt(&ends, SystemTime::now()), wanted) else {
+        let reads = |on: &Machine, reading: &Reading| read(on, reading, projects.as_deref());
+        let prompt = brief.prompt(&reads, SystemTime::now);
+        // Given up while another machine's daemon read, it runs no model.
+        if !wanted() {
             return;
+        }
+        let said = match prompt {
+            Ok(prompt) => {
+                // Given up, it is owed to a briefing that is gone.
+                let Some(said) = write(&prompt, wanted) else {
+                    return;
+                };
+                said
+            },
+            Err(why) => Err(format!("brief: {why}")),
         };
         due.pay(Ok(Written { at, said }));
     });
@@ -828,16 +914,21 @@ pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::ExitStatus;
+    use std::sync::Mutex;
 
+    use lunetad::api::TranscriptEndsRequest;
+    use lunetad::transcripts::TAILS_BYTES;
     use serde_json::json;
 
     use super::*;
 
     fn note(session: &str, pane: u32, name: &str, transcript: Option<&str>) -> Note {
         Note {
-            session: session.to_owned(),
+            on: Machine::Local,
+            session: named(session),
             pane,
             name: name.to_owned(),
             status: "idle".to_owned(),
@@ -851,6 +942,31 @@ mod tests {
     /// Three minutes after each note's agent came to its status.
     fn now() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_mins(3)
+    }
+
+    fn named(session: &str) -> SessionName {
+        SessionName::parse(session).expect("a session's name")
+    }
+
+    /// A brief of every session of this machine, named `sessions`, in order.
+    fn every(sessions: &[&str]) -> Over {
+        let sessions = sessions.iter().map(|it| (Machine::Local, named(it))).collect();
+        Over::Sessions { sessions, unknown: Vec::new() }
+    }
+
+    /// What reads the ends of this machine's transcripts, as luneta reads
+    /// them in `projects`.
+    fn read_here(
+        projects: &Path,
+    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync + '_
+    {
+        move |on, reading| read(on, reading, Some(projects))
+    }
+
+    /// What reads no end of a transcript, on any machine.
+    #[expect(clippy::unnecessary_wraps, reason = "it is a `Reads`")]
+    fn none_read(_: &Machine, _: &Reading) -> Result<HashMap<SessionId, String>, String> {
+        Ok(HashMap::new())
     }
 
     /// What the model reads of each agent: what the sidebar knows of it, and
@@ -910,7 +1026,6 @@ mod tests {
         fs::write(project.join(format!("{fold}.jsonl")), fold_file).expect("a file");
         fs::write(project.join(format!("{quiet}.jsonl")), lines(&quiet_end)).expect("a file");
 
-        let over = Over::Sessions(vec!["a".to_owned(), "b".to_owned()]);
         let notes = vec![
             note("a", 1, "fold", None),
             note("b", 4, "fold", Some(fold)),
@@ -918,8 +1033,8 @@ mod tests {
             note("b", 6, "spare", Some(gone)),
             Note { since: None, ..note("b", 7, "spare", None) },
         ];
-        let brief = Brief::new(over, notes).expect("a brief");
-        let prompt = brief.prompt(&brief.ends(projects.path()), now());
+        let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
+        let prompt = brief.prompt(&read_here(projects.path()), now).expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;
         assert_eq!(
             notes,
@@ -986,7 +1101,8 @@ Its transcript is unknown: Claude Code names none for it.
         }
 
         let note = |(n, id): (usize, &String)| Note {
-            session: "a".to_owned(),
+            on: Machine::Local,
+            session: named("a"),
             pane: n as u32,
             name: format!("agent {n}"),
             status: "busy".to_owned(),
@@ -996,13 +1112,21 @@ Its transcript is unknown: Claude Code names none for it.
             transcript: Some(SessionId::parse(id).expect("a UUID")),
         };
         let notes = ids.iter().enumerate().map(note).collect();
-        let brief = Brief::new(Over::Sessions(vec!["a".to_owned()]), notes).expect("a brief");
-        let ends = brief.ends(projects.path());
+        let brief = Brief::new(every(&["a"]), notes).expect("a brief");
+        let kept = Mutex::new(0);
+        let here = read_here(projects.path());
+        let told = brief.told(&|on, reading| {
+            let ends = here(on, reading)?;
+            *kept.lock().expect("no panic") += ends.values().map(String::len).sum::<usize>();
+            Ok(ends)
+        });
 
-        let kept: usize = ends.values().map(String::len).sum();
+        let kept = kept.into_inner().expect("no panic");
         assert!(kept <= TAILS_BYTES, "{kept}");
-        for (n, id) in ids.iter().enumerate() {
-            let digest = digest(&ends[id], Over::Sessions(Vec::new()).steps());
+        for (n, told) in told.expect("a reading").iter().enumerate() {
+            let Told::Read(digest) = told else {
+                panic!("agent {n}: its transcript was not read");
+            };
             let last = digest.steps.last().map(String::as_str).unwrap_or_default();
             assert!(last.starts_with(&format!("said: agent {n}, step 63: ")), "{last}");
         }
@@ -1016,7 +1140,8 @@ Its transcript is unknown: Claude Code names none for it.
     #[test]
     fn a_brief_says_how_many_agents_it_has_no_room_for() {
         let note = |session: &str, pane: usize, name: String| Note {
-            session: session.to_owned(),
+            on: Machine::Local,
+            session: named(session),
             pane: pane as u32,
             name,
             status: "busy".to_owned(),
@@ -1032,22 +1157,125 @@ Its transcript is unknown: Claude Code names none for it.
             (many.collect(), MAX_NOTES, "The notes leave out 2 more agents for room, in session b."),
             (vec![long("a", 0), long("b", 1)], 1, "leave out 1 more agent for room, in session b."),
         ] {
-            let over = Over::Sessions(vec!["a".to_owned(), "b".to_owned()]);
-            let prompt = Brief::new(over, notes).expect("a brief").prompt(&HashMap::new(), now());
+            let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
+            let prompt = brief.prompt(&none_read, now).expect("a reading");
             assert_eq!(prompt.matches("\nAgent \"").count(), told, "{said}");
             assert!(prompt.contains(said), "{said}");
             assert!(prompt.len() <= NOTES_BYTES, "{said}");
         }
     }
 
-    /// A transcript's id names a file in Claude Code's folder, and one that
-    /// would name a file elsewhere names none.
+    /// Each agent is told of on its machine: one of another machine's in
+    /// its session there, as "<session> on <machine>", by what that
+    /// machine's daemon read of its transcript. Each machine is asked for
+    /// its own transcripts alone, all at once, each an equal share of what
+    /// a reading keeps of them all; one whose daemon read none says why, and
+    /// a machine lunetad does not reach is told of as one whose sessions are
+    /// unknown. Agents named alike in sessions named alike, but of two
+    /// machines, are not told apart by their panes. A brief of a machine
+    /// covers its agents alone. With no agent where lunetad reaches, a brief
+    /// of every session says whose sessions are unknown.
     #[test]
-    fn a_transcript_s_id_is_a_uuid_s_digits_and_dashes() {
-        assert!(SessionId::parse("0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60").is_some());
-        for id in ["", "../0b7c5e1a", "0b7c5e1a/x", "id-1"] {
-            assert_eq!(SessionId::parse(id), None, "{id}");
+    fn the_notes_tell_each_agent_on_its_machine() {
+        let ids = [
+            "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60",
+            "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a",
+            "9e8d7c6b-5a4f-4e3d-2c1b-0a9f8e7d6c5b",
+            "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        ];
+        let nixos = || Machine::Remote("nixos".parse().expect("a destination"));
+        let vps = || Machine::Remote("me@vps".parse().expect("a destination"));
+        let on = |on: Machine, note: Note| Note { on, ..note };
+        let notes = vec![
+            note("a", 1, "fold", Some(ids[0])),
+            on(nixos(), note("a", 1, "fold", Some(ids[1]))),
+            on(nixos(), note("b", 2, "gone", Some(ids[2]))),
+            on(vps(), note("c", 3, "far", Some(ids[3]))),
+        ];
+        let sessions = [(Machine::Local, "a"), (nixos(), "a"), (nixos(), "b"), (vps(), "c")];
+        let sessions = sessions.into_iter().map(|(on, it)| (on, named(it))).collect();
+        let pi = || -> Destination { "pi".parse().expect("a destination") };
+        let over = Over::Sessions { sessions, unknown: vec![(pi(), "reaching…")] };
+        let brief = Brief::new(over, notes.clone()).expect("a brief");
+        let asked = Mutex::new(HashMap::new());
+        let said = |text: &str| {
+            let block = json!({"type": "text", "text": text});
+            json!({"type": "assistant", "message": {"content": [block]}}).to_string()
+        };
+        let reads = |machine: &Machine, reading: &Reading| {
+            let TranscriptEndsRequest { ids: read, share, .. } = reading.asked(None);
+            asked.lock().expect("no panic").insert(machine.clone(), (read, share));
+            let (id, end) = match machine {
+                Machine::Local => (ids[0], said("here")),
+                Machine::Remote(_) if *machine == nixos() => (ids[1], said("there")),
+                Machine::Remote(_) => return Err("me@vps: lunetad did not answer in 6s".to_owned()),
+            };
+            Ok(HashMap::from([(SessionId::parse(id).expect("a UUID"), end)]))
+        };
+        let prompt = brief.prompt(&reads, now);
+        let share = u32::try_from(TAILS_BYTES / 4).expect("a share");
+        let of = |ids: &[&str]| (ids.iter().map(|id| (*id).to_owned()).collect(), share);
+        let asked_of = HashMap::from([
+            (Machine::Local, of(&ids[..1])),
+            (nixos(), of(&ids[1..3])),
+            (vps(), of(&ids[3..])),
+        ]);
+        assert_eq!(asked.into_inner().expect("no panic"), asked_of);
+        let prompt = prompt.expect("a reading");
+        let notes_said = prompt.split_once("The notes:\n").expect("the notes").1;
+        assert_eq!(
+            notes_said,
+            "
+Sessions, in order: a, a on nixos, b on nixos, c on me@vps
+Machines whose sessions are unknown, as lunetad does not reach them now: pi (reaching…)
+
+Agent \"fold\" in session a
+Status: idle, for 3m
+Works in /w/a
+Lately, oldest first:
+- said: here
+
+Agent \"fold\" in session a on nixos
+Status: idle, for 3m
+Works in /w/a
+Lately, oldest first:
+- said: there
+
+Agent \"gone\" in session b on nixos
+Status: idle, for 3m
+Works in /w/b
+Its transcript was not found.
+
+Agent \"far\" in session c on me@vps
+Status: idle, for 3m
+Works in /w/c
+Its transcript was not read: me@vps: lunetad did not answer in 6s
+"
+        );
+
+        assert!(prompt.contains("sessions of a machine are unknown, end with"), "{prompt}");
+        // With no machine of unknown sessions, it asks of none: asked anyway, the
+        // model makes one up.
+        let of_nixos = Brief::new(Over::Machine(nixos(), Vec::new()), notes.clone());
+        let of_nixos = of_nixos.expect("a brief").prompt(&none_read, now).expect("a reading");
+        assert_eq!(of_nixos.matches("\nAgent \"").count(), 2);
+        assert!(!of_nixos.contains("unknown"), "{of_nixos}");
+        let titled = |over| Brief::new(over, notes.clone()).map(|it| it.title().to_owned());
+        let a = || named("a");
+        for (over, title) in [
+            (Over::Machine(nixos(), vec![a()]), Ok("Brief of every session on nixos")),
+            (Over::Session(nixos(), a()), Ok("Brief of a on nixos")),
+            (Over::Agent(nixos(), a(), 1), Ok("Brief of fold, in a on nixos")),
+            (Over::Machine(Machine::Local, vec![a()]), Ok("Brief of every session on this machine")),
+            (Over::Session(vps(), a()), Err("brief: no agents in a on me@vps")),
+            (Over::Machine(Machine::Remote(pi()), Vec::new()), Err("brief: no agents on pi")),
+        ] {
+            assert_eq!(titled(over), title.map(str::to_owned).map_err(str::to_owned));
         }
+        let unknown = ["pi", "me@vps"].map(|it| (it.parse().expect("a destination"), "lost"));
+        let nowhere = Over::Sessions { sessions: Vec::new(), unknown: unknown.into() };
+        let said = "brief: no agents to brief you on; lunetad does not reach pi, me@vps now";
+        assert_eq!(Brief::new(nowhere, Vec::new()).err().as_deref(), Some(said));
     }
 
     /// What `claude` wrote is the brief, and a run that wrote nothing but

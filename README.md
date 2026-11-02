@@ -295,9 +295,9 @@ sidebar's keys. A folded session's agents are among them.
 
 | keys | brief |
 |---|---|
-| `b` `z` | every session, a line each |
-| `b` `s` | the row's session, a line for each agent in it |
-| `b` `h` | the agent in the row's pane, in a few lines; on a session's row, its session |
+| `b` `z` | every session of every machine, a line each |
+| `b` `s` | the row's session, a line for each agent in it; on a machine's header, its sessions |
+| `b` `h` | the agent in the row's pane, in a few lines; on a session's row, its session; on a machine's header, its sessions |
 
 The brief shows in a box over zellij, which has the keys and the mouse until
 it closes: while the model writes, the box says `⠋ Asking haiku…`, the
@@ -317,9 +317,15 @@ may tell fewer steps of each. It is asked to use those alone. luneta reads the
 transcripts in the folder lunetad reads Claude Code's sessions in, where the
 agents it lists come from, whatever `CLAUDE_CONFIG_DIR` luneta has, by the
 session id Claude Code gives; the model is told when one was not found there.
-Two agents a session names alike are told apart by their panes, as
-`luneta/main:4`, and a brief tells of 32 agents at most, and says how many it
-leaves out.
+An agent of [another machine](#other-machines) is told of with its machine, as
+`luneta on nixos`, and lunetad there reads its transcript in its own folder and
+hands the end back, every machine at once; haiku still runs here, so `b z` is
+one brief over every machine's agents. Where lunetad there does not hand it
+back in time, or is older than the question, the agent is told of without it,
+and the model is told why; a machine lunetad does not reach is told of as one
+whose sessions are unknown. Two agents a session names alike are told apart by
+their panes, as `luneta/main:4`, and a brief tells of 32 agents at most, and
+says how many it leaves out.
 
 The model is `claude -p --model haiku`, on your Claude Code login, with no
 tools, and in `--safe-mode`, so that none of your hooks, `CLAUDE.md` or MCP
@@ -539,7 +545,8 @@ you were.
 
 `b` opens the [brief](#brief)'s keys: `b z` briefs you on every session, `b s`
 on the highlighted row's session, and `b h` on the agent in its pane, or on a
-session's row, on its session. Over zellij, the row is the pane zellij is on,
+session's row, on its session; on a machine's header, `b s` and `b h` brief
+you on its sessions. Over zellij, the row is the pane zellij is on,
 and closing the brief gives the keys back where the menu took them from.
 
 `a` opens the [ask box](#from-lunetas-sidebar), where you tell an agent in
@@ -796,8 +803,8 @@ do here, and ask first by that machine's agents. The session luneta's zellij is
 in there is deleted once zellij is in the newest other session of that
 machine's; with none, it is deleted with zellij in it, and luneta goes on as it
 does when a session there ends. While luneta's zellij is on another machine,
-the menu over zellij is for its pane there. The Brief group but for every
-session, the ask box and moving its sessions come later. `u` marks
+the menu over zellij is for its pane there. The Brief group briefs you on its
+agents as on this machine's. The ask box and moving its sessions come later. `u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.

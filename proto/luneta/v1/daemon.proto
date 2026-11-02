@@ -75,13 +75,18 @@ service Daemon {
   // once the session's server has ended, or with why it did not: a session
   // that took the name since stays.
   rpc Kill(KillRequest) returns (KillResponse);
+  // The ends of transcripts of Claude Code's sessions, as luneta's brief
+  // reads them in the daemon's Claude Code folder: of each, the last records
+  // that tell what its agent is doing, whole ones alone, as many as a share
+  // of bytes has room for. A transcript not found there, or that does not
+  // read, has none.
+  rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
 }
 
-// The machine a question of zellij's is for: this daemon's own where it is
-// absent, and otherwise one of its `Host.remotes`, by its destination, whose
-// daemon this one hands the question on to, without it, through the bridge
-// it watches that machine on. One it does not reach now is answered as
-// unavailable.
+// The machine a question is for: this daemon's own where it is absent, and
+// otherwise one of its `Host.remotes`, by its destination, whose daemon this
+// one hands the question on to, without it, through the bridge it watches
+// that machine on. One it does not reach now is answered as unavailable.
 message On {
   string destination = 1;
 }
@@ -306,6 +311,23 @@ message KillRequest {
 }
 
 message KillResponse {}
+
+message TranscriptEndsRequest {
+  On on = 1;
+  // The sessions whose transcripts it reads, by the ids Claude Code gives
+  // them: a UUID's hex digits and dashes. More than 32, or one of anything
+  // else, is invalid.
+  repeated string ids = 2;
+  // The most bytes it keeps of each end: 512 KiB at the most of them all
+  // together. None, as a question that does not say has, is invalid.
+  uint32 share = 3;
+}
+
+message TranscriptEndsResponse {
+  // The end of each transcript it found, by its session's id: its records,
+  // a line each, oldest first.
+  map<string, string> ends = 1;
+}
 
 // A session that runs, and its clients, which are those it has before the
 // client that goes on there comes.
