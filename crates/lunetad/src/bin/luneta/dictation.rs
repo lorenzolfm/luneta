@@ -12,7 +12,9 @@
 //! nothing moves what it writes into from under it. Of the keys, it takes
 //! its own, and does nothing with the rest. luneta tells a hold from a tap by
 //! when the key is let go, which only a terminal that speaks the kitty
-//! keyboard protocol tells it: in one that does not, the key taps.
+//! keyboard protocol tells it: in one that does not, the key taps, and what
+//! it presses again as the key is held is the key repeating, which does
+//! nothing.
 //!
 //! The first time, the model is fetched, which the box says as it goes. The
 //! fetch goes on with the box closed, and dictation waits for it.
@@ -37,6 +39,12 @@ pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('r'), KeyModifiers::ALT)
 /// held to talk. As hex has it.
 const TAP: Duration = Duration::from_millis(300);
 
+/// How soon after it last went down, or repeated, the key that dictates
+/// pressed again is the key held down, repeating, where the terminal does not
+/// say so: a keyboard repeats a key held every 30 to 90 ms, and no one taps
+/// to talk and taps again to be done as soon.
+const REPEATS: Duration = Duration::from_millis(150);
+
 /// What the rule along the box's top names it.
 const TITLE: &str = "Dictate";
 
@@ -52,6 +60,32 @@ pub struct Dictated {
     pub text: String,
     /// Whether it is sent once written, as `Enter` ended the dictation.
     pub sends: bool,
+}
+
+/// When the key that dictates last went down or repeated, by which luneta
+/// tells it held down from pressed again, where the terminal does not say:
+/// one that does not speak the kitty keyboard protocol presses the key held
+/// again and again, as it would type it, and says no key let go.
+#[derive(Debug, Default)]
+pub struct Repeats {
+    last: Option<Instant>,
+}
+
+impl Repeats {
+    /// `key` at `now`, as it is, or, where it is the key that dictates
+    /// pressed as soon after it last went down as a key held repeats, as the
+    /// repeat it is, as kitty's keys say it.
+    pub fn read(&mut self, key: KeyEvent, now: Instant) -> KeyEvent {
+        if (key.code, key.modifiers) != KEY || key.kind == KeyEventKind::Release {
+            return key;
+        }
+        let soon = self.last.is_some_and(|last| now.saturating_duration_since(last) < REPEATS);
+        self.last = Some(now);
+        match key.kind {
+            KeyEventKind::Press if soon => KeyEvent { kind: KeyEventKind::Repeat, ..key },
+            _ => key,
+        }
+    }
 }
 
 /// What a key does to the box, for luneta to do.
@@ -460,6 +494,29 @@ mod tests {
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Nothing);
         assert_eq!(stop.try_recv(), Ok(()));
+    }
+
+    /// A terminal that says no key repeats presses the key held again and
+    /// again: the first press past the keyboard's delay is a press, which is
+    /// done with a tap, and the presses as soon after as a key repeats are
+    /// its repeats, until a press after a pause. Other keys are as they are.
+    #[test]
+    fn the_key_pressed_as_soon_after_as_a_key_repeats_is_held() {
+        let at = Instant::now();
+        let mut repeats = Repeats::default();
+        let mut read = |key: KeyEvent, after: u64| {
+            repeats.read(key, at + Duration::from_millis(after)).kind
+        };
+        let press = alt_r(KeyEventKind::Press);
+        assert_eq!(read(press, 0), KeyEventKind::Press);
+        assert_eq!(read(press, 500), KeyEventKind::Press);
+        assert_eq!(read(press, 530), KeyEventKind::Repeat);
+        assert_eq!(read(alt_r(KeyEventKind::Repeat), 560), KeyEventKind::Repeat);
+        assert_eq!(read(press, 590), KeyEventKind::Repeat);
+        assert_eq!(read(alt_r(KeyEventKind::Release), 600), KeyEventKind::Release);
+        assert_eq!(read(press, 2_000), KeyEventKind::Press);
+        let typed = pressed(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(read(typed, 2_010), KeyEventKind::Press);
     }
 
     #[test]

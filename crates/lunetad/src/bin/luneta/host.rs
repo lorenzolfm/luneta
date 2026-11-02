@@ -559,6 +559,9 @@ struct App {
     /// How many dictations luneta has opened, which are numbered as briefs
     /// are.
     dictations: u64,
+    /// When the key that dictates last went down, by which a press of it
+    /// that is the key held is its repeat.
+    repeats: dictation::Repeats,
     /// The thread that runs the speech model, from the first dictation on.
     speech: Option<Speech>,
     /// The fetch of the speech model, while it is on its way, and how many
@@ -791,6 +794,7 @@ fn run_in(
         asks: 0,
         pickers: 0,
         dictations: 0,
+        repeats: dictation::Repeats::default(),
         speech: None,
         fetching: None,
         fetched: 0,
@@ -1153,9 +1157,11 @@ impl App {
     }
 
     fn key(&mut self, key: &KeyEvent) {
+        let now = Instant::now();
+        let key = &self.repeats.read(*key, now);
         // The dictation box takes every key, going up too, until it closes.
         if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
-            match dictation.key(key, Instant::now()) {
+            match dictation.key(key, now) {
                 dictation::Keyed::Nothing => {},
                 dictation::Keyed::Close => self.undictate(None),
                 dictation::Keyed::Dictate => {
@@ -1165,11 +1171,16 @@ impl App {
             }
             return;
         }
-        if key.kind == KeyEventKind::Release {
+        let chord = (key.code, key.modifiers);
+        // No key going up reaches what is under the box, nor the key that
+        // dictates, held down past the box it opened, as it repeats: it
+        // would type itself there, or open the box again.
+        if key.kind == KeyEventKind::Release
+            || (chord == dictation::KEY && key.kind == KeyEventKind::Repeat)
+        {
             return;
         }
-        let chord = (key.code, key.modifiers);
-        if chord == dictation::KEY && key.kind == KeyEventKind::Press && self.dictate() {
+        if chord == dictation::KEY && self.dictate() {
             return;
         }
         match &mut self.focus.over {
