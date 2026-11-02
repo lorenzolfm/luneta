@@ -175,8 +175,9 @@ impl Command {
         }
     }
 
-    /// What the legend says the command does.
-    const fn does(self) -> &'static str {
+    /// What the legend says the command does, and the rule over the search
+    /// names it.
+    pub const fn does(self) -> &'static str {
         match self {
             Command::Search => "Search",
             Command::Unread => "Unread",
@@ -2575,7 +2576,7 @@ mod tests {
         assert_eq!(wants, Wants::Skills("/w/luneta/main".to_owned()));
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
-            ["─ Skills ──────── luneta/main ─", " /_", " finding skills…"]
+            ["─ Skills ──────── luneta/main ─", " _", " finding skills…"]
         );
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
         // The one the cursor is on is lit, as the sidebar's row is while it
@@ -2586,7 +2587,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('i')));
         assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
             "─ Skills ──────── luneta/main ─".to_owned(),
-            " /ti_".to_owned(),
+            " ti_".to_owned(),
             " /tigerstyle  tigerstyle it".to_owned(),
         ]);
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));

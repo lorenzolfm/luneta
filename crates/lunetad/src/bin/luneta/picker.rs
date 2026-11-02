@@ -41,7 +41,7 @@ use crate::gruvbox;
 use crate::host::Event;
 use crate::hosted;
 use crate::menu::{self, Hint};
-use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, LIT, Listed, Mark, NAME, Place};
+use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, Place};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::{self, Closes, Exited, SessionName};
 
@@ -1322,14 +1322,14 @@ impl Picker {
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
         // A space either side, and a space between the name and the right.
         let room = width.saturating_sub(2 + lead_width + right_width + 1);
-        let name = sidebar::cut(&row.name, room);
+        let (name, named) = sidebar::lit(&row.name, room, Keep::Start, &row.hits, name_style);
         let mut spans = vec![Span::raw(" ")];
         if let Some(lead) = lead {
             spans.push(lead);
             spans.push(Span::raw(" "));
         }
-        spans.extend(hit_spans(&name, &row.hits, name_style));
-        let gap = width.saturating_sub(1 + lead_width + name.width() + right_width + 1);
+        spans.extend(name);
+        let gap = width.saturating_sub(1 + lead_width + named + right_width + 1);
         if matches!(&row.key, Key::Live(place) if self.is_here(place)) {
             spans.push(Span::raw(" "));
             spans.push(Span::styled("─".repeat(gap.saturating_sub(2)), Style::new().fg(ACCENT)));
@@ -1634,16 +1634,6 @@ fn dir_rows<'a>(
     found.into_iter().map(|(.., row)| row).collect()
 }
 
-/// `name` in `style`, the characters at `hits` in the accent, as a search
-/// found them.
-fn hit_spans(name: &str, hits: &[usize], style: Style) -> Vec<Span<'static>> {
-    let hit = style.fg(ACCENT).add_modifier(Modifier::BOLD);
-    name.chars()
-        .enumerate()
-        .map(|(at, c)| Span::styled(c.to_string(), if hits.contains(&at) { hit } else { style }))
-        .collect()
-}
-
 /// The line of a directory's row, `width` wide: the name of the session
 /// `Enter` makes there, and at its right the directory's `path`, the
 /// characters a search found of it lit, its start cut where the row is short
@@ -1651,19 +1641,13 @@ fn hit_spans(name: &str, hits: &[usize], style: Style) -> Vec<Span<'static>> {
 fn dir_line(row: &Row, path: &str, width: usize) -> Line<'static> {
     // A space either side, and two between the name and the path.
     let name = sidebar::cut(&row.name, width.saturating_sub(4 + path.width()).max(width / 3));
-    let shown = sidebar::tail(path, width.saturating_sub(4 + name.width()));
-    // `tail` puts one `…` in the place of the characters it takes.
-    let taken = (path != shown).then(|| path.chars().count() + 1 - shown.chars().count());
-    let hits: Vec<usize> = match taken {
-        None => row.hits.clone(),
-        Some(taken) => {
-            row.hits.iter().filter(|at| **at >= taken).map(|at| at - taken + 1).collect()
-        },
-    };
-    let gap = width.saturating_sub(1 + name.width() + shown.width() + 1);
+    let room = width.saturating_sub(4 + name.width());
+    let grey = Style::new().fg(gruvbox::GREY);
+    let (shown, wide) = sidebar::lit(path, room, Keep::End, &row.hits, grey);
+    let gap = width.saturating_sub(1 + name.width() + wide + 1);
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let mut spans = vec![Span::raw(" "), Span::styled(name, bold), Span::raw(" ".repeat(gap))];
-    spans.extend(hit_spans(&shown, &hits, Style::new().fg(gruvbox::GREY)));
+    spans.extend(shown);
     spans.push(Span::raw(" "));
     Line::from(spans)
 }
@@ -1737,8 +1721,8 @@ fn count(at: Option<usize>, total: usize) -> String {
     }
 }
 
-/// What is typed, `width` wide, after a `/`, and what `Enter` does with it
-/// on the right, or why it does nothing, where it has the room.
+/// What is typed, `width` wide, and what `Enter` does with it on the right,
+/// or why it does nothing, where it has the room.
 fn typed(input: &str, action: Result<String, String>, width: usize) -> Line<'static> {
     let mut spans = sidebar::query(input, width).spans;
     let used: usize = spans.iter().map(|span| span.content.width()).sum();

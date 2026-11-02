@@ -197,7 +197,7 @@ back to the keys, and so does `Backspace` once there is nothing to take back.
 
 ```text
 ╭─ Skills ─────────────────────────────────────── luneta/main ─╮
-│ /_                                                           │
+│ _                                                            │
 │ /code-review  Review the changes since a fixed point, on tw… │
 │ /diagnosing-bugs  Diagnosis loop for hard bugs and performa… │
 │ /handoff  Hand the work off to the next agent, with what it… │
@@ -462,12 +462,25 @@ yet to change them.
 
 `/` searches the rows, fuzzily, as the picker does: a session by its name, a
 pane by its row, its branch, its tab or its directory. What you type shows at
-the bottom where the keys were. The rows left keep their order, and the
-highlight lands on the best match, so `Ctrl a` `/` *a few characters* `Enter`
-takes you anywhere. A folded session opens to show the panes found in it, and
-a session found by its name shows all of its panes, the highlight on the one
-that matches best, or else on the first. There `Enter` goes to the highlighted
-row, and `Esc` clears the search. Giving zellij the keys clears it too.
+the bottom where the keys were, under a rule that counts the panes found of
+every pane, and the letters each row matched light up, as in the picker. The
+rows left keep their order, and the highlight lands on the best match, so
+`Ctrl a` `/` *a few characters* `Enter` takes you anywhere. A folded session
+opens to show the panes found in it, and a session found by its name shows all
+of its panes, the highlight on the one that matches best, or else on the
+first. There `Enter` goes to the highlighted row, and `Esc` clears the search;
+a click on either key under it presses it. Giving zellij the keys clears it
+too.
+
+```text
+ ▾ bipa ───────────────────────
+       a-p-i-x
+       pix outflow
+
+─ Search ──────────────── 2/7 ─
+ pix_
+ <ENTER> - Go, <ESC> - Close
+```
 
 The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read

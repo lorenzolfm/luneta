@@ -1465,16 +1465,19 @@ impl App {
     }
 
     /// Does what a click on a spot does, where what drew it has the mouse
-    /// still: presses its key, the legend's, the menu's or the picker's, or
-    /// picks the skill the menu's search finds, or the picker's row, as
-    /// `Enter` does on it. A spot of what closed since it drew, or gave way
-    /// to another, does nothing, as what zellij answers a menu closed does:
-    /// what was drawn last is what the click was on, but what came since,
-    /// with it as luneta drew the next frame, can have changed what it does.
+    /// still: presses its key, the legend's, the search's, the menu's or the
+    /// picker's, or picks the skill the menu's search finds, or the picker's
+    /// row, as `Enter` does on it. A spot of what closed since it drew, or
+    /// gave way to another, does nothing, as what zellij answers a menu closed
+    /// does: what was drawn last is what the click was on, but what came
+    /// since, with it as luneta drew the next frame, can have changed what it
+    /// does.
     fn hit(&mut self, hit: Hit) {
         match hit {
-            Hit::Legend(key) if self.focus.over.is_none() => {
-                let asked = self.sidebar.legend_key(&key, SystemTime::now());
+            // The sidebar does nothing with a key of what left the bottom
+            // since, or while a box over zellij has the keys.
+            Hit::Keys(keyed, key) => {
+                let asked = self.sidebar.keys_clicked(keyed, &key, SystemTime::now());
                 self.follow(asked);
             },
             Hit::Menu(menu, choice) if matches!(self.focus.over, None | Some(Over::Menu)) => {
@@ -1490,7 +1493,7 @@ impl App {
                 }
             },
             // A box opened over what drew it since.
-            Hit::Legend(_) | Hit::Menu(..) => {},
+            Hit::Menu(..) => {},
         }
     }
 
