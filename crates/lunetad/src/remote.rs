@@ -208,7 +208,9 @@ impl Drop for Bridged {
 /// socket must be, and as ssh adds to it as it makes one: macOS's `TMPDIR`,
 /// where the folder is there, leaves no room for ssh's own `%C`. A folder
 /// that leaves no room either has none: each ssh then has a connection of
-/// its own, as ssh with a socket's path too long for it would not run.
+/// its own, as ssh with a socket's path too long for it would not run. So
+/// has one whose path ssh would read as other than it is, as `misread`
+/// says.
 #[must_use]
 pub fn sharing(folder: &Path, destination: &Destination) -> Vec<OsString> {
     // FNV-1a, which names it alike in every build of luneta and its daemon.
@@ -219,7 +221,8 @@ pub fn sharing(folder: &Path, destination: &Destination) -> Vec<OsString> {
     }
     let name = format!("/ssh-{hash:016x}");
     let folder = folder.as_os_str().as_bytes();
-    if folder.len() + name.len() + SOCKET_MAKING > SOCKET_PATH_MAX {
+    let too_long = folder.len() + name.len() + SOCKET_MAKING > SOCKET_PATH_MAX;
+    if too_long || folder.iter().copied().any(misread) {
         return Vec::new();
     }
     // ssh reads a `%` in the path as one of its own tokens, and `%%` as `%`.
@@ -238,6 +241,17 @@ pub fn sharing(folder: &Path, destination: &Destination) -> Vec<OsString> {
         OsString::from(format!("ServerAliveCountMax={ALIVE_MISSES}")),
     ];
     options.into_iter().flat_map(|option| [OsString::from("-o"), option]).collect()
+}
+
+/// Whether ssh reads `byte`, in the path of an option's value, as other
+/// than itself: it reads the value as words, as it reads a line of its
+/// config. White space ends a word, and ssh refuses a value of more than
+/// one; a quote starts a quoted word, which ssh reads without its quotes,
+/// and refuses where none closes it; and a backslash takes the next as
+/// itself, so that `\\` is read as one. Nor does luneta hand ssh a control
+/// character, as it hands it no destination with one.
+fn misread(byte: u8) -> bool {
+    byte == b' ' || byte.is_ascii_control() || matches!(byte, b'\'' | b'"' | b'\\')
 }
 
 /// What the hosts file names, as it was last read.
@@ -761,9 +775,9 @@ mod tests {
     }
 
     /// Each ssh to a machine shares one socket, another machine's another,
-    /// in luneta's runtime folder, with a `%` there spelled as ssh reads it
-    /// back. A folder as long as macOS's `TMPDIR` has room for it; one that
-    /// leaves ssh none to make it has none, and each ssh runs alone.
+    /// in luneta's runtime folder. A folder as long as macOS's `TMPDIR` has
+    /// room for it; one that leaves ssh none to make it has none, and each
+    /// ssh runs alone.
     #[test]
     fn each_ssh_to_a_machine_shares_a_socket_where_there_is_room_for_one() {
         let path = |folder: &str, destination: &str| -> Option<String> {
@@ -777,9 +791,49 @@ mod tests {
         assert!(nixos.starts_with(&format!("{tmpdir}/ssh-")), "{nixos}");
         assert_eq!(path(tmpdir, "nixos"), Some(nixos.clone()));
         assert_ne!(path(tmpdir, "me@vps"), Some(nixos));
-        let odd = path("/run/user/1000/50%/luneta", "nixos").unwrap();
-        assert!(odd.starts_with("/run/user/1000/50%%/luneta/ssh-"), "{odd}");
         assert_eq!(path(&format!("/{}", "x".repeat(70)), "nixos"), None);
+    }
+
+    /// ssh takes what `sharing` gives it in a folder of any name: the
+    /// socket it reads is the one in the folder, `%` and all. Where the
+    /// folder's path holds what ssh would read as more than the path, or
+    /// another, as white space, a quote or a backslash, it runs all the
+    /// same, on a connection of its own. A machine with no ssh has none to
+    /// ask.
+    #[test]
+    fn ssh_takes_what_it_is_told_to_share_on() {
+        let folders = [
+            ("/run/user/1000/luneta", true),
+            ("/run/user/1000/50%/luneta", true),
+            ("/run/user/1000/two words/luneta", false),
+            ("/run/user/1000/a\ttab/luneta", false),
+            ("/run/user/1000/it's/luneta", false),
+            ("/run/user/1000/\"quoted\"/luneta", false),
+            (r"/run/user/1000/back\\slashes/luneta", false),
+        ];
+        let destination: Destination = "nixos".parse().unwrap();
+        for (folder, shares) in folders {
+            // The options as ssh reads them, with no config of yours.
+            let mut ssh = Process::new("ssh");
+            ssh.args(["-G", "-F", "/dev/null"]);
+            ssh.args(sharing(Path::new(folder), &destination)).arg("nixos");
+            let read = match ssh.output() {
+                Ok(read) => read,
+                Err(error) if error.kind() == ErrorKind::NotFound => return,
+                Err(error) => panic!("ssh: {error}"),
+            };
+            let said = String::from_utf8_lossy(&read.stderr);
+            assert!(read.status.success(), "{folder:?}: {said}");
+            let options = String::from_utf8(read.stdout).unwrap();
+            let socket = options.lines().find_map(|line| line.strip_prefix("controlpath "));
+            let ours = format!("{folder}/ssh-");
+            if shares {
+                let in_folder = socket.is_some_and(|socket| socket.starts_with(&ours));
+                assert!(in_folder, "{folder:?}: {socket:?}");
+            } else {
+                assert_eq!(socket, None, "{folder:?}");
+            }
+        }
     }
 
     /// ssh runs again at once after a first failure, then after a second,

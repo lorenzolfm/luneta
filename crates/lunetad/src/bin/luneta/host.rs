@@ -28,7 +28,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use alacritty_terminal::term::ClipboardType;
+use alacritty_terminal::term::{ClipboardType, TermMode};
 use alacritty_terminal::vte::ansi::CursorShape;
 use base64::Engine as _;
 use crossterm::cursor::SetCursorStyle;
@@ -144,6 +144,10 @@ const WAITING_MAX: Duration = Duration::from_secs(2);
 /// zellij: what zellij draws as luneta draws brings no `Said::Drew` of its
 /// own.
 const WAITING_LOOK: Duration = Duration::from_millis(50);
+
+/// What ssh ends with where it failed itself, and not the command it ran on
+/// the machine: as where it reached none, or lost its connection.
+const SSH_FAILED: i32 = 255;
 
 /// The key that hands the keys from zellij to the sidebar, and back.
 const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
@@ -1956,9 +1960,8 @@ impl App {
             };
             let exited = self.client.exited;
             let status = exited.map_or_else(|| "its end unread".to_owned(), |it| it.to_string());
-            let text = self.client.hosted.text();
-            let said = text.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("ssh ended");
-            self.sidebar.notify(format!("{destination}: {} ({status})", said.trim()));
+            let said = failed_saying(&self.client.hosted, exited);
+            self.sidebar.notify(format!("{destination}: {said} ({status})"));
             return self.go_back(back);
         }
         // With none, it is in no session that could have gone with it, as on
@@ -2114,6 +2117,24 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// What a client of zellij's on another machine said as it failed, ending
+/// `exited`: the last line on its screen, as an ssh that reached no machine,
+/// or a zellij there that could not attach, writes it as it ends. One that
+/// ended with zellij's screen up still, which zellij takes down as it ends,
+/// ended under zellij, as an ssh that lost its connection does: the screen
+/// shows what zellij drew, not what went wrong.
+fn failed_saying(hosted: &Hosted, exited: Option<ExitStatus>) -> String {
+    if hosted.mode().contains(TermMode::ALT_SCREEN) {
+        return match exited.and_then(|status| status.code()) {
+            Some(SSH_FAILED) => "ssh lost the connection".to_owned(),
+            _ => "zellij's client there ended".to_owned(),
+        };
+    }
+    let text = hosted.text();
+    let said = text.lines().rfind(|line| !line.trim().is_empty());
+    said.map_or("ssh ended", str::trim).to_owned()
 }
 
 /// How luneta's terminal is told to draw a cursor of `shape` that blinks or

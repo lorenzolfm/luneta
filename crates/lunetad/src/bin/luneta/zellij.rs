@@ -1873,14 +1873,15 @@ mod tests {
 
     /// A session's name reaches zellij on another machine as it is, through
     /// the shell there that reads the command ssh hands it, whatever is in
-    /// it: sh, or fish, where the tests run with one.
+    /// it: sh, or fish, where the tests run with one. fish runs without your
+    /// config, which could print as it starts.
     #[test]
     fn a_session_s_name_reads_back_in_the_shell_there() {
         let names = ["work", "odd | name", "it's", r"back\slash", "$HOME *", "a\nb", r"\'"];
-        for shell in ["sh", "fish"] {
+        for (shell, flags) in [("sh", &[][..]), ("fish", &["--no-config"][..])] {
             for name in names {
                 let printed = format!("printf %s {}", quoted(name));
-                let said = match Command::new(shell).args(["-c", &printed]).output() {
+                let said = match Command::new(shell).args(flags).args(["-c", &printed]).output() {
                     Ok(said) => said,
                     Err(error) if shell == "fish" && error.kind() == io::ErrorKind::NotFound => {
                         break;
