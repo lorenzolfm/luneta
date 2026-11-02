@@ -58,7 +58,7 @@ impl Ran {
 /// longer than that. An error when it could not be started, or what it said
 /// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let Ok(ran) = running::<Infallible>(command, limit, None, Kills::Program)?;
+    let Ok(ran) = running::<Infallible>(command, limit, None, Kills::Program, Stdio::null())?;
     Ok(ran)
 }
 
@@ -70,7 +70,7 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
 /// typed there. With none, it fails, and says why. What it started, as git
 /// does that wt runs, would run on once it is killed.
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let Ok(ran) = running::<Infallible>(alone(command), limit, None, Kills::Group)?;
+    let Ok(ran) = running::<Infallible>(alone(command), limit, None, Kills::Group, Stdio::null())?;
     Ok(ran)
 }
 
@@ -82,8 +82,22 @@ pub fn run_while(
     limit: Duration,
     wanted: impl Fn() -> bool,
 ) -> io::Result<Option<Ran>> {
+    run_while_reading(command, limit, wanted, Stdio::null())
+}
+
+/// Runs `command` as `run_while` does, with `stdin` on its stdin, in place
+/// of nothing. A file handed it there it holds open for as long as it runs,
+/// and a lock on the file with it, past the end of what started it: luneta's
+/// lock on the speech model it fetches is curl's too, so that a curl that
+/// runs on past a luneta killed outright holds it until it ends.
+pub fn run_while_reading(
+    command: &mut Command,
+    limit: Duration,
+    wanted: impl Fn() -> bool,
+    stdin: Stdio,
+) -> io::Result<Option<Ran>> {
     let wanted = || if wanted() { Ok(()) } else { Err(()) };
-    running::<()>(command, limit, Some(&wanted), Kills::Program).map(Result::ok)
+    running::<()>(command, limit, Some(&wanted), Kills::Program, stdin).map(Result::ok)
 }
 
 /// What of a program is killed, as it is stuck or no longer wanted.
@@ -98,16 +112,17 @@ enum Kills {
 
 /// Runs `command`, as `run_while` does, where it is `wanted` only for a
 /// while, which says what that comes to once it is not, or else as `run`
-/// does, and kills of it what `kills` says.
+/// does, with `stdin` on its stdin, and kills of it what `kills` says.
 fn running<N>(
     command: &mut Command,
     limit: Duration,
     wanted: Option<&dyn Fn() -> Result<(), N>>,
     kills: Kills,
+    stdin: Stdio,
 ) -> io::Result<Result<Ran, N>> {
     let deadline = Instant::now() + limit;
     let mut child =
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let heard = hear(&mut child, deadline, wanted);
     // Whatever was heard of it, or why nothing could be, what is left of it
     // is killed, and it is waited for last, so that no kill names a pid let
@@ -273,15 +288,39 @@ fn in_thread<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, File, TryLockError};
     use std::os::unix::process::ExitStatusExt;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use rustix::process::{self, Pid, Signal};
 
-    use super::{Ran, SAID_MAX, alone, run, run_alone, run_while};
+    use super::{Ran, SAID_MAX, alone, run, run_alone, run_while, run_while_reading};
+
+    /// A file handed a program on its stdin, and the lock on it with it, is
+    /// held for as long as what the program left running holds it, past the
+    /// end of the program, and of the command that started it: a `sleep` that
+    /// `sh` leaves behind holds it here, as a curl that ran on past luneta.
+    #[test]
+    fn a_lock_on_what_a_program_reads_is_held_while_it_runs() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("lock");
+        let lock = File::create(&path).unwrap();
+        lock.lock().unwrap();
+        let mut sh = Command::new("sh");
+        sh.args(["-c", "exec 3<&0; sleep 0.5 >/dev/null 2>&1 &"]);
+        let ran = run_while_reading(&mut sh, Duration::from_secs(5), || true, Stdio::from(lock));
+        assert!(matches!(ran, Ok(Some(Ran::Ended { status, .. })) if status.success()));
+        drop(sh);
+        let other = File::open(&path).unwrap();
+        assert!(matches!(other.try_lock(), Err(TryLockError::WouldBlock)));
+        let free = Instant::now() + Duration::from_secs(5);
+        while other.try_lock().is_err() {
+            assert!(Instant::now() < free, "the lock outlived the program");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     /// A program that says more than the most has failed, rather than been
     /// read short.

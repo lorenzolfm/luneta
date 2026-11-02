@@ -13,8 +13,10 @@
 //! size and the SHA-256 it is pinned by: both are on every machine luneta
 //! runs on. It takes its name in the folder only once it passes, so that no
 //! luneta reads one halfway fetched. One luneta fetches it at a time, under a
-//! lock beside it, into the one part of it there is, which a luneta that
-//! ended mid-fetch, however it ended, leaves for the next to fetch over.
+//! lock beside it, which curl holds with it, into the one part of it there
+//! is: a curl that runs on past a luneta killed outright holds the lock
+//! until it is done, and the next luneta checks what it fetched, and keeps
+//! it. A luneta that gave up mid-fetch takes its part away.
 //!
 //! One thread of luneta's runs the model, from the first dictation until
 //! luneta ends, as reading it in again each time would take a second where
@@ -28,7 +30,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,7 +45,9 @@ use crate::mic::{self, Mic};
 
 /// The model, as it is fetched: the name it is kept by, where it is fetched
 /// from, of a revision of its own, and how many bytes it is, and the SHA-256
-/// of them. The revision, the size and the sum are those hex pins.
+/// of them. The revision, the size and the sum are those hex pins. Another
+/// pin is another folder: the change that makes one takes away the folders
+/// of the others under `luneta/models`, which no luneta reads any more.
 const FILE: &str = "parakeet-unified-en-0.6b-Q8_0.gguf";
 const URL: &str = "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/\
     7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf";
@@ -169,8 +173,8 @@ pub fn fetch(events: &Sender<Event>) -> Asking {
 /// Fetches the model, for as long as it is `wanted`, as its part beside where
 /// it is kept, and gives it its name once it passed its check. It waits for
 /// the lock beside it first, which the system lets go of however the luneta
-/// that holds it ends, and tells `events` how far the luneta that holds it
-/// got, and takes what that one kept.
+/// and the curl that hold it end, and tells `events` how far the one that
+/// holds it got, and takes what that one kept.
 fn fetching(wanted: &dyn Fn() -> bool, events: &Sender<Event>) -> Result<(), String> {
     let path = path()?;
     let folder = path.parent().ok_or("the model is kept in no folder")?;
@@ -205,13 +209,23 @@ fn fetching(wanted: &dyn Fn() -> bool, events: &Sender<Event>) -> Result<(), Str
     if whole(&path) {
         return Ok(());
     }
-    let mut curl = Command::new("curl");
-    curl.args(["--fail", "--location", "--silent", "--show-error", "--retry", "3", "--output"]);
-    curl.arg(&part).arg(URL);
-    let fetched = match program::run_while(&mut curl, FETCH, still) {
-        Ok(Some(ran)) => ran.answer().map(drop).map_err(|why| format!("curl: {why}")),
-        Ok(None) => Err("given up".to_owned()),
-        Err(error) => Err(format!("luneta fetches the speech model with curl: {error}")),
+    // A curl that ran on past a luneta killed outright fetched it all, as
+    // this one waited: what it fetched is checked as this one's would be.
+    let fetched = if whole(&part) {
+        Ok(())
+    } else {
+        let mut curl = Command::new("curl");
+        curl.args(["--fail", "--location", "--silent", "--show-error", "--retry", "3"]);
+        curl.arg("--output").arg(&part).arg(URL);
+        // curl holds the lock with luneta, on its stdin, which it never reads.
+        let held = lock
+            .try_clone()
+            .map_err(|error| format!("the speech model takes no lock: {error}"))?;
+        match program::run_while_reading(&mut curl, FETCH, still, Stdio::from(held)) {
+            Ok(Some(ran)) => ran.answer().map(drop).map_err(|why| format!("curl: {why}")),
+            Ok(None) => Err("given up".to_owned()),
+            Err(error) => Err(format!("luneta fetches the speech model with curl: {error}")),
+        }
     };
     let checked = fetched.and_then(|()| check(&part, wanted));
     let kept = checked.and_then(|()| {
