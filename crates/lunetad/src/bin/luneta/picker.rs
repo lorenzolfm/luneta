@@ -250,7 +250,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
             },
             Ask::Closes(place) => {
                 let pane = place.pane().ok_or_else(|| "no pane to close".to_owned());
-                let closes = pane.and_then(|pane| zellij::closes_now(place.session(), pane));
+                let closes = pane.and_then(|pane| zellij::closes_now(place.listed().name(), pane));
                 Heard::Closes { place, closes }
             },
             Ask::Rename { from, to } => {
@@ -258,7 +258,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
                 Heard::Renamed { from, to, renamed }
             },
             Ask::Delete(session) => {
-                let deleted = zellij::deleted(session.as_str());
+                let deleted = zellij::deleted(&session);
                 Heard::Deleted { session, deleted }
             },
             Ask::Dirs => Heard::Dirs(dirs::visited()),
@@ -2060,7 +2060,8 @@ mod tests {
         let (rows, give_up) = clicks(&picker, "<ESC>");
         assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
         assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
-        let kill = Act::Kill { session: "c".to_owned(), started: listed("c", 30).started() };
+        let c = listed("c", 30);
+        let kill = Act::Kill { session: c.name().clone(), started: c.started() };
         let plan = Plan::of(kill, Ok(&[(0, Doing::Busy)]));
         assert_eq!(picker.planned(Ok(plan)), Picked::Nothing);
         let (rows, yes) = clicks(&picker, "<y>");
@@ -2132,7 +2133,8 @@ mod tests {
     fn del_asks_before_ending_an_agent_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
         let mut picker = three();
         let planning = Picked::Plan { session: listed("c", 30), deletes: Deletes::Session };
-        let kill = || Act::Kill { session: "c".to_owned(), started: listed("c", 30).started() };
+        let c = listed("c", 30);
+        let kill = || Act::Kill { session: c.name().clone(), started: c.started() };
         let plan = |doing: Doing| Plan::of(kill(), Ok(&[(0, doing)]));
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);

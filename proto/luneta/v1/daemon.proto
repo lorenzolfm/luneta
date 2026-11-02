@@ -60,6 +60,21 @@ service Daemon {
   // back, which it brings back, as it does. It answers once zellij has taken
   // the action, or with what zellij said as it failed.
   rpc Start(StartRequest) returns (StartResponse);
+  // What closing a terminal of a session closes with it, as zellij lists the
+  // session's panes now: the pane alone, its tab, or the session.
+  rpc Closes(ClosesRequest) returns (ClosesResponse);
+  // Has zellij close a terminal of a session, or a tab of it, its panes and
+  // all, as `zellij action close-pane` and `close-tab-by-id` do, while the
+  // session's panes are as `Closes` said: a terminal that would take its tab
+  // along now, or a tab that holds other terminals than it did, or that
+  // would take the session along now, stays. It answers once zellij has, or
+  // with what zellij said as it failed, or why it closed nothing.
+  rpc Close(CloseRequest) returns (CloseResponse);
+  // Has zellij kill a session and delete it, so that it keeps nothing to
+  // bring it back with, as `zellij delete-session --force` does. It answers
+  // once the session's server has ended, or with why it did not: a session
+  // that took the name since stays.
+  rpc Kill(KillRequest) returns (KillResponse);
 }
 
 // The machine a question of zellij's is for: this daemon's own where it is
@@ -232,6 +247,65 @@ message StartRequest {
 }
 
 message StartResponse {}
+
+message ClosesRequest {
+  On on = 1;
+  string session = 2;
+  // The pane, by its terminal's id.
+  uint32 pane = 3;
+}
+
+message ClosesResponse {
+  // What it closes: one of these, always. A client that finds none has a
+  // newer daemon's.
+  oneof closes {
+    // The pane alone: something else holds its tab open.
+    Pane pane = 1;
+    // Its tab: nothing else holds the tab open.
+    Tab tab = 2;
+    // Its session: nothing else holds the tab open, and the session has no
+    // other tab.
+    Session session = 3;
+  }
+
+  message Pane {}
+
+  message Tab {
+    uint32 id = 1;
+    // The terminals in it, the pane's own among them, and the floating
+    // ones.
+    repeated uint32 panes = 2;
+  }
+
+  message Session {}
+}
+
+message CloseRequest {
+  On on = 1;
+  string session = 2;
+  // What it closes: one of these, always. A question with neither is
+  // invalid.
+  oneof closes {
+    // A terminal, by its id, which `Closes` said closes alone.
+    uint32 pane = 3;
+    // A tab, by its id, with the terminals `Closes` said are in it. A tab of
+    // no terminal is invalid.
+    ClosesResponse.Tab tab = 4;
+  }
+}
+
+message CloseResponse {}
+
+message KillRequest {
+  On on = 1;
+  string session = 2;
+  // When the session started, as its `Session.started_at` says: a session
+  // by its name that started at another time took the name since, and
+  // stays. A question without it is invalid.
+  google.protobuf.Timestamp started_at = 3;
+}
+
+message KillResponse {}
 
 // A session that runs, and its clients, which are those it has before the
 // client that goes on there comes.

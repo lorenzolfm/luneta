@@ -82,8 +82,9 @@ impl v1::ListAgentsResponse {
 /// runs, by its session and its pane, as `files` lists them: one outside
 /// zellij ends with no delete. Or how many luneta cannot place: one whose
 /// session lunetad cannot follow, and each that a daemon older than
-/// `unread_files` counts and does not list.
-fn seats(unread: u32, files: &[v1::UnreadFile]) -> Result<Vec<(&str, u32)>, Unplaced> {
+/// `unread_files` counts and does not list. A machine's host, as another's
+/// daemon says it, tells them as this one's does.
+pub fn seats(unread: u32, files: &[v1::UnreadFile]) -> Result<Vec<(&str, u32)>, Unplaced> {
     let listed = u32::try_from(files.len()).unwrap_or(u32::MAX);
     // A file listed is one it cannot read, counted or not.
     let unread = unread.max(listed);

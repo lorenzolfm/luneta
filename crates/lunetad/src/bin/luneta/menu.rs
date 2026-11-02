@@ -147,11 +147,6 @@ const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets on
 const REMOTE_BRIEF: &str = "menu: luneta briefs you on this machine's agents alone, as it reads \
                             their transcripts here";
 
-/// What the menu says of a key of the Delete group on another machine's
-/// session or pane.
-const REMOTE_DELETE: &str = "menu: luneta closes and deletes this machine's panes and sessions \
-                             alone, for now";
-
 /// What the menu says of the key that opens the ask box on another
 /// machine's session or pane.
 const REMOTE_ASK: &str = "menu: the ask box works on this machine alone, for now; open it on a \
@@ -1050,9 +1045,9 @@ pub enum Done {
     /// Take luneta's zellij to the pane that has the pull request's branch
     /// checked out.
     Go(Place),
-    /// Have zellij do what a delete key planned: for the session luneta's
-    /// zellij is in, once it has left it.
-    Act(Act),
+    /// Have zellij on the machine do what a delete key planned for a session
+    /// there: for the session luneta's zellij is in, once it has left it.
+    Act(Machine, Act),
     /// Brief you on what the agents it covers are doing.
     Brief(Briefed),
     /// Open the ask box, for the row the menu was for.
@@ -1316,9 +1311,6 @@ impl Menu {
                         Did::Closed(Done::Start(target.machine().clone(), cwd))
                     },
                 },
-                Pressed::Delete { .. } if matches!(target.machine(), Machine::Remote(_)) => {
-                    Did::Closed(Done::Wrong(REMOTE_DELETE.to_owned()))
-                },
                 Pressed::Delete { key, session, scope } => {
                     let wants = Wants::Plan { session: session.clone(), scope };
                     let delete = Delete { key, session, scope };
@@ -1409,7 +1401,7 @@ impl Menu {
             let stage = Stage::Asking { keys, delete, plan, asks };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
-        Did::Closed(Done::Act(plan.act))
+        Did::Closed(Done::Act(target.machine().clone(), plan.act))
     }
 
     /// What the key of the menu for a pull request or an issue that waits
@@ -2479,11 +2471,12 @@ mod tests {
 
     /// On another machine's pane, a key opens beside the pane what it opens
     /// on this machine's, and a session in its directory, which the menu
-    /// stays for, of that machine. The Delete group, the Brief group but for
-    /// every session, and the ask box say they are this machine's alone, on
-    /// another's pane or session.
+    /// stays for, of that machine. The Delete group plans what it deletes as
+    /// on this machine's, and has it deleted on that machine. The Brief group
+    /// but for every session, and the ask box say they are this machine's
+    /// alone, on another's pane or session.
     #[test]
-    fn another_machine_s_row_opens_there_and_deletes_nothing() {
+    fn another_machine_s_row_opens_and_deletes_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let (pane, session) = (Target::Pane(vps(), row()), Target::Session(vps(), listed()));
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
@@ -2494,11 +2487,15 @@ mod tests {
         let cwd = "/w/luneta/main".to_owned();
         assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), cwd));
 
+        let (menu, _) = stays(opened(pane.clone(), Some('d')));
+        let (menu, wants) = stays(menu.key(&char('d')));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
+        let done = closed(menu.planned(plan(Closes::Pane, Vec::new())));
+        assert_eq!(done, Done::Act(vps(), Act::Pane { session: listed().name().clone(), pane: 4 }));
         for row in [pane, session] {
-            for key in ['d', 's'] {
-                let (menu, _) = stays(opened(row.clone(), Some('d')));
-                assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_DELETE.to_owned()));
-            }
+            let (menu, _) = stays(opened(row.clone(), Some('d')));
+            let (_, wants) = stays(menu.key(&char('s')));
+            assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Session });
             for key in ['s', 'h'] {
                 let (menu, _) = stays(opened(row.clone(), Some('b')));
                 assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_BRIEF.to_owned()));
@@ -2680,7 +2677,8 @@ mod tests {
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         assert_eq!(menu.planning(), Some((&listed(), 4)));
         let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
-        assert_eq!(done, Done::Act(Act::Pane { session: "luneta".to_owned(), pane: 4 }));
+        let act = Act::Pane { session: listed().name().clone(), pane: 4 };
+        assert_eq!(done, Done::Act(Machine::Local, act));
         // On a session's row, `d d` deletes the session, which zellij need not
         // say anything of first.
         let (menu, _) = stays(opened(session_row(), Some('d')));
@@ -2728,8 +2726,8 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let act = Act::Tab { session: "luneta".to_owned(), tab: 2, panes: vec![4, 5] };
-        assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(act));
+        let act = Act::Tab { session: listed().name().clone(), tab: 2, panes: vec![4, 5] };
+        assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
     }
 
     /// A delete of the session luneta's zellij is in closes the menu as any
@@ -2748,8 +2746,9 @@ mod tests {
             refuge: Some(elo.clone()),
         };
         let started = session.started();
-        let leave = Act::Leave { session: "luneta".to_owned(), started, to: elo };
-        assert_eq!(closed(menu.planned(close::plan(&subject))), Done::Act(leave));
+        let leave = Act::Leave { session: listed().name().clone(), started, to: elo };
+        let done = closed(menu.planned(close::plan(&subject)));
+        assert_eq!(done, Done::Act(Machine::Local, leave));
     }
 
     /// zellij's side, `width` by `height` past `ZELLIJ_X` columns of the
