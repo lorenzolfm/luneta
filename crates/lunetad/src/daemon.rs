@@ -44,19 +44,26 @@ use tonic::{Request, Response, Status};
 
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
+use crate::api::keep_printed_response::{self, File as PrintedFile, Nothing, Top};
+use crate::api::list_skills_response::Skill;
+use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
     self, GoRequest, GoResponse, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse,
-    ListClientsRequest, ListClientsResponse, RefugeRequest, RefugeResponse,
+    KeepPrintedRequest, KeepPrintedResponse, ListClientsRequest, ListClientsResponse,
+    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
+    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
 };
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::remote::{Bridges, Destination};
 use crate::watch::Troubles;
 use crate::zellij::SessionName;
+use crate::opens::{Open, Tab};
+use crate::printed::{Kept as KeptFile, Printed};
 use crate::{
-    claude, client, clients, git, github, log, metadata, moves, panes, release, remote, shells,
-    watch, zellij,
+    claude, client, clients, git, github, log, metadata, moves, names, opens, panes, printed,
+    release, remote, shells, skills, watch, zellij,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -477,6 +484,101 @@ impl Daemon for Host {
         };
         Ok(Response::new(RefugeResponse { ended: Some(ended) }))
     }
+
+    async fn open(&self, request: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
+        let OpenRequest { on, session, cwd, command, opens } = request.into_inner();
+        let session = named("session", &session)?.to_string();
+        let Some(what) = opens else {
+            return Err(Status::invalid_argument("opens: neither a pane nor a tab"));
+        };
+        if let Some(mut daemon) = self.bridged(on)? {
+            let opens = Some(what);
+            return daemon.open(OpenRequest { on: None, session, cwd, command, opens }).await;
+        }
+        let open = match what {
+            Opens::Beside(beside) => Open::Pane { session, beside, cwd, command },
+            Opens::Tab(open_request::Tab { name }) => {
+                Open::Tab { session, tab: Tab { cwd, name, command } }
+            },
+        };
+        let opened = task::spawn_blocking(move || opens::opening(&open)).await;
+        let opened = opened.map_err(|error| unfinished(&error))?;
+        let terminal = opened.map_err(Status::failed_precondition)?;
+        Ok(Response::new(OpenResponse { terminal }))
+    }
+
+    async fn list_skills(
+        &self,
+        request: Request<ListSkillsRequest>,
+    ) -> Result<Response<ListSkillsResponse>, Status> {
+        let ListSkillsRequest { on, dir } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.list_skills(ListSkillsRequest { on: None, dir }).await;
+        }
+        let found = task::spawn_blocking(move || skills::found_in(&dir)).await;
+        let found = found.map_err(|error| unfinished(&error))?;
+        let skills = found.map_err(Status::failed_precondition)?;
+        let skill = |skills::Skill { name, description }| {
+            Skill { name: name.to_string(), description }
+        };
+        Ok(Response::new(ListSkillsResponse { skills: skills.into_iter().map(skill).collect() }))
+    }
+
+    async fn keep_printed(
+        &self,
+        request: Request<KeepPrintedRequest>,
+    ) -> Result<Response<KeepPrintedResponse>, Status> {
+        let KeepPrintedRequest { on, session, pane, typed } = request.into_inner();
+        let session = named("session", &session)?.to_string();
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.keep_printed(KeepPrintedRequest { on: None, session, pane, typed }).await;
+        }
+        let kept = task::spawn_blocking(move || printed::kept_after(&session, pane, &typed)).await;
+        let kept = kept.map_err(|error| unfinished(&error))?;
+        let kept = kept.map_err(Status::failed_precondition)?;
+        let file = |KeptFile { file, lines, left_out }| PrintedFile {
+            path: file,
+            lines: lines as u64,
+            left_out: left_out as u64,
+        };
+        let printed = match kept {
+            Printed::After(kept) => keep_printed_response::Printed::After(file(kept)),
+            Printed::Nothing => keep_printed_response::Printed::Nothing(Nothing {}),
+            Printed::Unsure(kept) => keep_printed_response::Printed::Unsure(file(kept)),
+            Printed::Top(kept) => keep_printed_response::Printed::Top(Top { file: kept.map(file) }),
+        };
+        Ok(Response::new(KeepPrintedResponse { printed: Some(printed) }))
+    }
+
+    async fn name_session(
+        &self,
+        request: Request<NameSessionRequest>,
+    ) -> Result<Response<NameSessionResponse>, Status> {
+        let NameSessionRequest { on, dir } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.name_session(NameSessionRequest { on: None, dir }).await;
+        }
+        let named = task::spawn_blocking(move || names::free_for(&dir)).await;
+        let named = named.map_err(|error| unfinished(&error))?;
+        let name = named.map_err(Status::failed_precondition)?.to_string();
+        Ok(Response::new(NameSessionResponse { name }))
+    }
+
+    async fn start(
+        &self,
+        request: Request<StartRequest>,
+    ) -> Result<Response<StartResponse>, Status> {
+        let StartRequest { on, at, to, cwd } = request.into_inner();
+        let (at, to) = (named("at", &at)?, named("to", &to)?);
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (at, to) = (at.to_string(), to.to_string());
+            return daemon.start(StartRequest { on: None, at, to, cwd }).await;
+        }
+        let started = task::spawn_blocking(move || moves::started(&at, &to, cwd.as_deref())).await;
+        let started = started.map_err(|error| unfinished(&error))?;
+        started.map_err(Status::failed_precondition)?;
+        Ok(Response::new(StartResponse {}))
+    }
 }
 
 /// The clients of `session` here, as zellij lists them now, or why not.
@@ -491,10 +593,10 @@ fn named(field: &str, name: &str) -> Result<SessionName, Status> {
     SessionName::running(name).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
 }
 
-/// Why what the daemon asked of zellij did not answer: the thread it was asked
-/// on panicked.
+/// Why what the daemon asked of zellij, or of the finder of skills, did not
+/// answer: the thread it was asked on panicked.
 fn unfinished(error: &task::JoinError) -> Status {
-    Status::internal(format!("zellij's answer was lost: {error}"))
+    Status::internal(format!("lunetad lost its answer: {error}"))
 }
 
 impl Host {

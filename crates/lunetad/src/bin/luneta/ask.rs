@@ -402,8 +402,8 @@ fn plain(text: &str) -> String {
 /// opened, for words that point at it.
 fn highlighted(target: &Target) -> String {
     let row = match target {
-        Target::Session(listed) => format!("session {}", listed.name()),
-        Target::Pane(PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
+        Target::Session(_, listed) => format!("session {}", listed.name()),
+        Target::Pane(_, PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
         Target::Machine(Machine::Local) => "the header of this machine".to_owned(),
         Target::Machine(Machine::Remote(destination)) => {
             format!("the header of the machine `ssh {destination}` reaches")
@@ -675,13 +675,14 @@ mod tests {
     }
 
     fn pane_row() -> Target {
-        Target::Pane(PaneRow {
+        let row = PaneRow {
             session: listed(),
             pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
             ran: Ran::Unhooked,
-        })
+        };
+        Target::Pane(Machine::Local, row)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -906,7 +907,7 @@ mod tests {
         assert!(var(&first, TURN_VAR).is_some_and(|key| key.is_some()));
         assert_eq!(var(&first, BEFORE_VAR), Some(None));
 
-        let session = Target::Session(listed());
+        let session = Target::Session(Machine::Local, listed());
         let ask = Ask::new(2, &session, Path::new("/w"));
         let turn = Turn { key: 255, before: Some(10) };
         let next = claude(&ask.cwd, Some("7c22"), None, &ask.highlighted, turn);

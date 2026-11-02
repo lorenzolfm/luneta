@@ -77,6 +77,34 @@ pub fn went(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<(),
     }
 }
 
+/// `zellij`, a command of zellij's set up as its caller needs, with the
+/// action that takes the client that last typed in the session `at` to a
+/// session it makes, `to`, that starts in `cwd`, or where the client started.
+/// zellij takes it to a session that runs by that name instead, and makes
+/// none, and brings back one of that name it keeps, which ended: the
+/// directory goes unused then. zellij's client makes it, so that it has the
+/// client's environment, not the CLI's.
+#[must_use]
+pub fn start(
+    mut zellij: Command,
+    at: &SessionName,
+    to: &SessionName,
+    cwd: Option<&str>,
+) -> Command {
+    zellij.args(["--session", at.as_str(), "action", "switch-session", to.as_str()]);
+    zellij.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
+    zellij
+}
+
+/// Has zellij take the action `start` makes, or says why it did not, as
+/// zellij said it.
+pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&str>) -> Result<(), String> {
+    let mut zellij = start(Command::new("zellij"), at, to, cwd);
+    let ran = program::run(&mut zellij, LIMIT)
+        .map_err(|error| format!("zellij could not be run: {error}"))?;
+    ran.answer().map(drop).map_err(|said| format!("zellij: {said}"))
+}
+
 /// A session a client can go on in: one that runs, as it answered for its
 /// clients, which are those it has before the client comes.
 pub struct Refuge {

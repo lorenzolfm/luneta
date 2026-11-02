@@ -10,8 +10,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
+use lunetad::api::keep_printed_response::{self, File};
+use lunetad::api::list_skills_response::Skill;
+use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
-use lunetad::api::{self, Client, GoRequest, ListClientsRequest, On, RefugeRequest, WatchRequest};
+use lunetad::api::{
+    self, Client, GoRequest, KeepPrintedRequest, ListClientsRequest, ListSkillsRequest,
+    NameSessionRequest, On, OpenRequest, RefugeRequest, StartRequest, WatchRequest,
+};
 use tonic::Code;
 
 use crate::demand::Detached;
@@ -468,19 +474,32 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
     });
 }
 
-/// A daemon hands what a client asks of zellij on another machine to that
-/// machine's daemon, through the bridge it watches it on, which asks zellij
-/// there: where to take a client, a session's clients, and where a client
-/// goes on once its session ended. Without a machine, it asks its own; of
-/// one it does not reach, it says so.
+/// A daemon hands what a client asks of another machine to that machine's
+/// daemon, through the bridge it watches it on, which asks zellij there, or
+/// looks there: where to take a client, a session's clients, where a client
+/// goes on once its session ended, a pane or a tab to open, the skills of a
+/// directory, what a pane's shell printed, which it keeps there, and the
+/// name a session for a directory takes there, and to start it. Without a
+/// machine, it asks its own; of one it does not reach, it says so.
 #[test]
-fn a_daemon_hands_on_what_is_asked_of_another_machine_s_zellij() {
+fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    // A claude there that lists no plugins, whatever this machine has.
+    script(&far.zellij.bin().join("claude"), "echo '[]'\n");
     let _work = far.serve("work");
-    far.zellij.list("work", &serde_json::json!([]));
+    let tab = serde_json::json!({
+        "id": 4, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
+        "is_floating": false, "tab_id": 3,
+    });
+    far.zellij.list("work", &serde_json::json!([tab]));
     far.zellij.clients("work", &[(1, "terminal_3")]);
+    far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
+    let dir = tempfile::tempdir().unwrap();
+    let skill = dir.path().join(".claude/skills/near");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), "---\ndescription: Near.\n---\n").unwrap();
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -524,5 +543,55 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine_s_zellij() {
         let seatless = daemon.refuge(seatless).await.unwrap_err();
         assert_eq!(seatless.code(), Code::InvalidArgument, "{seatless:?}");
         assert_eq!(far.zellij.went(), went);
+
+        let open = |opens| OpenRequest {
+            on: on("far"),
+            session: "work".to_owned(),
+            cwd: "/w".to_owned(),
+            command: vec!["claude".to_owned()],
+            opens,
+        };
+        let pane = daemon.open(open(Some(Opens::Beside(2)))).await.unwrap().into_inner();
+        let tab = Opens::Tab(open_request::Tab { name: Some("#5".to_owned()) });
+        let tab = daemon.open(open(Some(tab))).await.unwrap().into_inner();
+        assert_eq!((pane.terminal, tab.terminal), (9, 4));
+        let opened = [
+            "2 --session work action new-pane --no-focus --cwd /w -- claude",
+            "- --session work action new-tab --no-focus --cwd /w --name #5 -- claude",
+        ];
+        assert_eq!(far.zellij.opened(), opened);
+        let nothing = daemon.open(open(None)).await.unwrap_err();
+        assert_eq!(nothing.code(), Code::InvalidArgument, "{nothing:?}");
+        assert!(here.zellij.opened().is_empty());
+
+        let skills = dir.path().to_str().unwrap().to_owned();
+        let skills = ListSkillsRequest { on: on("far"), dir: skills };
+        let found = daemon.list_skills(skills).await.unwrap();
+        let near = Skill { name: "near".to_owned(), description: "Near.".to_owned() };
+        assert_eq!(found.into_inner().skills, [near]);
+
+        let typed = "cargo test".to_owned();
+        let session = "work".to_owned();
+        let printed = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
+        let kept = daemon.keep_printed(printed).await.unwrap().into_inner().printed;
+        let Some(keep_printed_response::Printed::After(File { path, lines: 1, left_out: 0 })) = kept
+        else {
+            panic!("kept {kept:?}");
+        };
+        assert!(Path::new(&path).starts_with(far.runtime.path().canonicalize().unwrap()), "{path}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "error[E0308]\n");
+
+        // A directory named for a session that runs there takes the name after.
+        let work = dir.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let work = work.to_str().unwrap().to_owned();
+        let named = NameSessionRequest { on: on("far"), dir: work.clone() };
+        let named = daemon.name_session(named).await.unwrap().into_inner();
+        assert_eq!(named.name, "work-2");
+        let (at, cwd) = ("work".to_owned(), Some(work.clone()));
+        daemon.start(StartRequest { on: on("far"), at, to: named.name, cwd }).await.unwrap();
+        let started = format!("--session work action switch-session work-2 --cwd {work}");
+        assert_eq!(far.zellij.went().last(), Some(&started));
+        assert!(here.zellij.went().is_empty());
     });
 }

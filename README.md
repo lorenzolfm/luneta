@@ -786,9 +786,16 @@ luneta goes back to the session you left, and the notes say what ssh said.
 Where the session there ends, luneta goes on in the newest session of that
 machine's, or of this one's where it has none left.
 
-The menu and moving its sessions come later. `u` marks its panes read, and
-their dots and folds are kept as this machine's are, a folded machine and
-another machine's folded sessions in
+The menu on another machine's pane opens what it opens here, there: `n p`,
+`n t` and the agents of the Claude group open in zellij on that machine, `c f`
+and `c e` keep what the pane printed in a file there, for the agent there to
+read, `/` finds the skills of the pane's directory there, and `n s` makes a
+session there, named as that machine names one; luneta's zellij goes to what
+opened, as `Enter` would. While luneta's zellij is on another machine, the
+menu over zellij is for its pane there. The Delete group, the Brief group but
+for every session, the ask box and moving its sessions come later. `u` marks
+its panes read, and their dots and folds are kept as this machine's are, a
+folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.
 
 ### Tell an agent

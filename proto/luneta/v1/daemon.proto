@@ -34,6 +34,32 @@ service Daemon {
   // Where a client that ended in one of a few sessions goes on, as its
   // session went with it: the newest session that answers for its clients.
   rpc Refuge(RefugeRequest) returns (RefugeResponse);
+  // Has zellij open a pane beside another of a session, or a tab of it, as
+  // `zellij action new-pane` and `new-tab` do, with no client moved. It
+  // answers with the terminal it opened, for a client to go to, or with what
+  // zellij said as it failed.
+  rpc Open(OpenRequest) returns (OpenResponse);
+  // The skills Claude Code can run in a directory, as luneta's menu searches
+  // them: each a `SKILL.md`, a command or a workflow, of the directory and
+  // those above it, of the user's, and of each plugin that is on there.
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+  // Keeps what the shell in a pane printed after the line a command was last
+  // typed on, in a file for the daemon's user alone, for an agent there to
+  // read, as luneta's menu does for `c f` and `c e`: zellij dumps the pane's
+  // text, and the daemon keeps what follows that line, up to the prompt the
+  // shell waits at. Files kept a day go as another is kept.
+  rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
+  // The name a session luneta makes for a directory takes, as its picker's
+  // directories name one: the directory's own, or its repository's and its
+  // own where it is a worktree of one, with a `-2` where a session that runs,
+  // or one zellij keeps to bring back, has that name.
+  rpc NameSession(NameSessionRequest) returns (NameSessionResponse);
+  // Has zellij take the client that last typed in a session to a session it
+  // makes, that starts in a directory, as `zellij action switch-session
+  // --cwd` does: or to one that runs by that name, or one it keeps to bring
+  // back, which it brings back, as it does. It answers once zellij has taken
+  // the action, or with what zellij said as it failed.
+  rpc Start(StartRequest) returns (StartResponse);
 }
 
 // The machine a question of zellij's is for: this daemon's own where it is
@@ -96,6 +122,116 @@ message RefugeResponse {
     Refuge refuge = 1;
   }
 }
+
+message OpenRequest {
+  On on = 1;
+  string session = 2;
+  // The directory it starts in.
+  string cwd = 3;
+  // What runs in it: the shell of the user the daemon runs as, where empty.
+  repeated string command = 4;
+  // What it opens: one of these, always. A question with neither is
+  // invalid.
+  oneof opens {
+    // A pane beside this one, by its terminal's id, in its tab.
+    uint32 beside = 5;
+    Tab tab = 6;
+  }
+
+  // A tab, named so, or as zellij numbers it where absent.
+  message Tab {
+    optional string name = 1;
+  }
+}
+
+message OpenResponse {
+  // The terminal it opened: in a tab, the first zellij lists there.
+  uint32 terminal = 1;
+}
+
+message ListSkillsRequest {
+  On on = 1;
+  string dir = 2;
+}
+
+message ListSkillsResponse {
+  // By their names, each once: the first found of a name, the nearest the
+  // directory.
+  repeated Skill skills = 1;
+
+  // A skill, by the name a prompt runs it by, after its `/`, a word, and
+  // what it says it does, on one line.
+  message Skill {
+    string name = 1;
+    string description = 2;
+  }
+}
+
+message KeepPrintedRequest {
+  On on = 1;
+  string session = 2;
+  // The pane, by its terminal's id.
+  uint32 pane = 3;
+  // The line the command was typed on, as luneta's shell hook says it: the
+  // command, or `fg` for a job `fg` brought back.
+  string typed = 4;
+}
+
+message KeepPrintedResponse {
+  // What it found: one of these, always. A client that finds none has a
+  // newer daemon's.
+  oneof printed {
+    // What the command printed, after the line it was typed on.
+    File after = 1;
+    // Nothing follows the line the command was typed on, the first the pane
+    // holds: it printed nothing.
+    Nothing nothing = 2;
+    // Nothing follows the last line that holds the command after a word,
+    // which may be a line it printed: all the pane holds, up to and with
+    // that line.
+    File unsure = 3;
+    // No line holds the command, as after a `clear`: all the pane holds.
+    Top top = 4;
+  }
+
+  // A file the lines are in.
+  message File {
+    // Its path, with every link in it followed.
+    string path = 1;
+    // How many lines it holds, the last the pane had, and how many came
+    // before them, left out.
+    uint64 lines = 2;
+    uint64 left_out = 3;
+  }
+
+  message Nothing {}
+
+  message Top {
+    // Absent where the pane holds nothing.
+    File file = 1;
+  }
+}
+
+message NameSessionRequest {
+  On on = 1;
+  string dir = 2;
+}
+
+message NameSessionResponse {
+  string name = 1;
+}
+
+message StartRequest {
+  On on = 1;
+  // The session the client is in, where it typed last.
+  string at = 2;
+  // The session it makes.
+  string to = 3;
+  // Where the session starts. Absent for where the client started.
+  optional string cwd = 4;
+}
+
+message StartResponse {}
 
 // A session that runs, and its clients, which are those it has before the
 // client that goes on there comes.

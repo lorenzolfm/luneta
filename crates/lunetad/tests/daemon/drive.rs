@@ -315,20 +315,23 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
     let in_the_box = [("LUNETA_PANE", "work:2"), ("LUNETA_TURN", "00000000000000aa")];
     let open = |what: &str, command: &[&str]| {
         let args = [&["open", what, "--cwd", cwd, "--"][..], command].concat();
-        let opened = asked(&host, &in_the_box, &args);
-        assert_eq!(opened.status.code(), Some(1), "{what} {command:?}");
-        String::from_utf8_lossy(&opened.stderr).into_owned()
+        asked(&host, &in_the_box, &args)
     };
-    // The fake zellij opens nothing, and says what it was asked.
+    // The fake zellij opens nothing, and notes what it was asked.
+    let last_opened = || host.lists.opened().last().cloned().unwrap_or_default();
     for (what, command) in [
         ("pane", &[][..]),
         ("pane", &["claude", "--name", "issue-42", "tackle it"]),
         ("pane", &["claude", "/thermo-nuclear-review"]),
         ("tab", &["claude"]),
     ] {
-        let why = open(what, command);
-        assert!(why.contains(&format!("was asked: action new-{what}")), "{command:?}: {why}");
+        open(what, command);
+        let asked = last_opened();
+        let runs = command.join(" ");
+        let opens = asked.contains(&format!("action new-{what}")) && asked.ends_with(&runs);
+        assert!(opens, "{command:?}: {asked}");
     }
+    let opened = host.lists.opened();
     for (what, command, refused) in [
         ("pane", &["touch", "x"][..], "it does not run touch x"),
         ("pane", &["sh", "-c", "claude"], "it does not run sh -c claude"),
@@ -337,14 +340,19 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
         ("pane", &["claude", "--name", "-x"], "no option but --name"),
         ("pane", &["claude", "!rm -rf ~"], "no prompt with a ! first"),
     ] {
-        let why = open(what, command);
+        let refusal = open(what, command);
+        let why = String::from_utf8_lossy(&refusal.stderr);
+        assert_eq!(refusal.status.code(), Some(1), "{command:?}: {why}");
         assert!(why.contains("in luneta's ask box, a pane runs your shell or"), "{command:?}: {why}");
-        assert!(why.contains(refused) && !why.contains("was asked"), "{command:?}: {why}");
+        assert!(why.contains(refused), "{command:?}: {why}");
     }
+    assert_eq!(host.lists.opened(), opened);
 
     let opened = luneta(&host, ("work", 2), &["open", "pane", "--cwd", cwd, "--", "touch", "x"]);
-    let why = String::from_utf8_lossy(&opened.stderr);
-    assert!(why.contains("was asked: action new-pane"), "{why}");
+    assert!(opened.status.success(), "{}", String::from_utf8_lossy(&opened.stderr));
+    assert_eq!(String::from_utf8_lossy(&opened.stdout), "work:9\n");
+    let touch = format!("action new-pane --no-focus --cwd {cwd} -- touch x");
+    assert!(last_opened().ends_with(&touch), "{}", last_opened());
 }
 
 /// The ask box names the pane you asked from by its session's name as you

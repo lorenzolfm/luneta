@@ -113,8 +113,11 @@ pub fn script(path: &Path, text: &str) {
 /// once; and one a test had `unkept` or `gone` as zellij deletes those. As it
 /// deletes one a test had `renews`, another session is made by a name. It
 /// lets go of what it keeps of one with no socket, as of one that ended. It
-/// notes each go it is asked to take, for `went`, and takes none. It knows no
-/// other command.
+/// notes each go it is asked to take, for `went`, and takes none. It notes
+/// each pane and tab it is asked to open, with the pane it is asked from, for
+/// `opened`, opens none, and says it opened `terminal_9`, or the tab `3`. It
+/// dumps a pane as the text a test had it `dumps` for its session. It knows
+/// no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -169,6 +172,19 @@ case "$*" in
         echo "$asked" >> "{panes}/went"
         exit 0
         ;;
+    "action new-pane "*)
+        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
+        echo terminal_9
+        exit 0
+        ;;
+    "action new-tab "*)
+        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
+        echo 3
+        exit 0
+        ;;
+    "action dump-screen "*)
+        exec cat "{panes}/$session.dump"
+        ;;
     "delete-session "*)
         if [ -S "$socket" ]; then
             echo "A session by the name \"$session\" exists and is active, use --force to delete it."
@@ -184,7 +200,7 @@ case "$*" in
         exit 0
         ;;
     *)
-        echo "this zellij only lists and closes, and was asked: $*" >&2
+        echo "this zellij knows no such command, and was asked: $*" >&2
         exit 2
         ;;
 esac
@@ -250,6 +266,17 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// were, in the order it was asked.
     pub fn went(&self) -> Vec<String> {
         self.lines("went")
+    }
+
+    /// Each pane and tab zellij was asked to open, in the order it was
+    /// asked, after the pane it was asked from, or `-`.
+    pub fn opened(&self) -> Vec<String> {
+        self.lines("opened")
+    }
+
+    /// Has zellij dump `text` of any pane of `session` from now on.
+    pub fn dumps(&self, session: &str, text: &str) {
+        self.write(&format!("{session}.dump"), text);
     }
 
     /// The lines of the file `name`, none while there is none.

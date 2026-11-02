@@ -311,7 +311,7 @@
                 # the flake: the check is against the claude you run.
                 skills)
                   dir="$(cd "''${1:-$here}" && pwd -P)"
-                  LUNETA_SKILLS_DIR="$dir" cargo test --locked -p lunetad --bin luneta \
+                  LUNETA_SKILLS_DIR="$dir" cargo test --locked -p lunetad --lib \
                     skills::tests::the_finder_finds_what_claude_code_runs -- --ignored --exact
                   ;;
               esac
