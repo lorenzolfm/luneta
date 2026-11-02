@@ -30,8 +30,9 @@ const KINDS: [&str; 4] =
     [r#""type":"ai-title""#, r#""type":"last-prompt""#, r#""type":"user""#, r#""type":"assistant""#];
 
 /// The id Claude Code gives a session, which names its transcript: a UUID's
-/// hex digits and dashes, a digit first, and nothing that would take the file
-/// it names out of its folder, nor read as an option to `claude --resume`.
+/// hex digits and dashes, a hex digit first, and nothing that would take the
+/// file it names out of its folder, nor read as an option to `claude
+/// --resume`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 

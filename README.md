@@ -963,7 +963,12 @@ it watches that machine on. So its `luneta` commands, `zoxide`, `gh` and
 worktrees act there. It works in the highlighted pane's directory there, or in
 your home there on a session's row or the machine's header, and the box's top
 says which machine, as `luneta/main on nixos`. A machine without `claude`, or
-without a login there, says so in the box.
+without a login there, says so in the box. lunetad there finds `claude`, and the
+`zoxide`, `gh` and `git` the agent runs, on the `PATH` it started with: that of
+the command ssh ran `luneta bridge` in, where the bridge started it, or of the
+terminal a luneta there ran in. So a `claude` that only your interactive shell
+puts on the `PATH` is found there only while a lunetad started from a terminal
+runs there.
 
 While luneta's zellij is on that machine, the agent goes by the pane it is on
 there, as it does here. While luneta's zellij is on another machine, as on this

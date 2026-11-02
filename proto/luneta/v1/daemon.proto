@@ -322,8 +322,8 @@ message KillResponse {}
 message TranscriptEndsRequest {
   On on = 1;
   // The sessions whose transcripts it reads, by the ids Claude Code gives
-  // them: a UUID's hex digits and dashes, a digit first. More than 32, or one
-  // of anything else, is invalid.
+  // them: a UUID's hex digits and dashes, a hex digit first. More than 32, or
+  // one of anything else, is invalid.
   repeated string ids = 2;
   // The most bytes it keeps of each end: 512 KiB at the most of them all
   // together. None, as a question that does not say has, is invalid.
