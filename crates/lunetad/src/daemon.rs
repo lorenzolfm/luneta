@@ -58,13 +58,14 @@ use crate::api::{
     GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
-    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
+    RefugeResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
+use crate::links::{Pasted, Ready};
 use crate::remote::{Bridges, Destination};
 use crate::watch::Troubles;
 use crate::zellij::SessionName;
@@ -511,8 +512,8 @@ impl Daemon for Host {
         }
         let opened = task::spawn_blocking(move || opens::opening(&open)).await;
         let opened = opened.map_err(|error| unfinished(&error))?;
-        let terminal = opened.map_err(Status::failed_precondition)?;
-        Ok(Response::new(OpenResponse { terminal }))
+        let opens::Opened { terminal, notes } = opened.map_err(Status::failed_precondition)?;
+        Ok(Response::new(OpenResponse { terminal, notes }))
     }
 
     async fn list_skills(
@@ -572,8 +573,9 @@ impl Daemon for Host {
         }
         let named = task::spawn_blocking(move || names::free_for(&dir)).await;
         let named = named.map_err(|error| unfinished(&error))?;
-        let name = named.map_err(Status::failed_precondition)?.to_string();
-        Ok(Response::new(NameSessionResponse { name }))
+        let (name, since) = named.map_err(Status::failed_precondition)?;
+        let named_at = Some(since.into());
+        Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at }))
     }
 
     async fn start(
@@ -684,6 +686,43 @@ impl Daemon for Host {
         let steps = talked(move |wanted, hear| asked.talk(wanted, hear));
         Ok(Response::new(Box::pin(steps)))
     }
+
+    type PasteStream = Pin<Box<dyn Stream<Item = Result<PasteResponse, Status>> + Send>>;
+
+    async fn paste(
+        &self,
+        request: Request<PasteRequest>,
+    ) -> Result<Response<Self::PasteStream>, Status> {
+        let (on, pasted) = Pasted::of(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let answer = late(move || pasted.ready().map(Ready::answer));
+        Ok(Response::new(Box::pin(answer)))
+    }
+}
+
+/// What `job` answers, from a thread of its own, as a stream of that answer
+/// alone: one that comes as late as the job takes, as the server times out
+/// a question as it waits for the answer's start, which the stream is. The
+/// stream ends with why there is no answer where the job says so, or where
+/// its thread panicked. A question that hangs up first does not stop it.
+fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>
+where
+    T: Send + 'static,
+    J: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (answer, answered) = tokio::sync::mpsc::channel(1);
+    task::spawn(async move {
+        let done = match task::spawn_blocking(job).await {
+            Ok(done) => done.map_err(Status::failed_precondition),
+            Err(error) => Err(unfinished(&error)),
+        };
+        // The question hung up.
+        let _ = answer.send(done).await;
+    });
+    ReceiverStream::new(answered)
 }
 
 /// What `talk` hears of a turn of the ask box's agent, a step at a time, as
@@ -742,27 +781,31 @@ fn directory(field: &str, dir: String) -> Result<String, Status> {
 /// What `request` has zellij open, on the machine it names, or why the
 /// question is invalid: it names a session zellij would not take, or a
 /// directory by no absolute path, or it opens neither a pane nor a tab, or a
-/// tab by an empty name, where an absent one has zellij number it.
+/// tab by an empty name, where an absent one has zellij number it, or alone
+/// since no time there is.
 fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
     let OpenRequest { on, session, cwd, command, opens } = request;
     let (session, cwd) = (named("session", &session)?, directory("cwd", cwd)?);
     let open = match opens {
         None => return Err(Status::invalid_argument("opens: neither a pane nor a tab")),
         Some(Opens::Beside(beside)) => Open::Pane { session, beside, cwd, command },
-        Some(Opens::Tab(open_request::Tab { name: Some(name) })) if name.is_empty() => {
+        Some(Opens::Tab(open_request::Tab { name: Some(name), .. })) if name.is_empty() => {
             let why = "opens: a tab's name is empty, where an absent one has zellij number it";
             return Err(Status::invalid_argument(why));
         },
-        Some(Opens::Tab(open_request::Tab { name })) => {
-            Open::Tab { session, tab: Tab { cwd, name, command } }
+        Some(Opens::Tab(open_request::Tab { name, alone_since })) => {
+            let alone_since = alone_since.map(SystemTime::try_from).transpose().map_err(|_| {
+                Status::invalid_argument("opens: alone_since says no time a session started at")
+            })?;
+            Open::Tab { session, tab: Tab { cwd, name, command }, alone_since }
         },
     };
     Ok((on, open))
 }
 
 /// Why what the daemon asked of zellij, or of the finder of skills, or what
-/// it read of Claude Code's transcripts, did not answer: the thread it was
-/// asked on panicked.
+/// it read of Claude Code's transcripts, or where a pasted link's key goes,
+/// did not answer: the thread it was asked on panicked.
 fn unfinished(error: &task::JoinError) -> Status {
     Status::internal(format!("lunetad lost its answer: {error}"))
 }

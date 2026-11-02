@@ -818,7 +818,13 @@ machine's; with none, it is deleted with zellij in it, and luneta goes on as it
 does when a session there ends. While luneta's zellij is on another machine,
 the menu over zellij is for its pane there. The Brief group briefs you on its
 agents as on this machine's, and [the ask box](#on-another-machines-row) runs
-its agent there. Moving its sessions comes later. `u` marks
+its agent there. A pull request's or an issue's link pasted on its row is that
+machine's to act on: lunetad there finds where its keys go among that
+machine's panes and the clones its zoxide knows, asks its `gh`, and has its
+`luneta worktree` make the worktree there, with the `zoxide`, `gh` and `git` on
+the `PATH` it started with, as for the ask box; a session it makes for the link
+is made there, holding the `#123` tab alone, as here. Moving its sessions comes
+later. `u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.

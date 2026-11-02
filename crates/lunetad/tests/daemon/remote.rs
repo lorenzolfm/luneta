@@ -23,6 +23,7 @@ use lunetad::api::{
     RefugeRequest, StartRequest, TranscriptEndsRequest, WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
+use lunetad::links::{self, At, Link, Pasted, Ready};
 use lunetad::transcripts::SessionId;
 use lunetad::SessionName;
 use rustix::process::{test_kill_process, Pid};
@@ -31,6 +32,7 @@ use tonic::{Code, Status};
 
 use crate::demand::Detached;
 use crate::host::{eventually, folder_in, script, start, Host, Vars, LUNETA};
+use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
 /// host's daemon, that reaches the test's other hosts by the destinations it
@@ -580,7 +582,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             opens,
         };
         let pane = daemon.open(open(Some(Opens::Beside(2)))).await.unwrap().into_inner();
-        let tab = Opens::Tab(open_request::Tab { name: Some("#5".to_owned()) });
+        let tab = Opens::Tab(open_request::Tab { name: Some("#5".to_owned()), alone_since: None });
         let tab = daemon.open(open(Some(tab))).await.unwrap().into_inner();
         assert_eq!((pane.terminal, tab.terminal), (9, 4));
         let opened = [
@@ -594,7 +596,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
         let relative = OpenRequest { cwd: "w".to_owned(), ..open(Some(Opens::Beside(2))) };
         invalid(daemon.open(relative).await.unwrap_err());
-        let unnamed = |name: &str| Opens::Tab(open_request::Tab { name: Some(name.to_owned()) });
+        let unnamed = |name: &str| {
+            Opens::Tab(open_request::Tab { name: Some(name.to_owned()), alone_since: None })
+        };
         invalid(daemon.open(open(Some(unnamed("")))).await.unwrap_err());
         let idle = OpenRequest { session: "idle".to_owned(), ..open(Some(unnamed("#5"))) };
         let idle = daemon.open(idle).await.unwrap_err();
@@ -629,9 +633,13 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let work = dir.path().join("work");
         fs::create_dir(&work).unwrap();
         let work = work.to_str().unwrap().to_owned();
+        let before = SystemTime::now();
         let named = NameSessionRequest { on: on("far"), dir: work.clone() };
         let named = daemon.name_session(named).await.unwrap().into_inner();
         assert_eq!(named.name, "work-2");
+        // Just before the daemon there read the names, by its clock.
+        let named_at = named.named_at.map(|at| SystemTime::try_from(at).unwrap());
+        assert!(named_at.is_some_and(|at| at >= before && at <= SystemTime::now()), "{named_at:?}");
         let relative = NameSessionRequest { on: on("far"), dir: "work".to_owned() };
         invalid(daemon.name_session(relative).await.unwrap_err());
         let (at, to, cwd) = ("work".to_owned(), named.name.clone(), Some("work".to_owned()));
@@ -912,5 +920,145 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
         ended.unwrap();
         assert_eq!(steps.len(), 3, "{steps:?}");
         assert!(started.elapsed() >= Duration::from_secs(6), "{:?}", started.elapsed());
+    });
+}
+
+/// Where a key goes for `pasted` on the machine `on`, as `daemon` hands on
+/// the one answer its stream holds, by places of the panes `pasted` says; or
+/// why there is none.
+async fn pasted_on(
+    daemon: &mut DaemonClient<Channel>,
+    on: &str,
+    pasted: &Pasted,
+) -> Result<Ready<usize>, Status> {
+    let request = pasted.asked(Some(On { destination: on.to_owned() }));
+    let mut answer = daemon.paste(request).await?.into_inner();
+    let ready = answer.message().await?.expect("an answer");
+    assert_eq!(answer.message().await?, None, "the stream ends after the answer");
+    Ok(Ready::of(ready).expect("an answer luneta reads"))
+}
+
+/// A link pasted on a row of another machine is found there: gh there asks
+/// GitHub of the issue, git there reads the repository its panes work in,
+/// and `luneta worktree` there makes the issue's branch's worktree, beside
+/// the lunetad there. The key goes to a tab of the session of the pane
+/// that works in the repository, by its place among those luneta said; or,
+/// with none, to a session to make in the clone zoxide knows there, named
+/// for it as the daemon there names it then. A paste asked of a pane by no
+/// absolute path is refused, and one for a machine the daemon does not
+/// reach runs nothing.
+#[test]
+fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    far.gh.issue(7, "https://github.com/o/n/issues/7");
+    let scratch = tempfile::tempdir().unwrap();
+    // As git says the worktree, by its real path, as on macOS, where the
+    // temporary folder is through a link.
+    let scratch = scratch.path().canonicalize().unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(&scratch, &up, &clone);
+    // The issue's repository on GitHub, by a remote of the clone, which git
+    // takes for `up`.
+    let bare = clone.join(".bare");
+    let github = "git@github.com:o/n.git";
+    git(&bare, &["remote", "add", "upstream", github]);
+    git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
+    let main = clone.join("main").display().to_string();
+    script(&far.zellij.bin().join("zoxide"), &format!("echo '{main}'\n"));
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let link = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
+        let session = Pasted::new(link.clone(), vec![worked("/nowhere/at/all"), worked(&main)]);
+        let ready = pasted_on(&mut daemon, "far", &session).await.unwrap();
+        let worktree = clone.join("issue-7").display().to_string();
+        let branch = Some("issue-7".to_owned());
+        assert_eq!(ready, Ready { at: At::Session(1), worktree: worktree.clone(), branch });
+        assert!(clone.join("issue-7").join(".git").is_file());
+        let viewed = "issue view 7 --repo github.com/o/n --json url --jq .url";
+        assert_eq!(far.gh.issues(), [viewed]);
+        assert!(here.gh.issues().is_empty());
+
+        let made = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), Vec::new())).await;
+        let Ready { at: At::Clone { cwd, name }, worktree: again, .. } = made.unwrap() else {
+            panic!("no session to make");
+        };
+        assert_eq!((cwd, name.as_str(), again), (clone.display().to_string(), "n", worktree));
+
+        let relative = Pasted::new(link.clone(), vec![worked("n/main")]);
+        let relative = pasted_on(&mut daemon, "far", &relative).await.unwrap_err();
+        assert_eq!(relative.code(), Code::InvalidArgument, "{relative:?}");
+        let nowhere = pasted_on(&mut daemon, "nowhere", &session).await.unwrap_err();
+        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
+        assert_eq!(far.gh.issues().len(), 2);
+    });
+}
+
+/// A tab asked to open alone in a session of another machine takes the
+/// place there of the tabs zellij made the session with, which go once it
+/// has opened, where the session started then or after, by that machine's
+/// clock. One that started before keeps them, and the answer says so. None
+/// opens in a session no client is in, alone or not: zellij would give it
+/// no room for its panes.
+#[test]
+fn a_tab_there_opens_alone_in_a_session_made_since() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _work = far.serve("work");
+    let laid = |id: u32, tab_id: u32| {
+        serde_json::json!({
+            "id": id, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
+            "is_floating": false, "tab_id": tab_id,
+        })
+    };
+    far.zellij.list("work", &serde_json::json!([laid(10, 1), laid(11, 2)]));
+    far.zellij.clients("work", &[(1, "terminal_10")]);
+    far.zellij.opens_into("work", &serde_json::json!([laid(10, 1), laid(11, 2), laid(12, 3)]));
+    far.zellij.list("idle", &serde_json::json!([laid(13, 1)]));
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let alone_in = |session: &str, since: SystemTime| OpenRequest {
+            on: Some(On { destination: "far".to_owned() }),
+            session: session.to_owned(),
+            cwd: "/w/n/issue-7".to_owned(),
+            command: Vec::new(),
+            opens: Some(Opens::Tab(open_request::Tab {
+                name: Some("#7".to_owned()),
+                alone_since: Some(since.into()),
+            })),
+        };
+        let alone = |since| alone_in("work", since);
+        let made = daemon.open(alone(SystemTime::UNIX_EPOCH)).await.unwrap().into_inner();
+        assert_eq!((made.terminal, made.notes), (12, Vec::new()));
+        let closed = [1, 2].map(|tab| format!("--session work action close-tab-by-id {tab}"));
+        assert_eq!(far.zellij.closed(), closed);
+        let later = SystemTime::now() + Duration::from_hours(1);
+        let kept = daemon.open(alone(later)).await.unwrap().into_inner();
+        let notes = vec!["work ran already, and keeps its tabs".to_owned()];
+        assert_eq!((kept.terminal, kept.notes), (12, notes));
+        assert_eq!(far.zellij.closed(), closed);
+        assert!(here.zellij.closed().is_empty());
+        let idle = daemon.open(alone_in("idle", SystemTime::UNIX_EPOCH)).await.unwrap_err();
+        assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
+        assert!(idle.message().contains("no client is in idle"), "{idle:?}");
+        assert_eq!(far.zellij.closed(), closed);
     });
 }

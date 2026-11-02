@@ -314,7 +314,7 @@ fn pane(
     let cwd = directory(cwd)?;
     let named = session_named(&session)?;
     let open = Open::Pane { session: named, beside: pane, cwd, command: command.to_vec() };
-    let opened = zellij::opening(&open)?;
+    let opened = zellij::opening(&open)?.terminal;
     Ok(Pane { session, pane: opened }.to_string())
 }
 
@@ -336,8 +336,8 @@ fn tab(
     started(&session, &zellij::running()?)?;
     let (name, command) = (name.map(str::to_owned), command.to_vec());
     let tab = Tab { cwd: directory(cwd)?, name, command };
-    let open = Open::Tab { session: session_named(&session)?, tab };
-    let opened = zellij::opening(&open)?;
+    let open = Open::Tab { session: session_named(&session)?, tab, alone_since: None };
+    let opened = zellij::opening(&open)?.terminal;
     Ok(Pane { session, pane: opened }.to_string())
 }
 

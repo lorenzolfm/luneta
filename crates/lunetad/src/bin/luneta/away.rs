@@ -13,12 +13,13 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
     closes_response, AskResponse, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
-    ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, RefugeRequest, RefugeResponse,
-    StartRequest,
+    ListClientsRequest, ListSkillsRequest, NameSessionRequest, NameSessionResponse, On,
+    RefugeRequest, RefugeResponse, StartRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
-use lunetad::opens::Open;
+use lunetad::links::{self, Pasted, Ready};
+use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Skill};
 use lunetad::transcripts::{Reading, SessionId};
@@ -96,13 +97,13 @@ impl Away {
     }
 
     /// The name a session luneta makes for `dir` there takes, as
-    /// `lunetad::names::free_for` names it there, or why it takes none.
-    pub fn name(&mut self, dir: &str) -> Result<SessionName, String> {
+    /// `lunetad::names::free_for` names it there, with the time just before
+    /// it read which names zellij there has, by that machine's clock, as
+    /// `named_by` reads them; or why it takes none.
+    pub fn name(&mut self, dir: &str) -> Result<(SessionName, Option<SystemTime>), String> {
         let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
         let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
-        let on = &self.on;
-        SessionName::running(&named.name)
-            .map_err(|why| format!("{on}: lunetad named a session \"{}\": {why}", named.name))
+        named_by(&self.on, named)
     }
 
     /// The clients of `session` there, as zellij lists them now, or why it
@@ -123,11 +124,14 @@ impl Away {
     }
 
     /// Has zellij there open `open`, as `lunetad::opens::opening` does, and
-    /// says which terminal it opened, or why it did not.
-    pub fn open(&mut self, open: &Open) -> Result<u32, String> {
+    /// says which terminal it opened, and what it left as it was, each of
+    /// the machine's, or why it opened nothing.
+    pub fn open(&mut self, open: &Open) -> Result<Opened, String> {
         let request = open.asked(Some(self.on()));
         let opened = self.ask(|mut daemon| async move { daemon.open(request).await })?;
-        Ok(opened.terminal)
+        let on = &self.on;
+        let notes = opened.notes.into_iter().map(|note| format!("{on}: {note}")).collect();
+        Ok(Opened { terminal: opened.terminal, notes })
     }
 
     /// The skills `dir` there can run, as `lunetad::skills::found_in` finds
@@ -246,6 +250,34 @@ impl Away {
         })
     }
 
+    /// Where a key of luneta's menu goes for the link `pasted` there, as
+    /// `lunetad::links` finds it there, by the place of its pane among those
+    /// `pasted` says, and the worktree it has made there; or why it found
+    /// nothing, as it said there, or as luneta heard no answer by
+    /// `links::PATIENCE` and its patience after, by which the daemon there
+    /// has done with it.
+    pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, String> {
+        let request = pasted.asked(Some(self.on()));
+        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let secs = patience.as_secs_f32();
+        let minutes = links::PATIENCE.as_secs() / 60;
+        self.runtime.block_on(async move {
+            // The daemon answers with the stream at once, and the answer in
+            // it once it has found it.
+            let mut answer = match tokio::time::timeout(patience, daemon.paste(request)).await {
+                Ok(Ok(answer)) => answer.into_inner(),
+                Ok(Err(status)) => return Err(said(on, &status)),
+                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+            };
+            match tokio::time::timeout(links::PATIENCE + patience, answer.message()).await {
+                Ok(Ok(Some(ready))) => Ready::of(ready).map_err(|why| format!("{on}: {why}")),
+                Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
+                Ok(Err(status)) => Err(said(on, &status)),
+                Err(_) => Err(format!("{on}: lunetad had found nothing after {minutes} minutes")),
+            }
+        })
+    }
+
     fn on(&self) -> On {
         On { destination: self.on.to_string() }
     }
@@ -298,6 +330,20 @@ async fn heard(
             Ok(None) => return Some(Ok(())),
         }
     }
+}
+
+/// The name the daemon of `on` gives a session in `answer`, and the time it
+/// read zellij's names at there: none from a daemon older than that time,
+/// which names the session all the same, as for one to start. Or why it
+/// names none zellij would make.
+fn named_by(
+    on: &Destination,
+    answer: NameSessionResponse,
+) -> Result<(SessionName, Option<SystemTime>), String> {
+    let NameSessionResponse { name, named_at } = answer;
+    let name = SessionName::running(&name)
+        .map_err(|why| format!("{on}: lunetad named a session \"{name}\": {why}"))?;
+    Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok())))
 }
 
 /// What `status`, of a question for `on`, says: what lunetad said, or what a
@@ -377,5 +423,24 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
+    }
+
+    /// The daemon there names a session to make, and says when it read
+    /// zellij's names there. One older than that time says none, and its
+    /// name stands all the same, as for a session to start. A name zellij
+    /// would not take is none.
+    #[test]
+    fn a_session_is_named_there_by_a_daemon_old_or_new() {
+        let on = "nixos".parse().unwrap();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let answer = |name: &str, at: Option<SystemTime>| NameSessionResponse {
+            name: name.to_owned(),
+            named_at: at.map(Into::into),
+        };
+        let cdk = SessionName::running("cdk-2").unwrap();
+        assert_eq!(named_by(&on, answer("cdk-2", Some(at))), Ok((cdk.clone(), Some(at))));
+        assert_eq!(named_by(&on, answer("cdk-2", None)), Ok((cdk, None)));
+        let why = "nixos: lunetad named a session \"../x\": name cannot contain '/'";
+        assert_eq!(named_by(&on, answer("../x", None)), Err(why.to_owned()));
     }
 }

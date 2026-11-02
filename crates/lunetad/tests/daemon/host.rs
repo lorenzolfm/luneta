@@ -116,7 +116,8 @@ pub fn script(path: &Path, text: &str) {
 /// lets go of what it keeps of one with no socket, as of one that ended. It
 /// notes each go it is asked to take, for `went`, and takes none. It notes
 /// each pane and tab it is asked to open, with the pane it is asked from, for
-/// `opened`, opens none, and says it opened `terminal_9`, or the tab `3`. It
+/// `opened`, opens none, and says it opened `terminal_9`, or the tab `3`,
+/// after which it lists the panes a test wrote with `opens_into`, if any. It
 /// dumps a pane as the text a test had it `dumps` for its session. It knows
 /// no other command.
 pub struct FakeZellij {
@@ -180,6 +181,9 @@ case "$*" in
         ;;
     "action new-tab "*)
         echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
+        if [ -f "{panes}/$session.opened.json" ]; then
+            mv "{panes}/$session.opened.json" "{panes}/$session.json"
+        fi
         echo 3
         exit 0
         ;;
@@ -296,6 +300,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.write(&format!("{session}.json"), &panes.to_string());
     }
 
+    /// Has zellij list `panes` for the session `session` once it has opened
+    /// the next tab there, as `list` would, with that tab, `3`, among them.
+    pub fn opens_into(&self, session: &str, panes: &serde_json::Value) {
+        self.write(&format!("{session}.opened.json"), &panes.to_string());
+    }
+
     /// Has zellij list `clients` for the session `session` from now on, each
     /// an id and a pane as `list-clients` spells them, `terminal_3` or
     /// `plugin_2`, and padded as zellij 0.45.1 pads them.
@@ -360,10 +370,13 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 /// A `gh` of a test's own, beside its `zellij`, that finds the pull request
 /// of the branch checked out where it runs as a test has it: what it wrote
 /// with `open` for the branch's name, whatever the repository. Of a branch it
-/// was given none for, it says there is none, as gh does. It knows no other
-/// command. It notes the branch of each pull request it is asked for, for
-/// `asked`. Given a branch with `switch`, it checks that out first, the next
-/// time it is asked.
+/// was given none for, it says there is none, as gh does. It notes the branch
+/// of each pull request it is asked for, for `asked`. Given a branch with
+/// `switch`, it checks that out first, the next time it is asked. It views an
+/// issue by its number as `gh issue view` does, for its page alone, which a
+/// test wrote with `issue`, and notes what it was asked, for `issues`; of an
+/// issue it was given none for, it says GitHub has none. It knows no other
+/// command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -374,7 +387,13 @@ impl FakeGh {
         let gh = FakeGh { pulls: bin.join("pulls") };
         fs::create_dir(&gh.pulls).unwrap();
         let text = format!(
-            r#"if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
+            r#"if [ "$1 $2" = "issue view" ]; then
+    echo "$*" >> "{pulls}/issues"
+    [ -f "{pulls}/issue-$3" ] && exec cat "{pulls}/issue-$3"
+    echo "GraphQL: Could not resolve to an issue or pull request with the number of $3." >&2
+    exit 1
+fi
+if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
@@ -407,6 +426,21 @@ exec cat "{pulls}/$branch.json"
     /// The branches gh has been asked about, in the order it was asked.
     pub fn asked(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("asked")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
+    }
+
+    /// Has gh say `page` of the issue numbered `number` from now on, as `gh
+    /// issue view --json url --jq .url` writes it, of whichever repository.
+    pub fn issue(&self, number: u32, page: &str) {
+        fs::write(self.pulls.join(format!("issue-{number}")), format!("{page}\n")).unwrap();
+    }
+
+    /// What gh has been asked of issues, in the order it was asked.
+    pub fn issues(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("issues")) {
             Ok(asked) => asked.lines().map(str::to_owned).collect(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("what gh was asked does not read: {error}"),

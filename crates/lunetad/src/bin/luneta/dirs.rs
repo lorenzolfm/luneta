@@ -3,15 +3,13 @@
 //! lists it. luneta runs both itself, rather than lunetad.
 
 use std::io;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
 use lunetad::program;
+pub use lunetad::zoxide::{visited, Dir};
 
-use crate::zellij::{self, SessionName};
-
-/// How long zoxide has to list the directories, and eza what is in one.
+/// How long eza has to list what is in a directory.
 const ANSWER: Duration = Duration::from_secs(2);
 
 /// What eza is asked to list a directory as: an entry a line, the hidden
@@ -27,50 +25,13 @@ const LIST: [&str; 7] = [
     "--no-quotes",
 ];
 
-/// A directory zoxide knows, and the session named for it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Dir {
-    pub path: String,
-    pub name: SessionName,
-}
-
-/// The directories zoxide knows, best first, each with the session named
-/// for it, as `zellij::session_for` names it: for its repository too where it
-/// is a worktree of one. One no session can be named for, as `/`, is left
-/// out.
-pub fn visited() -> Result<Vec<Dir>, String> {
-    let mut zoxide = Command::new("zoxide");
-    zoxide.args(["query", "--list"]);
-    let ran = program::run(&mut zoxide, ANSWER).map_err(|error| unrun("zoxide", &error))?;
-    let listed = ran.answer().map_err(|why| format!("zoxide: {why}"))?;
-    Ok(dirs_in(&listed))
-}
-
-/// The directories of what `zoxide query --list` printed, a path a line. A
-/// line that is no absolute path is no directory of zoxide's, and would be
-/// read from luneta's own. One that is no UTF-8 is of a directory no session
-/// can be named for, as `session_for` has it, and made UTF-8 it would name
-/// another. A path with a newline in it reads as two: zoxide lists no other
-/// way.
-fn dirs_in(listed: &[u8]) -> Vec<Dir> {
-    let dir = |line: &[u8]| {
-        let path = std::str::from_utf8(line).ok()?;
-        if !path.starts_with('/') {
-            return None;
-        }
-        let name = zellij::session_for(Path::new(path))?;
-        Some(Dir { path: path.to_owned(), name })
-    };
-    listed.split(|byte| *byte == b'\n').filter_map(dir).collect()
-}
-
 /// What is in the directory `path`, as eza lists it, an entry a line, in
 /// colour; or why eza did not list it. eza says why it cannot read a
 /// directory on stderr, and may end with success all the same.
 pub fn listed(path: &str) -> Result<String, String> {
     let mut eza = Command::new("eza");
     eza.args(LIST).arg("--").arg(path);
-    let ran = program::run(&mut eza, ANSWER).map_err(|error| unrun("eza", &error))?;
+    let ran = program::run(&mut eza, ANSWER).map_err(|error| unrun(&error))?;
     let program::Ran::Ended { status, stdout, stderr } = ran else {
         return Err("eza: it did not answer in time".to_owned());
     };
@@ -99,31 +60,17 @@ fn before<'a>(text: &'a str, marker: &str) -> &'a str {
     text.rfind(marker).map_or(text, |at| &text[..at])
 }
 
-/// Why `program` could not be run.
-fn unrun(program: &str, error: &io::Error) -> String {
+/// Why eza could not be run.
+fn unrun(error: &io::Error) -> String {
     if error.kind() == io::ErrorKind::NotFound {
-        return format!("{program} is not on the PATH");
+        return "eza is not on the PATH".to_owned();
     }
-    format!("{program}: {error}")
+    format!("eza: {error}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A line of zoxide's that is no absolute path, or the path of a
-    /// directory no session can be named for, as `/`, or as one that is no
-    /// UTF-8, is no directory of the list.
-    #[test]
-    fn a_line_that_names_no_directory_a_session_can_be_made_in_is_left_out() {
-        let dir = |path: &str, name: &str| Dir {
-            path: path.to_owned(),
-            name: SessionName::parse(name).unwrap(),
-        };
-        let listed = b"/home/you/luneta\n/\n\nluneta\n/home/you/caf\xe9\n/home/you/notes/\n";
-        let dirs = [dir("/home/you/luneta", "luneta"), dir("/home/you/notes/", "notes")];
-        assert_eq!(dirs_in(listed), dirs);
-    }
 
     /// What eza says as it fails, less the path and the error's number.
     #[test]

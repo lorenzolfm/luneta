@@ -50,6 +50,7 @@ use lunetad::api::{
     Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, UnreadFile, Zellij,
 };
 use lunetad::asks::User;
+use lunetad::links;
 use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination};
 use ratatui::buffer::Buffer;
@@ -822,13 +823,14 @@ pub enum Asked {
     /// where a session has that name: one that runs, or one that ended, which
     /// zellij keeps to bring back, as zellij there says then.
     Start { on: Machine, cwd: String },
-    /// Take zellij's client to a session it makes, `session`, that starts in
-    /// `cwd`, and have zellij open a tab of it once it is there, in `tab_cwd`,
-    /// named `name`, with `command` in it, or your shell for none, for the
-    /// menu numbered `menu`, which takes its client there once zellij says
-    /// what it opened.
+    /// Take zellij's client to a session it makes on `on`, `session`, that
+    /// starts in `cwd`, and have zellij open a tab of it once it is there, in
+    /// `tab_cwd`, named `name`, with `command` in it, or your shell for none,
+    /// in place of the tabs zellij makes it with, for the menu numbered
+    /// `menu`, which takes its client there once zellij says what it opened.
     Make {
         menu: u64,
+        on: Machine,
         session: SessionName,
         cwd: String,
         tab_cwd: String,
@@ -836,9 +838,9 @@ pub enum Asked {
         command: Vec<String>,
     },
     /// Find where a key of the menu numbered `menu`, for the pull request or
-    /// the issue `link`, goes among the panes `worked`, and have its worktree
-    /// made.
-    Pull { menu: u64, link: Link, worked: Vec<Worked> },
+    /// the issue `link`, pasted on a row of `on`, goes among its panes
+    /// `worked`, and have its worktree made there.
+    Pull { menu: u64, on: Machine, link: Link, worked: Vec<Worked> },
     /// Find the skills that `cwd`, on `on`, can run, for the menu numbered
     /// `menu`.
     Find { menu: u64, on: Machine, cwd: String },
@@ -2282,16 +2284,6 @@ impl Sidebar {
         }
     }
 
-    /// What the menu for a pasted link is for, as it opens on the highlighted
-    /// row: on another machine's session or pane, that machine's header, as
-    /// the link's keys go to this machine's sessions, whatever the row.
-    fn link_target(&self) -> Option<Target> {
-        let Some(Spot::Remote(destination, _)) = &self.cursor else {
-            return self.target();
-        };
-        Some(Target::Machine(Machine::Remote(destination.clone())))
-    }
-
     /// What the menu is for, as it opens on `place`, of `machine`: for a
     /// pane, the directory it works in, or its agent, as its row says it,
     /// the branch checked out there, and what its shell said it ran last. A
@@ -2354,9 +2346,10 @@ impl Sidebar {
 
     /// Opens the menu for the pull request or the issue `text` is the link
     /// of, if it is one, in the place of the menu open, over zellij or at the
-    /// bottom of the sidebar, or else at the bottom, for the row highlighted.
-    /// Other text does nothing, as a paste did before. What is pasted in the
-    /// box for a machine's destination goes in it, a link too.
+    /// bottom of the sidebar, or else at the bottom, for the row highlighted:
+    /// its keys act on the machine of that row, as every key of the menu
+    /// does. Other text does nothing, as a paste did before. What is pasted
+    /// in the box for a machine's destination goes in it, a link too.
     pub fn paste(&mut self, text: &str) {
         if self.menu.as_mut().is_some_and(|menu| menu.paste(text)) {
             return;
@@ -2367,7 +2360,7 @@ impl Sidebar {
         self.notice = None;
         let target = match &self.menu {
             Some(menu) => Some(menu.target().clone()),
-            None => self.link_target(),
+            None => self.target(),
         };
         let Some(target) = target else {
             if self.cursor.is_none() {
@@ -2474,8 +2467,7 @@ impl Sidebar {
                         Asked::Nothing
                     },
                     Done::Start(on, cwd) => Asked::Start { on, cwd },
-                    // A link's pane is this machine's.
-                    Done::Go(place) => Asked::Go { on: Machine::Local, place },
+                    Done::Go(on, place) => Asked::Go { on, place },
                     Done::Act(on, act) => self.delete(on, act),
                     Done::Brief(briefed) => self.brief(briefed),
                     Done::Ask(target) => Asked::Ask(target),
@@ -2500,7 +2492,8 @@ impl Sidebar {
             Wants::Open { session, pane, cwd, opens: Opens::Tab { name, command } } => {
                 let place = Place::Pane { session, pane };
                 let session = place.listed().name().clone();
-                let open = Open::Tab { session: session.clone(), tab: Tab { cwd, name, command } };
+                let tab = Tab { cwd, name, command };
+                let open = Open::Tab { session: session.clone(), tab, alone_since: None };
                 let here = self.going().is_none() && self.on == on;
                 if here && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, on, open }
@@ -2508,12 +2501,15 @@ impl Sidebar {
                     Asked::OpenThere { menu: number, on, place, open }
                 }
             },
-            Wants::Pull(link) => Asked::Pull { menu: number, link, worked: self.worked() },
+            Wants::Pull(link) => match self.worked(&on) {
+                Ok(worked) => Asked::Pull { menu: number, on, link, worked },
+                Err(why) => self.pulled(number, Err(why)),
+            },
             Wants::Printed { session, pane, ended } => {
                 Asked::Printed { menu: number, on, session: session.name, pane, ended }
             },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
-                Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
+                Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
                 Asked::Closes { menu: number, on, session: session.name, pane }
@@ -2554,20 +2550,33 @@ impl Sidebar {
         self.menu_did(waiting.printed(printed))
     }
 
-    /// Every pane the daemon says a directory of, in the order of the rows,
-    /// for luneta to find where a key of the menu for a pull request goes:
-    /// where each works, as its row says, the pull request of the branch
-    /// checked out there, by its page, and whether luneta's zellij is in its
-    /// session. A daemon older than the page says none of one.
-    fn worked(&self) -> Vec<Worked> {
-        let Some(host) = &self.host else {
-            return Vec::new();
+    /// Every pane of `on` the daemon says a directory of, in the order of the
+    /// rows, for luneta to find where a key of the menu for a pull request
+    /// goes: where each works, as its row says, the pull request of the
+    /// branch checked out there, by its page, and whether luneta's zellij is
+    /// in its session. A daemon older than the page says none of one. Of
+    /// this machine, none while lunetad has said nothing; of another, why
+    /// luneta knows none: lunetad does not reach it, as it last said, and a
+    /// key found among none would make a session for the link there, which
+    /// one of its sessions may work in.
+    fn worked(&self, on: &Machine) -> Result<Vec<Worked>, String> {
+        let Some(seen) = self.seen(on) else {
+            return match on {
+                Machine::Local => Ok(Vec::new()),
+                Machine::Remote(destination) => {
+                    Err(format!("lunetad does not reach {destination} now"))
+                },
+            };
         };
-        let here = self.here_local();
-        let agents = seated(&host.agents, &host.sessions);
-        let pulls = pull_requests(&host.pull_requests);
-        let (mut sessions, _) = oldest_first(&host.sessions);
-        self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+        let here = self.here().filter(|_| self.on == *on);
+        let agents = seated(seen.agents, seen.sessions);
+        let pulls = pull_requests(seen.pull_requests);
+        let (mut sessions, _) = oldest_first(seen.sessions);
+        // This machine's sessions go in the order you moved them to, and
+        // another's oldest first, as their rows do.
+        if *on == Machine::Local {
+            self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+        }
         let mut worked = Vec::new();
         for (listed, session) in sessions {
             let mut panes: Vec<&Pane> =
@@ -2581,16 +2590,13 @@ impl Sidebar {
                 let Some(dir) = dir else {
                     continue;
                 };
-                worked.push(Worked {
-                    session: listed.clone(),
-                    pane: pane.id,
-                    dir: dir.to_owned(),
-                    pull: pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?)),
-                    here: here == Some(session.name.as_str()),
-                });
+                let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
+                let here = here == Some(session.name.as_str());
+                let it = links::Worked { dir: dir.to_owned(), pull, here };
+                worked.push(Worked { session: listed.clone(), pane: pane.id, works: it });
             }
         }
-        worked
+        Ok(worked)
     }
 
     /// What deleting what `deletes` deletes of `listed`, of the machine
@@ -6322,7 +6328,8 @@ mod tests {
             " <BS> - Back, <ESC> - Close",
         ]);
         let (older, cwd) = (session_name("older"), "/w/luneta/main".to_owned());
-        let tab = Open::Tab { session: older, tab: Tab { cwd, name: None, command: Vec::new() } };
+        let tab = Tab { cwd, name: None, command: Vec::new() };
+        let tab = Open::Tab { session: older, tab, alone_since: None };
         let tab = Asked::Open { menu: 1, on: Machine::Local, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
         let opened = Place::Pane { session: listed("older", 10), pane: 7 };
@@ -6338,7 +6345,8 @@ mod tests {
         type_in(&mut sidebar, "n");
         let newer = Place::Pane { session: listed("newer", 20), pane: 1 };
         let (session, cwd) = (session_name("newer"), "/w/b".to_owned());
-        let tab = Open::Tab { session, tab: Tab { cwd, name: None, command: Vec::new() } };
+        let tab = Tab { cwd, name: None, command: Vec::new() };
+        let tab = Open::Tab { session, tab, alone_since: None };
         let asked = Asked::OpenThere { menu: 2, on: Machine::Local, place: newer, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
@@ -6373,21 +6381,21 @@ mod tests {
         let worked = |session, pane, dir: &str, pull, here| Worked {
             session,
             pane,
-            dir: dir.to_owned(),
-            pull,
-            here,
+            works: links::Worked { dir: dir.to_owned(), pull, here },
         };
         let worked = vec![
             worked(listed("older", 10), 1, "/w/luneta/main", None, true),
             worked(listed("older", 10), 2, "/w/c", None, true),
             worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
         ];
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Pull { menu: 1, link, worked });
+        let pull = Asked::Pull { menu: 1, on: Machine::Local, link, worked };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
         let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
         let asked = Asked::Make {
             menu: 1,
+            on: Machine::Local,
             session: session_name("newer-2"),
             cwd: "/w/n".to_owned(),
             tab_cwd: "/w/n/feat".to_owned(),
@@ -6544,7 +6552,7 @@ mod tests {
 
         let (older, cwd) = (session_name("older"), "/w/luneta/main".to_owned());
         let tab = Tab { cwd: cwd.clone(), name: None, command: vec![] };
-        let tab = Open::Tab { session: older.clone(), tab };
+        let tab = Open::Tab { session: older.clone(), tab, alone_since: None };
         type_in(&mut sidebar, "n");
         let tab = Asked::Open { menu: 1, on: Machine::Local, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
@@ -7328,8 +7336,8 @@ mod tests {
     /// is for that pane, of that machine, which opens what a key opens, and
     /// `v` and the mouse that would move its session move none: the notes
     /// say why. `u` takes the dot from its pane as from this machine's. A
-    /// link pasted on its row opens the menu for the link, on its machine's
-    /// header, as the link's keys go to this machine's sessions.
+    /// link pasted on its row opens the menu for the link on that pane, of
+    /// that machine, as every key of the menu acts there.
     #[test]
     fn another_machine_s_rows_go_there_and_open_there() {
         let mut sidebar = fresh();
@@ -7353,7 +7361,7 @@ mod tests {
         let (session, cwd) = (listed("main", 20), Some("/w/b".to_owned()));
         let row = PaneRow { session, pane: 1, cwd, branch: None, ran: Ran::Unhooked };
         let menu = sidebar.menu.as_ref().expect("the menu");
-        assert_eq!(menu.target(), &Target::Pane(on.clone(), row));
+        assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
         let number = menu.number();
         let (session, cwd) = (session_name("main"), "/w/b".to_owned());
         let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
@@ -7380,36 +7388,59 @@ mod tests {
         assert_eq!(lines[8], "   ✓ \u{ec82} fix                  1m");
 
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
-        let header = Target::Machine(Machine::Remote(nixos()));
-        assert_eq!(sidebar.menu.as_ref().map(Menu::target), Some(&header));
+        let pasted = sidebar.menu.as_ref().map(Menu::target);
+        assert_eq!(pasted, Some(&Target::Pane(on, PaneRow { ran: Ran::Unhooked, ..row })));
     }
 
-    /// A link pasted on another machine's row has luneta make the session it
-    /// opens a tab of on this machine, as its keys go to this machine's
-    /// sessions, and go to that tab here, though the other machine has a
-    /// session of that name.
+    /// A link pasted on another machine's row is found among that machine's
+    /// panes, as lunetad says of them, though luneta's zellij is in none of
+    /// them, being on this machine. The session made for it is made there,
+    /// and the tab it opens is where luneta goes, on that machine, though
+    /// this one has a session of that name.
     #[test]
-    fn a_link_pasted_on_another_machine_s_row_makes_its_session_here() {
+    fn a_link_pasted_on_another_machine_s_row_makes_its_session_there() {
         let mut sidebar = fresh();
         let mut host = machines();
-        let work = vec![session("work", 20, vec![pane(3, 0, "/w/b", "fish")])];
-        host.remotes[0] = remote("nixos", up(work, Vec::new()));
-        sidebar.heard(host);
+        let work = || session("work", 20, vec![pane(3, 0, "/w/b", "fish")]);
+        host.remotes[0] = remote("nixos", up(vec![work()], Vec::new()));
+        sidebar.heard(host.clone());
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("work", 20))));
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
         let number = sidebar.menu.as_ref().map_or(0, Menu::number);
-        let pull = sidebar.key(&char('w'), moment(160_000));
-        assert!(matches!(pull, Asked::Pull { .. }), "{pull:?}");
-        let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("work") };
+        let on = Machine::Remote(nixos());
+        let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
+        let worked = links::Worked { dir: "/w/b".to_owned(), pull: None, here: false };
+        let worked = vec![Worked { session: listed("work", 20), pane: 3, works: worked }];
+        let pull = Asked::Pull { menu: number, on: on.clone(), link, worked };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
+        let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
         let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
-        let make = sidebar.pulled(number, Ok(ready));
-        assert!(matches!(make, Asked::Make { .. }), "{make:?}");
-        if let Some(host) = &mut sidebar.host {
-            host.sessions.push(session("work", 30, vec![pane(1, 0, "/w/n", "fish")]));
-        }
-        let opened = Place::Pane { session: listed("work", 30), pane: 3 };
-        assert_eq!(sidebar.opened(number, Ok(3)), go_here(opened));
+        let asked = sidebar.pulled(number, Ok(ready));
+        assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
+        let made = session("main", 30, vec![pane(1, 0, "/w/n", "fish")]);
+        host.remotes[0] = remote("nixos", up(vec![work(), made], Vec::new()));
+        sidebar.heard(host);
+        let opened = Place::Pane { session: listed("main", 30), pane: 3 };
+        assert_eq!(sidebar.opened(number, Ok(3)), Asked::Go { on, place: opened });
+    }
+
+    /// A key of the menu for a link pasted on the row of a machine lunetad
+    /// does not reach finds nothing there: luneta knows none of its panes,
+    /// one of which may work in the repository. The menu closes, and says
+    /// why.
+    #[test]
+    fn a_link_pasted_on_a_machine_lunetad_does_not_reach_finds_nothing() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Machine(Machine::Remote("me@vps".parse().unwrap())));
+        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert!(sidebar.menu.is_some());
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        let why = "menu: lorenzolfm/luneta#5: lunetad does not reach me@vps now";
+        assert_eq!(sidebar.notice.as_deref(), Some(why));
     }
 
     /// `d d` on another machine's pane asks zellij there what closing it
@@ -7555,7 +7586,7 @@ mod tests {
         type_in(&mut sidebar, "n");
         let menu = sidebar.menu.as_ref().map_or(0, Menu::number);
         let tab = Tab { cwd: "/w/a".to_owned(), name: None, command: Vec::new() };
-        let open = Open::Tab { session: session_name("main"), tab };
+        let open = Open::Tab { session: session_name("main"), tab, alone_since: None };
         let there = Asked::OpenThere { menu, on: Machine::Local, place: here, open };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), there);
     }

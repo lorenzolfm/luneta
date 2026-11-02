@@ -18,6 +18,7 @@ mod daemon;
 pub mod folder;
 mod git;
 mod github;
+pub mod links;
 pub mod log;
 mod metadata;
 pub mod moves;
@@ -35,6 +36,7 @@ pub mod state;
 pub mod transcripts;
 mod watch;
 mod zellij;
+pub mod zoxide;
 
 pub use claude::folder as claude_folder;
 pub use client::{connect, listening, stream, through, Unbridged, BRIDGED, REACH};
