@@ -12,11 +12,14 @@
 //! too, as does what went wrong with what the menu did there: each has the
 //! keys and the mouse until it closes, when the side that had them before has
 //! them again. `Ctrl j` opens the picker in a box there too, on the
-//! sessions, `Ctrl b` on the agents and `Ctrl d` on the directories. What the
-//! mouse drags on zellij stays with zellij under a box too. A click on an
-//! entry of the menu, a key a line of keys names, a skill the menu's search
-//! finds, or a row of the picker, does what its key does, or `Enter` on it,
-//! as each said where it drew them; and the one under the pointer is lit.
+//! sessions, `Ctrl b` on the agents and `Ctrl d` on the directories. `Alt r`
+//! dictates, held or tapped, into the pane zellij is on or the ask box, in a
+//! box along the bottom of zellij that has the keys until what you said is
+//! written. What the mouse drags on zellij stays with zellij under a box too.
+//! A click on an entry of the menu, a key a line of keys names, a skill the
+//! menu's search finds, or a row of the picker, does what its key does, or
+//! `Enter` on it, as each said where it drew them; and the one under the
+//! pointer is lit.
 
 use std::collections::VecDeque;
 use std::env;
@@ -48,8 +51,9 @@ use ratatui::DefaultTerminal;
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
-use crate::brief::{self, Briefing, Written};
+use crate::brief::{self, Asking, Briefing, Written};
 use crate::close::Act;
+use crate::dictation::{self, Dictated, Dictation, Where};
 use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
@@ -65,6 +69,7 @@ use crate::printed::{self, Printed};
 use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
+use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
 use crate::width::Width;
 use crate::zellij::{self, After, Arrival, Closes, Ended, Refuge, SessionName, Tab};
@@ -115,6 +120,10 @@ pub enum Event {
     Heard { number: u64, heard: Heard },
     /// What zellij answered the picker numbered `number`.
     Picker { number: u64, heard: picker::Heard },
+    /// What the speech model said of the dictation numbered `number`.
+    Spoken { number: u64, spoken: Spoken },
+    /// How the fetch of the speech model goes.
+    Fetched(Fetched),
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -524,6 +533,21 @@ struct App {
     asks: u64,
     /// How many pickers luneta has opened, which are numbered as briefs are.
     pickers: u64,
+    /// The dictation box, over zellij and any box there, from `Alt r` until
+    /// what you said is written: it has the keys meanwhile.
+    dictation: Option<Dictation>,
+    /// How many dictations luneta has opened, which are numbered as briefs
+    /// are.
+    dictations: u64,
+    /// The thread that runs the speech model, from the first dictation on.
+    speech: Option<Speech>,
+    /// The fetch of the speech model, while it is on its way, and how many
+    /// bytes of it are in.
+    fetching: Option<Asking>,
+    fetched: u64,
+    /// Whether luneta's terminal says when a key is let go, as the kitty
+    /// keyboard protocol does, by which a dictation tells a hold from a tap.
+    releases: bool,
     /// The folder the daemon reads Claude Code's sessions in, where a brief
     /// reads the transcripts of the agents it lists: none until luneta has
     /// reached one.
@@ -611,9 +635,12 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         EnableThemeChange
     )
     .and_then(|()| {
+        // And when a key goes up, for a dictation held as you talk. luneta
+        // hands zellij no key going up.
         if answers.kitty {
-            let disambiguate = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
-            execute!(io::stdout(), PushKeyboardEnhancementFlags(disambiguate))?;
+            let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+            execute!(io::stdout(), PushKeyboardEnhancementFlags(flags))?;
         }
         run_in(
             &mut terminal,
@@ -622,6 +649,7 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             unkept,
             &dir,
             answers.colours,
+            answers.kitty,
             events,
             &mut inbox,
         )
@@ -655,8 +683,9 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
 
 /// Runs zellij beside the sidebar until it ends, and says what it said as it
 /// failed, if it did. zellij's terminal answers it with `colours`, until
-/// luneta's terminal says others. `unkept` is why what goes wrong is kept in
-/// no log, where it is not.
+/// luneta's terminal says others, which says when a key is let go where
+/// `releases` says. `unkept` is why what goes wrong is kept in no log, where
+/// it is not.
 fn run_in(
     terminal: &mut DefaultTerminal,
     session: Option<&SessionName>,
@@ -664,6 +693,7 @@ fn run_in(
     unkept: Option<String>,
     dir: &Path,
     colours: Colours,
+    releases: bool,
     events: Sender<Event>,
     inbox: &mut Inbox,
 ) -> io::Result<Option<String>> {
@@ -740,6 +770,12 @@ fn run_in(
         briefs: 0,
         asks: 0,
         pickers: 0,
+        dictation: None,
+        dictations: 0,
+        speech: None,
+        fetching: None,
+        fetched: 0,
+        releases,
         claude_folder: None,
         daemon,
         events,
@@ -912,6 +948,16 @@ impl App {
                     self.picked(did);
                 }
             },
+            Event::Spoken { number, spoken } => {
+                if let Some(dictation) = &mut self.dictation
+                    && dictation.number() == number
+                    && let Some(dictated) = dictation.spoken(spoken, Instant::now())
+                {
+                    self.dictation = None;
+                    self.write(dictated);
+                }
+            },
+            Event::Fetched(fetched) => self.fetched(&fetched),
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
         }
@@ -941,7 +987,8 @@ impl App {
             Some(Over::Ask(ask)) => ask.turning(),
             Some(Over::Menu | Over::Picker(_) | Over::Note(_)) | None => false,
         };
-        over || self.sidebar.turning()
+        let dictating = self.dictation.as_ref().is_some_and(Dictation::turning);
+        over || dictating || self.sidebar.turning()
     }
 
     /// When the picker asks zellij for what its preview shows, while it is
@@ -1087,10 +1134,25 @@ impl App {
     }
 
     fn key(&mut self, key: &KeyEvent) {
+        // The dictation box takes every key, going up too, until it closes.
+        if let Some(dictation) = &mut self.dictation {
+            match dictation.key(key, Instant::now()) {
+                dictation::Keyed::Nothing => {},
+                dictation::Keyed::Close => self.dictation = None,
+                dictation::Keyed::Dictate => {
+                    self.dictation = None;
+                    self.dictate();
+                },
+            }
+            return;
+        }
         if key.kind == KeyEventKind::Release {
             return;
         }
         let chord = (key.code, key.modifiers);
+        if chord == dictation::KEY && key.kind == KeyEventKind::Press && self.dictate() {
+            return;
+        }
         match &mut self.focus.over {
             // The ask box takes every key, for its agent.
             Some(Over::Ask(ask)) => {
@@ -1543,6 +1605,85 @@ impl App {
         }
     }
 
+    /// Opens the dictation box, for what you say to be written where the keys
+    /// are, if that is somewhere it can be: in the pane zellij is on, while
+    /// zellij has them under no box, or in the ask box, but while its agent
+    /// is at a turn. The first time, the box says how the fetch of the model
+    /// goes instead, which it starts. Whether it opened.
+    fn dictate(&mut self) -> bool {
+        let into = match &self.focus.over {
+            Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask.number()),
+            None if self.focus.zellij() => Where::Zellij,
+            _ => return false,
+        };
+        self.dictations += 1;
+        let number = self.dictations;
+        let dictation = if speech::fetched() {
+            let speech = self.speech.get_or_insert_with(Speech::start);
+            let listening = speech.listen(number, &self.events);
+            Dictation::hearing(number, into, listening, self.releases, Instant::now())
+        } else {
+            if self.fetching.is_none() {
+                self.fetched = 0;
+                self.fetching = Some(speech::fetch(&self.events));
+            }
+            Dictation::fetching(number, self.fetched)
+        };
+        self.dictation = Some(dictation);
+        true
+    }
+
+    /// Writes what you dictated where it goes: pasted in the pane zellij is
+    /// on, with a space after it for what you say next, or on the line of the
+    /// ask box it was for, if that is still open. Then sends it, as `Enter`
+    /// would, where you ended the dictation with `Enter`.
+    fn write(&mut self, dictated: Dictated) {
+        let Dictated { into, text, sends } = dictated;
+        match into {
+            Where::Zellij => {
+                let mode = self.client.hosted.mode();
+                self.client.hosted.send(keys::paste(&format!("{text} "), mode));
+                let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                if sends && let Some(bytes) = keys::key(&enter, mode) {
+                    self.client.hosted.send(bytes);
+                }
+                self.typed();
+            },
+            Where::Ask(number) => {
+                let Some(Over::Ask(ask)) = &mut self.focus.over else {
+                    return;
+                };
+                if ask.number() != number {
+                    return;
+                }
+                ask.dictated(&text);
+                if sends {
+                    self.converse();
+                }
+            },
+        }
+    }
+
+    /// Takes in how the fetch of the speech model goes, for the dictation
+    /// box, if it is open: once it ended, the next `Alt r` dictates, or
+    /// fetches it again. What went wrong with a fetch the box no longer
+    /// shows, the sidebar says.
+    fn fetched(&mut self, fetched: &Fetched) {
+        match fetched {
+            Fetched::Got(got) => self.fetched = *got,
+            Fetched::Ended(ended) => {
+                self.fetching = None;
+                let shown = self.dictation.is_some();
+                if let (Err(why), false) = (ended, shown) {
+                    self.sidebar.notify(format!("the speech model did not come: {why}"));
+                }
+            },
+        }
+        if let Some(dictation) = &mut self.dictation {
+            dictation.fetched(fetched);
+        }
+    }
+
     /// Takes zellij's client to the pane the sidebar lists after the one it
     /// is on, of the machine it runs on. The sidebar gives the keys up first,
     /// which closes a search: the pane after is the one after in every row,
@@ -1856,6 +1997,9 @@ impl App {
 
     fn focus_window(&mut self, focused: bool) {
         self.focused = focused;
+        if !focused && let Some(dictation) = &mut self.dictation {
+            dictation.unfocused();
+        }
         // The pointer has gone elsewhere, as far as luneta knows, and lights
         // nothing until it moves over luneta again.
         if !focused {
@@ -2102,8 +2246,12 @@ impl App {
             if let Some(pointer) = self.pointer {
                 drawn.light(buffer, pointer);
             }
+            if let Some(dictation) = &self.dictation {
+                dictation.draw(buffer, zellij, (now, Instant::now()));
+            }
             // zellij's cursor shows while zellij has the keys, under no box.
             if self.focus.zellij()
+                && self.dictation.is_none()
                 && let Some(cursor) = cursor
             {
                 frame.set_cursor_position(cursor);

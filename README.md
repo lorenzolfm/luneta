@@ -37,6 +37,8 @@ picker over it with sessions, agents and directories tabs.
 * [Tell an agent](#tell-an-agent) what you want in words: a session to work on
   something, an agent on each of four issues, every session closed. Tell the
   agent you're talking to, or [luneta's sidebar](#from-lunetas-sidebar)
+* [Dictate](#dictate) to an agent, or to the ask box, by a speech model that
+  runs on your machine: hold `Alt r` and talk
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -353,7 +355,7 @@ the session zellij is in ends, as zellij quits, its last pane exits, or it is
 killed, luneta attaches zellij to the newest session that runs, which the
 picker lists first, but never to the one luneta's own pane is in, and ends
 where none is left. When zellij fails, luneta ends and says what zellij said.
-zellij's keys are yours as they were, but seven, which luneta takes before
+zellij's keys are yours as they were, but eight, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
 - `Ctrl a` goes back and forth between zellij and the sidebar. A click goes to
@@ -368,11 +370,13 @@ zellij sees them, whichever of the two has the keys:
   closes it again.
 - `Ctrl j` opens the picker over zellij, on the sessions, `Ctrl b` on the
   agents, and `Ctrl d` on the directories.
+- `Alt r` [dictates](#dictate) into the pane zellij is on, or the ask box:
+  hold it and talk.
 
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
 line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
 and a shell ends on `Ctrl d`. zellij's default config binds `Ctrl b` to tmux
-mode and `Ctrl q` to quit. luneta takes all seven first: if you use those,
+mode and `Ctrl q` to quit. luneta takes all eight first: if you use those,
 bind them to other keys, in zellij's config or in Claude Code's
 `~/.claude/keybindings.json`.
 
@@ -876,7 +880,7 @@ zellij, and you tell the agent there:
 │                                                    │
 │ › yes_                                             │
 │                                                    │
-│ <ENTER> - Send, <ESC> - Close                      │
+│ <ENTER> - Send, <Alt r> - Dictate, <ESC> - Close   │
 └────────────────────────────────────────────────────┘
 ```
 
@@ -916,6 +920,50 @@ prompt the box's agent wrote, in your own permission mode. The `luneta` it runs
 is the sidebar's own. Each turn writes a Claude session in that directory, as
 any `claude -p` does, so `claude --resume` lists it there.
 
+`Alt r` in the box [dictates](#dictate) on its line, after what you typed.
+
+### Dictate
+
+`Alt r` writes what you say where you would type it: in the pane zellij is on,
+as a paste is, so on an agent's prompt or a shell's line, or on the
+[ask box](#from-lunetas-sidebar)'s line. Hold it and talk, and let it go: what
+you said is written. A tap of it, let go at once, keeps the microphone on until
+you press it again, to talk with your hands free, and there `Enter` writes what
+you said and sends it, as `Enter` would. `Esc` gives it up. Short of `Enter`,
+nothing is sent: what is written waits for you to read it, fix it and send it,
+as what you type does.
+
+```text
+┌─ Dictate ──────────────────────────────── ● 0:05 ▃▅▇▅▂ ─┐
+│ Open a new tab in the session, and run the tests for    │
+│ the sidebar                                             │
+│                                                         │
+│ <Alt r> - Let go to write, <ESC> - Cancel               │
+└─────────────────────────────────────────────────────────┘
+```
+
+A box along the bottom of zellij shows what you say as you say it, how long
+you have talked, and how loud the microphone hears you. It has the keys until
+what you said is written, under half a second after you let go. A terminal
+tells luneta that a key was let go only with the kitty keyboard protocol, as
+Ghostty and kitty speak it: in one that does not, `Alt r` taps.
+
+What you say is turned into text on your machine, and none of it leaves it, or
+is kept. It is NVIDIA's Parakeet, an English model, that does it, which
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) runs: on
+the CPU on Linux, and on the GPU through Metal on macOS. The model is 731 MB,
+and the first `Alt r` fetches it from Hugging Face, once, with `curl`, into
+`luneta/models` of `$XDG_DATA_HOME`, or of `~/.local/share`, checked against
+the SHA-256 luneta pins with `sha256sum`, or `shasum` on macOS. The box says
+how far it got, and it goes on with the box closed. The microphone is the
+system's default input, on only while you dictate: ALSA's on Linux, which
+PipeWire and PulseAudio serve, and CoreAudio's on macOS. One that is muted
+hears nothing, which the box says.
+
+luneta records on the machine it runs on, the one you sit at, whichever machine
+the agent you talk to runs on: Claude Code's own `/voice` records on the
+machine Claude Code runs on, which over ssh has no microphone of yours.
+
 ## Getting started
 
 ### Requirements
@@ -932,6 +980,7 @@ any `claude -p` does, so `claude --resume` lists it there.
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), and the issue of a link you paste there |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
+| a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
 
 The sessions need nothing but zellij. The optional tools are looked up by
 name on the `PATH` luneta starts with, which the daemon it starts has too, but

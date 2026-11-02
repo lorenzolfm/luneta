@@ -84,6 +84,28 @@
             ];
           };
 
+          # What luneta's speech model is built with, but for what each system
+          # brings: cmake, which builds transcribe.cpp and its ggml, and on Linux
+          # ALSA, which the microphone is read through, found with pkg-config.
+          speechBuild = [
+            pkgs.cmake
+            pkgs.pkg-config
+          ];
+          speechLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.alsa-lib ];
+
+          # ggml builds for the CPU it is built on, with -march=native, which nix's
+          # compiler drops, as what a derivation makes must not hang on the machine
+          # that made it. It then builds for the first x86_64 CPUs, and the speech
+          # model runs four times slower on a Ryzen than with the instructions of
+          # x86-64-v3, which every x86_64 CPU of the last ten years has: those are
+          # named instead. On arm64 the base it builds for has the vectors ggml
+          # runs on, and on macOS transcribe.cpp names its own, and runs on Metal.
+          ggmlCpu =
+            {
+              x86_64-linux = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON";
+            }
+            .${system} or "-DGGML_NATIVE=OFF";
+
           # What the daemon's derivations share.
           daemon = {
             pname = "lunetad";
@@ -92,8 +114,11 @@
 
             cargoExtraArgs = "--locked -p lunetad";
 
-            # The build scripts write the protocol out as Rust, through protoc.
-            nativeBuildInputs = [ pkgs.protobuf ];
+            # The build scripts write the protocol out as Rust, through protoc, and
+            # build the speech model's library.
+            nativeBuildInputs = [ pkgs.protobuf ] ++ speechBuild;
+            buildInputs = speechLibs;
+            TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
 
             # The daemon asks git how each work tree stands, and the tests make work
             # trees of their own for it to ask about. It asks `ps` which processes are
@@ -201,13 +226,15 @@
             name = "dev";
             meta.description = "luneta build recipes on the flake-pinned toolchain";
             # protoc is for the build scripts of the protocol's crate and of the
-            # daemon, which `dev clippy` and `dev skills` run.
+            # daemon, which `dev clippy` and `dev skills` run, and cmake and
+            # pkg-config for the speech model's, with ALSA's below.
             runtimeInputs = [
               toolchain
               pkgs.coreutils
               pkgs.git
               pkgs.protobuf
-            ];
+            ]
+            ++ speechBuild;
             text = ''
               # luneta build recipes, as one command.
               #
@@ -246,6 +273,12 @@
                   exit 2
                   ;;
               esac
+
+              # What the speech model's library is built with, as the package's is.
+              export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
+              export PKG_CONFIG_PATH="${
+                pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
+              }''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
               if ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
                 echo "dev: run this inside the luneta checkout (no git worktree here)" >&2
@@ -291,12 +324,16 @@
           checks = { inherit clippy; };
 
           shell = pkgs.mkShell {
-            # protoc for the daemon's build script, as `cargo build -p lunetad` runs it.
+            # protoc for the daemon's build script, as `cargo build -p lunetad` runs it,
+            # and what the speech model's library is built with.
             packages = [
               toolchain
               dev
               pkgs.protobuf
-            ];
+            ]
+            ++ speechBuild;
+            buildInputs = speechLibs;
+            TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
 
             shellHook = ''
               echo "luneta — rust $(rustc --version | cut -d' ' -f2); run 'dev help' for the command set"
