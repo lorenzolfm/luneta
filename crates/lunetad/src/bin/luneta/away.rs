@@ -97,13 +97,19 @@ impl Away {
     }
 
     /// The name a session luneta makes for `dir` there takes, as
-    /// `lunetad::names::free_for` names it there, or why it takes none.
-    pub fn name(&mut self, dir: &str) -> Result<SessionName, String> {
+    /// `lunetad::names::free_for` names it there, with the time just before
+    /// it read which names zellij there has, by that machine's clock; or why
+    /// it takes none, or a daemon older than luneta's says no time.
+    pub fn name(&mut self, dir: &str) -> Result<(SessionName, SystemTime), String> {
         let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
         let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
         let on = &self.on;
-        SessionName::running(&named.name)
-            .map_err(|why| format!("{on}: lunetad named a session \"{}\": {why}", named.name))
+        let name = SessionName::running(&named.name)
+            .map_err(|why| format!("{on}: lunetad named a session \"{}\": {why}", named.name))?;
+        let since = named.named_at.and_then(|at| SystemTime::try_from(at).ok()).ok_or_else(|| {
+            format!("{on}: lunetad says no time it named {name} at, as one older than luneta does")
+        })?;
+        Ok((name, since))
     }
 
     /// The clients of `session` there, as zellij lists them now, or why it

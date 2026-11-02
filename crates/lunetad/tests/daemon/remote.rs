@@ -633,9 +633,13 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let work = dir.path().join("work");
         fs::create_dir(&work).unwrap();
         let work = work.to_str().unwrap().to_owned();
+        let before = SystemTime::now();
         let named = NameSessionRequest { on: on("far"), dir: work.clone() };
         let named = daemon.name_session(named).await.unwrap().into_inner();
         assert_eq!(named.name, "work-2");
+        // Just before the daemon there read the names, by its clock.
+        let named_at = named.named_at.map(|at| SystemTime::try_from(at).unwrap());
+        assert!(named_at.is_some_and(|at| at >= before && at <= SystemTime::now()), "{named_at:?}");
         let relative = NameSessionRequest { on: on("far"), dir: "work".to_owned() };
         invalid(daemon.name_session(relative).await.unwrap_err());
         let (at, to, cwd) = ("work".to_owned(), named.name.clone(), Some("work".to_owned()));
@@ -985,13 +989,11 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         assert_eq!(far.gh.issues(), [viewed]);
         assert!(here.gh.issues().is_empty());
 
-        let before = SystemTime::now();
         let made = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), Vec::new())).await;
-        let Ready { at: At::Clone { cwd, name, since }, worktree: again, .. } = made.unwrap() else {
+        let Ready { at: At::Clone { cwd, name }, worktree: again, .. } = made.unwrap() else {
             panic!("no session to make");
         };
         assert_eq!((cwd, name.as_str(), again), (clone.display().to_string(), "n", worktree));
-        assert!(since >= before, "{since:?} {before:?}");
 
         let relative = Pasted::new(link.clone(), vec![worked("n/main")]);
         let relative = pasted_on(&mut daemon, "far", &relative).await.unwrap_err();
@@ -1005,7 +1007,9 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
 /// A tab asked to open alone in a session of another machine takes the
 /// place there of the tabs zellij made the session with, which go once it
 /// has opened, where the session started then or after, by that machine's
-/// clock. One that started before keeps them, and the answer says so.
+/// clock. One that started before keeps them, and the answer says so. None
+/// opens in a session no client is in, alone or not: zellij would give it
+/// no room for its panes.
 #[test]
 fn a_tab_there_opens_alone_in_a_session_made_since() {
     let here = Host::new();
@@ -1019,7 +1023,9 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
         })
     };
     far.zellij.list("work", &serde_json::json!([laid(10, 1), laid(11, 2)]));
+    far.zellij.clients("work", &[(1, "terminal_10")]);
     far.zellij.opens_into("work", &serde_json::json!([laid(10, 1), laid(11, 2), laid(12, 3)]));
+    far.zellij.list("idle", &serde_json::json!([laid(13, 1)]));
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -1029,9 +1035,9 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let alone = |since: SystemTime| OpenRequest {
+        let alone_in = |session: &str, since: SystemTime| OpenRequest {
             on: Some(On { destination: "far".to_owned() }),
-            session: "work".to_owned(),
+            session: session.to_owned(),
             cwd: "/w/n/issue-7".to_owned(),
             command: Vec::new(),
             opens: Some(Opens::Tab(open_request::Tab {
@@ -1039,6 +1045,7 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
                 alone_since: Some(since.into()),
             })),
         };
+        let alone = |since| alone_in("work", since);
         let made = daemon.open(alone(SystemTime::UNIX_EPOCH)).await.unwrap().into_inner();
         assert_eq!((made.terminal, made.notes), (12, Vec::new()));
         let closed = [1, 2].map(|tab| format!("--session work action close-tab-by-id {tab}"));
@@ -1049,5 +1056,9 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
         assert_eq!((kept.terminal, kept.notes), (12, notes));
         assert_eq!(far.zellij.closed(), closed);
         assert!(here.zellij.closed().is_empty());
+        let idle = daemon.open(alone_in("idle", SystemTime::UNIX_EPOCH)).await.unwrap_err();
+        assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
+        assert!(idle.message().contains("no client is in idle"), "{idle:?}");
+        assert_eq!(far.zellij.closed(), closed);
     });
 }

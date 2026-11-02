@@ -182,7 +182,9 @@ message OpenRequest {
     // with, which go once it has opened, where the session started then or
     // after, by the daemon's clock: as one zellij made for a client asked to
     // make it then. One that started before keeps them, as one renamed to
-    // its name since does.
+    // its name since does. The daemon takes it as said: the time a
+    // `NameSessionResponse` of its own said it named the session at, just
+    // before the client made it, and no other.
     google.protobuf.Timestamp alone_since = 2;
   }
 }
@@ -266,6 +268,11 @@ message NameSessionRequest {
 
 message NameSessionResponse {
   string name = 1;
+  // Just before the daemon read which names its zellij has, by its clock: a
+  // session of the name that started then or after is one zellij made since,
+  // as `OpenRequest.Tab` takes it for its `alone_since`. A daemon older than
+  // this field says none.
+  google.protobuf.Timestamp named_at = 2;
 }
 
 message StartRequest {
@@ -458,11 +465,9 @@ message PasteResponse {
     // The directory the session starts in, which holds the clone.
     string cwd = 1;
     // Its name, which no session the daemon's zellij runs, nor one it keeps
-    // to bring back, had as the daemon named it.
+    // to bring back, had as the daemon named it. luneta has it named again
+    // just before it makes the session, which can take minutes to come to.
     string name = 2;
-    // When the daemon named it, by its clock, as `OpenRequest.Tab` takes it
-    // for its `alone_since`.
-    google.protobuf.Timestamp named_at = 3;
   }
 }
 

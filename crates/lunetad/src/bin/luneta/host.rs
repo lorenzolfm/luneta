@@ -56,6 +56,7 @@ use crate::ask::{Ask, Heard, Keyed};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::close::Act;
 use crate::dictation::{self, Dictated, Dictation};
+use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
@@ -339,6 +340,15 @@ enum Coming {
     Overdue(Option<Arrival>),
 }
 
+impl Coming {
+    /// What waits on the client's arrival, if anything.
+    fn arrival(self) -> Option<Arrival> {
+        match self {
+            Coming::Held(Waiting { arrival, .. }) | Coming::Overdue(arrival) => arrival,
+        }
+    }
+}
+
 /// luneta's client on its way to a session zellij makes for it, from the one
 /// it is in, until zellij titles luneta's terminal there. Dropped before, as
 /// where zellij did not take it there, or luneta sent it elsewhere since, or
@@ -354,9 +364,10 @@ struct Making {
 /// what the first did as it started.
 struct Client {
     hosted: Hosted,
-    /// Where luneta's zellij goes back to where it fails on another machine,
-    /// as where ssh does not reach it: the session it was in before. None of
-    /// one on this machine, which ends luneta where it fails.
+    /// Where luneta's zellij goes back to where it fails, as where ssh does
+    /// not reach its machine, or zellij cannot attach: the session it was in
+    /// before, on another machine. None of one that took the place of none
+    /// there, which ends luneta where it fails on this machine.
     back: Option<Back>,
     /// The pane it goes on to once it is in that pane's session, as luneta
     /// started it to go to it.
@@ -378,9 +389,10 @@ struct Client {
 enum Joins<'a> {
     /// It attaches to this one, which runs.
     Attach(&'a SessionName),
-    /// It makes this one, in that directory, or where luneta started, where
-    /// none runs by its name, and else attaches to the one that does, or
-    /// brings back the one zellij keeps, which ended.
+    /// It makes this one, in that directory, or where luneta started, and
+    /// fails where one runs by its name by then, or zellij keeps one by it
+    /// that ended, as `zellij::make` says: luneta found the name unused just
+    /// before.
     Make(&'a SessionName, Option<&'a str>),
 }
 
@@ -1589,16 +1601,15 @@ impl App {
             },
             // The menu waits until zellij has opened it, and takes the keys
             // there with it.
-            Asked::Make { menu, on, session, cwd, tab_cwd, name, command, since } => {
+            Asked::Make { menu, on, session, cwd, tab_cwd, name, command } => {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                let alone = Alone { owed: zellij::owed(menu, &self.events), tab, since };
                 let unused = match &on {
                     Machine::Local => zellij::makes(session),
                     Machine::Remote(destination) => {
                         zellij::makes_away(destination, &session, &cwd)
                     },
                 };
-                if !self.make(unused, &cwd, Some(alone)) {
+                if !self.make(unused, &cwd, Some((zellij::owed(menu, &self.events), tab))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1835,12 +1846,12 @@ impl App {
     /// on another machine, or zellij's own here, as `client_ended` has one
     /// take the place of a client that ended, and goes on to the pane once it
     /// is in, where `place` is one, or does `after` there, which opens what
-    /// it goes to. Where a client on another machine fails, as where ssh does
-    /// not reach it, luneta's zellij goes back to the session it leaves.
-    /// Whether it went.
+    /// it goes to. Where the client fails, as where ssh does not reach the
+    /// machine, or zellij cannot attach, luneta's zellij goes back to the
+    /// session it leaves. Whether it went.
     fn swap(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
         let session = place.listed().name().clone();
-        let back = self.back(machine);
+        let back = self.back();
         let before = match machine {
             Machine::Local => zellij::before(session.as_str()),
             Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
@@ -1862,9 +1873,9 @@ impl App {
     /// Takes zellij's client to a session it makes, `session`, on `machine`,
     /// another than the one it runs on, that starts in `cwd`, or where luneta
     /// started: a client that makes it there takes its place, as `swap`
-    /// says, or attaches to one that runs by that name instead. Once it is
-    /// in, the tab of `alone` opens there, if any, as `Alone` says. Whether
-    /// it went.
+    /// says, and fails where the name is taken by then, as `Joins::Make`
+    /// says, which takes luneta's zellij back. Once it is in, the tab of
+    /// `alone` opens there, if any, as `Alone` says. Whether it went.
     fn swap_making(
         &mut self,
         machine: &Machine,
@@ -1872,9 +1883,9 @@ impl App {
         cwd: Option<&str>,
         alone: Option<Alone>,
     ) -> bool {
-        let back = self.back(machine);
+        let back = self.back();
         let joins = Joins::Make(session, cwd);
-        let next = alone.map(|alone| Next::After(alone.after(session)));
+        let next = alone.map(|alone| Next::After(alone.after()));
         match self.restart(machine, joins, Before::Made, back, next) {
             Ok(()) => true,
             Err(error) => {
@@ -1884,17 +1895,12 @@ impl App {
         }
     }
 
-    /// Where luneta's zellij goes back to where a client on `machine` fails:
-    /// the session it is in, of the machine it is on now. Only a client on
-    /// another machine goes back.
-    fn back(&self, machine: &Machine) -> Option<Back> {
-        match machine {
-            Machine::Local => None,
-            Machine::Remote(_) => {
-                let here = self.sidebar.here().and_then(|here| SessionName::running(here).ok());
-                here.map(|session| Back { machine: self.sidebar.on().clone(), session })
-            },
-        }
+    /// Where luneta's zellij goes back to where a client that takes its
+    /// place on another machine fails: the session it is in, of the machine
+    /// it is on now.
+    fn back(&self) -> Option<Back> {
+        let here = self.sidebar.here().and_then(|here| SessionName::running(here).ok());
+        here.map(|session| Back { machine: self.sidebar.on().clone(), session })
     }
 
     /// Starts a client on `machine` that `joins` its session, in the place
@@ -1930,7 +1936,7 @@ impl App {
         let ((program, args), dir) = match (machine, joins) {
             (Machine::Local, Joins::Attach(session)) => (zellij::rejoin(session.as_str()), None),
             // zellij's client makes a session in the directory it starts in.
-            (Machine::Local, Joins::Make(session, cwd)) => (zellij::client(Some(session)), cwd),
+            (Machine::Local, Joins::Make(session, cwd)) => (zellij::make(session), cwd),
             (Machine::Remote(destination), Joins::Attach(session)) => {
                 (zellij::attach_away(destination, session.as_str()), None)
             },
@@ -2009,13 +2015,23 @@ impl App {
     }
 
     /// Takes zellij's client to a session zellij makes on the machine of
-    /// `unused`, by its name, that starts in `cwd`, and opens the tab of
-    /// `alone` there once it is, as `start` does; or says why zellij would
-    /// make none, but take it to one that has the name, before the sidebar
-    /// takes the client for one on its way there. Whether it went.
-    fn make(&mut self, unused: Result<Unused, String>, cwd: &str, alone: Option<Alone>) -> bool {
+    /// `unused`, by its name, that starts in `cwd`, and opens `tab` there
+    /// once it is, if any, for the menu owed what it opens, in place of the
+    /// tabs zellij makes it with, as `Alone` says, as `start` does; or says
+    /// why zellij would make none, but take it to one that has the name,
+    /// before the sidebar takes the client for one on its way there. Whether
+    /// it went.
+    fn make(
+        &mut self,
+        unused: Result<Unused, String>,
+        cwd: &str,
+        tab: Option<(Due<u32>, Tab)>,
+    ) -> bool {
         match unused {
-            Ok(unused) => self.start(unused.on(), unused.name(), Some(cwd), alone),
+            Ok(unused) => {
+                let alone = tab.map(|(owed, tab)| Alone::new(owed, tab, &unused));
+                self.start(unused.on(), unused.name(), Some(cwd), alone)
+            },
             Err(why) => {
                 self.sidebar.notify(why);
                 false
@@ -2249,12 +2265,18 @@ impl App {
     /// zellij quits, the session's last pane exits, or the session is killed,
     /// a client of the newest session that answers takes its place, and
     /// luneta goes on. luneta ends where none does, and where the client
-    /// detached, or failed, as where zellij cannot attach. A client on
-    /// another machine ends as `ended_away` says.
+    /// detached, or failed, as where zellij cannot attach; but one that took
+    /// the place of a client on another machine goes back there where it
+    /// failed, and the notes say what it said. A client on another machine
+    /// ends as `ended_away` says.
     fn client_ended(&mut self) -> io::Result<()> {
         if let Machine::Remote(destination) = self.sidebar.on() {
             let destination = destination.clone();
             return self.ended_away(&destination);
+        }
+        let failed = self.client.exited.is_none_or(|status| !status.success());
+        if let Some(back) = self.client.back.clone().filter(|_| failed) {
+            return self.failed_back(&Machine::Local, back);
         }
         let seats = self.sidebar.seats();
         let ended = self.client.exited.filter(ExitStatus::success).filter(|_| !seats.is_empty());
@@ -2284,11 +2306,7 @@ impl App {
                 self.ended = true;
                 return Ok(());
             };
-            let exited = self.client.exited;
-            let status = exited.map_or_else(|| "its end unread".to_owned(), |it| it.to_string());
-            let said = failed_saying(&self.client.hosted, exited);
-            self.sidebar.notify(format!("{destination}: {said} ({status})"));
-            return self.go_back(back);
+            return self.failed_back(&Machine::Remote(destination.clone()), back);
         }
         // With none, it is in no session that could have gone with it, as on
         // this machine.
@@ -2316,6 +2334,26 @@ impl App {
             },
             None => self.newest_here(),
         }
+    }
+
+    /// Has luneta's zellij go back to `back`, as zellij's client on `on`,
+    /// which took the place of one on another machine, failed: the notes say
+    /// what it said, and how it ended.
+    fn failed_back(&mut self, on: &Machine, back: Back) -> io::Result<()> {
+        let exited = self.client.exited;
+        let status = exited.map_or_else(|| "its end unread".to_owned(), |it| it.to_string());
+        let said = failed_saying(&self.client.hosted, exited, on);
+        let note = match on {
+            Machine::Local => format!("{said} ({status})"),
+            Machine::Remote(destination) => format!("{destination}: {said} ({status})"),
+        };
+        // What waits on its arrival, as a menu waits on a session made for
+        // it, hears why it did not come, not that it ended with no answer.
+        if let Some(arrival) = self.client.coming.take().and_then(Coming::arrival) {
+            arrival.failed(note.clone(), &self.events);
+        }
+        self.sidebar.notify(note);
+        self.go_back(back)
     }
 
     /// Has a client of `back` take the place of zellij's client, which failed
@@ -2454,22 +2492,27 @@ impl App {
     }
 }
 
-/// What a client of zellij's on another machine said as it failed, ending
-/// `exited`: the last line on its screen, as an ssh that reached no machine,
-/// or a zellij there that could not attach, writes it as it ends. One that
-/// ended with zellij's screen up still, which zellij takes down as it ends,
-/// ended under zellij, as an ssh that lost its connection does: the screen
-/// shows what zellij drew, not what went wrong.
-fn failed_saying(hosted: &Hosted, exited: Option<ExitStatus>) -> String {
+/// What a client of zellij's on `on` said as it failed, ending `exited`: the
+/// last line on its screen, as an ssh that reached no machine, or a zellij
+/// that could not attach, or make a session of a name taken, writes it as it
+/// ends. One that ended with zellij's screen up still, which zellij takes
+/// down as it ends, ended under zellij, as an ssh that lost its connection
+/// does: the screen shows what zellij drew, not what went wrong.
+fn failed_saying(hosted: &Hosted, exited: Option<ExitStatus>, on: &Machine) -> String {
     if hosted.mode().contains(TermMode::ALT_SCREEN) {
-        return match exited.and_then(|status| status.code()) {
-            Some(SSH_FAILED) => "ssh lost the connection".to_owned(),
-            _ => "zellij's client there ended".to_owned(),
+        return match (on, exited.and_then(|status| status.code())) {
+            (Machine::Remote(_), Some(SSH_FAILED)) => "ssh lost the connection".to_owned(),
+            (Machine::Remote(_), _) => "zellij's client there ended".to_owned(),
+            (Machine::Local, _) => "zellij's client ended".to_owned(),
         };
     }
     let text = hosted.text();
     let said = text.lines().rfind(|line| !line.trim().is_empty());
-    said.map_or("ssh ended", str::trim).to_owned()
+    let ended = match on {
+        Machine::Remote(_) => "ssh ended",
+        Machine::Local => "zellij's client ended",
+    };
+    said.map_or(ended, str::trim).to_owned()
 }
 
 /// How luneta's terminal is told to draw a cursor of `shape` that blinks or

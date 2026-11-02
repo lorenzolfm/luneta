@@ -1015,16 +1015,9 @@ pub enum Wants {
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, in place
-    /// of the tabs zellij makes it with, as the session was named at `since`,
-    /// for luneta to take its client there in turn.
-    Make {
-        session: SessionName,
-        cwd: String,
-        tab_cwd: String,
-        name: String,
-        command: Vec<String>,
-        since: SystemTime,
-    },
+    /// of the tabs zellij makes it with, for luneta to take its client there
+    /// in turn.
+    Make { session: SessionName, cwd: String, tab_cwd: String, name: String, command: Vec<String> },
 }
 
 /// What a menu that closed leaves the sidebar to do.
@@ -1443,9 +1436,9 @@ impl Menu {
                 let opens = Opens::Tab { name: Some(link.tab()), command };
                 opening(session, pane, opens)
             },
-            (At::Clone { cwd, name, since }, _) => {
+            (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
-                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command, since };
+                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { link, step: Step::Waiting(Wait::Making(name)) };
                 // The session is the machine's, as zellij makes it, and the
                 // menu is for that, until it has a pane of it.
@@ -3028,8 +3021,7 @@ mod tests {
     #[test]
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
-        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(7);
-        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone(), since };
+        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
         let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None };
         let (menu, wants) = stays(pulling('w').pulled(Ok(ready)));
         assert_eq!(
@@ -3040,7 +3032,6 @@ mod tests {
                 tab_cwd: "/w/cdk/feat-x".to_owned(),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
-                since,
             }
         );
         assert_eq!(menu.opening(), Some(Opening::Made(&name)));
@@ -3070,8 +3061,8 @@ mod tests {
         let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(At::Session((other, 7)))));
         let Target::Pane(machine, row) = menu.target() else { panic!("not a pane's row") };
         assert_eq!((machine, row.pane), (&vps(), 7));
-        let (name, since) = (SessionName::parse("cdk").unwrap(), SystemTime::UNIX_EPOCH);
-        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name, since };
+        let name = SessionName::parse("cdk").unwrap();
+        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
         let header = Target::Machine(vps());
         let (menu, wants) = stays(pulling_on(header.clone(), 'w').pulled(ready(clone)));
         assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");

@@ -166,6 +166,16 @@ pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
     }
 }
 
+/// The program luneta runs beside the sidebar for a client that makes
+/// `session`, and its arguments: zellij's client, which makes a session in
+/// the directory it starts in, and fails where one runs by that name, or
+/// zellij keeps one that ended, to bring back, and says so: a name taken
+/// since luneta found it unused, where `attach --create` would take the
+/// client to that session, as though it had made it.
+pub fn make(session: &SessionName) -> (String, Vec<String>) {
+    client_with(&["--session", session.as_str()])
+}
+
 /// The program luneta runs beside the sidebar in place of a client that
 /// ended, and its arguments: zellij's client, attached to `session`, which
 /// runs. Without `--create`, which would make one gone since anew, empty.
@@ -195,16 +205,15 @@ pub fn attach_away(destination: &Destination, session: &str) -> (String, Vec<Str
 
 /// The program luneta runs beside the sidebar for a client that makes
 /// `session` on `destination`, in `cwd`, or where ssh starts it there, and
-/// its arguments, as `attach_away` says: zellij's client makes a session in
-/// the directory it starts in, and attaches to one that runs by that name,
-/// or that ended, which it brings back, instead.
+/// its arguments, as `attach_away` says: zellij's client there, as `make`
+/// says of this machine's, which fails where the name is taken.
 pub fn make_away(
     destination: &Destination,
     session: &str,
     cwd: Option<&str>,
 ) -> (String, Vec<String>) {
     let cd = cwd.map(|cwd| format!("cd {} && ", quoted(cwd))).unwrap_or_default();
-    away(destination, format!("{cd}zellij attach --create {}", quoted(session)))
+    away(destination, format!("{cd}zellij --session {}", quoted(session)))
 }
 
 /// ssh, to run `command` on `destination`, in a terminal it asks for there,
@@ -410,13 +419,13 @@ pub fn start(
     let when = nudged.until();
     match (then, alone) {
         (Some(look), alone) if runs != Some(true) => {
-            let after = alone.map(|alone| alone.after(to));
+            let after = alone.map(Alone::after);
             run(command, Some(Then::Made(look.number)), when, events);
             Some(Arrival::new(on, look, Before::Made, after))
         },
         (Some(look), alone) => {
-            let after = alone.map(|Alone { owed, tab, .. }| After::tab(owed, to, tab));
-            run(command, Some(Then::Arrive(look, after)), when, events);
+            let beside = |Alone { owed, tab, session, .. }| After::tab(owed, &session, tab);
+            run(command, Some(Then::Arrive(look, alone.map(beside))), when, events);
             None
         },
         (None, None) => {
@@ -425,7 +434,7 @@ pub fn start(
         },
         // Nothing would say when the client is there.
         (None, Some(alone)) => {
-            alone.after(to).untold(events);
+            alone.after().untold(events);
             None
         },
     }
@@ -433,20 +442,26 @@ pub fn start(
 
 /// The tab a session luneta makes for a menu opens with, for the menu owed
 /// what it opens: in place of the tabs zellij makes the session with, as
-/// `Open::Alone` says, where the session's machine made it at `since` or
-/// after, by that machine's clock, as its name was free then.
+/// `Open::Tab` says, where the session's machine made it since luneta found
+/// its name unused there, by that machine's clock, as `Unused` says.
 pub struct Alone {
-    pub owed: Due<u32>,
-    pub tab: Tab,
-    pub since: SystemTime,
+    owed: Due<u32>,
+    tab: Tab,
+    session: SessionName,
+    since: SystemTime,
 }
 
 impl Alone {
-    /// What opens it once the client has come to `session`, the session made
-    /// for it.
-    pub fn after(self, session: &SessionName) -> After {
-        let Alone { owed, tab, since } = self;
-        After::Open(owed, Open::Alone { session: session.clone(), tab, since })
+    /// The tab `tab`, for the menu `owed` what it opens, in the session
+    /// luneta makes by the name `made` found unused.
+    pub fn new(owed: Due<u32>, tab: Tab, made: &Unused) -> Self {
+        Alone { owed, tab, session: made.name.clone(), since: made.since }
+    }
+
+    /// What opens it once the client has come to the session made for it.
+    pub fn after(self) -> After {
+        let Alone { owed, tab, session, since } = self;
+        After::Open(owed, Open::Tab { session, tab, alone_since: Some(since) })
     }
 }
 
@@ -568,7 +583,7 @@ pub enum After {
 impl After {
     /// Open `tab` in `session`, for the menu `owed` what it opens.
     fn tab(owed: Due<u32>, session: &SessionName, tab: Tab) -> Self {
-        After::Open(owed, Open::Tab { session: session.clone(), tab })
+        After::Open(owed, Open::Tab { session: session.clone(), tab, alone_since: None })
     }
 
     /// Says that nothing would tell when the client is there, so that it is
@@ -618,6 +633,15 @@ impl After {
                 // luneta is on its way out.
                 let _ = events.send(Event::Notice(format!("\"{session}\" stays")));
             },
+        }
+    }
+
+    /// Says that the client did not come, as it failed, saying `why`: to the
+    /// menu owed what it opens, or as a notice that the session stays.
+    fn failed(self, why: String, events: &Sender<Event>) {
+        match self {
+            After::Open(owed, _) => owed.pay(Err(why)),
+            kill @ After::Kill { .. } => kill.stayed(events),
         }
     }
 }
@@ -942,6 +966,14 @@ impl Arrival {
             after.stayed(events);
         }
     }
+
+    /// Says to what waits on it that the client did not come, as it failed,
+    /// saying `why`.
+    pub fn failed(self, why: String, events: &Sender<Event>) {
+        if let Some(after) = self.after {
+            after.failed(why, events);
+        }
+    }
 }
 
 /// Asks zellij for the clients of the session of `arrival`'s look, on a
@@ -987,6 +1019,11 @@ pub fn before(session: &str) -> Before {
 pub struct Unused {
     on: Machine,
     name: SessionName,
+    /// Just before luneta read which names zellij on `on` has, by that
+    /// machine's clock: a session of the name that started then or after is
+    /// one zellij made since, as one renamed to it keeps the time it started
+    /// at.
+    since: SystemTime,
 }
 
 impl Unused {
@@ -1002,7 +1039,8 @@ impl Unused {
 /// The name a session luneta makes for `dir` on this machine takes, as
 /// `lunetad::names::free_for` names it, or why it takes none.
 pub fn unused_for(dir: &str) -> Result<Unused, String> {
-    lunetad::names::free_for(dir).map(|name| Unused { on: Machine::Local, name })
+    let (name, since) = lunetad::names::free_for(dir)?;
+    Ok(Unused { on: Machine::Local, name, since })
 }
 
 /// The name a session luneta makes for `dir` on `destination` takes, as its
@@ -1010,7 +1048,7 @@ pub fn unused_for(dir: &str) -> Result<Unused, String> {
 /// it, or why it takes none.
 pub fn name_away(destination: &Destination, dir: &str) -> Result<Unused, String> {
     let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(dir));
-    named.map(|name| Unused { on: Machine::Remote(destination.clone()), name })
+    named.map(|(name, since)| Unused { on: Machine::Remote(destination.clone()), name, since })
 }
 
 /// What luneta knows of the clients of `session` on `destination`, which
@@ -1036,13 +1074,14 @@ fn runs(session: &str) -> Option<bool> {
 /// `switch-session`, which does either, so luneta asks just before.
 pub fn makes(to: SessionName) -> Result<Unused, String> {
     let cannot = || format!("no session made: luneta cannot tell whether one is called {to}");
+    let since = SystemTime::now();
     if runs(to.as_str()).ok_or_else(cannot)? {
         return Err(format!("no session made: {to} runs already"));
     }
     if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
         return Err(format!("no session made: zellij keeps {to}, which ended, to bring back"));
     }
-    Ok(Unused { on: Machine::Local, name: to })
+    Ok(Unused { on: Machine::Local, name: to, since })
 }
 
 /// `to`, as a name zellij on `destination` would make a session of now, for
@@ -1397,6 +1436,10 @@ mod tests {
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
+        let (program, args) = make(&session);
+        assert_eq!(program, "env");
+        assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
+        assert_eq!(args[args.len() - 3..], ["zellij", "--session", "luneta-main"]);
         let (program, args) = rejoin("elo");
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
@@ -1541,5 +1584,25 @@ mod tests {
             panic!("the menu alone hears, once");
         };
         assert_eq!(why, "luneta cannot tell when zellij's client is there");
+    }
+
+    /// A client that failed on its way to a session, as zellij refuses to make
+    /// one of a name taken, has the menu waiting on it hear why, once.
+    #[test]
+    fn a_menu_hears_why_the_client_it_waits_on_failed() {
+        let (events, heard) = std::sync::mpsc::channel();
+        let Ok(to) = SessionName::parse("cdk") else {
+            panic!("a name zellij takes");
+        };
+        let tab = Tab { cwd: "/w/cdk/feat".to_owned(), name: None, command: Vec::new() };
+        let after = After::tab(owed(7, &events), &to, tab);
+        let look = Look { session: "cdk".to_owned(), number: 3, went: None };
+        let arrival = Arrival::new(Machine::Local, look, Before::Made, Some(after));
+        arrival.failed("Session with name \"cdk\" already exists".to_owned(), &events);
+        let heard: Vec<Event> = heard.try_iter().collect();
+        let [Event::Opened { menu: 7, opened: Err(why) }] = &heard[..] else {
+            panic!("the menu alone hears, once");
+        };
+        assert_eq!(why, "Session with name \"cdk\" already exists");
     }
 }

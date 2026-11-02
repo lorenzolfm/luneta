@@ -37,7 +37,7 @@ use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use wt::cmd::add::{self, Fetch};
 use wt::repo::Repo;
@@ -408,8 +408,9 @@ pub enum At<P> {
     Session(P),
     /// A tab of a session luneta makes, `name`, that starts in `cwd`, where
     /// the clone of the repository is. No session the machine's zellij has
-    /// was called so at `since`, by the machine's clock, as it was named.
-    Clone { cwd: String, name: SessionName, since: SystemTime },
+    /// was called so as it was named: luneta has it named again just before
+    /// it makes the session, as a while can go by first.
+    Clone { cwd: String, name: SessionName },
 }
 
 /// What a key of the menu goes on with: where it goes, the worktree of the
@@ -431,7 +432,7 @@ impl Ready<usize> {
         let at = match at {
             At::There(at) => At::There(pane(at)?),
             At::Session(at) => At::Session(pane(at)?),
-            At::Clone { cwd, name, since } => At::Clone { cwd, name, since },
+            At::Clone { cwd, name } => At::Clone { cwd, name },
         };
         Ok(Ready { at, worktree, branch })
     }
@@ -446,19 +447,17 @@ impl Ready<usize> {
         let at = match at {
             At::There(at) => paste_response::At::There(place(at)),
             At::Session(at) => paste_response::At::Session(place(at)),
-            At::Clone { cwd, name, since } => paste_response::At::Clone(MadeClone {
-                cwd,
-                name: name.to_string(),
-                named_at: Some(since.into()),
-            }),
+            At::Clone { cwd, name } => {
+                paste_response::At::Clone(MadeClone { cwd, name: name.to_string() })
+            },
         };
         PasteResponse { at: Some(at), worktree, branch }
     }
 
     /// Where `answer` says the key goes, or why it says nothing luneta can
-    /// go by: it names a session zellij would not take, or no time it was
-    /// named at, or a worktree or a directory for the session by no absolute
-    /// path, or it says where in words of a newer daemon's.
+    /// go by: it names a session zellij would not take, or a worktree or a
+    /// directory for the session by no absolute path, or it says where in
+    /// words of a newer daemon's.
     pub fn of(answer: PasteResponse) -> Result<Self, String> {
         let PasteResponse { at, worktree, branch } = answer;
         if !worktree.starts_with('/') {
@@ -468,15 +467,13 @@ impl Ready<usize> {
         let at = match at {
             Some(paste_response::At::There(at)) => At::There(place(at)),
             Some(paste_response::At::Session(at)) => At::Session(place(at)),
-            Some(paste_response::At::Clone(MadeClone { cwd, name, named_at })) => {
+            Some(paste_response::At::Clone(MadeClone { cwd, name })) => {
                 if !cwd.starts_with('/') {
                     return Err(format!("clone: {cwd:?} is no absolute path"));
                 }
                 let name = SessionName::parse(&name)
                     .map_err(|why| format!("clone: \"{name}\" names no session: {why}"))?;
-                let since = named_at.and_then(|at| SystemTime::try_from(at).ok());
-                let since = since.ok_or("clone: it says no time its session was named at")?;
-                At::Clone { cwd, name, since }
+                At::Clone { cwd, name }
             },
             None => {
                 return Err("it says where the key goes in words this luneta cannot read, as a \
@@ -593,10 +590,7 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
     let at = match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
         (Some((at, _)), _) => At::There(at),
         (None, Going::Session(at)) => At::Session(at),
-        (None, Going::Clone { cwd, name }) => {
-            let (name, since) = free(&name)?;
-            At::Clone { cwd, name, since }
-        },
+        (None, Going::Clone { cwd, name }) => At::Clone { cwd, name: free(&name)? },
     };
     Ok(Ready { at, branch: branch(&worktree), worktree })
 }
@@ -677,14 +671,10 @@ fn clone(
 
 /// `name`, or the first of it with a `-2` and on that no session has, one
 /// that runs or one that ended, which zellij keeps to bring back, as zellij's
-/// folders say now; and the time just before luneta looked there. A session
-/// of the name that started then or after is one zellij made since, as luneta
-/// asked it to: one renamed to the name keeps the time it started at. Or why
-/// luneta cannot tell which names are free.
-fn free(name: &SessionName) -> Result<(SessionName, SystemTime), String> {
-    let since = SystemTime::now();
+/// folders say now; or why luneta cannot tell which names are free.
+fn free(name: &SessionName) -> Result<SessionName, String> {
     let named = names::named().ok_or("luneta cannot tell which sessions zellij has")?;
-    Ok((name.free(&named.iter().map(String::as_str).collect::<Vec<_>>()), since))
+    Ok(name.free(&named.iter().map(String::as_str).collect::<Vec<_>>()))
 }
 
 /// Why no clone of `link`'s repository is for `wt add`, as what luneta has
@@ -1302,15 +1292,14 @@ mod tests {
     }
 
     /// Where a key goes is answered as it was found: a pane by its place
-    /// among those asked of, or a session to make, by its name, and when it
-    /// was named. An answer luneta cannot go by is refused: of a worktree by
-    /// no absolute path, a session zellij would not take, or no time, or of
-    /// where in words of a newer daemon's.
+    /// among those asked of, or a session to make, by its name. An answer
+    /// luneta cannot go by is refused: of a worktree by no absolute path, a
+    /// session zellij would not take, or of where in words of a newer
+    /// daemon's.
     #[test]
     fn where_a_key_goes_is_answered_as_it_was_found() {
-        let since = SystemTime::UNIX_EPOCH + Duration::from_hours(500_000);
         let name = SessionName::parse("cdk").unwrap();
-        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name, since };
+        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
         for at in [At::There(1), At::Session(0), clone] {
             let (worktree, branch) = ("/w/cdk/issue-2736", Some("issue-2736".to_owned()));
             let ready = Ready { at, worktree: worktree.to_owned(), branch };
@@ -1322,19 +1311,16 @@ mod tests {
         let relative = PasteResponse { worktree: "x".to_owned(), ..answer() };
         assert_eq!(refused(relative), "worktree: \"x\" is no absolute path");
         assert!(refused(PasteResponse { at: None, ..answer() }).contains("a newer lunetad does"));
-        let made = |cwd: &str, name: &str, named_at| PasteResponse {
+        let made = |cwd: &str, name: &str| PasteResponse {
             at: Some(paste_response::At::Clone(MadeClone {
                 cwd: cwd.to_owned(),
                 name: name.to_owned(),
-                named_at,
             })),
             ..answer()
         };
-        let unnamed = refused(made("/w", "a/b", Some(since.into())));
+        let unnamed = refused(made("/w", "a/b"));
         assert_eq!(unnamed, "clone: \"a/b\" names no session: name cannot contain '/'");
-        let untimed = refused(made("/w", "cdk", None));
-        assert_eq!(untimed, "clone: it says no time its session was named at");
-        let relative = refused(made("w", "cdk", Some(since.into())));
+        let relative = refused(made("w", "cdk"));
         assert_eq!(relative, "clone: \"w\" is no absolute path");
     }
 

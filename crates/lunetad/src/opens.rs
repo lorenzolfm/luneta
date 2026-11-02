@@ -40,14 +40,13 @@ pub enum Open {
     /// The tab `tab`, in `session`. zellij makes a tab as big as a client of
     /// its session, and one it opens in a session with none has no room for
     /// its panes: in another session than luneta's client's, it opens once
-    /// that client has come.
-    Tab { session: SessionName, tab: Tab },
-    /// The tab `tab`, in `session`, in place of the tabs zellij made the
-    /// session with, where it started at `since` or after, by its machine's
-    /// clock: as one zellij made for a client asked to make it then, which
-    /// has come to it. One that started before keeps them, as one renamed
-    /// to its name since does, and the tab opens beside them.
-    Alone { session: SessionName, tab: Tab, since: SystemTime },
+    /// that client has come. Where `alone_since` says a time, it takes the
+    /// place of the tabs zellij made the session with, where the session
+    /// started then or after, by its machine's clock: as one zellij made for
+    /// a client asked to make it then, which has come to it. One that started
+    /// before keeps them, as one renamed to its name since does, and the tab
+    /// opens beside them.
+    Tab { session: SessionName, tab: Tab, alone_since: Option<SystemTime> },
 }
 
 impl Open {
@@ -55,18 +54,14 @@ impl Open {
     /// on the daemon's own, where it names none.
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> OpenRequest {
-        let tab = |name: &Option<String>, since: Option<SystemTime>| {
-            Opens::Tab(open_request::Tab { name: name.clone(), alone_since: since.map(Into::into) })
-        };
         let (session, cwd, command, opens) = match self {
             Open::Pane { session, beside, cwd, command } => {
                 (session, cwd, command, Opens::Beside(*beside))
             },
-            Open::Tab { session, tab: Tab { cwd, name, command } } => {
-                (session, cwd, command, tab(name, None))
-            },
-            Open::Alone { session, tab: Tab { cwd, name, command }, since } => {
-                (session, cwd, command, tab(name, Some(*since)))
+            Open::Tab { session, tab: Tab { cwd, name, command }, alone_since } => {
+                let alone_since = alone_since.map(Into::into);
+                let tab = open_request::Tab { name: name.clone(), alone_since };
+                (session, cwd, command, Opens::Tab(tab))
             },
         };
         let (session, cwd, command) = (session.to_string(), cwd.clone(), command.clone());
@@ -96,8 +91,8 @@ pub struct Opened {
 /// `PANE_VAR`, whatever tab that is in and whether a client is on it, and
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
 /// the one it lists in that tab. No tab opens in a session no client is in,
-/// where it would have no room for its panes, as `Open::Tab` says; one that
-/// opens alone opens once the client has come, as `alone` says.
+/// where it would have no room for its panes, as `Open::Tab` says, alone or
+/// beside the session's tabs.
 pub fn opening(open: &Open) -> Result<Opened, String> {
     let terminal = |terminal| Opened { terminal, notes: Vec::new() };
     match open {
@@ -115,7 +110,7 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             let unnamed = || format!("zellij opened no pane it named: {:?}", said.trim());
             pane.map(terminal).ok_or_else(unnamed)
         },
-        Open::Tab { session, tab } => {
+        Open::Tab { session, tab, alone_since } => {
             let mut zellij = Command::new("zellij");
             quiet(&mut zellij);
             if clients::list(zellij, session.as_str())?.is_empty() {
@@ -124,10 +119,12 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
                      in a session with none: open a pane beside one of its panes, or go there first"
                 ));
             }
+            if let Some(since) = alone_since {
+                return alone(session, tab, *since);
+            }
             let (opened, laid) = tab_opened(session, tab)?;
             terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned())
         },
-        Open::Alone { session, tab, since } => alone(session, tab, *since),
     }
 }
 

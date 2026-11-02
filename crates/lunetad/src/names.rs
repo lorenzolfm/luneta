@@ -5,6 +5,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::metadata;
 use crate::zellij::{self, SessionName};
@@ -97,14 +98,17 @@ pub fn kept() -> Option<Vec<String>> {
 
 /// The name a session luneta makes for `dir` takes: the one `session_for`
 /// gives it, with a `-2` where a session has that name, one that runs or
-/// one that ended, which zellij keeps to bring back, as zellij says now; or
-/// why it takes none.
-pub fn free_for(dir: &str) -> Result<SessionName, String> {
+/// one that ended, which zellij keeps to bring back, as zellij says now; and
+/// the time just before luneta read which names zellij has. A session of the
+/// name that started then or after is one zellij made since: one renamed to
+/// the name keeps the time it started at. Or why it takes none.
+pub fn free_for(dir: &str) -> Result<(SessionName, SystemTime), String> {
     let unnamed = || format!("no session can be named for {dir}");
     let name = session_for(Path::new(dir)).ok_or_else(unnamed)?;
+    let since = SystemTime::now();
     let sessions = named().ok_or("luneta cannot tell which sessions zellij has")?;
     let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
-    Ok(name.free(&names))
+    Ok((name.free(&names), since))
 }
 
 #[cfg(test)]

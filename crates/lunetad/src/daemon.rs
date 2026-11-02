@@ -573,8 +573,9 @@ impl Daemon for Host {
         }
         let named = task::spawn_blocking(move || names::free_for(&dir)).await;
         let named = named.map_err(|error| unfinished(&error))?;
-        let name = named.map_err(Status::failed_precondition)?.to_string();
-        Ok(Response::new(NameSessionResponse { name }))
+        let (name, since) = named.map_err(Status::failed_precondition)?;
+        let named_at = Some(since.into());
+        Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at }))
     }
 
     async fn start(
@@ -792,14 +793,11 @@ fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
             let why = "opens: a tab's name is empty, where an absent one has zellij number it";
             return Err(Status::invalid_argument(why));
         },
-        Some(Opens::Tab(open_request::Tab { name, alone_since: None })) => {
-            Open::Tab { session, tab: Tab { cwd, name, command } }
-        },
-        Some(Opens::Tab(open_request::Tab { name, alone_since: Some(since) })) => {
-            let since = SystemTime::try_from(since).map_err(|_| {
+        Some(Opens::Tab(open_request::Tab { name, alone_since })) => {
+            let alone_since = alone_since.map(SystemTime::try_from).transpose().map_err(|_| {
                 Status::invalid_argument("opens: alone_since says no time a session started at")
             })?;
-            Open::Alone { session, tab: Tab { cwd, name, command }, since }
+            Open::Tab { session, tab: Tab { cwd, name, command }, alone_since }
         },
     };
     Ok((on, open))
