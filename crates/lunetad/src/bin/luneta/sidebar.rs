@@ -720,17 +720,30 @@ impl Seen<'_> {
     }
 }
 
-/// A machine, with what its daemon says of it, or why lunetad has nothing
-/// of it.
-type Told<'a> = (Machine, Result<Seen<'a>, Away>);
+/// Each machine lunetad says of: this one, of which it always says; the
+/// others, in the order of luneta's hosts file, with what each one's daemon
+/// says of it, or why it says nothing; and how many of those it says of are
+/// left out, as lunetad never sends them, but one of another build might:
+/// one whose destination does not read, and one named a second time.
+struct Machines<'a> {
+    here: Seen<'a>,
+    others: Vec<(Destination, Result<Seen<'a>, Away>)>,
+    left_out: usize,
+}
 
-/// Each machine lunetad says of, this one first, then the others in the
-/// order of luneta's hosts file, with what its daemon says of it, or why it
-/// says nothing; and how many it says of that are left out, as lunetad never
-/// sends them, but one of another build might: one whose destination does
-/// not read, and one named a second time.
-fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
-    let local = Seen {
+impl<'a> Machines<'a> {
+    /// Each, this one first, with what its daemon says of it, or why it
+    /// says nothing.
+    fn each(self) -> impl Iterator<Item = (Machine, Result<Seen<'a>, Away>)> {
+        let others = self.others.into_iter();
+        let others = others.map(|(destination, seen)| (Machine::Remote(destination), seen));
+        std::iter::once((Machine::Local, Ok(self.here))).chain(others)
+    }
+}
+
+/// Each machine lunetad says of in `host`, as `Machines` has them.
+fn machines(host: &Host) -> Machines<'_> {
+    let here = Seen {
         sessions: &host.sessions,
         agents: &host.agents,
         work_trees: &host.work_trees,
@@ -739,7 +752,7 @@ fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
         unread: host.unread,
         unread_files: &host.unread_files,
     };
-    let mut machines = vec![(Machine::Local, Ok(local))];
+    let mut others = Vec::new();
     let mut named = HashSet::new();
     let mut left_out = 0;
     for remote in &host.remotes {
@@ -770,9 +783,9 @@ fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
                     .to_owned(),
             }),
         };
-        machines.push((Machine::Remote(destination), seen));
+        others.push((destination, seen));
     }
-    (machines, left_out)
+    Machines { here, others, left_out }
 }
 
 /// What the sidebar asks of luneta.
@@ -1121,7 +1134,7 @@ impl Sidebar {
             return None;
         }
         let mut live = Lists::default();
-        for (machine, seen) in machines(host).0 {
+        for (machine, seen) in machines(host).each() {
             let Ok(seen) = seen else {
                 live.lists(&machine, [], false);
                 continue;
@@ -1560,9 +1573,12 @@ impl Sidebar {
         let mut due: Option<SystemTime> = None;
         // Each machine, and the sessions of each lunetad lists: this one's
         // in the order you moved them to, and another's oldest first.
-        let (machines, unlisted_machines) = machines(host);
-        let mut unlisted = 0;
-        let mut sessions: Vec<Vec<(Listed, &Session)>> = machines
+        let machines = machines(host);
+        let unlisted_machines = machines.left_out;
+        let (mut here_sessions, mut unlisted) = oldest_first(machines.here.sessions);
+        self.order.sessions(&mut here_sessions, |(listed, _)| listed.name.as_str());
+        let others_sessions: Vec<Vec<(Listed, &Session)>> = machines
+            .others
             .iter()
             .map(|(_, reached)| {
                 let Ok(reached) = reached else {
@@ -1573,20 +1589,20 @@ impl Sidebar {
                 sessions
             })
             .collect();
-        self.order.sessions(&mut sessions[0], |(listed, _)| listed.name.as_str());
-        let running_of = |sessions: &[Vec<(Listed, &Session)>]| {
-            let listed = sessions.iter().flatten().map(|(listed, _)| listed.kept);
-            listed.collect::<Vec<ledger::Session>>()
+        let running_of = |here_sessions: &[(Listed, &Session)]| {
+            let sessions = here_sessions.iter().chain(others_sessions.iter().flatten());
+            sessions.map(|(listed, _)| listed.kept).collect::<Vec<ledger::Session>>()
         };
-        let mut running = running_of(&sessions);
+        let mut running = running_of(&here_sessions);
         // What the daemon said last, while it does not answer, can list a
         // session that has ended since, whose colour another luneta gave up.
         // A colour kept takes up the order as another luneta left it, which
         // the rows go in.
         if self.away.is_none() && self.order.colour_sessions(&running) {
-            self.order.sessions(&mut sessions[0], |(listed, _)| listed.name.as_str());
-            running = running_of(&sessions);
+            self.order.sessions(&mut here_sessions, |(listed, _)| listed.name.as_str());
+            running = running_of(&here_sessions);
         }
+        let sessions = std::iter::once(here_sessions).chain(others_sessions);
         let mut colours = self.order.colours(&running).into_iter();
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
@@ -1604,7 +1620,7 @@ impl Sidebar {
                 best = Some((at, fit));
             }
         };
-        for ((machine, reached), sessions) in machines.into_iter().zip(sessions) {
+        for ((machine, reached), sessions) in machines.each().zip(sessions) {
             // The machine luneta's zellij is on, which has its pane.
             let on = machine == self.on;
             let name = match &machine {
@@ -2397,8 +2413,13 @@ impl Sidebar {
 
     /// What the daemon last said of `machine`, where it said anything of it.
     fn seen(&self, machine: &Machine) -> Option<Seen<'_>> {
-        let (machines, _) = machines(self.host.as_ref()?);
-        machines.into_iter().find(|(told, _)| told == machine)?.1.ok()
+        let machines = machines(self.host.as_ref()?);
+        match machine {
+            Machine::Local => Some(machines.here),
+            Machine::Remote(destination) => {
+                machines.others.into_iter().find(|(other, _)| other == destination)?.1.ok()
+            },
+        }
     }
 
     /// The pane `id` of the session `listed`, of `machine`, as the daemon
@@ -2596,35 +2617,34 @@ impl Sidebar {
     /// the branch on its row, and by its machine, whose daemon reads its
     /// transcript. A machine lunetad does not reach now is told of as one
     /// whose sessions are unknown. With no agent there, or no word of its
-    /// machine, the sidebar says so where the menu was.
+    /// machine, as of one it does not reach, or no longer watches, the
+    /// sidebar says so where the menu was.
     fn brief(&mut self, briefed: Briefed) -> Asked {
         let Some(host) = &self.host else {
             return Asked::Nothing;
         };
-        let (machines, _) = machines(host);
-        let mut every: Vec<(Machine, String)> = Vec::new();
+        let machines = machines(host);
+        let mut reached = vec![(Machine::Local, machines.here)];
         let mut unknown = Vec::new();
+        for (destination, seen) in machines.others {
+            match seen {
+                Ok(seen) => reached.push((Machine::Remote(destination), seen)),
+                Err(away) => unknown.push((destination, away.said().0)),
+            }
+        }
+        let mut every: Vec<(Machine, SessionName)> = Vec::new();
         let mut notes = Vec::new();
-        for (machine, seen) in machines {
-            let seen = match (seen, &machine) {
-                (Ok(seen), _) => seen,
-                (Err(away), Machine::Remote(destination)) => {
-                    unknown.push((destination.clone(), away.said().0.to_owned()));
-                    continue;
-                },
-                // lunetad always says this machine's.
-                (Err(_), Machine::Local) => continue,
-            };
+        for (machine, seen) in &reached {
             // In the order of their rows: this machine's as you moved them.
             let (mut sessions, _) = oldest_first(seen.sessions);
-            if machine == Machine::Local {
+            if *machine == Machine::Local {
                 self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
             }
             let agents = seated(seen.agents, seen.sessions);
             let trees: HashMap<&str, &lunetad::api::WorkTree> =
                 seen.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
             for (listed, session) in sessions {
-                every.push((machine.clone(), listed.name.to_string()));
+                every.push((machine.clone(), listed.name.clone()));
                 let mut panes: Vec<_> =
                     session.panes.iter().flat_map(|panes| &panes.panes).collect();
                 panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -2638,7 +2658,7 @@ impl Sidebar {
                     });
                     notes.push(Note {
                         on: machine.clone(),
-                        session: session.name.clone(),
+                        session: listed.name.clone(),
                         pane: pane.id,
                         name: label(Some(agent), pane),
                         status: status_word(agent),
@@ -2654,8 +2674,8 @@ impl Sidebar {
             Briefed::Every => None,
             Briefed::Machine(on) | Briefed::Session(on, _) | Briefed::Agent(on, ..) => Some(on),
         };
-        if let Some(Machine::Remote(destination)) = on
-            && unknown.iter().any(|(machine, _)| machine == destination)
+        if let Some(on @ Machine::Remote(destination)) = on
+            && !reached.iter().any(|(machine, _)| machine == on)
         {
             self.say(format!("brief: lunetad does not reach {destination} now"));
             return Asked::Nothing;
@@ -2667,8 +2687,8 @@ impl Sidebar {
                 let sessions = of.map(|(_, session)| session).collect();
                 Over::Machine(on, sessions)
             },
-            Briefed::Session(on, session) => Over::Session(on, session.to_string()),
-            Briefed::Agent(on, session, pane) => Over::Agent(on, session.to_string(), pane),
+            Briefed::Session(on, session) => Over::Session(on, session),
+            Briefed::Agent(on, session, pane) => Over::Agent(on, session, pane),
         };
         match Brief::new(over, notes) {
             Ok(brief) => Asked::Brief(brief),
@@ -6378,9 +6398,10 @@ mod tests {
         }];
         sidebar.heard(host);
         sidebar.focus(Keys::Sidebar);
+        let older = || SessionName::parse("older").unwrap();
         let fold = Note {
             on: Machine::Local,
-            session: "older".to_owned(),
+            session: older(),
             pane: 1,
             name: "fold".to_owned(),
             status: "waiting".to_owned(),
@@ -6391,13 +6412,13 @@ mod tests {
         };
         let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fold.clone()]).unwrap());
         let here = |sessions: [&str; 2]| {
-            let sessions = sessions.map(|it| (Machine::Local, it.to_owned())).into();
-            Over::Sessions { sessions, unknown: Vec::new() }
+            let sessions = sessions.map(|it| (Machine::Local, SessionName::parse(it).unwrap()));
+            Over::Sessions { sessions: sessions.into(), unknown: Vec::new() }
         };
         let every = || here(["older", "newer"]);
-        let older = || Over::Session(Machine::Local, "older".to_owned());
-        let agent = Over::Agent(Machine::Local, "older".to_owned(), 1);
-        for (key, over) in [('z', every()), ('s', older()), ('h', agent)] {
+        let session = || Over::Session(Machine::Local, older());
+        let agent = Over::Agent(Machine::Local, older(), 1);
+        for (key, over) in [('z', every()), ('s', session()), ('h', agent)] {
             type_in(&mut sidebar, "b");
             assert_eq!(sidebar.key(&char(key), moment(160_000)), brief(over), "{key}");
             assert!(sidebar.menu.is_none(), "{key}");
@@ -6414,7 +6435,7 @@ mod tests {
         type_in(&mut sidebar, "h");
         assert_eq!(cursor(&sidebar), Some(Place::Session(listed("older", 10))));
         type_in(&mut sidebar, "b");
-        assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(older()));
+        assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(session()));
         type_in(&mut sidebar, "b");
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(every()));
         // The older session moved under the newer one.
@@ -6428,16 +6449,18 @@ mod tests {
     /// sessions are unknown; `b s` and `b h` on a machine's header on its
     /// sessions, this one's too; and on its session's row or its pane's, on
     /// the session or the agent there. Of a machine lunetad no longer
-    /// reaches, the sidebar says so.
+    /// reaches, or no longer watches, the sidebar says so; and with no agent
+    /// where it reaches, it says whose sessions are unknown.
     #[test]
     fn the_brief_s_keys_brief_you_on_every_machine_s_agents() {
         let mut sidebar = fresh();
         sidebar.heard(machines());
         sidebar.focus(Keys::Sidebar);
         let on = || Machine::Remote(nixos());
+        let main = || SessionName::parse("main").unwrap();
         let fix = Note {
             on: on(),
-            session: "main".to_owned(),
+            session: main(),
             pane: 1,
             name: "fix".to_owned(),
             status: "waiting".to_owned(),
@@ -6447,9 +6470,8 @@ mod tests {
             transcript: None,
         };
         let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fix.clone()]).unwrap());
-        let main = || "main".to_owned();
         let unknown = [("me@vps", "unreachable"), ("pi", "reaching…")];
-        let unknown = unknown.map(|(it, word)| (it.parse().unwrap(), word.to_owned())).into();
+        let unknown = unknown.map(|(it, word)| (it.parse().unwrap(), word)).into();
         let every = Over::Sessions { sessions: vec![(Machine::Local, main()), (on(), main())], unknown };
         let session = Place::Session(listed("main", 20));
         let pane = Place::Pane { session: listed("main", 20), pane: 1 };
@@ -6472,8 +6494,22 @@ mod tests {
         type_in(&mut sidebar, "b");
         let mut host = machines();
         host.remotes[0] = remote("nixos", down(100));
-        sidebar.heard(host);
+        sidebar.heard(host.clone());
         assert_eq!(sidebar.key(&char('h'), moment(160_000)), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some("brief: lunetad does not reach nixos now"));
+        sidebar.cursor = Some(Spot::Machine(Machine::Local));
+        type_in(&mut sidebar, "b");
+        assert_eq!(sidebar.key(&char('z'), moment(160_000)), Asked::Nothing);
+        let nowhere = "brief: no agents to brief you on; lunetad does not reach nixos, me@vps, pi \
+                       now";
+        assert_eq!(sidebar.notice.as_deref(), Some(nowhere));
+        // The menu opened while luneta's hosts file named nixos.
+        sidebar.heard(machines());
+        sidebar.cursor = Some(Spot::Machine(on()));
+        type_in(&mut sidebar, "b");
+        host.remotes.remove(0);
+        sidebar.heard(host);
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         assert_eq!(sidebar.notice.as_deref(), Some("brief: lunetad does not reach nixos now"));
     }
 

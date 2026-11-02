@@ -61,9 +61,9 @@ impl Reading {
     /// The ends of the transcripts of `ids`, `share` bytes of each at the
     /// most, or why not: they are too many, or together too long, or it
     /// keeps nothing of each, which would read as an end that says nothing.
-    pub fn new(ids: Vec<SessionId>, share: usize) -> Result<Reading, String> {
+    fn new(ids: Vec<SessionId>, share: usize) -> Result<Reading, String> {
         if ids.len() > IDS_MAX {
-            return Err(format!("ids: {} transcripts, of {IDS_MAX} at the most", ids.len()));
+            return Err(too_many(ids.len()));
         }
         if share == 0 {
             return Err("share: no bytes of each transcript".to_owned());
@@ -78,11 +78,18 @@ impl Reading {
         Ok(Reading { ids, share })
     }
 
-    /// What reading the ends of `count` transcripts together keeps of each:
-    /// an equal share of `TAILS_BYTES`.
-    #[must_use]
-    pub fn share_of(count: usize) -> usize {
-        TAILS_BYTES / count.max(1)
+    /// The ends of the transcripts of each of `groups`, as readings handed
+    /// back each with what its group came with, which keep an equal share of
+    /// `TAILS_BYTES` of each transcript of them all, and so no more of them
+    /// together than one reading of them all would; or why not: they are
+    /// more than `IDS_MAX` together.
+    pub fn shared<K>(groups: Vec<(K, Vec<SessionId>)>) -> Result<Vec<(K, Reading)>, String> {
+        let count: usize = groups.iter().map(|(_, ids)| ids.len()).sum();
+        if count > IDS_MAX {
+            return Err(too_many(count));
+        }
+        let share = TAILS_BYTES / count.max(1);
+        Ok(groups.into_iter().map(|(with, ids)| (with, Reading { ids, share })).collect())
     }
 
     /// The reading a question asks for, of the transcripts of `ids`, `share`
@@ -134,6 +141,11 @@ impl Reading {
     }
 }
 
+/// Why a reading of `count` transcripts is none: they are too many.
+fn too_many(count: usize) -> String {
+    format!("ids: {count} transcripts, of {IDS_MAX} at the most")
+}
+
 /// The last records of the kinds the brief reads among the last
 /// `WINDOW_BYTES` of the transcript at `path`, whole ones alone, as many as
 /// `share` bytes have room for. The window starts partway into a record,
@@ -182,7 +194,7 @@ mod tests {
         let ids = |count: usize| -> Vec<String> {
             (0..count).map(|n| format!("{n:08x}-0000-4000-8000-000000000000")).collect()
         };
-        let share = |count| u32::try_from(Reading::share_of(count)).unwrap();
+        let share = |count| u32::try_from(TAILS_BYTES / count).unwrap();
         let most = Reading::of(&ids(IDS_MAX), share(IDS_MAX)).unwrap();
         let asked = most.asked(None);
         assert_eq!(Reading::of(&asked.ids, asked.share), Ok(most));
@@ -192,5 +204,28 @@ mod tests {
         assert_eq!(Reading::of(&ids(1), 0), Err("share: no bytes of each transcript".to_owned()));
         let named = Reading::of(&["../x".to_owned()], 1).unwrap_err();
         assert_eq!(named, r#"ids: "../x" names no session"#);
+    }
+
+    /// Readings shared out of some transcripts keep an equal share of each
+    /// of them all, and so no more together than one reading of them all
+    /// would, each handed back with what its group came with, and each one a
+    /// daemon takes. Of more than `IDS_MAX` transcripts together there are
+    /// none.
+    #[test]
+    fn shared_readings_keep_no_more_than_one_reading_does() {
+        let ids = |from: usize, count: usize| -> Vec<SessionId> {
+            let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
+            (from..from + count).map(|n| SessionId::parse(&id(n)).unwrap()).collect()
+        };
+        let shared = Reading::shared(vec![("here", ids(0, 3)), ("there", ids(3, 1))]).unwrap();
+        let share = TAILS_BYTES / 4;
+        let here = Reading { ids: ids(0, 3), share };
+        assert_eq!(shared, [("here", here), ("there", Reading { ids: ids(3, 1), share })]);
+        for (_, reading) in shared {
+            let asked = reading.asked(None);
+            assert_eq!(Reading::of(&asked.ids, asked.share), Ok(reading));
+        }
+        let many = Reading::shared(vec![(1, ids(0, IDS_MAX)), (2, ids(IDS_MAX, 1))]);
+        assert_eq!(many, Err("ids: 33 transcripts, of 32 at the most".to_owned()));
     }
 }
