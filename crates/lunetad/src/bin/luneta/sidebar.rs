@@ -3363,9 +3363,10 @@ impl Sidebar {
     /// session files of Claude Code's it cannot read, what went wrong last,
     /// and the menu while it is open, or else the search while that is, or
     /// else the legend while the sidebar has the focus.
-    /// The menu and the legend leave the rows a line. And what has the mouse
-    /// there, the menu or the legend, with the spots on it by their line among
-    /// the notes. A spinner on the menu shows `frame`.
+    /// The menu, the search and the legend leave the rows a line. And what has
+    /// the mouse there, the menu or the keys of the search or the legend, with
+    /// the spots on it by their line among the notes. A spinner on the menu
+    /// shows `frame`.
     fn notes(&self, width: usize, height: usize, frame: usize) -> (Vec<Line<'static>>, Drawn) {
         let mut notes = Vec::new();
         let error = Style::new().fg(ERROR);
@@ -3446,8 +3447,10 @@ impl Sidebar {
     /// The search at the bottom, in at most `room` lines `width` wide, as a
     /// group of the menu stands there: a rule that names it, and once
     /// something is typed, counts the panes it finds of every pane; what is
-    /// typed; and the keys it takes, a spot on each that presses it. Short of
-    /// room, it leaves out the keys, and then the rule.
+    /// typed; and the keys it takes, a spot on each that presses it, while the
+    /// sidebar has the keys: under a box over zellij they are the box's, and
+    /// the search shows none, as the legend shows none there. Short of room,
+    /// it leaves out the keys, and then the rule.
     fn searching(
         &self,
         search: &Search,
@@ -3468,7 +3471,7 @@ impl Sidebar {
             lines.push(menu::rule(Command::Search.does(), &counted, width));
         }
         lines.extend((room >= 1).then(|| query(term, width)));
-        if room < 3 {
+        if room < 3 || self.keys != Keys::Sidebar {
             return (lines, Spots::default());
         }
         let (keys, spots) = menu::keyed(width, &[(Hint::Enter, "Go"), (Hint::Esc, "Close")]);
@@ -6109,18 +6112,24 @@ mod tests {
         assert_eq!(bottom(&mut sidebar), " b  Brief ▸");
     }
 
-    /// The search stays open under a box over zellij, but a click on a key
-    /// under it does nothing while the box has the keys: `Enter` would go to
-    /// the highlighted row from under a brief, and to the menu floating
-    /// there.
+    /// The search stays open under a box over zellij, but without the keys
+    /// under it, which are the box's, as the legend goes. A click on one drawn
+    /// before the box opened does nothing: `Enter` would go to the
+    /// highlighted row from under a brief, and to the menu floating there.
     #[test]
-    fn a_click_on_a_key_under_the_search_does_nothing_under_a_box() {
+    fn the_search_has_no_keys_under_a_box() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "/pix");
         let enter = KeyEvent::from(KeyCode::Enter);
+        let area = Rect::new(0, 0, 32, 16);
+        let rule = format!("─ Search {} 2/7 ─", "─".repeat(16));
         for keys in [Keys::Lent, Keys::Menu { lent: true }] {
             sidebar.focus(keys);
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw(&mut buffer, area, moment(160_000));
+            let line = |y: u16| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            assert_eq!([line(14).trim_end(), line(15).trim_end()], [rule.as_str(), " pix_"]);
             let clicked = sidebar.keys_clicked(Keyed::Search, &enter, moment(160_000));
             assert_eq!(clicked, Asked::Nothing);
         }
