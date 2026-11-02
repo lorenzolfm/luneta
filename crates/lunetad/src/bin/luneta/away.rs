@@ -6,16 +6,17 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    closes_response, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
+    closes_response, AskResponse, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
     ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, RefugeRequest, RefugeResponse,
     StartRequest,
 };
+use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
 use lunetad::opens::Open;
 use lunetad::printed::{Kept, Printed};
@@ -23,6 +24,7 @@ use lunetad::skills::{Name, Skill};
 use lunetad::transcripts::{Reading, SessionId};
 use lunetad::{Destination, SessionName};
 use tokio::runtime::Runtime;
+use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
@@ -216,6 +218,34 @@ impl Away {
         Ok(answer.ends.into_iter().filter_map(end).collect())
     }
 
+    /// Has Claude Code take the turn `asked` there, as `lunetad::asks` runs
+    /// it there, and hands each step it hears to `hear` as it comes, for as
+    /// long as the turn is `wanted`: none once it is not, as the question
+    /// hangs up then, which gives up the turn there. Or how the turn ended:
+    /// well, or why not, as it did there, or as luneta heard nothing of its
+    /// end by `asks::TURN` and its patience after, by which that daemon ends
+    /// it, or as it heard a step that is none, which it hangs up on too.
+    pub fn talk(
+        &mut self,
+        asked: &Asked,
+        wanted: &dyn Fn() -> bool,
+        hear: &dyn Fn(Step),
+    ) -> Option<Result<(), String>> {
+        let request = asked.asked(Some(self.on()));
+        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let deadline = Instant::now() + asks::TURN + patience;
+        let secs = patience.as_secs_f32();
+        self.runtime.block_on(async move {
+            // The daemon answers with the stream as the turn starts.
+            let steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
+                Ok(Ok(steps)) => steps.into_inner(),
+                Ok(Err(status)) => return Some(Err(said(on, &status))),
+                Err(_) => return Some(Err(format!("{on}: lunetad did not answer in {secs}s"))),
+            };
+            heard(on, steps, deadline, wanted, hear).await
+        })
+    }
+
     fn on(&self) -> On {
         On { destination: self.on.to_string() }
     }
@@ -237,6 +267,39 @@ impl Away {
     }
 }
 
+/// How a turn of the ask box's agent on `on` ended, as the daemon hands on
+/// its `steps`, each of which goes to `hear` as it comes, for as long as the
+/// turn is `wanted`: none once it is not. Or why not: as it ended there, or
+/// as its end had not come by `deadline`, or as a step is none. Short of its
+/// end there, the question hangs up as `steps` goes, which gives up the turn
+/// there.
+async fn heard(
+    on: &Destination,
+    mut steps: impl Stream<Item = Result<AskResponse, Status>> + Unpin,
+    deadline: Instant,
+    wanted: &dyn Fn() -> bool,
+    hear: &dyn Fn(Step),
+) -> Option<Result<(), String>> {
+    let minutes = asks::TURN.as_secs() / 60;
+    loop {
+        if !wanted() {
+            return None;
+        }
+        if Instant::now() >= deadline {
+            return Some(Err(format!("{on}: the turn had not ended after {minutes} minutes")));
+        }
+        match tokio::time::timeout(asks::LOOK, steps.next()).await {
+            Err(_) => {},
+            Ok(Some(Ok(step))) => match Step::of(step) {
+                Ok(step) => step.into_iter().for_each(hear),
+                Err(why) => return Some(Err(format!("{on}: {why}"))),
+            },
+            Ok(Some(Err(status))) => return Some(Err(said(on, &status))),
+            Ok(None) => return Some(Ok(())),
+        }
+    }
+}
+
 /// What `status`, of a question for `on`, says: what lunetad said, or what a
 /// daemon older than the question would mean.
 fn said(on: &Destination, status: &Status) -> String {
@@ -246,5 +309,73 @@ fn said(on: &Destination, status: &Status) -> String {
         },
         _ if status.message().is_empty() => format!("{on}: lunetad: {}", status.code()),
         _ => format!("{on}: {}", status.message()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::pin::Pin;
+
+    use lunetad::api::ask_response;
+
+    use super::*;
+
+    /// How long a turn there has, in these tests.
+    const DEADLINE: Duration = Duration::from_millis(50);
+
+    /// What the daemon hands on of a turn there.
+    type Steps = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>>>>;
+
+    /// `steps`, and then the stream's end.
+    fn ending(steps: Vec<Result<AskResponse, Status>>) -> Steps {
+        Box::pin(tokio_stream::iter(steps))
+    }
+
+    /// `steps`, and then nothing more, ever.
+    fn stuck(steps: Vec<Result<AskResponse, Status>>) -> Steps {
+        Box::pin(tokio_stream::iter(steps).chain(tokio_stream::pending()))
+    }
+
+    /// The steps luneta hears of a turn on nixos as the daemon hands on
+    /// `steps`, by a deadline `DEADLINE` off, while the turn is `wanted`, and
+    /// how it ended.
+    fn heard_of(steps: Steps, wanted: bool) -> (Vec<Step>, Option<Result<(), String>>) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let on = "nixos".parse().unwrap();
+        let told = RefCell::new(Vec::new());
+        let hear = |step: Step| told.borrow_mut().push(step);
+        let deadline = Instant::now() + DEADLINE;
+        let ended = runtime.block_on(heard(&on, steps, deadline, &|| wanted, &hear));
+        (told.into_inner(), ended)
+    }
+
+    /// A turn there ends for luneta as the daemon's stream of it does, its
+    /// steps heard as they come: well, or with why not. One whose end has
+    /// not come by its deadline ends with luneta saying so, one with a step
+    /// that is none ends at that step, and one given up ends with nothing
+    /// to say.
+    #[test]
+    fn a_turn_there_ends_as_its_stream_does_or_by_its_deadline() {
+        let said = Step::Said("Looking.".to_owned());
+        let well = heard_of(ending(vec![Ok(said.clone().answer())]), true);
+        assert_eq!(well, (vec![said.clone()], Some(Ok(()))));
+        let failed = Err(Status::failed_precondition("Not logged in"));
+        let not_well = heard_of(ending(vec![Ok(said.clone().answer()), failed]), true);
+        let why = "nixos: Not logged in".to_owned();
+        assert_eq!(not_well, (vec![said.clone()], Some(Err(why))));
+
+        let started = Instant::now();
+        let late = heard_of(stuck(vec![Ok(said.clone().answer())]), true);
+        let why = "nixos: the turn had not ended after 10 minutes".to_owned();
+        assert_eq!(late, (vec![said.clone()], Some(Err(why))));
+        assert!(started.elapsed() >= DEADLINE, "{:?}", started.elapsed());
+
+        let unnamed = AskResponse { step: Some(ask_response::Step::Session("../x".to_owned())) };
+        let none = heard_of(stuck(vec![Ok(unnamed), Ok(said.answer())]), true);
+        let why = "nixos: session: \"../x\" names no session".to_owned();
+        assert_eq!(none, (Vec::new(), Some(Err(why))));
+
+        assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
     }
 }

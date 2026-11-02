@@ -81,6 +81,13 @@ service Daemon {
   // of bytes has room for. A transcript not found there, or that does not
   // read, has none.
   rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
+  // Has Claude Code take a turn of a talk of luneta's ask box on the daemon's
+  // machine, as `claude -p` with luneta's skill, which runs luneta's commands
+  // there: what the agent does as it goes, a step at a time, for as long as
+  // it takes, up to ten minutes. The stream ends as the turn does: well, or
+  // with why not. A question that hangs up first gives up the turn, and
+  // `claude` is killed.
+  rpc Ask(AskRequest) returns (stream AskResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -315,8 +322,8 @@ message KillResponse {}
 message TranscriptEndsRequest {
   On on = 1;
   // The sessions whose transcripts it reads, by the ids Claude Code gives
-  // them: a UUID's hex digits and dashes. More than 32, or one of anything
-  // else, is invalid.
+  // them: a UUID's hex digits and dashes, a hex digit first. More than 32, or
+  // one of anything else, is invalid.
   repeated string ids = 2;
   // The most bytes it keeps of each end: 512 KiB at the most of them all
   // together. None, as a question that does not say has, is invalid.
@@ -327,6 +334,64 @@ message TranscriptEndsResponse {
   // The end of each transcript it found, by its session's id: its records,
   // a line each, oldest first.
   map<string, string> ends = 1;
+}
+
+message AskRequest {
+  On on = 1;
+  // The directory the agent works in, by its absolute path: one by another,
+  // as an empty one, is invalid. Absent for the home of the daemon's user.
+  optional string cwd = 2;
+  // What the user typed: with nothing but white space, it is invalid.
+  string words = 3;
+  // The Claude session the talk goes on on, by the id the turn before said,
+  // as `TranscriptEndsRequest.ids` has one, and anything else is invalid.
+  // Absent for a talk's first turn.
+  optional string resumed = 4;
+  // What the agent is told of the row highlighted in luneta's sidebar as the
+  // box opened, for words that point at it.
+  string highlighted = 5;
+  // Where the user is as they send the turn, as luneta tells it: absent
+  // where it cannot tell.
+  oneof user {
+    // In a pane of zellij there, where luneta's zellij is: a session's name
+    // zellij takes, or else the question is invalid, and its terminal.
+    UserPane pane = 6;
+    // On another machine, where luneta's zellij is: in none of its panes.
+    Away away = 7;
+  }
+  // The key of the turn, and of the turn before, absent for the first: a
+  // close the agent runs takes a yes only to a plan said in the turn before.
+  fixed64 turn = 8;
+  optional fixed64 before = 9;
+
+  message UserPane {
+    string session = 1;
+    uint32 pane = 2;
+  }
+
+  message Away {}
+}
+
+// A step of a turn of the agent, as `claude` says it. One with none of
+// these, as a newer daemon's could be, is left out.
+message AskResponse {
+  oneof step {
+    // The Claude session the turn runs on, by its id, which the next turn
+    // goes on with.
+    string session = 1;
+    // A command the agent runs, or another tool it uses, by its name.
+    Ran ran = 2;
+    // Claude Code denied the agent the call of this id, which ran nothing.
+    string denied = 3;
+    // What the agent said.
+    string said = 4;
+  }
+
+  message Ran {
+    // The id Claude Code gives the call.
+    string id = 1;
+    string command = 2;
+  }
 }
 
 // A session that runs, and its clients, which are those it has before the

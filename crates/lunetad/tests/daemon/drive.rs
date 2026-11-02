@@ -255,9 +255,12 @@ fn asked(host: &Host, vars: &[(&str, &str)], args: &[&str]) -> Output {
 /// The agent luneta's ask box runs is in no pane, and goes by the pane you
 /// asked from, as the box names it: it is where `here` says it runs, and
 /// what holds it is what a close takes last. A command in a pane of zellij
-/// that names another for the box's goes by neither. Where the box names
-/// none, as it cannot tell, a close in a turn of it closes nothing, as it
-/// could take your pane first.
+/// that names another for the box's goes by neither, nor does one the box
+/// names a pane for outside a turn. Where the box names none, as it cannot
+/// tell, a close in a turn of it closes nothing, as it could take your pane
+/// first, and `here`, `go`, `open session`, and `open pane` and `open tab`
+/// without a pane or a session to open in, say that it cannot tell, and ask
+/// zellij nothing.
 #[test]
 fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     let host = Host::new();
@@ -267,33 +270,117 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
     host.lists.list("work", &work);
     let box_pane = ("LUNETA_PANE", "work:2");
+    let first = [box_pane, ("LUNETA_TURN", "00000000000000aa")];
+    let second =
+        [box_pane, ("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
 
-    let seat = asked(&host, &[box_pane], &["here"]);
+    let seat = asked(&host, &first, &["here"]);
     assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
     assert_eq!(String::from_utf8(seat.stdout).unwrap(), "work:2\n");
-    let in_pane = [box_pane, ("ZELLIJ_SESSION_NAME", "work"), ("ZELLIJ_PANE_ID", "3")];
-    let seat = asked(&host, &in_pane, &["here"]);
-    let why = String::from_utf8_lossy(&seat.stderr);
-    assert_eq!(seat.status.code(), Some(1), "{why}");
-    assert!(why.contains("LUNETA_PANE names work:2"), "{why}");
+    let in_zellij = [("ZELLIJ_SESSION_NAME", "work"), ("ZELLIJ_PANE_ID", "3")];
+    for (vars, said) in [
+        (&[box_pane][..], "LUNETA_PANE is set, and LUNETA_TURN is not"),
+        (&[first[0], first[1], in_zellij[0], in_zellij[1]], "LUNETA_PANE names work:2"),
+    ] {
+        let seat = asked(&host, vars, &["here"]);
+        let why = String::from_utf8_lossy(&seat.stderr);
+        assert_eq!(seat.status.code(), Some(1), "{why}");
+        assert!(why.contains(said), "{why}");
+    }
 
-    let (said, agreed) = planned(&asked(&host, &[box_pane], &["close", "work:2", "play"]));
+    let (said, agreed) = planned(&asked(&host, &first, &["close", "work:2", "play"]));
     assert_eq!(
         said,
         format!("delete session play: {UNTOLD}\nclose pane work:2: {UNTOLD}\n")
     );
-    let told = asked(&host, &[box_pane], &["close", "work:2", "play", "--yes", &agreed]);
+    let told = asked(&host, &second, &["close", "work:2", "play", "--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     let closed =
         ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
 
-    let unseated = asked(&host, &[("LUNETA_TURN", "00000000000000aa")], &["close", "work:3"]);
+    let untold = [("LUNETA_TURN", "00000000000000aa")];
+    let unseated = asked(&host, &untold, &["close", "work:3"]);
     let why = String::from_utf8_lossy(&unseated.stderr);
     assert_eq!(unseated.status.code(), Some(1), "{why}");
     assert!(why.contains("cannot tell which pane the user asked from"), "{why}");
     assert!(unseated.stdout.is_empty(), "{}", String::from_utf8_lossy(&unseated.stdout));
     assert_eq!(host.lists.closed(), closed);
+    for args in [
+        &["here"][..],
+        &["go", "work"],
+        &["open", "session", "--cwd", "/w"],
+        &["open", "pane", "--cwd", "/w"],
+        &["open", "tab", "--cwd", "/w"],
+    ] {
+        let refused = asked(&host, &untold, args);
+        let why = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}: {why}");
+        assert!(why.contains("cannot tell which pane the user asked from"), "{args:?}: {why}");
+    }
+    assert!(host.lists.went().is_empty());
+    assert!(host.lists.opened().is_empty());
+}
+
+/// Asked from another machine, where luneta's zellij is, the ask box's
+/// agent goes by no pane of this one's, as none is yours: a close takes a
+/// yes in the turn after its plan, as ever, and keeps no pane for last.
+/// `here`, `go`, `open session`, and `open pane` and `open tab` without a
+/// pane or a session to open in, say why they have none to go by, and ask
+/// zellij nothing. A command in a pane of zellij that the box says was asked
+/// from another machine goes by neither, nor one the box says both of, nor
+/// one it says so of outside a turn, or by anything but luneta's `1`.
+#[test]
+fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    let tab = (0, "Tab #1");
+    let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
+    host.lists.list("work", &work);
+    let away = ("LUNETA_AWAY", "1");
+    let first = [away, ("LUNETA_TURN", "00000000000000aa")];
+    let second =
+        [away, ("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
+
+    let (said, agreed) = planned(&asked(&host, &first, &["close", "work:2", "play"]));
+    assert_eq!(
+        said,
+        format!("delete session play: {UNTOLD}\nclose pane work:2: {UNTOLD}\n")
+    );
+    let told = asked(&host, &second, &["close", "work:2", "play", "--yes", &agreed]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    let closed =
+        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
+    assert_eq!(host.lists.closed(), closed);
+
+    for args in [
+        &["here"][..],
+        &["go", "work"],
+        &["open", "session", "--cwd", "/w"],
+        &["open", "pane", "--cwd", "/w"],
+        &["open", "tab", "--cwd", "/w"],
+    ] {
+        let refused = asked(&host, &first, args);
+        let why = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}: {why}");
+        assert!(why.contains("asked from another machine"), "{args:?}: {why}");
+    }
+    let in_zellij = [("ZELLIJ_SESSION_NAME", "work"), ("ZELLIJ_PANE_ID", "3")];
+    for (vars, said) in [
+        (&[first[0], first[1], in_zellij[0], in_zellij[1]][..], "LUNETA_AWAY says"),
+        (&[first[0], first[1], ("LUNETA_PANE", "work:2")], "LUNETA_PANE names work:2"),
+        (&[away], "LUNETA_AWAY is set, and LUNETA_TURN is not"),
+        (&[("LUNETA_AWAY", "0"), first[1]], "LUNETA_AWAY is \"0\""),
+    ] {
+        let seat = asked(&host, vars, &["here"]);
+        let why = String::from_utf8_lossy(&seat.stderr);
+        assert_eq!(seat.status.code(), Some(1), "{why}");
+        assert!(why.contains(said), "{why}");
+    }
+    assert_eq!(host.lists.closed(), closed);
+    assert!(host.lists.went().is_empty());
+    assert!(host.lists.opened().is_empty());
 }
 
 /// The ask box's agent runs what it may without anyone asking you, and a
@@ -373,10 +460,11 @@ fn the_ask_box_s_agent_goes_by_the_name_the_session_has_now() {
     eventually("the agent is in fix", || in_session("fix"));
     let _taken = UnixListener::bind(host.contract().join("work")).unwrap();
 
-    let seat = asked(&host, &[("LUNETA_PANE", "work:2")], &["here"]);
+    let turn = ("LUNETA_TURN", "00000000000000aa");
+    let seat = asked(&host, &[("LUNETA_PANE", "work:2"), turn], &["here"]);
     assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
     assert_eq!(String::from_utf8(seat.stdout).unwrap(), "work:2\n");
-    let seat = asked(&host, &[("LUNETA_PANE", "gone:2")], &["here"]);
+    let seat = asked(&host, &[("LUNETA_PANE", "gone:2"), turn], &["here"]);
     let why = String::from_utf8_lossy(&seat.stderr);
     assert_eq!(seat.status.code(), Some(1), "{why}");
     assert!(why.contains("no session runs by that name now"), "{why}");

@@ -30,6 +30,7 @@ use lunetad::opens::tab_opened;
 pub use lunetad::names::{named, session_for};
 use lunetad::names::kept;
 pub use lunetad::opens::{opening, Open, Tab};
+use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::{clients, moves, program, Destination};
 pub use lunetad::SessionName;
 
@@ -38,12 +39,6 @@ use crate::due::Due;
 use crate::host::{Event, Nudged};
 use crate::machines::Machine;
 use crate::own::{Before, Look, Looked};
-
-/// What names the pane you asked luneta's ask box from, in the variables of
-/// the agent it runs, which runs in no pane: the pane luneta's zellij was on
-/// as the turn started, as `<session>:<pane>`, by the name its session had
-/// then, not the one it had as the pane opened.
-pub const ASKED_VAR: &str = "LUNETA_PANE";
 
 /// A pane of a session, as the CLI names it: `<session>:<pane>`, as `luneta
 /// agents` writes it.
@@ -75,18 +70,33 @@ pub enum Seat {
     /// In a pane of zellij, by the name its session had as the pane opened,
     /// which a rename leaves behind.
     Opened { named: String, pane: u32 },
-    /// In no pane, as the agent of luneta's ask box runs, by the pane you
-    /// asked from, by the name its session had as you asked.
-    Asked(Pane),
+    /// In no pane, as the agent of luneta's ask box runs, in `turn`, for you
+    /// where `user` says: in the pane you asked from, by the name its session
+    /// had as you asked, or on another machine, where luneta's zellij was,
+    /// or where luneta could not tell.
+    Asked { turn: Turn, user: User },
+}
+
+impl Seat {
+    /// The turn of luneta's ask box it is in: none outside the box.
+    pub fn turn(&self) -> Option<Turn> {
+        match self {
+            Seat::Asked { turn, .. } => Some(*turn),
+            Seat::Opened { .. } => None,
+        }
+    }
 }
 
 /// Where this runs, as zellij names it in the variables of what runs in its
 /// panes, or luneta's ask box in those of its agent: none outside both. Or
-/// why the box's does not read, or names a pane where zellij's name another:
-/// nothing runs in one pane and asks from another.
+/// why the box's do not read, as `asks::turn_in` says, or name a turn where
+/// zellij's name a pane: nothing runs in a pane and asks from another.
 pub fn here() -> Result<Option<Seat>, String> {
-    let (asked, session, pane) = (var(ASKED_VAR)?, var(SESSION_VAR)?, var(PANE_VAR)?);
-    seat_in(asked.as_deref(), session.as_deref(), pane.as_deref())
+    let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
+    let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
+    let turn = asks::turn_in(key.as_deref(), before.as_deref(), asked.as_deref(), away.as_deref());
+    let (session, pane) = (var(SESSION_VAR)?, var(PANE_VAR)?);
+    seat_in(turn?, session.as_deref(), pane.as_deref())
 }
 
 /// The variable `name` of this process: none where it is not set, or why it
@@ -99,22 +109,27 @@ pub fn var(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The seat `asked` names, as `ASKED_VAR` does, or else the one zellij's
-/// `session` and `pane` do, or none.
+/// The seat of the turn of luneta's ask box `asked`, and where it says you
+/// are, or else the one zellij's `session` and `pane` name, or none.
 fn seat_in(
-    asked: Option<&str>,
+    asked: Option<(Turn, User)>,
     session: Option<&str>,
     pane: Option<&str>,
 ) -> Result<Option<Seat>, String> {
     match (asked, session.filter(|session| !session.is_empty())) {
-        (Some(asked), Some(session)) => Err(format!(
-            "{ASKED_VAR} names {asked}, a pane luneta's ask box asked from, and this runs in a \
-             pane of {session}"
-        )),
-        (Some(asked), None) => {
-            let asked = pane_address(asked).map_err(|why| format!("{ASKED_VAR}: {why}"))?;
-            Ok(Some(Seat::Asked(asked)))
+        (Some((_, user)), Some(session)) => {
+            let asked = match user {
+                User::Pane { session: from, pane } => {
+                    format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
+                },
+                User::Away => {
+                    format!("{AWAY_VAR} says luneta's ask box asked from another machine")
+                },
+                User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
+            };
+            Err(format!("{asked}, and this runs in a pane of {session}"))
         },
+        (Some((turn, user)), None) => Ok(Some(Seat::Asked { turn, user })),
         (None, Some(named)) => {
             let pane = pane.and_then(|pane| pane.parse().ok());
             Ok(pane.map(|pane| Seat::Opened { named: named.to_owned(), pane }))
@@ -1383,26 +1398,27 @@ mod tests {
 
     /// A command runs in the pane zellij's variables name, by the name its
     /// session had as the pane opened, and the agent of luneta's ask box, in
-    /// none, goes by the pane the box names. One the box misspells is no
-    /// pane, nor is one it names where zellij's name another.
+    /// none, goes by the turn the box names, for you where it says. Where
+    /// zellij names a pane too, it goes by neither: nothing runs in one pane
+    /// and asks from another.
     #[test]
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
         let opened = |named: &str, pane| Ok(Some(Seat::Opened { named: named.to_owned(), pane }));
-        let asked = |session: &str, pane| {
-            Ok(Some(Seat::Asked(Pane { session: session.to_owned(), pane })))
-        };
         assert_eq!(seat_in(None, Some("work"), Some("2")), opened("work", 2));
-        assert_eq!(seat_in(Some("a:b:4"), None, None), asked("a:b", 4));
-        assert_eq!(seat_in(Some("work:4"), Some(""), Some("2")), asked("work", 4));
         for (session, pane) in
             [(Some(""), Some("2")), (Some("work"), Some("terminal_2")), (Some("work"), None), (None, None)]
         {
             assert_eq!(seat_in(None, session, pane), Ok(None), "{session:?} {pane:?}");
         }
-        for asked in ["", "work", ":4", "work:x"] {
-            assert!(seat_in(Some(asked), None, None).is_err(), "{asked}");
+        let turn = Turn::new(255, Some(10)).unwrap();
+        let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
+        for user in [work, User::Away, User::Untold] {
+            let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
+            assert_eq!(seat_in(Some((turn, user.clone())), None, None), asked);
+            assert_eq!(seat_in(Some((turn, user.clone())), Some(""), Some("2")), asked);
+            let in_a_pane = seat_in(Some((turn, user.clone())), Some("play"), Some("2"));
+            assert!(in_a_pane.is_err_and(|why| why.ends_with("this runs in a pane of play")));
         }
-        assert!(seat_in(Some("work:4"), Some("work"), Some("2")).is_err());
     }
 
     /// zellij's client reads `NUDGE` as a key let go once it asked its

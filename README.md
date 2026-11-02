@@ -817,7 +817,8 @@ in there is deleted once zellij is in the newest other session of that
 machine's; with none, it is deleted with zellij in it, and luneta goes on as it
 does when a session there ends. While luneta's zellij is on another machine,
 the menu over zellij is for its pane there. The Brief group briefs you on its
-agents as on this machine's. The ask box and moving its sessions come later. `u` marks
+agents as on this machine's, and [the ask box](#on-another-machines-row) runs
+its agent there. Moving its sessions comes later. `u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.
@@ -952,6 +953,33 @@ is the sidebar's own. Each turn writes a Claude session in that directory, as
 any `claude -p` does, so `claude --resume` lists it there.
 
 `Alt r` in the box [dictates](#dictate) on its line, after what you typed.
+
+##### On another machine's row
+
+On a row of another machine's, the agent runs on that machine: lunetad there
+runs `claude -p` with that machine's luneta, skill, settings and Claude Code
+login, and the daemon here hands on what it does as it goes, through the bridge
+it watches that machine on. So its `luneta` commands, `zoxide`, `gh` and
+worktrees act there. It works in the highlighted pane's directory there, or in
+your home there on a session's row or the machine's header, and the box's top
+says which machine, as `luneta/main on nixos`. A machine without `claude`, or
+without a login there, says so in the box. lunetad there finds `claude`, and the
+`zoxide`, `gh` and `git` the agent runs, on the `PATH` it started with: that of
+the command ssh ran `luneta bridge` in, where the bridge started it, or of the
+terminal a luneta there ran in. So a `claude` that only your interactive shell
+puts on the `PATH` is found there only while a lunetad started from a terminal
+runs there.
+
+While luneta's zellij is on that machine, the agent goes by the pane it is on
+there, as it does here. While luneta's zellij is on another machine, as on this
+one with the row on nixos, the agent is told you are on another machine, as
+`LUNETA_AWAY` says, and goes by no pane there, as none is yours: a close takes
+none of yours along, and takes `--yes` in the turn after its plan as ever,
+while `luneta here`, `go`, `open session`, and `open pane` and `open tab`
+without `--beside` and `--session`, say why they can't. The same goes for a
+row of this machine's while luneta's zellij is on another. `Esc` gives up the
+turn there too, and lunetad there kills `claude`. A turn takes up to ten
+minutes wherever it runs.
 
 ### Dictate
 

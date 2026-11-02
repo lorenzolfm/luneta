@@ -56,7 +56,8 @@ impl<'a> Vars<'a> {
             "CLAUDE_CONFIG_DIR",
             "ZELLIJ_SOCKET_DIR",
         ];
-        let panes = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "LUNETA_PANE"];
+        let panes =
+            ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "LUNETA_PANE", "LUNETA_AWAY"];
         let turns = ["LUNETA_TURN", "LUNETA_TURN_BEFORE"];
         for name in names.into_iter().chain(panes).chain(turns) {
             command.env_remove(name);

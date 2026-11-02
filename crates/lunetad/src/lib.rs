@@ -7,6 +7,7 @@
 
 mod agent;
 pub mod api;
+pub mod asks;
 mod claude;
 pub mod cli;
 mod client;

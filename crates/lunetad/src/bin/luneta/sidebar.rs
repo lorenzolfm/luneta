@@ -49,6 +49,7 @@ use lunetad::api::shell::Doing;
 use lunetad::api::{
     Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, UnreadFile, Zellij,
 };
+use lunetad::asks::User;
 use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination};
 use ratatui::buffer::Buffer;
@@ -77,7 +78,7 @@ use crate::printed::Printed;
 use crate::pull::{Link, Ready, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
-use crate::zellij::{self, Closes, Open, SessionName, Tab};
+use crate::zellij::{Closes, Open, SessionName, Tab};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
@@ -1425,16 +1426,23 @@ impl Sidebar {
         self.here().filter(|_| self.on == Machine::Local)
     }
 
-    /// The pane luneta's zellij is on, by its session's name now, while it
-    /// is in a session of this machine's, on its way to none, and on a pane,
-    /// not a plugin's.
-    pub fn here_pane(&self) -> Option<zellij::Pane> {
-        if self.going().is_some() || self.on != Machine::Local {
-            return None;
+    /// Where you are, for the ask box's agent on `machine` to go by: on
+    /// another machine while luneta's zellij is; or else on the pane
+    /// luneta's zellij is on, by its session's name now, while it is on its
+    /// way to no session, and on a pane, not a plugin's; or where luneta
+    /// cannot tell.
+    pub fn user(&self, machine: &Machine) -> User {
+        if self.on != *machine {
+            return User::Away;
         }
-        let session = self.here()?;
-        let pane = self.own.pane().filter(|_| self.own.session() == Some(session))?;
-        Some(zellij::Pane { session: session.to_owned(), pane })
+        let Some(session) = self.here().filter(|_| self.going().is_none()) else {
+            return User::Untold;
+        };
+        let pane = self.own.pane().filter(|_| self.own.session() == Some(session));
+        match (SessionName::running(session), pane) {
+            (Ok(session), Some(pane)) => User::Pane { session, pane },
+            (Err(_), _) | (_, None) => User::Untold,
+        }
     }
 
     /// The sessions zellij's client may be in: the one luneta sent it to,
@@ -7529,7 +7537,9 @@ mod tests {
         assert_eq!(sidebar.next_pane(), Some(there(2)));
         sidebar.went(&there(2));
         assert_eq!(sidebar.next_pane(), Some(there(1)));
-        assert_eq!(sidebar.here_pane(), None);
+        let on_its_pane = User::Pane { session: session_name("main"), pane: 2 };
+        assert_eq!(sidebar.user(&Machine::Remote(nixos())), on_its_pane);
+        assert_eq!(sidebar.user(&Machine::Local), User::Away);
         assert_eq!(sidebar.float_menu(), Ok(()));
         let floating = sidebar.menu.take().map(|menu| menu.target().clone());
         let Some(Target::Pane(on, PaneRow { pane: 2, .. })) = floating else {

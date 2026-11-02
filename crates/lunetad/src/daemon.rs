@@ -28,6 +28,7 @@ use std::io::{self, ErrorKind};
 use std::mem;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -39,7 +40,8 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tokio::task;
 use tokio::time::timeout;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tokio_stream::Stream;
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status};
 
@@ -52,13 +54,14 @@ use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
-    self, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse, GoRequest, GoResponse,
-    InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
-    ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
-    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse,
+    self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
+    GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
+    KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
+    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
+    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
+    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
+use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
@@ -105,6 +108,15 @@ const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 /// The most questions a client has open at once on one connection, which
 /// HTTP/2 tells it: `luneta` asks one.
 const QUESTIONS_MAX: u32 = 16;
+
+/// The most steps of a turn of the ask box's agent that wait to be handed
+/// on: a turn takes a few dozen, and `claude` waits while the client takes
+/// in this many.
+const STEPS_WAITING: usize = 64;
+
+/// What the daemon says of a turn of the ask box's agent that it ran, and
+/// that ended without saying how.
+const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of it failed";
 
 /// How long the daemon runs on once zellij has no session, and no client
 /// watches it: long enough that ending the last one and opening another does
@@ -658,6 +670,51 @@ impl Daemon for Host {
         let ends = read.into_iter().map(|(id, end)| (id.as_str().to_owned(), end)).collect();
         Ok(Response::new(TranscriptEndsResponse { ends }))
     }
+
+    type AskStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
+
+    async fn ask(&self, request: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
+        let (on, asked) = Asked::of(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let steps = daemon.ask(asked.asked(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(steps)));
+        }
+        // The server times out a question as it waits for the answer's
+        // start, which the stream is, and never as it waits for the rest.
+        let steps = talked(move |wanted, hear| asked.talk(wanted, hear));
+        Ok(Response::new(Box::pin(steps)))
+    }
+}
+
+/// What `talk` hears of a turn of the ask box's agent, a step at a time, as
+/// the daemon hands it on, from a thread of its own, as a turn takes as long
+/// as `claude` does. The stream ends as the turn does: well, or with why
+/// not, or with the daemon saying that its runner of the turn failed. A
+/// question that hangs up gives up the turn, as it is no longer `wanted`.
+fn talked<T>(talk: T) -> ReceiverStream<Result<AskResponse, Status>>
+where
+    T: FnOnce(&dyn Fn() -> bool, &dyn Fn(Step)) -> Option<Result<(), String>> + Send + 'static,
+{
+    let (heard, steps) = tokio::sync::mpsc::channel(STEPS_WAITING);
+    let failed = heard.clone();
+    let talking = task::spawn_blocking(move || {
+        // The question hung up, which gives the turn up.
+        let wanted = || !heard.is_closed();
+        let hear = |step: Step| {
+            let _ = heard.blocking_send(Ok(step.answer()));
+        };
+        if let Some(Err(why)) = talk(&wanted, &hear) {
+            let _ = heard.blocking_send(Err(Status::failed_precondition(why)));
+        }
+    });
+    // A turn that panicked dropped what it heard with, which alone would end
+    // the stream as a turn that ended well.
+    task::spawn(async move {
+        if talking.await.is_err() {
+            let _ = failed.send(Err(Status::internal(UNTALKED))).await;
+        }
+    });
+    ReceiverStream::new(steps)
 }
 
 /// The clients of `session` here, as zellij lists them now, or why not.
@@ -755,7 +812,11 @@ impl Host {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::Alone;
+    use tokio_stream::StreamExt as _;
+    use tonic::Code;
+
+    use super::{talked, Alone, UNTALKED};
+    use crate::asks::Step;
 
     /// zellij is alone from the first look that finds no session, and a
     /// session, however short its life, has it start over: ending the last
@@ -771,5 +832,24 @@ mod tests {
         assert_eq!(alone.saw(true, at(40)), Duration::ZERO);
         assert_eq!(alone.saw(true, at(69)), Duration::from_secs(29));
         assert_eq!(alone.saw(true, at(70)), Duration::from_secs(30));
+    }
+
+    /// A turn whose runner failed ends after the steps it heard, with the
+    /// daemon saying so: not as a turn that ended well.
+    #[test]
+    fn a_turn_whose_runner_failed_does_not_end_well() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let ended: Vec<_> = runtime.block_on(async {
+            let steps = talked(|_, hear| {
+                hear(Step::Said("Looking.".to_owned()));
+                panic!("the runner of the turn fails");
+            });
+            steps.collect().await
+        });
+        let [Ok(heard), Err(failed)] = ended.as_slice() else {
+            panic!("{ended:?}");
+        };
+        assert_eq!(*heard, Step::Said("Looking.".to_owned()).answer());
+        assert_eq!((failed.code(), failed.message()), (Code::Internal, UNTALKED));
     }
 }
