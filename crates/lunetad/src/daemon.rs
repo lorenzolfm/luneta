@@ -33,6 +33,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use luneta_protocol::said::Said;
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
@@ -486,21 +487,10 @@ impl Daemon for Host {
     }
 
     async fn open(&self, request: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
-        let OpenRequest { on, session, cwd, command, opens } = request.into_inner();
-        let session = named("session", &session)?.to_string();
-        let Some(what) = opens else {
-            return Err(Status::invalid_argument("opens: neither a pane nor a tab"));
-        };
+        let (on, open) = asked_open(request.into_inner())?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let opens = Some(what);
-            return daemon.open(OpenRequest { on: None, session, cwd, command, opens }).await;
+            return daemon.open(open.asked(None)).await;
         }
-        let open = match what {
-            Opens::Beside(beside) => Open::Pane { session, beside, cwd, command },
-            Opens::Tab(open_request::Tab { name }) => {
-                Open::Tab { session, tab: Tab { cwd, name, command } }
-            },
-        };
         let opened = task::spawn_blocking(move || opens::opening(&open)).await;
         let opened = opened.map_err(|error| unfinished(&error))?;
         let terminal = opened.map_err(Status::failed_precondition)?;
@@ -512,6 +502,7 @@ impl Daemon for Host {
         request: Request<ListSkillsRequest>,
     ) -> Result<Response<ListSkillsResponse>, Status> {
         let ListSkillsRequest { on, dir } = request.into_inner();
+        let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
             return daemon.list_skills(ListSkillsRequest { on: None, dir }).await;
         }
@@ -529,8 +520,10 @@ impl Daemon for Host {
         request: Request<KeepPrintedRequest>,
     ) -> Result<Response<KeepPrintedResponse>, Status> {
         let KeepPrintedRequest { on, session, pane, typed } = request.into_inner();
-        let session = named("session", &session)?.to_string();
+        let session = named("session", &session)?;
+        let typed = Said::new(typed).ok_or_else(|| Status::invalid_argument("typed: it is empty"))?;
         if let Some(mut daemon) = self.bridged(on)? {
+            let (session, typed) = (session.to_string(), typed.into());
             return daemon.keep_printed(KeepPrintedRequest { on: None, session, pane, typed }).await;
         }
         let kept = task::spawn_blocking(move || printed::kept_after(&session, pane, &typed)).await;
@@ -555,6 +548,7 @@ impl Daemon for Host {
         request: Request<NameSessionRequest>,
     ) -> Result<Response<NameSessionResponse>, Status> {
         let NameSessionRequest { on, dir } = request.into_inner();
+        let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
             return daemon.name_session(NameSessionRequest { on: None, dir }).await;
         }
@@ -570,6 +564,7 @@ impl Daemon for Host {
     ) -> Result<Response<StartResponse>, Status> {
         let StartRequest { on, at, to, cwd } = request.into_inner();
         let (at, to) = (named("at", &at)?, named("to", &to)?);
+        let cwd = cwd.map(|cwd| directory("cwd", cwd)).transpose()?;
         if let Some(mut daemon) = self.bridged(on)? {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
@@ -591,6 +586,37 @@ fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
 /// why the question is invalid: it is not one.
 fn named(field: &str, name: &str) -> Result<SessionName, Status> {
     SessionName::running(name).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
+}
+
+/// `dir`, of the question's `field`, as a directory by its absolute path, or
+/// why the question is invalid: one by a path relative to the daemon's own
+/// directory, or by none, would be read as that one, which is no one's.
+fn directory(field: &str, dir: String) -> Result<String, Status> {
+    if dir.starts_with('/') {
+        return Ok(dir);
+    }
+    Err(Status::invalid_argument(format!("{field}: {dir:?} is no absolute path")))
+}
+
+/// What `request` has zellij open, on the machine it names, or why the
+/// question is invalid: it names a session zellij would not take, or a
+/// directory by no absolute path, or it opens neither a pane nor a tab, or a
+/// tab by an empty name, where an absent one has zellij number it.
+fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
+    let OpenRequest { on, session, cwd, command, opens } = request;
+    let (session, cwd) = (named("session", &session)?, directory("cwd", cwd)?);
+    let open = match opens {
+        None => return Err(Status::invalid_argument("opens: neither a pane nor a tab")),
+        Some(Opens::Beside(beside)) => Open::Pane { session, beside, cwd, command },
+        Some(Opens::Tab(open_request::Tab { name: Some(name) })) if name.is_empty() => {
+            let why = "opens: a tab's name is empty, where an absent one has zellij number it";
+            return Err(Status::invalid_argument(why));
+        },
+        Some(Opens::Tab(open_request::Tab { name })) => {
+            Open::Tab { session, tab: Tab { cwd, name, command } }
+        },
+    };
+    Ok((on, open))
 }
 
 /// Why what the daemon asked of zellij, or of the finder of skills, did not

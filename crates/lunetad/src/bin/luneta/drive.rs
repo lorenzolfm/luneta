@@ -270,7 +270,8 @@ fn pane(
     let Pane { session, pane } =
         beside.ok_or("this runs in no pane of zellij: name one to open beside with --beside")?;
     let cwd = directory(cwd)?;
-    let open = Open::Pane { session: session.clone(), beside: pane, cwd, command: command.to_vec() };
+    let named = session_named(&session)?;
+    let open = Open::Pane { session: named, beside: pane, cwd, command: command.to_vec() };
     let opened = zellij::opening(&open)?;
     Ok(Pane { session, pane: opened }.to_string())
 }
@@ -291,15 +292,9 @@ fn tab(
         None => seat_here(folder)?.ok_or(UNNAMED)?.session,
     };
     started(&session, &zellij::running()?)?;
-    if zellij::clients(&session)?.is_empty() {
-        return Err(format!(
-            "no client is in {session}, and zellij makes a tab with no room for its panes in a \
-             session with none: open a pane beside one of its panes, or go there first"
-        ));
-    }
     let (name, command) = (name.map(str::to_owned), command.to_vec());
     let tab = Tab { cwd: directory(cwd)?, name, command };
-    let open = Open::Tab { session: session.clone(), tab };
+    let open = Open::Tab { session: session_named(&session)?, tab };
     let opened = zellij::opening(&open)?;
     Ok(Pane { session, pane: opened }.to_string())
 }
@@ -726,6 +721,11 @@ fn act(act: &Act) -> Result<(), String> {
             zellij::killed(session, *started)
         },
     }
+}
+
+/// `session` as a name zellij takes, or why it is none.
+fn session_named(session: &str) -> Result<SessionName, String> {
+    SessionName::running(session).map_err(|why| format!("{session:?} names no session: {why}"))
 }
 
 /// When `session` started, of the sessions `running`, or that none runs by

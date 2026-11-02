@@ -9,7 +9,11 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
+use crate::api::open_request::{self, Opens};
+use crate::api::{On, OpenRequest};
 use crate::cli::{self, answered, laid, quiet, terminal_of, Laid};
+use crate::clients;
+use crate::zellij::SessionName;
 
 /// What names your shell, in luneta's variables, as in those of the zellij
 /// it starts, which runs it where its config names no other. What runs luneta
@@ -29,12 +33,30 @@ const NO_SHELL: &str = "/bin/sh";
 pub enum Open {
     /// `command`, or your shell where there is none, in a pane of its own
     /// beside the pane `beside` of `session`, in its tab, and in `cwd`.
-    Pane { session: String, beside: u32, cwd: String, command: Vec<String> },
+    Pane { session: SessionName, beside: u32, cwd: String, command: Vec<String> },
     /// The tab `tab`, in `session`. zellij makes a tab as big as a client of
     /// its session, and one it opens in a session with none has no room for
     /// its panes: in another session than luneta's client's, it opens once
     /// that client has come.
-    Tab { session: String, tab: Tab },
+    Tab { session: SessionName, tab: Tab },
+}
+
+impl Open {
+    /// The question that has zellij open it on the machine `on` names, or
+    /// on the daemon's own, where it names none.
+    #[must_use]
+    pub fn asked(&self, on: Option<On>) -> OpenRequest {
+        let (session, cwd, command, opens) = match self {
+            Open::Pane { session, beside, cwd, command } => {
+                (session, cwd, command, Opens::Beside(*beside))
+            },
+            Open::Tab { session, tab: Tab { cwd, name, command } } => {
+                (session, cwd, command, Opens::Tab(open_request::Tab { name: name.clone() }))
+            },
+        };
+        let (session, cwd, command) = (session.to_string(), cwd.clone(), command.clone());
+        OpenRequest { on, session, cwd, command, opens: Some(opens) }
+    }
 }
 
 /// A tab luneta opens, in `cwd`, named `name` or as zellij numbers it, with
@@ -50,13 +72,15 @@ pub struct Tab {
 /// `--no-focus` beside the one the command runs in, which it reads in
 /// `PANE_VAR`, whatever tab that is in and whether a client is on it, and
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
-/// the one it lists in that tab.
+/// the one it lists in that tab. No tab opens in a session no client is in,
+/// where it would have no room for its panes, as `Open::Tab` says.
 pub fn opening(open: &Open) -> Result<u32, String> {
     match open {
         Open::Pane { session, beside, cwd, command: runs } => {
             let mut command = Command::new("zellij");
             quiet(&mut command);
             command.env(cli::PANE_VAR, beside.to_string());
+            let session = session.as_str();
             command.args(["--session", session, "action", "new-pane", "--no-focus", "--cwd", cwd]);
             if !runs.is_empty() {
                 command.arg("--").args(runs);
@@ -66,6 +90,14 @@ pub fn opening(open: &Open) -> Result<u32, String> {
             pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
         },
         Open::Tab { session, tab } => {
+            let mut zellij = Command::new("zellij");
+            quiet(&mut zellij);
+            if clients::list(zellij, session.as_str())?.is_empty() {
+                return Err(format!(
+                    "no client is in {session}, and zellij makes a tab with no room for its panes \
+                     in a session with none: open a pane beside one of its panes, or go there first"
+                ));
+            }
             let (opened, laid) = tab_opened(session, tab)?;
             terminal_of(&laid, opened).ok_or_else(|| "zellij opened a tab with no pane".to_owned())
         },
@@ -74,13 +106,13 @@ pub fn opening(open: &Open) -> Result<u32, String> {
 
 /// Opens `tab` in `session`, as `opening` does, and says its id, and the
 /// panes of the session with it in.
-pub fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
+pub fn tab_opened(session: &SessionName, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
     let shell = shell(login_shell(), env::var_os(SHELL_VAR));
     let said = answered(&mut new_tab(session, tab, &shell))?;
     let Ok(tab) = said.trim().parse::<u32>() else {
         return Err(format!("zellij opened no tab it named: {:?}", said.trim()));
     };
-    Ok((tab, laid(session)?))
+    Ok((tab, laid(session.as_str())?))
 }
 
 /// The zellij that opens `tab` in `session`. A tab with no command of its
@@ -89,10 +121,11 @@ pub fn tab_opened(session: &str, tab: &Tab) -> Result<(u32, Vec<Laid>), String> 
 /// `--cwd`, but its own shell where the session's template for a tab says,
 /// and the template of a session zellij brought back says the directory the
 /// session was in.
-fn new_tab(session: &str, tab: &Tab, shell: &OsStr) -> Command {
+fn new_tab(session: &SessionName, tab: &Tab, shell: &OsStr) -> Command {
     let Tab { cwd, name, command: runs } = tab;
     let mut command = Command::new("zellij");
     quiet(&mut command);
+    let session = session.as_str();
     command.args(["--session", session, "action", "new-tab", "--no-focus", "--cwd", cwd]);
     command.args(name.iter().flat_map(|name| ["--name", name.as_str()]));
     if runs.is_empty() {
@@ -130,7 +163,8 @@ mod tests {
         let opened = |command: &[&str]| {
             let command = command.iter().map(|arg| (*arg).to_owned()).collect();
             let tab = Tab { cwd: "/w/n/feat".to_owned(), name: Some("#5".to_owned()), command };
-            let new_tab = new_tab("n", &tab, OsStr::new("/bin/fish"));
+            let n = SessionName::running("n").unwrap();
+            let new_tab = new_tab(&n, &tab, OsStr::new("/bin/fish"));
             let args = new_tab.get_args().map(|arg| arg.to_string_lossy().into_owned());
             args.collect::<Vec<_>>()
         };

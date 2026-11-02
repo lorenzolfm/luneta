@@ -18,7 +18,7 @@ use lunetad::api::{
     self, Client, GoRequest, KeepPrintedRequest, ListClientsRequest, ListSkillsRequest,
     NameSessionRequest, On, OpenRequest, RefugeRequest, StartRequest, WatchRequest,
 };
-use tonic::Code;
+use tonic::{Code, Status};
 
 use crate::demand::Detached;
 use crate::host::{eventually, folder_in, script, start, Host, Vars, LUNETA};
@@ -480,7 +480,10 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
 /// goes on once its session ended, a pane or a tab to open, the skills of a
 /// directory, what a pane's shell printed, which it keeps there, and the
 /// name a session for a directory takes there, and to start it. Without a
-/// machine, it asks its own; of one it does not reach, it says so.
+/// machine, it asks its own; of one it does not reach, it says so. A
+/// question that names a directory by no absolute path, an empty line typed,
+/// or a tab by an empty name is invalid here, and no tab opens there in a
+/// session no client is in.
 #[test]
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
@@ -495,6 +498,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     });
     far.zellij.list("work", &serde_json::json!([tab]));
     far.zellij.clients("work", &[(1, "terminal_3")]);
+    far.zellij.list("idle", &serde_json::json!([tab]));
     far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join(".claude/skills/near");
@@ -562,6 +566,17 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(far.zellij.opened(), opened);
         let nothing = daemon.open(open(None)).await.unwrap_err();
         assert_eq!(nothing.code(), Code::InvalidArgument, "{nothing:?}");
+        let invalid =
+            |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+        let relative = OpenRequest { cwd: "w".to_owned(), ..open(Some(Opens::Beside(2))) };
+        invalid(daemon.open(relative).await.unwrap_err());
+        let unnamed = |name: &str| Opens::Tab(open_request::Tab { name: Some(name.to_owned()) });
+        invalid(daemon.open(open(Some(unnamed("")))).await.unwrap_err());
+        let idle = OpenRequest { session: "idle".to_owned(), ..open(Some(unnamed("#5"))) };
+        let idle = daemon.open(idle).await.unwrap_err();
+        assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
+        assert!(idle.message().contains("no client is in idle"), "{idle:?}");
+        assert_eq!(far.zellij.opened(), opened);
         assert!(here.zellij.opened().is_empty());
 
         let skills = dir.path().to_str().unwrap().to_owned();
@@ -569,6 +584,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let found = daemon.list_skills(skills).await.unwrap();
         let near = Skill { name: "near".to_owned(), description: "Near.".to_owned() };
         assert_eq!(found.into_inner().skills, [near]);
+        let nowhere = ListSkillsRequest { on: on("far"), dir: String::new() };
+        invalid(daemon.list_skills(nowhere).await.unwrap_err());
 
         let typed = "cargo test".to_owned();
         let session = "work".to_owned();
@@ -580,6 +597,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         };
         assert!(Path::new(&path).starts_with(far.runtime.path().canonicalize().unwrap()), "{path}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "error[E0308]\n");
+        let (session, typed) = ("work".to_owned(), String::new());
+        let untyped = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
+        invalid(daemon.keep_printed(untyped).await.unwrap_err());
 
         // A directory named for a session that runs there takes the name after.
         let work = dir.path().join("work");
@@ -588,6 +608,10 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let named = NameSessionRequest { on: on("far"), dir: work.clone() };
         let named = daemon.name_session(named).await.unwrap().into_inner();
         assert_eq!(named.name, "work-2");
+        let relative = NameSessionRequest { on: on("far"), dir: "work".to_owned() };
+        invalid(daemon.name_session(relative).await.unwrap_err());
+        let (at, to, cwd) = ("work".to_owned(), named.name.clone(), Some("work".to_owned()));
+        invalid(daemon.start(StartRequest { on: on("far"), at, to, cwd }).await.unwrap_err());
         let (at, cwd) = ("work".to_owned(), Some(work.clone()));
         daemon.start(StartRequest { on: on("far"), at, to: named.name, cwd }).await.unwrap();
         let started = format!("--session work action switch-session work-2 --cwd {work}");

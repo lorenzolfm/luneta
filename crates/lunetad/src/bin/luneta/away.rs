@@ -7,14 +7,14 @@
 use std::future::Future;
 use std::time::Duration;
 
+use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
-use lunetad::api::open_request::{self, Opens};
 use lunetad::api::{
     Client, GoRequest, KeepPrintedRequest, ListClientsRequest, ListSkillsRequest,
-    NameSessionRequest, On, OpenRequest, RefugeRequest, RefugeResponse, StartRequest,
+    NameSessionRequest, On, RefugeRequest, RefugeResponse, StartRequest,
 };
-use lunetad::opens::{Open, Tab};
+use lunetad::opens::Open;
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Skill};
 use lunetad::{Destination, SessionName};
@@ -119,16 +119,7 @@ impl Away {
     /// Has zellij there open `open`, as `lunetad::opens::opening` does, and
     /// says which terminal it opened, or why it did not.
     pub fn open(&mut self, open: &Open) -> Result<u32, String> {
-        let (session, cwd, command, opens) = match open.clone() {
-            Open::Pane { session, beside, cwd, command } => {
-                (session, cwd, command, Opens::Beside(beside))
-            },
-            Open::Tab { session, tab: Tab { cwd, name, command } } => {
-                (session, cwd, command, Opens::Tab(open_request::Tab { name }))
-            },
-        };
-        let (on, opens) = (Some(self.on()), Some(opens));
-        let request = OpenRequest { on, session, cwd, command, opens };
+        let request = open.asked(Some(self.on()));
         let opened = self.ask(|mut daemon| async move { daemon.open(request).await })?;
         Ok(opened.terminal)
     }
@@ -148,8 +139,13 @@ impl Away {
     /// Has zellij there dump the terminal `pane` of `session`, and keeps
     /// what it printed after the line `typed` was last typed on, there, as
     /// `lunetad::printed::kept_after` does, or says why it kept nothing.
-    pub fn printed(&mut self, session: &str, pane: u32, typed: &str) -> Result<Printed, String> {
-        let (session, typed) = (session.to_owned(), typed.to_owned());
+    pub fn printed(
+        &mut self,
+        session: &SessionName,
+        pane: u32,
+        typed: &Said,
+    ) -> Result<Printed, String> {
+        let (session, typed) = (session.to_string(), typed.as_str().to_owned());
         let request = KeepPrintedRequest { on: Some(self.on()), session, pane, typed };
         let answer = self.ask(|mut daemon| async move { daemon.keep_printed(request).await })?;
         let kept = |File { path, lines, left_out }| Kept {

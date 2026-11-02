@@ -16,8 +16,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use luneta_protocol::said::Said;
+
 use crate::cli::{answered, quiet};
 use crate::folder;
+use crate::zellij::SessionName;
 
 /// The most lines a file keeps: the last a command printed, which say how it
 /// ended. Claude Code reads as many at once.
@@ -99,19 +102,19 @@ impl Printed {
 /// Has zellij dump the terminal `pane` of `session`, and keeps what it
 /// printed after the line `typed` was last typed on, in luneta's runtime
 /// folder, or says why it kept nothing.
-pub fn kept_after(session: &str, pane: u32, typed: &str) -> Result<Printed, String> {
+pub fn kept_after(session: &SessionName, pane: u32, typed: &Said) -> Result<Printed, String> {
     let dump = dump(session, pane)?;
     let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
-    keep(&runtime, cut(&dump, typed), SystemTime::now())
+    keep(&runtime, cut(&dump, typed.as_str()), SystemTime::now())
 }
 
 /// The text of the terminal `pane` of `session`, its scrollback with it, as
 /// zellij dumps it: a line for each line written to it, however many rows it
 /// wraps over, with no styles and no spaces at its end.
-fn dump(session: &str, pane: u32) -> Result<String, String> {
+fn dump(session: &SessionName, pane: u32) -> Result<String, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
-    command.args(["--session", session, "action", "dump-screen", "--full", "--pane-id"]);
+    command.args(["--session", session.as_str(), "action", "dump-screen", "--full", "--pane-id"]);
     command.arg(pane.to_string());
     answered(&mut command)
 }

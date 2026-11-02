@@ -7,8 +7,10 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
 pub use lunetad::printed::{Kept, Printed};
+use lunetad::SessionName;
 
 use crate::away::{self, Away};
 use crate::due::Due;
@@ -70,19 +72,19 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
 pub fn read(
     menu: u64,
     on: &Machine,
-    session: &str,
+    session: &SessionName,
     pane: u32,
     ended: Ended,
     events: &Sender<Event>,
 ) {
-    let (on, session) = (on.clone(), session.to_owned());
+    let (on, session) = (on.clone(), session.clone());
     let due = Due::new(events, move |printed| Event::Printed { menu, printed });
     thread::spawn(move || {
         let typed = typed(&ended);
         let printed = match &on {
-            Machine::Local => lunetad::printed::kept_after(&session, pane, typed),
+            Machine::Local => lunetad::printed::kept_after(&session, pane, &typed),
             Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                .and_then(|mut away| away.printed(&session, pane, typed)),
+                .and_then(|mut away| away.printed(&session, pane, &typed)),
         };
         due.pay(printed);
     });
@@ -91,18 +93,16 @@ pub fn read(
 /// The line the command that `ended` was typed on, as the hook says it: `fg`,
 /// for a job that `fg` brought back, or the command, which the hook says for
 /// either.
-fn typed(ended: &Ended) -> &str {
+fn typed(ended: &Ended) -> Said {
     match ended.ending {
-        Some(Ending::Resumed) => "fg",
-        Some(Ending::Exited(_)) | None => ended.command.as_str(),
+        Some(Ending::Resumed) => Said::new("fg".to_owned()).expect("`fg` is no empty line"),
+        Some(Ending::Exited(_)) | None => ended.command.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::UNIX_EPOCH;
-
-    use luneta_protocol::said::Said;
 
     use super::*;
 
@@ -116,10 +116,11 @@ mod tests {
     /// after it, as `fg %1`.
     #[test]
     fn a_job_brought_back_was_typed_as_fg() {
-        assert_eq!(typed(&ended("cargo test", Some(Ending::Exited(101)))), "cargo test");
-        assert_eq!(typed(&ended("vim", None)), "vim");
-        assert_eq!(typed(&ended("cargo build", Some(Ending::Resumed))), "fg");
-        assert_eq!(typed(&ended("fg %1", Some(Ending::Resumed))), "fg");
+        let typed = |ended: Ended| typed(&ended).as_str().to_owned();
+        assert_eq!(typed(ended("cargo test", Some(Ending::Exited(101)))), "cargo test");
+        assert_eq!(typed(ended("vim", None)), "vim");
+        assert_eq!(typed(ended("cargo build", Some(Ending::Resumed))), "fg");
+        assert_eq!(typed(ended("fg %1", Some(Ending::Resumed))), "fg");
     }
 
     /// The agent is told what the command was and how it ended, and where
