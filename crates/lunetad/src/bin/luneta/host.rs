@@ -263,6 +263,14 @@ enum Over {
     Dictation(Dictation, Where),
 }
 
+/// The fetch of the speech model, and how many bytes of it are in, which a
+/// dictation box opened while it goes says.
+struct Fetch {
+    /// Dropped, as luneta ends, it gives the fetch up.
+    _asking: Asking,
+    got: u64,
+}
+
 /// Where what you dictate is written: in the pane zellij is on, or on the
 /// line of the ask box, which waits under the dictation's.
 #[derive(Debug)]
@@ -564,10 +572,8 @@ struct App {
     repeats: dictation::Repeats,
     /// The thread that runs the speech model, from the first dictation on.
     speech: Option<Speech>,
-    /// The fetch of the speech model, while it is on its way, and how many
-    /// bytes of it are in.
-    fetching: Option<Asking>,
-    fetched: u64,
+    /// The fetch of the speech model, while it is on its way.
+    fetching: Option<Fetch>,
     /// Whether luneta's terminal says when a key is let go, as the kitty
     /// keyboard protocol does, by which a dictation tells a hold from a tap.
     releases: bool,
@@ -797,7 +803,6 @@ fn run_in(
         repeats: dictation::Repeats::default(),
         speech: None,
         fetching: None,
-        fetched: 0,
         releases,
         claude_folder: None,
         daemon,
@@ -1662,11 +1667,9 @@ impl App {
             let listening = speech.listen(number, &self.events);
             Dictation::hearing(number, listening, self.releases, Instant::now())
         } else {
-            if self.fetching.is_none() {
-                self.fetched = 0;
-                self.fetching = Some(speech::fetch(&self.events));
-            }
-            Dictation::fetching(number, self.fetched)
+            let events = &self.events;
+            let fetching = || Fetch { _asking: speech::fetch(events), got: 0 };
+            Dictation::fetching(number, self.fetching.get_or_insert_with(fetching).got)
         };
         let over = Some(Over::Dictation(dictation, under));
         self.give_from(had, Focus { side: self.focus.side, over });
@@ -1718,7 +1721,11 @@ impl App {
     /// shows, the sidebar says.
     fn fetched(&mut self, fetched: &Fetched) {
         match fetched {
-            Fetched::Got(got) => self.fetched = *got,
+            Fetched::Got(got) => {
+                if let Some(fetch) = &mut self.fetching {
+                    fetch.got = *got;
+                }
+            },
             Fetched::Ended(ended) => {
                 self.fetching = None;
                 let shown = matches!(self.focus.over, Some(Over::Dictation(..)));

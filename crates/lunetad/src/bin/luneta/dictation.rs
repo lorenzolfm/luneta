@@ -112,10 +112,11 @@ pub struct Dictation {
 enum Stage {
     /// The model is on its way, as the box says: this many bytes of it are in.
     Fetching(u64),
-    /// The model came, or why it did not.
-    Fetched(Result<(), String>),
+    /// The model came.
+    Fetched,
     Hearing(Hearing),
-    /// Why the dictation wrote nothing.
+    /// What went wrong: why the dictation wrote nothing, or why the model
+    /// did not come.
     Wrong(String),
 }
 
@@ -129,10 +130,6 @@ struct Hearing {
     levels: Vec<f32>,
     /// What the model makes of what you said so far.
     words: String,
-    /// Since when the model hears you.
-    since: Option<Instant>,
-    /// Whether what you said is sent once written.
-    sends: bool,
     /// The dictation the model is at: dropped, it is given up.
     listening: Listening,
 }
@@ -144,8 +141,9 @@ enum Key {
     Down(Instant),
     /// Tapped: the microphone stays on until the key goes down again.
     Tapped,
-    /// You are done: the model writes what you said.
-    Done,
+    /// You are done: the model writes what you said, which is sent then,
+    /// as `sends` says: where `Enter` ended the dictation.
+    Done { sends: bool },
 }
 
 /// What the model says of itself, as the dictation goes.
@@ -155,7 +153,8 @@ enum Model {
     Opening,
     /// The model is being read in, and hears what you say once it is.
     Loading,
-    Listening,
+    /// The model hears you, since then.
+    Listening(Instant),
 }
 
 impl Dictation {
@@ -170,8 +169,6 @@ impl Dictation {
             model: Model::Opening,
             levels: Vec::new(),
             words: String::new(),
-            since: None,
-            sends: false,
             listening,
         };
         Dictation { number, stage: Stage::Hearing(hearing) }
@@ -251,10 +248,7 @@ impl Dictation {
         };
         match spoken {
             Spoken::Loading => hearing.model = Model::Loading,
-            Spoken::Listening => {
-                hearing.model = Model::Listening;
-                hearing.since = Some(now);
-            },
+            Spoken::Listening => hearing.model = Model::Listening(now),
             Spoken::Level(level) => {
                 if hearing.levels.len() == LEVELS {
                     hearing.levels.remove(0);
@@ -262,8 +256,11 @@ impl Dictation {
                 hearing.levels.push(level);
             },
             Spoken::Words(words) => hearing.words = words,
+            // A dictation that went on as long as one goes ends with the key
+            // still down, or tapped, and is not sent.
             Spoken::Ended(Ok(text)) => {
-                return Some(Dictated { text, sends: hearing.sends });
+                let sends = hearing.key == Key::Done { sends: true };
+                return Some(Dictated { text, sends });
             },
             Spoken::Ended(Err(why)) => self.stage = Stage::Wrong(why),
         }
@@ -274,8 +271,9 @@ impl Dictation {
     pub fn fetched(&mut self, fetched: &Fetched) {
         match (&mut self.stage, fetched) {
             (Stage::Fetching(got), Fetched::Got(now)) => *got = *now,
-            (Stage::Fetching(_), Fetched::Ended(ended)) => {
-                self.stage = Stage::Fetched(ended.clone());
+            (Stage::Fetching(_), Fetched::Ended(Ok(()))) => self.stage = Stage::Fetched,
+            (Stage::Fetching(_), Fetched::Ended(Err(why))) => {
+                self.stage = Stage::Wrong(format!("The speech model did not come: {why}"));
             },
             _ => {},
         }
@@ -296,15 +294,12 @@ impl Dictation {
         };
         let (lines, keys, right) = match &self.stage {
             Stage::Fetching(got) => fetching(*got, inner),
-            Stage::Fetched(Ok(())) => {
+            Stage::Fetched => {
                 let said = "The speech model is in. Hold Alt r and talk, or tap it to talk \
                     with your hands free.";
                 let lines = menu::wrap(said, inner, Style::new());
                 let keys = vec![(Hint::Alt('r'), "Dictate"), (Hint::AnyOtherKey, "Close")];
                 (lines, keys, String::new())
-            },
-            Stage::Fetched(Err(why)) => {
-                wrong(&format!("The speech model did not come: {why}"), inner)
             },
             Stage::Wrong(why) => wrong(why, inner),
             Stage::Hearing(hearing) => hearing.lines(inner, now),
@@ -331,8 +326,7 @@ impl Dictation {
 impl Hearing {
     /// Has the model write what you said, and send it then, if `sends`.
     fn finish(&mut self, sends: bool) {
-        self.sends = sends;
-        self.key = Key::Done;
+        self.key = Key::Done { sends };
         self.listening.finish();
     }
 
@@ -347,14 +341,14 @@ impl Hearing {
             lines.clear();
         }
         let doing = match self.model {
-            _ if self.key == Key::Done => Some("Writing what you said…"),
+            _ if matches!(self.key, Key::Done { .. }) => Some("Writing what you said…"),
             Model::Opening => Some("Opening the microphone…"),
             Model::Loading => Some("Reading the speech model in: go on talking…"),
-            Model::Listening if lines.is_empty() => {
+            Model::Listening(_) if lines.is_empty() => {
                 lines.push(Line::styled(" Listening…", dim));
                 None
             },
-            Model::Listening => None,
+            Model::Listening(_) => None,
         };
         if let Some(doing) = doing {
             if !lines.is_empty() {
@@ -369,10 +363,12 @@ impl Hearing {
                 (Hint::Enter, "Write and send"),
                 (Hint::Esc, "Cancel"),
             ],
-            Key::Done => vec![(Hint::Esc, "Cancel")],
+            Key::Done { .. } => vec![(Hint::Esc, "Cancel")],
         };
-        let since = |since: Instant| now.1.saturating_duration_since(since);
-        let heard = self.since.map_or(Duration::ZERO, since);
+        let heard = match self.model {
+            Model::Listening(since) => now.1.saturating_duration_since(since),
+            Model::Opening | Model::Loading => Duration::ZERO,
+        };
         let seconds = heard.as_secs();
         let bars: String = self.levels.iter().map(|level| bar(*level)).collect();
         (lines, keys, format!("● {}:{:02} {bars}", seconds / 60, seconds % 60))

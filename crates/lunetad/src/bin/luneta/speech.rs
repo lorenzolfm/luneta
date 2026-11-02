@@ -331,12 +331,11 @@ fn heard(
 ) -> Result<String, String> {
     let (sender, heard) = mpsc::channel();
     let mic = Mic::open(sender)?;
-    if session.is_none() {
+    let session = if let Some(session) = session {
+        session
+    } else {
         said(Spoken::Loading);
-        *session = Some(load()?);
-    }
-    let Some(session) = session.as_mut() else {
-        return Err("the speech model was not read in".to_owned());
+        session.insert(load()?)
     };
     let mut stream = session
         .stream(&RunOptions::default(), &StreamOptions::default())
