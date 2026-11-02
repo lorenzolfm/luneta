@@ -953,10 +953,12 @@ What you say is turned into text on your machine, and none of it leaves it, or
 is kept. It is NVIDIA's Parakeet, an English model, that does it, which
 [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) runs: on
 the CPU on Linux, and on the GPU through Metal on macOS. The model is 731 MB,
-and the first `Alt r` fetches it from Hugging Face, once, with `curl`, into
-`luneta/models` of `$XDG_DATA_HOME`, or of `~/.local/share`, checked against
-the SHA-256 luneta pins with `sha256sum`, or `shasum` on macOS. The box says
-how far it got, and it goes on with the box closed. The microphone is the
+and the first `Alt r` fetches it from Hugging Face, once, with `curl`, into a
+folder named by the SHA-256 luneta pins, in `luneta/models` of
+`$XDG_DATA_HOME`, or of `~/.local/share`, checked against that SHA-256 with
+`sha256sum`, or `shasum` on macOS. The box says how far it got, and it goes
+on with the box closed. Two lunetas fetch it once: the second waits on the
+first. The microphone is the
 system's default input, on only while you dictate: ALSA's on Linux, which
 PipeWire and PulseAudio serve, and CoreAudio's on macOS. One that is muted
 hears nothing, which the box says.
