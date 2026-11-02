@@ -16,11 +16,17 @@ use lunetad::api::{close_request, closes_response};
 use lunetad::api::list_skills_response::Skill;
 use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
+use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
-    self, Client, CloseRequest, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
-    ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, OpenRequest, RefugeRequest,
-    StartRequest, TranscriptEndsRequest, WatchRequest,
+    self, AskRequest, Client, CloseRequest, ClosesRequest, GoRequest, KeepPrintedRequest,
+    KillRequest, ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, OpenRequest,
+    RefugeRequest, StartRequest, TranscriptEndsRequest, WatchRequest,
 };
+use lunetad::asks::{Asked, Step, Turn, User};
+use lunetad::transcripts::SessionId;
+use lunetad::SessionName;
+use rustix::process::{test_kill_process, Pid};
+use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::demand::Detached;
@@ -706,5 +712,205 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let long = ends(on("far"), &[id, unwritten], 512 * 1024);
         invalid(daemon.transcript_ends(long).await.unwrap_err());
         invalid(daemon.transcript_ends(ends(on("far"), &[id], 0)).await.unwrap_err());
+    });
+}
+
+/// A `claude` for `host` that takes turns of the ask box: it writes where it
+/// ran and what it was told in `host`'s home, `told` and `words` there, and
+/// says it starts a session, and runs `luneta here`, and says where the user
+/// is. On words that say `please-fail`, it fails as one with no login does;
+/// on `please-be-slow`, it takes six seconds first, longer than a daemon
+/// gives a question; and on `please-get-stuck`, it says it runs `luneta
+/// here`, writes its pid in `stuck` there, and sleeps for a minute.
+fn claude_that_takes_turns(host: &Host) {
+    let home = host.home.path().display();
+    let text = format!(
+        r#"cat > "{home}/words"
+{{ echo "cwd=$(pwd -P)"; echo "pane=${{LUNETA_PANE-unset}}"; echo "away=${{LUNETA_AWAY-unset}}"
+echo "turn=${{LUNETA_TURN-unset}}"; echo "before=${{LUNETA_TURN_BEFORE-unset}}"
+resumed=none; for arg; do [ "$after" = --resume ] && resumed=$arg; after=$arg; done
+echo "resumed=$resumed"; echo "model=$2 $3"
+}} > "{home}/told"
+echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+ran='{{"type":"assistant","parent_tool_use_id":null,"message":{{"content":[{{"type":"tool_use",'\
+'"id":"toolu_1","name":"Bash","input":{{"command":"luneta here"}}}}]}}}}'
+case "$(cat "{home}/words")" in
+    *please-fail*)
+        echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
+        exit 1 ;;
+    *please-be-slow*) sleep 6 ;;
+    *please-get-stuck*) echo "$ran"; echo $$ > "{home}/stuck"; exec sleep 60 ;;
+esac
+echo "$ran"
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"You are in work:2."}}'
+"#
+    );
+    script(&host.zellij.bin().join("claude"), &text);
+}
+
+/// What `claude` there was told as it ran, by `claude_that_takes_turns`, a
+/// line of each, and the words it was told on its stdin.
+fn told(host: &Host) -> (Vec<String>, String) {
+    let told = fs::read_to_string(host.home.path().join("told")).unwrap();
+    let words = fs::read_to_string(host.home.path().join("words")).unwrap();
+    (told.lines().map(str::to_owned).collect(), words)
+}
+
+/// The steps of the turn `request` asks of `daemon`, as it hands them on,
+/// and how the turn ended.
+async fn turn(
+    daemon: &mut DaemonClient<Channel>,
+    request: AskRequest,
+) -> (Vec<Step>, Result<(), Status>) {
+    let mut steps = match daemon.ask(request).await {
+        Ok(steps) => steps.into_inner(),
+        Err(status) => return (Vec::new(), Err(status)),
+    };
+    let mut heard = Vec::new();
+    loop {
+        match steps.message().await {
+            Ok(Some(step)) => heard.extend(Step::of(step)),
+            Ok(None) => return (heard, Ok(())),
+            Err(status) => return (heard, Err(status)),
+        }
+    }
+}
+
+/// A turn of the ask box asked of `on`, with `words`, in `cwd`, for the user
+/// where `user` says, the first of its talk or else one that goes on with
+/// the session `7c22`.
+fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> AskRequest {
+    let resumed = (!first).then(|| SessionId::parse("7c22").unwrap());
+    let turn = Turn { key: 255, before: (!first).then_some(10) };
+    let row = "The row highlighted is session work.".to_owned();
+    let asked = Asked::new(cwd.map(Path::to_owned), words, resumed, row, user, turn).unwrap();
+    asked.asked(Some(On { destination: on.to_owned() }))
+}
+
+/// A turn of the ask box asked of another machine runs `claude` there: in
+/// the directory it names there, or in the home of the daemon's user there,
+/// for the user in the pane it names there, or on another machine, in the
+/// turn it names, on the session it resumes. The daemon there hands on each
+/// step `claude` says as it says it, and the turn's end: well, or why not.
+/// A question that hangs up gives up the turn, and `claude` there is
+/// killed. One for a machine this daemon does not reach, or for no turn,
+/// runs nothing.
+#[test]
+fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    claude_that_takes_turns(&far);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+    let dir = far.home.path().join("w");
+    fs::create_dir(&dir).unwrap();
+    let (dir_there, home_there) =
+        (dir.canonicalize().unwrap(), far.home.path().canonicalize().unwrap());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 2 };
+        let first = ask("far", Some(&dir), "where am I", work, true);
+        let (steps, ended) = turn(&mut daemon, first).await;
+        let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() };
+        let session = Step::Session(SessionId::parse("7c22").unwrap());
+        let said = Step::Said("You are in work:2.".to_owned());
+        assert_eq!(steps, [session.clone(), ran.clone(), said.clone()]);
+        ended.unwrap();
+        let (told_there, words) = told(&far);
+        assert_eq!(told_there, [
+            format!("cwd={}", dir_there.display()),
+            "pane=work:2".to_owned(),
+            "away=unset".to_owned(),
+            "turn=00000000000000ff".to_owned(),
+            "before=unset".to_owned(),
+            "resumed=none".to_owned(),
+            "model=--model sonnet".to_owned(),
+        ]);
+        assert_eq!(words, "[luneta: the user is in pane work:2.]\n\nwhere am I");
+
+        let (steps, ended) = turn(&mut daemon, ask("far", None, "yes", User::Away, false)).await;
+        assert_eq!(steps, [session.clone(), ran.clone(), said]);
+        ended.unwrap();
+        let (told_there, words) = told(&far);
+        assert_eq!(told_there[..6], [
+            format!("cwd={}", home_there.display()),
+            "pane=unset".to_owned(),
+            "away=1".to_owned(),
+            "turn=00000000000000ff".to_owned(),
+            "before=000000000000000a".to_owned(),
+            "resumed=7c22".to_owned(),
+        ]);
+        assert!(words.starts_with("[luneta: the user is on another machine just now"), "{words}");
+
+        let failing = ask("far", None, "please-fail", User::Untold, true);
+        let (steps, ended) = turn(&mut daemon, failing).await;
+        assert_eq!(steps, std::slice::from_ref(&session));
+        let failed = ended.unwrap_err();
+        assert_eq!((failed.code(), failed.message()), (Code::FailedPrecondition, "Not logged in"));
+
+        // Hung up as `claude` there runs, the turn is given up there.
+        let stuck = ask("far", None, "please-get-stuck", User::Untold, true);
+        let mut steps = daemon.ask(stuck).await.unwrap().into_inner();
+        for step in [session, ran] {
+            assert_eq!(steps.message().await.unwrap().and_then(Step::of), Some(step));
+        }
+        let stuck = fs::read_to_string(far.home.path().join("stuck")).unwrap();
+        let stuck = Pid::from_raw(stuck.trim().parse().unwrap()).unwrap();
+        assert!(test_kill_process(stuck).is_ok());
+        drop(steps);
+        // The runtime sends the hang-up as it runs on.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while test_kill_process(stuck).is_ok() {
+            assert!(Instant::now() < deadline, "claude there is never killed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let invalid =
+            |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+        let x = || ask("far", None, "x", User::Untold, true);
+        let relative = AskRequest { cwd: Some("w".to_owned()), ..x() };
+        invalid(turn(&mut daemon, relative).await.1.unwrap_err());
+        let blank = AskRequest { words: " ".to_owned(), ..x() };
+        invalid(turn(&mut daemon, blank).await.1.unwrap_err());
+        let forged = AskRequest { resumed: Some("--debug".to_owned()), ..x() };
+        invalid(turn(&mut daemon, forged).await.1.unwrap_err());
+        let nowhere = turn(&mut daemon, ask("nowhere", None, "x", User::Untold, true)).await;
+        assert_eq!(nowhere.1.unwrap_err().code(), Code::Unavailable);
+        assert!(!here.home.path().join("told").exists());
+    });
+}
+
+/// A turn of the ask box there takes as long as `claude` there does: longer
+/// than a daemon gives a question, which bounds only the time to the
+/// stream's start, and quiet all the while.
+#[test]
+fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    claude_that_takes_turns(&far);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let started = Instant::now();
+        let slow = ask("far", None, "please-be-slow", User::Untold, true);
+        let (steps, ended) = turn(&mut daemon, slow).await;
+        ended.unwrap();
+        assert_eq!(steps.len(), 3, "{steps:?}");
+        assert!(started.elapsed() >= Duration::from_secs(6), "{:?}", started.elapsed());
     });
 }

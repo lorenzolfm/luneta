@@ -30,15 +30,16 @@ const KINDS: [&str; 4] =
     [r#""type":"ai-title""#, r#""type":"last-prompt""#, r#""type":"user""#, r#""type":"assistant""#];
 
 /// The id Claude Code gives a session, which names its transcript: a UUID's
-/// hex digits and dashes, and nothing that would take the file it names out
-/// of its folder.
+/// hex digits and dashes, a digit first, and nothing that would take the file
+/// it names out of its folder, nor read as an option to `claude --resume`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
 impl SessionId {
     #[must_use]
     pub fn parse(id: &str) -> Option<Self> {
-        let uuid = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
+        let first = id.bytes().next().is_some_and(|byte| byte.is_ascii_hexdigit());
+        let uuid = first && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
         uuid.then(|| SessionId(id.to_owned()))
     }
 
@@ -176,11 +177,12 @@ mod tests {
     use super::*;
 
     /// A transcript's id names a file in Claude Code's folder, and one that
-    /// would name a file elsewhere names none.
+    /// would name a file elsewhere names none, nor one that reads as an
+    /// option.
     #[test]
     fn a_transcript_s_id_is_a_uuid_s_digits_and_dashes() {
         assert!(SessionId::parse("0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60").is_some());
-        for id in ["", "../0b7c5e1a", "0b7c5e1a/x", "id-1"] {
+        for id in ["", "../0b7c5e1a", "0b7c5e1a/x", "id-1", "-0b7c5e1a", "--"] {
             assert_eq!(SessionId::parse(id), None, "{id}");
         }
     }

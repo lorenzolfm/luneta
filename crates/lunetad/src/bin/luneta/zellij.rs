@@ -30,6 +30,7 @@ use lunetad::opens::tab_opened;
 pub use lunetad::names::{named, session_for};
 use lunetad::names::kept;
 pub use lunetad::opens::{opening, Open, Tab};
+use lunetad::asks::{ASKED_VAR, AWAY_VAR};
 use lunetad::{clients, moves, program, Destination};
 pub use lunetad::SessionName;
 
@@ -38,12 +39,6 @@ use crate::due::Due;
 use crate::host::{Event, Nudged};
 use crate::machines::Machine;
 use crate::own::{Before, Look, Looked};
-
-/// What names the pane you asked luneta's ask box from, in the variables of
-/// the agent it runs, which runs in no pane: the pane luneta's zellij was on
-/// as the turn started, as `<session>:<pane>`, by the name its session had
-/// then, not the one it had as the pane opened.
-pub const ASKED_VAR: &str = "LUNETA_PANE";
 
 /// A pane of a session, as the CLI names it: `<session>:<pane>`, as `luneta
 /// agents` writes it.
@@ -78,15 +73,20 @@ pub enum Seat {
     /// In no pane, as the agent of luneta's ask box runs, by the pane you
     /// asked from, by the name its session had as you asked.
     Asked(Pane),
+    /// In no pane, as the agent of luneta's ask box runs, asked from another
+    /// machine, where luneta's zellij was: no pane of this one's is yours.
+    Away,
 }
 
 /// Where this runs, as zellij names it in the variables of what runs in its
 /// panes, or luneta's ask box in those of its agent: none outside both. Or
-/// why the box's does not read, or names a pane where zellij's name another:
-/// nothing runs in one pane and asks from another.
+/// why the box's do not read, or name a pane where zellij's name another, or
+/// say two things: nothing runs in one pane and asks from another, nor asks
+/// from a pane and from another machine.
 pub fn here() -> Result<Option<Seat>, String> {
-    let (asked, session, pane) = (var(ASKED_VAR)?, var(SESSION_VAR)?, var(PANE_VAR)?);
-    seat_in(asked.as_deref(), session.as_deref(), pane.as_deref())
+    let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?.is_some());
+    let (session, pane) = (var(SESSION_VAR)?, var(PANE_VAR)?);
+    seat_in(asked.as_deref(), away, session.as_deref(), pane.as_deref())
 }
 
 /// The variable `name` of this process: none where it is not set, or why it
@@ -99,27 +99,38 @@ pub fn var(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The seat `asked` names, as `ASKED_VAR` does, or else the one zellij's
-/// `session` and `pane` do, or none.
+/// The seat `asked` names, as `ASKED_VAR` does, or `away` says, as
+/// `AWAY_VAR` does, or else the one zellij's `session` and `pane` do, or
+/// none.
 fn seat_in(
     asked: Option<&str>,
+    away: bool,
     session: Option<&str>,
     pane: Option<&str>,
 ) -> Result<Option<Seat>, String> {
-    match (asked, session.filter(|session| !session.is_empty())) {
-        (Some(asked), Some(session)) => Err(format!(
+    match (asked, away, session.filter(|session| !session.is_empty())) {
+        (Some(asked), true, _) => Err(format!(
+            "{ASKED_VAR} names {asked}, a pane luneta's ask box asked from, and {AWAY_VAR} says \
+             it asked from another machine"
+        )),
+        (Some(asked), false, Some(session)) => Err(format!(
             "{ASKED_VAR} names {asked}, a pane luneta's ask box asked from, and this runs in a \
              pane of {session}"
         )),
-        (Some(asked), None) => {
+        (None, true, Some(session)) => Err(format!(
+            "{AWAY_VAR} says luneta's ask box asked from another machine, and this runs in a \
+             pane of {session}"
+        )),
+        (Some(asked), false, None) => {
             let asked = pane_address(asked).map_err(|why| format!("{ASKED_VAR}: {why}"))?;
             Ok(Some(Seat::Asked(asked)))
         },
-        (None, Some(named)) => {
+        (None, true, None) => Ok(Some(Seat::Away)),
+        (None, false, Some(named)) => {
             let pane = pane.and_then(|pane| pane.parse().ok());
             Ok(pane.map(|pane| Seat::Opened { named: named.to_owned(), pane }))
         },
-        (None, None) => Ok(None),
+        (None, false, None) => Ok(None),
     }
 }
 
@@ -1383,26 +1394,33 @@ mod tests {
 
     /// A command runs in the pane zellij's variables name, by the name its
     /// session had as the pane opened, and the agent of luneta's ask box, in
-    /// none, goes by the pane the box names. One the box misspells is no
-    /// pane, nor is one it names where zellij's name another.
+    /// none, goes by the pane the box names, or by none where the box says
+    /// you asked from another machine. One the box misspells is no pane, nor
+    /// is one it names where zellij's name another, or where it says you
+    /// asked from another machine too, nor is another machine where zellij
+    /// names a pane.
     #[test]
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
         let opened = |named: &str, pane| Ok(Some(Seat::Opened { named: named.to_owned(), pane }));
         let asked = |session: &str, pane| {
             Ok(Some(Seat::Asked(Pane { session: session.to_owned(), pane })))
         };
-        assert_eq!(seat_in(None, Some("work"), Some("2")), opened("work", 2));
-        assert_eq!(seat_in(Some("a:b:4"), None, None), asked("a:b", 4));
-        assert_eq!(seat_in(Some("work:4"), Some(""), Some("2")), asked("work", 4));
+        assert_eq!(seat_in(None, false, Some("work"), Some("2")), opened("work", 2));
+        assert_eq!(seat_in(Some("a:b:4"), false, None, None), asked("a:b", 4));
+        assert_eq!(seat_in(Some("work:4"), false, Some(""), Some("2")), asked("work", 4));
+        assert_eq!(seat_in(None, true, None, None), Ok(Some(Seat::Away)));
+        assert_eq!(seat_in(None, true, Some(""), Some("2")), Ok(Some(Seat::Away)));
         for (session, pane) in
             [(Some(""), Some("2")), (Some("work"), Some("terminal_2")), (Some("work"), None), (None, None)]
         {
-            assert_eq!(seat_in(None, session, pane), Ok(None), "{session:?} {pane:?}");
+            assert_eq!(seat_in(None, false, session, pane), Ok(None), "{session:?} {pane:?}");
         }
         for asked in ["", "work", ":4", "work:x"] {
-            assert!(seat_in(Some(asked), None, None).is_err(), "{asked}");
+            assert!(seat_in(Some(asked), false, None, None).is_err(), "{asked}");
         }
-        assert!(seat_in(Some("work:4"), Some("work"), Some("2")).is_err());
+        assert!(seat_in(Some("work:4"), false, Some("work"), Some("2")).is_err());
+        assert!(seat_in(Some("work:4"), true, None, None).is_err());
+        assert!(seat_in(None, true, Some("work"), Some("2")).is_err());
     }
 
     /// zellij's client reads `NUDGE` as a key let go once it asked its

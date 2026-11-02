@@ -296,6 +296,63 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     assert_eq!(host.lists.closed(), closed);
 }
 
+/// Asked from another machine, where luneta's zellij is, the ask box's
+/// agent goes by no pane of this one's, as none is yours: a close takes a
+/// yes in the turn after its plan, as ever, and keeps no pane for last.
+/// `here`, `go`, `open session`, and `open pane` and `open tab` without a
+/// pane or a session to open in, say why they have none to go by, and ask
+/// zellij nothing. A command in a pane of zellij that the box says was asked
+/// from another machine goes by neither, nor one the box says both of.
+#[test]
+fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let _play = UnixListener::bind(host.contract().join("play")).unwrap();
+    let tab = (0, "Tab #1");
+    let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
+    host.lists.list("work", &work);
+    let away = ("LUNETA_AWAY", "1");
+    let first = [away, ("LUNETA_TURN", "00000000000000aa")];
+    let second =
+        [away, ("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
+
+    let (said, agreed) = planned(&asked(&host, &first, &["close", "work:2", "play"]));
+    assert_eq!(
+        said,
+        format!("delete session play: {UNTOLD}\nclose pane work:2: {UNTOLD}\n")
+    );
+    let told = asked(&host, &second, &["close", "work:2", "play", "--yes", &agreed]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    let closed =
+        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
+    assert_eq!(host.lists.closed(), closed);
+
+    for args in [
+        &["here"][..],
+        &["go", "work"],
+        &["open", "session", "--cwd", "/w"],
+        &["open", "pane", "--cwd", "/w"],
+        &["open", "tab", "--cwd", "/w"],
+    ] {
+        let refused = asked(&host, &first, args);
+        let why = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}: {why}");
+        assert!(why.contains("asked from another machine"), "{args:?}: {why}");
+    }
+    for (vars, said) in [
+        (&[away, ("ZELLIJ_SESSION_NAME", "work"), ("ZELLIJ_PANE_ID", "3")][..], "LUNETA_AWAY says"),
+        (&[away, ("LUNETA_PANE", "work:2")], "LUNETA_PANE names work:2"),
+    ] {
+        let seat = asked(&host, vars, &["here"]);
+        let why = String::from_utf8_lossy(&seat.stderr);
+        assert_eq!(seat.status.code(), Some(1), "{why}");
+        assert!(why.contains(said), "{why}");
+    }
+    assert_eq!(host.lists.closed(), closed);
+    assert!(host.lists.went().is_empty());
+    assert!(host.lists.opened().is_empty());
+}
+
 /// The ask box's agent runs what it may without anyone asking you, and a
 /// pane runs what it is given: so a pane it opens, or a tab, runs your shell
 /// or Claude Code, as `claude [--name <name>] [<prompt>]`, which asks you or

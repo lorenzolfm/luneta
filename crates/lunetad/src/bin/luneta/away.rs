@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
@@ -16,6 +16,7 @@ use lunetad::api::{
     ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, RefugeRequest, RefugeResponse,
     StartRequest,
 };
+use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
 use lunetad::opens::Open;
 use lunetad::printed::{Kept, Printed};
@@ -214,6 +215,48 @@ impl Away {
         let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
         let end = |(id, end): (String, String)| Some((SessionId::parse(&id)?, end));
         Ok(answer.ends.into_iter().filter_map(end).collect())
+    }
+
+    /// Has Claude Code take the turn `asked` there, as `lunetad::asks` runs
+    /// it there, and hands each step it hears to `hear` as it comes, for as
+    /// long as the turn is `wanted`: none once it is not, as the question
+    /// hangs up then, which gives up the turn there. Or how the turn ended:
+    /// well, or why not, as it did there, or as luneta heard nothing of its
+    /// end by `asks::TURN` and its patience after, by which that daemon ends
+    /// it.
+    pub fn talk(
+        &mut self,
+        asked: &Asked,
+        wanted: &dyn Fn() -> bool,
+        hear: &dyn Fn(Step),
+    ) -> Option<Result<(), String>> {
+        let request = asked.asked(Some(self.on()));
+        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let deadline = Instant::now() + asks::TURN + patience;
+        let (secs, minutes) = (patience.as_secs_f32(), asks::TURN.as_secs() / 60);
+        self.runtime.block_on(async move {
+            // The daemon answers with the stream as the turn starts.
+            let mut steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
+                Ok(Ok(steps)) => steps.into_inner(),
+                Ok(Err(status)) => return Some(Err(said(on, &status))),
+                Err(_) => return Some(Err(format!("{on}: lunetad did not answer in {secs}s"))),
+            };
+            loop {
+                if !wanted() {
+                    return None;
+                }
+                if Instant::now() >= deadline {
+                    let late = format!("{on}: the turn had not ended after {minutes} minutes");
+                    return Some(Err(late));
+                }
+                match tokio::time::timeout(asks::LOOK, steps.message()).await {
+                    Err(_) => {},
+                    Ok(Ok(Some(step))) => Step::of(step).into_iter().for_each(hear),
+                    Ok(Ok(None)) => return Some(Ok(())),
+                    Ok(Err(status)) => return Some(Err(said(on, &status))),
+                }
+            }
+        })
     }
 
     fn on(&self) -> On {

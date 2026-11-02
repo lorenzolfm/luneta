@@ -28,6 +28,7 @@ use std::io::{self, ErrorKind};
 use std::mem;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -39,7 +40,8 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tokio::task;
 use tokio::time::timeout;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tokio_stream::Stream;
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status};
 
@@ -52,13 +54,14 @@ use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
-    self, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse, GoRequest, GoResponse,
-    InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
-    ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
-    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse,
+    self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
+    GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
+    KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
+    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
+    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
+    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
+use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
@@ -105,6 +108,11 @@ const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 /// The most questions a client has open at once on one connection, which
 /// HTTP/2 tells it: `luneta` asks one.
 const QUESTIONS_MAX: u32 = 16;
+
+/// The most steps of a turn of the ask box's agent that wait to be handed
+/// on: a turn takes a few dozen, and `claude` waits while the client takes
+/// in this many.
+const STEPS_WAITING: usize = 64;
 
 /// How long the daemon runs on once zellij has no session, and no client
 /// watches it: long enough that ending the last one and opening another does
@@ -657,6 +665,30 @@ impl Daemon for Host {
         let read = read.map_err(|error| unfinished(&error))?;
         let ends = read.into_iter().map(|(id, end)| (id.as_str().to_owned(), end)).collect();
         Ok(Response::new(TranscriptEndsResponse { ends }))
+    }
+
+    type AskStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
+
+    async fn ask(&self, request: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
+        let (on, asked) = Asked::of(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let steps = daemon.ask(asked.asked(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(steps)));
+        }
+        let (heard, steps) = tokio::sync::mpsc::channel(STEPS_WAITING);
+        // The server times out a question as it waits for the answer's
+        // start, which the stream is, and never as it waits for the rest.
+        task::spawn_blocking(move || {
+            // The question hung up, which gives the turn up.
+            let wanted = || !heard.is_closed();
+            let hear = |step: Step| {
+                let _ = heard.blocking_send(Ok(step.answer()));
+            };
+            if let Some(Err(why)) = asked.talk(&wanted, &hear) {
+                let _ = heard.blocking_send(Err(Status::failed_precondition(why)));
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(steps))))
     }
 }
 

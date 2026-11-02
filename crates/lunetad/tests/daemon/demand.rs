@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse, GoRequest, GoResponse,
-    InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
-    KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
-    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
+    self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
+    GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
+    KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
+    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
+    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
+    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -606,6 +606,12 @@ impl Daemon for StandIn {
         _: Request<TranscriptEndsRequest>,
     ) -> Result<Response<TranscriptEndsResponse>, Status> {
         Err(Status::unimplemented("a stand-in reads no transcripts"))
+    }
+
+    type AskStream = tokio_stream::Empty<Result<AskResponse, Status>>;
+
+    async fn ask(&self, _: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
+        Err(Status::unimplemented("a stand-in runs no agent"))
     }
 }
 

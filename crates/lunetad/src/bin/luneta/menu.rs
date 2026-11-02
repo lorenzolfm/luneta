@@ -142,11 +142,6 @@ const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open besi
 /// header.
 const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets only the others";
 
-/// What the menu says of the key that opens the ask box on another
-/// machine's session or pane.
-const REMOTE_ASK: &str = "menu: the ask box works on this machine alone, for now; open it on a \
-                          row of this machine's";
-
 /// A key of the sidebar's own that does more than move the highlight or fold
 /// a session. The legend lists each before the menu's keys, and a key of the
 /// menu's that one has stays the command's at the top of the sidebar: `/`
@@ -1314,12 +1309,6 @@ impl Menu {
                 },
                 Pressed::Forget(Machine::Local) => Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned())),
                 Pressed::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
-                Pressed::Ask
-                    if matches!(target, Target::Session(Machine::Remote(_), _)
-                        | Target::Pane(Machine::Remote(_), _)) =>
-                {
-                    Did::Closed(Done::Wrong(REMOTE_ASK.to_owned()))
-                },
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
             Stage::Ssh { keys, mut typed, .. } => match ssh_key(key, &mut typed) {
@@ -2501,7 +2490,7 @@ mod tests {
                 let (menu, _) = stays(opened(row.clone(), Some('b')));
                 assert_eq!(closed(menu.key(&char(key))), Done::Brief(briefed), "{key}");
             }
-            assert_eq!(closed(opened(row, Some('a'))), Done::Wrong(REMOTE_ASK.to_owned()));
+            assert_eq!(closed(opened(row.clone(), Some('a'))), Done::Ask(row));
         }
     }
 

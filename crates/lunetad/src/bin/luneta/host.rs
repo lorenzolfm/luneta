@@ -45,6 +45,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::SetTitle;
 use lunetad::api::Host;
+use lunetad::asks::User;
 use lunetad::log::{self, Process};
 use lunetad::Destination;
 use ratatui::layout::{Position, Rect};
@@ -1661,21 +1662,25 @@ impl App {
         }
     }
 
-    /// Hands what you typed in the ask box to its agent, for you in the pane
-    /// luneta's zellij is on. luneta's zellij types there first, as the last
-    /// client to type in its session, which zellij moves where the agent has
-    /// it take you somewhere.
+    /// Hands what you typed in the ask box to its agent, for you where you
+    /// are: in the pane luneta's zellij is on, where that is on the agent's
+    /// machine, or on another. luneta's zellij types in its pane first, as
+    /// the last client to type in its session, which zellij moves where the
+    /// agent has it take you somewhere.
     fn converse(&mut self) {
-        let here = self.sidebar.here_pane();
+        let Some(Over::Ask(ask)) = &self.focus.over else {
+            return;
+        };
+        let user = self.sidebar.user(&ask.machine());
         // Whether it typed there before or not: another client may have
         // since, and the agent acts well after the nudge.
-        if here.is_some()
+        if matches!(user, User::Pane { .. })
             && let Ok(seat) = self.seat()
         {
             self.client.nudge_in(seat.to_string());
         }
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
-            ask.send(here.as_ref(), &self.events);
+            ask.send(user, &self.events);
         }
     }
 
