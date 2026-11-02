@@ -26,6 +26,9 @@ alacritty_terminal = "0.26.0"
 # the tree by way of alacritty_terminal.
 base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
+# The microphone, while you dictate: ALSA's default input on Linux, which
+# PipeWire and PulseAudio serve, and CoreAudio's on macOS.
+cpal = "0.18.2"
 # Sets luneta's terminal's modes. What `input` reads of it are crossterm's keys
 # and mouse, which `keys` and the sidebar take.
 crossterm = "0.29.0"
@@ -66,6 +69,11 @@ tokio-stream = { version = "0.1.19", features = ["net"] }
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tower = { version = "0.5.3", features = ["util"] }
+# Runs the speech model that writes what you dictate, on this machine:
+# transcribe.cpp, which carries ggml and builds both with cmake, offline, into
+# luneta's binary. Its default feature is Metal, which it turns on for macOS
+# alone. Exact, as a 0.x release of it may change what it runs.
+transcribe-cpp = "=0.4.1"
 unicode-width = { version = "0.2.2", default-features = false }
 # The shell the user database names yours, which a tab luneta opens runs:
 # std has no safe getpwuid, nor rustix any. Its libc is in the tree already.

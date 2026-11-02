@@ -237,6 +237,19 @@ impl Ask {
         }
     }
 
+    /// Types `text`, as you dictated it, on one line after what you typed, a
+    /// space between them, but while the agent is at a turn.
+    pub fn dictated(&mut self, text: &str) {
+        if self.turn.is_some() {
+            return;
+        }
+        let text = plain(text);
+        if !self.typed.is_empty() && !self.typed.ends_with(' ') && !text.is_empty() {
+            self.typed.push(' ');
+        }
+        self.typed.push_str(&text);
+    }
+
     /// Hands what you typed to the agent, on a thread of its own, for you in
     /// the pane `here`, if luneta can tell it, as `told` tells it, and takes
     /// it from what you are typing. What the turn hears comes back on
@@ -321,7 +334,7 @@ impl Ask {
         let mut lines = self.lines(inner, sidebar::frame(now));
         let keys: &[(Hint, &str)] = match self.turn {
             Some(_) => &[(Hint::Esc, "Close")],
-            None => &[(Hint::Enter, "Send"), (Hint::Esc, "Close")],
+            None => &[(Hint::Enter, "Send"), (Hint::Alt('r'), "Dictate"), (Hint::Esc, "Close")],
         };
         let footer = [Line::default(), menu::keys_line(inner, keys)];
         let lines_room = room.saturating_sub(footer.len());
@@ -702,6 +715,20 @@ mod tests {
         Asking::on_thread(|_| {})
     }
 
+    /// What you dictate goes on the line after what you typed, a space
+    /// between them, but while the agent is at a turn.
+    #[test]
+    fn what_you_dictate_goes_on_the_line_after_what_you_typed() {
+        let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
+        ask.dictated("Open a tab.");
+        assert_eq!(ask.typed, "Open a tab.");
+        ask.dictated("Then\nrun the tests.");
+        assert_eq!(ask.typed, "Open a tab. Then run the tests.");
+        ask.turn = Some(at_a_turn());
+        ask.dictated("Close it.");
+        assert_eq!(ask.typed, "Open a tab. Then run the tests.");
+    }
+
     /// What you type shows on the box's last line, and `Enter` sends it once
     /// there is anything to send. While the agent is at its turn, the box
     /// shows what you asked, what it ran and what it said as it hears it, and
@@ -725,7 +752,7 @@ mod tests {
                 "┌─ Ask ──────────────────────────── luneta/main ─┐",
                 "│ › close bipa and elo_                          │",
                 "│                                                │",
-                "│ <ENTER> - Send, <ESC> - Close                  │",
+                "│ <ENTER> Send  <Alt r> Dictate  <ESC> Close     │",
                 "└────────────────────────────────────────────────┘",
             ]
         );
@@ -824,7 +851,7 @@ mod tests {
                 "│                                      │",
                 "│ › _                                  │",
                 "│                                      │",
-                "│ <ENTER> - Send, <ESC> - Close        │",
+                "│ <ENTER>/<Alt r>/<ESC>                │",
                 "└──────────────────────────────────────┘",
             ]
         );

@@ -1877,6 +1877,7 @@ pub enum Hint {
     Delete,
     Char(char),
     Ctrl(char),
+    Alt(char),
     /// The arrows down and up.
     Moves,
     AnyKey,
@@ -1894,6 +1895,7 @@ impl Hint {
             Hint::Delete => "<Del>".to_owned(),
             Hint::Char(c) => format!("<{c}>"),
             Hint::Ctrl(c) => format!("<Ctrl {c}>"),
+            Hint::Alt(c) => format!("<Alt {c}>"),
             Hint::Moves => "<↓↑>".to_owned(),
             Hint::AnyKey => "<any key>".to_owned(),
             Hint::AnyOtherKey => "<any other key>".to_owned(),
@@ -1910,6 +1912,7 @@ impl Hint {
             Hint::Delete => (KeyCode::Delete, KeyModifiers::NONE),
             Hint::Char(c) => (KeyCode::Char(c), KeyModifiers::NONE),
             Hint::Ctrl(c) => (KeyCode::Char(c), KeyModifiers::CONTROL),
+            Hint::Alt(c) => (KeyCode::Char(c), KeyModifiers::ALT),
             Hint::Moves | Hint::AnyKey | Hint::AnyOtherKey => return None,
         };
         Some(KeyEvent::new(code, modifiers))
