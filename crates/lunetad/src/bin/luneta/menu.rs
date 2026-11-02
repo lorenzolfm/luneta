@@ -48,7 +48,7 @@ use crate::brief;
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::machines::Machine;
-use crate::printed::Printed;
+use crate::printed::{self, Printed};
 use crate::pull::{At, Kind, Link, Ready};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, Place, TAG};
 use crate::skills::{Name, Search, Skills};
@@ -142,9 +142,20 @@ const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open besi
 const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets only the others";
 
 /// What the menu says of a key of the Brief group on another machine's
-/// header.
+/// header, or of one that briefs you on a session or a pane of another
+/// machine's.
 const REMOTE_BRIEF: &str = "menu: luneta briefs you on this machine's agents alone, as it reads \
                             their transcripts here";
+
+/// What the menu says of a key of the Delete group on another machine's
+/// session or pane.
+const REMOTE_DELETE: &str = "menu: luneta closes and deletes this machine's panes and sessions \
+                             alone, for now";
+
+/// What the menu says of the key that opens the ask box on another
+/// machine's session or pane.
+const REMOTE_ASK: &str = "menu: the ask box works on this machine alone, for now; open it on a \
+                          row of this machine's";
 
 /// A key of the sidebar's own that does more than move the highlight or fold
 /// a session. The legend lists each before the menu's keys, and a key of the
@@ -745,12 +756,13 @@ enum Removes {
     Machine(Machine),
 }
 
-/// What the menu is for: the row highlighted as it opened.
+/// What the menu is for: the row highlighted as it opened, of the machine
+/// its session or pane is on, which what a key opens there is of too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// A session's row, which has no pane.
-    Session(Listed),
-    Pane(PaneRow),
+    Session(Machine, Listed),
+    Pane(Machine, PaneRow),
     /// A machine's header, which has neither a session nor a pane.
     Machine(Machine),
 }
@@ -799,19 +811,28 @@ pub struct Ended {
 }
 
 impl Target {
+    /// The machine it is of.
+    pub fn machine(&self) -> &Machine {
+        match self {
+            Target::Session(machine, _) | Target::Pane(machine, _) | Target::Machine(machine) => {
+                machine
+            },
+        }
+    }
+
     /// The directory its pane works in, where the daemon has said it.
     pub fn cwd(&self) -> Option<&str> {
         match self {
-            Target::Session(_) | Target::Machine(_) => None,
-            Target::Pane(row) => row.cwd.as_deref(),
+            Target::Session(..) | Target::Machine(_) => None,
+            Target::Pane(_, row) => row.cwd.as_deref(),
         }
     }
 
     /// The branch checked out where its pane works.
     pub fn branch(&self) -> Option<&str> {
         match self {
-            Target::Session(_) | Target::Machine(_) => None,
-            Target::Pane(row) => row.branch.as_deref(),
+            Target::Session(..) | Target::Machine(_) => None,
+            Target::Pane(_, row) => row.branch.as_deref(),
         }
     }
 
@@ -819,10 +840,10 @@ impl Target {
     /// session's row, its session; or on a machine's header, the machine.
     fn removes(&self) -> Removes {
         match self {
-            Target::Session(session) => {
+            Target::Session(_, session) => {
                 Removes::Row { session: session.clone(), scope: Scope::Session }
             },
-            Target::Pane(row) => {
+            Target::Pane(_, row) => {
                 Removes::Row { session: row.session.clone(), scope: Scope::Pane(row.pane) }
             },
             Target::Machine(machine) => Removes::Machine(machine.clone()),
@@ -833,8 +854,8 @@ impl Target {
     /// is none: a session's row has no pane, nor a machine's header.
     fn beside(&self) -> Result<Beside, String> {
         match self {
-            Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
-            Target::Pane(row) => row.beside(),
+            Target::Session(..) => Err(NO_ROW_PANE.to_owned()),
+            Target::Pane(_, row) => row.beside(),
             Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
         }
     }
@@ -844,26 +865,32 @@ impl Target {
     /// session's row has no pane, nor a machine's header.
     fn ended(&self) -> Result<(Beside, Ended), String> {
         match self {
-            Target::Session(_) => Err(NO_ROW_PANE.to_owned()),
-            Target::Pane(row) => row.ended(),
+            Target::Session(..) => Err(NO_ROW_PANE.to_owned()),
+            Target::Pane(_, row) => row.ended(),
             Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
         }
     }
 
     /// What a key of the Brief group briefs you on, as `scope` says, by the
     /// row: on this machine's header, every session, as every agent it can
-    /// brief you on is of this machine's; on another's, why it can not.
+    /// brief you on is of this machine's; on another's, or on its session or
+    /// pane, but for every session, why it can not.
     fn brief(&self, scope: brief::Scope) -> Done {
         let briefed = match (self, scope) {
-            (Target::Machine(Machine::Remote(_)), _) => {
+            (Target::Machine(Machine::Remote(_)), _)
+            | (
+                Target::Session(Machine::Remote(_), _) | Target::Pane(Machine::Remote(_), _),
+                brief::Scope::Session | brief::Scope::Highlighted,
+            ) => {
                 return Done::Wrong(REMOTE_BRIEF.to_owned());
             },
             (Target::Machine(Machine::Local), _) | (_, brief::Scope::Every) => Briefed::Every,
-            (Target::Pane(row), brief::Scope::Highlighted) => {
+            (Target::Pane(Machine::Local, row), brief::Scope::Highlighted) => {
                 Briefed::Agent(row.session.name().clone(), row.pane)
             },
             (
-                Target::Session(session) | Target::Pane(PaneRow { session, .. }),
+                Target::Session(Machine::Local, session)
+                | Target::Pane(Machine::Local, PaneRow { session, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
             ) => Briefed::Session(session.name().clone()),
         };
@@ -1017,8 +1044,9 @@ pub enum Done {
     Nothing,
     /// Say why what a key asked went wrong.
     Wrong(String),
-    /// Take luneta's zellij to a session it makes, that starts in `cwd`.
-    Start(String),
+    /// Take luneta's zellij to a session it makes, on the machine, that
+    /// starts in `cwd`.
+    Start(Machine, String),
     /// Take luneta's zellij to the pane that has the pull request's branch
     /// checked out.
     Go(Place),
@@ -1284,7 +1312,12 @@ impl Menu {
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
-                    (New::Session, Ok(Beside { cwd, .. })) => Did::Closed(Done::Start(cwd)),
+                    (New::Session, Ok(Beside { cwd, .. })) => {
+                        Did::Closed(Done::Start(target.machine().clone(), cwd))
+                    },
+                },
+                Pressed::Delete { .. } if matches!(target.machine(), Machine::Remote(_)) => {
+                    Did::Closed(Done::Wrong(REMOTE_DELETE.to_owned()))
                 },
                 Pressed::Delete { key, session, scope } => {
                     let wants = Wants::Plan { session: session.clone(), scope };
@@ -1296,6 +1329,12 @@ impl Menu {
                 },
                 Pressed::Forget(Machine::Local) => Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned())),
                 Pressed::Brief(scope) => Did::Closed(target.brief(scope)),
+                Pressed::Ask
+                    if matches!(target, Target::Session(Machine::Remote(_), _)
+                        | Target::Pane(Machine::Remote(_), _)) =>
+                {
+                    Did::Closed(Done::Wrong(REMOTE_ASK.to_owned()))
+                },
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
             Stage::Ssh { keys, mut typed, .. } => match ssh_key(key, &mut typed) {
@@ -1402,7 +1441,9 @@ impl Menu {
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
-            let target = Target::Pane(PaneRow { session: session.clone(), pane, cwd, branch, ran });
+            let row = PaneRow { session: session.clone(), pane, cwd, branch, ran };
+            // luneta finds where a link goes among this machine's panes.
+            let target = Target::Pane(Machine::Local, row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { link: link.clone(), step };
             let cwd = worktree.clone();
@@ -1423,6 +1464,9 @@ impl Menu {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { link, step: Step::Waiting(Wait::Making(name)) };
+                // luneta makes the session on this machine, whatever machine's
+                // row the link was pasted on.
+                let target = Target::Machine(Machine::Local);
                 Did::Stays(Menu { number, target, stage }, wants)
             },
         }
@@ -1431,7 +1475,7 @@ impl Menu {
     /// What the shell of the menu's row ran, as the daemon says it now: one
     /// may have ended, or begun, since the menu opened.
     pub fn reran(&mut self, ran: Ran) {
-        if let Target::Pane(row) = &mut self.target {
+        if let Target::Pane(_, row) = &mut self.target {
             row.ran = ran;
         }
     }
@@ -1454,13 +1498,14 @@ impl Menu {
                 return Did::Closed(Done::Wrong(format!("menu: what pane {pane} printed: {why}")));
             },
         };
-        if !matches!(&target, Target::Pane(PaneRow { ran: Ran::Ended(now), .. }) if *now == ended) {
+        let still = |row: &PaneRow| matches!(&row.ran, Ran::Ended(now) if *now == ended);
+        if !matches!(&target, Target::Pane(_, row) if still(row)) {
             return Did::Closed(Done::Wrong(format!(
                 "menu: pane {pane}'s shell went on as luneta read what `{}` printed; ask again",
                 ended.command.as_str()
             )));
         }
-        let prompt = printed.prompt(last.asks(), &ended);
+        let prompt = printed::prompt(&printed, last.asks(), &ended);
         let opens = Opens::Pane { beside: pane, command: claude_reading(prompt, printed.file()) };
         let stage = Stage::Opening { keys, session: session.clone() };
         Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
@@ -2075,11 +2120,11 @@ mod tests {
     }
 
     fn pane_row() -> Target {
-        Target::Pane(row())
+        Target::Pane(Machine::Local, row())
     }
 
     fn session_row() -> Target {
-        Target::Session(listed())
+        Target::Session(Machine::Local, listed())
     }
 
     fn char(key: char) -> KeyEvent {
@@ -2145,7 +2190,7 @@ mod tests {
 
         // luneta goes to a new session itself.
         let (menu, _) = stays(opened(pane_row(), Some('n')));
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(cwd));
+        assert_eq!(closed(menu.key(&char('s'))), Done::Start(Machine::Local, cwd));
     }
 
     #[test]
@@ -2235,7 +2280,7 @@ mod tests {
 
     /// A row whose shell said the command it ran last ended.
     fn ended_row() -> Target {
-        Target::Pane(PaneRow { ran: Ran::Ended(cargo_test()), ..row() })
+        Target::Pane(Machine::Local, PaneRow { ran: Ran::Ended(cargo_test()), ..row() })
     }
 
     /// What luneta kept once the row's shell went on, as the daemon says,
@@ -2257,7 +2302,8 @@ mod tests {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
-        let busy = Target::Pane(PaneRow { ran: Ran::Going(said("cargo test")), ..row() });
+        let busy =
+            Target::Pane(Machine::Local, PaneRow { ran: Ran::Going(said("cargo test")), ..row() });
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
@@ -2317,7 +2363,7 @@ mod tests {
                 done => panic!("it did {done:?}"),
             }
         };
-        let ran = |ran| Target::Pane(PaneRow { ran, ..row() });
+        let ran = |ran| Target::Pane(Machine::Local, PaneRow { ran, ..row() });
         assert_eq!(
             refused(ran(Ran::Going(said("make")))),
             "menu: pane 4 runs `make` still, and what it prints is not over"
@@ -2431,6 +2477,38 @@ mod tests {
         }), NEW_NAME);
     }
 
+    /// On another machine's pane, a key opens beside the pane what it opens
+    /// on this machine's, and a session in its directory, which the menu
+    /// stays for, of that machine. The Delete group, the Brief group but for
+    /// every session, and the ask box say they are this machine's alone, on
+    /// another's pane or session.
+    #[test]
+    fn another_machine_s_row_opens_there_and_deletes_nothing() {
+        let vps = || Machine::Remote("me@vps".parse().unwrap());
+        let (pane, session) = (Target::Pane(vps(), row()), Target::Session(vps(), listed()));
+        let (menu, _) = stays(opened(pane.clone(), Some('n')));
+        let (menu, wants) = stays(menu.key(&char('p')));
+        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: Vec::new() }));
+        assert_eq!(menu.target(), &pane);
+        let (menu, _) = stays(opened(pane.clone(), Some('n')));
+        let cwd = "/w/luneta/main".to_owned();
+        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), cwd));
+
+        for row in [pane, session] {
+            for key in ['d', 's'] {
+                let (menu, _) = stays(opened(row.clone(), Some('d')));
+                assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_DELETE.to_owned()));
+            }
+            for key in ['s', 'h'] {
+                let (menu, _) = stays(opened(row.clone(), Some('b')));
+                assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_BRIEF.to_owned()));
+            }
+            let (menu, _) = stays(opened(row.clone(), Some('b')));
+            assert_eq!(closed(menu.key(&char('z'))), Done::Brief(Briefed::Every));
+            assert_eq!(closed(opened(row, Some('a'))), Done::Wrong(REMOTE_ASK.to_owned()));
+        }
+    }
+
     /// On a machine's header, the Delete group forgets the machine, and on
     /// this one's says it cannot; the Brief group briefs you on every
     /// session, from this one's, and on none from another's; and a key that
@@ -2464,7 +2542,7 @@ mod tests {
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
         let (menu, _) = stays(opened(session_row(), Some('n')));
         assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_ROW_PANE.to_owned()));
-        let unknown = Target::Pane(PaneRow { cwd: None, ..row() });
+        let unknown = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
         let (menu, _) = stays(opened(unknown, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where pane 4 works")));
@@ -2893,7 +2971,7 @@ mod tests {
             let cwd = worktree.clone();
             assert_eq!(wants, Wants::Open { session: other.clone(), pane: 7, cwd, opens });
             assert_eq!(menu.opening(), Some(Opening::In(&other)));
-            let Target::Pane(row) = menu.target() else { panic!("not a pane's row") };
+            let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
             assert_eq!((&row.session, row.pane), (&other, 7));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
@@ -2905,7 +2983,7 @@ mod tests {
         let opens = Opens::Pane { beside: 9, command: review };
         let cwd = worktree.clone();
         assert_eq!(wants, Wants::Open { session: other.clone(), pane: 9, cwd, opens });
-        let Target::Pane(row) = menu.target() else { panic!("not a pane's row") };
+        let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
         assert_eq!((&row.session, row.pane), (&other, 9));
     }
 

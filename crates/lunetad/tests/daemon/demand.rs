@@ -14,8 +14,11 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, GoRequest, GoResponse, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse,
-    ListClientsRequest, ListClientsResponse, RefugeRequest, RefugeResponse, Version, WatchRequest,
+    self, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest,
+    KeepPrintedResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
+    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
+    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
+    StartResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -553,6 +556,35 @@ impl Daemon for StandIn {
     }
 
     async fn refuge(&self, _: Request<RefugeRequest>) -> Result<Response<RefugeResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn open(&self, _: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn list_skills(
+        &self,
+        _: Request<ListSkillsRequest>,
+    ) -> Result<Response<ListSkillsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in finds no skills"))
+    }
+
+    async fn keep_printed(
+        &self,
+        _: Request<KeepPrintedRequest>,
+    ) -> Result<Response<KeepPrintedResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn name_session(
+        &self,
+        _: Request<NameSessionRequest>,
+    ) -> Result<Response<NameSessionResponse>, Status> {
+        Err(Status::unimplemented("a stand-in names nothing"))
+    }
+
+    async fn start(&self, _: Request<StartRequest>) -> Result<Response<StartResponse>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 }

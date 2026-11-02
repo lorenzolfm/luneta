@@ -1,0 +1,158 @@
+//! The name luneta gives a session it makes for a directory, as the
+//! picker's directories name one, and the names zellij has, which it takes a
+//! client to a session of rather than make one, on the machine it runs on.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::metadata;
+use crate::zellij::{self, SessionName};
+
+/// The file zellij keeps how a session is laid out in, in the session's
+/// folder in its cache, to bring it back from once it ends: zellij lists a
+/// session that ended to bring back where it has this file and no socket.
+const LAYOUT: &str = "session-layout.kdl";
+
+/// The session a directory is for, as the picker's directories name it: for
+/// the directory itself, or for its repository too when it is a worktree of
+/// one, as `luneta-main`. None for a directory no session can be named for,
+/// as `/`.
+#[must_use]
+pub fn session_for(dir: &Path) -> Option<SessionName> {
+    let path = dir.to_str()?;
+    common_dir(dir)
+        .and_then(|common| worktree_name(path, common.to_str()?))
+        .or_else(|| SessionName::parse(path.split('/').rfind(|part| !part.is_empty())?).ok())
+}
+
+/// The repository a linked worktree is of: its git directory, which every
+/// worktree of it shares. A worktree's `.git` is a file that names its own git
+/// directory, and that names the shared one in `commondir`. None for a
+/// directory that is no linked worktree, as a repository's main one is not.
+fn common_dir(dir: &Path) -> Option<PathBuf> {
+    let dot_git = fs::read_to_string(dir.join(".git")).ok()?;
+    let own = dir.join(dot_git.lines().next()?.strip_prefix("gitdir: ")?);
+    let common = fs::read_to_string(own.join("commondir")).ok()?;
+    fs::canonicalize(own.join(common.lines().next()?)).ok()
+}
+
+/// A worktree is named for its repository too, `luneta-main`, where `main`
+/// alone would name one of every repository, wherever the worktree lives. The
+/// repository is its git directory, less a bare repository's `.git`, or, when
+/// that directory is hidden, as a `.git` or a `.bare`, the directory that
+/// holds it. A worktree whose own name starts with its repository's, as
+/// `app-hotfix` beside `app`, keeps it, and so does one whose name would come
+/// out too long for zellij to make a session of.
+fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
+    let base = path.split('/').rfind(|part| !part.is_empty())?;
+    let mut parts = common.split('/').filter(|part| !part.is_empty());
+    let mut repository = parts.next_back()?;
+    if repository.starts_with('.') {
+        repository = parts.next_back()?;
+    }
+    let repository =
+        repository.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(repository);
+    if base.strip_prefix(repository).is_some_and(|rest| !rest.starts_with(char::is_alphanumeric)) {
+        return None;
+    }
+    SessionName::parse(&format!("{repository}-{base}")).ok()
+}
+
+/// The names `switch-session` takes the client to a session of, rather
+/// than make one: of the sessions that run, by zellij's sockets, and of those
+/// that ended, which zellij keeps to bring back. None where luneta cannot
+/// read where zellij keeps either.
+#[must_use]
+pub fn named() -> Option<Vec<String>> {
+    let running = zellij::running(&zellij::folder())?;
+    let mut named: Vec<String> = running.into_iter().map(|(name, _)| name).collect();
+    named.extend(kept()?);
+    Some(named)
+}
+
+/// The sessions zellij keeps how they were laid out of, in its cache, to
+/// bring them back from: those that ended, and those that run. None where
+/// luneta cannot read the folder they are in. A zellij of another contract
+/// keeps them elsewhere, and none is kept here.
+#[must_use]
+pub fn kept() -> Option<Vec<String>> {
+    let entries = match fs::read_dir(metadata::folder()?) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut kept = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        // A name that is no UTF-8 is of no session luneta names.
+        if let Ok(name) = entry.file_name().into_string()
+            && entry.path().join(LAYOUT).is_file()
+        {
+            kept.push(name);
+        }
+    }
+    Some(kept)
+}
+
+/// The name a session luneta makes for `dir` takes: the one `session_for`
+/// gives it, with a `-2` where a session has that name, one that runs or
+/// one that ended, which zellij keeps to bring back, as zellij says now; or
+/// why it takes none.
+pub fn free_for(dir: &str) -> Result<SessionName, String> {
+    let unnamed = || format!("no session can be named for {dir}");
+    let name = session_for(Path::new(dir)).ok_or_else(unnamed)?;
+    let sessions = named().ok_or("luneta cannot tell which sessions zellij has")?;
+    let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
+    Ok(name.free(&names))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_is_the_directory_itself() {
+        let named = |dir: &str| session_for(Path::new(dir)).map(|name| name.as_str().to_owned());
+        assert_eq!(named("/nowhere/at/all/luneta"), Some("luneta".to_owned()));
+        assert_eq!(named("/nowhere/at/all/luneta/"), Some("luneta".to_owned()));
+        assert_eq!(named("/"), None);
+    }
+
+    #[test]
+    fn a_worktree_is_named_for_its_repository_too() {
+        let named = |path: &str, common: &str| {
+            worktree_name(path, common).map(|name| name.as_str().to_owned())
+        };
+        assert_eq!(named("/w/luneta/main", "/w/luneta/.bare"), Some("luneta-main".to_owned()));
+        assert_eq!(named("/w/trees/main", "/w/luneta/.git"), Some("luneta-main".to_owned()));
+        assert_eq!(named("/w/infra.git/master", "/w/infra.git"), Some("infra-master".to_owned()));
+        assert_eq!(named("/w/app-hotfix", "/w/app/.git"), None);
+        assert_eq!(named("/w/application", "/w/app/.git"), Some("app-application".to_owned()));
+        let long = "x".repeat(zellij::NAME_BYTES_MAX);
+        assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
+    }
+
+    /// A worktree made by git is found one, by the files git leaves in it.
+    #[test]
+    fn a_linked_worktree_is_found_by_its_git_files() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        let common = root.join("luneta").join(".bare");
+        let own = common.join("worktrees").join("main");
+        let tree = root.join("luneta").join("main");
+        for dir in [&own, &tree] {
+            assert!(fs::create_dir_all(dir).is_ok());
+        }
+        let wrote = [
+            fs::write(tree.join(".git"), format!("gitdir: {}\n", own.display())),
+            fs::write(own.join("commondir"), "../..\n"),
+        ];
+        assert!(wrote.iter().all(Result::is_ok));
+        assert_eq!(session_for(&tree).as_ref().map(SessionName::as_str), Some("luneta-main"));
+        let repository = root.join("luneta");
+        assert_eq!(session_for(&repository).as_ref().map(SessionName::as_str), Some("luneta"));
+    }
+}
