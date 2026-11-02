@@ -11,9 +11,9 @@ use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    close_request, closes_response, Client, CloseRequest, ClosesRequest, GoRequest,
-    KeepPrintedRequest, KillRequest, ListClientsRequest, ListSkillsRequest, NameSessionRequest,
-    On, RefugeRequest, RefugeResponse, StartRequest,
+    closes_response, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
+    ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, RefugeRequest, RefugeResponse,
+    StartRequest,
 };
 use lunetad::closes::{Close, Closes};
 use lunetad::opens::Open;
@@ -187,22 +187,18 @@ impl Away {
         }
     }
 
-    /// Has zellij there close `close` of `session`, or says why it did not.
-    pub fn close(&mut self, session: &str, close: Close) -> Result<(), String> {
-        let closes = match close {
-            Close::Pane(pane) => close_request::Closes::Pane(pane),
-            Close::Tab(tab) => close_request::Closes::Tab(tab),
-        };
-        let session = session.to_owned();
-        let request = CloseRequest { on: Some(self.on()), session, closes: Some(closes) };
+    /// Has zellij there close `close` of `session`, as
+    /// `lunetad::closes::closed` does there, or says why it did not.
+    pub fn close(&mut self, session: &SessionName, close: &Close) -> Result<(), String> {
+        let request = close.asked(Some(self.on()), session);
         self.ask(|mut daemon| async move { daemon.close(request).await }).map(|_| ())
     }
 
     /// Has zellij there kill `session`, the one that started at `started`,
     /// and delete it, as `lunetad::closes::killed` does there, or says why
     /// it did not.
-    pub fn kill(&mut self, session: &str, started: SystemTime) -> Result<(), String> {
-        let (session, started_at) = (session.to_owned(), Some(started.into()));
+    pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
+        let (session, started_at) = (session.to_string(), Some(started.into()));
         let request = KillRequest { on: Some(self.on()), session, started_at };
         self.ask(|mut daemon| async move { daemon.kill(request).await }).map(|_| ())
     }

@@ -621,10 +621,11 @@ fn plans_in(
     wanted: &Wanted,
     told: Result<&Told, &Untold>,
 ) -> Result<Vec<Plan>, String> {
-    let owned = || session.to_owned();
+    let named = session_named(session)?;
+    let owned = || named.clone();
     let acts = match wanted {
         Wanted::Session => vec![Act::Kill { session: owned(), started }],
-        Wanted::Panes(panes) => match zellij::closes_together(session, panes)? {
+        Wanted::Panes(panes) => match zellij::closes_together(&named, panes)? {
             Closing::Session => vec![Act::Kill { session: owned(), started }],
             Closing::Parts { tabs, panes } => {
                 let tabs = tabs.into_iter().map(|(tab, panes)| Act::Tab { session: owned(), tab, panes });
@@ -654,7 +655,7 @@ fn session_of(act: &Act) -> &str {
         Act::Pane { session, .. }
         | Act::Tab { session, .. }
         | Act::Kill { session, .. }
-        | Act::Leave { session, .. } => session,
+        | Act::Leave { session, .. } => session.as_str(),
     }
 }
 
@@ -715,8 +716,10 @@ fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane
 /// Has zellij do `act`.
 fn act(act: &Act) -> Result<(), String> {
     match act {
-        Act::Pane { session, pane } => zellij::closed(session, Close::Pane(*pane)),
-        Act::Tab { session, tab, .. } => zellij::closed(session, Close::Tab(*tab)),
+        Act::Pane { session, pane } => zellij::closed(session, &Close::Pane(*pane)),
+        Act::Tab { session, tab, panes } => {
+            zellij::closed(session, &Close::Tab { id: *tab, panes: panes.clone() })
+        },
         Act::Kill { session, started } | Act::Leave { session, started, .. } => {
             zellij::killed(session, *started)
         },

@@ -546,7 +546,7 @@ pub enum After {
     Open(Due<u32>, Open),
     /// Kill the session the client left, which it was in, the one that
     /// started at `started`, and delete it.
-    Kill { session: String, started: SystemTime },
+    Kill { session: SessionName, started: SystemTime },
 }
 
 impl After {
@@ -578,7 +578,7 @@ impl After {
             // A zellij of its own kills it: one run as the client's would
             // wait on the session it ends.
             (After::Kill { session, started }, There::Here) => {
-                kill(&Machine::Local, &session, started, events);
+                kill(&Machine::Local, session, started, events);
             },
             // The daemon there kills it, which waits on no client.
             (After::Kill { session, started }, There::Away(away)) => {
@@ -625,14 +625,16 @@ pub fn owed(menu: u64, events: &Sender<Event>) -> Due<u32> {
 /// the tab opens, and they hold what its layout laid out and no more, as far
 /// as luneta can tell: nothing zellij has says so, but the session is new,
 /// and the menu has the keys until the tab opens, so that only a tab another
-/// client or an agent opened there by then goes with them. What zellij says
-/// of a tab it did not close comes back as a notice.
+/// client or an agent opened there by then goes with them. Each goes with
+/// the terminals zellij lists in it once the tab has opened: one that holds
+/// others by the time zellij would close it stays. What zellij says of a tab
+/// it did not close comes back as a notice.
 fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, String> {
     let made = tabs(&laid(to.as_str())?);
     let (opened, laid) = tab_opened(to, tab)?;
     let terminal = terminal_of(&laid, opened).ok_or("zellij opened a tab with no pane")?;
     for made in made {
-        if let Err(why) = closed(to.as_str(), Close::Tab(made)) {
+        if let Err(why) = closed(to, &Close::tab(&laid, made)) {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
@@ -655,10 +657,10 @@ pub fn closes(menu: u64, on: &Machine, session: SessionName, pane: u32, events: 
 /// Has zellij on the machine `on` close `close` of `session`, on a thread of
 /// its own, at once: it moves no client. What zellij says of a failure comes
 /// back as a notice.
-pub fn close(on: &Machine, session: &str, close: Close, events: &Sender<Event>) {
-    let (on, session, events) = (on.clone(), session.to_owned(), events.clone());
+pub fn close(on: &Machine, session: SessionName, close: Close, events: &Sender<Event>) {
+    let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
-        if let Err(why) = There::on(&on).and_then(|mut there| there.close(&session, close)) {
+        if let Err(why) = There::on(&on).and_then(|mut there| there.close(&session, &close)) {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
@@ -670,11 +672,11 @@ pub fn close(on: &Machine, session: &str, close: Close, events: &Sender<Event>) 
 /// thread, for luneta to wait for as it ends.
 pub fn kill(
     on: &Machine,
-    session: &str,
+    session: SessionName,
     started: SystemTime,
     events: &Sender<Event>,
 ) -> JoinHandle<()> {
-    let (on, session, events) = (on.clone(), session.to_owned(), events.clone());
+    let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
         if let Err(why) = There::on(&on).and_then(|mut there| there.kill(&session, started)) {
             // luneta is on its way out.
@@ -1209,13 +1211,13 @@ impl There {
     /// `lunetad::closes::closes_now` says, or why it closes nothing.
     fn closes(&mut self, session: &SessionName, pane: u32) -> Result<Closes, String> {
         match self {
-            There::Here => closes_now(session.as_str(), pane),
+            There::Here => closes_now(session, pane),
             There::Away(away) => away.closes(session, pane),
         }
     }
 
     /// Has zellij close `close` of `session`, or says why it did not.
-    fn close(&mut self, session: &str, close: Close) -> Result<(), String> {
+    fn close(&mut self, session: &SessionName, close: &Close) -> Result<(), String> {
         match self {
             There::Here => closed(session, close),
             There::Away(away) => away.close(session, close),
@@ -1224,7 +1226,7 @@ impl There {
 
     /// Has zellij kill `session`, the one that started at `started`, and
     /// delete it, as `lunetad::closes::killed` does, or says why it did not.
-    fn kill(&mut self, session: &str, started: SystemTime) -> Result<(), String> {
+    fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
         match self {
             There::Here => killed(session, started),
             There::Away(away) => away.kill(session, started),

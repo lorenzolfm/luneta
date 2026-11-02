@@ -481,11 +481,13 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
 /// looks there: where to take a client, a session's clients, where a client
 /// goes on once its session ended, a pane or a tab to open, the skills of a
 /// directory, what a pane's shell printed, which it keeps there, and the
-/// name a session for a directory takes there, and to start it. Without a
-/// machine, it asks its own; of one it does not reach, it says so. A
+/// name a session for a directory takes there, and to start it, and what
+/// closing a pane closes there, to close it, and a session to kill. Without
+/// a machine, it asks its own; of one it does not reach, it says so. A
 /// question that names a directory by no absolute path, an empty line typed,
-/// or a tab by an empty name is invalid here, and no tab opens there in a
-/// session no client is in.
+/// a tab by an empty name, or a tab to close of no terminal is invalid here;
+/// no tab opens there in a session no client is in, and nothing closes there
+/// that zellij lists otherwise than the close says.
 #[test]
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
@@ -506,6 +508,11 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         "is_floating": false, "tab_id": 6,
     });
     far.zellij.list("two", &serde_json::json!([tab, beside]));
+    let holds = serde_json::json!({
+        "id": 8, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
+        "is_floating": false, "tab_id": 3,
+    });
+    far.zellij.list("held", &serde_json::json!([tab, holds, beside]));
     far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join(".claude/skills/near");
@@ -638,13 +645,30 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let idle = daemon.closes(closes("idle")).await.unwrap().into_inner().closes;
         let whole = closes_response::Closes::Session(closes_response::Session {});
         assert_eq!(idle, Some(whole));
-        let close = |closes| CloseRequest { on: on("far"), session: "two".to_owned(), closes };
-        daemon.close(close(Some(close_request::Closes::Pane(4)))).await.unwrap();
-        daemon.close(close(Some(close_request::Closes::Tab(6)))).await.unwrap();
-        invalid(daemon.close(close(None)).await.unwrap_err());
+        // What it closes goes while zellij lists it as the close says: a pane
+        // another holds its tab open beside, and a tab with its terminals.
+        let close = |session: &str, closes| {
+            CloseRequest { on: on("far"), session: session.to_owned(), closes: Some(closes) }
+        };
+        let pane = close_request::Closes::Pane;
+        let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
+        daemon.close(close("held", pane(4))).await.unwrap();
+        daemon.close(close("two", tab(3, vec![4]))).await.unwrap();
+        for (session, closes, why) in [
+            ("two", pane(4), "pane 4 would take its tab along now"),
+            ("two", tab(6, vec![5, 9]), "tab 6 holds other panes than it did"),
+            ("two", pane(9), "pane 9 is gone"),
+        ] {
+            let stays = daemon.close(close(session, closes)).await.unwrap_err();
+            assert_eq!(stays.code(), Code::FailedPrecondition, "{stays:?}");
+            assert!(stays.message().contains(why), "{stays:?}");
+        }
+        invalid(daemon.close(close("two", tab(3, Vec::new()))).await.unwrap_err());
+        let none = CloseRequest { closes: None, ..close("two", pane(4)) };
+        invalid(daemon.close(none).await.unwrap_err());
         let closed_there = [
-            "--session two action close-pane --pane-id terminal_4",
-            "--session two action close-tab-by-id 6",
+            "--session held action close-pane --pane-id terminal_4",
+            "--session two action close-tab-by-id 3",
         ];
         assert_eq!(far.zellij.closed(), closed_there);
 

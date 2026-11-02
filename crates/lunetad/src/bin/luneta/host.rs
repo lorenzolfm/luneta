@@ -1551,14 +1551,14 @@ impl App {
             },
             Asked::Delete { on, act } => match act {
                 Act::Pane { session, pane } => {
-                    zellij::close(&on, &session, Close::Pane(pane), &self.events);
+                    zellij::close(&on, session, Close::Pane(pane), &self.events);
                 },
-                Act::Tab { session, tab, .. } => {
-                    zellij::close(&on, &session, Close::Tab(tab), &self.events);
+                Act::Tab { session, tab, panes } => {
+                    zellij::close(&on, session, Close::Tab { id: tab, panes }, &self.events);
                 },
                 Act::Kill { session, started } => {
                     self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(zellij::kill(&on, &session, started, &self.events));
+                    self.deleting.push(zellij::kill(&on, session, started, &self.events));
                 },
                 // The plan found zellij's client in `session`, on `on`, and on
                 // its way nowhere, as the key was pressed: where it goes from.

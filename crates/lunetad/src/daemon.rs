@@ -589,7 +589,7 @@ impl Daemon for Host {
             let session = session.to_string();
             return daemon.closes(ClosesRequest { on: None, session, pane }).await;
         }
-        let found = task::spawn_blocking(move || closes::closes_now(session.as_str(), pane)).await;
+        let found = task::spawn_blocking(move || closes::closes_now(&session, pane)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let closes = match found.map_err(Status::failed_precondition)? {
             Closes::Pane => closes_response::Closes::Pane(Pane {}),
@@ -607,14 +607,16 @@ impl Daemon for Host {
         let session = named("session", &session)?;
         let close = match closes {
             Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
-            Some(close_request::Closes::Tab(tab)) => Close::Tab(tab),
+            Some(close_request::Closes::Tab(ClosedTab { panes, .. })) if panes.is_empty() => {
+                return Err(Status::invalid_argument("closes: a tab of no terminal"));
+            },
+            Some(close_request::Closes::Tab(ClosedTab { id, panes })) => Close::Tab { id, panes },
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
         if let Some(mut daemon) = self.bridged(on)? {
-            let session = session.to_string();
-            return daemon.close(CloseRequest { on: None, session, closes }).await;
+            return daemon.close(close.asked(None, &session)).await;
         }
-        let closed = task::spawn_blocking(move || closes::closed(session.as_str(), close)).await;
+        let closed = task::spawn_blocking(move || closes::closed(&session, &close)).await;
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
         Ok(Response::new(CloseResponse {}))
@@ -630,7 +632,7 @@ impl Daemon for Host {
             let (session, started_at) = (session.to_string(), Some(started.into()));
             return daemon.kill(KillRequest { on: None, session, started_at }).await;
         }
-        let killed = task::spawn_blocking(move || closes::killed(session.as_str(), started)).await;
+        let killed = task::spawn_blocking(move || closes::killed(&session, started)).await;
         let killed = killed.map_err(|error| unfinished(&error))?;
         killed.map_err(Status::failed_precondition)?;
         Ok(Response::new(KillResponse {}))

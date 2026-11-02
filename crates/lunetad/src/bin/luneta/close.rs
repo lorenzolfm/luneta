@@ -18,7 +18,7 @@ use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 
 use crate::sidebar::{Listed, Place};
-use crate::zellij::Closes;
+use crate::zellij::{Closes, SessionName};
 
 /// What the menu says of deleting a session while luneta's zellij is on its
 /// way to one: it may be the session luneta is in, or not.
@@ -148,19 +148,19 @@ pub struct Subject<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     /// Close a pane of a session.
-    Pane { session: String, pane: u32 },
+    Pane { session: SessionName, pane: u32 },
     /// Close a tab of a session, by its id, and the terminals in it, the
     /// floating ones too.
-    Tab { session: String, tab: u32, panes: Vec<u32> },
+    Tab { session: SessionName, tab: u32, panes: Vec<u32> },
     /// Kill the session that started at `started`, and delete it, so that
     /// zellij keeps nothing to bring it back with. A key plans it for a
     /// session luneta's zellij is not in, or for the only one, which luneta's
     /// zellij ends with, and luneta with it; `luneta close` for any, as a
     /// client that ends with its session goes on in another.
-    Kill { session: String, started: SystemTime },
+    Kill { session: SessionName, started: SystemTime },
     /// Take luneta's zellij to `to`, and kill and delete `session`, which it
     /// is in, the one that started at `started`, once it has left.
-    Leave { session: String, started: SystemTime, to: Place },
+    Leave { session: SessionName, started: SystemTime, to: Place },
 }
 
 impl Act {
@@ -202,7 +202,7 @@ pub struct Plan {
 /// luneta, where it is the only one; and none goes while luneta cannot tell
 /// which session that is.
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
-    let (session, started) = (subject.session.name().to_string(), subject.session.started());
+    let (session, started) = (subject.session.name().clone(), subject.session.started());
     let act = match &subject.deletes {
         Deletes::Pane { pane, closes: Closes::Pane } => Act::Pane { session, pane: *pane },
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {
@@ -341,7 +341,7 @@ mod tests {
         let planned = |seat: Seat, deletes: Deletes| {
             plan(&subject(&luneta, seat, deletes, Vec::new())).map(|plan| plan.act)
         };
-        let (session, started) = ("luneta".to_owned(), luneta.started());
+        let (session, started) = (luneta.name().clone(), luneta.started());
         assert_eq!(
             planned(Seat::In, pane(Closes::Pane)),
             Ok(Act::Pane { session: session.clone(), pane: 4 })
@@ -371,7 +371,7 @@ mod tests {
                 panic!("the only session is killed");
             };
             let started = luneta.started();
-            assert_eq!(planned.act, Act::Kill { session: "luneta".to_owned(), started });
+            assert_eq!(planned.act, Act::Kill { session: luneta.name().clone(), started });
             let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
             assert_eq!(planned.question(), asks);
         }
@@ -388,7 +388,7 @@ mod tests {
             assert_eq!(planned.map(|plan| plan.act), Err(MOVING.to_owned()));
         }
         let planned = plan(&subject(&luneta, Seat::Moving, pane(Closes::Pane), Vec::new()));
-        let session = "luneta".to_owned();
+        let session = luneta.name().clone();
         assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, pane: 4 }));
     }
 

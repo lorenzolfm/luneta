@@ -64,8 +64,11 @@ service Daemon {
   // session's panes now: the pane alone, its tab, or the session.
   rpc Closes(ClosesRequest) returns (ClosesResponse);
   // Has zellij close a terminal of a session, or a tab of it, its panes and
-  // all, as `zellij action close-pane` and `close-tab-by-id` do. It answers
-  // once zellij has, or with what zellij said as it failed.
+  // all, as `zellij action close-pane` and `close-tab-by-id` do, while the
+  // session's panes are as `Closes` said: a terminal that would take its tab
+  // along now, or a tab that holds other terminals than it did, stays. It
+  // answers once zellij has, or with what zellij said as it failed, or why
+  // it closed nothing.
   rpc Close(CloseRequest) returns (CloseResponse);
   // Has zellij kill a session and delete it, so that it keeps nothing to
   // bring it back with, as `zellij delete-session --force` does. It answers
@@ -283,10 +286,11 @@ message CloseRequest {
   // What it closes: one of these, always. A question with neither is
   // invalid.
   oneof closes {
-    // A terminal, by its id.
+    // A terminal, by its id, which `Closes` said closes alone.
     uint32 pane = 3;
-    // A tab, by its id.
-    uint32 tab = 4;
+    // A tab, by its id, with the terminals `Closes` said are in it. A tab of
+    // no terminal is invalid.
+    ClosesResponse.Tab tab = 4;
   }
 }
 

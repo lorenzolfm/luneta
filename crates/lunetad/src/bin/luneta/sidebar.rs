@@ -2543,12 +2543,11 @@ impl Sidebar {
 
     /// What deleting what `deletes` deletes of `listed`, of the machine
     /// `on`, does, as the sidebar knows that machine now: for the menu, and
-    /// for the picker. Nothing goes of a machine lunetad does not reach now.
+    /// for the picker. Nothing goes of another machine lunetad last said it
+    /// does not reach, whether or not lunetad answers now: luneta knows none
+    /// of its sessions, nor which one to leave for first.
     pub fn plan(&self, on: &Machine, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
-        if let Machine::Remote(destination) = on
-            && self.away.is_none()
-            && self.seen(on).is_none()
-        {
+        if let Machine::Remote(destination) = on && self.seen(on).is_none() {
             return Err(format!("menu: lunetad does not reach {destination} now"));
         }
         close::plan(&self.subject(on, listed, deletes))
@@ -2653,13 +2652,15 @@ impl Sidebar {
     /// past the rows it takes away, once they are gone.
     fn delete(&mut self, on: Machine, act: Act) -> Asked {
         let takes_place = |place: &Place| match (&act, place.pane()) {
-            (Act::Pane { session, pane }, Some(at)) => place.session() == session && at == *pane,
+            (Act::Pane { session, pane }, Some(at)) => {
+                place.session() == session.as_str() && at == *pane
+            },
             (Act::Tab { session, panes, .. }, Some(at)) => {
-                place.session() == session && panes.contains(&at)
+                place.session() == session.as_str() && panes.contains(&at)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
             (Act::Kill { session, .. } | Act::Leave { session, .. }, _) => {
-                place.session() == session
+                place.session() == session.as_str()
             },
         };
         let takes = |spot: &Spot| {
@@ -6417,7 +6418,7 @@ mod tests {
             assert!(lines.contains(&note), "{lines:#?}");
             assert!(lines.contains(&asks.as_str()), "{lines:#?}");
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
-            let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
+            let act = Act::Pane { session: session_name("newer"), pane: 1 };
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
         }
     }
@@ -6440,7 +6441,7 @@ mod tests {
             type_in(&mut sidebar, "d");
             let closes = closes_here(1, "newer", 1);
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
-            let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
+            let act = Act::Pane { session: session_name("newer"), pane: 1 };
             let went = sidebar.closes(1, Ok(Closes::Pane));
             let lines = screen(&mut sidebar, true, 120, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
@@ -6461,7 +6462,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let closes = closes_here(1, "older", 2);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
-        let act = Act::Pane { session: "older".to_owned(), pane: 2 };
+        let act = Act::Pane { session: session_name("older"), pane: 2 };
         assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
         assert!(sidebar.menu.is_none());
         sidebar.heard(host(
@@ -6490,7 +6491,7 @@ mod tests {
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close its tab? 1 agent, 1");
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
-        let act = Act::Tab { session: "older".to_owned(), tab: 0, panes: vec![1] };
+        let act = Act::Tab { session: session_name("older"), tab: 0, panes: vec![1] };
         assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
 
         type_in(&mut sidebar, "d");
@@ -6499,7 +6500,7 @@ mod tests {
         assert_eq!(lines[13..15], [" Delete session older? 1", " agent, 1 waiting"]);
         let to = Place::Session(listed("newer", 20));
         let started = listed("older", 10).started();
-        let leave = Act::Leave { session: "older".to_owned(), started, to };
+        let leave = Act::Leave { session: session_name("older"), started, to };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
         assert!(sidebar.menu.is_none());
     }
@@ -6572,7 +6573,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         let to = Place::Session(listed("older", 10));
         let started = listed("newer", 20).started();
-        let leave = Act::Leave { session: "newer".to_owned(), started, to };
+        let leave = Act::Leave { session: session_name("newer"), started, to };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
     }
 
@@ -7075,7 +7076,7 @@ mod tests {
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
         assert!(lines.contains(&"Close the pane? 1 agent, 1 waiting"), "{lines:#?}");
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes);
-        let act = Act::Pane { session: "main".to_owned(), pane: 1 };
+        let act = Act::Pane { session: session_name("main"), pane: 1 };
         assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Delete { on, act });
         let left = vec![session("main", 20, vec![pane(2, 0, "/w/b", "fish")])];
         host.remotes[0] = remote("nixos", up(left, Vec::new()));
@@ -7109,31 +7110,38 @@ mod tests {
         };
         let (on, started) = (Machine::Remote(nixos()), listed("main", 20).started());
         let to = Place::Session(listed("work", 30));
-        let leave = Act::Leave { session: "main".to_owned(), started, to };
+        let leave = Act::Leave { session: session_name("main"), started, to };
         assert_eq!(delete(&mut sidebar), Asked::Delete { on: on.clone(), act: leave });
         host.remotes[0] = remote("nixos", up(vec![main()], Vec::new()));
         sidebar.heard(host);
-        let kill = Act::Kill { session: "main".to_owned(), started };
+        let kill = Act::Kill { session: session_name("main"), started };
         assert_eq!(delete(&mut sidebar), Asked::Delete { on, act: kill });
     }
 
     /// A delete on another machine's row that waits on your yes deletes
     /// nothing there once lunetad no longer reaches that machine, and says
-    /// so.
+    /// so, whether or not lunetad answers since: luneta knows none of that
+    /// machine's sessions.
     #[test]
     fn a_delete_on_a_machine_lunetad_no_longer_reaches_deletes_nothing() {
-        let mut sidebar = fresh();
-        let mut host = machines();
-        sidebar.heard(host.clone());
-        sidebar.focus(Keys::Sidebar);
-        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
-        type_in(&mut sidebar, "d");
-        // Its agent waits for you.
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
-        host.remotes[0] = remote("nixos", down(100));
-        sidebar.heard(host);
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.notice.as_deref(), Some("menu: lunetad does not reach nixos now"));
+        for answers in [true, false] {
+            let mut sidebar = fresh();
+            let mut host = machines();
+            sidebar.heard(host.clone());
+            sidebar.focus(Keys::Sidebar);
+            sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
+            type_in(&mut sidebar, "d");
+            // Its agent waits for you.
+            assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
+            host.remotes[0] = remote("nixos", down(100));
+            sidebar.heard(host);
+            if !answers {
+                sidebar.lost("lunetad stopped".to_owned());
+            }
+            assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Nothing);
+            let refused = Some("menu: lunetad does not reach nixos now");
+            assert_eq!(sidebar.notice.as_deref(), refused, "answers: {answers}");
+        }
     }
 
     /// luneta's zellij on another machine, once a client of a session there
