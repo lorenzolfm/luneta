@@ -350,7 +350,8 @@ impl Coming {
 }
 
 /// luneta's client on its way to a session zellij makes for it, from the one
-/// it is in, until zellij titles luneta's terminal there. Dropped before, as
+/// it is in, or as a client luneta starts to make it, until zellij titles
+/// luneta's terminal there. Dropped before, as
 /// where zellij did not take it there, or luneta sent it elsewhere since, or
 /// it ended, what waits on its arrival hears that it did not come.
 struct Making {
@@ -392,7 +393,8 @@ enum Joins<'a> {
     /// It makes this one, in that directory, or where luneta started, and
     /// fails where one runs by its name by then, or zellij keeps one by it
     /// that ended, as `zellij::make` says: luneta found the name unused just
-    /// before.
+    /// before. luneta finds it there once zellij titles its terminal in it,
+    /// as `restart` says.
     Make(&'a SessionName, Option<&'a str>),
 }
 
@@ -1908,7 +1910,11 @@ impl App {
     /// ended, or that luneta takes elsewhere. `before` is what luneta knows of
     /// the session's clients before it comes, `back` where luneta's zellij
     /// goes back to where it fails, and `next` where it goes on to once it is
-    /// in. The sidebar has luneta's zellij on `machine` from now on.
+    /// in. The sidebar has luneta's zellij on `machine` from now on. One that
+    /// makes its session is in it once zellij titles luneta's terminal there,
+    /// not once it shows anything: one that fails, as where the name is
+    /// taken by then, writes why, and a client of the session that took the
+    /// name is anyone's but luneta's.
     fn restart(
         &mut self,
         machine: &Machine,
@@ -1925,7 +1931,14 @@ impl App {
         let hosted = self.start_of(machine, joins)?;
         let look = self.sidebar.swapping(machine, joins.session());
         let arrival = Arrival::new(machine.clone(), look, before, after);
-        self.put(hosted, back, arrival, then_pane);
+        match joins {
+            Joins::Attach(_) => self.put(hosted, back, Some(arrival), then_pane),
+            Joins::Make(..) => {
+                self.put(hosted, back, None, then_pane);
+                let until = Instant::now() + zellij::START;
+                self.client.making = Some(Making { arrival, until });
+            },
+        }
         Ok(())
     }
 
@@ -1951,17 +1964,17 @@ impl App {
         Ok(hosted)
     }
 
-    /// Has `hosted` take the place of zellij's client, on its `arrival`, with
-    /// `back` to go back to where it fails, and `then_pane` to go on to once
-    /// it is in.
+    /// Has `hosted` take the place of zellij's client, on its `arrival`, if
+    /// luneta looks for it as zellij first shows anything, with `back` to go
+    /// back to where it fails, and `then_pane` to go on to once it is in.
     fn put(
         &mut self,
         hosted: Hosted,
         back: Option<Back>,
-        arrival: Arrival,
+        arrival: Option<Arrival>,
         then_pane: Option<Place>,
     ) {
-        self.client = Client::new(hosted, back, Some(arrival), then_pane);
+        self.client = Client::new(hosted, back, arrival, then_pane);
         // The client that takes its place heard no button go down over it.
         if self.held == Held::Zellij {
             self.held = Held::Nothing;
@@ -2287,7 +2300,7 @@ impl App {
         let hosted = self.start_of(&Machine::Local, Joins::Attach(&to))?;
         let look = self.sidebar.rejoining(&to);
         let arrival = Arrival::new(Machine::Local, look, Before::Listed(before), None);
-        self.put(hosted, None, arrival, None);
+        self.put(hosted, None, Some(arrival), None);
         Ok(())
     }
 
@@ -2349,7 +2362,9 @@ impl App {
         };
         // What waits on its arrival, as a menu waits on a session made for
         // it, hears why it did not come, not that it ended with no answer.
-        if let Some(arrival) = self.client.coming.take().and_then(Coming::arrival) {
+        let coming = self.client.coming.take().and_then(Coming::arrival);
+        let making = self.client.making.take().map(|making| making.arrival);
+        for arrival in coming.into_iter().chain(making) {
             arrival.failed(note.clone(), &self.events);
         }
         self.sidebar.notify(note);
