@@ -943,8 +943,9 @@ as what you type does.
 ```
 
 A box along the bottom of zellij shows what you say as you say it, how long
-you have talked, and how loud the microphone hears you. It has the keys until
-what you said is written, under half a second after you let go. A terminal
+you have talked, and how loud the microphone hears you. It has the keys and the
+mouse until what you said is written, under half a second after you let go, so
+that what it writes goes where you opened it. A terminal
 tells luneta that a key was let go only with the kitty keyboard protocol, as
 Ghostty and kitty speak it: in one that does not, `Alt r` taps.
 

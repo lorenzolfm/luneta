@@ -260,6 +260,7 @@ impl Speech {
 
 /// A dictation the thread hears, until it is told to finish, and while it
 /// writes what you said: dropped, it gives up.
+#[derive(Debug)]
 pub struct Listening {
     finish: Sender<()>,
 }

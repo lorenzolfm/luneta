@@ -8,7 +8,9 @@
 //!
 //! A box along the bottom of zellij shows what the model makes of what you
 //! say as you say it, and how loud the microphone hears you. It has the keys
-//! until it closes, and takes no other. luneta tells a hold from a tap by
+//! and the mouse until it closes, as every box over zellij does, so that
+//! nothing moves what it writes into from under it. Of the keys, it takes
+//! its own, and does nothing with the rest. luneta tells a hold from a tap by
 //! when the key is let go, which only a terminal that speaks the kitty
 //! keyboard protocol tells it: in one that does not, the key taps.
 //!
@@ -44,19 +46,9 @@ const LEVELS: usize = 8;
 /// The glyphs of a level, from silence to the loudest.
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Where what you said is written.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Where {
-    /// In the pane zellij is on.
-    Zellij,
-    /// On the line of the ask box of this number.
-    Ask(u64),
-}
-
-/// What you said, for luneta to write.
+/// What you said, for luneta to write where the box was opened over.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Dictated {
-    pub into: Where,
     pub text: String,
     /// Whether it is sent once written, as `Enter` ended the dictation.
     pub sends: bool,
@@ -73,6 +65,7 @@ pub enum Keyed {
 }
 
 /// The box, from when `KEY` opens it until it closes.
+#[derive(Debug)]
 pub struct Dictation {
     /// Its number among the dictations luneta has opened, which what the
     /// model says of it carries.
@@ -81,6 +74,7 @@ pub struct Dictation {
 }
 
 /// Where the box is at.
+#[derive(Debug)]
 enum Stage {
     /// The model is on its way, as the box says: this many bytes of it are in.
     Fetching(u64),
@@ -92,8 +86,8 @@ enum Stage {
 }
 
 /// A dictation, from when the key went down until what you said is written.
+#[derive(Debug)]
 struct Hearing {
-    into: Where,
     key: Key,
     /// What the model says of itself.
     model: Model,
@@ -131,20 +125,13 @@ enum Model {
 }
 
 impl Dictation {
-    /// The box numbered `number`, for the dictation `listening`, into
-    /// `into`, from `now`, as the key went down. Where luneta's terminal
-    /// tells it when a key is let go, as `releases` says, the key is held
-    /// until then; else it was tapped.
-    pub fn hearing(
-        number: u64,
-        into: Where,
-        listening: Listening,
-        releases: bool,
-        now: Instant,
-    ) -> Self {
+    /// The box numbered `number`, for the dictation `listening`, from
+    /// `now`, as the key went down. Where luneta's terminal tells it when a
+    /// key is let go, as `releases` says, the key is held until then; else it
+    /// was tapped.
+    pub fn hearing(number: u64, listening: Listening, releases: bool, now: Instant) -> Self {
         let key = if releases { Key::Down(now) } else { Key::Tapped };
         let hearing = Hearing {
-            into,
             key,
             model: Model::Opening,
             levels: Vec::new(),
@@ -242,7 +229,7 @@ impl Dictation {
             },
             Spoken::Words(words) => hearing.words = words,
             Spoken::Ended(Ok(text)) => {
-                return Some(Dictated { into: hearing.into, text, sends: hearing.sends });
+                return Some(Dictated { text, sends: hearing.sends });
             },
             Spoken::Ended(Err(why)) => self.stage = Stage::Wrong(why),
         }
@@ -421,7 +408,7 @@ mod tests {
     /// told: to finish, or, as it drops, to give up.
     fn hearing(releases: bool, at: Instant) -> (Dictation, Receiver<()>) {
         let (listening, stop) = Listening::new();
-        (Dictation::hearing(1, Where::Zellij, listening, releases, at), stop)
+        (Dictation::hearing(1, listening, releases, at), stop)
     }
 
     fn ended(dictation: &mut Dictation, text: &str) -> Option<Dictated> {
@@ -429,7 +416,7 @@ mod tests {
     }
 
     fn written(text: &str, sends: bool) -> Dictated {
-        Dictated { into: Where::Zellij, text: text.to_owned(), sends }
+        Dictated { text: text.to_owned(), sends }
     }
 
     /// The key held as you talk repeats, and does nothing, until it is let
