@@ -443,12 +443,14 @@ pub fn start(
 /// The tab a session luneta makes for a menu opens with, for the menu owed
 /// what it opens: in place of the tabs zellij makes the session with, as
 /// `Open::Tab` says, where the session's machine made it since luneta found
-/// its name unused there, by that machine's clock, as `Unused` says.
+/// its name unused there, by that machine's clock, as `Unused` says. Where
+/// that machine's daemon is too old to say when, the tab opens beside them,
+/// as that daemon would open it anyway: it knows no tab that opens alone.
 pub struct Alone {
     owed: Due<u32>,
     tab: Tab,
     session: SessionName,
-    since: SystemTime,
+    since: Option<SystemTime>,
 }
 
 impl Alone {
@@ -461,7 +463,7 @@ impl Alone {
     /// What opens it once the client has come to the session made for it.
     pub fn after(self) -> After {
         let Alone { owed, tab, session, since } = self;
-        After::Open(owed, Open::Tab { session, tab, alone_since: Some(since) })
+        After::Open(owed, Open::Tab { session, tab, alone_since: since })
     }
 }
 
@@ -1022,8 +1024,9 @@ pub struct Unused {
     /// Just before luneta read which names zellij on `on` has, by that
     /// machine's clock: a session of the name that started then or after is
     /// one zellij made since, as one renamed to it keeps the time it started
-    /// at.
-    since: SystemTime,
+    /// at. None from the daemon of another machine older than
+    /// `NameSessionResponse.named_at`, which says no time.
+    since: Option<SystemTime>,
 }
 
 impl Unused {
@@ -1040,7 +1043,7 @@ impl Unused {
 /// `lunetad::names::free_for` names it, or why it takes none.
 pub fn unused_for(dir: &str) -> Result<Unused, String> {
     let (name, since) = lunetad::names::free_for(dir)?;
-    Ok(Unused { on: Machine::Local, name, since })
+    Ok(Unused { on: Machine::Local, name, since: Some(since) })
 }
 
 /// The name a session luneta makes for `dir` on `destination` takes, as its
@@ -1081,7 +1084,7 @@ pub fn makes(to: SessionName) -> Result<Unused, String> {
     if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
         return Err(format!("no session made: zellij keeps {to}, which ended, to bring back"));
     }
-    Ok(Unused { on: Machine::Local, name: to, since })
+    Ok(Unused { on: Machine::Local, name: to, since: Some(since) })
 }
 
 /// `to`, as a name zellij on `destination` would make a session of now, for

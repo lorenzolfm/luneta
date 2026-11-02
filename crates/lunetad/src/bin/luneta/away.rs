@@ -13,8 +13,8 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
     closes_response, AskResponse, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
-    ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, RefugeRequest, RefugeResponse,
-    StartRequest,
+    ListClientsRequest, ListSkillsRequest, NameSessionRequest, NameSessionResponse, On,
+    RefugeRequest, RefugeResponse, StartRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
@@ -98,18 +98,12 @@ impl Away {
 
     /// The name a session luneta makes for `dir` there takes, as
     /// `lunetad::names::free_for` names it there, with the time just before
-    /// it read which names zellij there has, by that machine's clock; or why
-    /// it takes none, or a daemon older than luneta's says no time.
-    pub fn name(&mut self, dir: &str) -> Result<(SessionName, SystemTime), String> {
+    /// it read which names zellij there has, by that machine's clock, as
+    /// `named_by` reads them; or why it takes none.
+    pub fn name(&mut self, dir: &str) -> Result<(SessionName, Option<SystemTime>), String> {
         let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
         let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
-        let on = &self.on;
-        let name = SessionName::running(&named.name)
-            .map_err(|why| format!("{on}: lunetad named a session \"{}\": {why}", named.name))?;
-        let since = named.named_at.and_then(|at| SystemTime::try_from(at).ok()).ok_or_else(|| {
-            format!("{on}: lunetad says no time it named {name} at, as one older than luneta does")
-        })?;
-        Ok((name, since))
+        named_by(&self.on, named)
     }
 
     /// The clients of `session` there, as zellij lists them now, or why it
@@ -338,6 +332,20 @@ async fn heard(
     }
 }
 
+/// The name the daemon of `on` gives a session in `answer`, and the time it
+/// read zellij's names at there: none from a daemon older than that time,
+/// which names the session all the same, as for one to start. Or why it
+/// names none zellij would make.
+fn named_by(
+    on: &Destination,
+    answer: NameSessionResponse,
+) -> Result<(SessionName, Option<SystemTime>), String> {
+    let NameSessionResponse { name, named_at } = answer;
+    let name = SessionName::running(&name)
+        .map_err(|why| format!("{on}: lunetad named a session \"{name}\": {why}"))?;
+    Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok())))
+}
+
 /// What `status`, of a question for `on`, says: what lunetad said, or what a
 /// daemon older than the question would mean.
 fn said(on: &Destination, status: &Status) -> String {
@@ -415,5 +423,24 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
+    }
+
+    /// The daemon there names a session to make, and says when it read
+    /// zellij's names there. One older than that time says none, and its
+    /// name stands all the same, as for a session to start. A name zellij
+    /// would not take is none.
+    #[test]
+    fn a_session_is_named_there_by_a_daemon_old_or_new() {
+        let on = "nixos".parse().unwrap();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let answer = |name: &str, at: Option<SystemTime>| NameSessionResponse {
+            name: name.to_owned(),
+            named_at: at.map(Into::into),
+        };
+        let cdk = SessionName::running("cdk-2").unwrap();
+        assert_eq!(named_by(&on, answer("cdk-2", Some(at))), Ok((cdk.clone(), Some(at))));
+        assert_eq!(named_by(&on, answer("cdk-2", None)), Ok((cdk, None)));
+        let why = "nixos: lunetad named a session \"../x\": name cannot contain '/'";
+        assert_eq!(named_by(&on, answer("../x", None)), Err(why.to_owned()));
     }
 }
