@@ -1474,12 +1474,10 @@ impl App {
     /// does.
     fn hit(&mut self, hit: Hit) {
         match hit {
-            Hit::Legend(key) if self.focus.over.is_none() => {
-                let asked = self.sidebar.legend_key(&key, SystemTime::now());
-                self.follow(asked);
-            },
-            Hit::Search(key) if self.focus.over.is_none() => {
-                let asked = self.sidebar.search_clicked(&key, SystemTime::now());
+            // The sidebar does nothing with a key of what left the bottom
+            // since, or while a box over zellij has the keys.
+            Hit::Keys(keyed, key) => {
+                let asked = self.sidebar.keys_clicked(keyed, &key, SystemTime::now());
                 self.follow(asked);
             },
             Hit::Menu(menu, choice) if matches!(self.focus.over, None | Some(Over::Menu)) => {
@@ -1495,7 +1493,7 @@ impl App {
                 }
             },
             // A box opened over what drew it since.
-            Hit::Legend(_) | Hit::Search(_) | Hit::Menu(..) => {},
+            Hit::Menu(..) => {},
         }
     }
 

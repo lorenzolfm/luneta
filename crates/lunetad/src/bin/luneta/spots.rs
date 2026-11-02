@@ -121,10 +121,8 @@ pub enum Drawn {
     /// no room.
     #[default]
     Nothing,
-    /// The legend at the bottom of the sidebar.
-    Legend(Spots<KeyEvent>),
-    /// The search at the bottom of the sidebar: the keys it takes.
-    Search(Spots<KeyEvent>),
+    /// The keys at the bottom of the sidebar, the legend's or the search's.
+    Keys(Keyed, Spots<KeyEvent>),
     /// The menu numbered `number`: floating over zellij in the box `area`, or
     /// at the bottom of the sidebar, in none.
     Menu { number: u64, area: Option<Rect>, spots: Spots<Choice> },
@@ -132,11 +130,19 @@ pub enum Drawn {
     Picker { number: u64, area: Rect, spots: Spots<Pick> },
 }
 
+/// Which keys at the bottom of the sidebar drew: the legend's, or the
+/// search's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keyed {
+    Legend,
+    Search,
+}
+
 /// A spot a click hits, with what drew it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
-    Legend(KeyEvent),
-    Search(KeyEvent),
+    /// On the keys at the bottom of the sidebar.
+    Keys(Keyed, KeyEvent),
     /// On the menu numbered so.
     Menu(u64, Choice),
     /// On the picker numbered so.
@@ -149,7 +155,7 @@ impl Drawn {
         match self {
             Drawn::Menu { area, .. } => *area,
             Drawn::Picker { area, .. } => Some(*area),
-            Drawn::Nothing | Drawn::Legend(_) | Drawn::Search(_) => None,
+            Drawn::Nothing | Drawn::Keys(..) => None,
         }
     }
 
@@ -157,8 +163,7 @@ impl Drawn {
     pub fn at(&self, at: Position) -> Option<Hit> {
         match self {
             Drawn::Nothing => None,
-            Drawn::Legend(spots) => spots.at(at).copied().map(Hit::Legend),
-            Drawn::Search(spots) => spots.at(at).copied().map(Hit::Search),
+            Drawn::Keys(keyed, spots) => spots.at(at).map(|key| Hit::Keys(*keyed, *key)),
             Drawn::Menu { number, spots, .. } => {
                 spots.at(at).cloned().map(|choice| Hit::Menu(*number, choice))
             },
@@ -172,7 +177,7 @@ impl Drawn {
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
         match self {
             Drawn::Nothing => {},
-            Drawn::Legend(spots) | Drawn::Search(spots) => spots.light(buffer, pointer),
+            Drawn::Keys(_, spots) => spots.light(buffer, pointer),
             Drawn::Menu { spots, .. } => spots.light(buffer, pointer),
             Drawn::Picker { spots, .. } => spots.light(buffer, pointer),
         }
@@ -183,8 +188,7 @@ impl Drawn {
     pub fn placed(self, lines: usize, area: Rect) -> Drawn {
         match self {
             Drawn::Nothing => Drawn::Nothing,
-            Drawn::Legend(spots) => Drawn::Legend(spots.down(lines).placed(area)),
-            Drawn::Search(spots) => Drawn::Search(spots.down(lines).placed(area)),
+            Drawn::Keys(keyed, spots) => Drawn::Keys(keyed, spots.down(lines).placed(area)),
             Drawn::Menu { number, area: boxed, spots } => {
                 Drawn::Menu { number, area: boxed, spots: spots.down(lines).placed(area) }
             },
@@ -283,8 +287,8 @@ mod tests {
         spots.add(0, 0..4, key('d'));
         let area = Rect::new(0, 0, 4, 1);
         let at = Position::new(1, 0);
-        let legend = Drawn::Legend(spots.clone());
-        assert_eq!(legend.at(at), Some(Hit::Legend(key('d'))));
+        let legend = Drawn::Keys(Keyed::Legend, spots.clone());
+        assert_eq!(legend.at(at), Some(Hit::Keys(Keyed::Legend, key('d'))));
         assert_eq!(legend.boxed(), None);
         let menu = |area| Drawn::Menu { number: 3, area, spots: spots.clone().map(Choice::Key) };
         assert_eq!(menu(None).at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
