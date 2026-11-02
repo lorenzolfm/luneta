@@ -10,7 +10,7 @@ use crate::host::{Vars, LUNETA};
 
 /// git on the repository at `dir`, with no config but its own, as no one in
 /// particular, which must end well.
-fn git(dir: &Path, args: &[&str]) {
+pub fn git(dir: &Path, args: &[&str]) {
     let mut git = Command::new("git");
     for repository in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
         git.env_remove(repository);
@@ -46,7 +46,7 @@ fn worktree_with(dir: &Path, words: &[&str], named: Option<(&str, &Path)>) -> Ou
 /// A clone as wt makes one, of a repository it makes beside it, `up`, with
 /// the repository bare in `.bare` and `main` checked out beside it, at
 /// `clone`.
-fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
+pub fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
     origin(up);
     let (up, bare) = (up.display().to_string(), clone.join(".bare"));
     git(scratch, &["clone", "-q", "--bare", &up, &bare.display().to_string()]);

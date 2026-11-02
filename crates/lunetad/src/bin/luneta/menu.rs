@@ -1014,9 +1014,17 @@ pub enum Wants {
     Printed { session: Listed, pane: u32, ended: Ended },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
-    /// named `name`, with `command` in it, or your shell for none, for luneta
-    /// to take its client there in turn.
-    Make { session: SessionName, cwd: String, tab_cwd: String, name: String, command: Vec<String> },
+    /// named `name`, with `command` in it, or your shell for none, in place
+    /// of the tabs zellij makes it with, as the session was named at `since`,
+    /// for luneta to take its client there in turn.
+    Make {
+        session: SessionName,
+        cwd: String,
+        tab_cwd: String,
+        name: String,
+        command: Vec<String>,
+        since: SystemTime,
+    },
 }
 
 /// What a menu that closed leaves the sidebar to do.
@@ -1029,8 +1037,8 @@ pub enum Done {
     /// starts in `cwd`.
     Start(Machine, String),
     /// Take luneta's zellij to the pane that has the pull request's branch
-    /// checked out.
-    Go(Place),
+    /// checked out, on the machine.
+    Go(Machine, Place),
     /// Have zellij on the machine do what a delete key planned for a session
     /// there: for the session luneta's zellij is in, once it has left it.
     Act(Machine, Act),
@@ -1388,15 +1396,17 @@ impl Menu {
 
     /// What the key of the menu for a pull request or an issue that waits
     /// does, now that luneta found where it goes, as `ready` says, or why it
-    /// found nothing. `w` takes luneta's zellij to the pane that has the
-    /// branch checked out, or opens a tab in the worktree, named for the pull
-    /// request or the issue, in the session that works in its repository, or
-    /// one luneta makes; `r` opens an agent on a review of the pull request
-    /// beside that pane, or in that tab, and `t` one on tackling the issue.
-    /// The menu is then for where it opens that, and waits for zellij to open
-    /// it.
+    /// found nothing: on the machine of the row the link was pasted on,
+    /// where luneta found it. `w` takes luneta's zellij to the pane that has
+    /// the branch checked out, or opens a tab in the worktree, named for the
+    /// pull request or the issue, in the session that works in its
+    /// repository, or one luneta makes; `r` opens an agent on a review of the
+    /// pull request beside that pane, or in that tab, and `t` one on tackling
+    /// the issue. The menu is then for where it opens that, and waits for
+    /// zellij to open it.
     pub fn pulled(self, ready: Result<Ready, String>) -> Did {
         let Menu { number, target, stage } = self;
+        let on = target.machine().clone();
         let Stage::Pull { link, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
@@ -1416,32 +1426,30 @@ impl Menu {
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
             let row = PaneRow { session: session.clone(), pane, cwd, branch, ran };
-            // luneta finds where a link goes among this machine's panes.
-            let target = Target::Pane(Machine::Local, row);
+            let target = Target::Pane(on.clone(), row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { link: link.clone(), step };
             let cwd = worktree.clone();
             Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
         };
         match (at, pull) {
-            (At::There { session, pane }, Pull::Worktree) => {
-                Did::Closed(Done::Go(Place::Pane { session, pane }))
+            (At::There((session, pane)), Pull::Worktree) => {
+                Did::Closed(Done::Go(on, Place::Pane { session, pane }))
             },
-            (At::There { session, pane }, Pull::Agent) => {
+            (At::There((session, pane)), Pull::Agent) => {
                 opening(session, pane, Opens::Pane { beside: pane, command })
             },
-            (At::Session { session, pane }, _) => {
+            (At::Session((session, pane)), _) => {
                 let opens = Opens::Tab { name: Some(link.tab()), command };
                 opening(session, pane, opens)
             },
-            (At::Clone { cwd, name }, _) => {
+            (At::Clone { cwd, name, since }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, link.tab());
-                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
+                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command, since };
                 let stage = Stage::Pull { link, step: Step::Waiting(Wait::Making(name)) };
-                // luneta makes the session on this machine, whatever machine's
-                // row the link was pasted on.
-                let target = Target::Machine(Machine::Local);
-                Did::Stays(Menu { number, target, stage }, wants)
+                // The session is the machine's, as zellij makes it, and the
+                // menu is for that, until it has a pane of it.
+                Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
         }
     }
@@ -2893,13 +2901,18 @@ mod tests {
         Link::parse("https://github.com/cashubtc/cdk/pull/2736").expect("a link")
     }
 
-    /// The menu for the pull request, its key `key` pressed, waiting for
-    /// luneta to find where it goes.
-    fn pulling(key: char) -> Menu {
-        let (menu, wants) = stays(Menu::pull(1, pane_row(), link()).key(&char(key)));
+    /// The menu for the pull request, pasted on `row`, its key `key` pressed,
+    /// waiting for luneta to find where it goes.
+    fn pulling_on(row: Target, key: char) -> Menu {
+        let (menu, wants) = stays(Menu::pull(1, row, link()).key(&char(key)));
         assert_eq!(wants, Wants::Pull(link()));
         assert!(menu.pulling());
         menu
+    }
+
+    /// The same, pasted on a pane's row of this machine.
+    fn pulling(key: char) -> Menu {
+        pulling_on(pane_row(), key)
     }
 
     /// A paste opens the menu for the pull request, named for it, with its
@@ -2955,7 +2968,7 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let session = || At::Session { session: other.clone(), pane: 7 };
+        let session = || At::Session((other.clone(), 7));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
@@ -2967,9 +2980,9 @@ mod tests {
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
-        let there = || At::There { session: other.clone(), pane: 9 };
+        let there = || At::There((other.clone(), 9));
         let place = Place::Pane { session: other.clone(), pane: 9 };
-        assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(place));
+        assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
         let cwd = worktree.clone();
@@ -2997,7 +3010,7 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
-            at: At::Session { session: other.clone(), pane: 7 },
+            at: At::Session((other.clone(), 7)),
             worktree: worktree.clone(),
             branch: Some("issue-2736".to_owned()),
         };
@@ -3015,7 +3028,8 @@ mod tests {
     #[test]
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
-        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
+        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(7);
+        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone(), since };
         let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None };
         let (menu, wants) = stays(pulling('w').pulled(Ok(ready)));
         assert_eq!(
@@ -3026,6 +3040,7 @@ mod tests {
                 tab_cwd: "/w/cdk/feat-x".to_owned(),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
+                since,
             }
         );
         assert_eq!(menu.opening(), Some(Opening::Made(&name)));
@@ -3037,5 +3052,29 @@ mod tests {
             closed(pulling('r').pulled(Err(why))),
             Done::Wrong("menu: cashubtc/cdk#2736: no session works in cashubtc/cdk".to_owned())
         );
+    }
+
+    /// A link pasted on a row of another machine is found there, and what
+    /// its keys open is that machine's: the pane with the branch, a tab of a
+    /// session there, or a session made there, which the menu is for until
+    /// zellij opens a pane of it.
+    #[test]
+    fn the_keys_for_a_link_pasted_on_another_machine_s_row_open_there() {
+        let vps = || Machine::Remote("me@vps".parse().unwrap());
+        let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
+        let ready = |at| Ok(Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None });
+        let row = || Target::Pane(vps(), row());
+        let place = Place::Pane { session: other.clone(), pane: 9 };
+        let there = ready(At::There((other.clone(), 9)));
+        assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
+        let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(At::Session((other, 7)))));
+        let Target::Pane(machine, row) = menu.target() else { panic!("not a pane's row") };
+        assert_eq!((machine, row.pane), (&vps(), 7));
+        let (name, since) = (SessionName::parse("cdk").unwrap(), SystemTime::UNIX_EPOCH);
+        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name, since };
+        let header = Target::Machine(vps());
+        let (menu, wants) = stays(pulling_on(header.clone(), 'w').pulled(ready(clone)));
+        assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
+        assert_eq!(menu.target(), &header);
     }
 }

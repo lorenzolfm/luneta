@@ -56,7 +56,6 @@ use crate::ask::{Ask, Heard, Keyed};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::close::Act;
 use crate::dictation::{self, Dictated, Dictation};
-use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
@@ -74,7 +73,9 @@ use crate::skills::{self, Skill};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
 use crate::width::Width;
-use crate::zellij::{self, After, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused};
+use crate::zellij::{
+    self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused,
+};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -956,9 +957,9 @@ impl App {
                 self.on_to_pane();
             },
             Event::Stayed(look) => {
-                let making = self.client.making.as_ref();
-                if making.is_some_and(|making| making.arrival.look.number == look) {
-                    self.client.making = None;
+                let stayed = |making: &Making| making.arrival.look.number == look;
+                if let Some(making) = self.client.making.take_if(|making| stayed(making)) {
+                    making.arrival.stayed(&self.events);
                 }
                 let look = self.sidebar.stayed(look);
                 // The client never left: what it typed there counts still.
@@ -1104,6 +1105,7 @@ impl App {
         if let Some(making) = self.client.making.take_if(|making| now >= making.until) {
             self.sidebar.notify("zellij did not take its client there".to_owned());
             let look = self.sidebar.stayed(making.arrival.look.number);
+            making.arrival.stayed(&self.events);
             self.look(look);
         }
     }
@@ -1587,14 +1589,22 @@ impl App {
             },
             // The menu waits until zellij has opened it, and takes the keys
             // there with it.
-            Asked::Make { menu, session, cwd, tab_cwd, name, command } => {
+            Asked::Make { menu, on, session, cwd, tab_cwd, name, command, since } => {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                let owed = zellij::owed(menu, &self.events);
-                if !self.make(zellij::makes(session), &cwd, Some((owed, tab))) {
+                let alone = Alone { owed: zellij::owed(menu, &self.events), tab, since };
+                let unused = match &on {
+                    Machine::Local => zellij::makes(session),
+                    Machine::Remote(destination) => {
+                        zellij::makes_away(destination, &session, &cwd)
+                    },
+                };
+                if !self.make(unused, &cwd, Some(alone)) {
                     self.sidebar.close_menu();
                 }
             },
-            Asked::Pull { menu, link, worked } => pull::prepare(menu, link, worked, &self.events),
+            Asked::Pull { menu, on, link, worked } => {
+                pull::prepare(menu, on, link, worked, &self.events);
+            },
             Asked::Find { menu, on, cwd } => skills::find(menu, &on, &cwd, &self.events),
             Asked::Printed { menu, on, session, pane, ended } => {
                 printed::read(menu, &on, &session, pane, ended, &self.events);
@@ -1852,12 +1862,20 @@ impl App {
     /// Takes zellij's client to a session it makes, `session`, on `machine`,
     /// another than the one it runs on, that starts in `cwd`, or where luneta
     /// started: a client that makes it there takes its place, as `swap`
-    /// says, or attaches to one that runs by that name instead. Whether it
-    /// went.
-    fn swap_making(&mut self, machine: &Machine, session: &SessionName, cwd: Option<&str>) -> bool {
+    /// says, or attaches to one that runs by that name instead. Once it is
+    /// in, the tab of `alone` opens there, if any, as `Alone` says. Whether
+    /// it went.
+    fn swap_making(
+        &mut self,
+        machine: &Machine,
+        session: &SessionName,
+        cwd: Option<&str>,
+        alone: Option<Alone>,
+    ) -> bool {
         let back = self.back(machine);
         let joins = Joins::Make(session, cwd);
-        match self.restart(machine, joins, Before::Made, back, None) {
+        let next = alone.map(|alone| Next::After(alone.after(session)));
+        match self.restart(machine, joins, Before::Made, back, next) {
             Ok(()) => true,
             Err(error) => {
                 self.sidebar.notify(format!("no client of {session} started: {error}"));
@@ -1964,56 +1982,40 @@ impl App {
 
     /// Takes zellij's client to a session it makes on `machine`, `session`,
     /// that starts in `cwd`, or where the client started, or brings back,
-    /// where zellij kept one that ended, and opens `tab` there once it is,
-    /// for the menu owed what it opens. Where zellij makes it, its server
+    /// where zellij kept one that ended, and opens the tab of `alone` there
+    /// once it is, if any, as `Alone` says. Where zellij makes it, its server
     /// cannot bear being asked anything before it takes the client: luneta
     /// asks for the client's arrival there once zellij titles its terminal in
     /// it. On another machine than the one the client runs on, a client
-    /// there takes its place, as `swap_making` says. It opens a tab only of
-    /// this machine's, while the client runs on it. Whether it went.
+    /// there takes its place, as `swap_making` says. Whether it went.
     fn start(
         &mut self,
         machine: &Machine,
         session: &SessionName,
         cwd: Option<&str>,
-        mut tab: Option<(Due<u32>, Tab)>,
+        alone: Option<Alone>,
     ) -> bool {
-        let here = machine == self.sidebar.on();
-        // A client that takes the place of luneta's, on another machine than
-        // the one it is on, carries no tab, and `zellij::start` opens one on
-        // this machine alone. The notes say so, as the menu owed the tab
-        // closes once this goes nowhere.
-        if let Some((owed, _)) = tab.take_if(|_| !here) {
-            self.sidebar.notify(zellij::TAB_HERE.to_owned());
-            owed.pay(Err(zellij::TAB_HERE.to_owned()));
-            return false;
-        }
-        if !here {
-            return self.swap_making(machine, session, cwd);
+        if machine != self.sidebar.on() {
+            return self.swap_making(machine, session, cwd, alone);
         }
         let Some(nudged) = self.nudge() else {
             return false;
         };
         let then = self.sidebar.sending(session);
-        let made = zellij::start(&nudged, session, cwd, then, tab, &self.events);
+        let made = zellij::start(&nudged, session, cwd, then, alone, &self.events);
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
         true
     }
 
     /// Takes zellij's client to a session zellij makes on the machine of
-    /// `unused`, by its name, that starts in `cwd`, and opens `tab` there once
-    /// it is, as `start` does; or says why zellij would make none, but take it
-    /// to one that has the name, before the sidebar takes the client for one
-    /// on its way there. Whether it went.
-    fn make(
-        &mut self,
-        unused: Result<Unused, String>,
-        cwd: &str,
-        tab: Option<(Due<u32>, Tab)>,
-    ) -> bool {
+    /// `unused`, by its name, that starts in `cwd`, and opens the tab of
+    /// `alone` there once it is, as `start` does; or says why zellij would
+    /// make none, but take it to one that has the name, before the sidebar
+    /// takes the client for one on its way there. Whether it went.
+    fn make(&mut self, unused: Result<Unused, String>, cwd: &str, alone: Option<Alone>) -> bool {
         match unused {
-            Ok(unused) => self.start(unused.on(), unused.name(), Some(cwd), tab),
+            Ok(unused) => self.start(unused.on(), unused.name(), Some(cwd), alone),
             Err(why) => {
                 self.sidebar.notify(why);
                 false

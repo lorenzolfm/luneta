@@ -5,15 +5,18 @@
 //! open here for a luneta on another machine, whose menu was for a row of
 //! this one.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
+use std::time::SystemTime;
 
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
-use crate::cli::{self, answered, laid, quiet, terminal_of, Laid};
+use crate::cli::{self, answered, laid, quiet, tabs, terminal_of, Laid};
+use crate::closes::{self, Close};
 use crate::clients;
-use crate::zellij::SessionName;
+use crate::zellij::{self, SessionName};
 
 /// What names your shell, in luneta's variables, as in those of the zellij
 /// it starts, which runs it where its config names no other. What runs luneta
@@ -39,6 +42,12 @@ pub enum Open {
     /// its panes: in another session than luneta's client's, it opens once
     /// that client has come.
     Tab { session: SessionName, tab: Tab },
+    /// The tab `tab`, in `session`, in place of the tabs zellij made the
+    /// session with, where it started at `since` or after, by its machine's
+    /// clock: as one zellij made for a client asked to make it then, which
+    /// has come to it. One that started before keeps them, as one renamed
+    /// to its name since does, and the tab opens beside them.
+    Alone { session: SessionName, tab: Tab, since: SystemTime },
 }
 
 impl Open {
@@ -46,12 +55,18 @@ impl Open {
     /// on the daemon's own, where it names none.
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> OpenRequest {
+        let tab = |name: &Option<String>, since: Option<SystemTime>| {
+            Opens::Tab(open_request::Tab { name: name.clone(), alone_since: since.map(Into::into) })
+        };
         let (session, cwd, command, opens) = match self {
             Open::Pane { session, beside, cwd, command } => {
                 (session, cwd, command, Opens::Beside(*beside))
             },
             Open::Tab { session, tab: Tab { cwd, name, command } } => {
-                (session, cwd, command, Opens::Tab(open_request::Tab { name: name.clone() }))
+                (session, cwd, command, tab(name, None))
+            },
+            Open::Alone { session, tab: Tab { cwd, name, command }, since } => {
+                (session, cwd, command, tab(name, Some(*since)))
             },
         };
         let (session, cwd, command) = (session.to_string(), cwd.clone(), command.clone());
@@ -68,13 +83,23 @@ pub struct Tab {
     pub command: Vec<String>,
 }
 
+/// What zellij opened: the terminal, for luneta to take its client to, and
+/// what it left as it was of a tab that was to open alone, a line each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub terminal: u32,
+    pub notes: Vec<String>,
+}
+
 /// Opens `open`, and says which terminal it opened. zellij opens a pane
 /// `--no-focus` beside the one the command runs in, which it reads in
 /// `PANE_VAR`, whatever tab that is in and whether a client is on it, and
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
 /// the one it lists in that tab. No tab opens in a session no client is in,
-/// where it would have no room for its panes, as `Open::Tab` says.
-pub fn opening(open: &Open) -> Result<u32, String> {
+/// where it would have no room for its panes, as `Open::Tab` says; one that
+/// opens alone opens once the client has come, as `alone` says.
+pub fn opening(open: &Open) -> Result<Opened, String> {
+    let terminal = |terminal| Opened { terminal, notes: Vec::new() };
     match open {
         Open::Pane { session, beside, cwd, command: runs } => {
             let mut command = Command::new("zellij");
@@ -87,7 +112,8 @@ pub fn opening(open: &Open) -> Result<u32, String> {
             }
             let said = answered(&mut command)?;
             let pane = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
-            pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
+            let unnamed = || format!("zellij opened no pane it named: {:?}", said.trim());
+            pane.map(terminal).ok_or_else(unnamed)
         },
         Open::Tab { session, tab } => {
             let mut zellij = Command::new("zellij");
@@ -99,9 +125,60 @@ pub fn opening(open: &Open) -> Result<u32, String> {
                 ));
             }
             let (opened, laid) = tab_opened(session, tab)?;
-            terminal_of(&laid, opened).ok_or_else(|| "zellij opened a tab with no pane".to_owned())
+            terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned())
         },
+        Open::Alone { session, tab, since } => alone(session, tab, *since),
     }
+}
+
+/// What luneta says of a tab zellij opened with no pane in it.
+const NO_PANE: &str = "zellij opened a tab with no pane";
+
+/// Opens `tab` in `session`, in place of the tabs zellij made the session
+/// with, which luneta closes, so that the session holds the tab alone, where
+/// zellij made the session at `since` or after, as `made_since` tells; beside
+/// them where it did not, which the notes say. They are those zellij lists
+/// before the tab opens, and they hold what its layout laid out and no more,
+/// as far as luneta can tell: nothing zellij has says so, but the session is
+/// new, and luneta's menu has the keys until the tab opens, so that only a
+/// tab another client or an agent opened there by then goes with them. Each
+/// goes with the terminals zellij lists in it once the tab has opened: one
+/// that holds others by the time zellij would close it stays, which the
+/// notes say too.
+fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, String> {
+    let kept = match made_since(session, since) {
+        Some(true) => None,
+        Some(false) => Some(format!("{session} ran already, and keeps its tabs")),
+        None => {
+            Some(format!("luneta cannot tell whether zellij made {session}, which keeps its tabs"))
+        },
+    };
+    let made = match kept {
+        None => tabs(&laid(session.as_str())?),
+        Some(_) => BTreeSet::new(),
+    };
+    let (opened, laid) = tab_opened(session, tab)?;
+    let terminal = terminal_of(&laid, opened).ok_or(NO_PANE)?;
+    let mut notes: Vec<String> = kept.into_iter().collect();
+    for made in made {
+        if let Err(why) = closes::closed(session, &Close::tab(&laid, made)) {
+            notes.push(why);
+        }
+    }
+    Ok(Opened { terminal, notes })
+}
+
+/// Whether the session named `session`, which runs, started at `since` or
+/// after, by its socket: one zellij made as luneta asked then, rather than
+/// one that ran already, under that name or another, renamed to it since,
+/// as a rename keeps the socket's time. A socket's time is of the kernel's
+/// coarse clock, a tick behind at most, and zellij takes far longer than a
+/// tick to make a session. None where none runs, or where luneta cannot
+/// read all of zellij's folder, which could hold it.
+fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
+    let running = zellij::running(&zellij::folder())?;
+    let (_, started) = running.into_iter().find(|(name, _)| name == session.as_str())?;
+    Some(started >= since)
 }
 
 /// Opens `tab` in `session`, as `opening` does, and says its id, and the

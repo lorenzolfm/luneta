@@ -18,7 +18,8 @@ use lunetad::api::{
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
-use lunetad::opens::Open;
+use lunetad::links::{self, Pasted, Ready};
+use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Skill};
 use lunetad::transcripts::{Reading, SessionId};
@@ -123,11 +124,14 @@ impl Away {
     }
 
     /// Has zellij there open `open`, as `lunetad::opens::opening` does, and
-    /// says which terminal it opened, or why it did not.
-    pub fn open(&mut self, open: &Open) -> Result<u32, String> {
+    /// says which terminal it opened, and what it left as it was, each of
+    /// the machine's, or why it opened nothing.
+    pub fn open(&mut self, open: &Open) -> Result<Opened, String> {
         let request = open.asked(Some(self.on()));
         let opened = self.ask(|mut daemon| async move { daemon.open(request).await })?;
-        Ok(opened.terminal)
+        let on = &self.on;
+        let notes = opened.notes.into_iter().map(|note| format!("{on}: {note}")).collect();
+        Ok(Opened { terminal: opened.terminal, notes })
     }
 
     /// The skills `dir` there can run, as `lunetad::skills::found_in` finds
@@ -243,6 +247,34 @@ impl Away {
                 Err(_) => return Some(Err(format!("{on}: lunetad did not answer in {secs}s"))),
             };
             heard(on, steps, deadline, wanted, hear).await
+        })
+    }
+
+    /// Where a key of luneta's menu goes for the link `pasted` there, as
+    /// `lunetad::links` finds it there, by the place of its pane among those
+    /// `pasted` says, and the worktree it has made there; or why it found
+    /// nothing, as it said there, or as luneta heard no answer by
+    /// `links::PATIENCE` and its patience after, by which the daemon there
+    /// has done with it.
+    pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, String> {
+        let request = pasted.asked(Some(self.on()));
+        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let secs = patience.as_secs_f32();
+        let minutes = links::PATIENCE.as_secs() / 60;
+        self.runtime.block_on(async move {
+            // The daemon answers with the stream at once, and the answer in
+            // it once it has found it.
+            let mut answer = match tokio::time::timeout(patience, daemon.paste(request)).await {
+                Ok(Ok(answer)) => answer.into_inner(),
+                Ok(Err(status)) => return Err(said(on, &status)),
+                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+            };
+            match tokio::time::timeout(links::PATIENCE + patience, answer.message()).await {
+                Ok(Ok(Some(ready))) => Ready::of(ready).map_err(|why| format!("{on}: {why}")),
+                Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
+                Ok(Err(status)) => Err(said(on, &status)),
+                Err(_) => Err(format!("{on}: lunetad had found nothing after {minutes} minutes")),
+            }
         })
     }
 

@@ -88,6 +88,16 @@ service Daemon {
   // with why not. A question that hangs up first gives up the turn, and
   // `claude` is killed.
   rpc Ask(AskRequest) returns (stream AskResponse);
+  // Where a key of luneta's menu goes for a pull request's link, or an
+  // issue's, pasted on a row of the daemon's machine, and the worktree it
+  // has `luneta worktree` make of it there: a pane of those luneta says that
+  // has its branch checked out, or a tab of a session one of them is in that
+  // works in its repository, or a tab of a session to make in a clone of it
+  // that zoxide knows there. It answers once, as late as that takes, which
+  // fetches across the network: a stream, as the start of every answer is
+  // cut five seconds after the question. The stream ends after the answer,
+  // or with why there is none.
+  rpc Paste(PasteRequest) returns (stream PasteResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -168,12 +178,22 @@ message OpenRequest {
   // A tab, named so, or as zellij numbers it where absent.
   message Tab {
     optional string name = 1;
+    // Where present, it takes the place of the tabs zellij made the session
+    // with, which go once it has opened, where the session started then or
+    // after, by the daemon's clock: as one zellij made for a client asked to
+    // make it then. One that started before keeps them, as one renamed to
+    // its name since does.
+    google.protobuf.Timestamp alone_since = 2;
   }
 }
 
 message OpenResponse {
   // The terminal it opened: in a tab, the first zellij lists there.
   uint32 terminal = 1;
+  // What zellij left as it was of a tab that was to open alone, a line
+  // each: why the session keeps the tabs zellij made it with, or a tab of
+  // them it did not close.
+  repeated string notes = 2;
 }
 
 message ListSkillsRequest {
@@ -391,6 +411,58 @@ message AskResponse {
     // The id Claude Code gives the call.
     string id = 1;
     string command = 2;
+  }
+}
+
+message PasteRequest {
+  On on = 1;
+  // The link, of a pull request or of an issue on GitHub, as luneta pastes
+  // one: anything else is invalid.
+  string link = 2;
+  // The panes of the machine, in the order of luneta's rows. More than 1024
+  // are invalid.
+  repeated Worked worked = 3;
+
+  message Worked {
+    // The directory it works in, by its absolute path: one by another is
+    // invalid.
+    string dir = 1;
+    // The page of the pull request of the branch checked out there, as
+    // `PullRequest.url` says it, absent for none: one that is no link of a
+    // pull request or of an issue is invalid.
+    optional string pull = 2;
+    // Whether luneta's zellij is in its session.
+    bool here = 3;
+  }
+}
+
+message PasteResponse {
+  // Where the key goes: one of these, always. A client that finds none has a
+  // newer daemon's.
+  oneof at {
+    // The pane of this place in `PasteRequest.worked`, first 0, which has the
+    // branch checked out.
+    uint32 there = 1;
+    // A tab of the session of the pane of this place in `worked`, which works
+    // in the repository.
+    uint32 session = 2;
+    // A tab of a session to make.
+    Clone clone = 3;
+  }
+  // The worktree, by its real path.
+  string worktree = 4;
+  // The branch checked out there, absent for none.
+  optional string branch = 5;
+
+  message Clone {
+    // The directory the session starts in, which holds the clone.
+    string cwd = 1;
+    // Its name, which no session the daemon's zellij runs, nor one it keeps
+    // to bring back, had as the daemon named it.
+    string name = 2;
+    // When the daemon named it, by its clock, as `OpenRequest.Tab` takes it
+    // for its `alone_since`.
+    google.protobuf.Timestamp named_at = 3;
   }
 }
 

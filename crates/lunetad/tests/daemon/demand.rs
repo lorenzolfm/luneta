@@ -18,8 +18,9 @@ use lunetad::api::{
     GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
-    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
+    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
+    RefugeResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -612,6 +613,12 @@ impl Daemon for StandIn {
 
     async fn ask(&self, _: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
         Err(Status::unimplemented("a stand-in runs no agent"))
+    }
+
+    type PasteStream = tokio_stream::Empty<Result<PasteResponse, Status>>;
+
+    async fn paste(&self, _: Request<PasteRequest>) -> Result<Response<Self::PasteStream>, Status> {
+        Err(Status::unimplemented("a stand-in makes no worktree"))
     }
 }
 
