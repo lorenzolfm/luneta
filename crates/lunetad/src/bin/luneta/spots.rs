@@ -117,12 +117,14 @@ impl<S> Spots<S> {
 #[derive(Debug, Default)]
 pub enum Drawn {
     /// Nothing that takes a click: a brief, the ask box or a note, or the
-    /// sidebar collapsed, or with its search under the rows, or with nothing
-    /// there, or a box that had no room.
+    /// sidebar collapsed, or with nothing under the rows, or a box that had
+    /// no room.
     #[default]
     Nothing,
     /// The legend at the bottom of the sidebar.
     Legend(Spots<KeyEvent>),
+    /// The search at the bottom of the sidebar: the keys it takes.
+    Search(Spots<KeyEvent>),
     /// The menu numbered `number`: floating over zellij in the box `area`, or
     /// at the bottom of the sidebar, in none.
     Menu { number: u64, area: Option<Rect>, spots: Spots<Choice> },
@@ -134,6 +136,7 @@ pub enum Drawn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
     Legend(KeyEvent),
+    Search(KeyEvent),
     /// On the menu numbered so.
     Menu(u64, Choice),
     /// On the picker numbered so.
@@ -146,7 +149,7 @@ impl Drawn {
         match self {
             Drawn::Menu { area, .. } => *area,
             Drawn::Picker { area, .. } => Some(*area),
-            Drawn::Nothing | Drawn::Legend(_) => None,
+            Drawn::Nothing | Drawn::Legend(_) | Drawn::Search(_) => None,
         }
     }
 
@@ -155,6 +158,7 @@ impl Drawn {
         match self {
             Drawn::Nothing => None,
             Drawn::Legend(spots) => spots.at(at).copied().map(Hit::Legend),
+            Drawn::Search(spots) => spots.at(at).copied().map(Hit::Search),
             Drawn::Menu { number, spots, .. } => {
                 spots.at(at).cloned().map(|choice| Hit::Menu(*number, choice))
             },
@@ -168,7 +172,7 @@ impl Drawn {
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
         match self {
             Drawn::Nothing => {},
-            Drawn::Legend(spots) => spots.light(buffer, pointer),
+            Drawn::Legend(spots) | Drawn::Search(spots) => spots.light(buffer, pointer),
             Drawn::Menu { spots, .. } => spots.light(buffer, pointer),
             Drawn::Picker { spots, .. } => spots.light(buffer, pointer),
         }
@@ -180,6 +184,7 @@ impl Drawn {
         match self {
             Drawn::Nothing => Drawn::Nothing,
             Drawn::Legend(spots) => Drawn::Legend(spots.down(lines).placed(area)),
+            Drawn::Search(spots) => Drawn::Search(spots.down(lines).placed(area)),
             Drawn::Menu { number, area: boxed, spots } => {
                 Drawn::Menu { number, area: boxed, spots: spots.down(lines).placed(area) }
             },

@@ -1737,8 +1737,8 @@ fn count(at: Option<usize>, total: usize) -> String {
     }
 }
 
-/// What is typed, `width` wide, after a `/`, and what `Enter` does with it
-/// on the right, or why it does nothing, where it has the room.
+/// What is typed, `width` wide, and what `Enter` does with it on the right,
+/// or why it does nothing, where it has the room.
 fn typed(input: &str, action: Result<String, String>, width: usize) -> Line<'static> {
     let mut spans = sidebar::query(input, width).spans;
     let used: usize = spans.iter().map(|span| span.content.width()).sum();

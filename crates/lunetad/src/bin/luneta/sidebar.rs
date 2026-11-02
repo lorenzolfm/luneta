@@ -66,8 +66,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::Machine;
 use crate::menu::{
-    self, Briefed, Choice, Command, Did, Done, Menu, Opening, Opens, PaneRow, Ran, Target, Top,
-    Wants,
+    self, Briefed, Choice, Command, Did, Done, Hint, Menu, Opening, Opens, PaneRow, Ran, Target,
+    Top, Wants,
 };
 use crate::news::News;
 use crate::order::{Colour, Order};
@@ -76,7 +76,7 @@ use crate::picker::{Listing, Live, Seated, Shown};
 use crate::printed::Printed;
 use crate::pull::{Link, Ready, Worked};
 use crate::skills::{Name, Skill};
-use crate::spots::Drawn;
+use crate::spots::{Drawn, Spots};
 use crate::zellij::{self, Closes, Open, SessionName, Tab};
 
 /// How many columns the sidebar takes until its edge is dragged.
@@ -124,7 +124,8 @@ pub const ACCENT: Color = gruvbox::PURPLE;
 /// The colour of a session's name where it has no colour of its own, as in
 /// the picker.
 pub const NAME: Color = gruvbox::AQUA;
-/// The colour of an agent at work, and of the search's `/`.
+/// The colour of an agent at work, and of what the rule over a menu or the
+/// search says at its right.
 pub const TAG: Color = gruvbox::YELLOW;
 /// The colour of what went wrong: the notes at the bottom that say so, the
 /// box over zellij that says so for the menu there, and the rule of the
@@ -526,6 +527,8 @@ enum Row {
     Session {
         machine: Machine,
         session: Listed,
+        /// The characters of its name a search found.
+        hits: Vec<usize>,
         under: Under,
         /// Whether luneta's zellij is in it.
         here: bool,
@@ -549,6 +552,8 @@ enum Row {
         /// The icon of what runs in it, if that has one.
         icon: Option<&'static str>,
         label: String,
+        /// The characters of its label a search found.
+        hits: Vec<usize>,
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
         /// Where it sits among the panes listed of its tab, if it shares it,
@@ -885,9 +890,11 @@ impl Keys {
 /// What the rule along the top counts, of the rows: the sessions, the agents
 /// in their panes that wait for you, the panes with the dot, and the agents
 /// that are at work and that are in a shell, a folded session's among them.
+/// And every pane of the sessions, which the search counts what it finds of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Counts {
     sessions: usize,
+    panes: usize,
     waiting: usize,
     new: usize,
     busy: usize,
@@ -1661,6 +1668,7 @@ impl Sidebar {
                 let mut panes: Vec<_> =
                     session.panes.iter().flat_map(|panes| &panes.panes).collect();
                 panes.sort_by_key(|pane| (pane.tab, pane.id));
+                counts.panes += panes.len();
                 let agent = |pane: u32| agents.get(&(session.name.as_str(), pane)).copied();
                 // A pane's agent, or else the command its shell runs, by which
                 // its row is named, and whether its row has the dot. What
@@ -1716,8 +1724,10 @@ impl Sidebar {
                     continue;
                 }
                 let folded = self.folds.contains(Fold::Session(&machine, &listed.name));
-                let named =
-                    finder.as_ref().and_then(|finder| finder.session(listed.name.as_str()));
+                let (named, name_hits) = finder
+                    .as_ref()
+                    .and_then(|finder| finder.session(listed.name.as_str()))
+                    .unzip();
                 // A search looks inside a folded session too.
                 let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
                 // The rows of the panes listed, by their tab, each made once
@@ -1747,8 +1757,10 @@ impl Sidebar {
                     // its row and the picker say it.
                     let dir = agent(pane.id).map_or(cwd, |agent| Some(agent_dir(agent, pane)));
                     let tab = &pane.tab_name;
-                    let found =
-                        finder.as_ref().and_then(|finder| finder.pane(&label, branch, tab, dir));
+                    let (found, hits) = finder
+                        .as_ref()
+                        .and_then(|finder| finder.pane(&label, branch, tab, dir))
+                        .unzip();
                     if finder.is_some() && found.is_none() && named.is_none() {
                         continue;
                     }
@@ -1765,6 +1777,7 @@ impl Sidebar {
                         marked,
                         icon,
                         label,
+                        hits: hits.unwrap_or_default(),
                         checkout,
                         bracket,
                     };
@@ -1785,6 +1798,7 @@ impl Sidebar {
                 rows.push(Row::Session {
                     machine: machine.clone(),
                     session: listed.clone(),
+                    hits: name_hits.unwrap_or_default(),
                     under,
                     here: session_here,
                     colour,
@@ -2380,6 +2394,15 @@ impl Sidebar {
     /// place since it drew, or the keys went elsewhere.
     pub fn legend_key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
         if !matches!(self.bottom(), Bottom::Legend) {
+            return Asked::Nothing;
+        }
+        self.key(key, now)
+    }
+
+    /// What a click on a key of the search at the bottom does: what the key
+    /// does, while the search is open there still.
+    pub fn search_clicked(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
+        if !matches!(self.bottom(), Bottom::Search(_)) {
             return Asked::Nothing;
         }
         self.key(key, now)
@@ -3407,7 +3430,10 @@ impl Sidebar {
                 let spots = spots.down(above);
                 (lines, Drawn::Menu { number: menu.number(), area: None, spots })
             },
-            Bottom::Search(term) => (vec![query(term, width)], Drawn::Nothing),
+            Bottom::Search(term) => {
+                let (lines, spots) = self.searching(term, width, room);
+                (lines, Drawn::Search(spots.down(above)))
+            },
             Bottom::Legend => {
                 let (lines, spots) = menu::legend(width, room);
                 (lines, Drawn::Legend(spots.down(above)))
@@ -3416,6 +3442,34 @@ impl Sidebar {
         };
         notes.extend(lines);
         (notes, spotted)
+    }
+
+    /// The search at the bottom, in at most `room` lines `width` wide, as a
+    /// group of the menu stands there: a rule that names it, and once
+    /// something is typed, counts the panes it finds of every pane; what is
+    /// typed; and the keys it takes, a spot on each that presses it. Short of
+    /// room, it leaves out the keys, and then the rule.
+    fn searching(
+        &self,
+        term: &str,
+        width: usize,
+        room: usize,
+    ) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
+        let found = self.rows.iter().filter(|row| matches!(row, Row::Pane { .. })).count();
+        let counted =
+            if term.is_empty() { String::new() } else { format!("{found}/{}", self.counts.panes) };
+        let mut lines = Vec::with_capacity(3);
+        if room >= 2 {
+            lines.push(menu::rule(Command::Search.does(), &counted, width));
+        }
+        lines.extend((room >= 1).then(|| query(term, width)));
+        if room < 3 {
+            return (lines, Spots::default());
+        }
+        let (keys, spots) = menu::keyed(width, &[(Hint::Enter, "Go"), (Hint::Esc, "Close")]);
+        let at = lines.len();
+        lines.push(keys);
+        (lines, spots.down(at))
     }
 
     /// Why lunetad does not reach the machine of the header the keys took the
@@ -3491,15 +3545,12 @@ fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>], framing: Style)
     }
 }
 
-/// The search, `width` wide: a `/`, and then what is typed, before a `_` for
-/// the cursor, its end where it is too long.
+/// What is typed in a search, `width` wide, before a `_` for the cursor, its
+/// end where it is too long. What it is typed in names it a search: the
+/// rule over it, or the box around it.
 pub fn query(term: &str, width: usize) -> Line<'static> {
-    let typed = tail(&format!("{term}_"), width.saturating_sub(2));
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled("/", Style::new().fg(TAG)),
-        Span::styled(typed, Style::new().fg(ACCENT)),
-    ])
+    let typed = tail(&format!("{term}_"), width.saturating_sub(1));
+    Line::from(vec![Span::raw(" "), Span::styled(typed, Style::new().fg(ACCENT))])
 }
 
 /// Whether zellij's `title` for a terminal can be of the session `name`: it is
@@ -3722,23 +3773,27 @@ impl<'a> Finder<'a> {
         Finder { matcher: SkimMatcherV2::default(), anywhere, term }
     }
 
-    fn session(&self, name: &str) -> Option<Fit> {
-        self.find(name, &[]).map(|(fit, _)| fit)
+    /// A session by its name: how well it fits, and the characters of the
+    /// name the search found.
+    fn session(&self, name: &str) -> Option<(Fit, Vec<usize>)> {
+        self.find(name, &[])
     }
 
     /// A pane by its row, its branch, its tab and the directory it, or its
-    /// agent, works in. A tab zellij named `Tab #N` is no name to find, and a
-    /// directory is its last two parts, as a shell's row shows it: a whole
-    /// path has the letters for a few typed ones to land on nearly any of it.
+    /// agent, works in: how well the best of them fits, and the characters of
+    /// its `label` the search found. A tab zellij named `Tab #N` is no name to
+    /// find, and a directory is its last two parts, as a shell's row shows it:
+    /// a whole path has the letters for a few typed ones to land on nearly any
+    /// of it.
     fn pane(
         &self,
         label: &str,
         branch: Option<&str>,
         tab_name: &str,
         cwd: Option<&str>,
-    ) -> Option<Fit> {
+    ) -> Option<(Fit, Vec<usize>)> {
         let cwd = cwd.map(short_cwd);
-        self.find(label, &[branch, tab::named(tab_name), cwd.as_deref()]).map(|(fit, _)| fit)
+        self.find(label, &[branch, tab::named(tab_name), cwd.as_deref()])
     }
 
     /// What is typed against what a row shows, and against what else the row
@@ -3883,31 +3938,33 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Session { session, under, here, colour, waiting, dot, busy, .. } => {
+        Row::Session { session, hits, under, here, colour, waiting, dot, busy, .. } => {
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             // The name sits on the session's colour, with a space either side,
-            // as a browser draws the name of a group of tabs.
+            // as a browser draws the name of a group of tabs. What a search
+            // found of it is underlined: no colour reads on every chip.
             let chip = Style::new().fg(gruvbox::BG0).bg(*colour);
-            let name = cut(session.name.as_str(), width.saturating_sub(4 + reserve + 1));
+            let whole = session.name.as_str();
+            let name = cut(whole, width.saturating_sub(4 + reserve + 1));
             let rule = width.saturating_sub(3 + name.width() + 1 + reserve + 1);
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
+            let bold = chip.add_modifier(Modifier::BOLD);
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(if folded { FOLDED } else { UNFOLDED }, dim),
                 Span::styled(" ", chip),
-                Span::styled(name, chip.add_modifier(Modifier::BOLD)),
-                Span::styled(" ", chip),
-                Span::styled(RULE.repeat(rule), rule_style),
             ];
+            spans.extend(lit(whole, &name, hits, bold, bold.add_modifier(Modifier::UNDERLINED)));
+            spans.extend([Span::styled(" ", chip), Span::styled(RULE.repeat(rule), rule_style)]);
             if let Some(badge) = badge {
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { here, unread, marked, icon, label, checkout, bracket, .. } => {
+        Row::Pane { here, unread, marked, icon, label, hits, checkout, bracket, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
@@ -3936,9 +3993,15 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 None => spans.push(Span::raw(" ".repeat(icons::WIDTH))),
             }
             spans.push(Span::raw(" "));
-            let label = cut(label, width.saturating_sub(LABEL + reserve + 1));
-            let gap = width.saturating_sub(LABEL + label.width() + age.width() + 1);
-            spans.push(Span::styled(label, label_style));
+            let shown = cut(label, width.saturating_sub(LABEL + reserve + 1));
+            let gap = width.saturating_sub(LABEL + shown.width() + age.width() + 1);
+            // What a search found lights up as the picker lights it, but on
+            // a label in that colour already, which it underlines.
+            let hit = match mark {
+                Some(Mark::Waiting) => label_style.add_modifier(Modifier::UNDERLINED),
+                _ => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            };
+            spans.extend(lit(label, &shown, hits, label_style, hit));
             spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
@@ -3948,6 +4011,22 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             lines
         },
     }
+}
+
+/// `shown`, what `cut` left of `text`, in `style`, but the characters of
+/// `text` at `hits`, which a search found, in `hit`: none of those past the
+/// cut, whose `…` stands for what it took.
+fn lit(text: &str, shown: &str, hits: &[usize], style: Style, hit: Style) -> Vec<Span<'static>> {
+    let kept = if shown == text { usize::MAX } else { shown.chars().count().saturating_sub(1) };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (at, c) in shown.chars().enumerate() {
+        let style = if at < kept && hits.contains(&at) { hit } else { style };
+        match spans.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), style)),
+        }
+    }
+    spans
 }
 
 /// What a session's row ends in: how many of its agents wait for you, or else
@@ -4107,6 +4186,7 @@ mod tests {
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, Clients, Pane, Panes, UnreadFile, Version, Zellij};
     use prost_types::Timestamp;
+    use ratatui::buffer::Cell;
 
     use super::*;
     use crate::own::Before;
@@ -5828,10 +5908,16 @@ mod tests {
         HEADER + usize::from(header)
     }
 
-    /// The last line of the sidebar, focused: the search, or else the last of
-    /// the legend.
+    /// The last line of the sidebar, focused: the keys the search takes, or
+    /// else the last of the legend.
     fn bottom(sidebar: &mut Sidebar) -> String {
         screen(sidebar, true, 32, 16)[15].clone()
+    }
+
+    /// The search at the bottom of the sidebar, focused: its rule, what is
+    /// typed, and the keys it takes.
+    fn search_shown(sidebar: &mut Sidebar) -> Vec<String> {
+        screen(sidebar, true, 32, 16)[13..].to_vec()
     }
 
     /// A session found by its name keeps all its panes, the highlight on the
@@ -5937,31 +6023,95 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar)[..2], [" ▾ bipa", "       a-p-i-x"]);
     }
 
-    /// Every character types, `j` and `h` too, where the keys were. A long
+    /// Every character types, `j` and `h` too, where the keys were, under a
+    /// rule that names the search, over the keys it takes. Once something is
+    /// typed, the rule counts the panes it finds, of every pane. A long
     /// search shows its end. `Backspace` takes a character back, and closes
     /// the search once there is none.
     #[test]
     fn what_is_typed_shows_where_the_keys_were() {
         let mut sidebar = searched();
         let backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
-        type_in(&mut sidebar, "/pixjh");
-        assert_eq!(bottom(&mut sidebar), " /pixjh_");
+        let keys = " <ENTER> - Go, <ESC> - Close";
+        type_in(&mut sidebar, "/");
+        let rule = format!("─ Search {}", "─".repeat(22));
+        assert_eq!(search_shown(&mut sidebar), [rule.as_str(), " _", keys]);
+        type_in(&mut sidebar, "pixjh");
+        let rule = format!("─ Search {} 0/7 ─", "─".repeat(16));
+        assert_eq!(search_shown(&mut sidebar), [rule.as_str(), " pixjh_", keys]);
         assert_eq!(rows_shown(&mut sidebar), [" no match"]);
         sidebar.key(&backspace, moment(160_000));
         sidebar.key(&backspace, moment(160_000));
         assert_eq!(rows_shown(&mut sidebar), [" ▾ bipa", "       a-p-i-x", "       pix outflow"]);
+        assert!(search_shown(&mut sidebar)[0].ends_with(" 2/7 ─"));
         for _ in 0..4 {
             sidebar.key(&backspace, moment(160_000));
         }
         assert_eq!(bottom(&mut sidebar), " b  Brief ▸");
         type_in(&mut sidebar, "/a-very-long-search-for-something");
-        assert_eq!(bottom(&mut sidebar), " /…y-long-search-for-something_");
+        assert_eq!(search_shown(&mut sidebar)[1], " …ry-long-search-for-something_");
+    }
+
+    /// The keys under the search are spots that press them while it is open:
+    /// `<ESC>` closes it. What is typed is no spot, and a click on a key of
+    /// the search once the legend took its place does nothing, where the
+    /// legend's own `Enter` would go to the highlighted row.
+    #[test]
+    fn a_click_on_a_key_under_the_search_presses_it_while_it_is_open() {
+        let mut sidebar = searched();
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "/pix");
+        let area = Rect::new(0, 0, 32, 16);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let keys: String = (0..31).map(|x| buffer[(x, 15)].symbol()).collect();
+        let at = |key: &str| Position::new(u16::try_from(keys.find(key).unwrap()).unwrap(), 15);
+        let (enter, esc) = (KeyEvent::from(KeyCode::Enter), KeyEvent::from(KeyCode::Esc));
+        assert_eq!(drawn.at(at("<ENTER>")), Some(Hit::Search(enter)));
+        assert_eq!(drawn.at(at("<ESC>")), Some(Hit::Search(esc)));
+        assert_eq!(drawn.at(Position::new(2, 14)), None);
+        assert_eq!(sidebar.search_clicked(&esc, moment(160_000)), Asked::Nothing);
+        assert_eq!(bottom(&mut sidebar), " b  Brief ▸");
+        assert_eq!(sidebar.search_clicked(&enter, moment(160_000)), Asked::Nothing);
+        assert_eq!(bottom(&mut sidebar), " b  Brief ▸");
+    }
+
+    /// What a search found of a pane's label lights up as the picker lights
+    /// it, and of a session's name, underlined on its colour, as no colour
+    /// reads on every session's.
+    #[test]
+    fn a_search_lights_what_it_found_of_each_row() {
+        let mut sidebar = searched();
+        type_in(&mut sidebar, "/zed");
+        assert_eq!(rows_shown(&mut sidebar)[..3], [" ▾ zed", "     \u{eb31} htop", "       z-e-d"]);
+        let zed = u16::try_from(sessions_from(&screen(&mut sidebar, true, 32, 16))).unwrap();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let buffer = drawn_at(&mut sidebar, true, 32, 16, now);
+        let marked = |y: u16, mark: fn(&Cell) -> bool| -> String {
+            let cells = (0..31).map(|x| &buffer[(x, y)]);
+            cells.filter(|cell| mark(cell)).map(Cell::symbol).collect()
+        };
+        let underlined = |cell: &Cell| cell.modifier.contains(Modifier::UNDERLINED);
+        let lit = |cell: &Cell| cell.fg == ACCENT && cell.modifier.contains(Modifier::BOLD);
+        assert_eq!(marked(zed, underlined), "zed");
+        assert_eq!(marked(zed + 1, lit), "");
+        assert_eq!(marked(zed + 2, lit), "zed");
+    }
+
+    /// Of a label cut short, none of what the cut took lights up, under the
+    /// `…` that stands for it.
+    #[test]
+    fn what_the_cut_took_of_a_label_lights_nothing() {
+        let (plain, hit) = (Style::new(), Style::new().fg(ACCENT));
+        let spans = lit("pix outflow", "pix out…", &[0, 7], plain, hit);
+        let styled: Vec<(&str, Style)> =
+            spans.iter().map(|span| (span.content.as_ref(), span.style)).collect();
+        assert_eq!(styled, [("p", hit), ("ix out…", plain)]);
     }
 
     fn char(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
-
     /// Each line of the sidebar drawn 32 by 16, from the line `from` down, as
     /// text, and what a click a few columns into it hits.
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
@@ -6054,7 +6204,7 @@ mod tests {
             clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
         assert_eq!(skills, [
-            (" /_", None),
+            (" _", None),
             (" /code-review", on("code-review")),
             (" /tigerstyle", on("tigerstyle")),
         ]);
