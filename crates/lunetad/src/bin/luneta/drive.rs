@@ -38,7 +38,7 @@ use lunetad::api::{Agent, UnreadFile, Zellij};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
-use crate::zellij::{self, pane_address, Closing, Open, Pane, Seat, SessionName, Tab};
+use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
 
 /// A session, or a pane of one, as the CLI names them: `<session>`, or
 /// `<session>:<pane>`.
@@ -715,8 +715,8 @@ fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane
 /// Has zellij do `act`.
 fn act(act: &Act) -> Result<(), String> {
     match act {
-        Act::Pane { session, pane } => zellij::pane_closed(session, *pane),
-        Act::Tab { session, tab, .. } => zellij::tab_closed(session, *tab),
+        Act::Pane { session, pane } => zellij::closed(session, Close::Pane(*pane)),
+        Act::Tab { session, tab, .. } => zellij::closed(session, Close::Tab(*tab)),
         Act::Kill { session, started } | Act::Leave { session, started, .. } => {
             zellij::killed(session, *started)
         },

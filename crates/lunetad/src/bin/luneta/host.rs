@@ -73,7 +73,7 @@ use crate::skills::{self, Skill};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
 use crate::width::Width;
-use crate::zellij::{self, After, Arrival, Closes, Ended, Refuge, SessionName, Tab, Unused};
+use crate::zellij::{self, After, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused};
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -1546,20 +1546,24 @@ impl App {
                 self.go(&on, &place, None);
                 self.leave();
             },
-            Asked::Closes { menu, session, pane } => {
-                zellij::closes(menu, &session, pane, &self.events);
+            Asked::Closes { menu, on, session, pane } => {
+                zellij::closes(menu, &on, session, pane, &self.events);
             },
-            Asked::Delete(act) => match act {
-                Act::Pane { session, pane } => zellij::close_pane(&session, pane, &self.events),
-                Act::Tab { session, tab, .. } => zellij::close_tab(&session, tab, &self.events),
+            Asked::Delete { on, act } => match act {
+                Act::Pane { session, pane } => {
+                    zellij::close(&on, &session, Close::Pane(pane), &self.events);
+                },
+                Act::Tab { session, tab, .. } => {
+                    zellij::close(&on, &session, Close::Tab(tab), &self.events);
+                },
                 Act::Kill { session, started } => {
                     self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(zellij::kill(&session, started, &self.events));
+                    self.deleting.push(zellij::kill(&on, &session, started, &self.events));
                 },
-                // The plan found zellij's client in `session`, and on its
-                // way nowhere, as the key was pressed: where it goes from.
+                // The plan found zellij's client in `session`, on `on`, and on
+                // its way nowhere, as the key was pressed: where it goes from.
                 Act::Leave { session, started, to } => {
-                    self.go(&Machine::Local, &to, Some(After::Kill { session, started }));
+                    self.go(&on, &to, Some(After::Kill { session, started }));
                 },
             },
             Asked::Open { menu, on, open } => zellij::open(menu, &on, open, &self.events),
@@ -1640,7 +1644,7 @@ impl App {
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { session, deletes } => {
-                let plan = self.sidebar.plan(&session, deletes);
+                let plan = self.sidebar.plan(&Machine::Local, &session, deletes);
                 if let Some(Over::Picker(picker)) = &mut self.focus.over {
                     let did = picker.planned(plan);
                     self.picked(did);
@@ -1650,7 +1654,7 @@ impl App {
                 self.go(&Machine::Local, &to, Some(After::Kill { session, started }));
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Delete(act) => self.follow(Asked::Delete(act)),
+            Picked::Delete(act) => self.follow(Asked::Delete { on: Machine::Local, act }),
         }
     }
 

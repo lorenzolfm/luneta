@@ -48,6 +48,13 @@ pub fn answered(command: &mut Command) -> Result<String, String> {
     String::from_utf8(said).map_err(|_| "zellij said what is not UTF-8".to_owned())
 }
 
+/// Has `command`, a zellij, do what it was asked, and says why not when it
+/// did not.
+pub fn done(mut command: Command) -> Result<(), String> {
+    quiet(&mut command);
+    answered(&mut command).map(drop)
+}
+
 /// What zellij said as it failed: the last line it wrote on stderr, and how
 /// it ended.
 #[must_use]

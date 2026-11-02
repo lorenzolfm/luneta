@@ -5,15 +5,17 @@
 //! luneta's threads for zellij's actions are none of tokio's.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    Client, GoRequest, KeepPrintedRequest, ListClientsRequest, ListSkillsRequest,
-    NameSessionRequest, On, RefugeRequest, RefugeResponse, StartRequest,
+    close_request, closes_response, Client, CloseRequest, ClosesRequest, GoRequest,
+    KeepPrintedRequest, KillRequest, ListClientsRequest, ListSkillsRequest, NameSessionRequest,
+    On, RefugeRequest, RefugeResponse, StartRequest,
 };
+use lunetad::closes::{Close, Closes};
 use lunetad::opens::Open;
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Skill};
@@ -164,6 +166,45 @@ impl Away {
                 self.on
             )),
         }
+    }
+
+    /// What closing the terminal `pane` of `session` there closes, as
+    /// `lunetad::closes::closes_now` says there, or why it closes nothing.
+    pub fn closes(&mut self, session: &SessionName, pane: u32) -> Result<Closes, String> {
+        let request = ClosesRequest { on: Some(self.on()), session: session.to_string(), pane };
+        let answer = self.ask(|mut daemon| async move { daemon.closes(request).await })?;
+        match answer.closes {
+            Some(closes_response::Closes::Pane(_)) => Ok(Closes::Pane),
+            Some(closes_response::Closes::Tab(tab)) => {
+                Ok(Closes::Tab { id: tab.id, panes: tab.panes })
+            },
+            Some(closes_response::Closes::Session(_)) => Ok(Closes::Session),
+            None => Err(format!(
+                "{}: its lunetad says what closing the pane closes in words this luneta cannot \
+                 read, as a newer one does",
+                self.on
+            )),
+        }
+    }
+
+    /// Has zellij there close `close` of `session`, or says why it did not.
+    pub fn close(&mut self, session: &str, close: Close) -> Result<(), String> {
+        let closes = match close {
+            Close::Pane(pane) => close_request::Closes::Pane(pane),
+            Close::Tab(tab) => close_request::Closes::Tab(tab),
+        };
+        let session = session.to_owned();
+        let request = CloseRequest { on: Some(self.on()), session, closes: Some(closes) };
+        self.ask(|mut daemon| async move { daemon.close(request).await }).map(|_| ())
+    }
+
+    /// Has zellij there kill `session`, the one that started at `started`,
+    /// and delete it, as `lunetad::closes::killed` does there, or says why
+    /// it did not.
+    pub fn kill(&mut self, session: &str, started: SystemTime) -> Result<(), String> {
+        let (session, started_at) = (session.to_owned(), Some(started.into()));
+        let request = KillRequest { on: Some(self.on()), session, started_at };
+        self.ask(|mut daemon| async move { daemon.kill(request).await }).map(|_| ())
     }
 
     fn on(&self) -> On {

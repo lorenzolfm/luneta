@@ -791,9 +791,13 @@ The menu on another machine's pane opens what it opens here, there: `n p`,
 and `c e` keep what the pane printed in a file there, for the agent there to
 read, `/` finds the skills of the pane's directory there, and `n s` makes a
 session there, named as that machine names one; luneta's zellij goes to what
-opened, as `Enter` would. While luneta's zellij is on another machine, the
-menu over zellij is for its pane there. The Delete group, the Brief group but
-for every session, the ask box and moving its sessions come later. `u` marks
+opened, as `Enter` would. `d d` and `d s` close and delete there what they
+do here, and ask first by that machine's agents. The session luneta's zellij is
+in there is deleted once zellij is in the newest other session of that
+machine's; with none, it is deleted with zellij in it, and luneta goes on as it
+does when a session there ends. While luneta's zellij is on another machine,
+the menu over zellij is for its pane there. The Brief group but for every
+session, the ask box and moving its sessions come later. `u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.

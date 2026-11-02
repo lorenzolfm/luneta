@@ -43,6 +43,8 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status};
 
+use crate::api::close_request;
+use crate::api::closes_response::{self, Pane, Session as WholeSession, Tab as ClosedTab};
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_printed_response::{self, File as PrintedFile, Nothing, Top};
@@ -50,11 +52,13 @@ use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
-    self, GoRequest, GoResponse, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse,
-    KeepPrintedRequest, KeepPrintedResponse, ListClientsRequest, ListClientsResponse,
+    self, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse, GoRequest, GoResponse,
+    InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
+    ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
     ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
     OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
 };
+use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::remote::{Bridges, Destination};
@@ -63,8 +67,8 @@ use crate::zellij::SessionName;
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::{
-    claude, client, clients, git, github, log, metadata, moves, names, opens, panes, printed,
-    release, remote, shells, skills, watch, zellij,
+    claude, client, clients, closes, git, github, log, metadata, moves, names, opens, panes,
+    printed, release, remote, shells, skills, watch, zellij,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -573,6 +577,63 @@ impl Daemon for Host {
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
         Ok(Response::new(StartResponse {}))
+    }
+
+    async fn closes(
+        &self,
+        request: Request<ClosesRequest>,
+    ) -> Result<Response<ClosesResponse>, Status> {
+        let ClosesRequest { on, session, pane } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.closes(ClosesRequest { on: None, session, pane }).await;
+        }
+        let found = task::spawn_blocking(move || closes::closes_now(session.as_str(), pane)).await;
+        let found = found.map_err(|error| unfinished(&error))?;
+        let closes = match found.map_err(Status::failed_precondition)? {
+            Closes::Pane => closes_response::Closes::Pane(Pane {}),
+            Closes::Tab { id, panes } => closes_response::Closes::Tab(ClosedTab { id, panes }),
+            Closes::Session => closes_response::Closes::Session(WholeSession {}),
+        };
+        Ok(Response::new(ClosesResponse { closes: Some(closes) }))
+    }
+
+    async fn close(
+        &self,
+        request: Request<CloseRequest>,
+    ) -> Result<Response<CloseResponse>, Status> {
+        let CloseRequest { on, session, closes } = request.into_inner();
+        let session = named("session", &session)?;
+        let close = match closes {
+            Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
+            Some(close_request::Closes::Tab(tab)) => Close::Tab(tab),
+            None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
+        };
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.close(CloseRequest { on: None, session, closes }).await;
+        }
+        let closed = task::spawn_blocking(move || closes::closed(session.as_str(), close)).await;
+        let closed = closed.map_err(|error| unfinished(&error))?;
+        closed.map_err(Status::failed_precondition)?;
+        Ok(Response::new(CloseResponse {}))
+    }
+
+    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
+        let KillRequest { on, session, started_at } = request.into_inner();
+        let session = named("session", &session)?;
+        let started = started_at.and_then(|at| SystemTime::try_from(at).ok()).ok_or_else(|| {
+            Status::invalid_argument("started_at: it says no time the session started at")
+        })?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (session, started_at) = (session.to_string(), Some(started.into()));
+            return daemon.kill(KillRequest { on: None, session, started_at }).await;
+        }
+        let killed = task::spawn_blocking(move || closes::killed(session.as_str(), started)).await;
+        let killed = killed.map_err(|error| unfinished(&error))?;
+        killed.map_err(Status::failed_precondition)?;
+        Ok(Response::new(KillResponse {}))
     }
 }
 

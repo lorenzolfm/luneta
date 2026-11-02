@@ -14,11 +14,12 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest,
-    KeepPrintedResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
-    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, RefugeRequest, RefugeResponse, StartRequest,
-    StartResponse, Version, WatchRequest,
+    self, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse, GoRequest, GoResponse,
+    InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
+    KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
+    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
+    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse, Version,
+    WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -585,6 +586,18 @@ impl Daemon for StandIn {
     }
 
     async fn start(&self, _: Request<StartRequest>) -> Result<Response<StartResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn closes(&self, _: Request<ClosesRequest>) -> Result<Response<ClosesResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn close(&self, _: Request<CloseRequest>) -> Result<Response<CloseResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn kill(&self, _: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 }

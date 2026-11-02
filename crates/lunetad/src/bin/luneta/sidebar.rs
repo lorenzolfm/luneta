@@ -41,12 +41,14 @@ use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
-use luneta_protocol::tab;
+use luneta_protocol::{tab, unread};
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
-use lunetad::api::{Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, Zellij};
+use lunetad::api::{
+    Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, UnreadFile, Zellij,
+};
 use lunetad::{log, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -703,6 +705,18 @@ struct Seen<'a> {
     work_trees: &'a [lunetad::api::WorkTree],
     pull_requests: &'a [lunetad::api::PullRequest],
     unread_sockets: Option<u32>,
+    /// How many of Claude Code's session files its daemon cannot read, and
+    /// where the process of each runs, as far as it can tell.
+    unread: u32,
+    unread_files: &'a [UnreadFile],
+}
+
+impl Seen<'_> {
+    /// Where the agents of the session files its daemon cannot read run, as
+    /// `luneta_protocol::unread::seats` tells them.
+    fn unread_seats(&self) -> Result<Vec<(&str, u32)>, unread::Unplaced> {
+        unread::seats(self.unread, self.unread_files)
+    }
 }
 
 /// A machine, with what its daemon says of it, or why lunetad has nothing
@@ -721,6 +735,8 @@ fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
         work_trees: &host.work_trees,
         pull_requests: &host.pull_requests,
         unread_sockets: host.unread_sockets,
+        unread: host.unread,
+        unread_files: &host.unread_files,
     };
     let mut machines = vec![(Machine::Local, Ok(local))];
     let mut named = HashSet::new();
@@ -740,6 +756,8 @@ fn machines(host: &Host) -> (Vec<Told<'_>>, usize) {
                 work_trees: &host.work_trees,
                 pull_requests: &host.pull_requests,
                 unread_sockets: host.unread_sockets,
+                unread: host.unread,
+                unread_files: &host.unread_files,
             }),
             Some(Reached::Reaching(_)) => Err(Away::Reaching),
             Some(Reached::Unreached(unreached)) => Err(Away::of(unreached)),
@@ -767,11 +785,11 @@ pub enum Asked {
     Take,
     /// Give the focus back to zellij.
     Leave,
-    /// Ask zellij what closing the pane `pane` of `session` closes, for the
-    /// menu numbered `menu` to plan its delete by.
-    Closes { menu: u64, session: String, pane: u32 },
-    /// Have zellij do what a delete key planned.
-    Delete(Act),
+    /// Ask zellij on `on` what closing the pane `pane` of `session` closes,
+    /// for the menu numbered `menu` to plan its delete by.
+    Closes { menu: u64, on: Machine, session: SessionName, pane: u32 },
+    /// Have zellij on `on` do what a delete key planned for a session there.
+    Delete { on: Machine, act: Act },
     /// Have zellij on `on` open this, for the menu numbered `menu`, which
     /// takes its client there once zellij says what it opened.
     Open { menu: u64, on: Machine, open: Open },
@@ -950,7 +968,7 @@ pub struct Sidebar {
 /// the row it goes to once that is gone, the first after it that stays.
 #[derive(Debug)]
 struct Closing {
-    gone: Place,
+    gone: Spot,
     after: Option<Spot>,
 }
 
@@ -1815,8 +1833,8 @@ impl Sidebar {
         }
         // The highlight goes past what a delete took away, once it is gone.
         if let Some(closing) = &self.closing {
-            let gone = Spot::Local(closing.gone.clone());
-            if self.cursor.as_ref() == Some(&gone) && self.rows.iter().all(|row| row.spot() != gone)
+            let gone = &closing.gone;
+            if self.cursor.as_ref() == Some(gone) && self.rows.iter().all(|row| row.spot() != *gone)
             {
                 self.cursor.clone_from(&closing.after);
                 self.closing = None;
@@ -2406,7 +2424,7 @@ impl Sidebar {
                     Done::Start(on, cwd) => Asked::Start { on, cwd },
                     // A link's pane is this machine's.
                     Done::Go(place) => Asked::Go { on: Machine::Local, place },
-                    Done::Act(act) => self.delete(act),
+                    Done::Act(on, act) => self.delete(on, act),
                     Done::Brief(briefed) => self.brief(briefed),
                     Done::Ask(target) => Asked::Ask(target),
                     Done::Ssh(destination) => Asked::Ssh(destination),
@@ -2446,11 +2464,10 @@ impl Sidebar {
                 Asked::Make { menu: number, session, cwd, tab_cwd, name, command }
             },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
-                let session = session.name.as_str().to_owned();
-                Asked::Closes { menu: number, session, pane }
+                Asked::Closes { menu: number, on, session: session.name, pane }
             },
             Wants::Plan { session, scope: Scope::Session } => {
-                let plan = self.plan(&session, Deletes::Session);
+                let plan = self.plan(&on, &session, Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -2524,40 +2541,48 @@ impl Sidebar {
         worked
     }
 
-    /// What deleting what `deletes` deletes of `listed` does, as the
-    /// sidebar knows the host now: for the menu, and for the picker.
-    pub fn plan(&self, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
-        close::plan(&self.subject(listed, deletes))
+    /// What deleting what `deletes` deletes of `listed`, of the machine
+    /// `on`, does, as the sidebar knows that machine now: for the menu, and
+    /// for the picker. Nothing goes of a machine lunetad does not reach now.
+    pub fn plan(&self, on: &Machine, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
+        if let Machine::Remote(destination) = on
+            && self.away.is_none()
+            && self.seen(on).is_none()
+        {
+            return Err(format!("menu: lunetad does not reach {destination} now"));
+        }
+        close::plan(&self.subject(on, listed, deletes))
     }
 
-    /// What the delete is for, as the sidebar knows it: `listed`, where
-    /// luneta's zellij is, and what it `deletes`.
-    fn subject<'a>(&'a self, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
+    /// What the delete is for, as the sidebar knows it: `listed`, of the
+    /// machine `on`, where luneta's zellij is, and what it `deletes`.
+    fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
         let session = listed.name().as_str();
-        let seat = match (self.going(), self.here_local()) {
-            (None, Some(here)) if here == session => Seat::In,
-            (None, Some(_)) => Seat::Elsewhere,
+        let seat = match (self.going(), self.here()) {
             // In a session of another machine's, which this one's go on
             // without.
-            (None, None) if self.on != Machine::Local => Seat::Elsewhere,
+            (None, _) if self.on != *on => Seat::Elsewhere,
+            (None, Some(here)) if here == session => Seat::In,
+            (None, Some(_)) => Seat::Elsewhere,
             (Some(_), _) | (None, None) => Seat::Moving,
         };
         let mut agents = Err(Untold::Away);
         let mut refuge: Option<Listed> = None;
-        if let Some(host) = &self.host {
-            // What lunetad said last of its agents may be out of date while it
+        if let Some(seen) = self.seen(on) {
+            // What lunetad said last of the agents may be out of date while it
             // does not answer: one may have gone to work, or started since.
             if self.away.is_none() {
-                agents = host.unread_seats().map_err(Untold::Unplaced).map(|unread| {
-                    let seated = seated(&host.agents, &host.sessions);
+                agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread| {
+                    let seated = seated(seen.agents, seen.sessions);
                     let doing = seated.iter().filter(|((at, _), _)| *at == session);
                     let doing =
                         doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
                     doing.chain(close::unread_in(&unread, session)).collect()
                 });
             }
-            // The newest of the other sessions, which the picker lists first.
-            let (sessions, _) = oldest_first(&host.sessions);
+            // The newest of the machine's other sessions, which the picker
+            // lists first.
+            let (sessions, _) = oldest_first(seen.sessions);
             let mut others = sessions.into_iter().map(|(listed, _)| listed);
             refuge = others.rfind(|listed| listed.name.as_str() != session);
         }
@@ -2624,9 +2649,9 @@ impl Sidebar {
         }
     }
 
-    /// Has zellij do what a delete key planned, and the highlight go past the
-    /// rows it takes away, once they are gone.
-    fn delete(&mut self, act: Act) -> Asked {
+    /// Has zellij on `on` do what a delete key planned, and the highlight go
+    /// past the rows it takes away, once they are gone.
+    fn delete(&mut self, on: Machine, act: Act) -> Asked {
         let takes_place = |place: &Place| match (&act, place.pane()) {
             (Act::Pane { session, pane }, Some(at)) => place.session() == session && at == *pane,
             (Act::Tab { session, panes, .. }, Some(at)) => {
@@ -2637,9 +2662,10 @@ impl Sidebar {
                 place.session() == session
             },
         };
-        // What it takes is this machine's.
-        let takes = |spot: &Spot| matches!(spot, Spot::Local(place) if takes_place(place));
-        if let Some(Spot::Local(gone)) = self.cursor.clone().filter(|cursor| takes(cursor)) {
+        let takes = |spot: &Spot| {
+            spot.place().is_some_and(|place| spot.machine() == on && takes_place(place))
+        };
+        if let Some(gone) = self.cursor.clone().filter(|cursor| takes(cursor)) {
             let at = self.cursor_index().unwrap_or(0);
             let stays = |index: &usize| {
                 let row = &self.rows[*index];
@@ -2649,7 +2675,7 @@ impl Sidebar {
             let after = after.map(|index| self.rows[index].spot());
             self.closing = Some(Closing { gone, after });
         }
-        Asked::Delete(act)
+        Asked::Delete { on, act }
     }
 
     /// zellij opened the terminal `opened` for the menu numbered `menu`, or
@@ -2691,12 +2717,14 @@ impl Sidebar {
     /// waits on it.
     pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
         let waiting = self.menu.as_ref().filter(|it| it.number() == menu);
-        let Some((session, pane)) = waiting.and_then(Menu::planning) else {
+        let Some(((session, pane), on)) =
+            waiting.and_then(|it| Some((it.planning()?, it.target().machine())))
+        else {
             return Asked::Nothing;
         };
-        let session = session.clone();
+        let (session, on) = (session.clone(), on.clone());
         let plan = match closes {
-            Ok(closes) => self.plan(&session, Deletes::Pane { pane, closes }),
+            Ok(closes) => self.plan(&on, &session, Deletes::Pane { pane, closes }),
             Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
@@ -4065,6 +4093,18 @@ mod tests {
 
     fn session_name(name: &str) -> SessionName {
         SessionName::parse(name).unwrap()
+    }
+
+    /// What the sidebar asks of luneta for the menu numbered `menu`: zellij
+    /// here, to say what closing the pane `pane` of `session` closes.
+    fn closes_here(menu: u64, session: &str, pane: u32) -> Asked {
+        Asked::Closes { menu, on: Machine::Local, session: session_name(session), pane }
+    }
+
+    /// What the sidebar asks of luneta for a delete key: zellij here, to do
+    /// `act`.
+    fn delete_here(act: Act) -> Asked {
+        Asked::Delete { on: Machine::Local, act }
     }
 
     /// What takes luneta's zellij to `place`, of this machine.
@@ -6368,7 +6408,7 @@ mod tests {
             untold(&mut sidebar);
             sidebar.step(2);
             type_in(&mut sidebar, "d");
-            let closes = || Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
+            let closes = || closes_here(1, "newer", 1);
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
             let lines = screen(&mut sidebar, true, 160, 16);
@@ -6378,7 +6418,7 @@ mod tests {
             assert!(lines.contains(&asks.as_str()), "{lines:#?}");
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
             let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
-            assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+            assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
         }
     }
 
@@ -6398,7 +6438,7 @@ mod tests {
             sidebar.heard(Host { unread: 1, unread_files, ..host });
             sidebar.step(2);
             type_in(&mut sidebar, "d");
-            let closes = Asked::Closes { menu: 1, session: "newer".to_owned(), pane: 1 };
+            let closes = closes_here(1, "newer", 1);
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
             let act = Act::Pane { session: "newer".to_owned(), pane: 1 };
             let went = sidebar.closes(1, Ok(Closes::Pane));
@@ -6407,7 +6447,7 @@ mod tests {
             let note = "lunetad cannot read 1 of Claude Code's session files";
             assert!(lines.contains(&note), "{lines:#?}");
             let asked = lines.contains(&"Close the pane? 1 agent, 1 unknown");
-            assert_eq!((went == Asked::Delete(act), asked), (!asks, asks), "pane {pane}");
+            assert_eq!((went == delete_here(act), asked), (!asks, asks), "pane {pane}");
         }
     }
 
@@ -6419,10 +6459,10 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.step(1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
-        let closes = Asked::Closes { menu: 1, session: "older".to_owned(), pane: 2 };
+        let closes = closes_here(1, "older", 2);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         let act = Act::Pane { session: "older".to_owned(), pane: 2 };
-        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Delete(act));
+        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
         assert!(sidebar.menu.is_none());
         sidebar.heard(host(
             vec![
@@ -6442,7 +6482,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let closes = || Asked::Closes { menu: 1, session: "older".to_owned(), pane: 1 };
+        let closes = || closes_here(1, "older", 1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
         let tab = || Closes::Tab { id: 0, panes: vec![1] };
         assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Nothing);
@@ -6451,7 +6491,7 @@ mod tests {
         assert_eq!(lines[13], " Close its tab? 1 agent, 1");
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
         let act = Act::Tab { session: "older".to_owned(), tab: 0, panes: vec![1] };
-        assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Delete(act));
+        assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
 
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
@@ -6460,7 +6500,7 @@ mod tests {
         let to = Place::Session(listed("newer", 20));
         let started = listed("older", 10).started();
         let leave = Act::Leave { session: "older".to_owned(), started, to };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
         assert!(sidebar.menu.is_none());
     }
 
@@ -6523,7 +6563,7 @@ mod tests {
         }
         // Nor does its last pane close it.
         type_in(&mut sidebar, "d");
-        let closes = Asked::Closes { menu: 3, session: "newer".to_owned(), pane: 1 };
+        let closes = closes_here(3, "newer", 1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         assert_eq!(sidebar.closes(3, Ok(Closes::Session)), Asked::Nothing);
         assert!(moving(&sidebar));
@@ -6533,7 +6573,7 @@ mod tests {
         let to = Place::Session(listed("older", 10));
         let started = listed("newer", 20).started();
         let leave = Act::Leave { session: "newer".to_owned(), started, to };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Delete(leave));
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
     }
 
     /// luneta's zellij may be in either session while it goes from one to
@@ -7007,6 +7047,93 @@ mod tests {
         }
         let opened = Place::Pane { session: listed("work", 30), pane: 3 };
         assert_eq!(sidebar.opened(number, Ok(3)), go_here(opened));
+    }
+
+    /// `d d` on another machine's pane asks zellij there what closing it
+    /// closes, and asks first by that machine's agents: the agent there waits
+    /// for you, though this machine's session of that name runs none in its
+    /// pane. `y` has zellij there close it, and the highlight goes past its
+    /// row once it is gone.
+    #[test]
+    fn another_machine_s_pane_closes_there_by_its_agents() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let panes = vec![pane(1, 0, "/w/b", "claude"), pane(2, 0, "/w/b", "fish")];
+        let agents = vec![agent("main", 1, Status::Waiting, Some("fix"))];
+        host.remotes[0] = remote("nixos", up(vec![session("main", 20, panes)], agents));
+        sidebar.heard(host.clone());
+        sidebar.focus(Keys::Sidebar);
+        let fix = |pane| Spot::Remote(nixos(), Place::Pane { session: listed("main", 20), pane });
+        sidebar.cursor = Some(fix(1));
+        type_in(&mut sidebar, "d");
+        let menu = sidebar.menu.as_ref().map_or(0, Menu::number);
+        let on = Machine::Remote(nixos());
+        let closes = Asked::Closes { menu, on: on.clone(), session: session_name("main"), pane: 1 };
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
+        assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 120, 16);
+        let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+        assert!(lines.contains(&"Close the pane? 1 agent, 1 waiting"), "{lines:#?}");
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes);
+        let act = Act::Pane { session: "main".to_owned(), pane: 1 };
+        assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Delete { on, act });
+        let left = vec![session("main", 20, vec![pane(2, 0, "/w/b", "fish")])];
+        host.remotes[0] = remote("nixos", up(left, Vec::new()));
+        sidebar.heard(host);
+        assert_eq!(sidebar.cursor, Some(fix(2)));
+    }
+
+    /// `d s` on the session of another machine's that luneta's zellij is in
+    /// takes it first to the newest of that machine's other sessions, never
+    /// to this machine's, and has the session killed there once it has left.
+    /// That machine's only session is killed with luneta's zellij in it,
+    /// which goes on as it does once its session there ends.
+    #[test]
+    fn another_machine_s_session_luneta_is_in_goes_once_it_left_for_one_there() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let main = || session("main", 20, vec![pane(1, 0, "/w/b", "fish")]);
+        let work = session("work", 30, vec![pane(5, 0, "/w/c", "fish")]);
+        host.remotes[0] = remote("nixos", up(vec![main(), work], Vec::new()));
+        sidebar.heard(host.clone());
+        let look = sidebar.swapping(&Machine::Remote(nixos()), &session_name("main"));
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        let before = Some(Before::Listed(Vec::new()));
+        sidebar.looked(Looked { number: look.number, went: None, clients, before });
+        sidebar.titled("main | fish".to_owned());
+        sidebar.focus(Keys::Sidebar);
+        let delete = |sidebar: &mut Sidebar| {
+            sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
+            type_in(sidebar, "d");
+            sidebar.key(&char('s'), moment(160_000))
+        };
+        let (on, started) = (Machine::Remote(nixos()), listed("main", 20).started());
+        let to = Place::Session(listed("work", 30));
+        let leave = Act::Leave { session: "main".to_owned(), started, to };
+        assert_eq!(delete(&mut sidebar), Asked::Delete { on: on.clone(), act: leave });
+        host.remotes[0] = remote("nixos", up(vec![main()], Vec::new()));
+        sidebar.heard(host);
+        let kill = Act::Kill { session: "main".to_owned(), started };
+        assert_eq!(delete(&mut sidebar), Asked::Delete { on, act: kill });
+    }
+
+    /// A delete on another machine's row that waits on your yes deletes
+    /// nothing there once lunetad no longer reaches that machine, and says
+    /// so.
+    #[test]
+    fn a_delete_on_a_machine_lunetad_no_longer_reaches_deletes_nothing() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        sidebar.heard(host.clone());
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
+        type_in(&mut sidebar, "d");
+        // Its agent waits for you.
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
+        host.remotes[0] = remote("nixos", down(100));
+        sidebar.heard(host);
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some("menu: lunetad does not reach nixos now"));
     }
 
     /// luneta's zellij on another machine, once a client of a session there

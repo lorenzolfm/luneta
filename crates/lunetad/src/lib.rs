@@ -11,6 +11,7 @@ mod claude;
 pub mod cli;
 mod client;
 pub mod clients;
+pub mod closes;
 mod core;
 mod daemon;
 pub mod folder;

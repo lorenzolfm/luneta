@@ -4,7 +4,6 @@
 //! finds luneta's client among those, so that a multiplexer of luneta's own
 //! can take zellij's place behind it.
 
-use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
@@ -20,9 +19,13 @@ use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
 use lunetad::cli::{
-    answered, failure, laid, quiet, tabs, terminal_of, unrun, Laid, ANSWER, LEFT_OUT, PANE_VAR,
-    SESSION_VAR,
+    answered, done, failure, laid, quiet, tabs, terminal_of, unrun, Laid, ANSWER, LEFT_OUT,
+    PANE_VAR, SESSION_VAR,
 };
+pub use lunetad::closes::{
+    closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
+};
+use lunetad::closes::running_in;
 use lunetad::opens::tab_opened;
 pub use lunetad::names::{named, session_for};
 use lunetad::names::kept;
@@ -575,13 +578,14 @@ impl After {
             // A zellij of its own kills it: one run as the client's would
             // wait on the session it ends.
             (After::Kill { session, started }, There::Here) => {
-                kill(&session, started, events);
+                kill(&Machine::Local, &session, started, events);
             },
-            // The sidebar has none killed on another machine.
-            (After::Kill { session, .. }, There::Away(_)) => {
-                let why = format!("\"{session}\" stays: luneta kills this machine's alone");
-                // luneta is on its way out.
-                let _ = events.send(Event::Notice(why));
+            // The daemon there kills it, which waits on no client.
+            (After::Kill { session, started }, There::Away(away)) => {
+                if let Err(why) = away.kill(&session, started) {
+                    // luneta is on its way out.
+                    let _ = events.send(Event::Notice(why));
+                }
             },
         }
     }
@@ -628,7 +632,7 @@ fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, Str
     let (opened, laid) = tab_opened(to, tab)?;
     let terminal = terminal_of(&laid, opened).ok_or("zellij opened a tab with no pane")?;
     for made in made {
-        if let Err(why) = tab_closed(to.as_str(), made) {
+        if let Err(why) = closed(to.as_str(), Close::Tab(made)) {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
@@ -636,209 +640,46 @@ fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, Str
     Ok(terminal)
 }
 
-/// What closing a terminal of a session closes with it, as zellij closes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Closes {
-    /// The pane alone: something else holds its tab open.
-    Pane,
-    /// Its tab, by its id, and the terminals in it, the pane's own among
-    /// them, and the floating ones: nothing else holds the tab open.
-    Tab { id: u32, panes: Vec<u32> },
-    /// Its session: nothing else holds the tab open, and the session has no
-    /// other tab.
-    Session,
-}
-
-/// Asks zellij, on a thread of its own, what closing the terminal `pane` of
-/// `session` closes, for the menu numbered `menu`, and hands back what it
-/// answers.
-pub fn closes(menu: u64, session: &str, pane: u32, events: &Sender<Event>) {
-    let (session, events) = (session.to_owned(), events.clone());
+/// Asks zellij on the machine `on`, on a thread of its own, what closing the
+/// terminal `pane` of `session` closes, for the menu numbered `menu`, and
+/// hands back what it answers.
+pub fn closes(menu: u64, on: &Machine, session: SessionName, pane: u32, events: &Sender<Event>) {
+    let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
-        let closes = closes_now(&session, pane);
+        let closes = There::on(&on).and_then(|mut there| there.closes(&session, pane));
         // luneta is on its way out.
         let _ = events.send(Event::Closes { menu, closes });
     });
 }
 
-/// What closing the terminal `pane` of `session` closes, as zellij lists the
-/// session's panes now, or why it closes nothing.
-pub fn closes_now(session: &str, pane: u32) -> Result<Closes, String> {
-    laid(session).and_then(|laid| closing(&laid, pane))
-}
-
-/// What closing the terminal `pane` closes among `laid`, the panes of its
-/// session, or why it closes nothing: it is gone.
-fn closing(laid: &[Laid], pane: u32) -> Result<Closes, String> {
-    match together(laid, &BTreeSet::from([pane]))? {
-        Closing::Session => Ok(Closes::Session),
-        Closing::Parts { mut tabs, .. } => {
-            Ok(tabs.pop().map_or(Closes::Pane, |(id, panes)| Closes::Tab { id, panes }))
-        },
-    }
-}
-
-/// What closing some terminals of a session closes, together, as zellij
-/// closes them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Closing {
-    /// Each tab that nothing left in it holds open, by its id, with its
-    /// terminals, the floating ones too; and each terminal whose tab
-    /// something else holds open, alone.
-    Parts { tabs: Vec<(u32, Vec<u32>)>, panes: Vec<u32> },
-    /// Every tab of the session, and the session with them.
-    Session,
-}
-
-/// What closing the terminals `panes` of `session` closes, together, as
-/// zellij lists the session's panes now, or why it closes nothing.
-pub fn closes_together(session: &str, panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    laid(session).and_then(|laid| together(&laid, panes))
-}
-
-/// What closing the terminals `panes` closes among `laid`, the panes of their
-/// session, together: a tab goes once nothing left in it holds it open, and
-/// the session once all its tabs do. Or why it closes nothing: one is gone.
-fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    let given = |laid: &Laid| !laid.is_plugin && panes.contains(&laid.id);
-    let listed = |pane: u32| laid.iter().any(|laid| given(laid) && laid.id == pane);
-    if let Some(gone) = panes.iter().find(|pane| !listed(**pane)) {
-        return Err(format!("pane {gone} is gone"));
-    }
-    let tabs = tabs(laid);
-    let in_tab = |tab: u32| laid.iter().filter(move |laid| laid.tab_id == tab);
-    let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(given));
-    let held = |tab: &u32| in_tab(*tab).any(|laid| !given(laid) && laid.holds_tab());
-    let (held, closed): (Vec<u32>, Vec<u32>) = touched.partition(held);
-    if closed.len() == tabs.len() {
-        return Ok(Closing::Session);
-    }
-    let terminals = |tab| in_tab(tab).filter(|laid| !laid.is_plugin).map(|laid| laid.id).collect();
-    let tabs = closed.into_iter().map(|tab| (tab, terminals(tab))).collect();
-    let alone = |tab| in_tab(tab).filter(|laid| given(laid)).map(|laid| laid.id);
-    let panes = held.into_iter().flat_map(alone).collect();
-    Ok(Closing::Parts { tabs, panes })
-}
-
-/// Closes the terminal `pane` of `session`, on a thread of its own, at once:
-/// it moves no client.
-pub fn close_pane(session: &str, pane: u32, events: &Sender<Event>) {
-    run(Action::Command(pane_closer(session, pane)), None, Instant::now(), events);
-}
-
-/// Closes the tab of `session` whose id is `tab`, its panes and all, on a
-/// thread of its own, at once.
-pub fn close_tab(session: &str, tab: u32, events: &Sender<Event>) {
-    run(Action::Command(tab_closer(session, tab)), None, Instant::now(), events);
-}
-
-/// Kills `session`, the one that started at `started`, and deletes it, on a
-/// thread of its own, as `killed` does: the thread, for luneta to wait for
-/// as it ends.
-pub fn kill(session: &str, started: SystemTime, events: &Sender<Event>) -> JoinHandle<()> {
-    let session = session.to_owned();
-    let events = events.clone();
+/// Has zellij on the machine `on` close `close` of `session`, on a thread of
+/// its own, at once: it moves no client. What zellij says of a failure comes
+/// back as a notice.
+pub fn close(on: &Machine, session: &str, close: Close, events: &Sender<Event>) {
+    let (on, session, events) = (on.clone(), session.to_owned(), events.clone());
     thread::spawn(move || {
-        if let Err(why) = killed(&session, started) {
+        if let Err(why) = There::on(&on).and_then(|mut there| there.close(&session, close)) {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
-    })
+    });
 }
 
-/// Closes the terminal `pane` of `session`, and says why not when zellij
-/// did not.
-pub fn pane_closed(session: &str, pane: u32) -> Result<(), String> {
-    done(pane_closer(session, pane))
-}
-
-/// Closes the tab of `session` whose id is `tab`, its panes and all, and
-/// says why not when zellij did not.
-pub fn tab_closed(session: &str, tab: u32) -> Result<(), String> {
-    done(tab_closer(session, tab))
-}
-
-/// What `delete-session --force` says as it kills a session that runs:
-/// `assert_dead_session` in zellij-utils 0.45.1's `sessions.rs` says it, on
-/// stdout, of one it finds a server of.
-const KILLING: &str = "will be force killed and deleted";
-
-/// How `delete-session` ends where zellij keeps nothing of the session:
-/// `delete_session` in the same file ends so where it finds no folder of the
-/// session to take away.
-const UNKEPT: i32 = 2;
-
-/// How long the server of a session zellij killed has to take its socket
-/// away: it does within milliseconds.
-const GOING: Duration = Duration::from_secs(1);
-
-/// How often luneta looks meanwhile.
-const GOING_LOOK: Duration = Duration::from_millis(10);
-
-/// How long a server goes on once its socket is gone, and its writer with
-/// it, which writes what zellij keeps of the session anew where it finds it
-/// gone: a few milliseconds, measured, and far less than this.
-const SETTLING: Duration = Duration::from_millis(100);
-
-/// Kills `session`, the one that started at `started`, and deletes it, so
-/// that zellij keeps nothing to bring it back with, and says why not when it
-/// did not. A client in it ends with it: luneta's own takes it to another
-/// session. A session that took its name since is another, which zellij
-/// would kill all the same: it stays. zellij first keeps anything of a
-/// session a second after it starts: it kills a younger one all the same,
-/// and fails to delete what it does not keep.
-///
-/// zellij takes away what it keeps before the server has ended, and the
-/// server's writer can write it anew, so it is gone only once the server
-/// is, as `settled` waits for: a luneta, or a `luneta close` in a pane of
-/// the session, that ends with the session may not be there by then.
-pub fn killed(session: &str, started: SystemTime) -> Result<(), String> {
-    let folder = lunetad::zellij_folder();
-    if running_in(&folder)?.iter().any(|(name, at)| name == session && *at != started) {
-        return Err(format!("\"{session}\" is a session made since, which stays"));
-    }
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
-    command.args(["delete-session", "--force", session]);
-    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
-    let unkept = matches!(&ran, program::Ran::Ended { status, stdout, .. }
-        if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
-    if !unkept {
-        ran.answer().map_err(|why| format!("zellij: {why}"))?;
-    }
-    settled(session, started, &folder)
-}
-
-/// Waits for the server of `session`, the one that started at `started`, to
-/// end, once zellij has killed it, and has zellij let go again of what its
-/// writer wrote of it meanwhile. What zellij keeps of a session that took
-/// the name since is that one's, and stays. How zellij ends says too little:
-/// it drops the word to the server that it fails to send, and ends well
-/// where it fails to take away what it keeps, but for finding none. What is
-/// in `folder`, zellij's sockets, and in its folder of what it keeps, says.
-fn settled(session: &str, started: SystemTime, folder: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + GOING;
-    while running_in(folder)?.iter().any(|(name, at)| name == session && *at == started) {
-        if Instant::now() >= deadline {
-            return Err(format!("zellij did not kill \"{session}\""));
+/// Has zellij on the machine `on` kill `session`, the one that started at
+/// `started`, and delete it, on a thread of its own, as `killed` does: the
+/// thread, for luneta to wait for as it ends.
+pub fn kill(
+    on: &Machine,
+    session: &str,
+    started: SystemTime,
+    events: &Sender<Event>,
+) -> JoinHandle<()> {
+    let (on, session, events) = (on.clone(), session.to_owned(), events.clone());
+    thread::spawn(move || {
+        if let Err(why) = There::on(&on).and_then(|mut there| there.kill(&session, started)) {
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
         }
-        thread::sleep(GOING_LOOK);
-    }
-    thread::sleep(SETTLING);
-    let kept = lunetad::zellij_info_folder().is_some_and(|info| info.join(session).exists());
-    if kept && running_in(folder)?.iter().all(|(name, _)| name != session) {
-        return deleted(session);
-    }
-    Ok(())
-}
-
-/// The sessions that run, each by its name and when it started, as their
-/// sockets in `folder` say now; or why luneta cannot tell them, as a
-/// session's socket could be in what it cannot read.
-fn running_in(folder: &Path) -> Result<Vec<(String, SystemTime)>, String> {
-    lunetad::zellij_sessions(folder).ok_or_else(|| {
-        let folder = folder.display();
-        format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")
     })
 }
 
@@ -1020,14 +861,6 @@ fn filled(stream: &mut UnixStream, buffer: &mut [u8], deadline: Instant) -> io::
     Ok(())
 }
 
-/// Has zellij let go of `session`, one that ended, which then cannot be
-/// brought back, or says why it did not. zellij keeps one that runs.
-pub fn deleted(session: &str) -> Result<(), String> {
-    let mut command = Command::new("zellij");
-    command.args(["delete-session", session]);
-    done(command)
-}
-
 /// The terminal of `session` a client coming there would be on, as zellij
 /// lists its panes now: in its first tab, the one focused there, or else the
 /// first, a tiled one before one floating. zellij says which tab a session
@@ -1053,28 +886,6 @@ pub fn dumped(session: &str, pane: u32) -> Result<String, String> {
     let pane = format!("terminal_{pane}");
     command.args(["--session", session, "action", "dump-screen", "--pane-id", &pane, "--ansi"]);
     answered(&mut command)
-}
-
-/// zellij, to close the terminal `pane` of `session`.
-fn pane_closer(session: &str, pane: u32) -> Command {
-    let mut command = Command::new("zellij");
-    let pane = format!("terminal_{pane}");
-    command.args(["--session", session, "action", "close-pane", "--pane-id", &pane]);
-    command
-}
-
-/// zellij, to close the tab of `session` whose id is `tab`.
-fn tab_closer(session: &str, tab: u32) -> Command {
-    let mut command = Command::new("zellij");
-    command.args(["--session", session, "action", "close-tab-by-id", &tab.to_string()]);
-    command
-}
-
-/// Has `command`, a zellij, do what it was asked, and says why not when it
-/// did not.
-fn done(mut command: Command) -> Result<(), String> {
-    quiet(&mut command);
-    answered(&mut command).map(drop)
 }
 
 /// Asks zellij on `on`, the machine luneta's client runs on, for the
@@ -1344,8 +1155,6 @@ impl Then {
 
 /// An action luneta has zellij take.
 enum Action {
-    /// This command of zellij's CLI, on this machine.
-    Command(Command),
     /// A go, as `moves::go` says, on `on`.
     Go { on: Machine, at: SessionName, to: SessionName, pane: Option<u32> },
     /// A start, as `moves::start` says, on `on`.
@@ -1396,12 +1205,37 @@ impl There {
         }
     }
 
+    /// What closing the terminal `pane` of `session` closes, as
+    /// `lunetad::closes::closes_now` says, or why it closes nothing.
+    fn closes(&mut self, session: &SessionName, pane: u32) -> Result<Closes, String> {
+        match self {
+            There::Here => closes_now(session.as_str(), pane),
+            There::Away(away) => away.closes(session, pane),
+        }
+    }
+
+    /// Has zellij close `close` of `session`, or says why it did not.
+    fn close(&mut self, session: &str, close: Close) -> Result<(), String> {
+        match self {
+            There::Here => closed(session, close),
+            There::Away(away) => away.close(session, close),
+        }
+    }
+
+    /// Has zellij kill `session`, the one that started at `started`, and
+    /// delete it, as `lunetad::closes::killed` does, or says why it did not.
+    fn kill(&mut self, session: &str, started: SystemTime) -> Result<(), String> {
+        match self {
+            There::Here => killed(session, started),
+            There::Away(away) => away.kill(session, started),
+        }
+    }
+
     /// Has zellij take `action`, which is of its machine, or says why it did
     /// not. A pane already focused is where the action would take the
     /// client, and no failure.
     fn take(&mut self, action: Action) -> Result<(), String> {
         let command = match (action, self) {
-            (Action::Command(command), _) => command,
             (Action::Go { at, to, pane, .. }, There::Away(away)) => return away.go(&at, &to, pane),
             (Action::Go { at, to, pane, .. }, There::Here) => {
                 match moves::go(Command::new("zellij"), &at, &to, pane) {
@@ -1437,11 +1271,8 @@ impl There {
 fn run(action: Action, then: Option<Then>, when: Instant, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
-        let there = match &action {
-            Action::Command(_) => Ok(There::Here),
-            Action::Go { on, .. } | Action::Start { on, .. } => There::on(on),
-        };
-        let mut there = match there {
+        let (Action::Go { on, .. } | Action::Start { on, .. }) = &action;
+        let mut there = match There::on(on) {
             Ok(there) => there,
             Err(why) => {
                 // luneta is on its way out.
@@ -1661,52 +1492,6 @@ mod tests {
         let first = [focused(floating(laid(5, 0))), laid(6, 0), laid(7, 0)];
         assert_eq!(shown(&first), Some(6));
         assert_eq!(shown(&[plugin(laid(8, 0))]), None);
-    }
-
-    /// zellij closes a tab with its last pane that holds it open, its
-    /// floating panes and all, and a session with its last tab. A bar holds
-    /// none open, a plugin's pane you can go to does, and so does a terminal
-    /// another took the place of, which comes back.
-    #[test]
-    fn the_last_pane_that_holds_its_tab_open_closes_the_tab_or_the_session() {
-        let floating = Laid { is_floating: true, ..laid(5, 0) };
-        let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
-        let plugin = Laid { is_plugin: true, ..laid(4, 0) };
-        let suspended = Laid { is_suppressed: true, ..laid(7, 0) };
-        let other_tab = laid(9, 1);
-        let tab = |panes: Vec<u32>| Ok(Closes::Tab { id: 0, panes });
-        for (panes, id, closes) in [
-            (vec![laid(4, 0), bar.clone(), other_tab.clone()], 4, tab(vec![4])),
-            (vec![laid(4, 0), floating.clone(), other_tab.clone()], 4, tab(vec![4, 5])),
-            (vec![laid(4, 0), laid(6, 0), other_tab.clone()], 4, Ok(Closes::Pane)),
-            (vec![laid(4, 0), floating.clone(), other_tab.clone()], 5, Ok(Closes::Pane)),
-            (vec![laid(4, 0), plugin, other_tab.clone()], 4, Ok(Closes::Pane)),
-            (vec![suspended, laid(4, 0), other_tab.clone()], 4, Ok(Closes::Pane)),
-            (vec![laid(4, 0), floating, bar], 4, Ok(Closes::Session)),
-            (vec![other_tab], 4, Err("pane 4 is gone".to_owned())),
-        ] {
-            assert_eq!(closing(&panes, id), closes, "pane {id}");
-        }
-    }
-
-    /// Panes closed together close a tab once nothing left in it holds it
-    /// open, as the last of them would close it, and the session once all its
-    /// tabs go; a pane whose tab something else holds open closes alone.
-    #[test]
-    fn panes_closed_together_close_the_tab_none_left_holds_open() {
-        let floating = Laid { is_floating: true, ..laid(5, 0) };
-        let tab = vec![laid(4, 0), laid(6, 0), floating, laid(7, 1), laid(8, 1)];
-        let parts = |tabs: Vec<(u32, Vec<u32>)>, panes: Vec<u32>| Ok(Closing::Parts { tabs, panes });
-        for (given, closes) in [
-            (vec![4, 6], parts(vec![(0, vec![4, 6, 5])], vec![])),
-            (vec![4, 7], parts(vec![], vec![4, 7])),
-            (vec![4, 6, 7], parts(vec![(0, vec![4, 6, 5])], vec![7])),
-            (vec![4, 6, 7, 8], Ok(Closing::Session)),
-            (vec![4, 9], Err("pane 9 is gone".to_owned())),
-        ] {
-            let given: BTreeSet<u32> = given.iter().copied().collect();
-            assert_eq!(together(&tab, &given), closes, "panes {given:?}");
-        }
     }
 
     /// The client leaves out the variable zellij refuses by to attach a pane's
