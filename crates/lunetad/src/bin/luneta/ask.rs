@@ -20,7 +20,6 @@
 //! luneta's zellij is the last client to type in its pane as each turn
 //! starts, so that `go` and `open session` move it.
 
-use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
@@ -204,7 +203,7 @@ impl Ask {
         if words.is_empty() {
             return;
         }
-        let turn = self.next_turn();
+        let turn = Turn::after(self.turned);
         let (on, cwd) = match &self.works {
             Works::Here(cwd) => (None, Some(cwd.clone())),
             Works::There { on, cwd } => (Some(on.clone()), cwd.as_ref().map(PathBuf::from)),
@@ -214,12 +213,10 @@ impl Ask {
         self.talk.push(Said::You(words));
         let asked = match asked {
             Ok(asked) => asked,
-            // No turn went to the agent, for the next to come after.
-            Err(why) => {
-                self.turned = turn.before;
-                return self.talk.push(Said::Wrong(format!("ask: {why}")));
-            },
+            Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
+        // The next turn comes after this one, which goes to the agent.
+        self.turned = Some(turn.key());
         let (number, events) = (self.number, events.clone());
         // How the turn ended, or else that it ended with no answer.
         let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
@@ -243,13 +240,6 @@ impl Ask {
                 due.pay(Ok(ended));
             }
         }));
-    }
-
-    /// The turn after the last, by a key of its own: one nothing the agent
-    /// runs can tell, as std seeds the keys of its hashers at random.
-    fn next_turn(&mut self) -> Turn {
-        let key = RandomState::new().build_hasher().finish();
-        Turn { key, before: self.turned.replace(key) }
     }
 
     /// Takes in what the turn the agent is at heard.
@@ -637,15 +627,5 @@ mod tests {
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());
         assert_eq!(ask.turned, None);
-    }
-
-    /// Each turn has a key of its own, and the key of the turn before it, the
-    /// first none.
-    #[test]
-    fn a_turn_goes_by_its_own_key_and_the_one_before() {
-        let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
-        let [first, second, third] = [(); 3].map(|()| ask.next_turn());
-        assert_eq!([first.before, second.before, third.before], [None, Some(first.key), Some(second.key)]);
-        assert!(first.key != second.key && second.key != third.key);
     }
 }

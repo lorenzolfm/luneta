@@ -15,6 +15,7 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -115,18 +116,51 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     You run in no pane yourself, so closing it does not end you, but it is the user's: leave \
     it and its session out of \"all\", as the skill says.";
 
+/// What `AWAY_VAR` is, where it is set.
+const AWAY_SET: &str = "1";
+
 /// A turn of the agent of luneta's ask box, by its key, and the key of the
 /// turn before it, where one went before. A plan a close says in a turn is of
 /// its key, and the one it takes a yes to, of the key before, so that a close
 /// takes a yes only to a plan said in the turn before, what you answered the
-/// agent between them.
+/// agent between them. No turn is of the key of the turn before it, as it
+/// would take a yes to the plan it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Turn {
-    pub key: u64,
-    pub before: Option<u64>,
+    key: u64,
+    before: Option<u64>,
 }
 
 impl Turn {
+    /// The turn after the one of the key `before`, where one went before, by
+    /// a key of its own: one nothing the agent runs can tell, as std seeds
+    /// the keys of its hashers at random.
+    #[must_use]
+    pub fn after(before: Option<u64>) -> Turn {
+        let key = RandomState::new().build_hasher().finish();
+        let key = if before == Some(key) { !key } else { key };
+        Turn { key, before }
+    }
+
+    /// The turn of `key`, after the one of `before`, where one went before,
+    /// or why it is none: `before` is `key`.
+    pub fn new(key: u64, before: Option<u64>) -> Result<Turn, String> {
+        if before == Some(key) {
+            return Err(format!("turn: {key:016x} is the key of the turn before it too"));
+        }
+        Ok(Turn { key, before })
+    }
+
+    #[must_use]
+    pub fn key(self) -> u64 {
+        self.key
+    }
+
+    #[must_use]
+    pub fn before(self) -> Option<u64> {
+        self.before
+    }
+
     /// Names it in the variables of `command`, for a close it runs to read.
     pub fn name_in(self, command: &mut Command) {
         command.env(TURN_VAR, format!("{:016x}", self.key));
@@ -134,6 +168,23 @@ impl Turn {
             Some(before) => command.env(BEFORE_VAR, format!("{before:016x}")),
             None => command.env_remove(BEFORE_VAR),
         };
+    }
+
+    /// The turn `key` and `before` name, as `name_in` names one in `TURN_VAR`
+    /// and `BEFORE_VAR`: none where neither does. Or why they do not read.
+    fn read(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
+        let read = |name, spelled: &str| {
+            let read = u64::from_str_radix(spelled, 16);
+            read.map_err(|_| format!("{name} is no key of a turn of luneta's ask box"))
+        };
+        match (key, before) {
+            (None, None) => Ok(None),
+            (None, Some(_)) => Err(format!("{BEFORE_VAR} is set, and {TURN_VAR} is not")),
+            (Some(key), before) => {
+                let before = before.map(|before| read(BEFORE_VAR, before)).transpose()?;
+                Turn::new(read(TURN_VAR, key)?, before).map(Some)
+            },
+        }
     }
 }
 
@@ -148,6 +199,66 @@ pub enum User {
     Away,
     /// Where luneta cannot tell just now.
     Untold,
+}
+
+impl User {
+    /// Names it in the variables of `command`, for luneta's commands to go
+    /// by: the pane, as `<session>:<pane>`, in `ASKED_VAR`, or another
+    /// machine in `AWAY_VAR`, or neither.
+    fn name_in(&self, command: &mut Command) {
+        command.env_remove(ASKED_VAR).env_remove(AWAY_VAR);
+        match self {
+            User::Pane { session, pane } => command.env(ASKED_VAR, format!("{session}:{pane}")),
+            User::Away => command.env(AWAY_VAR, AWAY_SET),
+            User::Untold => command,
+        };
+    }
+
+    /// Where you are, as `name_in` names it in `asked` and `away`, of
+    /// `ASKED_VAR` and `AWAY_VAR`. Or why they do not read, or say both.
+    fn read(asked: Option<&str>, away: Option<&str>) -> Result<User, String> {
+        match (asked, away) {
+            (None, None) => Ok(User::Untold),
+            (None, Some(AWAY_SET)) => Ok(User::Away),
+            (None, Some(away)) => {
+                Err(format!("{AWAY_VAR} is {away:?}, and luneta's ask box sets it to {AWAY_SET}"))
+            },
+            // A session's name may hold a `:` of its own, as zellij's may.
+            (Some(asked), None) => {
+                let pane = asked.rsplit_once(':').and_then(|(session, pane)| {
+                    let session = SessionName::running(session).ok()?;
+                    Some(User::Pane { session, pane: pane.parse().ok()? })
+                });
+                let no_pane = || format!("{ASKED_VAR}: {asked} is no pane of a session zellij runs");
+                pane.ok_or_else(no_pane)
+            },
+            (Some(asked), Some(_)) => Err(format!(
+                "{ASKED_VAR} names {asked}, a pane luneta's ask box asked from, and {AWAY_VAR} says \
+                 it asked from another machine"
+            )),
+        }
+    }
+}
+
+/// The turn of luneta's ask box a command runs in, and where you are, as the
+/// box names them in the variables of its agent: `key` and `before`, of
+/// `TURN_VAR` and `BEFORE_VAR`, and `asked` and `away`, of `ASKED_VAR` and
+/// `AWAY_VAR`. None where none is set, as outside the box. Or why they do
+/// not read, or say where you are outside a turn.
+pub fn turn_in(
+    key: Option<&str>,
+    before: Option<&str>,
+    asked: Option<&str>,
+    away: Option<&str>,
+) -> Result<Option<(Turn, User)>, String> {
+    let Some(turn) = Turn::read(key, before)? else {
+        return match (asked, away) {
+            (None, None) => Ok(None),
+            (Some(_), _) => Err(format!("{ASKED_VAR} is set, and {TURN_VAR} is not")),
+            (None, Some(_)) => Err(format!("{AWAY_VAR} is set, and {TURN_VAR} is not")),
+        };
+    };
+    Ok(Some((turn, User::read(asked, away)?)))
 }
 
 /// A step of a turn of the agent, as `claude` says it.
@@ -177,17 +288,22 @@ impl Step {
         AskResponse { step: Some(step) }
     }
 
-    /// The step a daemon handed on, where it is one: not where it names a
-    /// session by no id of one, nor where it is none of these, as a newer
-    /// daemon's could be.
-    #[must_use]
-    pub fn of(answer: AskResponse) -> Option<Step> {
-        Some(match answer.step? {
-            ask_response::Step::Session(session) => Step::Session(SessionId::parse(&session)?),
+    /// The step a daemon handed on: none where it is none of these, as a
+    /// newer daemon's could be. Or why it is no step: it names a session by
+    /// no id of one, which the next turn could not go on with.
+    pub fn of(answer: AskResponse) -> Result<Option<Step>, String> {
+        let Some(step) = answer.step else {
+            return Ok(None);
+        };
+        Ok(Some(match step {
+            ask_response::Step::Session(session) => match SessionId::parse(&session) {
+                Some(session) => Step::Session(session),
+                None => return Err(format!("session: {session:?} names no session")),
+            },
             ask_response::Step::Ran(Ran { id, command }) => Step::Ran { id, command },
             ask_response::Step::Denied(id) => Step::Denied(id),
             ask_response::Step::Said(said) => Step::Said(said),
-        })
+        }))
     }
 }
 
@@ -231,7 +347,7 @@ impl Asked {
     /// The turn a question asks for, and the machine it is for, or why the
     /// question is invalid: as `new` says, or it resumes a session by no id
     /// of one, or names your pane in a session by a name zellij does not
-    /// take.
+    /// take, or its turn is of the key of the turn before it.
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
         let AskRequest { on, cwd, words, resumed, highlighted, user, turn, before } = request;
         let resumed = match resumed {
@@ -249,7 +365,7 @@ impl Asked {
                 User::Pane { session, pane }
             },
         };
-        let turn = Turn { key: turn, before };
+        let turn = Turn::new(turn, before)?;
         let asked = Asked::new(cwd.map(PathBuf::from), &words, resumed, highlighted, user, turn)?;
         Ok((on, asked))
     }
@@ -315,12 +431,7 @@ impl Asked {
             claude.env_remove(name);
         }
         git::local(&mut claude);
-        claude.env_remove(ASKED_VAR).env_remove(AWAY_VAR);
-        match &self.user {
-            User::Pane { session, pane } => claude.env(ASKED_VAR, format!("{session}:{pane}")),
-            User::Away => claude.env(AWAY_VAR, "1"),
-            User::Untold => &mut claude,
-        };
+        self.user.name_in(&mut claude);
         self.turn.name_in(&mut claude);
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
             claude.env("PATH", path);
@@ -626,10 +737,81 @@ mod tests {
         assert!(untold.ends_with("]\n\nyes"), "{untold}");
     }
 
+    /// luneta's commands read in the variables of the agent the turn it is
+    /// at and where you are, as the box named them, and read none outside
+    /// the box.
+    #[test]
+    fn the_agent_s_commands_read_the_turn_and_where_you_are() {
+        let var = |command: &Command, name: &str| {
+            let set = command.get_envs().find(|(key, _)| key.to_str() == Some(name));
+            set.and_then(|(_, value)| value).map(|value| value.to_string_lossy().into_owned())
+        };
+        let first = Turn::new(10, None).unwrap();
+        for user in [pane("a:b", 4), User::Away, User::Untold] {
+            for turn in [first, turn()] {
+                let asked = Asked::new(None, "yes", None, String::new(), user.clone(), turn);
+                let claude = asked.unwrap().claude();
+                let [key, before, pane, away] =
+                    [TURN_VAR, BEFORE_VAR, ASKED_VAR, AWAY_VAR].map(|name| var(&claude, name));
+                let read = turn_in(key.as_deref(), before.as_deref(), pane.as_deref(), away.as_deref());
+                assert_eq!(read, Ok(Some((turn, user.clone()))));
+            }
+        }
+        assert_eq!(turn_in(None, None, None, None), Ok(None));
+    }
+
+    /// A command reads no turn of the box's but one its variables name in
+    /// full: a key that reads, after none or another that does, and where
+    /// you are by a pane of a session zellij could run, or by the `1` that
+    /// says another machine, or by neither. Where you are, outside a turn,
+    /// is none of the box's, nor are both.
+    #[test]
+    fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
+        let (key, before) = (Some("ff"), Some("0a"));
+        assert_eq!(turn_in(key, before, None, None), Ok(Some((turn(), User::Untold))));
+        for (key, before) in [
+            (Some(""), None),
+            (Some("forged"), None),
+            (Some("ff"), Some("")),
+            (None, Some("ff")),
+            (Some("ff"), Some("ff")),
+        ] {
+            assert!(turn_in(key, before, None, None).is_err(), "{key:?} {before:?}");
+        }
+        for (asked, away) in [(Some("work:2"), None), (None, Some("1"))] {
+            assert!(turn_in(None, None, asked, away).is_err(), "{asked:?} {away:?}");
+        }
+        for (asked, away) in [
+            (Some(""), None),
+            (Some("work"), None),
+            (Some(":4"), None),
+            (Some("work:x"), None),
+            (Some("a/b:4"), None),
+            (None, Some("")),
+            (None, Some("0")),
+            (Some("work:2"), Some("1")),
+        ] {
+            assert!(turn_in(key, before, asked, away).is_err(), "{asked:?} {away:?}");
+        }
+    }
+
+    /// Each turn has a key of its own, and the key of the turn before it, the
+    /// first none.
+    #[test]
+    fn a_turn_goes_by_its_own_key_and_the_one_before() {
+        let first = Turn::after(None);
+        let second = Turn::after(Some(first.key()));
+        let third = Turn::after(Some(second.key()));
+        let befores = [first.before(), second.before(), third.before()];
+        assert_eq!(befores, [None, Some(first.key()), Some(second.key())]);
+        assert!(first.key() != second.key() && second.key() != third.key());
+    }
+
     /// A turn is asked of a daemon as it is, and a question that asks for
     /// none is invalid: one in a directory by no absolute path, of words
-    /// that are only white space, that resumes a session by no id of one, or
-    /// that names your pane in a session by a name zellij does not take.
+    /// that are only white space, that resumes a session by no id of one,
+    /// that names your pane in a session by a name zellij does not take, or
+    /// whose turn is of the key of the turn before it.
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
         let on = || Some(On { destination: "nixos".to_owned() });
@@ -654,14 +836,16 @@ mod tests {
                 user: Some(ask_request::User::Pane(UserPane { session: String::new(), pane: 2 })),
                 ..request()
             },
+            AskRequest { turn: 7, before: Some(7), ..request() },
         ];
         for request in invalid {
             assert!(Asked::of(request.clone()).is_err(), "{request:?}");
         }
     }
 
-    /// A step a daemon hands on is the step it took, and one that names a
-    /// session by no id of one, or is none a daemon hands on, is left out.
+    /// A step a daemon hands on is the step it took, and one that is none a
+    /// daemon hands on is left out. One that names a session by no id of
+    /// one is no step.
     #[test]
     fn a_step_is_handed_on_as_it_is() {
         let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() };
@@ -672,11 +856,11 @@ mod tests {
             Step::Said("Done.".to_owned()),
         ];
         for step in steps {
-            assert_eq!(Step::of(step.clone().answer()), Some(step));
+            assert_eq!(Step::of(step.clone().answer()), Ok(Some(step)));
         }
+        assert_eq!(Step::of(AskResponse { step: None }), Ok(None));
         let unnamed = AskResponse { step: Some(ask_response::Step::Session("../x".to_owned())) };
-        assert_eq!(Step::of(unnamed), None);
-        assert_eq!(Step::of(AskResponse { step: None }), None);
+        assert_eq!(Step::of(unnamed), Err("session: \"../x\" names no session".to_owned()));
     }
 
     /// The agent runs this luneta, where it is one, or the one beside this

@@ -37,7 +37,7 @@ use std::time::SystemTime;
 
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
-use lunetad::asks::{Turn, BEFORE_VAR, TURN_VAR};
+use lunetad::asks::{Turn, User};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
@@ -86,12 +86,13 @@ pub fn address(spelled: &str) -> Result<Address, String> {
 enum Seated {
     /// In this pane, or asked from it, by its session's name now.
     In(Pane),
-    /// Outside zellij, and luneta's ask box, or in the box where it cannot
-    /// tell where you asked from.
+    /// Outside zellij, and luneta's ask box.
     Nowhere,
     /// In luneta's ask box, asked from another machine: no pane here is
     /// yours.
     Away,
+    /// In luneta's ask box, where it cannot tell where you asked from.
+    Untold,
 }
 
 /// What a command that needs your pane says of the ask box's agent asked
@@ -100,22 +101,27 @@ const AWAY: &str = "luneta's ask box asked from another machine, where luneta's 
                     no pane of this machine's is the user's, and zellij here moves none of \
                     their clients";
 
+/// What a command that needs your pane says of the ask box's agent where
+/// the box cannot tell where you asked from.
+const UNTOLD_PANE: &str = "luneta's ask box cannot tell which pane the user asked from just now";
+
 impl Seated {
     /// The pane it is in, or asked from: none outside zellij. Or why there
-    /// is none to be had, asked from another machine.
+    /// is none to be had, in luneta's ask box.
     fn pane(self) -> Result<Option<Pane>, String> {
         match self {
             Seated::In(pane) => Ok(Some(pane)),
             Seated::Nowhere => Ok(None),
             Seated::Away => Err(AWAY.to_owned()),
+            Seated::Untold => Err(UNTOLD_PANE.to_owned()),
         }
     }
 }
 
 /// The pane this runs in, its session by the name it has now among those
 /// `running`: none outside zellij. Or that it was asked from another
-/// machine, where luneta's ask box says so. Or why luneta cannot tell which
-/// session that is.
+/// machine, or from where luneta's ask box cannot tell, where the box says
+/// so. Or why luneta cannot tell which session that is.
 ///
 /// zellij names the session in the variables of this pane by the name it had
 /// as the pane opened, and a rename leaves that behind. lunetad follows the
@@ -134,11 +140,13 @@ impl Seated {
 fn seat(agents: Option<&[Agent]>, running: &[(String, SystemTime)]) -> Result<Seated, String> {
     let (named, pane) = match zellij::here()? {
         None => return Ok(Seated::Nowhere),
-        Some(Seat::Away) => return Ok(Seated::Away),
-        Some(Seat::Asked(asked)) if running.iter().any(|(name, _)| *name == asked.session) => {
-            return Ok(Seated::In(asked));
-        },
-        Some(Seat::Asked(asked)) => {
+        Some(Seat::Asked { user: User::Away, .. }) => return Ok(Seated::Away),
+        Some(Seat::Asked { user: User::Untold, .. }) => return Ok(Seated::Untold),
+        Some(Seat::Asked { user: User::Pane { session, pane }, .. }) => {
+            let asked = Pane { session: session.to_string(), pane };
+            if running.iter().any(|(name, _)| *name == asked.session) {
+                return Ok(Seated::In(asked));
+            }
             return Err(format!(
                 "luneta's ask box asked from pane {asked}, and no session runs by that name \
                  now: it was renamed since"
@@ -425,29 +433,11 @@ pub fn agreed(spelled: &str) -> Result<Agreed, String> {
     read.map(Agreed).map_err(|_| format!("{spelled} is no plan a close said"))
 }
 
-/// The turn of luneta's ask box this runs in, as the box names it in the
-/// variables of its agent, `TURN_VAR` and `BEFORE_VAR`: none outside the
-/// box. Or why they do not read.
+/// The turn of luneta's ask box this runs in, as `zellij::here` reads it
+/// in the variables of its agent: none outside the box. Or why they do not
+/// read.
 fn turn_here() -> Result<Option<Turn>, String> {
-    let (key, before) = (zellij::var(TURN_VAR)?, zellij::var(BEFORE_VAR)?);
-    turn_in(key.as_deref(), before.as_deref())
-}
-
-/// The turn `key` and `before` name, as `TURN_VAR` and `BEFORE_VAR` do: none
-/// where neither does.
-fn turn_in(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
-    let read = |name, spelled: &str| {
-        let read = u64::from_str_radix(spelled, 16);
-        read.map_err(|_| format!("{name} is no key of a turn of luneta's ask box"))
-    };
-    match (key, before) {
-        (None, None) => Ok(None),
-        (None, Some(_)) => Err(format!("{BEFORE_VAR} is set, and {TURN_VAR} is not")),
-        (Some(key), before) => Ok(Some(Turn {
-            key: read(TURN_VAR, key)?,
-            before: before.map(|before| read(BEFORE_VAR, before)).transpose()?,
-        })),
-    }
+    Ok(zellij::here()?.and_then(|seat| seat.turn()))
 }
 
 /// What a close is given in one session: the session, or panes of it. The
@@ -522,10 +512,9 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     // from another machine, none here is yours.
     let here = match here {
         Seated::In(pane) => Some(pane),
-        Seated::Nowhere if turn.is_some() => {
+        Seated::Untold => {
             eprintln!(
-                "luneta: luneta's ask box cannot tell which pane the user asked from just now, \
-                 so a close cannot take theirs last, and closes nothing"
+                "luneta: {UNTOLD_PANE}, so a close cannot take theirs last, and closes nothing"
             );
             return ExitCode::FAILURE;
         },
@@ -560,12 +549,12 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
         here.as_ref().is_some_and(holds)
     };
     plans.sort_by_key(holds_here);
-    let agreed = Agreed::of(&plans, &sessions, turn.map(|turn| turn.key));
+    let agreed = Agreed::of(&plans, &sessions, turn.map(Turn::key));
     // The ask box's agent learns the plan of its turn as it is said, and
     // can be told yes to it only once the turn ends, with your answer.
     let takes = match turn {
         None => Some(agreed),
-        Some(turn) => turn.before.map(|before| Agreed::of(&plans, &sessions, Some(before))),
+        Some(turn) => turn.before().map(|before| Agreed::of(&plans, &sessions, Some(before))),
     };
     let told = yes.is_some() && yes == takes;
     let mut failed = false;
@@ -818,23 +807,6 @@ mod tests {
         assert_eq!(address(":3"), session(":3"));
         assert!(address("").is_err());
         assert!(pane_address("work").is_err());
-    }
-
-    /// A command of the ask box's agent runs in the turn its variables name,
-    /// after the one they name before it, if any, and one of anything else in
-    /// none. A key that does not read, and a turn before with none after it,
-    /// are none of luneta's.
-    #[test]
-    fn a_turn_of_the_ask_box_is_the_keys_its_variables_name() {
-        let turn = |key, before| Ok(Some(Turn { key, before }));
-        assert_eq!(turn_in(None, None), Ok(None));
-        assert_eq!(turn_in(Some("00000000000000ff"), None), turn(255, None));
-        assert_eq!(turn_in(Some("ff"), Some("0a")), turn(255, Some(10)));
-        for (key, before) in
-            [(Some(""), None), (Some("forged"), None), (Some("ff"), Some("")), (None, Some("ff"))]
-        {
-            assert!(turn_in(key, before).is_err(), "{key:?} {before:?}");
-        }
     }
 
     /// A directory given with a `.` or a `..` in it is the one it leads to,

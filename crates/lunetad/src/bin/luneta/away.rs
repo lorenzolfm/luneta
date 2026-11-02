@@ -223,7 +223,7 @@ impl Away {
     /// hangs up then, which gives up the turn there. Or how the turn ended:
     /// well, or why not, as it did there, or as luneta heard nothing of its
     /// end by `asks::TURN` and its patience after, by which that daemon ends
-    /// it.
+    /// it, or as it heard a step that is none, which it hangs up on too.
     pub fn talk(
         &mut self,
         asked: &Asked,
@@ -251,7 +251,12 @@ impl Away {
                 }
                 match tokio::time::timeout(asks::LOOK, steps.message()).await {
                     Err(_) => {},
-                    Ok(Ok(Some(step))) => Step::of(step).into_iter().for_each(hear),
+                    Ok(Ok(Some(step))) => match Step::of(step) {
+                        Ok(step) => step.into_iter().for_each(hear),
+                        // The question hangs up, which gives up the turn
+                        // there.
+                        Err(why) => return Some(Err(format!("{on}: {why}"))),
+                    },
                     Ok(Ok(None)) => return Some(Ok(())),
                     Ok(Err(status)) => return Some(Err(said(on, &status))),
                 }

@@ -114,6 +114,10 @@ const QUESTIONS_MAX: u32 = 16;
 /// in this many.
 const STEPS_WAITING: usize = 64;
 
+/// What the daemon says of a turn of the ask box's agent that it ran, and
+/// that ended without saying how.
+const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of it failed";
+
 /// How long the daemon runs on once zellij has no session, and no client
 /// watches it: long enough that ending the last one and opening another does
 /// not end it.
@@ -676,9 +680,10 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(steps)));
         }
         let (heard, steps) = tokio::sync::mpsc::channel(STEPS_WAITING);
+        let failed = heard.clone();
         // The server times out a question as it waits for the answer's
         // start, which the stream is, and never as it waits for the rest.
-        task::spawn_blocking(move || {
+        let talking = task::spawn_blocking(move || {
             // The question hung up, which gives the turn up.
             let wanted = || !heard.is_closed();
             let hear = |step: Step| {
@@ -686,6 +691,13 @@ impl Daemon for Host {
             };
             if let Some(Err(why)) = asked.talk(&wanted, &hear) {
                 let _ = heard.blocking_send(Err(Status::failed_precondition(why)));
+            }
+        });
+        // A turn that panicked dropped what it heard with, which alone would
+        // end the stream as a turn that ended well.
+        task::spawn(async move {
+            if talking.await.is_err() {
+                let _ = failed.send(Err(Status::internal(UNTALKED))).await;
             }
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(steps))))

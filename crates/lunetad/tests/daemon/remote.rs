@@ -769,7 +769,7 @@ async fn turn(
     let mut heard = Vec::new();
     loop {
         match steps.message().await {
-            Ok(Some(step)) => heard.extend(Step::of(step)),
+            Ok(Some(step)) => heard.extend(Step::of(step).expect("a step")),
             Ok(None) => return (heard, Ok(())),
             Err(status) => return (heard, Err(status)),
         }
@@ -781,7 +781,7 @@ async fn turn(
 /// the session `7c22`.
 fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> AskRequest {
     let resumed = (!first).then(|| SessionId::parse("7c22").unwrap());
-    let turn = Turn { key: 255, before: (!first).then_some(10) };
+    let turn = Turn::new(255, (!first).then_some(10)).unwrap();
     let row = "The row highlighted is session work.".to_owned();
     let asked = Asked::new(cwd.map(Path::to_owned), words, resumed, row, user, turn).unwrap();
     asked.asked(Some(On { destination: on.to_owned() }))
@@ -859,7 +859,7 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
         let stuck = ask("far", None, "please-get-stuck", User::Untold, true);
         let mut steps = daemon.ask(stuck).await.unwrap().into_inner();
         for step in [session, ran] {
-            assert_eq!(steps.message().await.unwrap().and_then(Step::of), Some(step));
+            assert_eq!(steps.message().await.unwrap().map(Step::of), Some(Ok(Some(step))));
         }
         let stuck = fs::read_to_string(far.home.path().join("stuck")).unwrap();
         let stuck = Pid::from_raw(stuck.trim().parse().unwrap()).unwrap();
