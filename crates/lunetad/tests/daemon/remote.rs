@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
+use lunetad::api::refuge_response::{Ended, Kept, Went};
 use lunetad::api::{self, Client, GoRequest, ListClientsRequest, On, RefugeRequest, WatchRequest};
 use tonic::Code;
 
@@ -508,10 +509,20 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine_s_zellij() {
         let seats = |seat: &str| vec![seat.to_owned()];
         let ended = RefugeRequest { on: on("far"), seats: seats("gone") };
         let found = daemon.refuge(ended).await.unwrap().into_inner();
-        let refuge = api::Refuge { session: "work".to_owned(), before: listed.clients };
-        assert_eq!((found.went, found.refuge), (true, Some(refuge)));
+        let refuge = Some(api::Refuge { session: "work".to_owned(), before: listed.clients });
+        assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
         let detached = RefugeRequest { on: on("far"), seats: seats("work") };
         let found = daemon.refuge(detached).await.unwrap().into_inner();
-        assert_eq!((found.went, found.refuge), (false, None));
+        assert_eq!(found.ended, Some(Ended::Kept(Kept {})));
+
+        // A question that names no session, or none the client was in, asks
+        // nothing of zellij, here or there.
+        let (at, to) = (String::new(), "play".to_owned());
+        let nameless = daemon.go(GoRequest { on: on("far"), at, to, pane: None }).await.unwrap_err();
+        assert_eq!(nameless.code(), Code::InvalidArgument, "{nameless:?}");
+        let seatless = RefugeRequest { on: on("far"), seats: Vec::new() };
+        let seatless = daemon.refuge(seatless).await.unwrap_err();
+        assert_eq!(seatless.code(), Code::InvalidArgument, "{seatless:?}");
+        assert_eq!(far.zellij.went(), went);
     });
 }

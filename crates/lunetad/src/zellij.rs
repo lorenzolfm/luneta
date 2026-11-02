@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -42,6 +43,87 @@ const CONTRACT: &str = "contract_version_";
 /// sessions' sockets in this folder, and of their metadata in zellij's cache
 /// folder.
 pub const SPOKEN: &str = "contract_version_1";
+
+/// The longest name zellij makes a session of on any host, in bytes: what
+/// its socket's path leaves where the user's id has ten digits. Where it has
+/// fewer, zellij makes longer ones.
+pub const NAME_BYTES_MAX: usize = 60;
+
+// `SessionName::parse` refuses a longer name in zellij's words, which count the
+// bytes a name must be shorter than.
+const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
+
+/// A name zellij can make a session of, or made one of, on any machine.
+/// `parse` and `running` are the ways to make one, so a name that reaches
+/// zellij as one has been held to what zellij takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionName(String);
+
+impl SessionName {
+    /// A name for luneta to make a session of: one zellij takes on any host.
+    pub fn parse(name: &str) -> Result<Self, &'static str> {
+        let name = SessionName::running(name)?;
+        if name.0.len() > NAME_BYTES_MAX {
+            return Err("name must be shorter than 61 bytes");
+        }
+        Ok(name)
+    }
+
+    /// The name of a session zellij runs, as its folder lists it: one held
+    /// to what zellij holds every name to, which is not its length, as
+    /// zellij made the session on this host.
+    pub fn running(name: &str) -> Result<Self, &'static str> {
+        if name.is_empty() {
+            return Err("name must not be empty");
+        }
+        if name.trim().is_empty() {
+            return Err("name cannot be only whitespace");
+        }
+        if name == "." || name == ".." {
+            return Err("name cannot be '.' or '..'");
+        }
+        if name.contains('/') {
+            return Err("name cannot contain '/'");
+        }
+        Ok(SessionName(name.to_owned()))
+    }
+
+    /// The name with `-n` after it, cut between characters where it must be
+    /// for the two to fit. What is left of a name holds no `/`, and the
+    /// postfix is neither whitespace nor a dot, so the two are a name too.
+    #[must_use]
+    pub fn with_postfix(&self, n: usize) -> Self {
+        let postfix = format!("-{n}");
+        let mut end = NAME_BYTES_MAX.saturating_sub(postfix.len()).min(self.0.len());
+        while !self.0.is_char_boundary(end) {
+            end -= 1;
+        }
+        SessionName(format!("{}{postfix}", &self.0[..end]))
+    }
+
+    /// The name, where no session of `names` has it, or else the first with
+    /// a postfix from `-2` up that none has.
+    #[must_use]
+    pub fn free(&self, names: &[&str]) -> Self {
+        let taken = |name: &SessionName| names.contains(&name.as_str());
+        // Of more names than there are sessions, one is free.
+        std::iter::once(self.clone())
+            .chain((2..names.len() + 3).map(|n| self.with_postfix(n)))
+            .find(|name| !taken(name))
+            .expect("one of more names than there are sessions is free")
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Where zellij keeps the folders its sockets are in: `$ZELLIJ_SOCKET_DIR`, or
 /// else `zellij` in `$XDG_RUNTIME_DIR` on Linux, or else `zellij-<uid>` in the
@@ -310,7 +392,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
-    use super::{running, scan, CONTRACT, WEB_SERVER};
+    use super::{running, scan, SessionName, CONTRACT, NAME_BYTES_MAX, WEB_SERVER};
     use crate::watch::Troubles;
 
     /// zellij is alone only as far as a scan can tell: a folder of its
@@ -346,5 +428,30 @@ mod tests {
         let unread = running(folder.path());
         fs::set_permissions(&contract, Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unread, None);
+    }
+
+    #[test]
+    fn a_postfix_makes_room_for_itself_between_characters() {
+        let Ok(name) = SessionName::parse("luneta-main") else {
+            panic!("a name zellij takes");
+        };
+        assert_eq!(name.with_postfix(2).as_str(), "luneta-main-2");
+        let Ok(long) = SessionName::parse(&format!("{}é", "x".repeat(NAME_BYTES_MAX - 3))) else {
+            panic!("a name zellij takes");
+        };
+        let postfixed = long.with_postfix(12);
+        assert_eq!(postfixed.as_str(), format!("{}-12", "x".repeat(NAME_BYTES_MAX - 3)));
+        assert!(SessionName::parse(postfixed.as_str()).is_ok());
+    }
+
+    /// A session's name names a file in a folder, as its fold does: no name
+    /// that names none, or one out of the folder, is a session's, to make or
+    /// of one that runs.
+    #[test]
+    fn a_name_that_names_no_file_is_no_session_s() {
+        for name in ["../out", "..", ".", ""] {
+            assert!(SessionName::parse(name).is_err(), "{name:?}");
+            assert!(SessionName::running(name).is_err(), "{name:?}");
+        }
     }
 }

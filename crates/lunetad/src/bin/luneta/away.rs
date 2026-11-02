@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{Client, GoRequest, ListClientsRequest, On, RefugeRequest, RefugeResponse};
-use lunetad::Destination;
+use lunetad::{Destination, SessionName};
 use tokio::runtime::Runtime;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
@@ -56,8 +56,13 @@ impl Away {
 
     /// Has zellij there take the client that last typed in the session `at`
     /// to the pane `pane` of `to`, or to `to` alone, or says why it did not.
-    pub fn go(&mut self, at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
-        let (at, to) = (at.to_owned(), to.to_owned());
+    pub fn go(
+        &mut self,
+        at: &SessionName,
+        to: &SessionName,
+        pane: Option<u32>,
+    ) -> Result<(), String> {
+        let (at, to) = (at.to_string(), to.to_string());
         let request = GoRequest { on: Some(self.on()), at, to, pane };
         self.ask(|mut daemon| async move { daemon.go(request).await }).map(|_| ())
     }
@@ -73,8 +78,8 @@ impl Away {
     /// What became there of the session of a client that ended in one of
     /// `seats`, and the session it goes on in, as `lunetad::moves::refuge`
     /// finds them there; or why the daemon there did not say.
-    pub fn refuge(&mut self, seats: &[&str]) -> Result<RefugeResponse, String> {
-        let seats = seats.iter().map(|seat| (*seat).to_owned()).collect();
+    pub fn refuge(&mut self, seats: &[SessionName]) -> Result<RefugeResponse, String> {
+        let seats = seats.iter().map(SessionName::to_string).collect();
         let request = RefugeRequest { on: Some(self.on()), seats };
         self.ask(|mut daemon| async move { daemon.refuge(request).await })
     }

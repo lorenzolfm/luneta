@@ -143,6 +143,8 @@ pub struct Hosted {
     /// hang it up before alacritty has read what it wrote, which alacritty
     /// drops where it cannot lock the screen at once.
     _far: File,
+    /// Its number, which what it says carries.
+    number: u64,
     size: Size,
     /// The listener's, which `draw` clears.
     drew: Arc<AtomicBool>,
@@ -190,7 +192,13 @@ impl Hosted {
         let reader = EventLoop::new(Arc::clone(&screen), listener, pty, drain_on_exit, false)?;
         let pty = reader.channel();
         reader.spawn();
-        Ok(Hosted { screen, pty, modes, _far: far, size, drew })
+        Ok(Hosted { screen, pty, modes, _far: far, number, size, drew })
+    }
+
+    /// Its number, of the programs luneta started, which what it says
+    /// carries.
+    pub fn number(&self) -> u64 {
+        self.number
     }
 
     pub fn size(&self) -> Size {

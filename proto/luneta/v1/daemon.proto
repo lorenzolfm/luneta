@@ -45,6 +45,8 @@ message On {
   string destination = 1;
 }
 
+// Each session a question names is by a name zellij takes: one that is not,
+// as an empty one, has the question answered as an invalid argument.
 message GoRequest {
   On on = 1;
   // The session the client is in, where it typed last.
@@ -71,18 +73,28 @@ message ListClientsResponse {
 message RefugeRequest {
   On on = 1;
   // The sessions the client may have been in: one, or the two it was on its
-  // way between. Its session went with it where any of them is gone.
+  // way between. Its session went with it where any of them is gone. Never
+  // none: a question with none is invalid.
   repeated string seats = 2;
 }
 
 message RefugeResponse {
-  // Whether the client's session went with it, as one of `seats` is gone:
-  // where none is, it runs still, as the client detached, or the daemon
-  // cannot read all of zellij's folder, which could hold it.
-  bool went = 1;
-  // Where it went, the session to go on in. Absent where none answers, and
-  // where it did not go.
-  Refuge refuge = 2;
+  // What became of the client's session: one of these, always. A client
+  // that finds none has a newer daemon's.
+  oneof ended {
+    Kept kept = 1;
+    Went went = 2;
+  }
+
+  // It runs still, as none of `seats` is gone: the client detached, or the
+  // daemon cannot read all of zellij's folder, which could hold it.
+  message Kept {}
+
+  // It went with the client, as one of `seats` is gone.
+  message Went {
+    // The session to go on in. Absent where none answers.
+    Refuge refuge = 1;
+  }
 }
 
 // A session that runs, and its clients, which are those it has before the

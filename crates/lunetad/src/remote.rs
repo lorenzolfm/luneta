@@ -148,14 +148,15 @@ impl Reached {
 
 /// The daemons of the machines this one watches, each through the bridge it
 /// watches it on, while the last question there was answered: for a
-/// client's question of one, which this one hands on.
+/// client's question of one, which this one hands on. Each with the number
+/// of the watch that reached it.
 #[derive(Default)]
-pub struct Bridges(Mutex<HashMap<Destination, DaemonClient<Channel>>>);
+pub struct Bridges(Mutex<HashMap<Destination, (u64, DaemonClient<Channel>)>>);
 
 impl Bridges {
     /// The daemon of `destination`, while this one reaches it.
     pub fn to(&self, destination: &Destination) -> Option<DaemonClient<Channel>> {
-        locked(&self.0).get(destination).cloned()
+        locked(&self.0).get(destination).map(|(_, daemon)| daemon.clone())
     }
 }
 
@@ -164,15 +165,27 @@ impl Bridges {
 struct Bridged {
     bridges: Arc<Bridges>,
     destination: Destination,
+    /// The watch's number, of those `follow` started, each after the one
+    /// before. A machine forgotten and added again has a watch that ends as
+    /// the next begins: the one that ends neither takes out nor writes over
+    /// what the later one has there.
+    watch: u64,
 }
 
 impl Bridged {
     fn reached(&self, daemon: &DaemonClient<Channel>) {
-        locked(&self.bridges.0).insert(self.destination.clone(), daemon.clone());
+        let mut bridges = locked(&self.bridges.0);
+        let later = bridges.get(&self.destination).is_some_and(|(watch, _)| *watch > self.watch);
+        if !later {
+            bridges.insert(self.destination.clone(), (self.watch, daemon.clone()));
+        }
     }
 
     fn lost(&self) {
-        locked(&self.bridges.0).remove(&self.destination);
+        let mut bridges = locked(&self.bridges.0);
+        if bridges.get(&self.destination).is_some_and(|(watch, _)| *watch == self.watch) {
+            bridges.remove(&self.destination);
+        }
     }
 }
 
@@ -326,6 +339,8 @@ pub fn follow(
     let mut watched: Vec<(Destination, oneshot::Sender<()>)> = Vec::new();
     let mut unwatched: HashMap<Destination, SystemTime> = HashMap::new();
     let mut unwatchable = Troubles::default();
+    // How many watches it began, which numbers each.
+    let mut begun: u64 = 0;
     let tell = move |named: Option<Named>| {
         // A file that does not read leaves the machines as they were.
         let named = match named {
@@ -350,7 +365,8 @@ pub fn follow(
                 continue;
             }
             let bridges = Arc::clone(&bridges);
-            let daemon = Bridged { bridges, destination: destination.clone() };
+            begun += 1;
+            let daemon = Bridged { bridges, destination: destination.clone(), watch: begun };
             match watch(daemon, core.clone(), kept.clone(), folder.clone()) {
                 Ok(ends) => {
                     unwatched.remove(destination);
@@ -717,6 +733,31 @@ mod tests {
         assert_eq!(named.len(), HOSTS_MAX);
         assert_eq!(named.last().unwrap(), &format!("host-{}", HOSTS_MAX - 1));
         assert_eq!(unread, 3);
+    }
+
+    /// A machine forgotten and added again has a watch that ends as the
+    /// next begins: the daemon the later one reached is the one questions
+    /// go to, whichever of the two heard last, and ends with it.
+    #[test]
+    fn a_watch_that_ends_leaves_a_later_one_s_bridge() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        // A channel is made within a runtime, which it needs.
+        let _entered = runtime.enter();
+        let daemon = DaemonClient::new(Channel::from_static("http://[::1]:1").connect_lazy());
+        let bridges = Arc::new(Bridges::default());
+        let destination: Destination = "nixos".parse().unwrap();
+        let of_watch = |watch| {
+            let (bridges, destination) = (Arc::clone(&bridges), destination.clone());
+            Bridged { bridges, destination, watch }
+        };
+        let (ending, later) = (of_watch(1), of_watch(2));
+        later.reached(&daemon);
+        ending.reached(&daemon);
+        drop(ending);
+        let watch = locked(&bridges.0).get(&destination).map(|(watch, _)| *watch);
+        assert_eq!(watch, Some(2));
+        drop(later);
+        assert!(bridges.to(&destination).is_none());
     }
 
     /// Each ssh to a machine shares one socket, another machine's another,

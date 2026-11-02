@@ -44,6 +44,7 @@ use tonic::{Request, Response, Status};
 
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
+use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
     self, GoRequest, GoResponse, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse,
     ListClientsRequest, ListClientsResponse, RefugeRequest, RefugeResponse,
@@ -52,6 +53,7 @@ use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::remote::{Bridges, Destination};
 use crate::watch::Troubles;
+use crate::zellij::SessionName;
 use crate::{
     claude, client, clients, git, github, log, metadata, moves, panes, release, remote, shells,
     watch, zellij,
@@ -416,7 +418,9 @@ impl Daemon for Host {
 
     async fn go(&self, request: Request<GoRequest>) -> Result<Response<GoResponse>, Status> {
         let GoRequest { on, at, to, pane } = request.into_inner();
+        let (at, to) = (named("at", &at)?, named("to", &to)?);
         if let Some(mut daemon) = self.bridged(on)? {
+            let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
         let went = task::spawn_blocking(move || moves::went(&at, &to, pane)).await;
@@ -430,7 +434,9 @@ impl Daemon for Host {
         request: Request<ListClientsRequest>,
     ) -> Result<Response<ListClientsResponse>, Status> {
         let ListClientsRequest { on, session } = request.into_inner();
+        let session = named("session", &session)?;
         if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
             return daemon.list_clients(ListClientsRequest { on: None, session }).await;
         }
         let listed = task::spawn_blocking(move || clients_of(&session)).await;
@@ -444,29 +450,45 @@ impl Daemon for Host {
         request: Request<RefugeRequest>,
     ) -> Result<Response<RefugeResponse>, Status> {
         let RefugeRequest { on, seats } = request.into_inner();
+        let seats: Vec<SessionName> =
+            seats.iter().map(|seat| named("seats", seat)).collect::<Result<_, _>>()?;
+        if seats.is_empty() {
+            return Err(Status::invalid_argument("seats: the client was in none"));
+        }
         if let Some(mut daemon) = self.bridged(on)? {
+            let seats = seats.iter().map(SessionName::to_string).collect();
             return daemon.refuge(RefugeRequest { on: None, seats }).await;
         }
         let sockets = self.sockets.clone();
         let found = task::spawn_blocking(move || {
-            let seats: Vec<&str> = seats.iter().map(String::as_str).collect();
             // No session here is one luneta's terminal is a pane of: that
             // luneta's client is on another machine.
             moves::refuge(&sockets, &seats, None, |session| clients_of(session).ok())
         });
-        let refuge = |moves::Refuge { session, before }| api::Refuge { session, before };
-        let answer = match found.await.map_err(|error| unfinished(&error))? {
-            moves::Ended::Kept => RefugeResponse { went: false, refuge: None },
-            moves::Ended::Went(found) => RefugeResponse { went: true, refuge: found.map(refuge) },
+        let refuge = |moves::Refuge { session, before }| api::Refuge {
+            session: session.to_string(),
+            before,
         };
-        Ok(Response::new(answer))
+        let ended = match found.await.map_err(|error| unfinished(&error))? {
+            moves::Ended::Kept => refuge_response::Ended::Kept(Kept {}),
+            moves::Ended::Went(found) => {
+                refuge_response::Ended::Went(Went { refuge: found.map(refuge) })
+            },
+        };
+        Ok(Response::new(RefugeResponse { ended: Some(ended) }))
     }
 }
 
 /// The clients of `session` here, as zellij lists them now, or why not.
-fn clients_of(session: &str) -> Result<Vec<api::Client>, String> {
-    let listed = clients::list(std::process::Command::new("zellij"), session)?;
+fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
+    let listed = clients::list(std::process::Command::new("zellij"), session.as_str())?;
     Ok(listed.into_iter().map(clients::Client::to_api).collect())
+}
+
+/// `name`, of the question's `field`, as a session's name zellij takes, or
+/// why the question is invalid: it is not one.
+fn named(field: &str, name: &str) -> Result<SessionName, Status> {
+    SessionName::running(name).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
 }
 
 /// Why what the daemon asked of zellij did not answer: the thread it was asked

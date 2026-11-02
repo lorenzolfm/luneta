@@ -159,6 +159,10 @@ const UNSURE_PANE: &str = "menu: luneta cannot tell yet which of the session's c
 const PLUGIN_PANE: &str = "menu: zellij is on a plugin's pane; the menu opens over a terminal's";
 /// zellij's client is on another machine, whose panes have no menu yet.
 const AWAY_PANE: &str = "menu: luneta's zellij is on another machine, whose panes have no menu yet";
+/// zellij's client is on another machine, and a tab of this machine's opens
+/// once it is in one of its sessions.
+const AWAY_TAB: &str = "menu: luneta's zellij is on another machine; a tab opens in this \
+                        machine's sessions from one of them";
 /// The daemon lists more than one session of the name zellij is in.
 const TWIN_SESSIONS: &str = "menu: lunetad lists more than one session of the name zellij is in, \
                              and luneta cannot tell which it is";
@@ -270,8 +274,8 @@ impl Place {
 }
 
 /// What a row stands for, by which the highlight keeps to it as rows come and
-/// go: a machine's header, or a session or a pane of this machine's, where
-/// luneta's zellij goes, or of another's, which is only for looking.
+/// go: a machine's header, or a session or a pane of this machine's, or of
+/// another's, where luneta's zellij goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Spot {
     Machine(Machine),
@@ -1338,6 +1342,12 @@ impl Sidebar {
         self.folds.set(Fold::Session(&self.on, session), false);
     }
 
+    /// The machine luneta's zellij's client runs on: this one until a client
+    /// on another takes its place, as `swapping` says.
+    pub fn on(&self) -> &Machine {
+        &self.on
+    }
+
     /// The sessions the daemon lists of the machine luneta's zellij is on, as
     /// it last said: none while it says none of that machine.
     fn on_sessions(&self) -> &[Session] {
@@ -1394,14 +1404,16 @@ impl Sidebar {
 
     /// The sessions zellij's client may be in: the one luneta sent it to,
     /// and the one it left, until it is there; or else the one it is in, as
-    /// `here` says.
-    pub fn seats(&self) -> Vec<&str> {
-        match &self.sent {
+    /// `here` says. A name zellij makes no session of, as of a title that
+    /// names none, is of none it is in.
+    pub fn seats(&self) -> Vec<SessionName> {
+        let seats: Vec<&str> = match &self.sent {
             Some(Sent { session, from, landed: false, .. }) => {
                 from.iter().map(|from| &from.session).chain([session]).map(String::as_str).collect()
             },
             _ => self.here().into_iter().collect(),
-        }
+        };
+        seats.into_iter().filter_map(|seat| SessionName::running(seat).ok()).collect()
     }
 
     /// The pane luneta's zellij is on, in the one session of the name it is
@@ -2425,6 +2437,13 @@ impl Sidebar {
             // session luneta's zellij is in has one, and another opens it once
             // luneta's zellij is there: its last client may have left since
             // lunetad listed them.
+            // On another machine, luneta's zellij has none of this machine's
+            // sessions to open it from.
+            Wants::Open { opens: Opens::Tab { .. }, .. } if self.on != Machine::Local => {
+                self.menu = None;
+                self.say(AWAY_TAB.to_owned());
+                Asked::Nothing
+            },
             Wants::Open { session, pane, cwd, opens: Opens::Tab { name, command } } => {
                 let place = Place::Pane { session, pane };
                 let session = place.session().to_owned();
@@ -6548,13 +6567,16 @@ mod tests {
     #[test]
     fn luneta_s_zellij_may_be_in_either_session_while_on_its_way() {
         let mut sidebar = two_sessions();
-        assert_eq!(sidebar.seats(), ["older"]);
+        let seats = |names: &[&str]| -> Vec<SessionName> {
+            names.iter().map(|name| session_name(name)).collect()
+        };
+        assert_eq!(sidebar.seats(), seats(&["older"]));
         sidebar.sending(&session_name("newer"));
-        assert_eq!(sidebar.seats(), ["older", "newer"]);
+        assert_eq!(sidebar.seats(), seats(&["older", "newer"]));
         sidebar.titled("newer | fish".to_owned());
-        assert_eq!(sidebar.seats(), ["newer"]);
+        assert_eq!(sidebar.seats(), seats(&["newer"]));
         sidebar.rejoining(&session_name("older"));
-        assert_eq!(sidebar.seats(), ["older"]);
+        assert_eq!(sidebar.seats(), seats(&["older"]));
     }
 
     /// A client that takes the place of one that ended on its way to a
@@ -6980,7 +7002,8 @@ mod tests {
     /// one has one of its name: the pane it is on there has the mark, and
     /// `Alt Tab` goes among that machine's panes, never to this one's. The
     /// menu over zellij, the picker and the ask box are this machine's, and
-    /// know of no pane luneta's zellij is on.
+    /// know of no pane luneta's zellij is on; and the menu opens no tab of
+    /// this machine's, which takes luneta's zellij in one of its sessions.
     #[test]
     fn luneta_s_zellij_on_another_machine_is_in_that_machine_s_session() {
         let mut sidebar = fresh();
@@ -7008,6 +7031,15 @@ mod tests {
         assert_eq!(sidebar.float_menu(), Err(AWAY_PANE));
         let listing = sidebar.listing();
         assert_eq!((listing.here, listing.here_pane), (None, None));
+
+        // A tab of this machine's opens from one of its sessions, where
+        // luneta's zellij is not.
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(Place::Pane { session: listed("main", 10), pane: 1 }));
+        type_in(&mut sidebar, "n");
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        assert_eq!(sidebar.notice.as_deref(), Some(AWAY_TAB));
     }
 
     /// What is pasted in the box `n m` opens goes in it, on one line, and a

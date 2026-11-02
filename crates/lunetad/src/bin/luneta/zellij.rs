@@ -18,8 +18,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::term::TermMode;
-use lunetad::api::Client;
+use lunetad::api::{refuge_response, Client};
+pub use lunetad::moves::{Ended, Refuge};
 use lunetad::{clients, moves, program, Destination};
+pub use lunetad::SessionName;
 use serde::Deserialize;
 
 use crate::away::{self, Away};
@@ -27,15 +29,6 @@ use crate::due::Due;
 use crate::host::{Event, Nudged};
 use crate::machines::Machine;
 use crate::own::{Before, Look, Looked};
-
-/// The longest name zellij makes a session of on any host, in bytes: what
-/// its socket's path leaves where the user's id has ten digits. Where it has
-/// fewer, zellij makes longer ones.
-const NAME_BYTES_MAX: usize = 60;
-
-// `SessionName::parse` refuses a longer name in zellij's words, which count the
-// bytes a name must be shorter than.
-const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 
 /// The file zellij keeps how a session is laid out in, in the session's
 /// folder in its cache, to bring it back from once it ends: zellij lists a
@@ -75,75 +68,6 @@ pub const ASKED_VAR: &str = "LUNETA_PANE";
 /// then. The window ids are of the terminal luneta's own is made by, and name
 /// no window.
 const LEFT_OUT: [&str; 5] = ["ZELLIJ", SESSION_VAR, PANE_VAR, "WINDOWID", "ALACRITTY_WINDOW_ID"];
-
-/// A name zellij can make a session of, or made one of. `parse` and `running`
-/// are the ways to make one, so a name that reaches zellij as one has been
-/// held to what zellij takes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionName(String);
-
-impl SessionName {
-    /// A name for luneta to make a session of: one zellij takes on any host.
-    pub fn parse(name: &str) -> Result<Self, &'static str> {
-        let name = SessionName::running(name)?;
-        if name.0.len() > NAME_BYTES_MAX {
-            return Err("name must be shorter than 61 bytes");
-        }
-        Ok(name)
-    }
-
-    /// The name of a session zellij runs, as its folder lists it: one held
-    /// to what zellij holds every name to, which is not its length, as
-    /// zellij made the session on this host.
-    pub fn running(name: &str) -> Result<Self, &'static str> {
-        if name.is_empty() {
-            return Err("name must not be empty");
-        }
-        if name.trim().is_empty() {
-            return Err("name cannot be only whitespace");
-        }
-        if name == "." || name == ".." {
-            return Err("name cannot be '.' or '..'");
-        }
-        if name.contains('/') {
-            return Err("name cannot contain '/'");
-        }
-        Ok(SessionName(name.to_owned()))
-    }
-
-    /// The name with `-n` after it, cut between characters where it must be
-    /// for the two to fit. What is left of a name holds no `/`, and the
-    /// postfix is neither whitespace nor a dot, so the two are a name too.
-    pub fn with_postfix(&self, n: usize) -> Self {
-        let postfix = format!("-{n}");
-        let mut end = NAME_BYTES_MAX.saturating_sub(postfix.len()).min(self.0.len());
-        while !self.0.is_char_boundary(end) {
-            end -= 1;
-        }
-        SessionName(format!("{}{postfix}", &self.0[..end]))
-    }
-
-    /// The name, where no session of `names` has it, or else the first with
-    /// a postfix from `-2` up that none has.
-    pub fn free(&self, names: &[&str]) -> Self {
-        let taken = |name: &SessionName| names.contains(&name.as_str());
-        // Of more names than there are sessions, one is free.
-        std::iter::once(self.clone())
-            .chain((2..names.len() + 3).map(|n| self.with_postfix(n)))
-            .find(|name| !taken(name))
-            .expect("one of more names than there are sessions is free")
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for SessionName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// A pane of a session, as the CLI names it: `<session>:<pane>`, as `luneta
 /// agents` writes it.
@@ -235,7 +159,7 @@ pub fn refusal(session: &SessionName) -> Option<String> {
 
 /// `refusal`, for a terminal in the session `current`, if it is a pane's.
 fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
-    (current == Some(session.0.as_str())).then(|| {
+    (current == Some(session.as_str())).then(|| {
         format!(
             "this terminal is a pane of \"{session}\", which zellij would show inside itself: \
              name another session, or run luneta outside zellij"
@@ -248,7 +172,7 @@ fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
 /// in a session of a name zellij makes up.
 pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
     match session {
-        Some(session) => client_with(&["attach", "--create", &session.0]),
+        Some(session) => client_with(&["attach", "--create", session.as_str()]),
         None => client_with(&[]),
     }
 }
@@ -313,67 +237,56 @@ fn quoted(word: &str) -> String {
     quoted
 }
 
-/// A session luneta's zellij can go on in: one that runs, as it answered for
-/// its clients, which are those it has before luneta's comes.
-pub struct Refuge {
-    pub session: SessionName,
-    pub before: Vec<Client>,
-}
-
-/// What became of the session luneta's zellij's client ended in.
-pub enum Ended {
-    /// It runs still, as the client detached, or luneta cannot tell.
-    Kept,
-    /// It went with the client: luneta's zellij goes on in this one, of its
-    /// machine, where any answers.
-    Went(Option<Refuge>),
-}
-
 /// Where luneta's zellij goes on once its client ended in one of `seats`,
 /// the sessions it may have been in, as `lunetad::moves::refuge` finds it on
 /// this machine: never the session luneta's terminal is a pane of, as
-/// `refusal` says, nor one of a name luneta cannot hand zellij. None where
-/// the client's session runs still, as it detached, or none answers.
-pub fn refuge(seats: &[&str]) -> Option<Refuge> {
+/// `refusal` says. None where the client's session runs still, as it
+/// detached, or none answers.
+pub fn refuge(seats: &[SessionName]) -> Option<Refuge> {
     let current = env::var(SESSION_VAR).ok();
-    let ended = moves::refuge(&lunetad::zellij_folder(), seats, current.as_deref(), |session| {
-        SessionName::running(session).ok()?;
-        clients(session).ok()
+    let folder = lunetad::zellij_folder();
+    let ended = moves::refuge(&folder, seats, current.as_deref(), |session| {
+        clients(session.as_str()).ok()
     });
-    let moves::Ended::Went(Some(found)) = ended else {
+    let Ended::Went(found) = ended else {
         return None;
     };
-    let session = SessionName::running(&found.session).ok()?;
-    Some(Refuge { session, before: found.before })
+    found
 }
 
 /// This machine's newest session, as `lunetad::moves::newest` finds it,
 /// where luneta's zellij goes on once its client ended on another machine:
-/// never the session luneta's terminal is a pane of, nor one of a name luneta
-/// cannot hand zellij.
+/// never the session luneta's terminal is a pane of.
 pub fn newest() -> Option<Refuge> {
     let current = env::var(SESSION_VAR).ok();
-    let found = moves::newest(&lunetad::zellij_folder(), current.as_deref(), |session| {
-        SessionName::running(session).ok()?;
-        clients(session).ok()
-    })?;
-    let session = SessionName::running(&found.session).ok()?;
-    Some(Refuge { session, before: found.before })
+    moves::newest(&lunetad::zellij_folder(), current.as_deref(), |session| {
+        clients(session.as_str()).ok()
+    })
 }
 
 /// What became of the session luneta's zellij's client ended in, of
 /// `seats`, on `destination`, as its daemon there finds it, and where it
-/// goes on there; or why that daemon did not say.
-pub fn ended_away(destination: &Destination, seats: &[&str]) -> Result<Ended, String> {
+/// goes on there; or why that daemon did not say, or said what luneta does
+/// not read.
+pub fn ended_away(destination: &Destination, seats: &[SessionName]) -> Result<Ended, String> {
     let found = Away::reach(destination, away::ANSWER)?.refuge(seats)?;
-    if !found.went {
-        return Ok(Ended::Kept);
+    match found.ended {
+        Some(refuge_response::Ended::Kept(_)) => Ok(Ended::Kept),
+        Some(refuge_response::Ended::Went(went)) => {
+            let refuge = went.refuge.map(|refuge| -> Result<Refuge, String> {
+                let session = SessionName::running(&refuge.session).map_err(|why| {
+                    format!("{destination}: lunetad went on in \"{}\": {why}", refuge.session)
+                })?;
+                Ok(Refuge { session, before: refuge.before })
+            });
+            Ok(Ended::Went(refuge.transpose()?))
+        },
+        // A newer daemon's.
+        None => Err(format!(
+            "{destination}: its lunetad says what became of the session in words this luneta \
+             cannot read, as a newer one does"
+        )),
     }
-    let refuge = found.refuge.and_then(|refuge| {
-        let session = SessionName::running(&refuge.session).ok()?;
-        Some(Refuge { session, before: refuge.before })
-    });
-    Ok(Ended::Went(refuge))
 }
 
 /// The session a directory is for, as the picker's directories name it: for
@@ -470,12 +383,12 @@ const ARRIVING: Duration = Duration::from_millis(20);
 /// on, and then takes the look `then`, if any: of the session it was in, for
 /// the pane, or of `to`, for the client's arrival there, after which it does
 /// `after`. zellij takes the action once it has taken in the key that makes
-/// the client the one it moves, as `nudged` says, on `on`, the machine the
-/// client runs on. What zellij says of a failure comes back as a notice.
+/// the client the one it moves, as `nudged` says, on the machine it was
+/// nudged on, whose session `to` is too. What zellij says of a failure comes
+/// back as a notice.
 pub fn go(
-    on: &Machine,
     nudged: &Nudged,
-    to: &str,
+    to: &SessionName,
     pane: Option<u32>,
     then: Option<Look>,
     after: Option<After>,
@@ -485,7 +398,6 @@ pub fn go(
     if at == to && pane.is_none() {
         return;
     }
-    let action = Action::Go { at: at.to_owned(), to: to.to_owned(), pane };
     let then = match (then, after) {
         (Some(look), after) if at != to => Some(Then::Arrive(look, after)),
         (then, None) => then.map(Then::Look),
@@ -495,11 +407,13 @@ pub fn go(
             return;
         },
     };
-    run(on, action, then, nudged.until(), events);
+    let (on, at, to) = (nudged.on().clone(), at.clone(), to.clone());
+    run(Action::Go { on, at, to, pane }, then, nudged.until(), events);
 }
 
-/// Takes the client from the session it was `nudged` in, as `go` says, to a
-/// session it makes, `to`, that starts in `cwd`, or where the client
+/// Takes the client from the session it was `nudged` in, of this machine's,
+/// whose CLI this runs, as `go` says, to a session it makes, `to`, that
+/// starts in `cwd`, or where the client
 /// started, and then takes the look `then`, if any, for the client's arrival
 /// there, after which it opens the tab `tab` there, if any, for the menu
 /// owed what it opens. A session that runs under that name is where it goes,
@@ -521,24 +435,25 @@ pub fn start(
     events: &Sender<Event>,
 ) -> Option<Arrival> {
     let mut command = Command::new("zellij");
-    command.args(["--session", nudged.session(), "action", "switch-session", &to.0]);
+    let at = nudged.session().as_str();
+    command.args(["--session", at, "action", "switch-session", to.as_str()]);
     command.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
     let when = nudged.until();
     let asked = SystemTime::now();
-    let (local, command) = (&Machine::Local, Action::Command(command));
+    let command = Action::Command(command);
     match (then, tab) {
-        (Some(look), tab) if runs(&to.0) != Some(true) => {
-            run(local, command, Some(Then::Made(look.number)), when, events);
+        (Some(look), tab) if runs(to.as_str()) != Some(true) => {
+            run(command, Some(Then::Made(look.number)), when, events);
             let after = tab.map(|(owed, tab)| Pending::new(owed, tab, to, asked, events));
             Some(Arrival { look, on: Machine::Local, before: Before::Made, after })
         },
         (Some(look), tab) => {
             let after = tab.map(|(owed, tab)| After::tab(owed, to, tab));
-            run(local, command, Some(Then::Arrive(look, after)), when, events);
+            run(command, Some(Then::Arrive(look, after)), when, events);
             None
         },
         (None, None) => {
-            run(local, command, None, when, events);
+            run(command, None, when, events);
             None
         },
         // Nothing would say when the client is there.
@@ -599,10 +514,10 @@ pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
 /// is on, can fail.
 pub fn made(at: &str, to: &SessionName, cwd: &str) -> Result<(), String> {
     let mut command = Command::new("zellij");
-    command.args(["--session", at, "action", "switch-session", &to.0, "--cwd", cwd]);
+    command.args(["--session", at, "action", "switch-session", to.as_str(), "--cwd", cwd]);
     let asked = SystemTime::now();
     done(command)?;
-    match made_since(&to.0, asked, START) {
+    match made_since(to.as_str(), asked, START) {
         Some(true) => Ok(()),
         Some(false) => Err(format!("{to} ran already, so zellij made none")),
         None => Err(UNMOVED.to_owned()),
@@ -781,11 +696,11 @@ pub fn opening(open: &Open) -> Result<u32, String> {
 /// client or an agent opened there by then goes with them. What zellij says
 /// of a tab it did not close comes back as a notice.
 fn alone(to: &SessionName, tab: &Tab, events: &Sender<Event>) -> Result<u32, String> {
-    let made = tabs(&laid(&to.0)?);
-    let (opened, laid) = tab_opened(&to.0, tab)?;
+    let made = tabs(&laid(to.as_str())?);
+    let (opened, laid) = tab_opened(to.as_str(), tab)?;
     let terminal = terminal_of(&laid, opened).ok_or("zellij opened a tab with no pane")?;
     for made in made {
-        if let Err(why) = tab_closed(&to.0, made) {
+        if let Err(why) = tab_closed(to.as_str(), made) {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
@@ -1000,15 +915,13 @@ fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
 /// Closes the terminal `pane` of `session`, on a thread of its own, at once:
 /// it moves no client.
 pub fn close_pane(session: &str, pane: u32, events: &Sender<Event>) {
-    let close = Action::Command(pane_closer(session, pane));
-    run(&Machine::Local, close, None, Instant::now(), events);
+    run(Action::Command(pane_closer(session, pane)), None, Instant::now(), events);
 }
 
 /// Closes the tab of `session` whose id is `tab`, its panes and all, on a
 /// thread of its own, at once.
 pub fn close_tab(session: &str, tab: u32, events: &Sender<Event>) {
-    let close = Action::Command(tab_closer(session, tab));
-    run(&Machine::Local, close, None, Instant::now(), events);
+    run(Action::Command(tab_closer(session, tab)), None, Instant::now(), events);
 }
 
 /// Kills `session`, the one that started at `started`, and deletes it, on a
@@ -1203,7 +1116,7 @@ fn spelled_ago(spelled: &str) -> Option<Duration> {
 pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
     relisted_in(&lunetad::zellij_folder(), session)?;
     let mut command = Command::new("zellij");
-    command.args(["--session", &session.0, "action", "rename-session", &to.0]);
+    command.args(["--session", session.as_str(), "action", "rename-session", to.as_str()]);
     done(command)
 }
 
@@ -1239,7 +1152,7 @@ const CONNECTED: [u8; 2] = [0x22, 0];
 /// `RELIST` is of has the name, the rename is left to say why, as zellij's
 /// CLI speaks its own.
 fn relisted_in(folder: &Path, session: &SessionName) -> Result<(), String> {
-    let socket = folder.join(lunetad::ZELLIJ_CONTRACT).join(&session.0);
+    let socket = folder.join(lunetad::ZELLIJ_CONTRACT).join(session.as_str());
     let failed = |error: io::Error| format!("zellij did not list its sessions again: {error}");
     let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
@@ -1442,7 +1355,7 @@ impl Pending {
     /// that name after luneta looked.
     fn made(&self) -> Result<(), String> {
         let to = &self.to;
-        match made_since(&to.0, self.asked, Duration::ZERO) {
+        match made_since(to.as_str(), self.asked, Duration::ZERO) {
             Some(true) => Ok(()),
             Some(false) => Err(format!("{to} ran already, and keeps its tabs")),
             None => {
@@ -1518,10 +1431,10 @@ fn runs(session: &str) -> Option<bool> {
 /// either, so luneta asks just before.
 pub fn makes(to: &SessionName) -> Result<(), String> {
     let cannot = || format!("no session made: luneta cannot tell whether one is called {to}");
-    if runs(&to.0).ok_or_else(cannot)? {
+    if runs(to.as_str()).ok_or_else(cannot)? {
         return Err(format!("no session made: {to} runs already"));
     }
-    if kept().ok_or_else(cannot)?.contains(&to.0) {
+    if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
         return Err(format!("no session made: zellij keeps {to}, which ended, to bring back"));
     }
     Ok(())
@@ -1609,8 +1522,8 @@ impl Then {
 enum Action {
     /// This command of zellij's CLI, on this machine.
     Command(Command),
-    /// A go, as `moves::go` says, on the machine zellij is asked on.
-    Go { at: String, to: String, pane: Option<u32> },
+    /// A go, as `moves::go` says, on `on`.
+    Go { on: Machine, at: SessionName, to: SessionName, pane: Option<u32> },
 }
 
 /// zellij, on the machine luneta's client runs on: this one's, by its CLI,
@@ -1648,13 +1561,14 @@ impl There {
         }
     }
 
-    /// Has zellij take `action`, or says why it did not. A pane already
-    /// focused is where the action would take the client, and no failure.
+    /// Has zellij take `action`, which is of its machine, or says why it did
+    /// not. A pane already focused is where the action would take the
+    /// client, and no failure.
     fn take(&mut self, action: Action) -> Result<(), String> {
         let command = match (action, self) {
             (Action::Command(command), _) => command,
-            (Action::Go { at, to, pane }, There::Away(away)) => return away.go(&at, &to, pane),
-            (Action::Go { at, to, pane }, There::Here) => {
+            (Action::Go { at, to, pane, .. }, There::Away(away)) => return away.go(&at, &to, pane),
+            (Action::Go { at, to, pane, .. }, There::Here) => {
                 match moves::go(Command::new("zellij"), &at, &to, pane) {
                     Some(command) => command,
                     None => return Ok(()),
@@ -1674,15 +1588,19 @@ impl There {
     }
 }
 
-/// Has zellij on `on` take `action` at `when` on a thread of its own, so
-/// that the sidebar goes on drawing while zellij answers, says why when it
-/// fails, and then does as `then` says. A client on its way to another
-/// session comes there once zellij lists one more client of it than before
-/// the action, and then what waits on it is done.
-fn run(on: &Machine, action: Action, then: Option<Then>, when: Instant, events: &Sender<Event>) {
-    let (on, events) = (on.clone(), events.clone());
+/// Has zellij take `action` at `when`, on the machine it is of, on a thread
+/// of its own, so that the sidebar goes on drawing while zellij answers, says
+/// why when it fails, and then does as `then` says. A client on its way to
+/// another session comes there once zellij lists one more client of it than
+/// before the action, and then what waits on it is done.
+fn run(action: Action, then: Option<Then>, when: Instant, events: &Sender<Event>) {
+    let events = events.clone();
     thread::spawn(move || {
-        let mut there = match There::on(&on) {
+        let there = match &action {
+            Action::Command(_) => Ok(There::Here),
+            Action::Go { on, .. } => There::on(on),
+        };
+        let mut there = match there {
             Ok(there) => there,
             Err(why) => {
                 // luneta is on its way out.
@@ -1861,7 +1779,7 @@ mod tests {
 
     #[test]
     fn a_name_is_the_directory_itself() {
-        let named = |dir: &str| session_for(Path::new(dir)).map(|name| name.0);
+        let named = |dir: &str| session_for(Path::new(dir)).map(|name| name.as_str().to_owned());
         assert_eq!(named("/nowhere/at/all/luneta"), Some("luneta".to_owned()));
         assert_eq!(named("/nowhere/at/all/luneta/"), Some("luneta".to_owned()));
         assert_eq!(named("/"), None);
@@ -1869,13 +1787,15 @@ mod tests {
 
     #[test]
     fn a_worktree_is_named_for_its_repository_too() {
-        let named = |path: &str, common: &str| worktree_name(path, common).map(|name| name.0);
+        let named = |path: &str, common: &str| {
+            worktree_name(path, common).map(|name| name.as_str().to_owned())
+        };
         assert_eq!(named("/w/luneta/main", "/w/luneta/.bare"), Some("luneta-main".to_owned()));
         assert_eq!(named("/w/trees/main", "/w/luneta/.git"), Some("luneta-main".to_owned()));
         assert_eq!(named("/w/infra.git/master", "/w/infra.git"), Some("infra-master".to_owned()));
         assert_eq!(named("/w/app-hotfix", "/w/app/.git"), None);
         assert_eq!(named("/w/application", "/w/app/.git"), Some("app-application".to_owned()));
-        let long = "x".repeat(NAME_BYTES_MAX);
+        let long = "x".repeat(lunetad::SESSION_NAME_BYTES_MAX);
         assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
     }
 
@@ -1897,9 +1817,9 @@ mod tests {
             fs::write(own.join("commondir"), "../..\n"),
         ];
         assert!(wrote.iter().all(Result::is_ok));
-        assert_eq!(session_for(&tree).map(|name| name.0), Some("luneta-main".to_owned()));
+        assert_eq!(session_for(&tree).as_ref().map(SessionName::as_str), Some("luneta-main"));
         let repository = root.join("luneta");
-        assert_eq!(session_for(&repository).map(|name| name.0), Some("luneta".to_owned()));
+        assert_eq!(session_for(&repository).as_ref().map(SessionName::as_str), Some("luneta"));
     }
 
     #[test]
@@ -1969,31 +1889,6 @@ mod tests {
                 };
                 assert_eq!(String::from_utf8(said.stdout).unwrap(), name, "{shell}");
             }
-        }
-    }
-
-    #[test]
-    fn a_postfix_makes_room_for_itself_between_characters() {
-        let Ok(name) = SessionName::parse("luneta-main") else {
-            panic!("a name zellij takes");
-        };
-        assert_eq!(name.with_postfix(2).0, "luneta-main-2");
-        let Ok(long) = SessionName::parse(&format!("{}é", "x".repeat(NAME_BYTES_MAX - 3))) else {
-            panic!("a name zellij takes");
-        };
-        let postfixed = long.with_postfix(12);
-        assert_eq!(postfixed.0, format!("{}-12", "x".repeat(NAME_BYTES_MAX - 3)));
-        assert!(SessionName::parse(&postfixed.0).is_ok());
-    }
-
-    /// A session's name names a file in a folder, as its fold does: no name
-    /// that names none, or one out of the folder, is a session's, to make or
-    /// of one that runs.
-    #[test]
-    fn a_name_that_names_no_file_is_no_session_s() {
-        for name in ["../out", "..", ".", ""] {
-            assert!(SessionName::parse(name).is_err(), "{name:?}");
-            assert!(SessionName::running(name).is_err(), "{name:?}");
         }
     }
 
