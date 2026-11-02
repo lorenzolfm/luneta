@@ -128,9 +128,9 @@ impl Close {
 /// Closes `close` of `session`, while zellij lists the session's panes as
 /// it did for the plan, and says why not when zellij did not, or why it
 /// closed nothing: a pane that would take its tab along now, or a tab that
-/// holds other terminals than it did, stays. zellij closes nothing on a
-/// condition of its own: what changes between the list and the close goes
-/// with it.
+/// holds other terminals than it did, or that would take the session along
+/// now, stays. zellij closes nothing on a condition of its own: what changes
+/// between the list and the close goes with it.
 pub fn closed(session: &SessionName, close: &Close) -> Result<(), String> {
     still(&laid(session.as_str())?, close)?;
     let mut command = Command::new("zellij");
@@ -154,10 +154,14 @@ fn still(laid: &[Laid], close: &Close) -> Result<(), String> {
         },
         Close::Tab { id, panes } => {
             let now: BTreeSet<u32> = terminals(laid, *id).into_iter().collect();
-            if now == panes.iter().copied().collect() {
-                return Ok(());
+            if now != panes.iter().copied().collect() {
+                return Err(format!("tab {id} holds other panes than it did, so it stays"));
             }
-            Err(format!("tab {id} holds other panes than it did, so it stays"))
+            // zellij ends a session with its last tab.
+            if tabs(laid).iter().all(|tab| tab == id) {
+                return Err(format!("tab {id} would take the session along now, so it stays"));
+            }
+            Ok(())
         },
     }
 }
@@ -319,22 +323,26 @@ mod tests {
 
     /// A close goes ahead only while zellij lists what it closes as it was
     /// planned: a pane whose tab something else holds open, and a tab with
-    /// the terminals it had, in any order. A pane opened in the tab since, or
-    /// the pane that held it open gone, has it close nothing.
+    /// the terminals it had, in any order, beside another tab. A pane opened
+    /// in the tab since, the pane that held it open gone, or every other tab
+    /// gone, as zellij ends a session with its last, has it close nothing.
     #[test]
     fn a_close_goes_ahead_only_while_zellij_lists_what_was_planned() {
         let floating = Laid { is_floating: true, ..laid(5, 0) };
         let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
         let planned = vec![laid(4, 0), laid(6, 0), floating.clone(), bar, laid(9, 1)];
         let opened = [planned.clone(), vec![laid(7, 0)]].concat();
+        let last = planned[..4].to_vec();
         let left = vec![laid(4, 0), floating, laid(9, 1)];
         let tab = || Close::Tab { id: 0, panes: vec![6, 5, 4] };
         let other = || Err("tab 0 holds other panes than it did, so it stays".to_owned());
+        let session = Err("tab 0 would take the session along now, so it stays".to_owned());
         let along = Err("pane 4 would take its tab along now, so it stays".to_owned());
         for (listed, close, still_so) in [
             (&planned, Close::Pane(4), Ok(())),
             (&planned, tab(), Ok(())),
             (&opened, tab(), other()),
+            (&last, tab(), session),
             (&left, tab(), other()),
             (&left, Close::Pane(4), along),
             (&planned, Close::Pane(8), Err("pane 8 is gone".to_owned())),

@@ -66,9 +66,9 @@ service Daemon {
   // Has zellij close a terminal of a session, or a tab of it, its panes and
   // all, as `zellij action close-pane` and `close-tab-by-id` do, while the
   // session's panes are as `Closes` said: a terminal that would take its tab
-  // along now, or a tab that holds other terminals than it did, stays. It
-  // answers once zellij has, or with what zellij said as it failed, or why
-  // it closed nothing.
+  // along now, or a tab that holds other terminals than it did, or that
+  // would take the session along now, stays. It answers once zellij has, or
+  // with what zellij said as it failed, or why it closed nothing.
   rpc Close(CloseRequest) returns (CloseResponse);
   // Has zellij kill a session and delete it, so that it keeps nothing to
   // bring it back with, as `zellij delete-session --force` does. It answers

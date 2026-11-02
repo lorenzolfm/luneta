@@ -657,6 +657,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         for (session, closes, why) in [
             ("two", pane(4), "pane 4 would take its tab along now"),
             ("two", tab(6, vec![5, 9]), "tab 6 holds other panes than it did"),
+            ("idle", tab(3, vec![4]), "tab 3 would take the session along now"),
             ("two", pane(9), "pane 9 is gone"),
         ] {
             let stays = daemon.close(close(session, closes)).await.unwrap_err();
