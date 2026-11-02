@@ -49,6 +49,7 @@ use lunetad::api::shell::Doing;
 use lunetad::api::{
     Agent, Client, Front, Host, NameSource, Pane, Session, Shell, Status, UnreadFile, Zellij,
 };
+use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -56,7 +57,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::brief::{Brief, Note, Over, SessionId};
+use crate::brief::{Brief, Note, Over};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
@@ -2589,56 +2590,86 @@ impl Sidebar {
     }
 
     /// Asks for a brief of what the menu's row `briefed` it on: every
-    /// session, in the rows' order, or a session, or the agent in a pane. An
-    /// agent is told of as its row shows it, a folded session's too, by the
-    /// name, the status and the branch on its row. With no agent there, the
-    /// sidebar says so where the menu was. Every agent it tells of is this
-    /// machine's, whose transcripts it reads.
+    /// session of every machine, in the rows' order, or a machine's, or a
+    /// session, or the agent in a pane. An agent is told of as its row shows
+    /// it, a folded session's or machine's too, by the name, the status and
+    /// the branch on its row, and by its machine, whose daemon reads its
+    /// transcript. A machine lunetad does not reach now is told of as one
+    /// whose sessions are unknown. With no agent there, or no word of its
+    /// machine, the sidebar says so where the menu was.
     fn brief(&mut self, briefed: Briefed) -> Asked {
         let Some(host) = &self.host else {
             return Asked::Nothing;
         };
-        // In the order of their rows, whatever orders them, and any without
-        // one after them.
-        let (mut sessions, _) = oldest_first(&host.sessions);
-        let row = |listed: &Listed| {
-            let spot = Spot::Local(Place::Session(listed.clone()));
-            self.rows.iter().position(|row| row.spot() == spot).unwrap_or(usize::MAX)
-        };
-        sessions.sort_by_key(|(listed, _)| row(listed));
-        let every = || sessions.iter().map(|(listed, _)| listed.name.to_string()).collect();
-        let over = match briefed {
-            Briefed::Every => Over::Sessions(every()),
-            Briefed::Session(session) => Over::Session(session.to_string()),
-            Briefed::Agent(session, pane) => Over::Agent(session.to_string(), pane),
-        };
-        let agents = seated(&host.agents, &host.sessions);
-        let trees: HashMap<&str, &lunetad::api::WorkTree> =
-            host.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
+        let (machines, _) = machines(host);
+        let mut every: Vec<(Machine, String)> = Vec::new();
+        let mut unknown = Vec::new();
         let mut notes = Vec::new();
-        for (_, session) in sessions {
-            let mut panes: Vec<_> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
-            panes.sort_by_key(|pane| (pane.tab, pane.id));
-            for pane in panes {
-                let Some(agent) = agents.get(&(session.name.as_str(), pane.id)) else {
+        for (machine, seen) in machines {
+            let seen = match (seen, &machine) {
+                (Ok(seen), _) => seen,
+                (Err(away), Machine::Remote(destination)) => {
+                    unknown.push((destination.clone(), away.said().0.to_owned()));
                     continue;
-                };
-                let cwd = agent_dir(agent, pane);
-                let branch = trees.get(cwd).and_then(|tree| {
-                    checkout(&WorkTree::of_api(tree)?, None).map(|checkout| checkout.branch)
-                });
-                notes.push(Note {
-                    session: session.name.clone(),
-                    pane: pane.id,
-                    name: label(Some(agent), pane),
-                    status: status_word(agent),
-                    since: agent.status_since.and_then(|at| at.try_into().ok()),
-                    branch,
-                    cwd: cwd.to_owned(),
-                    transcript: SessionId::parse(&agent.session_id),
-                });
+                },
+                // lunetad always says this machine's.
+                (Err(_), Machine::Local) => continue,
+            };
+            // In the order of their rows: this machine's as you moved them.
+            let (mut sessions, _) = oldest_first(seen.sessions);
+            if machine == Machine::Local {
+                self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
+            }
+            let agents = seated(seen.agents, seen.sessions);
+            let trees: HashMap<&str, &lunetad::api::WorkTree> =
+                seen.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
+            for (listed, session) in sessions {
+                every.push((machine.clone(), listed.name.to_string()));
+                let mut panes: Vec<_> =
+                    session.panes.iter().flat_map(|panes| &panes.panes).collect();
+                panes.sort_by_key(|pane| (pane.tab, pane.id));
+                for pane in panes {
+                    let Some(agent) = agents.get(&(session.name.as_str(), pane.id)) else {
+                        continue;
+                    };
+                    let cwd = agent_dir(agent, pane);
+                    let branch = trees.get(cwd).and_then(|tree| {
+                        checkout(&WorkTree::of_api(tree)?, None).map(|checkout| checkout.branch)
+                    });
+                    notes.push(Note {
+                        on: machine.clone(),
+                        session: session.name.clone(),
+                        pane: pane.id,
+                        name: label(Some(agent), pane),
+                        status: status_word(agent),
+                        since: agent.status_since.and_then(|at| at.try_into().ok()),
+                        branch,
+                        cwd: cwd.to_owned(),
+                        transcript: SessionId::parse(&agent.session_id),
+                    });
+                }
             }
         }
+        let on = match &briefed {
+            Briefed::Every => None,
+            Briefed::Machine(on) | Briefed::Session(on, _) | Briefed::Agent(on, ..) => Some(on),
+        };
+        if let Some(Machine::Remote(destination)) = on
+            && unknown.iter().any(|(machine, _)| machine == destination)
+        {
+            self.say(format!("brief: lunetad does not reach {destination} now"));
+            return Asked::Nothing;
+        }
+        let over = match briefed {
+            Briefed::Every => Over::Sessions { sessions: every, unknown },
+            Briefed::Machine(on) => {
+                let of = every.into_iter().filter(|(machine, _)| *machine == on);
+                let sessions = of.map(|(_, session)| session).collect();
+                Over::Machine(on, sessions)
+            },
+            Briefed::Session(on, session) => Over::Session(on, session.to_string()),
+            Briefed::Agent(on, session, pane) => Over::Agent(on, session.to_string(), pane),
+        };
         match Brief::new(over, notes) {
             Ok(brief) => Asked::Brief(brief),
             Err(reason) => {
@@ -6348,6 +6379,7 @@ mod tests {
         sidebar.heard(host);
         sidebar.focus(Keys::Sidebar);
         let fold = Note {
+            on: Machine::Local,
             session: "older".to_owned(),
             pane: 1,
             name: "fold".to_owned(),
@@ -6358,10 +6390,14 @@ mod tests {
             transcript: SessionId::parse(id),
         };
         let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fold.clone()]).unwrap());
-        let every = || Over::Sessions(vec!["older".to_owned(), "newer".to_owned()]);
-        let older = || Over::Session("older".to_owned());
-        for (key, over) in [('z', every()), ('s', older()), ('h', Over::Agent("older".to_owned(), 1))]
-        {
+        let here = |sessions: [&str; 2]| {
+            let sessions = sessions.map(|it| (Machine::Local, it.to_owned())).into();
+            Over::Sessions { sessions, unknown: Vec::new() }
+        };
+        let every = || here(["older", "newer"]);
+        let older = || Over::Session(Machine::Local, "older".to_owned());
+        let agent = Over::Agent(Machine::Local, "older".to_owned(), 1);
+        for (key, over) in [('z', every()), ('s', older()), ('h', agent)] {
             type_in(&mut sidebar, "b");
             assert_eq!(sidebar.key(&char(key), moment(160_000)), brief(over), "{key}");
             assert!(sidebar.menu.is_none(), "{key}");
@@ -6383,8 +6419,62 @@ mod tests {
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(every()));
         // The older session moved under the newer one.
         type_in(&mut sidebar, "vJb");
-        let moved = Over::Sessions(vec!["newer".to_owned(), "older".to_owned()]);
-        assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(moved));
+        assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(here(["newer", "older"])));
+    }
+
+    /// The Brief group's keys brief you on another machine's agents as on
+    /// this one's: `b z` on every session of every machine, in the rows'
+    /// order, and on each machine lunetad does not reach as one whose
+    /// sessions are unknown; `b s` and `b h` on a machine's header on its
+    /// sessions, this one's too; and on its session's row or its pane's, on
+    /// the session or the agent there. Of a machine lunetad no longer
+    /// reaches, the sidebar says so.
+    #[test]
+    fn the_brief_s_keys_brief_you_on_every_machine_s_agents() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        let on = || Machine::Remote(nixos());
+        let fix = Note {
+            on: on(),
+            session: "main".to_owned(),
+            pane: 1,
+            name: "fix".to_owned(),
+            status: "waiting".to_owned(),
+            since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+            branch: None,
+            cwd: "/w/b".to_owned(),
+            transcript: None,
+        };
+        let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fix.clone()]).unwrap());
+        let main = || "main".to_owned();
+        let unknown = [("me@vps", "unreachable"), ("pi", "reaching…")];
+        let unknown = unknown.map(|(it, word)| (it.parse().unwrap(), word.to_owned())).into();
+        let every = Over::Sessions { sessions: vec![(Machine::Local, main()), (on(), main())], unknown };
+        let session = Place::Session(listed("main", 20));
+        let pane = Place::Pane { session: listed("main", 20), pane: 1 };
+        for (spot, key, over) in [
+            (Spot::Machine(on()), 'z', every),
+            (Spot::Machine(on()), 's', Over::Machine(on(), vec![main()])),
+            (Spot::Machine(on()), 'h', Over::Machine(on(), vec![main()])),
+            (Spot::Remote(nixos(), session), 'h', Over::Session(on(), main())),
+            (Spot::Remote(nixos(), pane.clone()), 'h', Over::Agent(on(), main(), 1)),
+        ] {
+            sidebar.cursor = Some(spot);
+            type_in(&mut sidebar, "b");
+            assert_eq!(sidebar.key(&char(key), moment(160_000)), brief(over), "{key}");
+        }
+        sidebar.cursor = Some(Spot::Machine(Machine::Local));
+        type_in(&mut sidebar, "bs");
+        assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents on this machine"));
+        // The menu opened while lunetad reached nixos.
+        sidebar.cursor = Some(Spot::Remote(nixos(), pane));
+        type_in(&mut sidebar, "b");
+        let mut host = machines();
+        host.remotes[0] = remote("nixos", down(100));
+        sidebar.heard(host);
+        assert_eq!(sidebar.key(&char('h'), moment(160_000)), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some("brief: lunetad does not reach nixos now"));
     }
 
     /// While lunetad does not answer, what it said last of the agents may be

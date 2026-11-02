@@ -2,6 +2,7 @@
 //! `ssh <destination> luneta bridge`: here, through an ssh of the test's own,
 //! which runs the bridge of another host of the test's.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use lunetad::api::refuge_response::{Ended, Kept, Went};
 use lunetad::api::{
     self, Client, CloseRequest, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
     ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, OpenRequest, RefugeRequest,
-    StartRequest, WatchRequest,
+    StartRequest, TranscriptEndsRequest, WatchRequest,
 };
 use tonic::{Code, Status};
 
@@ -482,12 +483,14 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
 /// goes on once its session ended, a pane or a tab to open, the skills of a
 /// directory, what a pane's shell printed, which it keeps there, and the
 /// name a session for a directory takes there, and to start it, and what
-/// closing a pane closes there, to close it, and a session to kill. Without
-/// a machine, it asks its own; of one it does not reach, it says so. A
-/// question that names a directory by no absolute path, an empty line typed,
-/// a tab by an empty name, or a tab to close of no terminal is invalid here;
-/// no tab opens there in a session no client is in, and nothing closes there
-/// that zellij lists otherwise than the close says.
+/// closing a pane closes there, to close it, and a session to kill, and the
+/// ends of transcripts in Claude Code's folder there. Without a machine, it
+/// asks its own; of one it does not reach, it says so. A question that names
+/// a directory by no absolute path, an empty line typed, a tab by an empty
+/// name, a tab to close of no terminal, or a transcript by no session's id,
+/// or more of the transcripts than a brief keeps, or none of them, is
+/// invalid here; no tab opens there in a session no client is in, and
+/// nothing closes there that zellij lists otherwise than the close says.
 #[test]
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
@@ -682,5 +685,26 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.kill(kill(work_started)).await.unwrap();
         assert_eq!(far.zellij.closed()[2..], ["delete-session --force work"]);
         assert!(here.zellij.closed().is_empty());
+
+        // A transcript there is read there, and one not written yet has no
+        // end.
+        let (id, unwritten) =
+            ("0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60", "9e8d7c6b-5a4f-4e3d-2c1b-0a9f8e7d6c5b");
+        let project = far.home.path().join(".claude/projects/-w");
+        fs::create_dir_all(&project).unwrap();
+        let said = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+        fs::write(project.join(format!("{id}.jsonl")), format!("{said}\n")).unwrap();
+        let ends = |on, ids: &[&str], share| {
+            let ids = ids.iter().map(|id| (*id).to_owned()).collect();
+            TranscriptEndsRequest { on, ids, share }
+        };
+        let read = daemon.transcript_ends(ends(on("far"), &[id, unwritten], 1024)).await.unwrap();
+        assert_eq!(read.into_inner().ends, HashMap::from([(id.to_owned(), said.to_owned())]));
+        let read = daemon.transcript_ends(ends(None, &[id], 1024)).await.unwrap();
+        assert!(read.into_inner().ends.is_empty());
+        invalid(daemon.transcript_ends(ends(on("far"), &["../x"], 1024)).await.unwrap_err());
+        let long = ends(on("far"), &[id, unwritten], 512 * 1024);
+        invalid(daemon.transcript_ends(long).await.unwrap_err());
+        invalid(daemon.transcript_ends(ends(on("far"), &[id], 0)).await.unwrap_err());
     });
 }

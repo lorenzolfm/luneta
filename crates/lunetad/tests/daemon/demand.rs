@@ -18,8 +18,8 @@ use lunetad::api::{
     InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
     KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
     ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse, Version,
-    WatchRequest,
+    OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -599,6 +599,13 @@ impl Daemon for StandIn {
 
     async fn kill(&self, _: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn transcript_ends(
+        &self,
+        _: Request<TranscriptEndsRequest>,
+    ) -> Result<Response<TranscriptEndsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in reads no transcripts"))
     }
 }
 

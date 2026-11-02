@@ -57,6 +57,7 @@ use crate::api::{
     ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
     ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
     OpenResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse,
 };
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
@@ -66,6 +67,7 @@ use crate::watch::Troubles;
 use crate::zellij::SessionName;
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
+use crate::transcripts::Reading;
 use crate::{
     claude, client, clients, closes, git, github, log, metadata, moves, names, opens, panes,
     printed, release, remote, shells, skills, watch, zellij,
@@ -637,6 +639,25 @@ impl Daemon for Host {
         killed.map_err(Status::failed_precondition)?;
         Ok(Response::new(KillResponse {}))
     }
+
+    async fn transcript_ends(
+        &self,
+        request: Request<TranscriptEndsRequest>,
+    ) -> Result<Response<TranscriptEndsResponse>, Status> {
+        let TranscriptEndsRequest { on, ids, share } = request.into_inner();
+        let reading = Reading::of(&ids, share).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.transcript_ends(reading.asked(None)).await;
+        }
+        // With no folder to look in, it finds none.
+        let Some(projects) = self.claude_folder.as_ref().map(|it| it.join("projects")) else {
+            return Ok(Response::new(TranscriptEndsResponse::default()));
+        };
+        let read = task::spawn_blocking(move || reading.ends(&projects)).await;
+        let read = read.map_err(|error| unfinished(&error))?;
+        let ends = read.into_iter().map(|(id, end)| (id.as_str().to_owned(), end)).collect();
+        Ok(Response::new(TranscriptEndsResponse { ends }))
+    }
 }
 
 /// The clients of `session` here, as zellij lists them now, or why not.
@@ -682,8 +703,9 @@ fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
     Ok((on, open))
 }
 
-/// Why what the daemon asked of zellij, or of the finder of skills, did not
-/// answer: the thread it was asked on panicked.
+/// Why what the daemon asked of zellij, or of the finder of skills, or what
+/// it read of Claude Code's transcripts, did not answer: the thread it was
+/// asked on panicked.
 fn unfinished(error: &task::JoinError) -> Status {
     Status::internal(format!("lunetad lost its answer: {error}"))
 }

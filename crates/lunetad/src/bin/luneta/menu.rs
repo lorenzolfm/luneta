@@ -15,7 +15,8 @@
 //! opens the Delete group, which closes the pane or deletes its session, and
 //! asks first when that would end an agent at work, and on a machine's header
 //! forgets the machine. `b` opens the Brief group, which briefs you on every
-//! session, the row's session, or the agent in its pane. luneta has no
+//! session, the row's session, or the agent in its pane, or on a machine's
+//! header, the machine's sessions. luneta has no
 //! configuration to read keys for skills from, and the Claude group's are its
 //! own.
 //!
@@ -140,12 +141,6 @@ const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open besi
 /// What the menu says of the key that forgets a machine, on this one's
 /// header.
 const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets only the others";
-
-/// What the menu says of a key of the Brief group on another machine's
-/// header, or of one that briefs you on a session or a pane of another
-/// machine's.
-const REMOTE_BRIEF: &str = "menu: luneta briefs you on this machine's agents alone, as it reads \
-                            their transcripts here";
 
 /// What the menu says of the key that opens the ask box on another
 /// machine's session or pane.
@@ -494,7 +489,7 @@ impl Keys {
     /// what the menu is for, as `removes` says, and `d s` deletes its
     /// session, or on a machine's header `d d` alone forgets the machine, and
     /// `b z`, `b s` and `b h` brief you on every session, its session and
-    /// what the menu is for.
+    /// what the menu is for, or on a machine's header, its sessions.
     fn new(removes: Removes) -> Self {
         let start = |(key, prompt)| Entry::Start { key, prompt };
         let root = vec![
@@ -867,29 +862,24 @@ impl Target {
     }
 
     /// What a key of the Brief group briefs you on, as `scope` says, by the
-    /// row: on this machine's header, every session, as every agent it can
-    /// brief you on is of this machine's; on another's, or on its session or
-    /// pane, but for every session, why it can not.
-    fn brief(&self, scope: brief::Scope) -> Done {
-        let briefed = match (self, scope) {
-            (Target::Machine(Machine::Remote(_)), _)
-            | (
-                Target::Session(Machine::Remote(_), _) | Target::Pane(Machine::Remote(_), _),
-                brief::Scope::Session | brief::Scope::Highlighted,
-            ) => {
-                return Done::Wrong(REMOTE_BRIEF.to_owned());
+    /// row, of whichever machine: every session of every machine; or on a
+    /// machine's header, its sessions; or the row's session, or the agent in
+    /// its pane.
+    fn brief(&self, scope: brief::Scope) -> Briefed {
+        match (self, scope) {
+            (_, brief::Scope::Every) => Briefed::Every,
+            (Target::Machine(machine), brief::Scope::Session | brief::Scope::Highlighted) => {
+                Briefed::Machine(machine.clone())
             },
-            (Target::Machine(Machine::Local), _) | (_, brief::Scope::Every) => Briefed::Every,
-            (Target::Pane(Machine::Local, row), brief::Scope::Highlighted) => {
-                Briefed::Agent(row.session.name().clone(), row.pane)
+            (Target::Pane(machine, row), brief::Scope::Highlighted) => {
+                Briefed::Agent(machine.clone(), row.session.name().clone(), row.pane)
             },
             (
-                Target::Session(Machine::Local, session)
-                | Target::Pane(Machine::Local, PaneRow { session, .. }),
+                Target::Session(machine, session)
+                | Target::Pane(machine, PaneRow { session, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(session.name().clone()),
-        };
-        Done::Brief(briefed)
+            ) => Briefed::Session(machine.clone(), session.name().clone()),
+        }
     }
 }
 
@@ -1061,12 +1051,14 @@ pub enum Done {
 /// What a key of the Brief group briefs you on, by the row the menu was for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Briefed {
-    /// Every session's agents.
+    /// The agents of every session of every machine.
     Every,
-    /// The agents of a session.
-    Session(SessionName),
-    /// The agent in the pane of a session.
-    Agent(SessionName, u32),
+    /// The agents of every session of a machine.
+    Machine(Machine),
+    /// The agents of a session of a machine.
+    Session(Machine, SessionName),
+    /// The agent in the pane of a session of a machine.
+    Agent(Machine, SessionName, u32),
 }
 
 /// What a click on a spot of the menu does: presses the key of an entry, or
@@ -1320,7 +1312,7 @@ impl Menu {
                     Did::Closed(Done::Forget(destination))
                 },
                 Pressed::Forget(Machine::Local) => Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned())),
-                Pressed::Brief(scope) => Did::Closed(target.brief(scope)),
+                Pressed::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
                 Pressed::Ask
                     if matches!(target, Target::Session(Machine::Remote(_), _)
                         | Target::Pane(Machine::Remote(_), _)) =>
@@ -2410,9 +2402,9 @@ mod tests {
         let luneta = || listed().name().clone();
         for (row, key, briefed) in [
             (pane_row(), 'z', Briefed::Every),
-            (pane_row(), 's', Briefed::Session(luneta())),
-            (pane_row(), 'h', Briefed::Agent(luneta(), 4)),
-            (session_row(), 'h', Briefed::Session(luneta())),
+            (pane_row(), 's', Briefed::Session(Machine::Local, luneta())),
+            (pane_row(), 'h', Briefed::Agent(Machine::Local, luneta(), 4)),
+            (session_row(), 'h', Briefed::Session(Machine::Local, luneta())),
         ] {
             let (menu, _) = stays(opened(row, Some('b')));
             assert_eq!(closed(menu.key(&char(key))), Done::Brief(briefed), "{key}");
@@ -2472,9 +2464,9 @@ mod tests {
     /// On another machine's pane, a key opens beside the pane what it opens
     /// on this machine's, and a session in its directory, which the menu
     /// stays for, of that machine. The Delete group plans what it deletes as
-    /// on this machine's, and has it deleted on that machine. The Brief group
-    /// but for every session, and the ask box say they are this machine's
-    /// alone, on another's pane or session.
+    /// on this machine's, and has it deleted on that machine, and the Brief
+    /// group briefs you on its session or its agent. The ask box says it is
+    /// this machine's alone, on another's pane or session.
     #[test]
     fn another_machine_s_row_opens_and_deletes_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
@@ -2492,24 +2484,30 @@ mod tests {
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         let done = closed(menu.planned(plan(Closes::Pane, Vec::new())));
         assert_eq!(done, Done::Act(vps(), Act::Pane { session: listed().name().clone(), pane: 4 }));
-        for row in [pane, session] {
+        let name = || listed().name().clone();
+        for (row, highlighted) in [
+            (pane, Briefed::Agent(vps(), name(), 4)),
+            (session, Briefed::Session(vps(), name())),
+        ] {
             let (menu, _) = stays(opened(row.clone(), Some('d')));
             let (_, wants) = stays(menu.key(&char('s')));
             assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Session });
-            for key in ['s', 'h'] {
+            for (key, briefed) in [
+                ('z', Briefed::Every),
+                ('s', Briefed::Session(vps(), name())),
+                ('h', highlighted),
+            ] {
                 let (menu, _) = stays(opened(row.clone(), Some('b')));
-                assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_BRIEF.to_owned()));
+                assert_eq!(closed(menu.key(&char(key))), Done::Brief(briefed), "{key}");
             }
-            let (menu, _) = stays(opened(row.clone(), Some('b')));
-            assert_eq!(closed(menu.key(&char('z'))), Done::Brief(Briefed::Every));
             assert_eq!(closed(opened(row, Some('a'))), Done::Wrong(REMOTE_ASK.to_owned()));
         }
     }
 
     /// On a machine's header, the Delete group forgets the machine, and on
     /// this one's says it cannot; the Brief group briefs you on every
-    /// session, from this one's, and on none from another's; and a key that
-    /// opens beside a pane says the header has none.
+    /// session of every machine, or on the machine's, from any header; and a
+    /// key that opens beside a pane says the header has none.
     #[test]
     fn a_machine_s_header_has_the_menu_forget_it() {
         let (menu, _) = stays(opened(remote_header(), Some('d')));
@@ -2525,11 +2523,15 @@ mod tests {
         let (menu, _) = stays(opened(local_header(), Some('d')));
         assert_eq!(closed(menu.key(&char('d'))), Done::Wrong(LOCAL_STAYS.to_owned()));
 
-        for key in ['z', 's', 'h'] {
-            let (menu, _) = stays(opened(local_header(), Some('b')));
-            assert_eq!(closed(menu.key(&char(key))), Done::Brief(Briefed::Every));
-            let (menu, _) = stays(opened(remote_header(), Some('b')));
-            assert_eq!(closed(menu.key(&char(key))), Done::Wrong(REMOTE_BRIEF.to_owned()));
+        let vps = || Machine::Remote("me@vps".parse().unwrap());
+        for (header, machine) in [(local_header(), Machine::Local), (remote_header(), vps())] {
+            let (menu, _) = stays(opened(header.clone(), Some('b')));
+            assert_eq!(closed(menu.key(&char('z'))), Done::Brief(Briefed::Every));
+            for key in ['s', 'h'] {
+                let (menu, _) = stays(opened(header.clone(), Some('b')));
+                let briefed = Briefed::Machine(machine.clone());
+                assert_eq!(closed(menu.key(&char(key))), Done::Brief(briefed), "{key}");
+            }
         }
         let (menu, _) = stays(opened(remote_header(), Some('n')));
         assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_MACHINE_PANE.to_owned()));

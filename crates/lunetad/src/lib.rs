@@ -31,6 +31,7 @@ mod remote;
 mod shells;
 pub mod skills;
 pub mod state;
+pub mod transcripts;
 mod watch;
 mod zellij;
 

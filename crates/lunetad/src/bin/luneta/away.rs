@@ -4,6 +4,7 @@
 //! question waits on a runtime of its own, on the thread that asks it, as
 //! luneta's threads for zellij's actions are none of tokio's.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, SystemTime};
 
@@ -19,6 +20,7 @@ use lunetad::closes::{Close, Closes};
 use lunetad::opens::Open;
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Skill};
+use lunetad::transcripts::{Reading, SessionId};
 use lunetad::{Destination, SessionName};
 use tokio::runtime::Runtime;
 use tonic::transport::Channel;
@@ -201,6 +203,17 @@ impl Away {
         let (session, started_at) = (session.to_string(), Some(started.into()));
         let request = KillRequest { on: Some(self.on()), session, started_at };
         self.ask(|mut daemon| async move { daemon.kill(request).await }).map(|_| ())
+    }
+
+    /// The end of each transcript `reading` reads there, by its session's
+    /// id, as `lunetad::transcripts` reads them there, or why it read none.
+    /// One by an id that names no session, as a newer daemon's could be, is
+    /// left out.
+    pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, String>, String> {
+        let request = reading.asked(Some(self.on()));
+        let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
+        let end = |(id, end): (String, String)| Some((SessionId::parse(&id)?, end));
+        Ok(answer.ends.into_iter().filter_map(end).collect())
     }
 
     fn on(&self) -> On {
