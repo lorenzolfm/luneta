@@ -5,9 +5,11 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::num::NonZeroU16;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +28,7 @@ use alacritty_terminal::vte::ansi::{Color as Colour, CursorShape, CursorStyle, N
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use rustix::fs::{Mode, OFlags};
 use rustix::termios::{self, LocalModes};
 
 use crate::host::Event;
@@ -88,6 +91,9 @@ impl From<Size> for WindowSize {
 #[derive(Clone)]
 struct Listener {
     events: Sender<Event>,
+    /// The program's number, which what it says carries: luneta counts the
+    /// programs it starts, and goes by what the last says.
+    number: u64,
     /// Whether the program drew since luneta last drew its screen. One
     /// `Said::Drew` stands for all it drew until then, so that luneta's queue
     /// holds one at the most, however fast the program draws.
@@ -120,7 +126,7 @@ impl EventListener for Listener {
             | Emitted::MouseCursorDirty => return,
         };
         // luneta is on its way out.
-        let _ = self.events.send(Event::Hosted(said));
+        let _ = self.events.send(Event::Hosted(self.number, said));
     }
 }
 
@@ -131,18 +137,28 @@ pub struct Hosted {
     /// luneta's end of the terminal, which says the modes the program set
     /// the terminal to.
     modes: File,
+    /// The program's end of the terminal, which luneta holds open, so that
+    /// the terminal hangs up only as luneta lets it go. A program that writes
+    /// as it ends, at once, as ssh does that reaches no machine, would else
+    /// hang it up before alacritty has read what it wrote, which alacritty
+    /// drops where it cannot lock the screen at once.
+    _far: File,
+    /// Its number, which what it says carries.
+    number: u64,
     size: Size,
     /// The listener's, which `draw` clears.
     drew: Arc<AtomicBool>,
 }
 
 impl Hosted {
-    /// Starts `program` in a terminal of `size`, in `dir`.
+    /// Starts `program` in a terminal of `size`, in `dir`, as the one
+    /// numbered `number`.
     pub fn start(
         program: String,
         args: Vec<String>,
         dir: &Path,
         size: Size,
+        number: u64,
         events: Sender<Event>,
     ) -> io::Result<Self> {
         // What the program writes as it ends is read before its terminal says
@@ -156,8 +172,9 @@ impl Hosted {
         };
         let pty = tty::new(&options, size.into(), 0)?;
         let modes = pty.file().try_clone()?;
+        let far = far_end(pty.file())?;
         let drew = Arc::new(AtomicBool::new(false));
-        let listener = Listener { events, drew: Arc::clone(&drew) };
+        let listener = Listener { events, number, drew: Arc::clone(&drew) };
         // zellij draws on the alternate screen, and keeps the scrollback of
         // each pane itself. It asks for the kitty keyboard protocol, which
         // `keys` speaks. Its cursor is the hollow block a program cannot ask
@@ -175,7 +192,13 @@ impl Hosted {
         let reader = EventLoop::new(Arc::clone(&screen), listener, pty, drain_on_exit, false)?;
         let pty = reader.channel();
         reader.spawn();
-        Ok(Hosted { screen, pty, modes, size, drew })
+        Ok(Hosted { screen, pty, modes, _far: far, number, size, drew })
+    }
+
+    /// Its number, of the programs luneta started, which what it says
+    /// carries.
+    pub fn number(&self) -> u64 {
+        self.number
     }
 
     pub fn size(&self) -> Size {
@@ -259,6 +282,15 @@ impl Drop for Hosted {
         // The reader is gone with the program already.
         let _ = self.pty.send(Msg::Shutdown);
     }
+}
+
+/// The program's end of the terminal whose end `near` is, opened as no
+/// terminal of luneta's own, and for none of what luneta runs to inherit.
+fn far_end(near: &File) -> io::Result<File> {
+    let path = rustix::pty::ptsname(near, Vec::new())?;
+    let path = Path::new(OsStr::from_bytes(path.as_bytes()));
+    let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
+    Ok(File::from(rustix::fs::open(path, flags, Mode::empty())?))
 }
 
 /// Draws `screen` into `area` of `buffer`, and says where its cursor is on
@@ -475,7 +507,7 @@ mod tests {
     #[test]
     fn a_colour_is_answered_where_lunetas_terminal_said_it_and_before_what_it_is() {
         let (events, inbox) = mpsc::channel();
-        let listener = Listener { events, drew: Arc::default() };
+        let listener = Listener { events, number: 1, drew: Arc::default() };
         let mut screen = Term::new(Config::default(), &TermSize::new(4, 1), listener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         // The background, the foreground, the second of the sixteen, and what
@@ -486,12 +518,41 @@ mod tests {
         let answers: Vec<String> = inbox
             .try_iter()
             .filter_map(|event| match event {
-                Event::Hosted(Said::AskedColour(index, spell)) => colours.answer(index, &*spell),
-                Event::Hosted(Said::Answer(answer)) => Some(answer),
+                Event::Hosted(_, Said::AskedColour(index, spell)) => colours.answer(index, &*spell),
+                Event::Hosted(_, Said::Answer(answer)) => Some(answer),
                 _ => None,
             })
             .collect();
         assert_eq!(answers, ["\x1b]11;rgb:1e1e/1e1e/2e2e\x07", "\x1b[?6c"]);
+    }
+
+    /// What a program says as it fails at once, as ssh does that reaches no
+    /// machine, reads as its terminal's text once the terminal closed, though
+    /// luneta had its screen locked as it ended, as luneta drawing it does.
+    #[test]
+    fn what_a_program_says_as_it_fails_at_once_is_its_text() {
+        let (events, inbox) = mpsc::channel();
+        let size = Size {
+            columns: NonZeroU16::new(40).unwrap(),
+            lines: NonZeroU16::new(4).unwrap(),
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let args = vec!["-c".to_owned(), "echo 'ssh: no such machine' >&2; exit 255".to_owned()];
+        let hosted =
+            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, 1, events).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let drawing = hosted.screen.lock();
+        // Long enough for the program to have ended.
+        thread::sleep(Duration::from_millis(300));
+        drop(drawing);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Event::Hosted(_, Said::Ended) = inbox.recv_timeout(left).unwrap() {
+                break;
+            }
+        }
+        assert_eq!(hosted.text(), "ssh: no such machine");
     }
 
     /// What `/bin/sh` shows as it ends, run with `stty` first in a terminal
@@ -511,7 +572,7 @@ mod tests {
         );
         let args = vec!["-c".to_owned(), program];
         let hosted =
-            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, events).unwrap();
+            Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, 1, events).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while hosted.text() != "ready" {
             assert!(Instant::now() < deadline, "the program printed {:?}", hosted.text());
@@ -521,7 +582,7 @@ mod tests {
         hosted.send(&b"typed\n"[..]);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if let Event::Hosted(Said::Ended) = inbox.recv_timeout(left).unwrap() {
+            if let Event::Hosted(_, Said::Ended) = inbox.recv_timeout(left).unwrap() {
                 break;
             }
         }

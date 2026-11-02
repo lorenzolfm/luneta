@@ -10,10 +10,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
-use lunetad::api::WatchRequest;
+use lunetad::api::refuge_response::{Ended, Kept, Went};
+use lunetad::api::{self, Client, GoRequest, ListClientsRequest, On, RefugeRequest, WatchRequest};
+use tonic::Code;
 
 use crate::demand::Detached;
-use crate::host::{eventually, script, start, Host, Vars, LUNETA};
+use crate::host::{eventually, folder_in, script, start, Host, Vars, LUNETA};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
 /// host's daemon, that reaches the test's other hosts by the destinations it
@@ -463,5 +465,64 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
     let said = "elsewhere: ssh: Could not resolve hostname elsewhere";
     eventually("what ssh said is in the log", || {
         fs::read_to_string(&log).ok().filter(|logged| logged.contains(said))
+    });
+}
+
+/// A daemon hands what a client asks of zellij on another machine to that
+/// machine's daemon, through the bridge it watches it on, which asks zellij
+/// there: where to take a client, a session's clients, and where a client
+/// goes on once its session ended. Without a machine, it asks its own; of
+/// one it does not reach, it says so.
+#[test]
+fn a_daemon_hands_on_what_is_asked_of_another_machine_s_zellij() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _work = far.serve("work");
+    far.zellij.list("work", &serde_json::json!([]));
+    far.zellij.clients("work", &[(1, "terminal_3")]);
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let on = |destination: &str| Some(On { destination: destination.to_owned() });
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let (at, to) = ("work".to_owned(), "play".to_owned());
+        let go = GoRequest { on: on("far"), at, to, pane: Some(2) };
+        daemon.go(go).await.unwrap();
+        let went = ["--session work action switch-session play --pane-id terminal_2"];
+        assert_eq!(far.zellij.went(), went);
+        assert!(here.zellij.went().is_empty());
+
+        let work = |on| ListClientsRequest { on, session: "work".to_owned() };
+        let listed = daemon.list_clients(work(on("far"))).await.unwrap().into_inner();
+        assert_eq!(listed.clients, [Client { id: 1, pane: Some(3) }]);
+        let here_none = daemon.list_clients(work(None)).await.unwrap_err();
+        assert_eq!(here_none.code(), Code::FailedPrecondition, "{here_none:?}");
+        let nowhere = daemon.list_clients(work(on("nowhere"))).await.unwrap_err();
+        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
+
+        let seats = |seat: &str| vec![seat.to_owned()];
+        let ended = RefugeRequest { on: on("far"), seats: seats("gone") };
+        let found = daemon.refuge(ended).await.unwrap().into_inner();
+        let refuge = Some(api::Refuge { session: "work".to_owned(), before: listed.clients });
+        assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
+        let detached = RefugeRequest { on: on("far"), seats: seats("work") };
+        let found = daemon.refuge(detached).await.unwrap().into_inner();
+        assert_eq!(found.ended, Some(Ended::Kept(Kept {})));
+
+        // A question that names no session, or none the client was in, asks
+        // nothing of zellij, here or there.
+        let (at, to) = (String::new(), "play".to_owned());
+        let nameless = daemon.go(GoRequest { on: on("far"), at, to, pane: None }).await.unwrap_err();
+        assert_eq!(nameless.code(), Code::InvalidArgument, "{nameless:?}");
+        let seatless = RefugeRequest { on: on("far"), seats: Vec::new() };
+        let seatless = daemon.refuge(seatless).await.unwrap_err();
+        assert_eq!(seatless.code(), Code::InvalidArgument, "{seatless:?}");
+        assert_eq!(far.zellij.went(), went);
     });
 }

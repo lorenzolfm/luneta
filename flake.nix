@@ -98,8 +98,11 @@
             # The daemon asks git how each work tree stands, and the tests make work
             # trees of their own for it to ask about. It asks `ps` which processes are
             # in front of the terminal a command runs on, and the tests ask it too.
+            # And the tests ask ssh how it reads the options the daemon has each ssh
+            # to a machine share one connection with.
             nativeCheckInputs = [
               pkgs.git
+              pkgs.openssh
               pkgs.procps
             ];
 

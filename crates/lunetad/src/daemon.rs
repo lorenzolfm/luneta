@@ -36,18 +36,27 @@ use std::time::{Duration, Instant, SystemTime};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
+use tokio::task;
 use tokio::time::timeout;
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::transport::Server;
+use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status};
 
+use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
-use crate::api::{self, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse};
+use crate::api::refuge_response::{self, Kept, Went};
+use crate::api::{
+    self, GoRequest, GoResponse, InfoRequest, InfoResponse, ListAgentsRequest, ListAgentsResponse,
+    ListClientsRequest, ListClientsResponse, RefugeRequest, RefugeResponse,
+};
 use crate::core::{self, Command, Wakes};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
+use crate::remote::{Bridges, Destination};
 use crate::watch::Troubles;
+use crate::zellij::SessionName;
 use crate::{
-    claude, client, git, github, log, metadata, panes, release, remote, shells, watch, zellij,
+    claude, client, clients, git, github, log, metadata, moves, panes, release, remote, shells,
+    watch, zellij,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -165,12 +174,15 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
-    remote::follow(core.clone(), watchers.kept.subscribe(), SWEEP)?;
+    let bridges = Arc::new(Bridges::default());
+    let folder = claim.folder.clone();
+    remote::follow(core.clone(), watchers.kept.subscribe(), SWEEP, folder, Arc::clone(&bridges))?;
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started: SystemTime::now(), sockets, claude_folder, core, watchers };
+    let started = SystemTime::now();
+    let host = Host { started, sockets, claude_folder, core, watchers, bridges };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     // Once the daemon has been alone long enough, or the thread that would say
@@ -365,6 +377,8 @@ struct Host {
     claude_folder: Option<PathBuf>,
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
+    /// The daemons of the other machines it watches, while it reaches them.
+    bridges: Arc<Bridges>,
 }
 
 #[tonic::async_trait]
@@ -401,9 +415,103 @@ impl Daemon for Host {
         };
         watched.map(Response::new)
     }
+
+    async fn go(&self, request: Request<GoRequest>) -> Result<Response<GoResponse>, Status> {
+        let GoRequest { on, at, to, pane } = request.into_inner();
+        let (at, to) = (named("at", &at)?, named("to", &to)?);
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (at, to) = (at.to_string(), to.to_string());
+            return daemon.go(GoRequest { on: None, at, to, pane }).await;
+        }
+        let went = task::spawn_blocking(move || moves::went(&at, &to, pane)).await;
+        let went = went.map_err(|error| unfinished(&error))?;
+        went.map_err(Status::failed_precondition)?;
+        Ok(Response::new(GoResponse {}))
+    }
+
+    async fn list_clients(
+        &self,
+        request: Request<ListClientsRequest>,
+    ) -> Result<Response<ListClientsResponse>, Status> {
+        let ListClientsRequest { on, session } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.list_clients(ListClientsRequest { on: None, session }).await;
+        }
+        let listed = task::spawn_blocking(move || clients_of(&session)).await;
+        let listed = listed.map_err(|error| unfinished(&error))?;
+        let clients = listed.map_err(Status::failed_precondition)?;
+        Ok(Response::new(ListClientsResponse { clients }))
+    }
+
+    async fn refuge(
+        &self,
+        request: Request<RefugeRequest>,
+    ) -> Result<Response<RefugeResponse>, Status> {
+        let RefugeRequest { on, seats } = request.into_inner();
+        let seats: Vec<SessionName> =
+            seats.iter().map(|seat| named("seats", seat)).collect::<Result<_, _>>()?;
+        if seats.is_empty() {
+            return Err(Status::invalid_argument("seats: the client was in none"));
+        }
+        if let Some(mut daemon) = self.bridged(on)? {
+            let seats = seats.iter().map(SessionName::to_string).collect();
+            return daemon.refuge(RefugeRequest { on: None, seats }).await;
+        }
+        let sockets = self.sockets.clone();
+        let found = task::spawn_blocking(move || {
+            // No session here is one luneta's terminal is a pane of: that
+            // luneta's client is on another machine.
+            moves::refuge(&sockets, &seats, None, |session| clients_of(session).ok())
+        });
+        let refuge = |moves::Refuge { session, before }| api::Refuge {
+            session: session.to_string(),
+            before,
+        };
+        let ended = match found.await.map_err(|error| unfinished(&error))? {
+            moves::Ended::Kept => refuge_response::Ended::Kept(Kept {}),
+            moves::Ended::Went(found) => {
+                refuge_response::Ended::Went(Went { refuge: found.map(refuge) })
+            },
+        };
+        Ok(Response::new(RefugeResponse { ended: Some(ended) }))
+    }
+}
+
+/// The clients of `session` here, as zellij lists them now, or why not.
+fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
+    let listed = clients::list(std::process::Command::new("zellij"), session.as_str())?;
+    Ok(listed.into_iter().map(clients::Client::to_api).collect())
+}
+
+/// `name`, of the question's `field`, as a session's name zellij takes, or
+/// why the question is invalid: it is not one.
+fn named(field: &str, name: &str) -> Result<SessionName, Status> {
+    SessionName::running(name).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
+}
+
+/// Why what the daemon asked of zellij did not answer: the thread it was asked
+/// on panicked.
+fn unfinished(error: &task::JoinError) -> Status {
+    Status::internal(format!("zellij's answer was lost: {error}"))
 }
 
 impl Host {
+    /// The daemon of the machine `on` names, where it names one, which the
+    /// question is handed on to; none for this machine; or why not, as one
+    /// this daemon does not reach now.
+    fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
+        let Some(api::On { destination }) = on else {
+            return Ok(None);
+        };
+        let destination: Destination =
+            destination.parse().map_err(|why: String| Status::invalid_argument(why))?;
+        let daemon = self.bridges.to(&destination);
+        let unreached = || Status::unavailable(format!("lunetad does not reach {destination} now"));
+        daemon.map(Some).ok_or_else(unreached)
+    }
+
     /// Asks the core, and waits for its answer. A core with too many
     /// questions open has the client told that the daemon is busy, rather
     /// than wait.
