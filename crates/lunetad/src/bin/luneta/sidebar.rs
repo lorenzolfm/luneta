@@ -1480,6 +1480,14 @@ impl Sidebar {
         }
     }
 
+    /// The machine whose header the highlight is on, if it is on one.
+    pub fn on_header(&self) -> Option<Machine> {
+        match self.cursor.as_ref()? {
+            Spot::Machine(machine) => Some(machine.clone()),
+            Spot::Local(_) | Spot::Remote(..) => None,
+        }
+    }
+
     /// What the picker lists, as the sidebar knows the host now: every
     /// session newest first, each with its panes in the order of their tabs,
     /// and the agents in them, those of the session luneta's zellij is in
@@ -1490,12 +1498,15 @@ impl Sidebar {
         let mut listing = Listing {
             here_pane: self.here_place().ok().filter(|_| self.on == Machine::Local),
             away: self.away.clone(),
+            this: self.this.clone(),
             ..Listing::default()
         };
         let Some(host) = &self.host else {
             listing.here = here;
             return listing;
         };
+        let others = machines(host).others.into_iter();
+        listing.remotes = others.filter(|(_, seen)| seen.is_ok()).map(|(at, _)| at).collect();
         let seated = seated(&host.agents, &host.sessions);
         let here_key =
             listing.here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
@@ -7589,6 +7600,21 @@ mod tests {
         let open = Open::Tab { session: session_name("main"), tab, alone_since: None };
         let there = Asked::OpenThere { menu, on: Machine::Local, place: here, open };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), there);
+    }
+
+    /// The picker lists the machines lunetad reaches, by this one's name,
+    /// and none it is reaching or does not reach. The highlight on a
+    /// machine's header is on that machine, and on a row of it, on none.
+    #[test]
+    fn the_picker_lists_the_machines_lunetad_reaches() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        let listing = sidebar.listing();
+        assert_eq!((listing.this.as_str(), listing.remotes), ("mac", vec![nixos()]));
+        sidebar.cursor = Some(Spot::Machine(Machine::Remote(nixos())));
+        assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
+        assert_eq!(sidebar.on_header(), None);
     }
 
     /// What is pasted in the box `n m` opens goes in it, on one line, and a

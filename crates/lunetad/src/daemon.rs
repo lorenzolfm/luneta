@@ -50,6 +50,7 @@ use crate::api::closes_response::{self, Pane, Session as WholeSession, Tab as Cl
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_printed_response::{self, File as PrintedFile, Nothing, Top};
+use crate::api::list_dirs_response::Dir;
 use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
@@ -57,7 +58,8 @@ use crate::api::{
     self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
     GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
-    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
+    ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
+    ListDirsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
     NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
     RefugeResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
@@ -73,8 +75,8 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
-    claude, client, clients, closes, git, github, log, metadata, moves, names, opens, panes,
-    printed, release, remote, shells, skills, watch, zellij,
+    claude, client, clients, closes, eza, git, github, log, metadata, moves, names, opens, panes,
+    printed, release, remote, shells, skills, watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -576,6 +578,36 @@ impl Daemon for Host {
         let (name, since) = named.map_err(Status::failed_precondition)?;
         let named_at = Some(since.into());
         Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at }))
+    }
+
+    async fn list_dirs(
+        &self,
+        request: Request<ListDirsRequest>,
+    ) -> Result<Response<ListDirsResponse>, Status> {
+        let ListDirsRequest { on } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.list_dirs(ListDirsRequest { on: None }).await;
+        }
+        let visited = task::spawn_blocking(zoxide::visited_free).await;
+        let visited = visited.map_err(|error| unfinished(&error))?;
+        let visited = visited.map_err(Status::failed_precondition)?;
+        let dir = |zoxide::Dir { path, name }| Dir { path, name: name.to_string() };
+        Ok(Response::new(ListDirsResponse { dirs: visited.into_iter().map(dir).collect() }))
+    }
+
+    async fn list_contents(
+        &self,
+        request: Request<ListContentsRequest>,
+    ) -> Result<Response<ListContentsResponse>, Status> {
+        let ListContentsRequest { on, dir } = request.into_inner();
+        let dir = directory("dir", dir)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.list_contents(ListContentsRequest { on: None, dir }).await;
+        }
+        let listed = task::spawn_blocking(move || eza::listed(&dir)).await;
+        let listed = listed.map_err(|error| unfinished(&error))?;
+        let listed = listed.map_err(Status::failed_precondition)?;
+        Ok(Response::new(ListContentsResponse { listed }))
     }
 
     async fn start(

@@ -15,6 +15,7 @@ pub mod clients;
 pub mod closes;
 mod core;
 mod daemon;
+pub mod eza;
 pub mod folder;
 mod git;
 mod github;

@@ -13,8 +13,8 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
     closes_response, AskResponse, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
-    ListClientsRequest, ListSkillsRequest, NameSessionRequest, NameSessionResponse, On,
-    RefugeRequest, RefugeResponse, StartRequest,
+    ListClientsRequest, ListContentsRequest, ListDirsRequest, ListDirsResponse, ListSkillsRequest,
+    NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse, StartRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
@@ -23,6 +23,7 @@ use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Skill};
 use lunetad::transcripts::{Reading, SessionId};
+use lunetad::zoxide::Dir;
 use lunetad::{Destination, SessionName};
 use tokio::runtime::Runtime;
 use tokio_stream::{Stream, StreamExt as _};
@@ -104,6 +105,23 @@ impl Away {
         let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
         let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
         named_by(&self.on, named)
+    }
+
+    /// The directories zoxide knows there, best first, each with the name a
+    /// session luneta makes there takes now, as `lunetad::zoxide::visited_free`
+    /// names them there, as `dirs_of` reads them; or why it did not list them.
+    pub fn dirs(&mut self) -> Result<Vec<Dir>, String> {
+        let request = ListDirsRequest { on: Some(self.on()) };
+        let listed = self.ask(|mut daemon| async move { daemon.list_dirs(request).await })?;
+        Ok(dirs_of(listed))
+    }
+
+    /// What is in the directory `dir` there, as `lunetad::eza::listed` lists
+    /// it there, or why eza did not.
+    pub fn contents(&mut self, dir: &str) -> Result<String, String> {
+        let request = ListContentsRequest { on: Some(self.on()), dir: dir.to_owned() };
+        let listed = self.ask(|mut daemon| async move { daemon.list_contents(request).await })?;
+        Ok(listed.listed)
     }
 
     /// The clients of `session` there, as zellij lists them now, or why it
@@ -346,6 +364,18 @@ fn named_by(
     Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok())))
 }
 
+/// The directories in `answer`, in its order: those by an absolute path,
+/// each named for a session zellij would make. Another is none a session
+/// can be made in, as a daemon that did not do what its answer says could
+/// send.
+fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
+    let dir = |dir: lunetad::api::list_dirs_response::Dir| {
+        let name = SessionName::running(&dir.name).ok()?;
+        dir.path.starts_with('/').then_some(Dir { path: dir.path, name })
+    };
+    answer.dirs.into_iter().filter_map(dir).collect()
+}
+
 /// What `status`, of a question for `on`, says: what lunetad said, or what a
 /// daemon older than the question would mean.
 fn said(on: &Destination, status: &Status) -> String {
@@ -442,5 +472,30 @@ mod tests {
         assert_eq!(named_by(&on, answer("cdk-2", None)), Ok((cdk, None)));
         let why = "nixos: lunetad named a session \"../x\": name cannot contain '/'";
         assert_eq!(named_by(&on, answer("../x", None)), Err(why.to_owned()));
+    }
+
+    /// The directories another machine's zoxide knows are those of the
+    /// answer, in its order, but for one by no absolute path, or named for a
+    /// session zellij would not make.
+    #[test]
+    fn another_machine_s_directories_are_those_a_session_can_be_made_in() {
+        let dir = |path: &str, name: &str| lunetad::api::list_dirs_response::Dir {
+            path: path.to_owned(),
+            name: name.to_owned(),
+        };
+        let answer = ListDirsResponse {
+            dirs: vec![
+                dir("/home/me/api", "api-2"),
+                dir("home/me/relative", "relative"),
+                dir("/home/me/odd", "../odd"),
+                dir("/home/me/blog", "blog"),
+            ],
+        };
+        let made = |path: &str, name: &str| Dir {
+            path: path.to_owned(),
+            name: SessionName::running(name).unwrap(),
+        };
+        let dirs = [made("/home/me/api", "api-2"), made("/home/me/blog", "blog")];
+        assert_eq!(dirs_of(answer), dirs);
     }
 }

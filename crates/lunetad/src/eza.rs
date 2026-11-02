@@ -1,13 +1,12 @@
-//! What luneta asks of zoxide and of eza, for the picker's directories: the
-//! directories you go to, as zoxide ranks them, and what is in one, as eza
-//! lists it. luneta runs both itself, rather than lunetad.
+//! What is in a directory of the machine eza runs on, as eza lists it, for
+//! luneta's picker to show. luneta asks it of its own machine, and a daemon
+//! of its machine for a luneta on another, whose picker shows one of this.
 
 use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use lunetad::program;
-pub use lunetad::zoxide::{visited, Dir};
+use crate::program;
 
 /// How long eza has to list what is in a directory.
 const ANSWER: Duration = Duration::from_secs(2);

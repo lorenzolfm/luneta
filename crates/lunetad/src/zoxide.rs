@@ -33,6 +33,19 @@ pub fn visited() -> Result<Vec<Dir>, String> {
     Ok(dirs_in(&listed))
 }
 
+/// The directories zoxide knows, best first, each with the name a session
+/// luneta makes there takes now: the one `visited` gives it, with a `-2`
+/// where a session has that name, as `names::free_for` names one. Or why
+/// zoxide did not list them, or why luneta cannot tell which names zellij
+/// has.
+pub fn visited_free() -> Result<Vec<Dir>, String> {
+    let visited = visited()?;
+    let sessions = names::named().ok_or("luneta cannot tell which sessions zellij has")?;
+    let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
+    let free = |dir: Dir| Dir { name: dir.name.free(&names), path: dir.path };
+    Ok(visited.into_iter().map(free).collect())
+}
+
 /// The directories of what `zoxide query --list` printed, a path a line. A
 /// line that is no absolute path is no directory of zoxide's, and would be
 /// read from the asker's own. One that is no UTF-8 is of a directory no

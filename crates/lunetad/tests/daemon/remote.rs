@@ -19,8 +19,9 @@ use lunetad::api::refuge_response::{Ended, Kept, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
     self, AskRequest, Client, CloseRequest, ClosesRequest, GoRequest, KeepPrintedRequest,
-    KillRequest, ListClientsRequest, ListSkillsRequest, NameSessionRequest, On, OpenRequest,
-    RefugeRequest, StartRequest, TranscriptEndsRequest, WatchRequest,
+    KillRequest, ListClientsRequest, ListContentsRequest, ListDirsRequest, ListSkillsRequest,
+    NameSessionRequest, On, OpenRequest, RefugeRequest, StartRequest, TranscriptEndsRequest,
+    WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::links::{self, At, Link, Pasted, Ready};
@@ -926,6 +927,58 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
 /// Where a key goes for `pasted` on the machine `on`, as `daemon` hands on
 /// the one answer its stream holds, by places of the panes `pasted` says; or
 /// why there is none.
+/// The directories zoxide knows on another machine are listed there, best
+/// first, each named for the session a luneta makes there now: past the
+/// name of a session that runs there. What is in one is what eza lists
+/// there. A directory by no absolute path is invalid; a machine the daemon
+/// does not reach lists nothing.
+#[test]
+fn another_machine_s_directories_are_listed_there() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let dir = tempfile::tempdir().unwrap();
+    let (work, notes) = (dir.path().join("work"), dir.path().join("notes"));
+    fs::create_dir(&work).unwrap();
+    fs::create_dir(&notes).unwrap();
+    let (work, notes) = (work.display().to_string(), notes.display().to_string());
+    let lists = |dirs: &[&str]| {
+        dirs.iter().fold(String::new(), |mut script, dir| {
+            writeln!(script, "echo '{dir}'").unwrap();
+            script
+        })
+    };
+    script(&far.zellij.bin().join("zoxide"), &lists(&[&work, &notes]));
+    script(&here.zellij.bin().join("zoxide"), &lists(&["/here/only"]));
+    script(&far.zellij.bin().join("eza"), "echo \"far: $*\"\n");
+    script(&here.zellij.bin().join("eza"), "echo \"here: $*\"\n");
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let on = |destination: &str| Some(On { destination: destination.to_owned() });
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let listed = daemon.list_dirs(ListDirsRequest { on: on("far") }).await.unwrap();
+        let named: Vec<(String, String)> =
+            listed.into_inner().dirs.into_iter().map(|dir| (dir.path, dir.name)).collect();
+        let dirs = [(work.clone(), "work-2".to_owned()), (notes.clone(), "notes".to_owned())];
+        assert_eq!(named, dirs);
+        let nowhere = daemon.list_dirs(ListDirsRequest { on: on("nowhere") }).await.unwrap_err();
+        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
+
+        let contents = |dir: &str| ListContentsRequest { on: on("far"), dir: dir.to_owned() };
+        let listed = daemon.list_contents(contents(&notes)).await.unwrap().into_inner().listed;
+        assert!(listed.starts_with("far: ") && listed.ends_with(&format!(" -- {notes}\n")));
+        let relative = daemon.list_contents(contents("notes")).await.unwrap_err();
+        assert_eq!(relative.code(), Code::InvalidArgument, "{relative:?}");
+    });
+}
+
 async fn pasted_on(
     daemon: &mut DaemonClient<Channel>,
     on: &str,
