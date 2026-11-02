@@ -6,6 +6,12 @@
 //! would; `Esc` gives it up. Short of `Enter`, nothing is sent: what is
 //! written waits for you, as what you type does.
 //!
+//! What you said goes in the pane zellij is on as it is written, as what
+//! you type would: where something took zellij elsewhere meanwhile, as
+//! another agent's `luneta go` does, or the pane ended, it goes there. zellij
+//! tells luneta of no such move, and asking it each time would hold every
+//! dictation up for a move few make.
+//!
 //! A box along the bottom of zellij shows what the model makes of what you
 //! say as you say it, and how loud the microphone hears you. It has the keys
 //! and the mouse until it closes, as every box over zellij does, so that
