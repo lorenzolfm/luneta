@@ -104,6 +104,9 @@ const FOLDED: &str = "▸";
 const RULE: &str = "─";
 /// What runs along a machine's header, where a session's row has `RULE`.
 const MACHINE_RULE: &str = "═";
+/// Nerd Fonts' `fa-desktop`, before a machine's name on its header, one
+/// column wide as the icons of panes are.
+const COMPUTER: &str = "\u{f108}";
 /// What runs down the sidebar's last column, its edge, between it and zellij,
 /// open or collapsed.
 const EDGE: &str = "│";
@@ -3959,11 +3962,13 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             let (word, since) = away.said();
             let age = since.map(|since| age(since, now)).unwrap_or_default();
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
-            let said = cut(&format!("{name} · {word}"), width.saturating_sub(3 + reserve + 1));
-            let gap = width.saturating_sub(3 + said.width() + age.width() + 1);
+            let said = cut(&format!("{name} · {word}"), width.saturating_sub(5 + reserve + 1));
+            let gap = width.saturating_sub(5 + said.width() + age.width() + 1);
             vec![Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
+                Span::raw(" "),
+                Span::styled(COMPUTER, dim),
                 Span::raw(" "),
                 Span::styled(said, dim),
                 Span::raw(" ".repeat(gap)),
@@ -3974,16 +3979,19 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
-            let name = cut(name, width.saturating_sub(4 + reserve + 1));
-            let rule = width.saturating_sub(3 + name.width() + 1 + reserve + 1);
+            let name = cut(name, width.saturating_sub(6 + reserve + 1));
+            let rule = width.saturating_sub(5 + name.width() + 1 + reserve + 1);
             // Folded, its rule says luneta's zellij is in one of its
             // sessions, as the session's own row would.
             let rule_style = if *here && folded { Style::new().fg(ACCENT) } else { dim };
+            let bold = Style::new().add_modifier(Modifier::BOLD);
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(if folded { FOLDED } else { UNFOLDED }, dim),
                 Span::raw(" "),
-                Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
+                Span::styled(COMPUTER, bold),
+                Span::raw(" "),
+                Span::styled(name, bold),
                 Span::raw(" "),
                 Span::styled(MACHINE_RULE.repeat(rule), rule_style),
             ];
@@ -4507,7 +4515,7 @@ mod tests {
                 "─ luneta ──────────────────────",
                 "─ 2 sessions ───────────── ●1 ─",
                 "",
-                " ▾ mac ════════════════════ ●1",
+                " ▾ \u{f108} mac ══════════════════ ●1",
                 " ▾ older ────────────────── ●1",
                 "   ● \u{ec82} fold                 1m",
                 "     \u{e6ae} nvim src/main.rs",
@@ -5535,7 +5543,7 @@ mod tests {
                 "─ luneta ──────────────────────",
                 "─ 1 session ──────── ●1 •3 ⠋1 ─",
                 "",
-                " ▾ mac ════════════════════ ●1",
+                " ▾ \u{f108} mac ══════════════════ ●1",
                 " ▾ s ────────────────────── ●1",
                 "   ⠋ \u{e795} cargo build --rele… 59s",
                 "   ● \u{e795} sudo -k true        59s",
@@ -5622,7 +5630,7 @@ mod tests {
                 "─ luneta ──────────────────────",
                 "─ 1 session ────────────── •2 ─",
                 "",
-                " ▾ mac ═══════════════════════",
+                " ▾ \u{f108} mac ═════════════════════",
                 " ▾ s ─────────────────────────",
                 "  •✓ \u{ec82} fold                 1m",
                 "  •✓ \u{e795} cargo test          29s",
@@ -5648,7 +5656,7 @@ mod tests {
                 "─ luneta ──────────────────────",
                 "─ 1 session ────────────── •1 ─",
                 "",
-                " ▾ mac ═══════════════════════",
+                " ▾ \u{f108} mac ═════════════════════",
                 " ▾ s ─────────────────────────",
                 "   ✓ \u{ec82} fold                 1m",
                 "  •✓ \u{e795} cargo test          31s",
@@ -5992,7 +6000,7 @@ mod tests {
     /// The line the sessions of `mac`, the machine of `fresh`, start on, as
     /// the sidebar draws them: under its header, where it has one.
     fn sessions_from(lines: &[String]) -> usize {
-        let header = lines.get(HEADER).is_some_and(|line| line.starts_with(" ▾ mac ═"));
+        let header = lines.get(HEADER).is_some_and(|line| line.starts_with(" ▾ \u{f108} mac ═"));
         HEADER + usize::from(header)
     }
 
@@ -7220,7 +7228,7 @@ mod tests {
         // Four lines of rows, between the rule and the legend.
         let area = Rect::new(0, 0, 32, 16);
         let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 16)[HEADER].clone();
-        assert_eq!(first(&mut sidebar), format!(" ▾ mac {}", "═".repeat(23)));
+        assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area);
@@ -7310,14 +7318,14 @@ mod tests {
                 "─ luneta ──────────────────────",
                 "─ 2 sessions ───────────── ●1 ─",
                 "",
-                " ▾ mac ═══════════════════════",
+                " ▾ \u{f108} mac ═════════════════════",
                 " ▾ main ──────────────────────",
                 "     \u{e795} w/a",
-                " ▾ nixos ══════════════════ ●1",
+                " ▾ \u{f108} nixos ════════════════ ●1",
                 " ▾ main ─────────────────── ●1",
                 "   ● \u{ec82} fix                  1m",
-                " ▸ me@vps · unreachable     1m",
-                " ▸ pi · reaching…",
+                " ▸ \u{f108} me@vps · unreachable   1m",
+                " ▸ \u{f108} pi · reaching…",
                 "",
             ]
         );
@@ -7352,9 +7360,9 @@ mod tests {
             [
                 " ▾ main",
                 "     \u{e795} w/a",
-                " ▸ nixos ══════════════════ ●1",
-                " ▸ me@vps · unreachable     1m",
-                " ▸ pi · reaching…",
+                " ▸ \u{f108} nixos ════════════════ ●1",
+                " ▸ \u{f108} me@vps · unreachable   1m",
+                " ▸ \u{f108} pi · reaching…",
             ]
         );
         type_in(&mut sidebar, "l");
@@ -7701,7 +7709,7 @@ mod tests {
         host.remotes.push(remote("-oProxyCommand=sh", down(100)));
         sidebar.heard(host);
         let lines = screen(&mut sidebar, false, 32, 16);
-        let headers = lines.iter().filter(|line| line.starts_with(" ▾ nixos")).count();
+        let headers = lines.iter().filter(|line| line.starts_with(" ▾ \u{f108} nixos")).count();
         assert_eq!(headers, 1);
         assert!(!lines.iter().any(|line| line.contains("ProxyCommand")));
         assert_eq!(
@@ -7732,7 +7740,7 @@ mod tests {
             type_in(&mut sidebar, "hl ");
             assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
             let lines = screen(&mut sidebar, true, area.width, area.height);
-            assert_eq!(lines[9], " ▸ me@vps · unreachable     1m");
+            assert_eq!(lines[9], " ▸ \u{f108} me@vps · unreachable   1m");
             assert_eq!(click(&mut sidebar, 20, 9, area), Asked::Take);
             assert_eq!(sidebar.folds.contains(Fold::Machine(&vps)), folded);
         }
@@ -7791,7 +7799,7 @@ mod tests {
         type_in(&mut sidebar, "K");
         assert_eq!(names_listed(&sidebar), ["work", "main", "main"]);
         let rows = rows_shown(&mut sidebar);
-        assert_eq!(rows[4], " ▾ nixos ══════════════════ ●1");
+        assert_eq!(rows[4], " ▾ \u{f108} nixos ════════════════ ●1");
     }
 
     /// A search looks through every machine's sessions, a folded machine's
@@ -7807,7 +7815,7 @@ mod tests {
         assert_eq!(
             lines[HEADER..HEADER + 3],
             [
-                " ▾ nixos ══════════════════ ●1",
+                " ▾ \u{f108} nixos ════════════════ ●1",
                 " ▾ main ─────────────────── ●1",
                 "   ● \u{ec82} fix                  1m",
             ]
