@@ -342,7 +342,7 @@ pub fn raise(title: Option<&str>) {
 /// That is luneta's own, which tells this one of the click through a socket
 /// of its.
 #[cfg(any(target_os = "macos", test))]
-pub mod notifier {
+mod notifier {
     use std::collections::HashMap;
     use std::fs;
     use std::io::{self, BufRead as _, BufReader};
@@ -451,7 +451,7 @@ pub mod notifier {
     /// Takes `orders` in turn, until luneta ends, and takes down what is up
     /// then.
     #[cfg(target_os = "macos")]
-    pub fn serve(
+    pub(super) fn serve(
         mut orders: tokio::sync::mpsc::UnboundedReceiver<super::Order>,
         events: &Sender<Event>,
     ) {
