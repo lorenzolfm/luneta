@@ -455,11 +455,16 @@ struct Rows {
 impl Rows {
     /// `rows` in the place of these, the highlight on the row of `held`
     /// where one is; or else, where that row went, on the row that took its
-    /// place, as the one after a row deleted; or else on the row `start`. No
-    /// further than the last.
+    /// place, as the one after a row deleted, counted under the row of the
+    /// session typed, which comes and goes over them; or else on the row
+    /// `start`. No further than the last.
     fn replace(&mut self, rows: Vec<Row>, held: Option<&Key>, start: usize) {
         let at = held.and_then(|held| rows.iter().position(|row| row.key == *held));
-        let was = self.at.filter(|_| held.is_some()).unwrap_or(start);
+        let over = |rows: &[Row]| {
+            usize::from(matches!(rows.first().map(|row| &row.key), Some(Key::New { .. })))
+        };
+        let was = self.at.filter(|_| held.is_some());
+        let was = was.map_or(start, |was| (was + over(&rows)).saturating_sub(over(&self.rows)));
         let last = rows.len().checked_sub(1);
         self.at = at.or_else(|| last.map(|last| was.min(last)));
         self.rows = rows;
@@ -1411,7 +1416,8 @@ impl Picker {
     /// this machine, where it is the only one listed, once zellij here said
     /// which sessions ended. Or else has you pick the machine to make it on,
     /// the highlight on the one the picker aims at, but where a session there
-    /// has the name, on the first that makes it now.
+    /// has the name, on the first that makes it now, or else on the first
+    /// that may, once zellij there says which sessions ended.
     fn choose(&mut self, session: SessionName) -> Picked {
         let machines = self.machines();
         if let [only] = machines.as_slice() {
@@ -1420,11 +1426,11 @@ impl Picker {
                 Err(_) => Picked::Nothing,
             };
         }
-        let aimed = machines.iter().find(|on| {
-            **on == self.aim && !self.makes_on(on, &session).is_err_and(Refused::taken)
-        });
-        let makes = || machines.iter().find(|on| self.makes_on(on, &session).is_ok());
-        let at = aimed.or_else(makes).cloned().unwrap_or(Machine::Local);
+        let may = |on: &&Machine| !self.makes_on(on, &session).is_err_and(Refused::taken);
+        let makes = |on: &&Machine| self.makes_on(on, &session).is_ok();
+        let aimed = machines.iter().filter(may).find(|on| **on == self.aim);
+        let at = aimed.or_else(|| machines.iter().find(makes));
+        let at = at.or_else(|| machines.iter().find(may)).cloned().unwrap_or(Machine::Local);
         self.stage = Stage::Choose { session, at };
         Picked::Nothing
     }
@@ -3126,6 +3132,17 @@ mod tests {
         assert_eq!(names(&picker), ["+"]);
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert!(picker.asks().is_empty());
+
+        // The row that comes over the rest as the name is let go of takes no
+        // row's place: the highlight goes on to the row after all the same.
+        let mut picker = Picker::open(1, List::Sessions, Listing::default(), Machine::Local);
+        picker.heard(kept_here(Ok(vec![ended("x", 10), ended("xy", 20)])));
+        typed(&mut picker, "x");
+        assert_eq!(names(&picker), ["ended", "x", "xy"]);
+        assert_eq!(lit(&picker), "x");
+        press(&mut picker, KeyCode::Delete);
+        assert_eq!(names(&picker), ["+", "ended", "xy"]);
+        assert_eq!(lit(&picker), "xy");
     }
 
     /// A session `Del` let go of stays off the list till zellij said it let
@@ -3724,9 +3741,11 @@ mod tests {
 
     /// With more than one machine listed, the row of a name typed is over
     /// them all, and `Enter` on it has you pick the machine to make it on, as
-    /// the search's line and the preview say: `j` and `k`, or the arrows,
-    /// move the highlight from this machine, no further than the last or the
-    /// first, and `Enter` makes the session on the one highlighted, once
+    /// the search's line and the preview say. It starts on this machine, or,
+    /// where a session here has the name, on one that may make it, once
+    /// zellij there says which sessions ended. `j` and `k`, or the arrows,
+    /// move the highlight, no further than the last machine or the first,
+    /// and `Enter` makes the session on the one highlighted, once
     /// zellij there said which sessions ended, and of none there by the name,
     /// one that runs or one that ended. `Esc` goes back to the search, and a
     /// click on a machine does what `Enter` does there. A session the search
@@ -3743,7 +3762,19 @@ mod tests {
         picker.heard(kept_here(Ok(Vec::new())));
         let name = |name: &str| SessionName::parse(name).unwrap();
         let lit_machine = |picker: &Picker| machines(picker).1.unwrap_or_default();
-        typed(&mut picker, "notes");
+        let retyped = |picker: &mut Picker, term: &str| {
+            for _ in 0..10 {
+                press(picker, KeyCode::Backspace);
+            }
+            typed(picker, term);
+        };
+        typed(&mut picker, "web");
+        assert_eq!(grouped(&picker), ["+", "── desk", "web"]);
+        press(&mut picker, KeyCode::Up);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
+        press(&mut picker, KeyCode::Esc);
+        retyped(&mut picker, "notes");
         assert_eq!(grouped(&picker), ["+"]);
         assert_eq!(lit(&picker), "+");
         assert!(said(&picker).contains(r#"<ENTER> Make "notes" on…"#), "{}", said(&picker));
@@ -3785,12 +3816,6 @@ mod tests {
         assert_eq!(spot, Some(Pick::Machine(nixos())));
         assert_eq!(picker.click(spot.unwrap()), there);
 
-        let retyped = |picker: &mut Picker, term: &str| {
-            for _ in 0..10 {
-                press(picker, KeyCode::Backspace);
-            }
-            typed(picker, term);
-        };
         retyped(&mut picker, "api");
         assert_eq!(grouped(&picker), ["+", "── nixos", "api"]);
         assert_eq!(lit(&picker), "api");
