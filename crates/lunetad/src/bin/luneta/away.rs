@@ -12,11 +12,11 @@ use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    closes_response, AskResponse, Client, ClosesRequest, DeleteExitedRequest, DumpScreenRequest,
-    GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest,
-    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
-    NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
-    RenameSessionRequest, StartRequest,
+    closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
+    DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
+    ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
+    ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
+    RenameSessionRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
@@ -86,20 +86,6 @@ impl Away {
         self.ask(|mut daemon| async move { daemon.go(request).await }).map(|_| ())
     }
 
-    /// Has zellij there take the client that last typed in the session `at`
-    /// to a session it makes, `to`, that starts in `cwd`, as
-    /// `lunetad::moves::start` says, or says why it did not.
-    pub fn start(
-        &mut self,
-        at: &SessionName,
-        to: &SessionName,
-        cwd: Option<&str>,
-    ) -> Result<(), String> {
-        let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(str::to_owned));
-        let request = StartRequest { on: Some(self.on()), at, to, cwd };
-        self.ask(|mut daemon| async move { daemon.start(request).await }).map(|_| ())
-    }
-
     /// The name a session luneta makes for `dir` there takes, as
     /// `lunetad::names::free_for` names it there, with the time just before
     /// it read which names zellij there has, by that machine's clock, as
@@ -108,6 +94,19 @@ impl Away {
         let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
         let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
         named_by(&self.on, named)
+    }
+
+    /// The time just before zellij there read which names it has, by that
+    /// machine's clock, where it would make a session called `to` now, as
+    /// `lunetad::names::unused` says there; or why it would make none. Every
+    /// daemon that answers this says when: an answer without the time is of
+    /// one that did not do what its answer says, and is refused.
+    pub fn check(&mut self, to: &SessionName) -> Result<SystemTime, String> {
+        let request = CheckNameRequest { on: Some(self.on()), name: to.to_string() };
+        let checked = self.ask(|mut daemon| async move { daemon.check_name(request).await })?;
+        let on = &self.on;
+        let at = checked.named_at.ok_or_else(|| format!("{on}: lunetad checked {to} at no time"))?;
+        SystemTime::try_from(at).map_err(|why| format!("{on}: lunetad checked {to} at {why}"))
     }
 
     /// The directories zoxide knows there, best first, each with the name a

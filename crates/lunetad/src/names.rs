@@ -111,6 +111,24 @@ pub fn free_for(dir: &str) -> Result<(SessionName, SystemTime), String> {
     Ok((name.free(&names), since))
 }
 
+/// Whether zellij would make a session called `to` now, rather than take a
+/// client to one that has it: one that runs, by zellij's sockets, or one
+/// that ended, which zellij keeps to bring back. The time just before luneta
+/// read which names zellij has, as `free_for` says it; or why zellij would
+/// make none.
+pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
+    let cannot = || format!("luneta cannot tell whether one is called {to}");
+    let since = SystemTime::now();
+    let running = zellij::running(&zellij::folder()).ok_or_else(cannot)?;
+    if running.iter().any(|(name, _)| name == to.as_str()) {
+        return Err(format!("{to} runs already"));
+    }
+    if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
+        return Err(format!("zellij keeps {to}, which ended, to bring back"));
+    }
+    Ok(since)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

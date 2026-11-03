@@ -6,14 +6,15 @@
 //! one list to the next, and what you type narrows all three. `Enter` takes
 //! zellij to the session highlighted, on its machine, bringing back one that
 //! ended, or to the pane of the agent highlighted, or makes the session you
-//! typed the name of, or one in the directory highlighted, named for it, on
-//! its machine. `Del` deletes the session highlighted, or lets go of one
-//! that ended, or closes the agent's pane, on its machine, asking first as
-//! the menu does while an agent at work would end; `Ctrl r` renames the
-//! session highlighted, on its machine. Beside the list, the preview
-//! shows the pane highlighted, or the one a client coming to the session
-//! highlighted is on, as zellij dumps its screen on its machine, or what is
-//! in the directory highlighted, as eza lists it on its machine.
+//! typed the name of, on the machine you pick of those listed, or one in the
+//! directory highlighted, named for it, on its machine. `Del` deletes
+//! the session highlighted, or lets go of one that ended, or closes the
+//! agent's pane, on its machine, asking first as the menu does while an
+//! agent at work would end; `Ctrl r` renames the session highlighted, on its
+//! machine. Beside the list, the preview shows the pane highlighted, or the
+//! one a client coming to the session highlighted is on, as zellij dumps its
+//! screen on its machine, or what is in the directory highlighted, as eza
+//! lists it on its machine.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -237,10 +238,10 @@ pub enum Picked {
     Close,
     /// Take zellij's client to `place`, on `on`, and close the picker.
     Go { on: Machine, place: Place },
-    /// Take zellij's client to the session of this name, which zellij makes
-    /// on this machine, of no session it has listed there, nor one that
-    /// ended, and close the picker; or say why zellij would make none.
-    Start(SessionName),
+    /// Take zellij's client to `session`, which zellij makes on `on`, of no
+    /// session it has listed there, nor one that ended, and close the
+    /// picker; or say why zellij would make none.
+    Start { on: Machine, session: SessionName },
     /// Take zellij's client to `session` on `on`, which ended, as zellij
     /// brings it back there, and close the picker.
     BringBack { on: Machine, session: SessionName },
@@ -389,11 +390,12 @@ fn reach(destination: &Destination) -> Result<Away, String> {
 
 /// What a click on a spot of the picker does: presses the key its help line
 /// names, or picks the row that stands for this, as `Enter` does with the
-/// highlight on it.
+/// highlight on it, or the machine to make the session typed on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
     Key(KeyEvent),
     Row(Key),
+    Machine(Machine),
 }
 
 /// What a row of a list stands for.
@@ -409,18 +411,10 @@ pub enum Key {
     /// A directory zoxide knows on `on`, by its path, and the session `Enter`
     /// makes there, or why it makes none yet.
     Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
-}
-
-impl Key {
-    /// The machine of what it stands for.
-    fn machine(&self) -> &Machine {
-        match self {
-            Key::Live { on, .. }
-            | Key::Exited { on, .. }
-            | Key::Agent { on, .. }
-            | Key::Dir { on, .. } => on,
-        }
-    }
+    /// The session typed, `session`, which `Enter` makes on this machine,
+    /// where it is the only one listed, or else on the one you pick of
+    /// them, as `Stage::Choose` has you pick it.
+    New { session: SessionName },
 }
 
 /// A row of a list: what it stands for, the name it shows, the characters
@@ -461,11 +455,16 @@ struct Rows {
 impl Rows {
     /// `rows` in the place of these, the highlight on the row of `held`
     /// where one is; or else, where that row went, on the row that took its
-    /// place, as the one after a row deleted; or else on the row `start`. No
-    /// further than the last.
+    /// place, as the one after a row deleted, counted under the row of the
+    /// session typed, which comes and goes over them; or else on the row
+    /// `start`. No further than the last.
     fn replace(&mut self, rows: Vec<Row>, held: Option<&Key>, start: usize) {
         let at = held.and_then(|held| rows.iter().position(|row| row.key == *held));
-        let was = self.at.filter(|_| held.is_some()).unwrap_or(start);
+        let over = |rows: &[Row]| {
+            usize::from(matches!(rows.first().map(|row| &row.key), Some(Key::New { .. })))
+        };
+        let was = self.at.filter(|_| held.is_some());
+        let was = was.map_or(start, |was| (was + over(&rows)).saturating_sub(over(&self.rows)));
         let last = rows.len().checked_sub(1);
         self.at = at.or_else(|| last.map(|last| was.min(last)));
         self.rows = rows;
@@ -495,12 +494,88 @@ enum Stage {
     /// Naming the session called `session` on `on` again, `input` typed so
     /// far.
     Rename { on: Machine, session: SessionName, input: String },
+    /// Picking the machine to make `session` on, of those listed, the
+    /// highlight on `at`.
+    Choose { session: SessionName, at: Machine },
     /// Waiting on zellij, or on the plan, to delete what `target` stands
     /// for: going ahead with the plan once it is `agreed`, what you said yes
     /// to, or else asking first, if it asks.
-    Planning { target: Key, agreed: Option<Plan> },
+    Planning { target: Target, agreed: Option<Plan> },
     /// Asking whether to go ahead with `plan`, as `asks`.
-    Asking { target: Key, plan: Plan, asks: String },
+    Asking { target: Target, plan: Plan, asks: String },
+}
+
+/// What a delete is planned for, on its machine: a session that runs, or
+/// an agent's pane. One that ended is let go of at once, with no plan.
+#[derive(Debug)]
+enum Target {
+    /// The session at `place` on `on`, as its row stands for it.
+    Session { on: Machine, place: Place },
+    /// The pane of an agent on `on`, as its row stands for it.
+    Pane { on: Machine, place: PanePlace },
+}
+
+impl Target {
+    /// The machine it is deleted on.
+    fn machine(&self) -> &Machine {
+        match self {
+            Target::Session { on, .. } | Target::Pane { on, .. } => on,
+        }
+    }
+}
+
+/// Why the picker makes no session of a name on a machine, as far as it
+/// knows: a session there has it, so its row is the one to go to, or zellij
+/// there has yet to say which sessions ended there, or did not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refused {
+    /// luneta's zellij is in the session of the name there, or on its way.
+    Here,
+    /// A session of the name runs there.
+    Runs,
+    /// zellij there keeps a session of the name that ended, to bring back.
+    Ended,
+    /// zellij there has yet to say which sessions ended, or to say it again.
+    Asking,
+    /// zellij there did not say which sessions ended.
+    Failed,
+    /// The machine is listed no more.
+    Gone,
+}
+
+impl Refused {
+    /// Whether a session there has the name, which the list has a row of:
+    /// there is no making one there, rather than not yet.
+    fn taken(self) -> bool {
+        matches!(self, Refused::Here | Refused::Runs | Refused::Ended | Refused::Gone)
+    }
+
+    /// What the machine's row in the list of machines says of it.
+    fn short(self) -> &'static str {
+        match self {
+            Refused::Here => "you are in it",
+            Refused::Runs => "runs there",
+            Refused::Ended => "ended there",
+            Refused::Asking => "asking zellij…",
+            Refused::Failed => "zellij did not say",
+            Refused::Gone => "listed no more",
+        }
+    }
+
+    /// Why no session called `name` is made on `machine`, nor renamed to it,
+    /// as the search's line says it: of no machine by name where it is the
+    /// only one listed, nor as you rename a session of it.
+    fn why(self, name: &SessionName, machine: Option<&str>) -> String {
+        let on = machine.map(|machine| format!(" on {machine}")).unwrap_or_default();
+        match self {
+            Refused::Here => format!("you are in {name}{on}"),
+            Refused::Runs => format!("{name} runs{on} already"),
+            Refused::Ended => format!("zellij{on} keeps {name}, which ended, to bring back"),
+            Refused::Asking => format!("zellij{on} has yet to say which sessions ended"),
+            Refused::Failed => format!("zellij{on} did not say which sessions ended"),
+            Refused::Gone => format!("{} is listed no more", machine.unwrap_or("the machine")),
+        }
+    }
 }
 
 /// Lines as a terminal shows them, in the colours they say, on a screen of
@@ -741,10 +816,11 @@ pub struct Picker {
     error: Option<String>,
     /// What the picker has yet to ask of zellij, which `asks` hands over.
     asking: Vec<Ask>,
-    /// The machine whose directories the highlight goes to: the one whose
-    /// header `Ctrl d` was pressed on, or this one. To the first of them as
-    /// they come, while `aiming`, and to the best of them that the search
-    /// finds as what is typed changes.
+    /// The machine the picker aims at: the one whose header `Ctrl j` or
+    /// `Ctrl d` was pressed on, or this one. The highlight goes to the first
+    /// of its directories as they come, while `aiming`, and to the best of
+    /// them that the search finds as what is typed changes; and the machines
+    /// to make the session typed on start on it, as `choose` says.
     aim: Machine,
     /// Whether the highlight goes to the first of `aim`'s directories as
     /// they come: until a key moves it.
@@ -752,10 +828,10 @@ pub struct Picker {
 }
 
 impl Picker {
-    /// The picker numbered `number`, open on `list`, of `listing`, its
-    /// highlight on the directories of `aim` as they come, which asks zellij
-    /// of each machine for the sessions it keeps to bring back, and zoxide
-    /// for the directories it knows.
+    /// The picker numbered `number`, open on `list`, of `listing`, aimed at
+    /// `aim`, its highlight on its directories as they come, which asks
+    /// zellij of each machine for the sessions it keeps to bring back, and
+    /// zoxide for the directories it knows.
     pub fn open(number: u64, list: List, listing: Listing, aim: Machine) -> Picker {
         let mut picker = Picker {
             number,
@@ -812,6 +888,14 @@ impl Picker {
         let machines = self.machines();
         self.visited.retain(|on, _| machines.contains(on));
         self.exited.retain(|on, _| machines.contains(on));
+        // The highlight goes to no other machine than the one it was on, for
+        // `Enter` to make the session there: the search is back, and says so.
+        if let Stage::Choose { at, .. } = &self.stage
+            && !machines.contains(at)
+        {
+            self.error = Some(format!("{} is listed no more", self.machine_name(at)));
+            self.stage = Stage::Search;
+        }
         let ended: Vec<Machine> = self
             .each()
             .filter(|(on, runs)| before.get(on).is_some_and(|ran| !ran.is_subset(&names(runs))))
@@ -923,7 +1007,7 @@ impl Picker {
             Heard::Closes { on, place, closes } => {
                 let planning = matches!(
                     &self.stage,
-                    Stage::Planning { target: Key::Agent { on: planned, place: at }, .. }
+                    Stage::Planning { target: Target::Pane { on: planned, place: at }, .. }
                         if (planned, at) == (&on, &place)
                 );
                 if !planning {
@@ -991,6 +1075,7 @@ impl Picker {
         let picked = match std::mem::replace(&mut self.stage, Stage::Search) {
             Stage::Search => self.search_key(key),
             Stage::Rename { on, session, input } => self.rename_key(key, on, session, input),
+            Stage::Choose { session, at } => self.choose_key(key, session, at),
             // Only `Esc` does anything while zellij is asked, or the plan:
             // it gives up the delete.
             Stage::Planning { target, agreed } => {
@@ -1020,25 +1105,49 @@ impl Picker {
                 self.rebuild(true);
             },
             Stage::Rename { input, .. } => input.push_str(&text),
-            Stage::Planning { .. } | Stage::Asking { .. } => {},
+            Stage::Choose { .. } | Stage::Planning { .. } | Stage::Asking { .. } => {},
         }
     }
 
-    /// Moves the highlight `by` rows, as the wheel does.
+    /// Moves the highlight `by` rows, as the wheel does, or `by` machines.
     pub fn scroll(&mut self, by: isize) {
         self.aiming = false;
-        if matches!(self.stage, Stage::Search) {
-            self.rows_mut().step(by);
-            self.follow();
+        match &self.stage {
+            Stage::Search => {
+                self.rows_mut().step(by);
+                self.follow();
+            },
+            Stage::Choose { at, .. } => {
+                let at = self.machine_by(at, by);
+                if let Stage::Choose { at: was, .. } = &mut self.stage {
+                    *was = at;
+                }
+            },
+            Stage::Rename { .. } | Stage::Planning { .. } | Stage::Asking { .. } => {},
         }
     }
 
     /// What a click on `pick` does: what the key it names does, or what
-    /// `Enter` does with the highlight on its row. A row picks nothing once
-    /// the list shows it no more, nor while it picks none, as `picks` says.
+    /// `Enter` does with the highlight on its row, or on its machine. A row
+    /// picks nothing once the list shows it no more, nor while it picks none,
+    /// as `picks` says; nor a machine once the machines are no longer picked
+    /// from, or it is listed no more.
     pub fn click(&mut self, pick: Pick) -> Picked {
         let row = match pick {
             Pick::Key(key) => return self.key(&key),
+            Pick::Machine(machine) => {
+                let listed = self.machines().contains(&machine);
+                return match std::mem::replace(&mut self.stage, Stage::Search) {
+                    Stage::Choose { session, .. } if listed => {
+                        self.error = None;
+                        self.choose_key(&KeyEvent::from(KeyCode::Enter), session, machine)
+                    },
+                    stage => {
+                        self.stage = stage;
+                        Picked::Nothing
+                    },
+                };
+            },
             Pick::Row(row) => row,
         };
         let at = self.rows().rows.iter().position(|it| it.key == row);
@@ -1137,6 +1246,10 @@ impl Picker {
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
         if let Stage::Rename { on, session, input } = &self.stage {
             let spots = self.draw_rename(buffer, &layout, on, session, input);
+            return Drawn::Picker { number: self.number, area, spots };
+        }
+        if let Stage::Choose { session, at } = &self.stage {
+            let spots = self.draw_choose(buffer, &layout, session, at);
             return Drawn::Picker { number: self.number, area, spots };
         }
         let mut spots = Spots::default();
@@ -1239,15 +1352,13 @@ impl Picker {
     }
 
     /// What `Enter` does: takes zellij to the row highlighted, or makes the
-    /// session typed, where no session is highlighted, or one in the
-    /// directory highlighted, as its row names it. Where no agent or
-    /// directory is, it does nothing: what is typed there names none.
+    /// session typed, on the machine you pick where more than one is listed,
+    /// as `choose` says, or one in the directory highlighted, as its row
+    /// names it. Where no row is, it does nothing: what is typed names
+    /// nothing to go to, nor a session to make.
     fn enter(&mut self) -> Picked {
         let Some(row) = self.rows().selected() else {
-            return match self.new_name() {
-                Ok(Some(name)) if self.list == List::Sessions => Picked::Start(name),
-                Ok(_) | Err(_) => Picked::Nothing,
-            };
+            return Picked::Nothing;
         };
         match &row.key {
             Key::Live { on, place } if self.is_here(on, place) => Picked::Close,
@@ -1262,23 +1373,99 @@ impl Picker {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
             Key::Dir { session: Err(_), .. } => Picked::Nothing,
+            Key::New { session } => {
+                let session = session.clone();
+                self.choose(session)
+            },
         }
     }
 
-    /// The session typed, which `Enter` makes on this machine: none of
-    /// nothing typed, and none of the name of the session luneta's zellij is
-    /// in here. None until zellij here said which sessions ended, either: one
-    /// of those is a row of its own once it did, which `Enter` brings back.
-    fn new_name(&self) -> Result<Option<SessionName>, &'static str> {
-        if self.term.is_empty() {
-            return Ok(None);
+    /// The session typed, which the row over the sessions makes, as
+    /// `Key::New` says. None where what is typed is no name zellij takes, nor
+    /// where a session of every machine's has it, the one luneta's zellij is
+    /// in, or one that runs, or one that ended: its row is the one to go to,
+    /// or to bring back.
+    fn new_name(&self) -> Option<SessionName> {
+        let name = SessionName::parse(&self.term).ok()?;
+        let free = |on: &Machine| !self.makes_on(on, &name).is_err_and(Refused::taken);
+        self.machines().iter().any(free).then_some(name)
+    }
+
+    /// Whether zellij on `on` makes a session called `name` now, rather than
+    /// take a client to one that has it, as far as the picker knows: once it
+    /// said there which sessions ended. Or why it makes none there.
+    fn makes_on(&self, on: &Machine, name: &SessionName) -> Result<(), Refused> {
+        if self.here_session(on) == Some(name.as_str()) {
+            return Err(Refused::Here);
         }
-        if self.here_session(&Machine::Local) == Some(self.term.as_str()) {
-            return Err("you are in it");
+        let runs = self.runs(on).ok_or(Refused::Gone)?;
+        if runs.sessions.iter().any(|live| live.place.session() == name.as_str()) {
+            return Err(Refused::Runs);
         }
-        let name = SessionName::parse(&self.term)?;
-        self.taken(&Machine::Local)?;
-        Ok(Some(name))
+        match self.exited.get(on) {
+            Some(Ended::Heard { exited, .. }) if exited.iter().any(|it| it.name == *name) => {
+                Err(Refused::Ended)
+            },
+            Some(Ended::Heard { .. }) => Ok(()),
+            Some(Ended::Failed(_)) => Err(Refused::Failed),
+            Some(Ended::Asking(_) | Ended::Stale { .. }) | None => Err(Refused::Asking),
+        }
+    }
+
+    /// What `Enter` does on the row of `session`, the one typed: makes it on
+    /// this machine, where it is the only one listed, once zellij here said
+    /// which sessions ended. Or else has you pick the machine to make it on,
+    /// the highlight on the one the picker aims at, but where a session there
+    /// has the name, on the first that makes it now, or else on the first
+    /// that may, once zellij there says which sessions ended.
+    fn choose(&mut self, session: SessionName) -> Picked {
+        let machines = self.machines();
+        if let [only] = machines.as_slice() {
+            return match self.makes_on(only, &session) {
+                Ok(()) => Picked::Start { on: only.clone(), session },
+                Err(_) => Picked::Nothing,
+            };
+        }
+        let may = |on: &&Machine| !self.makes_on(on, &session).is_err_and(Refused::taken);
+        let makes = |on: &&Machine| self.makes_on(on, &session).is_ok();
+        let aimed = machines.iter().filter(may).find(|on| **on == self.aim);
+        let at = aimed.or_else(|| machines.iter().find(makes));
+        let at = at.or_else(|| machines.iter().find(may)).cloned().unwrap_or(Machine::Local);
+        self.stage = Stage::Choose { session, at };
+        Picked::Nothing
+    }
+
+    /// What a key does as you pick the machine to make `session` on, the
+    /// highlight on `at`: `j` and `k`, or the arrows, move it, and `Enter`
+    /// makes the session there, where zellij there makes one now, as the
+    /// search's line says. `Esc` goes back to the search.
+    fn choose_key(&mut self, key: &KeyEvent, session: SessionName, at: Machine) -> Picked {
+        let by = match key.code {
+            KeyCode::Esc => return Picked::Nothing,
+            KeyCode::Enter if self.makes_on(&at, &session).is_ok() => {
+                return Picked::Start { on: at, session };
+            },
+            KeyCode::Char('j') if plain(key) => 1,
+            KeyCode::Char('k') if plain(key) => -1,
+            KeyCode::Down => 1,
+            KeyCode::Up => -1,
+            _ => 0,
+        };
+        let at = self.machine_by(&at, by);
+        self.stage = Stage::Choose { session, at };
+        Picked::Nothing
+    }
+
+    /// The machine listed `by` after `at`, or before, no further than the
+    /// last or the first; `at` where it is listed no more.
+    fn machine_by(&self, at: &Machine, by: isize) -> Machine {
+        let machines = self.machines();
+        let Some(was) = machines.iter().position(|on| on == at) else {
+            return at.clone();
+        };
+        let last = machines.len().saturating_sub(1);
+        let to = if by < 0 { was.saturating_sub(by.unsigned_abs()) } else { was + by.unsigned_abs() };
+        machines[to.min(last)].clone()
     }
 
     /// What `Del` does: plans deleting the session highlighted, or closing the
@@ -1299,25 +1486,25 @@ impl Picker {
                 self.rebuild(false);
                 Picked::Nothing
             },
-            Key::Dir { .. } => Picked::Nothing,
-            target => self.plan(target, None),
+            Key::Live { on, place } => self.plan(Target::Session { on, place }, None),
+            Key::Agent { on, place } => self.plan(Target::Pane { on, place }, None),
+            Key::Dir { .. } | Key::New { .. } => Picked::Nothing,
         }
     }
 
     /// Plans deleting what `target` stands for, going ahead once the plan is
     /// `agreed`: of a session, at once; of a pane, once zellij says what
     /// closing it closes, on its machine.
-    fn plan(&mut self, target: Key, agreed: Option<Plan>) -> Picked {
+    fn plan(&mut self, target: Target, agreed: Option<Plan>) -> Picked {
         let picked = match &target {
-            Key::Live { on, place } => {
+            Target::Session { on, place } => {
                 let (on, session) = (on.clone(), place.listed().clone());
                 Picked::Plan { on, session, deletes: Deletes::Session }
             },
-            Key::Agent { on, place } => {
+            Target::Pane { on, place } => {
                 self.asking.push(Ask::Closes { on: on.clone(), place: place.clone() });
                 Picked::Nothing
             },
-            Key::Exited { .. } | Key::Dir { .. } => return Picked::Nothing,
         };
         self.stage = Stage::Planning { target, agreed };
         picked
@@ -1340,7 +1527,7 @@ impl Picker {
                      brings it back"
                 ));
             },
-            Some(Key::Agent { .. } | Key::Dir { .. }) | None => {},
+            Some(Key::Agent { .. } | Key::Dir { .. } | Key::New { .. }) | None => {},
         }
     }
 
@@ -1374,28 +1561,28 @@ impl Picker {
     }
 
     /// The name `session` on `on` takes, of what was typed, or why it takes
-    /// none.
+    /// none: one no other session there has, as `makes_on` says of a session
+    /// made by it.
     fn rename_to(
         &self,
         on: &Machine,
         session: &SessionName,
         name: &str,
-    ) -> Result<SessionName, &'static str> {
-        let name = SessionName::parse(name)?;
+    ) -> Result<SessionName, String> {
+        let name = SessionName::parse(name).map_err(str::to_owned)?;
         if name == *session {
-            return Err("already called that");
+            return Err("already called that".to_owned());
         }
-        if self.taken(on)?.contains(&name.as_str()) {
-            return Err("a session by that name already exists");
-        }
+        self.makes_on(on, &name).map_err(|refused| refused.why(&name, None))?;
         Ok(name)
     }
 
-    /// The names of the sessions of `on` that run and of those that ended,
-    /// which no other session there can take; or why they are not known
-    /// yet, as zellij there has yet to list those that ended, or to list them
-    /// again since. A name zellij has yet to say ended is one
-    /// `switch-session` would bring back.
+    /// The names zellij on `on` makes no session of now, as `makes_on` says
+    /// of each: the session luneta's zellij is in or on its way to there,
+    /// those that run there, and those that ended, which zellij keeps; or
+    /// why they are not known yet, as zellij there has yet to list those that
+    /// ended, or to list them again since. A name zellij has yet to say
+    /// ended is one `switch-session` would bring back.
     fn taken(&self, on: &Machine) -> Result<Vec<&str>, &'static str> {
         let exited = match self.exited.get(on) {
             Some(Ended::Heard { exited, .. }) => exited,
@@ -1406,7 +1593,8 @@ impl Picker {
         };
         let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
         let live = sessions.iter().map(|live| live.place.session());
-        Ok(live.chain(exited.iter().map(|exited| exited.name.as_str())).collect())
+        let ended = exited.iter().map(|exited| exited.name.as_str());
+        Ok(self.here_session(on).into_iter().chain(live).chain(ended).collect())
     }
 
     /// The sessions zellij on `on` keeps to bring back, as far as it said,
@@ -1417,25 +1605,35 @@ impl Picker {
 
     /// Builds the lists again, of what is typed, each machine's rows in
     /// turn, this one's first, under its rule where more than one machine is
-    /// listed: the highlight on the row it was on, or the one that took its
+    /// listed, and the session typed over them all, where `new_name` makes
+    /// one: the highlight on the row it was on, or the one that took its
     /// place where that went; or else, `snap`, as what is typed changed, on
     /// the best match of the first machine's that has one, which of the
     /// directories is the best of the aim's machine's where it has one; or
-    /// on the first session after yours.
+    /// on the first session after yours. Going to a session the search finds
+    /// beats making one: the session typed is highlighted where it finds
+    /// none.
     fn rebuild(&mut self, snap: bool) {
         let finder = (!self.term.is_empty()).then(|| Finder::new(&self.term));
         let ruled = !self.listing.remotes.is_empty();
         let (mut sessions, mut agents) = (Vec::new(), Vec::new());
+        if let Some(session) = self.new_name() {
+            let key = Key::New { session };
+            let made = Row { key, name: self.term.clone(), hits: Vec::new(), rules: Rules::default() };
+            sessions.push(made);
+        }
         for (on, runs) in self.each() {
             let rule = || ruled.then(|| self.machine_name(&on));
             grouped(&mut sessions, self.session_rows(finder.as_ref(), &on, runs), rule());
             grouped(&mut agents, self.agent_rows(finder.as_ref(), &on, runs), rule());
         }
         let (dirs, aimed) = self.dir_rows();
-        let start = |rows: &[Row]| {
-            let first = rows.first().map(|row| &row.key);
-            let yours = matches!(first, Some(Key::Live { on, place }) if self.is_here(on, place));
-            usize::from(yours && self.term.is_empty())
+        let start = |rows: &[Row]| match rows.first().map(|row| &row.key) {
+            Some(Key::Live { on, place }) if self.is_here(on, place) => {
+                usize::from(self.term.is_empty())
+            },
+            Some(Key::New { .. }) => usize::from(rows.len() > 1),
+            Some(_) | None => 0,
         };
         let (session_start, agent_start) = (start(&sessions), start(&agents));
         let held = |rows: &Rows| rows.selected().map(|row| row.key.clone()).filter(|_| !snap);
@@ -1545,7 +1743,7 @@ impl Picker {
                 Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.pane))))
             },
             Some(Key::Dir { on, path, .. }) => Some(Preview::Dir((on.clone(), path.clone()))),
-            Some(Key::Exited { .. }) | None => None,
+            Some(Key::Exited { .. } | Key::New { .. }) | None => None,
         };
         match (preview, &self.wanted) {
             (Some(preview), Some((wanted, _))) if preview == *wanted => {},
@@ -1752,6 +1950,14 @@ impl Picker {
                 (Some(Span::styled(glyph, style)), name_style, right)
             },
             Key::Dir { path, .. } => return dir_line(row, path.as_str(), width),
+            // Dim until zellij on a machine said which sessions ended, and
+            // has none of the name, as `Enter` makes it only there.
+            Key::New { session } => {
+                let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
+                let makes = self.machines().iter().any(|on| self.makes_on(on, session).is_ok());
+                let style = if makes { bold } else { dim };
+                (Some(lead), style, vec![Span::styled("new", Style::new().fg(gruvbox::GREY))])
+            },
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
@@ -1810,11 +2016,11 @@ impl Picker {
         let grey = Style::new().fg(gruvbox::GREY);
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
-            let lines = vec![
-                Line::styled(" nothing highlighted", grey),
-                Line::default(),
-                Line::styled(" Enter takes what you type", grey),
-            ];
+            let mut lines = vec![Line::styled(" nothing highlighted", grey)];
+            if self.list == List::Sessions {
+                lines.push(Line::default());
+                lines.push(Line::styled(" type a name to make a session of it", grey));
+            }
             framed(buffer, area, "Preview", "", lines);
             return;
         };
@@ -1832,6 +2038,26 @@ impl Picker {
             },
             Key::Dir { on, path, .. } => {
                 self.draw_contents(buffer, area, &row.name, on, path);
+                return;
+            },
+            Key::New { session } => {
+                let mut lines = vec![Line::styled(" new", grey), Line::default()];
+                let machines = self.machines();
+                if let [only] = machines.as_slice() {
+                    let said = match self.makes_on(only, session) {
+                        Ok(()) => "no session has this name, nor one that ended: Enter makes it, \
+                                   and takes zellij to it"
+                            .to_owned(),
+                        Err(refused) => refused.why(session, None),
+                    };
+                    lines.extend(menu::wrap(&said, inner, grey));
+                } else {
+                    let said = "Enter has you pick the machine to make it on:";
+                    lines.extend(menu::wrap(said, inner, grey));
+                    lines.push(Line::default());
+                    lines.extend(machines.iter().map(|on| self.machine_line(on, session, inner)));
+                }
+                framed(buffer, area, &row.name, "", lines);
                 return;
             },
             Key::Live { on, place } => {
@@ -1965,11 +2191,18 @@ impl Picker {
                     Ok(there(&format!("Make \"{session}\""), on))
                 },
                 Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
+                Key::New { session } => match self.machines().as_slice() {
+                    [only] => match self.makes_on(only, session) {
+                        Ok(()) => Ok(format!("Make \"{session}\"")),
+                        Err(refused) => Err(refused.why(session, None)),
+                    },
+                    _ => Ok(format!("Make \"{session}\" on…")),
+                },
             },
-            None if self.list == List::Sessions => match self.new_name() {
-                Ok(Some(name)) => Ok(format!("Make \"{name}\"")),
-                Ok(None) => Ok(String::new()),
-                Err(why) => Err(why.to_owned()),
+            // What is typed makes a session on no machine: as it is no name
+            // zellij takes, it says why.
+            None if self.list == List::Sessions && !self.term.is_empty() => {
+                SessionName::parse(&self.term).map(|_| String::new()).map_err(str::to_owned)
             },
             None => Ok(String::new()),
         };
@@ -1993,6 +2226,12 @@ impl Picker {
             (Stage::Asking { .. }, _) => vec![(Hint::Char('y'), "Yes"), (Hint::AnyOtherKey, "No")],
             (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
             (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
+            (Stage::Choose { .. }, _) => vec![
+                (Hint::Char('j'), "Down"),
+                (Hint::Char('k'), "Up"),
+                (Hint::Enter, "Make"),
+                (Hint::Esc, "Back"),
+            ],
             (Stage::Search, List::Sessions) => vec![
                 (Hint::Moves, "Move"),
                 (Hint::Enter, "Go"),
@@ -2039,8 +2278,78 @@ impl Picker {
         }
         let width = usize::from(layout.input.width.saturating_sub(2));
         let action = self.rename_to(on, session, input).map(|_| there("Rename", on));
-        draw_input(buffer, layout, "Rename", typed(input, action.map_err(str::to_owned), width));
+        draw_input(buffer, layout, "Rename", typed(input, action, width));
         self.draw_help(buffer, layout.help)
+    }
+
+    /// Draws the box of the machines to make `session` on, the highlight on
+    /// `at`, and the search, which says what `Enter` does there; and says
+    /// the spots on the machines and on the keys.
+    fn draw_choose(
+        &self,
+        buffer: &mut Buffer,
+        layout: &Layout,
+        session: &SessionName,
+        at: &Machine,
+    ) -> Spots<Pick> {
+        let mut spots = Spots::default();
+        if let Some(full) = layout.full {
+            let inner = usize::from(full.width.saturating_sub(2));
+            let room = usize::from(full.height.saturating_sub(2));
+            let grey = Style::new().fg(gruvbox::GREY);
+            let mut lines = vec![Line::default()];
+            lines.extend(menu::wrap(&format!("make \"{session}\" on"), inner, grey));
+            lines.push(Line::default());
+            let machines = self.machines();
+            let lit = machines.iter().position(|on| on == at);
+            let shown = room.saturating_sub(lines.len());
+            let (start, end) = viewport(lit.unwrap_or(0), machines.len(), shown);
+            let mut picks = Spots::default();
+            for (number, on) in machines.iter().enumerate().take(end).skip(start) {
+                let line = self.machine_line(on, session, inner);
+                picks.add(lines.len(), 0..inner, Pick::Machine(on.clone()));
+                let line = if lit == Some(number) { line.patch_style(Style::new().bg(LIT)) } else { line };
+                lines.push(line);
+            }
+            framed(buffer, full, "Make", "", lines);
+            spots.extend(picks.placed(full.inner(Margin::new(1, 1))));
+        }
+        let width = usize::from(layout.input.width.saturating_sub(2));
+        let machine = self.machine_name(at);
+        let action = match self.makes_on(at, session) {
+            Ok(()) => Ok(format!("Make \"{session}\" on {machine}")),
+            Err(refused) => Err(refused.why(session, Some(&machine))),
+        };
+        draw_input(buffer, layout, self.list.title(), typed(&self.term, action, width));
+        spots.extend(self.draw_help(buffer, layout.help));
+        spots
+    }
+
+    /// The line of `on` among the machines to make `session` on, `width`
+    /// wide: the name it goes by, and what is known of the name there, dim
+    /// where zellij there makes no session of it now.
+    fn machine_line(&self, on: &Machine, session: &SessionName, width: usize) -> Line<'static> {
+        let refused = self.makes_on(on, session).err();
+        let style = Style::new().add_modifier(if refused.is_some() {
+            Modifier::DIM
+        } else {
+            Modifier::BOLD
+        });
+        let right = match (refused, on) {
+            (Some(refused), _) => refused.short(),
+            (None, Machine::Local) => "this one",
+            (None, Machine::Remote(_)) => "",
+        };
+        // A space either side, and a space between the name and the right.
+        let name = sidebar::cut(&self.machine_name(on), width.saturating_sub(3 + right.width()));
+        let gap = width.saturating_sub(2 + name.width() + right.width());
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(name, style),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(right, Style::new().fg(gruvbox::GREY)),
+            Span::raw(" "),
+        ])
     }
 }
 
@@ -2668,11 +2977,12 @@ mod tests {
     }
 
     /// What is typed narrows the list, a name that is what is typed first,
-    /// and `Enter` makes a session of a name no row has, once zellij said
-    /// which sessions ended, as a name it keeps would be a row then; but of
-    /// one zellij refuses, or of yours, or on the agents or the directories,
-    /// which `Tab` goes to one after the other, and back to the sessions, and
-    /// `Shift Tab` the other way round, the rule over the list naming each.
+    /// and a name no session has is a row of its own, over them, that
+    /// `Enter` makes a session of, once zellij said which sessions ended, as
+    /// a name it keeps would be a row then; but of one zellij refuses, or of
+    /// yours, or on the agents or the directories, which `Tab` goes to one
+    /// after the other, and back to the sessions, and `Shift Tab` the other
+    /// way round, the rule over the list naming each.
     #[test]
     fn what_is_typed_narrows_the_list_and_enter_makes_a_session_no_row_has() {
         let listing = Listing {
@@ -2688,13 +2998,18 @@ mod tests {
         typed(&mut picker, "luneta");
         assert_eq!(names(&picker), ["luneta", "luneta-main"]);
         typed(&mut picker, "-new");
-        assert_eq!(list(&picker).0, [r#"no match for "luneta-new""#]);
+        let (rows, lit) = list(&picker);
+        assert_eq!(names(&picker), ["+"]);
+        assert!(rows[0].starts_with("+ luneta-new ") && rows[0].ends_with(" new"), "{rows:?}");
+        assert_eq!(lit.as_ref(), rows.first());
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         let why = "zellij has yet to say which sessions ended";
         assert!(said(&picker).contains(why), "{}", said(&picker));
         picker.heard(kept_here(Ok(Vec::new())));
+        assert!(said(&picker).contains(r#"<ENTER> Make "luneta-new""#), "{}", said(&picker));
         let new = SessionName::parse("luneta-new").unwrap();
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(new));
+        let start = Picked::Start { on: Machine::Local, session: new };
+        assert_eq!(press(&mut picker, KeyCode::Enter), start);
         let titled = |picker: &Picker, title: &str| {
             let buffer = drawn(picker);
             let (results, _) = parts();
@@ -2790,7 +3105,8 @@ mod tests {
     /// `Del` on a session that ended lets go of it at once, as nothing runs
     /// in it to end, and asks zellij again for those it keeps once it did.
     /// The highlight goes on to the row after, and what is typed stays, so
-    /// that `Del` again deletes no row off the top of the list.
+    /// that `Del` again deletes no row off the top of the list: the row that
+    /// makes a session of the name, which waits on zellij to say it let go.
     #[test]
     fn del_lets_go_of_a_session_that_ended_at_once() {
         let mut picker = three();
@@ -2813,9 +3129,20 @@ mod tests {
         typed(&mut picker, "x");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert_eq!(picker.asks(), vec![delete(SessionName::running("x").unwrap())]);
-        assert_eq!(list(&picker).0, [r#"no match for "x""#]);
+        assert_eq!(names(&picker), ["+"]);
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert!(picker.asks().is_empty());
+
+        // The row that comes over the rest as the name is let go of takes no
+        // row's place: the highlight goes on to the row after all the same.
+        let mut picker = Picker::open(1, List::Sessions, Listing::default(), Machine::Local);
+        picker.heard(kept_here(Ok(vec![ended("x", 10), ended("xy", 20)])));
+        typed(&mut picker, "x");
+        assert_eq!(names(&picker), ["ended", "x", "xy"]);
+        assert_eq!(lit(&picker), "x");
+        press(&mut picker, KeyCode::Delete);
+        assert_eq!(names(&picker), ["+", "ended", "xy"]);
+        assert_eq!(lit(&picker), "xy");
     }
 
     /// A session `Del` let go of stays off the list till zellij said it let
@@ -2854,8 +3181,9 @@ mod tests {
     }
 
     /// `Ctrl r` renames the session highlighted, yours or another, to a name
-    /// no session has, those that ended among them. zellij renames none that
-    /// ended.
+    /// no session has, yours and those that ended among them, and says why
+    /// it takes no other, as the row that makes a session would. zellij
+    /// renames none that ended.
     #[test]
     fn ctrl_r_renames_the_highlighted_session_to_a_name_no_session_has() {
         let mut picker = three();
@@ -2866,10 +3194,17 @@ mod tests {
         };
         control(&mut picker, 'r');
         assert!(renaming(&picker));
-        for taken in ["a", "x", "c"] {
+        let refused = [
+            ("a", "a runs already"),
+            ("b", "you are in b"),
+            ("x", "zellij keeps x, which ended, to bring back"),
+            ("c", "already called that"),
+        ];
+        for (taken, why) in refused {
             typed(&mut picker, taken);
             press(&mut picker, KeyCode::Enter);
             assert!(picker.asks().is_empty(), "{taken}");
+            assert!(said(&picker).contains(why), "{taken}: {}", said(&picker));
             press(&mut picker, KeyCode::Backspace);
         }
         typed(&mut picker, "d");
@@ -3078,6 +3413,30 @@ mod tests {
         picker.asks();
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert!(picker.asks().is_empty());
+    }
+
+    /// The session luneta's zellij is on its way to, which zellij has yet to
+    /// list, has its name as one that runs does: a directory of that name is
+    /// named past it, and no session is renamed to it.
+    #[test]
+    fn no_session_takes_the_name_luneta_s_zellij_is_on_its_way_to() {
+        let listing = Listing {
+            here: Some(here("notes")),
+            local: sessions(vec![live("luneta", 10, None)]),
+            ..Listing::default()
+        };
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
+        picker.heard(kept_here(Ok(Vec::new())));
+        picker.heard(heard_here(Ok(vec![visited("/home/you/notes", "notes")])));
+        assert_eq!(names(&picker), ["notes-2"]);
+        press(&mut picker, KeyCode::Tab);
+        assert_eq!(lit(&picker), "luneta");
+        picker.asks();
+        control(&mut picker, 'r');
+        typed(&mut picker, "notes");
+        press(&mut picker, KeyCode::Enter);
+        assert!(picker.asks().is_empty());
+        assert!(said(&picker).contains("you are in notes"), "{}", said(&picker));
     }
 
     /// Where zoxide answers before zellij says which sessions ended, or
@@ -3312,7 +3671,9 @@ mod tests {
     }
 
     /// Each machine's sessions go under a rule of its own, this one's first,
-    /// with those that ended there under each, and a search keeps them so.
+    /// with those that ended there under each, and a search keeps them so,
+    /// with the row for the name typed over them all, where a machine has no
+    /// session of it, and a session it finds highlighted.
     /// `Enter` on another machine's takes zellij there, as the search's line
     /// says, and brings one that ended back there, whose preview names the
     /// machine. One that ends there asks zellij there again which ended, and
@@ -3349,10 +3710,172 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), back);
 
         typed(&mut picker, "b");
-        assert_eq!(grouped(&picker), ["── desk", "b", "── nixos", "blog"]);
+        assert_eq!(grouped(&picker), ["+", "── desk", "b", "── nixos", "blog"]);
+        assert_eq!(lit(&picker), "b");
         let ended_there = sessions(vec![live("api", 40, None)]);
         picker.listed(Listing { remotes: on_nixos(ended_there).remotes, ..listing() });
         assert_eq!(picker.asks(), [exited(nixos(), 3)]);
+    }
+
+    /// The machines to make the session typed on, as their box lists them,
+    /// each the name it goes by and what it says of the name there, and the
+    /// one highlighted.
+    fn machines(picker: &Picker) -> (Vec<String>, Option<String>) {
+        let buffer = drawn(picker);
+        let inner = |rect: Rect| rect.inner(Margin::new(1, 1));
+        let full = inner(Layout::of(inner(Picker::area(buffer.area))).full.unwrap());
+        let squeezed = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (mut listed, mut lit) = (Vec::new(), None);
+        // Over them, a blank line, what is made, and a blank line again.
+        for (y, line) in (full.y..full.bottom()).zip(text(&buffer, full)).skip(3) {
+            if line.is_empty() {
+                continue;
+            }
+            if buffer[(full.x, y)].bg == LIT {
+                lit = Some(squeezed(&line));
+            }
+            listed.push(squeezed(&line));
+        }
+        (listed, lit)
+    }
+
+    /// With more than one machine listed, the row of a name typed is over
+    /// them all, and `Enter` on it has you pick the machine to make it on, as
+    /// the search's line and the preview say. It starts on this machine, or,
+    /// where a session here has the name, on one that may make it, once
+    /// zellij there says which sessions ended. `j` and `k`, or the arrows,
+    /// move the highlight, no further than the last machine or the first,
+    /// and `Enter` makes the session on the one highlighted, once
+    /// zellij there said which sessions ended, and of none there by the name,
+    /// one that runs or one that ended. `Esc` goes back to the search, and a
+    /// click on a machine does what `Enter` does there. A session the search
+    /// finds is highlighted before the row, and there is no row where a
+    /// session of every machine's has the name. A machine that goes off the
+    /// listing as you pick it has you back in the search, which says so.
+    #[test]
+    fn enter_on_a_name_typed_has_you_pick_the_machine_to_make_it_on() {
+        let listing = || Listing {
+            local: sessions(vec![live("web", 30, None)]),
+            ..on_nixos(sessions(vec![live("api", 40, None)]))
+        };
+        let mut picker = Picker::open(1, List::Sessions, listing(), Machine::Local);
+        picker.heard(kept_here(Ok(Vec::new())));
+        let name = |name: &str| SessionName::parse(name).unwrap();
+        let lit_machine = |picker: &Picker| machines(picker).1.unwrap_or_default();
+        let retyped = |picker: &mut Picker, term: &str| {
+            for _ in 0..10 {
+                press(picker, KeyCode::Backspace);
+            }
+            typed(picker, term);
+        };
+        typed(&mut picker, "web");
+        assert_eq!(grouped(&picker), ["+", "── desk", "web"]);
+        press(&mut picker, KeyCode::Up);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
+        press(&mut picker, KeyCode::Esc);
+        retyped(&mut picker, "notes");
+        assert_eq!(grouped(&picker), ["+"]);
+        assert_eq!(lit(&picker), "+");
+        assert!(said(&picker).contains(r#"<ENTER> Make "notes" on…"#), "{}", said(&picker));
+        let preview = text(&drawn(&picker), parts().1);
+        let shows = |start: &str, end: &str| {
+            preview.iter().any(|line| line.starts_with(start) && line.ends_with(end))
+        };
+        assert!(shows("desk", "this one") && shows("nixos", "asking zellij…"), "{preview:?}");
+
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(machines(&picker).0, ["desk this one", "nixos asking zellij…"]);
+        assert_eq!(lit_machine(&picker), "desk this one");
+        assert!(said(&picker).contains(r#"<ENTER> Make "notes" on desk"#), "{}", said(&picker));
+        press(&mut picker, KeyCode::Char('j'));
+        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
+        let why = "zellij on nixos has yet to say which sessions ended";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        press(&mut picker, KeyCode::Char('j'));
+        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
+        let exited = vec![ended("old", 10), ended("web", 5)];
+        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(exited) });
+        assert_eq!(lit_machine(&picker), "nixos");
+        assert!(said(&picker).contains(r#"<ENTER> Make "notes" on nixos"#), "{}", said(&picker));
+        let there = Picked::Start { on: nixos(), session: name("notes") };
+        assert_eq!(press(&mut picker, KeyCode::Enter), there);
+
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        press(&mut picker, KeyCode::Down);
+        press(&mut picker, KeyCode::Up);
+        press(&mut picker, KeyCode::Char('k'));
+        assert_eq!(lit_machine(&picker), "desk this one");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
+        assert_eq!(lit(&picker), "+");
+        press(&mut picker, KeyCode::Enter);
+        let (rows, j) = clicks(&picker, "<j>");
+        assert_eq!(j, Some(Pick::Key(KeyEvent::from(KeyCode::Char('j')))));
+        let spot = rows.iter().find(|(word, _)| word == "nixos").and_then(|(_, pick)| pick.clone());
+        assert_eq!(spot, Some(Pick::Machine(nixos())));
+        assert_eq!(picker.click(spot.unwrap()), there);
+
+        retyped(&mut picker, "api");
+        assert_eq!(grouped(&picker), ["+", "── nixos", "api"]);
+        assert_eq!(lit(&picker), "api");
+        press(&mut picker, KeyCode::Up);
+        press(&mut picker, KeyCode::Enter);
+        assert_eq!(machines(&picker).0, ["desk this one", "nixos runs there"]);
+        press(&mut picker, KeyCode::Char('j'));
+        assert!(said(&picker).contains("api runs on nixos already"), "{}", said(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        press(&mut picker, KeyCode::Char('k'));
+        let api = Picked::Start { on: Machine::Local, session: name("api") };
+        assert_eq!(press(&mut picker, KeyCode::Enter), api);
+        retyped(&mut picker, "old");
+        assert_eq!(grouped(&picker), ["+", "── nixos", "ended", "old"]);
+        press(&mut picker, KeyCode::Up);
+        press(&mut picker, KeyCode::Enter);
+        press(&mut picker, KeyCode::Char('j'));
+        assert_eq!(lit_machine(&picker), "nixos ended there");
+        let why = "zellij on nixos keeps old, which ended, to bring back";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        // What is typed goes to the search only: `Esc` goes back to it.
+        typed(&mut picker, "x");
+        assert_eq!(lit_machine(&picker), "nixos ended there");
+        press(&mut picker, KeyCode::Esc);
+        retyped(&mut picker, "web");
+        assert_eq!(grouped(&picker), ["── desk", "web", "── nixos", "ended", "web"]);
+
+        retyped(&mut picker, "notes");
+        press(&mut picker, KeyCode::Enter);
+        press(&mut picker, KeyCode::Char('j'));
+        picker.listed(Listing { remotes: Vec::new(), ..listing() });
+        assert!(said(&picker).contains("nixos is listed no more"), "{}", said(&picker));
+        assert_eq!(lit(&picker), "+");
+        let here = Picked::Start { on: Machine::Local, session: name("notes") };
+        assert_eq!(press(&mut picker, KeyCode::Enter), here);
+    }
+
+    /// `Ctrl j` on a machine's header has the machines to make the session
+    /// typed on start on it, but where a session there has the name: on the
+    /// first then that makes it now. The sessions are listed and highlighted
+    /// as they are without.
+    #[test]
+    fn ctrl_j_on_a_machine_s_header_starts_the_machines_on_it() {
+        let there = sessions(vec![live("api", 40, None)]);
+        let listing = Listing { local: sessions(vec![live("blog", 30, None)]), ..on_nixos(there) };
+        let mut picker = Picker::open(1, List::Sessions, listing, nixos());
+        picker.heard(kept_here(Ok(Vec::new())));
+        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(Vec::new()) });
+        assert_eq!(lit(&picker), "blog");
+        typed(&mut picker, "x");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(machines(&picker).1.as_deref(), Some("nixos"));
+        let made = Picked::Start { on: nixos(), session: SessionName::parse("x").unwrap() };
+        assert_eq!(press(&mut picker, KeyCode::Enter), made);
+        press(&mut picker, KeyCode::Backspace);
+        typed(&mut picker, "api");
+        press(&mut picker, KeyCode::Up);
+        assert_eq!(lit(&picker), "+");
+        press(&mut picker, KeyCode::Enter);
+        assert_eq!(machines(&picker).1.as_deref(), Some("desk this one"));
     }
 
     /// `Del` and `Ctrl r` act on another machine's rows there. A session
@@ -3414,6 +3937,31 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         let place = PanePlace { session: listed("api", 40), pane: 2 };
         assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place }]);
+    }
+
+    /// A session of a machine that goes off the listing as you rename it
+    /// takes no name, as the search's line says: the machine is listed no
+    /// more.
+    #[test]
+    fn a_session_of_a_machine_listed_no_more_takes_no_name() {
+        let listing = || Listing {
+            local: sessions(vec![live("here", 30, None)]),
+            ..on_nixos(sessions(vec![live("api", 40, None)]))
+        };
+        let mut picker = Picker::open(1, List::Sessions, listing(), Machine::Local);
+        picker.heard(kept_here(Ok(Vec::new())));
+        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(Vec::new()) });
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(lit(&picker), "api");
+        control(&mut picker, 'r');
+        typed(&mut picker, "fresh");
+        assert!(said(&picker).contains("Rename on nixos"), "{}", said(&picker));
+        picker.listed(Listing { remotes: Vec::new(), ..listing() });
+        picker.asks();
+        press(&mut picker, KeyCode::Enter);
+        assert!(picker.asks().is_empty());
+        let why = "the machine is listed no more";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
     }
 
     /// zellij of a machine is asked which sessions ended as the picker first

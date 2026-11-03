@@ -18,7 +18,7 @@ use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
-    self, AskRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
+    self, AskRequest, CheckNameRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
     DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
     NameSessionRequest, On, OpenRequest, RefugeRequest, RenameSessionRequest, StartRequest,
@@ -667,6 +667,19 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(far.zellij.went().last(), Some(&started));
         assert!(here.zellij.went().is_empty());
 
+        // A name is checked there: one a session there runs by is taken, and
+        // another is free since the daemon there read the names, by its clock.
+        let check = |on, name: &str| CheckNameRequest { on, name: name.to_owned() };
+        let asked = SystemTime::now();
+        let free = daemon.check_name(check(on("far"), "fresh")).await.unwrap().into_inner();
+        let named_at = free.named_at.map(|at| SystemTime::try_from(at).unwrap());
+        assert!(named_at.is_some_and(|at| at >= asked && at <= SystemTime::now()), "{named_at:?}");
+        let runs = daemon.check_name(check(on("far"), "work")).await.unwrap_err();
+        assert_eq!(runs.code(), Code::FailedPrecondition, "{runs:?}");
+        assert!(runs.message().contains("work runs already"), "{runs:?}");
+        daemon.check_name(check(None, "work")).await.unwrap();
+        invalid(daemon.check_name(check(on("far"), "a/b")).await.unwrap_err());
+
         // Closing a pane there closes what zellij there lists it closes: the
         // tab of one in a tab beside another, the session of the only tab's.
         let closes = |session: &str| {
@@ -727,6 +740,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let old = list_exited_response::Exited { name: "old".to_owned(), ago };
         assert_eq!(listed.exited, [old]);
         assert!(daemon.list_exited(exited(None)).await.unwrap().into_inner().exited.is_empty());
+        let kept = daemon.check_name(check(on("far"), "old")).await.unwrap_err();
+        assert_eq!(kept.code(), Code::FailedPrecondition, "{kept:?}");
+        assert!(kept.message().contains("zellij keeps old, which ended"), "{kept:?}");
         let delete = |session: &str| {
             DeleteExitedRequest { on: on("far"), session: session.to_owned() }
         };

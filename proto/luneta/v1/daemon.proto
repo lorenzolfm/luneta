@@ -54,6 +54,12 @@ service Daemon {
   // own where it is a worktree of one, with a `-2` where a session that runs,
   // or one zellij keeps to bring back, has that name.
   rpc NameSession(NameSessionRequest) returns (NameSessionResponse);
+  // Whether zellij would make a session by a name now, as luneta's picker
+  // makes one by the name you type, rather than take a client to one that
+  // has it, as `Start` would: no session that runs has the name, nor one
+  // zellij keeps to bring back. It answers when the daemon read which names
+  // its zellij has, or with why zellij would make none.
+  rpc CheckName(CheckNameRequest) returns (CheckNameResponse);
   // The directories zoxide knows, best first, as luneta's picker lists them:
   // each with the name a session luneta makes there takes now, as
   // `NameSession` names it.
@@ -297,6 +303,19 @@ message NameSessionResponse {
   // as `OpenRequest.Tab` takes it for its `alone_since`. A daemon older than
   // this field says none.
   google.protobuf.Timestamp named_at = 2;
+}
+
+message CheckNameRequest {
+  On on = 1;
+  // The name: one zellij makes a session of on any machine, as luneta's are
+  // held to. One that is not, as one too long, is invalid.
+  string name = 2;
+}
+
+message CheckNameResponse {
+  // Just before the daemon read which names its zellij has, by its clock, as
+  // `NameSessionResponse.named_at` is.
+  google.protobuf.Timestamp named_at = 1;
 }
 
 message ListDirsRequest {

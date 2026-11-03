@@ -23,7 +23,6 @@ pub use lunetad::ended::{exited, Exited};
 pub use lunetad::renames::renamed;
 use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
-use lunetad::names::kept;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::{clients, moves, Destination};
@@ -415,20 +414,21 @@ pub fn go(
 }
 
 /// Takes the client from the session it was `nudged` in, as `go` says, on
-/// the machine it was nudged on, to a session it makes, `to`, that starts in
-/// `cwd`, or where the client started, and then takes the look `then`, if
-/// any, for the client's arrival there, after which it opens the tab of
-/// `alone` there, if any, as `Alone` says. A session that runs under that
-/// name is where it goes, and `cwd` goes unused, and the tab opens beside
-/// its own; one that ended, which zellij kept to bring back, comes back as
-/// it was: `makes` says first whether zellij would make it, on this
-/// machine, and the daemon of another named it for one it would.
+/// this machine, which it was nudged on, to a session it makes, `to`, that
+/// starts in `cwd`, or where the client started, and then takes the look
+/// `then`, if any, for the client's arrival there, after which it opens the
+/// tab of `alone` there, if any, as `Alone` says. A session that runs under
+/// that name is where it goes, and `cwd` goes unused, and the tab opens
+/// beside its own; one that ended, which zellij kept to bring back, comes
+/// back as it was: `makes` says first whether zellij would make it.
 ///
-/// Unless zellij's sockets here say one runs by that name, as they do not of
-/// one the sidebar names, nor of another machine's, zellij makes it, and must
-/// take the client there before it is asked anything, as `Before::Made`
-/// says: the look comes back as the client's arrival, for luneta to ask for
-/// once zellij titles its terminal in that session, with the tab.
+/// Unless zellij's sockets say one runs by that name just before, as they do
+/// not of one the sidebar names, zellij makes it, and must take the client
+/// there before it is asked anything, as `Before::Made` says: the look
+/// comes back as the client's arrival, for luneta to ask for once zellij
+/// titles its terminal in that session, with the tab. Of another machine,
+/// whose sockets luneta reads only through its daemon there, luneta makes a
+/// session only by a client of its own, as `Action::Start` says.
 pub fn start(
     nudged: &Nudged,
     to: &SessionName,
@@ -437,19 +437,15 @@ pub fn start(
     alone: Option<Alone>,
     events: &Sender<Event>,
 ) -> Option<Arrival> {
-    let on = nudged.on().clone();
-    let runs = match on {
-        Machine::Local => runs(to.as_str()),
-        Machine::Remote(_) => None,
-    };
+    let runs = runs(to.as_str());
     let (at, cwd) = (nudged.session().clone(), cwd.map(str::to_owned));
-    let command = Action::Start { on: on.clone(), at, to: to.clone(), cwd };
+    let command = Action::Start { at, to: to.clone(), cwd };
     let when = nudged.until();
     match (then, alone) {
         (Some(look), alone) if runs != Some(true) => {
             let after = alone.map(Alone::after);
             run(command, Some(Then::Made(look.number)), when, events);
-            Some(Arrival::new(on, look, Before::Made, after))
+            Some(Arrival::new(Machine::Local, look, Before::Made, after))
         },
         (Some(look), alone) => {
             let beside = |Alone { owed, tab, session, .. }| After::tab(owed, &session, tab);
@@ -904,15 +900,18 @@ fn runs(session: &str) -> Option<bool> {
 /// directory it was to make it in unused. zellij makes a session only by
 /// `switch-session`, which does either, so luneta asks just before.
 pub fn makes(to: SessionName) -> Result<Unused, String> {
-    let cannot = || format!("no session made: luneta cannot tell whether one is called {to}");
-    let since = SystemTime::now();
-    if runs(to.as_str()).ok_or_else(cannot)? {
-        return Err(format!("no session made: {to} runs already"));
-    }
-    if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
-        return Err(format!("no session made: zellij keeps {to}, which ended, to bring back"));
-    }
+    let since = lunetad::names::unused(&to).map_err(|why| format!("no session made: {why}"))?;
     Ok(Unused { on: Machine::Local, name: to, since: Some(since) })
+}
+
+/// `to`, as a name zellij on `destination` would make a session of now, as
+/// `makes` says of this machine's, as its daemon there says within
+/// `away::QUICK`, as luneta's screen waits on it; or why zellij there would
+/// make none.
+pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused, String> {
+    let checked = Away::reach(destination, away::QUICK).and_then(|mut away| away.check(&to));
+    let since = checked.map_err(|why| format!("no session made: {why}"))?;
+    Ok(Unused { on: Machine::Remote(destination.clone()), name: to, since: Some(since) })
 }
 
 /// `to`, as a name zellij on `destination` would make a session of now, for
@@ -984,8 +983,22 @@ impl Then {
 enum Action {
     /// A go, as `moves::go` says, on `on`.
     Go { on: Machine, at: SessionName, to: SessionName, pane: Option<u32> },
-    /// A start, as `moves::start` says, on `on`.
-    Start { on: Machine, at: SessionName, to: SessionName, cwd: Option<String> },
+    /// A start, as `moves::start` says, on this machine. `switch-session`
+    /// takes the client to whatever has the name by the time zellij takes
+    /// it, which `start` looks for just before only here: on another
+    /// machine, luneta makes a session by a client that makes it there, as
+    /// `zellij --session` does, which zellij refuses a name taken by then.
+    Start { at: SessionName, to: SessionName, cwd: Option<String> },
+}
+
+impl Action {
+    /// The machine whose zellij takes it.
+    fn machine(&self) -> Machine {
+        match self {
+            Action::Go { on, .. } => on.clone(),
+            Action::Start { .. } => Machine::Local,
+        }
+    }
 }
 
 /// zellij, on the machine luneta's client runs on: this one's, by its CLI,
@@ -1059,22 +1072,19 @@ impl There {
         }
     }
 
-    /// Has zellij take `action`, which is of its machine, or says why it did
-    /// not. A pane already focused is where the action would take the
-    /// client, and no failure.
+    /// Has zellij take `action`, which is of its machine, as `run` reaches
+    /// it by `Action::machine`, or says why it did not. A pane already
+    /// focused is where the action would take the client, and no failure.
     fn take(&mut self, action: Action) -> Result<(), String> {
-        let command = match (action, self) {
-            (Action::Go { at, to, pane, .. }, There::Away(away)) => return away.go(&at, &to, pane),
-            (Action::Go { at, to, pane, .. }, There::Here) => {
-                match moves::go(Command::new("zellij"), &at, &to, pane) {
+        let command = match action {
+            Action::Go { at, to, pane, .. } => match self {
+                There::Away(away) => return away.go(&at, &to, pane),
+                There::Here => match moves::go(Command::new("zellij"), &at, &to, pane) {
                     Some(command) => command,
                     None => return Ok(()),
-                }
+                },
             },
-            (Action::Start { at, to, cwd, .. }, There::Away(away)) => {
-                return away.start(&at, &to, cwd.as_deref());
-            },
-            (Action::Start { at, to, cwd, .. }, There::Here) => {
+            Action::Start { at, to, cwd } => {
                 moves::start(Command::new("zellij"), &at, &to, cwd.as_deref())
             },
         };
@@ -1099,8 +1109,7 @@ impl There {
 fn run(action: Action, then: Option<Then>, when: Instant, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
-        let (Action::Go { on, .. } | Action::Start { on, .. }) = &action;
-        let mut there = match There::on(on) {
+        let mut there = match There::on(&action.machine()) {
             Ok(there) => there,
             Err(why) => {
                 // luneta is on its way out.
