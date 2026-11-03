@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::cli::{done, failure, quiet, unrun, LEFT_OUT, PANE_VAR, SESSION_VAR};
+use lunetad::cli::{done, failure, laid, quiet, unrun, LEFT_OUT, PANE_VAR, SESSION_VAR};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -31,6 +31,7 @@ pub use lunetad::SessionName;
 use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::{Event, Nudged};
+use crate::icons;
 use crate::machines::Machine;
 use crate::own::{Before, Look, Looked};
 
@@ -288,10 +289,26 @@ pub fn within() -> Within {
     }
 }
 
-/// The session luneta's terminal is a pane of, as its environment says, by
-/// the name it had as the pane opened, which zellij's check goes by too.
-pub fn current() -> Option<String> {
-    env::var(SESSION_VAR).ok()
+/// Whether `session`, which runs here, may hold luneta's terminal in a pane: it
+/// has the name the pane opened under, or zellij lists the pane there running
+/// luneta, or what it has yet to say, or will not list its panes. The name
+/// alone will not do: a rename leaves it behind in the pane, and another
+/// session can take it. Nor can the list tell the pane of a script that runs
+/// luneta, which it lists as that script.
+pub fn may_hold_terminal(session: &str) -> bool {
+    if env::var(SESSION_VAR).is_ok_and(|named| named == session) {
+        return true;
+    }
+    let Some(pane) = env::var(PANE_VAR).ok().and_then(|pane| pane.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Ok(laid) = laid(session) else {
+        return true;
+    };
+    laid.iter().filter(|listed| !listed.is_plugin && listed.id == pane).any(|listed| {
+        let runs = listed.pane_command.as_deref();
+        runs.is_none_or(|command| icons::program(command) == Some("luneta"))
+    })
 }
 
 /// The sessions that run on this machine, as zellij's sockets say, once none

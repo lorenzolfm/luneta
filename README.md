@@ -372,8 +372,9 @@ anywhere. It starts in the first of these that exists:
 session is asking for it. Inside luneta, `n s` or the picker makes one.
 
 Run in a pane of zellij, luneta will not attach to the session that pane is
-in, as zellij will not. Where sessions run but luneta will join none of them,
-it makes none: it says so and ends, for you to name one.
+in, as zellij will not. A bare `luneta` knows that session under a new name
+too: zellij lists its pane there running luneta. Where sessions run but luneta
+will join none of them, it makes none: it says so and ends, for you to name one.
 
 When zellij detaches, luneta ends. When the session zellij is in ends, as
 zellij quits, its last pane exits, or it is killed, luneta attaches zellij to
@@ -709,8 +710,9 @@ a second. On the pane you are in, that is once you leave it, or luneta's
 window, and come back. A folded session shows the `•` when any of its panes
 has one, unless one waits for you. Each luneta sees you only on the
 pane its own zellij is on, and every luneta of one daemon shares what they
-saw and marked: a file for each pane in `seen` and `unread` in luneta's
-runtime folder, `$XDG_RUNTIME_DIR/luneta` or `$TMPDIR/luneta`, beside the
+saw and marked, and when you were last in each pane: a file for each pane in
+`seen`, `unread` and `been` in luneta's runtime folder,
+`$XDG_RUNTIME_DIR/luneta` or `$TMPDIR/luneta`, beside the
 daemon's socket, which every luneta watches. A pane's file keeps to the
 session's socket, by when it was made and its inode, so a session renamed
 keeps them, and one started again under its name has none. They go once the

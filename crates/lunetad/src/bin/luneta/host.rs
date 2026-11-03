@@ -81,7 +81,7 @@ use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
-use crate::starts::{self, First, Start};
+use crate::starts::{self, First, Sought, Start};
 use crate::width::Width;
 use crate::zellij::{
     self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused,
@@ -922,10 +922,12 @@ fn run_in(
 }
 
 /// Draws the sidebar, and what luneta waits for where zellij will show, until
-/// lunetad has said what runs on each of `machines`, or does not answer, or
-/// `HEARING` has gone by. What else comes meanwhile, the keys among it, waits
-/// in `inbox` for the loop, with what the daemon said, in the order it came,
-/// so that the loop hears of it all as it hears of it from then on.
+/// lunetad has said what runs on each of `machines`, or `HEARING` has gone by:
+/// a daemon that does not answer is looked for again meanwhile, as one can end
+/// as it is reached, or make way for a newer. What else comes meanwhile, the
+/// keys among it, waits in `inbox` for the loop, with what the daemon said, in
+/// the order it came, so that the loop hears of it all as it hears of it from
+/// then on.
 fn hear(
     terminal: &mut DefaultTerminal,
     sidebar: &mut Sidebar,
@@ -957,13 +959,10 @@ fn hear(
                 match &event {
                     // luneta's zellij has come to no session for it to look for.
                     Event::Daemon(Ok(host)) => {
+                        unheard = sidebar::unheard(host, within);
                         let _ = sidebar.heard(host.clone());
-                        unheard = sidebar.unheard(within).unwrap_or(unheard);
                     },
-                    Event::Daemon(Err(why)) => {
-                        sidebar.lost(why.clone());
-                        unheard.clear();
-                    },
+                    Event::Daemon(Err(why)) => sidebar.lost(why.clone()),
                     _ => {},
                 }
                 inbox.aside.push_back(event);
@@ -1005,9 +1004,11 @@ fn first_client(
             });
             (zellij::client(session.as_ref()), Fails::End, arrival)
         },
-        First::Here(Refuge { session, before }) => {
+        First::Here(session) => {
+            // Just before the client starts, as `own` goes by: luneta may
+            // have waited on its terminal since it chose the session.
+            let before = zellij::before(session.as_str());
             let look = sidebar.sending(&session);
-            let before = Before::Listed(before);
             let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
             (zellij::rejoin(session.as_str()), Fails::End, arrival)
         },
@@ -2709,8 +2710,8 @@ impl App {
     /// ends where no machine has one, and where it does not reach lunetad to
     /// ask; the log says why it passed each machine over.
     fn newest_away(&mut self, tried: &[Destination]) -> io::Result<()> {
-        let Some((destination, Refuge { session, before })) =
-            starts::away(&self.sidebar, tried, away::QUICK).found
+        let Sought::Found(destination, Refuge { session, before }) =
+            starts::away(&self.sidebar, tried, away::QUICK)
         else {
             self.ended = true;
             return Ok(());

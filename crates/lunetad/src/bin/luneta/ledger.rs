@@ -17,6 +17,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lunetad::SocketId;
 use serde::{Deserialize, Serialize};
 
 use crate::state;
@@ -39,6 +40,12 @@ impl Session {
     /// before 1970 or after 2554, which no file can be named for.
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
         Some(Session { started: nanos(started)?, socket })
+    }
+
+    /// The session of the socket `id`, or none as `new` says, or for a socket
+    /// of no inode, which no file system gives one.
+    pub fn of(id: SocketId) -> Option<Self> {
+        Session::new(id.started(), NonZeroU64::new(id.socket())?)
     }
 
     /// When its socket was made.

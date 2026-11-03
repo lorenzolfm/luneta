@@ -20,9 +20,9 @@
 //! of 1 or 2 joins without `--create`, as `zellij::rejoin` says, so that a
 //! session gone since luneta looked is not made again, empty.
 //!
-//! luneta never joins what may hold its own terminal, as `zellij::refusal` and
-//! `Sidebar::refuges_away` say. Where that leaves nothing though sessions run,
-//! it makes none: it says so, and ends.
+//! luneta never joins what may hold its own terminal, as
+//! `zellij::may_hold_terminal` and `Sidebar::refuges_away` say. Where that
+//! leaves nothing though sessions run, it makes none: it says so, and ends.
 
 use std::time::{Duration, SystemTime};
 
@@ -30,6 +30,7 @@ use lunetad::log;
 use lunetad::Destination;
 
 use crate::away::ANSWER;
+use crate::ledger::Session;
 use crate::machines;
 use crate::news::News;
 use crate::sidebar::{NoRefuge, Sidebar};
@@ -38,7 +39,7 @@ use crate::zellij::{self, Refuge, SessionName};
 /// What luneta's first client is.
 pub enum First {
     /// One of this session of this machine's, which answered.
-    Here(Refuge),
+    Here(SessionName),
     /// One through ssh of this session of that machine's, which answered.
     Away(Destination, Refuge),
     /// One attached to this session, made if none runs by its name, or with
@@ -66,11 +67,11 @@ struct Running {
 }
 
 /// What a bare luneta finds on this machine.
-struct Here {
+enum Here {
     /// The session to join, of those that answer.
-    refuge: Option<Refuge>,
-    /// The session luneta's terminal is a pane of, where it runs.
-    holding: Option<String>,
+    Join(SessionName),
+    /// None to join, and those that run that may hold luneta's terminal.
+    Nothing { holding: Vec<String> },
 }
 
 /// Where a `luneta <name>` starts, or why it does not: naming a session is
@@ -83,45 +84,46 @@ pub fn named(session: SessionName) -> Result<Start, String> {
 /// it does not. It goes by the rule of old, for the session `named`, where not
 /// all of zellij's folder reads, which could hold a session that runs.
 pub fn bare(named: Option<SessionName>, news: &News) -> Result<Start, String> {
-    let Some(here) = here(named.as_ref(), news) else {
-        return make(named).map(Start::Now);
+    let holding = match here(named.as_ref(), news) {
+        None => return make(named).map(Start::Now),
+        Some(Here::Join(session)) => return Ok(Start::Now(First::Here(session))),
+        Some(Here::Nothing { holding }) => holding,
     };
-    if let Some(refuge) = here.refuge {
-        return Ok(Start::Now(First::Here(refuge)));
-    }
-    let machines = machines::named();
+    let machines = machines::named().unwrap_or_else(|why| {
+        // On the terminal as luneta left it, where it stays once luneta ends.
+        eprintln!("luneta: looking on no other machine: {why}");
+        Vec::new()
+    });
     if !machines.is_empty() {
         return Ok(Start::Hear { machines, named });
     }
-    left(named, here.holding.as_deref(), &[]).map(Start::Now)
+    left(named, &holding, &[]).map(Start::Now)
 }
 
 /// Where a bare `luneta` starts once it has heard all it will of the other
 /// machines, as the sidebar has it, or why it does not. A session may have
 /// come to this machine as it waited.
 pub fn heard(named: Option<SessionName>, sidebar: &Sidebar) -> Result<First, String> {
-    let Some(here) = here(named.as_ref(), sidebar.news()) else {
-        return make(named);
+    let holding = match here(named.as_ref(), sidebar.news()) {
+        None => return make(named),
+        Some(Here::Join(session)) => return Ok(First::Here(session)),
+        Some(Here::Nothing { holding }) => holding,
     };
-    if let Some(refuge) = here.refuge {
-        return Ok(First::Here(refuge));
-    }
     // A machine slow to answer has a session luneta would make one for
     // otherwise, which is worth more than a moment.
-    let Sought { found, held } = away(sidebar, &[], ANSWER);
-    if let Some((destination, refuge)) = found {
-        return Ok(First::Away(destination, refuge));
+    match away(sidebar, &[], ANSWER) {
+        Sought::Found(destination, refuge) => Ok(First::Away(destination, refuge)),
+        Sought::Nowhere { held } => left(named, &holding, &held),
     }
-    left(named, here.holding.as_deref(), &held)
 }
 
 /// What luneta found of the other machines' sessions.
-pub struct Sought {
+pub enum Sought {
     /// The first machine with a session to go to, and that session.
-    pub found: Option<(Destination, Refuge)>,
-    /// Those it passed over before it, each of whose sessions may hold its
-    /// own terminal.
-    pub held: Vec<Destination>,
+    Found(Destination, Refuge),
+    /// No session to go to, and the machines it looked on each of whose
+    /// sessions may hold its own terminal.
+    Nowhere { held: Vec<Destination> },
 }
 
 /// The newest session that answers within `limit` of the first of the other
@@ -142,7 +144,7 @@ pub fn away(sidebar: &Sidebar, tried: &[Destination], limit: Duration) -> Sought
             },
         };
         match zellij::answering_away(&destination, sessions, limit) {
-            Ok(Some(refuge)) => return Sought { found: Some((destination, refuge)), held },
+            Ok(Some(refuge)) => return Sought::Found(destination, refuge),
             Ok(None) => log::say(&format!("{destination}: no session to go on in answers")),
             Err(why) => {
                 log::say(&format!("no session of another machine's to go on in: {why}"));
@@ -150,36 +152,33 @@ pub fn away(sidebar: &Sidebar, tried: &[Destination], limit: Duration) -> Sought
             },
         }
     }
-    Sought { found: None, held }
+    Sought::Nowhere { held }
 }
 
 /// What runs on this machine, as a bare luneta whose directory's session is
 /// `named` goes by it, with what `news` has of each. None where not all of
 /// zellij's folder reads.
 fn here(named: Option<&SessionName>, news: &News) -> Option<Here> {
-    let running = zellij::settled()?;
-    let current = zellij::current();
-    let holding = current.filter(|current| running.iter().any(|(name, _)| name == current));
-    let running = running.into_iter().map(|(name, id)| Running {
+    let running = zellij::settled()?.into_iter();
+    let (holding, free): (Vec<_>, Vec<_>) =
+        running.partition(|(name, _)| zellij::may_hold_terminal(name));
+    let free = free.into_iter().map(|(name, id)| Running {
         name,
         started: id.started(),
-        seen: news.last_seen(id.started(), id.socket()),
+        seen: Session::of(id).and_then(|session| news.last_seen(session)),
     });
-    let sessions = joinable(running.collect(), named, holding.as_deref());
-    Some(Here { refuge: zellij::answering(sessions), holding })
+    Some(match zellij::answering(joinable(free.collect(), named)) {
+        Some(Refuge { session, .. }) => Here::Join(session),
+        None => Here::Nothing { holding: holding.into_iter().map(|(name, _)| name).collect() },
+    })
 }
 
 /// The sessions of `running` a bare luneta can join, the likeliest first: the
 /// one `named` for its directory; then those you were last in; then those you
 /// have not been in, the newest first, and of two that started at once the one
-/// whose name comes last, as the picker has them. Never `holding`, nor one of
-/// a name luneta cannot hand zellij.
-fn joinable(
-    mut running: Vec<Running>,
-    named: Option<&SessionName>,
-    holding: Option<&str>,
-) -> Vec<SessionName> {
-    running.retain(|session| holding != Some(session.name.as_str()));
+/// whose name comes last, as the picker has them. Never one of a name luneta
+/// cannot hand zellij.
+fn joinable(mut running: Vec<Running>, named: Option<&SessionName>) -> Vec<SessionName> {
     let is_named = |session: &Running| named.is_some_and(|named| named.as_str() == session.name);
     running.sort_by(|a, b| {
         (is_named(b), b.seen, b.started, &b.name).cmp(&(is_named(a), a.seen, a.started, &a.name))
@@ -193,7 +192,7 @@ fn joinable(
 /// refuses for, as `refusal_to_make` says.
 fn left(
     named: Option<SessionName>,
-    holding: Option<&str>,
+    holding: &[String],
     held: &[Destination],
 ) -> Result<First, String> {
     match refusal_to_make(holding, held) {
@@ -212,13 +211,14 @@ fn make(named: Option<SessionName>) -> Result<First, String> {
 }
 
 /// Why a bare luneta makes no session, where it left none to join but
-/// `holding`, the session its terminal is a pane of, and every session of the
-/// machines `held`, which may hold it: sessions run, and you did not ask for
-/// another by naming it.
-fn refusal_to_make(holding: Option<&str>, held: &[Destination]) -> Option<String> {
+/// `holding`, those here its terminal may be a pane of, and every session of
+/// the machines `held`, which may hold it: sessions run, and you did not ask
+/// for another by naming it.
+fn refusal_to_make(holding: &[String], held: &[Destination]) -> Option<String> {
     let mut holders = Vec::new();
-    if let Some(session) = holding {
-        holders.push(format!("this terminal is a pane of \"{session}\""));
+    if !holding.is_empty() {
+        let sessions: Vec<String> = holding.iter().map(|name| format!("\"{name}\"")).collect();
+        holders.push(format!("this terminal is a pane of {}", sessions.join(" or ")));
     }
     if !held.is_empty() {
         let machines: Vec<String> = held.iter().map(ToString::to_string).collect();
@@ -250,13 +250,9 @@ mod tests {
         SessionName::running(name).unwrap()
     }
 
-    fn order(
-        sessions: Vec<Running>,
-        named: Option<&str>,
-        holding: Option<&str>,
-    ) -> Vec<String> {
+    fn order(sessions: Vec<Running>, named: Option<&str>) -> Vec<String> {
         let named = named.map(name);
-        let joinable = joinable(sessions, named.as_ref(), holding);
+        let joinable = joinable(sessions, named.as_ref());
         joinable.iter().map(ToString::to_string).collect()
     }
 
@@ -275,10 +271,10 @@ mod tests {
             ]
         };
         let by_news = ["seen-last", "seen-long-ago", "newest", "older", "project"];
-        assert_eq!(order(sessions(), None, None), by_news);
-        assert_eq!(order(sessions(), Some("no-such-session"), None), by_news);
+        assert_eq!(order(sessions(), None), by_news);
+        assert_eq!(order(sessions(), Some("no-such-session")), by_news);
         let in_project = ["project", "seen-last", "seen-long-ago", "newest", "older"];
-        assert_eq!(order(sessions(), Some("project"), None), in_project);
+        assert_eq!(order(sessions(), Some("project")), in_project);
     }
 
     /// Of two that started at once, the one whose name comes last goes first,
@@ -286,21 +282,15 @@ mod tests {
     #[test]
     fn of_two_alike_the_one_whose_name_comes_last_goes_first() {
         let sessions = vec![running("a", 2, None), running("b", 2, None)];
-        assert_eq!(order(sessions, None, None), ["b", "a"]);
+        assert_eq!(order(sessions, None), ["b", "a"]);
     }
 
-    /// A session luneta's terminal is a pane of is never joined, though it is
-    /// the one named for the directory, and the last you were in; and one of
-    /// a name luneta cannot hand zellij is passed over.
+    /// One of a name luneta cannot hand zellij is passed over, though it is
+    /// the last you were in.
     #[test]
-    fn a_session_that_holds_luneta_is_never_joined() {
-        let sessions = vec![
-            running("here", 30, Some(300)),
-            running("other", 20, None),
-            running("no/name", 40, Some(400)),
-        ];
-        assert_eq!(order(sessions, Some("here"), Some("here")), ["other"]);
-        assert!(order(vec![running("here", 30, None)], None, Some("here")).is_empty());
+    fn a_session_of_a_name_luneta_cannot_hand_zellij_is_passed_over() {
+        let sessions = vec![running("other", 20, None), running("no/name", 40, Some(400))];
+        assert_eq!(order(sessions, None), ["other"]);
     }
 
     /// With nothing left to join, luneta refuses where what it passed over
@@ -308,19 +298,23 @@ mod tests {
     /// it makes one. The session's words are those of the refusal of old.
     #[test]
     fn luneta_refuses_to_make_a_session_only_where_it_passed_sessions_over() {
-        assert_eq!(refusal_to_make(None, &[]), None);
+        let work = ["work".to_owned()];
+        assert_eq!(refusal_to_make(&[], &[]), None);
         assert_eq!(
-            refusal_to_make(Some("work"), &[]).unwrap(),
+            refusal_to_make(&work, &[]).unwrap(),
             "this terminal is a pane of \"work\", which zellij would show inside itself: name \
              another session, or run luneta outside zellij"
         );
         let held: [Destination; 2] = ["pi".parse().unwrap(), "me@vps".parse().unwrap()];
         assert_eq!(
-            refusal_to_make(None, &held).unwrap(),
+            refusal_to_make(&[], &held).unwrap(),
             "each session of pi, me@vps may hold this terminal in a pane, which zellij would show \
              inside itself: name another session, or run luneta outside zellij"
         );
-        let both = refusal_to_make(Some("work"), &held[..1]).unwrap();
+        let two = ["work".to_owned(), "play".to_owned()];
+        let two = refusal_to_make(&two, &[]).unwrap();
+        assert!(two.starts_with("this terminal is a pane of \"work\" or \"play\", which"), "{two}");
+        let both = refusal_to_make(&work, &held[..1]).unwrap();
         assert!(
             both.starts_with(
                 "this terminal is a pane of \"work\", and each session of pi may hold this \

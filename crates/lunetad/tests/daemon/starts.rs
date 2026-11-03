@@ -28,6 +28,9 @@ const ENDS: Duration = Duration::from_secs(30);
 /// lunetad gives a machine that does not answer this long before it gives up.
 const REACH: Duration = Duration::from_secs(10);
 
+/// How long luneta waits to hear of a machine, from when it starts to.
+const HEARING: Duration = Duration::from_secs(5);
+
 /// How luneta ended, and what it wrote on its terminal.
 struct Ended {
     status: ExitStatus,
@@ -121,7 +124,7 @@ fn a_bare_luneta_joins_the_session_you_were_in_last() {
     let started = seen.started_at.unwrap();
     let nanos = |seconds: i64, nanos: i32| i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
     let session = nanos(started.seconds, started.nanos);
-    let ledger = host.folder().join("seen");
+    let ledger = host.folder().join("been");
     fs::create_dir_all(&ledger).unwrap();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     fs::write(ledger.join(format!("{session}-{}-1", seen.socket)), format!("{now}\n")).unwrap();
@@ -181,6 +184,52 @@ fn a_bare_luneta_never_joins_the_session_its_terminal_is_a_pane_of() {
     let ended = on_terminal(other);
     assert!(ended.status.success(), "{}", ended.said);
     assert_eq!(host.zellij.attached(), ["attach other"]);
+}
+
+/// A rename leaves the name a pane opened under behind in what runs there. So
+/// a bare luneta goes by what zellij lists now as well: it passes over a
+/// session whose pane of its id runs luneta, or what zellij has yet to say, and
+/// makes none. It joins one whose pane of that id runs something else.
+#[test]
+fn a_bare_luneta_never_joins_its_own_session_once_that_is_renamed() {
+    let host = Host::new();
+    let dir = directory("project");
+    let in_a_pane = || {
+        let mut luneta = luneta(host.vars(), &dir.path);
+        luneta.env("ZELLIJ_SESSION_NAME", "opened-as").env("ZELLIJ_PANE_ID", "1");
+        luneta
+    };
+    let _renamed = host.serve("renamed");
+    host.zellij.list("renamed", &pane_running("luneta"));
+    let _untold = host.serve("untold");
+    let mut untold = pane_running("");
+    untold[0]["pane_command"] = json!(null);
+    host.zellij.list("untold", &untold);
+
+    let output = in_a_pane().output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    assert!(refusal.contains("this terminal is a pane of"), "{refusal}");
+    assert!(refusal.contains("\"renamed\"") && refusal.contains("\"untold\""), "{refusal}");
+    assert!(host.zellij.attached().is_empty());
+
+    let _other = host.serve("other");
+    host.zellij.list("other", &pane_running("fish"));
+    let ended = on_terminal(in_a_pane());
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(host.zellij.attached(), ["attach other"]);
+}
+
+/// A hosts file that does not read is said to be so, as it leaves luneta
+/// looking on no other machine, which is not to say that none is named.
+#[test]
+fn a_bare_luneta_says_where_the_hosts_file_does_not_read() {
+    let host = Host::new();
+    fs::create_dir_all(host.home.path().join(".local/state/luneta/hosts")).unwrap();
+    let ended = on_terminal(luneta(host.vars(), &directory("project").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert!(ended.said.contains("luneta/hosts: "), "{}", ended.said);
+    assert_eq!(host.zellij.attached(), ["attach --create project"]);
 }
 
 /// A machine of the hosts file, reached by `ssh`, with `name` running there.
@@ -267,6 +316,32 @@ fn a_machine_that_says_nothing_is_waited_for_a_while_and_counts_for_none() {
     assert!(ended.status.success(), "{}", ended.said);
     assert!(ended.said.contains("Waiting to hear what runs on silent"), "{}", ended.said);
     assert!(began.elapsed() < REACH, "it took {:?}", began.elapsed());
+    assert_eq!(here.zellij.attached(), ["attach --create project"]);
+}
+
+/// A daemon that goes away as luneta waits is looked for again, as one can end
+/// as it is reached, or make way for a newer: a machine still counts as having
+/// none only once the wait has run its course.
+#[test]
+fn a_daemon_that_goes_away_does_not_cut_the_wait_short() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.waits_on("silent");
+    hosts(&here, "silent\n");
+    let daemon = start(here.vars()).unwrap();
+    // Well into the wait, which starts once luneta gave up on its terminal's
+    // answers, about a second in.
+    let goes_away = thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        drop(daemon);
+    });
+
+    let began = Instant::now();
+    let ended = on_terminal(luneta(here.vars(), &directory("project").path));
+    let took = began.elapsed();
+    goes_away.join().unwrap();
+    assert!(ended.status.success(), "{}", ended.said);
+    assert!(took >= HEARING, "it took {took:?}");
     assert_eq!(here.zellij.attached(), ["attach --create project"]);
 }
 

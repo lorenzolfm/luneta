@@ -63,11 +63,11 @@ pub fn forget(destination: &Destination) -> Result<bool, String> {
     forget_in(&file()?, destination)
 }
 
-/// The machines luneta's hosts file names now: none where it does not read,
-/// or there is none to look for, as lunetad watches none then either.
-pub fn named() -> Vec<Destination> {
-    let text = file().and_then(|file| read(&file));
-    text.map_or_else(|_| Vec::new(), |text| lunetad::hosts_named(&text, |_| {}).machines)
+/// The machines luneta's hosts file names now, none where there is none. Or why
+/// it does not read, where lunetad watches none either.
+pub fn named() -> Result<Vec<Destination>, String> {
+    let text = read(&file()?)?;
+    Ok(lunetad::hosts_named(&text, |_| {}).machines)
 }
 
 /// Where luneta's hosts file is.
