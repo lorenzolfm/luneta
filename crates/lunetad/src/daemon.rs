@@ -51,18 +51,20 @@ use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_printed_response::{self, File as PrintedFile, Nothing, Top};
 use crate::api::list_dirs_response::Dir;
+use crate::api::list_exited_response::Exited;
 use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
     self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
-    DumpScreenRequest, DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse,
-    KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest,
-    ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
-    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest,
-    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
-    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse,
+    DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest, DumpScreenResponse, GoRequest,
+    GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
+    KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
+    ListContentsRequest, ListContentsResponse, ListDirsRequest, ListDirsResponse,
+    ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
+    NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, PasteRequest,
+    PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, RenameSessionResponse,
+    StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -77,8 +79,8 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
-    claude, client, clients, closes, eza, git, github, log, metadata, moves, names, opens, panes,
-    printed, release, remote, screens, shells, skills, watch, zellij, zoxide,
+    claude, client, clients, closes, ended, eza, git, github, log, metadata, moves, names, opens,
+    panes, printed, release, remote, renames, screens, shells, skills, watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -703,6 +705,66 @@ impl Daemon for Host {
         let killed = killed.map_err(|error| unfinished(&error))?;
         killed.map_err(Status::failed_precondition)?;
         Ok(Response::new(KillResponse {}))
+    }
+
+    async fn list_exited(
+        &self,
+        request: Request<ListExitedRequest>,
+    ) -> Result<Response<ListExitedResponse>, Status> {
+        let ListExitedRequest { on } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.list_exited(ListExitedRequest { on: None }).await;
+        }
+        let listed = task::spawn_blocking(ended::exited).await;
+        let listed = listed.map_err(|error| unfinished(&error))?;
+        let listed = listed.map_err(Status::failed_precondition)?;
+        // An age past what a Duration holds, some 292 billion years, is one
+        // zellij said of no session, as a line that does not read: how many
+        // go so goes in the log.
+        let exited = |ended::Exited { name, ago }| {
+            Some(Exited { name: name.to_string(), ago: Some(ago.try_into().ok()?) })
+        };
+        let read = listed.len();
+        let exited: Vec<Exited> = listed.into_iter().filter_map(exited).collect();
+        let left_out = read - exited.len();
+        if left_out > 0 {
+            log::say(&format!("left out {left_out} kept sessions of an age no Duration holds"));
+        }
+        Ok(Response::new(ListExitedResponse { exited }))
+    }
+
+    async fn delete_exited(
+        &self,
+        request: Request<DeleteExitedRequest>,
+    ) -> Result<Response<DeleteExitedResponse>, Status> {
+        let DeleteExitedRequest { on, session } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.delete_exited(DeleteExitedRequest { on: None, session }).await;
+        }
+        let deleted = task::spawn_blocking(move || closes::deleted(&session)).await;
+        let deleted = deleted.map_err(|error| unfinished(&error))?;
+        deleted.map_err(Status::failed_precondition)?;
+        Ok(Response::new(DeleteExitedResponse {}))
+    }
+
+    async fn rename_session(
+        &self,
+        request: Request<RenameSessionRequest>,
+    ) -> Result<Response<RenameSessionResponse>, Status> {
+        let RenameSessionRequest { on, session, to } = request.into_inner();
+        let session = named("session", &session)?;
+        let to = SessionName::parse(&to)
+            .map_err(|why| Status::invalid_argument(format!("to: {why}")))?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (session, to) = (session.to_string(), to.to_string());
+            return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
+        }
+        let renamed = task::spawn_blocking(move || renames::renamed(&session, &to)).await;
+        let renamed = renamed.map_err(|error| unfinished(&error))?;
+        renamed.map_err(Status::failed_precondition)?;
+        Ok(Response::new(RenameSessionResponse {}))
     }
 
     async fn transcript_ends(

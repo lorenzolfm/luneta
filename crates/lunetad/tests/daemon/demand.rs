@@ -15,13 +15,15 @@ use std::time::{Duration, Instant};
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
-    DumpScreenRequest, DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse,
-    KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest,
-    ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
-    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest,
-    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
-    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
+    DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest, DumpScreenResponse, GoRequest,
+    GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
+    KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
+    ListContentsRequest, ListContentsResponse, ListDirsRequest, ListDirsResponse,
+    ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
+    NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, PasteRequest,
+    PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, RenameSessionResponse,
+    StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse, Version,
+    WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -621,6 +623,27 @@ impl Daemon for StandIn {
     }
 
     async fn kill(&self, _: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn list_exited(
+        &self,
+        _: Request<ListExitedRequest>,
+    ) -> Result<Response<ListExitedResponse>, Status> {
+        Err(Status::unimplemented("a stand-in keeps no session"))
+    }
+
+    async fn delete_exited(
+        &self,
+        _: Request<DeleteExitedRequest>,
+    ) -> Result<Response<DeleteExitedResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn rename_session(
+        &self,
+        _: Request<RenameSessionRequest>,
+    ) -> Result<Response<RenameSessionResponse>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 

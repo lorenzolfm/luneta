@@ -12,15 +12,16 @@ use std::time::{Duration, Instant, SystemTime};
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_printed_response::{self, File};
-use lunetad::api::{close_request, closes_response};
+use lunetad::api::{close_request, closes_response, list_exited_response};
 use lunetad::api::list_skills_response::Skill;
 use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
-    self, AskRequest, Client, CloseRequest, ClosesRequest, DumpScreenRequest, GoRequest,
-    KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest, ListDirsRequest,
-    ListSkillsRequest, NameSessionRequest, On, OpenRequest, RefugeRequest, StartRequest,
+    self, AskRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
+    DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
+    ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
+    NameSessionRequest, On, OpenRequest, RefugeRequest, RenameSessionRequest, StartRequest,
     TranscriptEndsRequest, WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
@@ -493,14 +494,16 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
 /// directory, what a pane's shell printed, which it keeps there, what a
 /// terminal shows there, and the name a session for a directory takes
 /// there, and to start it, and what closing a pane closes there, to close
-/// it, and a session to kill, and the ends of transcripts in Claude Code's
-/// folder there. Without a machine, it asks its own; of one it does not
-/// reach, it says so. A question that names a directory by no absolute path,
-/// an empty line typed, a screen of no session, a tab by an empty name, a
-/// tab to close of no terminal, or a transcript by no session's id, or more
-/// of the transcripts than a brief keeps, or none of them, is invalid here;
-/// no tab opens there in a session no client is in, and nothing closes
-/// there that zellij lists otherwise than the close says.
+/// it, and a session to kill, and the sessions that ended there, to let one
+/// go of, and a session to rename, and the ends of transcripts in Claude
+/// Code's folder there. Without a machine, it asks its own; of one it does
+/// not reach, it says so. A question that names a directory by no absolute
+/// path, an empty line typed, a screen of no session, a tab by an empty
+/// name, a tab to close of no terminal, a session to let go of by no name, a
+/// name zellij would make no session of, or a transcript by no session's
+/// id, or more of the transcripts than a brief keeps, or none of them, is
+/// invalid here; no tab opens there in a session no client is in, and
+/// nothing closes there that zellij lists otherwise than the close says.
 #[test]
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
@@ -713,6 +716,35 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.kill(kill(work_started)).await.unwrap();
         assert_eq!(far.zellij.closed()[2..], ["delete-session --force work"]);
         assert!(here.zellij.closed().is_empty());
+
+        // The sessions that ended there are listed there, each by how long
+        // before zellij listed it it was made, as zellij there says, and one
+        // is let go of there.
+        far.keep("old");
+        let exited = |on| ListExitedRequest { on };
+        let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
+        let ago = Some(prost_types::Duration { seconds: 3723, nanos: 0 });
+        let old = list_exited_response::Exited { name: "old".to_owned(), ago };
+        assert_eq!(listed.exited, [old]);
+        assert!(daemon.list_exited(exited(None)).await.unwrap().into_inner().exited.is_empty());
+        let delete = |session: &str| {
+            DeleteExitedRequest { on: on("far"), session: session.to_owned() }
+        };
+        daemon.delete_exited(delete("old")).await.unwrap();
+        assert_eq!(far.zellij.closed()[3..], ["delete-session old"]);
+        let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
+        assert!(listed.exited.is_empty());
+        invalid(daemon.delete_exited(delete("")).await.unwrap_err());
+        // A session there is renamed there, to a name zellij makes a session
+        // of on any machine.
+        let rename = |to: &str| {
+            let session = "idle".to_owned();
+            RenameSessionRequest { on: on("far"), session, to: to.to_owned() }
+        };
+        daemon.rename_session(rename("rest")).await.unwrap();
+        assert_eq!(far.zellij.renamed(), ["--session idle action rename-session rest"]);
+        invalid(daemon.rename_session(rename(&"long".repeat(16))).await.unwrap_err());
+        assert!(here.zellij.renamed().is_empty());
 
         // A transcript there is read there, and one not written yet has no
         // end.

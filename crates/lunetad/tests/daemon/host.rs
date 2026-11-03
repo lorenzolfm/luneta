@@ -118,8 +118,11 @@ pub fn script(path: &Path, text: &str) {
 /// each pane and tab it is asked to open, with the pane it is asked from, for
 /// `opened`, opens none, and says it opened `terminal_9`, or the tab `3`,
 /// after which it lists the panes a test wrote with `opens_into`, if any. It
-/// dumps a pane as the text a test had it `dumps` for its session. It knows
-/// no other command.
+/// dumps a pane as the text a test had it `dumps` for its session. It lists
+/// each session it keeps how it was laid out of in the home, and that has no
+/// socket, as one that ended, which a test had it `keep`, made an hour, two
+/// minutes and three seconds before. It notes each rename it is asked for,
+/// for `renamed`, and renames nothing. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -189,6 +192,25 @@ case "$*" in
         ;;
     "action dump-screen "*)
         exec cat "{panes}/$session.dump"
+        ;;
+    "list-sessions --no-formatting")
+        listed=
+        for dir in "$cache"/contract_version_1/session_info/*/; do
+            name=$(basename "$dir")
+            [ -f "$dir/session-layout.kdl" ] || continue
+            [ -e "$ZELLIJ_SOCKET_DIR/contract_version_1/$name" ] && continue
+            echo "$name [Created 1h 2m 3s ago] (EXITED - attach to resurrect)"
+            listed=1
+        done
+        if [ -z "$listed" ]; then
+            echo "No active zellij sessions found." >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+    "action rename-session "*)
+        echo "$asked" >> "{panes}/renamed"
+        exit 0
         ;;
     "delete-session "*)
         if [ -S "$socket" ]; then
@@ -277,6 +299,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// asked, after the pane it was asked from, or `-`.
     pub fn opened(&self) -> Vec<String> {
         self.lines("opened")
+    }
+
+    /// Each rename zellij was asked for, as its arguments were, in the order
+    /// it was asked.
+    pub fn renamed(&self) -> Vec<String> {
+        self.lines("renamed")
     }
 
     /// Has zellij dump `text` of any pane of `session` from now on.
@@ -562,6 +590,14 @@ impl Host {
         let dir = self.metadata().join(session);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("session-metadata.kdl"), text).unwrap();
+    }
+
+    /// Has zellij keep how `session` was laid out, in place, to bring it
+    /// back from, as it keeps one that ended.
+    pub fn keep(&self, session: &str) {
+        let dir = self.metadata().join(session);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("session-layout.kdl"), "layout {\n}\n").unwrap();
     }
 
     /// The daemon's folder.

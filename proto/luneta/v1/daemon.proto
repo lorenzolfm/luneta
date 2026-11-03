@@ -87,6 +87,18 @@ service Daemon {
   // once the session's server has ended, or with why it did not: a session
   // that took the name since stays.
   rpc Kill(KillRequest) returns (KillResponse);
+  // The sessions zellij keeps to bring back, which ended, as `zellij
+  // list-sessions` lists them now, for luneta's picker to list.
+  rpc ListExited(ListExitedRequest) returns (ListExitedResponse);
+  // Has zellij let go of a session it keeps to bring back, which ended, as
+  // `zellij delete-session` does, so that it cannot bring it back. It
+  // answers once zellij has, or with what zellij said as it failed: a
+  // session that runs by the name stays.
+  rpc DeleteExited(DeleteExitedRequest) returns (DeleteExitedResponse);
+  // Has zellij call a session that runs by another name, as `zellij action
+  // rename-session` does, for luneta's picker. It answers once zellij has,
+  // or with what zellij said as it failed, as where a session has the name.
+  rpc RenameSession(RenameSessionRequest) returns (RenameSessionResponse);
   // The ends of transcripts of Claude Code's sessions, as luneta's brief
   // reads them in the daemon's Claude Code folder: of each, the last records
   // that tell what its agent is doing, whole ones alone, as many as a share
@@ -401,6 +413,42 @@ message KillRequest {
 }
 
 message KillResponse {}
+
+message ListExitedRequest {
+  On on = 1;
+}
+
+message ListExitedResponse {
+  // In the order zellij lists them.
+  repeated Exited exited = 1;
+
+  message Exited {
+    // A name zellij takes.
+    string name = 1;
+    // How long before zellij listed it it was made, to the second, as zellij
+    // says: no time by the machine's clock, which may be off of the
+    // client's.
+    google.protobuf.Duration ago = 2;
+  }
+}
+
+message DeleteExitedRequest {
+  On on = 1;
+  string session = 2;
+}
+
+message DeleteExitedResponse {}
+
+message RenameSessionRequest {
+  On on = 1;
+  // The session that runs.
+  string session = 2;
+  // The name it takes: one zellij makes a session of on any machine, as
+  // luneta's are held to. One that is not, as one too long, is invalid.
+  string to = 3;
+}
+
+message RenameSessionResponse {}
 
 message TranscriptEndsRequest {
   On on = 1;
