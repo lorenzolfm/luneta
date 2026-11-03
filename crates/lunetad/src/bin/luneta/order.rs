@@ -35,8 +35,9 @@
 //! later build may keep there, is written back as it was. A luneta changes it
 //! under the lock of `order.lock`, beside it, from the read to the write, so
 //! that of two that change it at once, as one moves a session while another
-//! gives one a colour, the second changes what the first wrote. Each luneta
-//! watches the file, and takes up a move another makes as it makes it.
+//! gives one a colour, the second changes what the first wrote. Where the
+//! lock cannot be had, it changes it without. Each luneta watches the file,
+//! and takes up a move another makes as it makes it.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
@@ -305,19 +306,14 @@ impl Order {
     /// Holds `order.lock`, beside the file, until what it gives back is
     /// dropped, for `keep` to read the file and write it under: of two
     /// lunetas that change it at once, the second reads what the first wrote,
-    /// and undoes none of it. A lock that cannot be had gives the file up, as
-    /// a write that fails does. A luneta of an earlier build takes none.
-    fn lock(&mut self) -> Option<File> {
-        let file = self.file.as_ref()?;
-        let lock = File::create(file.with_file_name(LOCK));
-        match lock.and_then(|lock| lock.lock().map(|()| lock)) {
-            Ok(lock) => Some(lock),
-            Err(error) => {
-                self.lost = Some(format!("{}: {error}", file.display()));
-                self.file = None;
-                None
-            },
-        }
+    /// and undoes none of it. Where the lock cannot be had, as on a
+    /// filesystem that has no locks, the change is made without it, as a
+    /// luneta of an earlier build makes it, which takes none: the file is
+    /// still shared, and given up only as a write fails.
+    fn lock(&self) -> Option<File> {
+        let lock = File::create(self.file.as_ref()?.with_file_name(LOCK)).ok()?;
+        lock.lock().ok()?;
+        Some(lock)
     }
 
     /// Makes `change` to the order as this luneta last took it up, and
@@ -690,6 +686,25 @@ mod tests {
             "remote_sessions": {"nixos": ["d", "c"]},
         });
         assert_eq!(kept, expected);
+    }
+
+    /// A lock that cannot be had, as where `order.lock` is a folder, or on a
+    /// filesystem that has no locks, leaves the file shared: a colour given
+    /// and a move are kept without it, as a luneta of an earlier build keeps
+    /// them, which takes none.
+    #[test]
+    fn a_lock_that_cannot_be_had_leaves_the_file_shared() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        fs::create_dir(scratch.path().join(LOCK)).unwrap();
+        let mut here = Order::within(file.clone());
+        let [a, b] = [1, 2].map(session);
+        assert_eq!(colour(&mut here, &[a, b]), [Colour::Blue, Colour::Yellow]);
+        here.keep_sessions(&Machine::Local, names(&["b", "a"]));
+        assert_eq!((here.lost(), here.file()), (None, Some(file.as_path())));
+        let mut later = Order::within(file);
+        assert_eq!(colour(&mut later, &[b, a]), [Colour::Yellow, Colour::Blue]);
+        assert_eq!(sorted(&later, &["a", "b"]), ["b", "a"]);
     }
 
     /// A file that does not read as an order leaves the order as it was, and
