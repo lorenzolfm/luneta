@@ -37,7 +37,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use lunetad::zoxide::{self, Dir};
-use lunetad::{eza, Destination};
+use lunetad::{eza, Destination, Directory};
 
 use crate::away::{self, Away};
 use crate::close::{Act, Deletes, Plan};
@@ -193,7 +193,7 @@ pub enum Picked {
     /// Take zellij's client to a session zellij makes on `on`, `session`,
     /// that starts in `cwd`, and close the picker; or say why zellij would
     /// make none.
-    Make { on: Machine, session: SessionName, cwd: String },
+    Make { on: Machine, session: SessionName, cwd: Directory },
     /// Plan deleting what `deletes` deletes of `session`, and hand the plan
     /// to `planned`.
     Plan { session: Listed, deletes: Deletes },
@@ -221,7 +221,7 @@ pub enum Heard {
     /// list them.
     Dirs { on: Machine, visited: Result<Vec<Dir>, String> },
     /// What eza listed of the directory `path` of `on`, or why it did not.
-    Listed { on: Machine, path: String, listed: Result<String, String> },
+    Listed { on: Machine, path: Directory, listed: Result<String, String> },
 }
 
 /// What the picker asks of zellij, and of zoxide and eza, of this machine
@@ -244,7 +244,7 @@ pub enum Ask {
     /// The directories zoxide knows on the machine.
     Dirs(Machine),
     /// What is in the directory at `path` of `on`, as eza lists it.
-    List { on: Machine, path: String },
+    List { on: Machine, path: Directory },
 }
 
 /// Asks zellij, zoxide or eza what `ask` asks, for the picker numbered
@@ -315,7 +315,7 @@ pub enum Key {
     Agent(Place),
     /// A directory zoxide knows on `on`, by its path, and the session `Enter`
     /// makes there, or why it makes none yet.
-    Dir { on: Machine, path: String, session: Result<SessionName, &'static str> },
+    Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
 }
 
 /// A row of a list: what it stands for, the name it shows, the characters
@@ -489,7 +489,7 @@ impl Contents {
 type Looked = (String, Option<u32>);
 
 /// A directory of a machine's, by its path.
-type Located = (Machine, String);
+type Located = (Machine, Directory);
 
 /// What the preview shows: a terminal's screen, or what is in a directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -616,7 +616,8 @@ impl Picker {
     /// Takes in what the sidebar knows of the host now. The sessions zellij
     /// keeps to bring back are asked for again once a session ran that runs
     /// no more, as zellij keeps one killed, and zoxide of a machine listed
-    /// for the first time for its directories.
+    /// for the first time for its directories, or again since it went off
+    /// the listing.
     pub fn listed(&mut self, listing: Listing) {
         let names = |listing: &Listing| -> HashSet<String> {
             listing.sessions.iter().map(|live| live.place.session().to_owned()).collect()
@@ -626,6 +627,14 @@ impl Picker {
         if ended {
             self.ask_exited();
         }
+        // What a machine that went off the listing said is of a reach that
+        // ended, and so is why it did not answer. One still asked keeps its
+        // ask, whose answer is the only one to come.
+        let machines = self.machines();
+        let kept = |on: &Machine, visited: &mut Visited| {
+            matches!(visited, Visited::Asking) || machines.contains(on)
+        };
+        self.visited.retain(kept);
         self.ask_dirs();
         self.rebuild(false);
     }
@@ -1453,7 +1462,7 @@ impl Picker {
                 right.push(Span::styled(age, dim));
                 (Some(Span::styled(glyph, style)), name_style, right)
             },
-            Key::Dir { path, .. } => return dir_line(row, path, width),
+            Key::Dir { path, .. } => return dir_line(row, path.as_str(), width),
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
@@ -1602,7 +1611,14 @@ impl Picker {
     /// where `Enter` makes the session `name`: its path, after the name of
     /// its machine where that is another, and under it the first of what eza
     /// listed in it that fit.
-    fn draw_contents(&self, buffer: &mut Buffer, area: Rect, name: &str, on: &Machine, path: &str) {
+    fn draw_contents(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        name: &str,
+        on: &Machine,
+        path: &Directory,
+    ) {
         let inner = usize::from(area.width.saturating_sub(2));
         let grey = Style::new().fg(gruvbox::GREY);
         let mut caption = vec![Span::raw(" ")];
@@ -1612,9 +1628,9 @@ impl Picker {
             caption.push(Span::styled(" · ", Style::new().add_modifier(Modifier::DIM)));
         }
         let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
-        caption.push(Span::styled(sidebar::tail(path, room.saturating_sub(1)), grey));
+        caption.push(Span::styled(sidebar::tail(path.as_str(), room.saturating_sub(1)), grey));
         let mut lines = vec![Line::from(caption), Line::default()];
-        let contents = self.contents.get(&(on.clone(), path.to_owned()));
+        let contents = self.contents.get(&(on.clone(), path.clone()));
         let mut right = String::new();
         match contents {
             None | Some(Contents::Reading) => lines.push(Line::styled(" reading…", grey)),
@@ -1778,7 +1794,7 @@ fn dir_rows<'a>(
         let hit = if term.is_empty() {
             Some((0, Vec::new()))
         } else {
-            matcher.fuzzy_indices(&dir.path, term).or_else(|| {
+            matcher.fuzzy_indices(dir.path.as_str(), term).or_else(|| {
                 let score = matcher.fuzzy_match(&name, term)?;
                 Some((score, Vec::new()))
             })
@@ -2018,9 +2034,14 @@ mod tests {
         Exited { name: SessionName::running(name).unwrap(), ago: Duration::from_secs(ago) }
     }
 
+    /// The directory at `path`.
+    fn directory(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
+    }
+
     /// A directory zoxide knows, for which a session is named `name`.
     fn visited(path: &str, name: &str) -> Dir {
-        Dir { path: path.to_owned(), name: SessionName::parse(name).unwrap() }
+        Dir { path: directory(path), name: SessionName::parse(name).unwrap() }
     }
 
     /// What zoxide on this machine said of its directories.
@@ -2610,7 +2631,7 @@ mod tests {
         let said = text(&buffer, buffer.area).join(" ");
         assert!(said.contains(r#"<ENTER> Make "luneta-2""#), "{said}");
         let session = SessionName::parse("luneta-2").unwrap();
-        let cwd = "/home/you/luneta".to_owned();
+        let cwd = directory("/home/you/luneta");
         let made = Picked::Make { on: Machine::Local, session, cwd };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.asks();
@@ -2640,7 +2661,7 @@ mod tests {
         picker.heard(Heard::Exited { ask: 1, exited: Ok(vec![ended("bipa", 100)]) });
         assert_eq!(lit(&picker), "bipa-2");
         let session = SessionName::parse("bipa-2").unwrap();
-        let cwd = "/home/you/bipa".to_owned();
+        let cwd = directory("/home/you/bipa");
         let made = Picked::Make { on: Machine::Local, session, cwd };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
 
@@ -2690,28 +2711,28 @@ mod tests {
     /// it under its path, or says why eza did not list it.
     #[test]
     fn the_preview_lists_what_eza_says_is_in_the_directory() {
-        let path = "/home/you/luneta".to_owned();
+        let path = "/home/you/luneta";
         let mut picker = three();
         control(&mut picker, 'd');
-        picker.heard(heard_here(Ok(vec![visited(&path, "luneta")])));
+        picker.heard(heard_here(Ok(vec![visited(path, "luneta")])));
         picker.asks();
         let due = picker.due().unwrap();
         picker.ticked(due);
-        assert_eq!(picker.asks(), vec![Ask::List { on: Machine::Local, path: path.clone() }]);
+        assert_eq!(picker.asks(), vec![Ask::List { on: Machine::Local, path: directory(path) }]);
         let preview = |picker: &Picker| {
             let buffer = drawn(picker);
             let (_, preview) = parts();
             (text(&buffer, preview), text(&buffer, buffer.area).join(" "))
         };
-        assert_eq!(preview(&picker).0[..3], [path.as_str(), "", "reading…"]);
+        assert_eq!(preview(&picker).0[..3], [path, "", "reading…"]);
         let listed = Ok("\x1b[34msrc\x1b[0m/\nCargo.toml\nREADME.md\n".to_owned());
-        picker.heard(Heard::Listed { on: Machine::Local, path: path.clone(), listed });
+        picker.heard(Heard::Listed { on: Machine::Local, path: directory(path), listed });
         let (lines, said) = preview(&picker);
-        assert_eq!(lines[..5], [path.as_str(), "", "src/", "Cargo.toml", "README.md"]);
+        assert_eq!(lines[..5], [path, "", "src/", "Cargo.toml", "README.md"]);
         assert!(said.contains("3 items"), "{said}");
         let listed = Err("Permission denied".to_owned());
-        picker.heard(Heard::Listed { on: Machine::Local, path: path.clone(), listed });
-        assert_eq!(preview(&picker).0[..3], [path.as_str(), "", "Permission denied"]);
+        picker.heard(Heard::Listed { on: Machine::Local, path: directory(path), listed });
+        assert_eq!(preview(&picker).0[..3], [path, "", "Permission denied"]);
     }
 
     /// Each machine's directories go under a rule of its own, this one's
@@ -2740,13 +2761,13 @@ mod tests {
         let buffer = drawn(&picker);
         let said = text(&buffer, buffer.area).join(" ");
         assert!(said.contains(r#"<ENTER> Make "api" on nixos"#), "{said}");
-        let (session, cwd) = (SessionName::parse("api").unwrap(), api.to_owned());
+        let (session, cwd) = (SessionName::parse("api").unwrap(), directory(api));
         let made = Picked::Make { on: nixos(), session, cwd };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.ticked(picker.due().unwrap());
-        assert_eq!(picker.asks(), vec![Ask::List { on: nixos(), path: api.to_owned() }]);
+        assert_eq!(picker.asks(), vec![Ask::List { on: nixos(), path: directory(api) }]);
         let listed = Ok("src/\nCargo.toml\n".to_owned());
-        picker.heard(Heard::Listed { on: nixos(), path: api.to_owned(), listed });
+        picker.heard(Heard::Listed { on: nixos(), path: directory(api), listed });
         let (_, preview) = parts();
         let shown = text(&drawn(&picker), preview);
         assert_eq!(shown[..4], ["nixos · /home/me/Projects/api", "", "src/", "Cargo.toml"]);
@@ -2788,6 +2809,8 @@ mod tests {
 
     /// zoxide of a machine is asked once, as the picker first lists it.
     /// One that did not list its directories says why over the others'.
+    /// One that goes off the listing and comes back is asked again, but for
+    /// one still asked, whose answer is to come.
     #[test]
     fn each_machine_s_zoxide_is_asked_once_and_says_why_it_listed_none() {
         let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
@@ -2803,6 +2826,14 @@ mod tests {
         let (lines, _) = list(&picker);
         assert_eq!(lines[..2].join(" "), older);
         assert_eq!(grouped(&picker)[2..], ["── desk", "notes"]);
+
+        let gone = || Listing { remotes: Vec::new(), ..two_machines() };
+        picker.listed(gone());
+        picker.listed(two_machines());
+        assert_eq!(picker.asks(), [Ask::Dirs(nixos())]);
+        picker.listed(gone());
+        picker.listed(two_machines());
+        assert!(picker.asks().is_empty());
     }
 
     /// Where zoxide does not answer, the directories say why, and list none.

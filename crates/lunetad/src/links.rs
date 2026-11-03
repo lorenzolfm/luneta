@@ -657,7 +657,7 @@ fn clone(
             format!("no session works in {repository}, and luneta cannot look for a clone: {why}")
         })?
         .into_iter()
-        .map(|dir| dir.path)
+        .map(|dir| dir.path.into())
         .collect();
     let Some(dir) = cloned(&dirs, repository_of) else {
         return Ok(None);

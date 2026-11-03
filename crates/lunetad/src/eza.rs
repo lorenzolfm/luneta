@@ -6,7 +6,7 @@ use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::program;
+use crate::{program, Directory};
 
 /// How long eza has to list what is in a directory.
 const ANSWER: Duration = Duration::from_secs(2);
@@ -27,7 +27,8 @@ const LIST: [&str; 7] = [
 /// What is in the directory `path`, as eza lists it, an entry a line, in
 /// colour; or why eza did not list it. eza says why it cannot read a
 /// directory on stderr, and may end with success all the same.
-pub fn listed(path: &str) -> Result<String, String> {
+pub fn listed(path: &Directory) -> Result<String, String> {
+    let path = path.as_str();
     let mut eza = Command::new("eza");
     eza.args(LIST).arg("--").arg(path);
     let ran = program::run(&mut eza, ANSWER).map_err(|error| unrun(&error))?;

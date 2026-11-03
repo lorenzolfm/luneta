@@ -66,6 +66,7 @@ use crate::api::{
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
+use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::links::{Pasted, Ready};
 use crate::remote::{Bridges, Destination};
@@ -525,9 +526,9 @@ impl Daemon for Host {
         let ListSkillsRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.list_skills(ListSkillsRequest { on: None, dir }).await;
+            return daemon.list_skills(ListSkillsRequest { on: None, dir: dir.into() }).await;
         }
-        let found = task::spawn_blocking(move || skills::found_in(&dir)).await;
+        let found = task::spawn_blocking(move || skills::found_in(dir.as_str())).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;
         let skill = |skills::Skill { name, description }| {
@@ -571,9 +572,9 @@ impl Daemon for Host {
         let NameSessionRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.name_session(NameSessionRequest { on: None, dir }).await;
+            return daemon.name_session(NameSessionRequest { on: None, dir: dir.into() }).await;
         }
-        let named = task::spawn_blocking(move || names::free_for(&dir)).await;
+        let named = task::spawn_blocking(move || names::free_for(dir.as_str())).await;
         let named = named.map_err(|error| unfinished(&error))?;
         let (name, since) = named.map_err(Status::failed_precondition)?;
         let named_at = Some(since.into());
@@ -591,7 +592,7 @@ impl Daemon for Host {
         let visited = task::spawn_blocking(zoxide::visited_free).await;
         let visited = visited.map_err(|error| unfinished(&error))?;
         let visited = visited.map_err(Status::failed_precondition)?;
-        let dir = |zoxide::Dir { path, name }| Dir { path, name: name.to_string() };
+        let dir = |zoxide::Dir { path, name }| Dir { path: path.into(), name: name.to_string() };
         Ok(Response::new(ListDirsResponse { dirs: visited.into_iter().map(dir).collect() }))
     }
 
@@ -602,7 +603,7 @@ impl Daemon for Host {
         let ListContentsRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.list_contents(ListContentsRequest { on: None, dir }).await;
+            return daemon.list_contents(ListContentsRequest { on: None, dir: dir.into() }).await;
         }
         let listed = task::spawn_blocking(move || eza::listed(&dir)).await;
         let listed = listed.map_err(|error| unfinished(&error))?;
@@ -618,10 +619,11 @@ impl Daemon for Host {
         let (at, to) = (named("at", &at)?, named("to", &to)?);
         let cwd = cwd.map(|cwd| directory("cwd", cwd)).transpose()?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let (at, to) = (at.to_string(), to.to_string());
+            let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let started = task::spawn_blocking(move || moves::started(&at, &to, cwd.as_deref())).await;
+        let start = move || moves::started(&at, &to, cwd.as_ref().map(Directory::as_str));
+        let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
         Ok(Response::new(StartResponse {}))
@@ -803,11 +805,8 @@ fn named(field: &str, name: &str) -> Result<SessionName, Status> {
 /// `dir`, of the question's `field`, as a directory by its absolute path, or
 /// why the question is invalid: one by a path relative to the daemon's own
 /// directory, or by none, would be read as that one, which is no one's.
-fn directory(field: &str, dir: String) -> Result<String, Status> {
-    if dir.starts_with('/') {
-        return Ok(dir);
-    }
-    Err(Status::invalid_argument(format!("{field}: {dir:?} is no absolute path")))
+fn directory(field: &str, dir: String) -> Result<Directory, Status> {
+    Directory::parse(dir).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
 }
 
 /// What `request` has zellij open, on the machine it names, or why the
@@ -817,7 +816,7 @@ fn directory(field: &str, dir: String) -> Result<String, Status> {
 /// since no time there is.
 fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
     let OpenRequest { on, session, cwd, command, opens } = request;
-    let (session, cwd) = (named("session", &session)?, directory("cwd", cwd)?);
+    let (session, cwd) = (named("session", &session)?, String::from(directory("cwd", cwd)?));
     let open = match opens {
         None => return Err(Status::invalid_argument("opens: neither a pane nor a tab")),
         Some(Opens::Beside(beside)) => Open::Pane { session, beside, cwd, command },

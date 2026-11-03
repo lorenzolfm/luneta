@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{names, program, SessionName};
+use crate::{names, program, Directory, SessionName};
 
 /// How long zoxide has to list the directories.
 const ANSWER: Duration = Duration::from_secs(2);
@@ -17,7 +17,7 @@ const ANSWER: Duration = Duration::from_secs(2);
 /// A directory zoxide knows, and the session named for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dir {
-    pub path: String,
+    pub path: Directory,
     pub name: SessionName,
 }
 
@@ -54,12 +54,9 @@ pub fn visited_free() -> Result<Vec<Dir>, String> {
 /// lists no other way.
 fn dirs_in(listed: &[u8]) -> Vec<Dir> {
     let dir = |line: &[u8]| {
-        let path = std::str::from_utf8(line).ok()?;
-        if !path.starts_with('/') {
-            return None;
-        }
-        let name = names::session_for(Path::new(path))?;
-        Some(Dir { path: path.to_owned(), name })
+        let path = Directory::parse(std::str::from_utf8(line).ok()?.to_owned()).ok()?;
+        let name = names::session_for(Path::new(path.as_str()))?;
+        Some(Dir { path, name })
     };
     listed.split(|byte| *byte == b'\n').filter_map(dir).collect()
 }
@@ -82,7 +79,7 @@ mod tests {
     #[test]
     fn a_line_that_names_no_directory_a_session_can_be_made_in_is_left_out() {
         let dir = |path: &str, name: &str| Dir {
-            path: path.to_owned(),
+            path: Directory::parse(path.to_owned()).unwrap(),
             name: SessionName::parse(name).unwrap(),
         };
         let listed = b"/home/you/luneta\n/\n\nluneta\n/home/you/caf\xe9\n/home/you/notes/\n";

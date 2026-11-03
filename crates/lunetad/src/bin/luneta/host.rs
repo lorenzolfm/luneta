@@ -1677,10 +1677,10 @@ impl App {
                 let unused = match &on {
                     Machine::Local => zellij::makes(session),
                     Machine::Remote(destination) => {
-                        zellij::makes_away(destination, &session, &cwd)
+                        zellij::makes_away(destination, &session, cwd.as_str())
                     },
                 };
-                self.make(unused, &cwd, None);
+                self.make(unused, cwd.as_str(), None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { session, deletes } => {
