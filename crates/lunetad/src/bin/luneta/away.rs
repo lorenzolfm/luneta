@@ -12,13 +12,15 @@ use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    closes_response, AskResponse, Client, ClosesRequest, DumpScreenRequest, GoRequest,
-    KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest, ListDirsRequest,
-    ListDirsResponse, ListSkillsRequest, NameSessionRequest, NameSessionResponse, On,
-    RefugeRequest, RefugeResponse, StartRequest,
+    closes_response, AskResponse, Client, ClosesRequest, DeleteExitedRequest, DumpScreenRequest,
+    GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest,
+    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
+    NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
+    RenameSessionRequest, StartRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
+use lunetad::ended::Exited;
 use lunetad::links::{self, Pasted, Ready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
@@ -252,6 +254,30 @@ impl Away {
         self.ask(|mut daemon| async move { daemon.kill(request).await }).map(|_| ())
     }
 
+    /// The sessions zellij keeps to bring back there, which ended, as
+    /// `lunetad::ended::exited` lists them there, as `exited_of` reads them;
+    /// or why it did not list them.
+    pub fn exited(&mut self) -> Result<Vec<Exited>, String> {
+        let request = ListExitedRequest { on: Some(self.on()) };
+        let listed = self.ask(|mut daemon| async move { daemon.list_exited(request).await })?;
+        Ok(exited_of(listed))
+    }
+
+    /// Has zellij there let go of `session`, one that ended, as
+    /// `lunetad::closes::deleted` does there, or says why it did not.
+    pub fn delete(&mut self, session: &SessionName) -> Result<(), String> {
+        let request = DeleteExitedRequest { on: Some(self.on()), session: session.to_string() };
+        self.ask(|mut daemon| async move { daemon.delete_exited(request).await }).map(|_| ())
+    }
+
+    /// Has zellij there call `session` `to`, as `lunetad::renames::renamed`
+    /// does there, or says why it did not.
+    pub fn rename(&mut self, session: &SessionName, to: &SessionName) -> Result<(), String> {
+        let (session, to) = (session.to_string(), to.to_string());
+        let request = RenameSessionRequest { on: Some(self.on()), session, to };
+        self.ask(|mut daemon| async move { daemon.rename_session(request).await }).map(|_| ())
+    }
+
     /// The end of each transcript `reading` reads there, by its session's
     /// id, as `lunetad::transcripts` reads them there, or why it read none.
     /// One by an id that names no session, as a newer daemon's could be, is
@@ -397,6 +423,18 @@ fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
         Some(Dir { path: Directory::parse(dir.path).ok()?, name })
     };
     answer.dirs.into_iter().filter_map(dir).collect()
+}
+
+/// The sessions that ended in `answer`, in its order: those by a name zellij
+/// takes, each with how long before zellij listed it it was made. Another
+/// is none zellij would bring back, as a daemon that did not do what its
+/// answer says could send.
+fn exited_of(answer: ListExitedResponse) -> Vec<Exited> {
+    let exited = |exited: lunetad::api::list_exited_response::Exited| {
+        let name = SessionName::running(&exited.name).ok()?;
+        Some(Exited { name, ago: exited.ago?.try_into().ok()? })
+    };
+    answer.exited.into_iter().filter_map(exited).collect()
 }
 
 /// What `status`, of a question for `on`, says: what lunetad said, or what a

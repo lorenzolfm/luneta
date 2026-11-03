@@ -1673,6 +1673,10 @@ impl App {
                 self.start(&Machine::Local, &session, None, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
+            Picked::BringBack { on, session } => {
+                self.bring_back(&on, &session);
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
             Picked::Make { on, session, cwd } => {
                 let unused = match &on {
                     Machine::Local => zellij::makes(session),
@@ -1877,6 +1881,26 @@ impl App {
         let next = after.map(Next::After).or_else(pane);
         let joins = Joins::Attach(&session);
         match self.restart(machine, joins, before, back, next) {
+            Ok(()) => true,
+            Err(error) => {
+                self.sidebar.notify(format!("no client of {session} started: {error}"));
+                false
+            },
+        }
+    }
+
+    /// Takes zellij's client to `session` on `machine`, which ended, as zellij
+    /// brings it back: as `start` does, on the machine the client runs on;
+    /// and on another, as a client of it there takes its place, as `swap`
+    /// says, which `attach` brings it back for, where `swap_making`'s would
+    /// refuse a name zellij keeps. Its server is new, as `Before::Made`
+    /// says. Whether it went.
+    fn bring_back(&mut self, machine: &Machine, session: &SessionName) -> bool {
+        if machine == self.sidebar.on() {
+            return self.start(machine, session, None, None);
+        }
+        let back = self.back();
+        match self.restart(machine, Joins::Attach(session), Before::Made, back, None) {
             Ok(()) => true,
             Err(error) => {
                 self.sidebar.notify(format!("no client of {session} started: {error}"));
