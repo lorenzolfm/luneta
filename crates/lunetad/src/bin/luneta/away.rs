@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::pin;
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
@@ -21,6 +22,7 @@ use lunetad::api::{
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
+use lunetad::images::{self, Png};
 use lunetad::links::{self, Pasted, Ready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
@@ -43,6 +45,10 @@ pub const ANSWER: Duration = Duration::from_secs(6);
 /// How long luneta waits for an answer that its screen waits on: a machine
 /// on the same network answers in milliseconds.
 pub const QUICK: Duration = Duration::from_secs(1);
+
+/// How long an image takes before luneta says it is on its way: a machine
+/// on the same network takes even a large one in less.
+const SLOW: Duration = Duration::from_secs(1);
 
 /// The daemon of a machine, through the daemon luneta watches.
 pub struct Away {
@@ -349,6 +355,47 @@ impl Away {
                 Ok(Err(status)) => Err(said(on, &status)),
                 Err(_) => Err(format!("{on}: lunetad had found nothing after {minutes} minutes")),
             }
+        })
+    }
+
+    /// Has the daemon there keep `png`, as `lunetad::images` does there, and
+    /// says the file's path there, or why it kept none: as it said there, or
+    /// as luneta heard no answer by `images::PATIENCE` and its patience
+    /// after, by which that daemon has given up on it. `slow` hears of an
+    /// image that takes longer than `SLOW`. Short of an answer, the question
+    /// hangs up as the runtime goes, which leaves no file there.
+    pub fn keep_image(&mut self, png: Png, slow: impl FnOnce()) -> Result<String, String> {
+        let request = png.asked(Some(self.on()));
+        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let secs = patience.as_secs_f32();
+        let minutes = images::PATIENCE.as_secs() / 60;
+        self.runtime.block_on(async move {
+            let kept = async {
+                // The daemon answers with the stream at once, and the answer
+                // in it once all of the image has come.
+                let answer = tokio::time::timeout(patience, daemon.keep_image(request)).await;
+                let mut answer = match answer {
+                    Ok(Ok(answer)) => answer.into_inner(),
+                    Ok(Err(status)) => return Err(said(on, &status)),
+                    Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+                };
+                let deadline = images::PATIENCE + patience;
+                match tokio::time::timeout(deadline, answer.message()).await {
+                    Ok(Ok(Some(kept))) if kept.path.starts_with('/') => Ok(kept.path),
+                    Ok(Ok(Some(kept))) => {
+                        Err(format!("{on}: lunetad kept the image at \"{}\"", kept.path))
+                    },
+                    Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
+                    Ok(Err(status)) => Err(said(on, &status)),
+                    Err(_) => Err(format!("{on}: the image had not gone after {minutes} minutes")),
+                }
+            };
+            let mut kept = pin!(kept);
+            if let Ok(done) = tokio::time::timeout(SLOW, &mut kept).await {
+                return done;
+            }
+            slow();
+            kept.await
         })
     }
 

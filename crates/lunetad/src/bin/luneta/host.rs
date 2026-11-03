@@ -66,6 +66,7 @@ use crate::due::Due;
 use crate::fails::{Back, Failed, Fails};
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
+use crate::images::{self, Went};
 use crate::input;
 use crate::keys;
 use crate::machines::{self, Added, Machine};
@@ -113,6 +114,11 @@ pub enum Event {
     Stayed(u64),
     /// Something went wrong that the sidebar says.
     Notice(String),
+    /// What came of the image `Ctrl v` was to paste in an agent's pane on
+    /// another machine.
+    Image(Went),
+    /// The image `Ctrl v` is sending to this machine is taking a while.
+    ImageSlow(Destination),
     /// What zellij opened for the menu numbered `menu`: the terminal, or why
     /// none.
     Opened { menu: u64, opened: Result<u32, String> },
@@ -627,6 +633,8 @@ struct App {
     /// How many dictations luneta has opened, which are numbered as briefs
     /// are.
     dictations: u64,
+    /// The image `images::KEY` is sending, if any.
+    image: images::Going,
     /// When the key that dictates last went down, by which a press of it
     /// that is the key held is its repeat.
     repeats: dictation::Repeats,
@@ -899,6 +907,7 @@ fn run_in(
         asks: 0,
         pickers: 0,
         dictations: 0,
+        image: images::Going::default(),
         repeats: dictation::Repeats::default(),
         speech: None,
         fetching: None,
@@ -1145,6 +1154,8 @@ impl App {
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Image(went) => self.image_went(went),
+            Event::ImageSlow(on) => self.sidebar.image_going(Some(on)),
             Event::Folds => self.sidebar.refold(),
             Event::Alerted(read) => {
                 if self.alerts.read(&read) {
@@ -1548,13 +1559,59 @@ impl App {
             return;
         }
         if self.focus.zellij() {
-            if let Some(bytes) = keys::key(key, self.client.hosted.mode()) {
-                self.client.hosted.send(bytes);
-                self.typed();
+            if chord == images::KEY && self.key_for_image(key) {
+                return;
             }
+            self.key_to_zellij(key);
         } else {
             let asked = self.sidebar.key(key, SystemTime::now());
             self.follow(asked);
+        }
+    }
+
+    /// Hands `key` to zellij's client, as what you typed.
+    fn key_to_zellij(&mut self, key: &KeyEvent) {
+        if let Some(bytes) = keys::key(key, self.client.hosted.mode()) {
+            self.client.hosted.send(bytes);
+            self.typed();
+        }
+    }
+
+    /// Whether `key`, `images::KEY`, goes for an image: on the pane of an
+    /// agent on another machine, where luneta runs on the machine you sit
+    /// at. It reads the clipboard there, and comes back in `image_went`,
+    /// where that holds none. The key held down, or pressed again, while an
+    /// image goes is none of the pane's.
+    fn key_for_image(&mut self, key: &KeyEvent) -> bool {
+        let Some(on) = self.sidebar.far_agent() else {
+            return false;
+        };
+        if desktop::elsewhere() {
+            return false;
+        }
+        self.image.send(on.clone(), *key, &self.events);
+        true
+    }
+
+    /// Takes in what came of the image `images::KEY` was to paste: the key
+    /// goes on to zellij with no image on the clipboard, and the path of one
+    /// kept is pasted where the cursor is now, as long as that is on the
+    /// machine that holds the file. Why it was not, the notes say.
+    fn image_went(&mut self, went: Went) {
+        self.image.heard();
+        self.sidebar.image_going(None);
+        match went {
+            Went::NoImage(key) => self.key_to_zellij(&key),
+            Went::Kept { on, path } => {
+                if matches!(self.sidebar.on(), Machine::Remote(there) if *there == on) {
+                    self.client.hosted.send(keys::paste(&path, self.client.hosted.mode()));
+                    self.typed();
+                } else {
+                    let left = format!("image not pasted: zellij left {on}, where it is at {path}");
+                    self.sidebar.notify(left);
+                }
+            },
+            Went::Failed(why) => self.sidebar.notify(format!("image not pasted: {why}")),
         }
     }
 

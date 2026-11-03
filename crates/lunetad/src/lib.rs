@@ -21,6 +21,8 @@ pub mod eza;
 pub mod folder;
 mod git;
 mod github;
+pub mod images;
+mod keeps;
 pub mod links;
 pub mod log;
 mod metadata;

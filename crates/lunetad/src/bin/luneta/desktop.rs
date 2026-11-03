@@ -20,6 +20,14 @@ use crate::alerts::{Alert, Key};
 use crate::host::Event;
 use crate::peers::{self, Heard, Peers, Reaching};
 
+/// Whether luneta runs over ssh, as sshd says in the variables it sets: the
+/// machine it runs on is not the one you sit at.
+pub fn elsewhere() -> bool {
+    ["SSH_CONNECTION", "SSH_TTY"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
 /// What luneta has the desktop do.
 #[derive(Debug)]
 enum Order {
@@ -57,11 +65,8 @@ impl Desktop {
     /// The desktop of the machine luneta runs on, which hands `events` the
     /// clicks on its notifications; or none, where luneta runs over ssh.
     pub fn start(events: &Sender<Event>) -> Desktop {
-        let elsewhere = ["SSH_CONNECTION", "SSH_TTY"].into_iter().any(|name| {
-            std::env::var_os(name).is_some_and(|value| !value.is_empty())
-        });
         let events = events.clone();
-        if elsewhere {
+        if elsewhere() {
             return Desktop { serving: None, role: Role::Unsure, events };
         }
         let (orders, taken) = channel::unbounded_channel();
