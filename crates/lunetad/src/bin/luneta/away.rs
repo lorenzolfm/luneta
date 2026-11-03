@@ -16,7 +16,7 @@ use lunetad::api::{
     DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
-    RenameSessionRequest, StartRequest,
+    RenameSessionRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
@@ -84,20 +84,6 @@ impl Away {
         let (at, to) = (at.to_string(), to.to_string());
         let request = GoRequest { on: Some(self.on()), at, to, pane };
         self.ask(|mut daemon| async move { daemon.go(request).await }).map(|_| ())
-    }
-
-    /// Has zellij there take the client that last typed in the session `at`
-    /// to a session it makes, `to`, that starts in `cwd`, as
-    /// `lunetad::moves::start` says, or says why it did not.
-    pub fn start(
-        &mut self,
-        at: &SessionName,
-        to: &SessionName,
-        cwd: Option<&str>,
-    ) -> Result<(), String> {
-        let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(str::to_owned));
-        let request = StartRequest { on: Some(self.on()), at, to, cwd };
-        self.ask(|mut daemon| async move { daemon.start(request).await }).map(|_| ())
     }
 
     /// The name a session luneta makes for `dir` there takes, as
