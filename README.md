@@ -837,10 +837,11 @@ Each key moves what you were shown. A review that has gone on since refuses
 
 What moves it on is a turn you began and let finish, as Claude Code's transcript
 says, and only that: a background task that wakes the agent is none, nor is a
-turn you interrupted. So a question of yours moves it on too, as lunetad cannot
-tell it from the changes you asked for: hold it first. It goes five seconds
-after the agent stops, and only while the agent is idle: not at work, not
-running a background shell, not waiting on a question of its own.
+turn you interrupted or that an API error ended, and it waits for you again. So
+a question of yours moves it on too, as lunetad cannot tell it from the changes
+you asked for: hold it first. It goes five seconds after the agent stops, and
+only while the agent is idle: not at work, not running a background shell, not
+waiting on a question of its own.
 
 lunetad keeps a review, in memory, so it goes on with no luneta window open, and
 ends as lunetad restarts.

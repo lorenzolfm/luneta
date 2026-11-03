@@ -15,11 +15,11 @@
 //! once a turn after a skill's has stopped, and stayed stopped for `QUIET`,
 //! which leaves a message you queued time to start, and Claude Code time to
 //! write down that you interrupted it, the transcript says who began it, as
-//! `began` reads it. It takes a turn you began and did not interrupt, and
-//! anything else leaves the next skill to wait, for you: it would rather wait
-//! for a key of the menu than run a skill you did not ask for yet. A skill's
-//! own prompt is written down as yours, as it goes as you would type it, and
-//! is told by its name.
+//! `began` reads it, and how it ended, as `ended_by` does. It takes a turn you
+//! began and that came to an answer, and anything else leaves the next skill to
+//! wait, for you: it would rather wait for a key of the menu than run a skill
+//! you did not ask for yet. A skill's own prompt is written down as yours, as
+//! it goes as you would type it, and is told by its name.
 //!
 //! The next skill goes as you would type it, in the agent's pane, and only
 //! while it is idle: not at work, not running a background shell, not waiting
@@ -80,6 +80,9 @@ const WINDOWS: [u64; 3] = [1 << 20, 1 << 24, 1 << 27];
 /// The `kind` of the origin Claude Code writes on a prompt a person typed.
 const HUMAN: &str = "human";
 
+/// The `model` Claude Code writes on an answer of its own, that no model gave.
+const SYNTHETIC: &str = "<synthetic>";
+
 /// Claude Code's mark at the head of its prompt box, and what it puts after it.
 const PROMPT: &str = "\u{276f}\u{a0}";
 
@@ -134,12 +137,13 @@ pub enum Answer {
 /// Who began the last turn of a session, as its transcript says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Began {
-    /// You did, and let it finish.
+    /// You did, and it came to an answer.
     You,
     /// The skill it is on did: no prompt has come since its own, which goes as
     /// you would type it, and is written down as yours.
     Skill,
-    /// Something else did, or you did and interrupted it.
+    /// Something else did, or you did, and interrupted it, or the API failed
+    /// it.
     Other,
     /// The transcript does not say, for this reason.
     Unread(String),
@@ -737,7 +741,7 @@ fn last_turn_of(path: &Path, skill: &str) -> io::Result<Began> {
         file.by_ref().take(window).read_to_end(&mut read)?;
         let text = String::from_utf8_lossy(&read);
         let all = window == length;
-        if let Some(began) = records(&text, all).rev().find_map(|line| began(line, skill)) {
+        if let Some(began) = last_turn_in(records(&text, all).rev(), skill) {
             return Ok(began);
         }
         if all {
@@ -745,6 +749,23 @@ fn last_turn_of(path: &Path, skill: &str) -> io::Result<Began> {
         }
     }
     Ok(Began::Unread(format!("{} has no prompt near its end", path.display())))
+}
+
+/// Who began the last turn of `lines`, the records of a transcript read back
+/// from its end, by the prompt that began it, as `began` reads it, and by how
+/// it ended, as `ended_by` does, where they tell. A turn is yours once it has
+/// come to an answer: of one you interrupt before that, Claude Code writes down
+/// nothing, and gives you the prompt back, while its record stays in the file.
+fn last_turn_in<'a>(lines: impl Iterator<Item = &'a str>, skill: &str) -> Option<Began> {
+    let mut ended = None;
+    for line in lines {
+        if let Some(began) = began(line, skill) {
+            let answered = ended == Some(Ended::Answered);
+            return Some(if began == Began::You && !answered { Began::Other } else { began });
+        }
+        ended = ended.or_else(|| ended_by(line));
+    }
+    None
 }
 
 /// The whole records of `text`, the end of a transcript, or `all` of it: what
@@ -786,8 +807,26 @@ struct Origin {
 
 #[derive(Deserialize)]
 struct Message {
+    model: Option<String>,
     #[serde(default)]
     content: Content,
+}
+
+/// An answer of a transcript, as much of it as `ended_by` reads.
+#[derive(Deserialize)]
+struct Reply {
+    #[serde(default, rename = "isApiErrorMessage")]
+    failed: bool,
+    message: Option<Message>,
+}
+
+/// How a turn ended, by its last answer that tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    /// It said something, or used a tool.
+    Answered,
+    /// The API failed it, as Claude Code says.
+    Failed,
 }
 
 #[derive(Default, Deserialize)]
@@ -819,6 +858,20 @@ impl Content {
                 Some(block.text.as_deref().unwrap_or_default())
             },
         }
+    }
+
+    /// Whether an answer of this came to anything, as Claude Code tells it to
+    /// give you back a prompt: it said something, or used a tool. Thinking is
+    /// not yet an answer.
+    fn answers(&self) -> bool {
+        let Content::Blocks(blocks) = self else {
+            return false;
+        };
+        blocks.iter().any(|block| match block.kind.as_str() {
+            "tool_use" => true,
+            "text" => block.text.as_deref().is_some_and(|text| !text.trim().is_empty()),
+            _ => false,
+        })
     }
 }
 
@@ -864,6 +917,29 @@ fn began(line: &str, skill: &str) -> Option<Began> {
         return None;
     }
     said.map(|_| Began::Other)
+}
+
+/// How the turn ended, by the record `line`, read back from the end of a
+/// transcript, where that record tells: an answer that says the API failed it,
+/// or one that came to something. What Claude Code answers for itself says
+/// nothing, as `No response requested.`, nor what a subagent does, nor an answer
+/// that does not read, which can only leave the next skill waiting.
+fn ended_by(line: &str) -> Option<Ended> {
+    // Most records are long, and it reads no more than the last few.
+    if !line.contains(r#""type":"assistant""#) {
+        return None;
+    }
+    let head = serde_json::from_str::<Head>(line).ok()?;
+    if head.kind != "assistant" || head.sidechain {
+        return None;
+    }
+    let reply = serde_json::from_str::<Reply>(line).ok()?;
+    if reply.failed {
+        return Some(Ended::Failed);
+    }
+    let message = reply.message?;
+    let given = message.model.as_deref() != Some(SYNTHETIC);
+    (given && message.content.answers()).then_some(Ended::Answered)
 }
 
 /// Whether `said`, a prompt in a transcript, is the skill `skill`'s: as Claude
@@ -1469,7 +1545,7 @@ mod tests {
         let answer = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
         let meta = r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>"}}"#;
         let side = r#"{"type":"user","isSidechain":true,"origin":{"kind":"human"},"message":{"content":"x"}}"#;
-        let them = r#"{"type":"assistant","message":{"content":"done"}}"#;
+        let them = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
         let holds = r#"{"type":"progress","data":{"type":"user"},"message":"text"}"#;
         let shapeless = r#"{"type":"user","message":{"content":[{"kind":"new"}]}}"#;
         assert_eq!(began(human, skill), Some(Began::You));
@@ -1503,6 +1579,35 @@ mod tests {
         // What Claude Code is still writing is no record yet.
         fs::write(&path, format!("{human}\n{them}\n{{\"type\":\"user\",\"mess")).unwrap();
         assert_eq!(last_turn_of(&path, skill).unwrap(), Began::You);
+
+        // A turn of yours counts once it has said something or used a tool,
+        // and its last answer is no failure: Claude Code writes down nothing
+        // of a turn you interrupt before that, and takes the prompt back.
+        let used = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm"},{"type":"tool_use","id":"t","name":"Bash","input":{"type":"user"}}]}}"#;
+        let thought = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm","signature":"x"}]}}"#;
+        let blank = r#"{"type":"assistant","message":{"content":[{"type":"text","text":" \n"}]}}"#;
+        let added = r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#;
+        let failed = r#"{"type":"assistant","isApiErrorMessage":true,"error":"server_error","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: Connection lost"}]}}"#;
+        let aside = r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"x"}]}}"#;
+        for finished in [&[human, used][..], &[human, them, thought], &[human, them, added]] {
+            assert_eq!(reads(finished), Began::You, "{finished:?}");
+        }
+        for cut_short in [
+            &[human][..],
+            &[human, meta],
+            &[human, thought],
+            &[human, blank],
+            &[human, added],
+            &[human, aside],
+            &[human, failed],
+            &[human, them, failed],
+            &[human, them, answer, failed, meta],
+        ] {
+            assert_eq!(reads(cut_short), Began::Other, "{cut_short:?}");
+        }
+        // The skill's own turn is told by its name, answered or not.
+        assert_eq!(reads(&[&own]), Began::Skill);
+        assert_eq!(reads(&[&own, failed]), Began::Skill);
     }
 
     /// A prompt far from the end of a transcript is found, as a turn writes
@@ -1515,7 +1620,8 @@ mod tests {
         let filler = format!(r#"{{"type":"assistant","x":"{}"}}"#, "é".repeat(4096));
         let filler = vec![filler; 200].join("\n");
         assert!(u64::try_from(filler.len()).unwrap() > WINDOWS[0]);
-        fs::write(&path, format!("{human}\n{filler}\n")).unwrap();
+        let them = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+        fs::write(&path, format!("{human}\n{filler}\n{them}\n")).unwrap();
         assert_eq!(last_turn_of(&path, SKILLS[0]).unwrap(), Began::You);
     }
 
@@ -1530,10 +1636,11 @@ mod tests {
             r#"{{"pad":"{pad}","type":"user","origin":{{"kind":"human"}},"message":{{"content":"fix it"}}}}"#
         );
         // The window starts 200 bytes before the filler, within the padding.
-        let shell = r#"{"type":"assistant","x":""}"#;
+        let shell = r#"{"type":"assistant","message":{"content":[{"type":"text","text":""}]}}"#;
         let window = usize::try_from(WINDOWS[0]).unwrap();
         let filler = "a".repeat(window - 200 - 1 - shell.len());
-        let filler = format!(r#"{{"type":"assistant","x":"{filler}"}}"#);
+        let filler =
+            format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{filler}"}}]}}}}"#);
         fs::write(&path, format!("{prompt}\n{filler}\n")).unwrap();
         assert_eq!(last_turn_of(&path, SKILLS[0]).unwrap(), Began::You);
     }

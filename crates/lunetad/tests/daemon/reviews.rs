@@ -31,6 +31,9 @@ const FIRST: &str = r#"{"type":"user","origin":{"kind":"human"},"message":{"cont
 const WOKEN: &str =
     r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"done"}}"#;
 
+/// What the agent answers a prompt with.
+const ANSWER: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+
 /// What zellij is asked for each skill that goes, in the pane of the agent.
 fn sent(skill: &str) -> [String; 2] {
     [
@@ -186,7 +189,7 @@ fn a_review_goes_on_after_a_turn_you_began() {
     reviewed.comes_to(ReviewWaits::You);
     assert_eq!(reviewed.host.zellij.written(), Vec::<String>::new());
 
-    reviewed.says(&[WOKEN, YOURS]);
+    reviewed.says(&[WOKEN, YOURS, ANSWER]);
     reviewed.works();
     reviewed.comes_to(ReviewWaits::Turn);
     reviewed.goes("idle");
@@ -274,7 +277,7 @@ fn a_turn_its_transcript_does_not_tell_of_says_so() {
     reviewed.comes_to(ReviewWaits::Transcript);
     assert_eq!(reviewed.host.zellij.written(), Vec::<String>::new());
 
-    reviewed.says(&[YOURS]);
+    reviewed.says(&[YOURS, ANSWER]);
     reviewed.works();
     reviewed.goes("idle");
     assert_eq!(reviewed.written(2), sent("/make-illegal-states-unrepresentable"));
