@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
@@ -32,12 +33,13 @@ use lunetad::images::{self, Png};
 use lunetad::links::{self, At, Link, Pasted, Ready};
 use lunetad::transcripts::SessionId;
 use lunetad::SessionName;
-use rustix::process::{test_kill_process, Pid};
+use rustix::process::{test_kill_process, Pid, Signal};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::agents::file_for;
-use crate::demand::Detached;
+use crate::demand::{stop, Detached};
 use crate::host::{eventually, folder_in, script, start, Host, Running, Vars, LUNETA};
 use crate::worktree::{cloned_as_wt, git};
 
@@ -1111,8 +1113,9 @@ async fn kept_image(
 /// machine is kept by the daemon it is asked of.
 ///
 /// An image that ends short of the size it said, or that is more than that,
-/// keeps no file there; nor do one by no size, one over the most that goes,
-/// one with no first part to say what it is, or one for a machine this daemon
+/// or that does not start as a PNG does, keeps no file there; nor do one by
+/// no size or by too few to start as one, one over the most that goes, one
+/// with no first part to say what it is, or one for a machine this daemon
 /// does not reach.
 #[test]
 fn an_image_is_kept_on_another_machine_through_the_bridge() {
@@ -1169,10 +1172,16 @@ fn an_image_is_kept_on_another_machine_through_the_bridge() {
         let another = vec![image_of(on("far"), 8), image_of(None, 8)];
         let why = refused(kept_image(&mut daemon, another).await, Code::FailedPrecondition);
         assert_eq!(why, "a part after the first is not the image's bytes");
+        let gif = vec![image_of(on("far"), 16), bytes_of(b"GIF89a, no PNG!!")];
+        let why = refused(kept_image(&mut daemon, gif).await, Code::FailedPrecondition);
+        assert_eq!(why, "the image is no PNG");
         assert_eq!(images_in(&far), 1);
 
         let unsized_ = vec![image_of(on("far"), 0)];
         refused(kept_image(&mut daemon, unsized_).await, Code::InvalidArgument);
+        let too_few = vec![image_of(on("far"), 7), bytes_of(&small[..7])];
+        let why = refused(kept_image(&mut daemon, too_few).await, Code::InvalidArgument);
+        assert_eq!(why, "too few bytes to be a PNG: 7");
         let huge = vec![image_of(on("far"), images::BYTES_MAX + 1)];
         let why = refused(kept_image(&mut daemon, huge).await, Code::InvalidArgument);
         assert_eq!(why, "the image is 65 MiB, and the most that goes is 64 MiB");
@@ -1182,6 +1191,39 @@ fn an_image_is_kept_on_another_machine_through_the_bridge() {
         let nowhere = vec![image_of(on("nowhere"), 16), bytes_of(&small)];
         refused(kept_image(&mut daemon, nowhere).await, Code::Unavailable);
         assert_eq!((images_in(&here), images_in(&far)), (1, 1));
+    });
+}
+
+/// A daemon stopped as an image comes, as luneta stops an older one for a
+/// newer, runs nothing on its way out. What had come of the image goes by no
+/// name an image goes by: nothing takes it for a whole one.
+#[test]
+fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
+    let host = Host::new();
+    let mut daemon = start(host.vars()).unwrap();
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let images = folder.path().join("images");
+    let found = || -> Vec<PathBuf> {
+        fs::read_dir(&images).map_or(Vec::new(), |found| found.flatten().map(|file| file.path()).collect())
+    };
+    let came = png(16);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut client = lunetad::connect(&folder).await.unwrap();
+        let (send, parts) = tokio::sync::mpsc::channel(2);
+        send.send(image_of(None, 1024)).await.unwrap();
+        send.send(bytes_of(&came)).await.unwrap();
+        let _answer = client.keep_image(ReceiverStream::new(parts)).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while found().iter().all(|file| fs::metadata(file).unwrap().len() < came.len() as u64) {
+            assert!(Instant::now() < deadline, "what came of the image was never written");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        stop(daemon.pid());
+        let ended = daemon.ended_within(Duration::from_secs(5)).expect("the daemon ends");
+        assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()), "it runs nothing on its way out");
+        let png = |file: &PathBuf| file.extension() == Some("png".as_ref());
+        assert!(!found().iter().any(png), "{:?}", found());
     });
 }
 

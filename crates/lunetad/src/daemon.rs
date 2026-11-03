@@ -75,7 +75,7 @@ use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
-use crate::images::{self, Keeping};
+use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Ready};
 use crate::remote::{Bridges, Destination};
 use crate::reviews::Move;
@@ -886,9 +886,9 @@ impl Daemon for Host {
         else {
             return Err(Status::invalid_argument("the first part does not say what the image is"));
         };
-        images::fits(size).map_err(Status::invalid_argument)?;
+        let size = Size::new(size).map_err(Status::invalid_argument)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let image = Image { on: None, size };
+            let image = Image { on: None, size: size.get() };
             let image = KeepImageRequest { part: Some(Part::Image(image)) };
             // A question that hangs up here ends what goes there short of
             // its size, which that daemon keeps no file of.
@@ -909,7 +909,7 @@ impl Daemon for Host {
 fn kept_image(
     handle: &Handle,
     mut parts: Streaming<KeepImageRequest>,
-    size: u64,
+    size: Size,
 ) -> Result<String, String> {
     let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
     let mut keeping = Keeping::new(&runtime, size, SystemTime::now())?;
@@ -923,7 +923,7 @@ fn kept_image(
         let next = next.map_err(|status| format!("the image did not all come: {}", status.message()))?;
         match next {
             None => return keeping.kept(),
-            Some(KeepImageRequest { part: Some(Part::Bytes(bytes)) }) => keeping.write(&bytes)?,
+            Some(KeepImageRequest { part: Some(Part::Bytes(bytes)) }) => keeping = keeping.write(&bytes)?,
             Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
         }
     }

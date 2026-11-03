@@ -201,6 +201,14 @@ mod tests {
         assert_eq!(image_of(&[absent, fails, not_png]), None);
     }
 
+    /// A tool that says too much on its stderr says nothing of an image: the
+    /// clipboard holds none, rather than one too large.
+    #[test]
+    fn a_tool_loud_on_its_stderr_says_no_image_is_too_large() {
+        const LOUD: &[&str] = &["-c", "head -c 16777217 /dev/zero >&2"];
+        assert!(matches!(image_by(&[tool(LOUD, Says::Bytes)]), Ok(None)));
+    }
+
     /// A tool that prints as `osascript` does hands over the bytes printed.
     #[test]
     fn a_tool_that_prints_hands_over_the_bytes_printed() {

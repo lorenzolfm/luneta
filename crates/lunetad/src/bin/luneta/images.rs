@@ -21,8 +21,9 @@ pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('v'), KeyModifiers::CONT
 /// What came of the image `KEY` was to paste.
 #[derive(Debug)]
 pub enum Went {
-    /// The clipboard holds none, and this key goes on to the pane.
-    NoImage(KeyEvent),
+    /// The clipboard holds none, and this key, pressed on the agent's pane on
+    /// the machine `on`, goes on to it, where zellij still is there.
+    NoImage { key: KeyEvent, on: Destination },
     /// The daemon of the machine `on` keeps it in the file `path`.
     Kept { on: Destination, path: String },
     /// Why it was not kept.
@@ -63,7 +64,7 @@ impl Going {
 fn went(on: Destination, key: KeyEvent, events: &Sender<Event>) -> Went {
     let png = match clipboard::image() {
         Ok(Some(png)) => png,
-        Ok(None) => return Went::NoImage(key),
+        Ok(None) => return Went::NoImage { key, on },
         Err(why) => return Went::Failed(why),
     };
     let slow = || {

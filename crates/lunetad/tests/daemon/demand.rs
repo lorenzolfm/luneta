@@ -99,7 +99,7 @@ fn held(host: &Host) -> bool {
     folder_in(host.runtime.path()).is_some_and(|folder| folder::held(&folder).unwrap())
 }
 
-fn stop(pid: u32) {
+pub fn stop(pid: u32) {
     let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     rustix::process::kill_process(pid, Signal::TERM).unwrap();
 }

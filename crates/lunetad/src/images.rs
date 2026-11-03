@@ -5,8 +5,6 @@
 //! bytes come from luneta through the bridge, as a stream of parts, and go in
 //! a file of their own, kept as `keeps` keeps one.
 
-use std::fs::{self, File};
-use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -14,7 +12,7 @@ use tokio_stream::{Stream, StreamExt as _};
 
 use crate::api::keep_image_request::{Image, Part};
 use crate::api::{KeepImageRequest, On};
-use crate::keeps;
+use crate::keeps::Draft;
 
 /// The largest image that goes: a screenshot of a 5K display, at its worst,
 /// is under this. A file holds it in `XDG_RUNTIME_DIR`, which is memory on
@@ -53,7 +51,7 @@ impl Png {
         if !bytes.starts_with(SIGNATURE) {
             return Err(Refused::NotPng);
         }
-        fits(bytes.len() as u64).map_err(Refused::TooLarge)?;
+        Size::new(bytes.len() as u64).map_err(Refused::TooLarge)?;
         Ok(Png(bytes))
     }
 
@@ -72,64 +70,75 @@ impl Png {
     }
 }
 
-/// Whether an image of `size` bytes goes, or why not.
-pub fn fits(size: u64) -> Result<(), String> {
-    if size == 0 {
-        return Err("the image has no bytes".to_owned());
+/// How many bytes an image is: room for a PNG's signature, and no more than
+/// `BYTES_MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Size(u64);
+
+impl Size {
+    /// `size` as an image's, or why an image of it does not go.
+    pub(crate) fn new(size: u64) -> Result<Size, String> {
+        if size < SIGNATURE.len() as u64 {
+            return Err(format!("too few bytes to be a PNG: {size}"));
+        }
+        if size > BYTES_MAX {
+            let (size, most) = (size.div_ceil(1024 * 1024), BYTES_MAX / (1024 * 1024));
+            return Err(format!("the image is {size} MiB, and the most that goes is {most} MiB"));
+        }
+        Ok(Size(size))
     }
-    if size > BYTES_MAX {
-        let (size, most) = (size.div_ceil(1024 * 1024), BYTES_MAX / (1024 * 1024));
-        return Err(format!("the image is {size} MiB, and the most that goes is {most} MiB"));
+
+    pub(crate) fn get(self) -> u64 {
+        self.0
     }
-    Ok(())
 }
 
-/// An image on its way into its file, which goes unless all of it came.
+/// An image on its way into its file, which goes unless all of it came. As
+/// `Size` has room for the signature, one with no bytes left has been seen to
+/// start as a PNG does.
 pub(crate) struct Keeping {
-    path: String,
-    file: File,
+    draft: Draft,
     /// How many of its bytes are yet to come.
     left: u64,
-    whole: bool,
+    /// What of `SIGNATURE` is yet to come.
+    unseen: &'static [u8],
 }
 
 impl Keeping {
     /// The file for an image of `size` bytes, in luneta's folder `runtime`.
-    pub(crate) fn new(runtime: &Path, size: u64, now: SystemTime) -> Result<Keeping, String> {
-        let (path, file) = keeps::new_file(runtime, FOLDER, "png", now)?;
-        Ok(Keeping { path, file, left: size, whole: false })
+    pub(crate) fn new(runtime: &Path, size: Size, now: SystemTime) -> Result<Keeping, String> {
+        let draft = Draft::new(runtime, FOLDER, "png", now)?;
+        Ok(Keeping { draft, left: size.get(), unseen: SIGNATURE })
     }
 
-    /// Writes the next of its bytes, or says why not: as they are more than
-    /// it said it has.
-    pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+    /// Writes the next of its bytes, or says why not, which ends it: as they
+    /// are more than it said it has, or do not start as a PNG does.
+    pub(crate) fn write(mut self, bytes: &[u8]) -> Result<Keeping, String> {
         let Some(left) = self.left.checked_sub(bytes.len() as u64) else {
             return Err("the image is larger than it said".to_owned());
         };
+        let (start, rest) = self.unseen.split_at(self.unseen.len().min(bytes.len()));
+        if !bytes.starts_with(start) {
+            return Err("the image is no PNG".to_owned());
+        }
         self.left = left;
-        self.file.write_all(bytes).map_err(|error| format!("{}: {error}", self.path))
+        self.unseen = rest;
+        self.draft.write(bytes)?;
+        Ok(self)
     }
 
     /// The file's path, with all of the image in it, or why it is not.
-    pub(crate) fn kept(mut self) -> Result<String, String> {
+    pub(crate) fn kept(self) -> Result<String, String> {
         if self.left > 0 {
             return Err(format!("the image ended {} bytes short", self.left));
         }
-        self.whole = true;
-        Ok(self.path.clone())
-    }
-}
-
-impl Drop for Keeping {
-    fn drop(&mut self) {
-        if !self.whole {
-            let _ = fs::remove_file(&self.path);
-        }
+        self.draft.keep()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -192,8 +201,9 @@ mod tests {
 
     /// All of an image goes in a file of its own, for this user alone, in the
     /// folder `images` of luneta's, by a name Claude Code takes for an
-    /// image's, and it stays; an image that ended short, or that is more than
-    /// it said, leaves nothing.
+    /// image's only once all of it came, and it stays; an image that ended
+    /// short, or that is more than it said, or that does not start as a PNG
+    /// does, in whatever parts, leaves nothing.
     #[test]
     fn an_image_is_kept_whole_or_not_at_all() {
         let root = tempfile::tempdir().unwrap();
@@ -201,52 +211,71 @@ mod tests {
         let now = SystemTime::now();
         let folder = || fs::read_dir(runtime.join(FOLDER)).unwrap().count();
 
-        let mut keeping = Keeping::new(&runtime, 5, now).unwrap();
-        keeping.write(b"PN").unwrap();
-        keeping.write(b"G!!").unwrap();
+        let size = |size| Size::new(size).unwrap();
+        let image = png(16);
+        let keeping = Keeping::new(&runtime, size(16), now).unwrap();
+        let keeping = keeping.write(&image[..3]).unwrap();
+        let keeping = keeping.write(&image[3..]).unwrap();
         let kept = keeping.kept().unwrap();
         assert_eq!(Path::new(&kept).extension(), Some("png".as_ref()), "{kept}");
-        assert_eq!(fs::read(&kept).unwrap(), b"PNG!!");
+        assert_eq!(fs::read(&kept).unwrap(), image);
         let mode = fs::metadata(&kept).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(folder(), 1);
 
-        let mut short = Keeping::new(&runtime, 5, now).unwrap();
-        short.write(b"PN").unwrap();
+        let short = Keeping::new(&runtime, size(16), now).unwrap();
+        let short = short.write(&image[..8]).unwrap();
         assert_eq!(folder(), 2);
-        assert_eq!(short.kept().err().unwrap(), "the image ended 3 bytes short");
+        let pngs = || {
+            let found = fs::read_dir(runtime.join(FOLDER)).unwrap().flatten();
+            found.filter(|file| file.path().extension() == Some("png".as_ref())).count()
+        };
+        assert_eq!(pngs(), 1, "one on its way goes by no name of an image's");
+        assert_eq!(short.kept().err().unwrap(), "the image ended 8 bytes short");
         assert_eq!(folder(), 1);
 
-        let mut long = Keeping::new(&runtime, 2, now).unwrap();
-        assert_eq!(long.write(b"PNG").unwrap_err(), "the image is larger than it said");
-        drop(long);
+        let long = Keeping::new(&runtime, size(8), now).unwrap();
+        assert_eq!(long.write(&image).err().unwrap(), "the image is larger than it said");
         assert_eq!(folder(), 1);
 
-        let hung_up = Keeping::new(&runtime, 2, now).unwrap();
+        let not_png = Keeping::new(&runtime, size(16), now).unwrap();
+        let not_png = not_png.write(&image[..3]).unwrap();
+        assert_eq!(not_png.write(b"GIF89a").err().unwrap(), "the image is no PNG");
+        assert_eq!(folder(), 1);
+
+        let hung_up = Keeping::new(&runtime, size(8), now).unwrap();
         drop(hung_up);
         assert_eq!(folder(), 1);
         assert!(Path::new(&kept).exists());
     }
 
-    /// An image kept more than a day ago goes as another is kept.
+    /// An image kept more than a day ago goes as another is kept, and so does
+    /// what a daemon left of one that was coming as it was killed, which runs
+    /// nothing on its way out.
     #[test]
     fn an_image_goes_a_day_on_as_another_is_kept() {
         let root = tempfile::tempdir().unwrap();
         let runtime = root.path().join("luneta");
         let now = SystemTime::now();
         let keep = |at| {
-            let mut keeping = Keeping::new(&runtime, 1, at).unwrap();
-            keeping.write(b"!").unwrap();
-            keeping.kept().unwrap()
+            let size = Size::new(8).unwrap();
+            let keeping = Keeping::new(&runtime, size, at).unwrap();
+            keeping.write(SIGNATURE).unwrap().kept().unwrap()
         };
         let old = keep(now);
-        File::options()
-            .write(true)
-            .open(&old)
-            .and_then(|file| file.set_modified(now - Duration::from_hours(25)))
-            .unwrap();
+        std::mem::forget(Keeping::new(&runtime, Size::new(8).unwrap(), now).unwrap());
+        let folder = runtime.join(FOLDER);
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 2);
+        for file in fs::read_dir(&folder).unwrap().flatten() {
+            File::options()
+                .write(true)
+                .open(file.path())
+                .and_then(|file| file.set_modified(now - Duration::from_hours(25)))
+                .unwrap();
+        }
         let young = keep(now);
         assert!(!Path::new(&old).exists());
         assert!(Path::new(&young).exists());
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
     }
 }

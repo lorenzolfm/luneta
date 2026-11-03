@@ -1593,15 +1593,22 @@ impl App {
         true
     }
 
-    /// Takes in what came of the image `images::KEY` was to paste: the key
-    /// goes on to zellij with no image on the clipboard, and the path of one
-    /// kept is pasted where the cursor is now, as long as that is on the
-    /// machine that holds the file. Why it was not, the notes say.
+    /// Takes in what came of the image `images::KEY` was to paste. With no
+    /// image on the clipboard the key goes on to zellij, as long as zellij
+    /// has the keys and is still on an agent of the machine it was pressed
+    /// for: one held up by a clipboard's tool is no key for where you went
+    /// since. The path of one kept is pasted where the cursor is now, as long
+    /// as that is on the machine that holds the file. Why it was not, the
+    /// notes say.
     fn image_went(&mut self, went: Went) {
         self.image.heard();
         self.sidebar.image_going(None);
         match went {
-            Went::NoImage(key) => self.key_to_zellij(&key),
+            Went::NoImage { key, on } => {
+                if self.focus.zellij() && self.sidebar.far_agent() == Some(&on) {
+                    self.key_to_zellij(&key);
+                }
+            },
             Went::Kept { on, path } => {
                 if matches!(self.sidebar.on(), Machine::Remote(there) if *there == on) {
                     self.client.hosted.send(keys::paste(&path, self.client.hosted.mode()));

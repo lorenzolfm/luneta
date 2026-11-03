@@ -169,8 +169,11 @@ fn hear<N>(
     wanted: Option<&dyn Fn() -> Result<(), N>>,
     most: u64,
 ) -> io::Result<Heard<N>> {
-    let stdout = read(child.stdout.take().expect("its stdout is piped"), most)?;
-    let stderr = read(child.stderr.take().expect("its stderr is piped"), SAID_MAX)?;
+    let stdout = child.stdout.take().expect("its stdout is piped");
+    let stdout = read(stdout, most, io::ErrorKind::FileTooLarge)?;
+    // What a program says of its failures is no answer that is too large.
+    let stderr = child.stderr.take().expect("its stderr is piped");
+    let stderr = read(stderr, SAID_MAX, io::ErrorKind::Other)?;
     let ended = ends(child)?;
     let left = || deadline.saturating_duration_since(Instant::now());
     loop {
@@ -270,11 +273,12 @@ fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
 }
 
 /// What comes out of `pipe` until it closes, read in a thread of its own and
-/// handed over in one piece, or why it could not all be read, as where it is
-/// more than `most` bytes.
+/// handed over in one piece, or why it could not all be read: an error of
+/// `over` where it is more than `most` bytes.
 fn read(
     mut pipe: impl Read + Send + 'static,
     most: u64,
+    over: io::ErrorKind,
 ) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
     in_thread(move || {
         let mut all = Vec::new();
@@ -286,7 +290,7 @@ fn read(
             Ok(0) => Ok(all),
             Ok(_) => {
                 let more = format!("it said more than {most} bytes");
-                Err(io::Error::new(io::ErrorKind::FileTooLarge, more))
+                Err(io::Error::new(over, more))
             },
             Err(error) => Err(error),
         }

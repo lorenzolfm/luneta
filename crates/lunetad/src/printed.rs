@@ -8,7 +8,6 @@
 //! keeps it here for a luneta on another machine, whose menu was for a pane
 //! of this one.
 
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::time::SystemTime;
@@ -199,15 +198,15 @@ fn keep(runtime: &Path, cut: Printed<Tail<'_>>, now: SystemTime) -> Result<Print
     cut.try_map(|tail| write(runtime, &tail, now))
 }
 
-/// Writes `tail` in a file of its own, as `keeps::new_file` makes it, in the
+/// Writes `tail` in a file of its own, as `keeps::Draft` keeps it, in the
 /// folder `FOLDER` of luneta's folder `runtime`.
 fn write(runtime: &Path, tail: &Tail<'_>, now: SystemTime) -> Result<Kept, String> {
     let Tail { lines, left_out } = tail;
-    let (file, mut written) = keeps::new_file(runtime, FOLDER, "txt", now)?;
+    let mut draft = keeps::Draft::new(runtime, FOLDER, "txt", now)?;
     let mut text = lines.join("\n");
     text.push('\n');
-    written.write_all(text.as_bytes()).map_err(|error| format!("{file}: {error}"))?;
-    Ok(Kept { file, lines: lines.len(), left_out: *left_out })
+    draft.write(text.as_bytes())?;
+    Ok(Kept { file: draft.keep()?, lines: lines.len(), left_out: *left_out })
 }
 
 #[cfg(test)]
