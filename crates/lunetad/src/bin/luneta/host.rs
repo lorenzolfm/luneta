@@ -663,6 +663,11 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             return ExitCode::FAILURE;
         },
     };
+    // The cursor shows where a frame puts it, and nowhere before the first,
+    // as luneta waits for its terminal's answers. ratatui's own, for it to
+    // know the cursor is hidden: the first frame shows it at zellij's, and
+    // ratatui shows it again as luneta ends.
+    let hidden = terminal.hide_cursor();
     // Before the hook, so that no panic of the sidebar's goes by the log. Why
     // there is none is for the sidebar to say, once it has its notes.
     let unkept = log::start(Process::Luneta).err();
@@ -722,7 +727,7 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
     let restored = put_back(&mut io::stdout());
     let left = ratatui::try_restore();
-    match ran.and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
+    match hidden.and(ran).and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
         // What zellij said as it failed went with luneta's screen.
         Ok(Some(failed)) => {
