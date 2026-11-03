@@ -1103,6 +1103,44 @@ impl Movable {
     }
 }
 
+/// What a move moves among, in the order of their rows, each by what the
+/// order keeps it by, with the rows it spans: the machines, or the sessions
+/// of one machine, by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Spans {
+    Machines(Vec<(Machine, Range<usize>)>),
+    Sessions(Machine, Vec<(String, Range<usize>)>),
+}
+
+impl Spans {
+    /// How many there are.
+    fn len(&self) -> usize {
+        match self {
+            Spans::Machines(machines) => machines.len(),
+            Spans::Sessions(_, sessions) => sessions.len(),
+        }
+    }
+
+    /// The rows each spans, in their order.
+    fn rows(&self) -> Vec<Range<usize>> {
+        match self {
+            Spans::Machines(machines) => machines.iter().map(|(_, rows)| rows.clone()).collect(),
+            Spans::Sessions(_, sessions) => sessions.iter().map(|(_, rows)| rows.clone()).collect(),
+        }
+    }
+
+    /// They, with those `taken` put back before the one at `to` of those
+    /// left, or after the last of them.
+    fn moved(&self, taken: Range<usize>, to: usize) -> Spans {
+        match self {
+            Spans::Machines(machines) => Spans::Machines(moved(machines, taken, to)),
+            Spans::Sessions(machine, sessions) => {
+                Spans::Sessions(machine.clone(), moved(sessions, taken, to))
+            },
+        }
+    }
+}
+
 /// A machine or a session the mouse lifted by its row, which goes where the
 /// mouse takes it, with the rows under it, once it lets go.
 #[derive(Debug)]
@@ -2343,88 +2381,85 @@ impl Sidebar {
     /// selected, for the next move.
     fn shift(&mut self, by: isize) {
         self.reorder();
-        let Moving::Selected(anchor) = &self.moving else {
-            return;
-        };
-        let anchor = anchor.clone();
         let Some((spans, held)) = self.selected() else {
             return;
         };
         let to = held.start.saturating_add_signed(by).min(spans.len() - held.len());
         if to != held.start {
-            self.keep(&anchor, &moved(&spans, held, to));
+            self.keep(spans.moved(held, to));
         }
     }
 
-    /// What the selection moves among, each by the rows it spans, and which
-    /// of them it holds, while it lasts.
-    fn selected(&self) -> Option<(Vec<Range<usize>>, Range<usize>)> {
+    /// What the selection moves among, and which of them it holds, while it
+    /// lasts.
+    fn selected(&self) -> Option<(Spans, Range<usize>)> {
         let Moving::Selected(anchor) = &self.moving else {
             return None;
         };
         let spans = self.spans(anchor);
-        let index = |at: usize| spans.iter().position(|span| span.contains(&at));
+        let rows = spans.rows();
+        let index = |at: usize| rows.iter().position(|span| span.contains(&at));
         let (from, to) = (index(self.row_of(&anchor.spot())?)?, index(self.cursor_index()?)?);
         Some((spans, from.min(to)..from.max(to) + 1))
     }
 
-    /// What `movable` moves among, each by the rows it spans: the machines,
-    /// or the sessions of its machine.
-    fn spans(&self, movable: &Movable) -> Vec<Range<usize>> {
+    /// What `movable` moves among: the machines, or the sessions of its
+    /// machine.
+    fn spans(&self, movable: &Movable) -> Spans {
         match movable {
-            Movable::Machine(_) => self.machines_spanned(),
-            Movable::Session(machine, _) => self.sessions(machine),
+            Movable::Machine(_) => Spans::Machines(self.machines_spanned()),
+            Movable::Session(machine, _) => {
+                Spans::Sessions(machine.clone(), self.sessions(machine))
+            },
         }
     }
 
-    /// The machines, each by the rows it spans: its header, and every row
+    /// The machines, each with the rows it spans: its header, and every row
     /// under it, up to the next machine's.
-    fn machines_spanned(&self) -> Vec<Range<usize>> {
-        let header = |(at, row): (usize, &Row)| matches!(row, Row::Machine { .. }).then_some(at);
-        let starts: Vec<usize> = self.rows.iter().enumerate().filter_map(header).collect();
-        let ends = starts.iter().skip(1).copied().chain([self.rows.len()]);
-        starts.iter().zip(ends).map(|(start, end)| *start..end).collect()
+    fn machines_spanned(&self) -> Vec<(Machine, Range<usize>)> {
+        let headers = self.rows.iter().enumerate().filter_map(|(at, row)| match row {
+            Row::Machine { machine, .. } => Some((at, machine)),
+            Row::Session { .. } | Row::Pane { .. } => None,
+        });
+        let starts: Vec<(usize, &Machine)> = headers.collect();
+        let ends = starts.iter().skip(1).map(|(at, _)| *at).chain([self.rows.len()]);
+        let spanned = starts.iter().zip(ends);
+        spanned.map(|((start, machine), end)| ((*machine).clone(), *start..end)).collect()
     }
 
-    /// The sessions of `machine`, each by the rows it spans: its own and its
-    /// panes', up to the next session's, or the next machine's header.
-    /// Sessions of one name next to each other go as one, as the order goes
-    /// by name, and cannot move one without the other.
-    fn sessions(&self, machine: &Machine) -> Vec<Range<usize>> {
-        let Some(span) = self.machines_spanned().into_iter().find(|span| {
-            matches!(&self.rows[span.start], Row::Machine { machine: it, .. } if it == machine)
-        }) else {
+    /// The sessions of `machine`, each by its name, with the rows it spans:
+    /// its own and its panes', up to the next session's, or the next
+    /// machine's header. Sessions of one name next to each other go as one,
+    /// as the order goes by name, and cannot move one without the other.
+    fn sessions(&self, machine: &Machine) -> Vec<(String, Range<usize>)> {
+        let spanned = self.machines_spanned().into_iter().find(|(it, _)| it == machine);
+        let Some((_, span)) = spanned else {
             return Vec::new();
         };
-        let mut starts = Vec::new();
-        let mut named: Option<&str> = None;
+        let mut starts: Vec<(usize, &str)> = Vec::new();
         for at in span.start + 1..span.end {
             if let Row::Session { session, .. } = &self.rows[at]
-                && named.replace(session.name.as_str()) != Some(session.name.as_str())
+                && starts.last().map(|(_, name)| *name) != Some(session.name.as_str())
             {
-                starts.push(at);
+                starts.push((at, session.name.as_str()));
             }
         }
-        let ends = starts.iter().skip(1).copied().chain([span.end]);
-        starts.iter().zip(ends).map(|(start, end)| *start..end).collect()
+        let ends = starts.iter().skip(1).map(|(at, _)| *at).chain([span.end]);
+        let spanned = starts.iter().zip(ends);
+        spanned.map(|((start, name), end)| ((*name).to_owned(), *start..end)).collect()
     }
 
-    /// Keeps the sessions of the machine of `movable`, or the machines, each
-    /// by the rows it spans in `spans`, in their order now, for every luneta,
-    /// and builds the rows again in it.
-    fn keep(&mut self, movable: &Movable, spans: &[Range<usize>]) {
-        let spots = spans.iter().map(|span| self.rows[span.start].spot());
-        match movable {
-            Movable::Machine(_) => {
-                let machines: Vec<Machine> = spots.map(|spot| spot.machine()).collect();
+    /// Keeps `spans`, the machines or the sessions of one, in their order
+    /// now, for every luneta, and builds the rows again in it.
+    fn keep(&mut self, spans: Spans) {
+        match spans {
+            Spans::Machines(machines) => {
+                let machines: Vec<Machine> = machines.into_iter().map(|(it, _)| it).collect();
                 self.order.keep_machines(&machines);
             },
-            Movable::Session(machine, _) => {
-                let name = |spot: Spot| {
-                    spot.place().expect("a session's span starts at its row").session().to_owned()
-                };
-                let sessions = spots.map(name).collect();
-                self.order.keep_sessions(machine, sessions);
+            Spans::Sessions(machine, sessions) => {
+                let names = sessions.into_iter().map(|(name, _)| name).collect();
+                self.order.keep_sessions(&machine, names);
             },
         }
         self.rebuild();
@@ -2440,17 +2475,18 @@ impl Sidebar {
         (0..start).chain(moved).chain(end..self.rows.len()).collect()
     }
 
-    /// Where `lift` lands as things stand: what it moves among, each by the
-    /// rows it spans, in the order they take once the mouse lets go, and the
-    /// rows the lifted one spans, with a session those of its name next to
-    /// it, which go with it. It lands where its row is nearest to the line
-    /// the mouse holds it on, a session among those of its machine alone,
-    /// and goes back while the mouse is off the sidebar.
-    fn landing(&self, lift: &Lift) -> Option<(Vec<Range<usize>>, Range<usize>)> {
+    /// Where `lift` lands as things stand: what it moves among, in the order
+    /// they take once the mouse lets go, and the rows the lifted one spans,
+    /// with a session those of its name next to it, which go with it. It
+    /// lands where its row is nearest to the line the mouse holds it on, a
+    /// session among those of its machine alone, and goes back while the
+    /// mouse is off the sidebar.
+    fn landing(&self, lift: &Lift) -> Option<(Spans, Range<usize>)> {
         let at = self.row_of(&lift.lifted.spot())?;
         let spans = self.spans(&lift.lifted);
-        let from = spans.iter().position(|span| span.contains(&at))?;
-        let lifted = spans[from].clone();
+        let rows = spans.rows();
+        let from = rows.iter().position(|span| span.contains(&at))?;
+        let lifted = rows[from].clone();
         if !lift.over {
             return Some((spans, lifted));
         }
@@ -2463,9 +2499,9 @@ impl Sidebar {
         // rows out of them, and the line after the last: from where the
         // first of them starts, under the header of their machine for
         // sessions.
-        let mut line = lines(0..spans[0].start);
-        let mut gaps = Vec::with_capacity(spans.len());
-        for (index, span) in spans.iter().enumerate() {
+        let mut line = lines(0..rows[0].start);
+        let mut gaps = Vec::with_capacity(rows.len());
+        for (index, span) in rows.iter().enumerate() {
             if index != from {
                 gaps.push(line);
                 line += lines(span.clone());
@@ -2474,7 +2510,7 @@ impl Sidebar {
         gaps.push(line);
         let distance = |gap: &usize| ((gaps[*gap] as isize - top).unsigned_abs(), *gap != from);
         let to = (0..gaps.len()).min_by_key(distance).unwrap_or(from);
-        Some((moved(&spans, from..from + 1, to), lifted))
+        Some((spans.moved(from..from + 1, to), lifted))
     }
 
     /// Opens the menu for the highlighted row, on the group `key` opens, or on
@@ -3224,9 +3260,7 @@ impl Sidebar {
                 self.reorder();
                 self.cursor = Some(lift.lifted.spot());
                 match self.landing(&lift) {
-                    Some((spans, _)) if spans != self.spans(&lift.lifted) => {
-                        self.keep(&lift.lifted, &spans);
-                    },
+                    Some((spans, _)) if spans != self.spans(&lift.lifted) => self.keep(spans),
                     _ => self.settle(None, false),
                 }
                 Asked::Nothing
@@ -3439,8 +3473,9 @@ impl Sidebar {
         let lit = match (&landing, highlight) {
             (Some((_, lifted)), _) => Some((lifted.clone(), LIT)),
             (None, Highlight::Lit(at)) => {
-                let held = self.selected().map(|(sessions, held)| {
-                    sessions[held.start].start..sessions[held.end - 1].end
+                let held = self.selected().map(|(spans, held)| {
+                    let rows = spans.rows();
+                    rows[held.start].start..rows[held.end - 1].end
                 });
                 held.or(at.map(|at| at..at + 1)).map(|rows| (rows, LIT))
             },
@@ -3448,7 +3483,7 @@ impl Sidebar {
             (None, Highlight::Off) => None,
         };
         let order = match &landing {
-            Some((sessions, _)) => self.landed(sessions),
+            Some((spans, _)) => self.landed(&spans.rows()),
             None => (0..self.rows.len()).collect::<Vec<_>>(),
         };
         let mut drawn: Vec<Line<'static>> = Vec::new();
@@ -3840,12 +3875,12 @@ fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
     (listed, unlisted)
 }
 
-/// `sessions` with those `taken` put back before the one at `to` of those
-/// left, or after the last of them.
-fn moved(sessions: &[Range<usize>], taken: Range<usize>, to: usize) -> Vec<Range<usize>> {
-    let left = sessions.iter().enumerate().filter(|(at, _)| !taken.contains(at));
-    let mut moved: Vec<Range<usize>> = left.map(|(_, span)| span.clone()).collect();
-    moved.splice(to..to, sessions[taken].iter().cloned());
+/// `items` with those `taken` put back before the one at `to` of those left,
+/// or after the last of them.
+fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
+    let left = items.iter().enumerate().filter(|(at, _)| !taken.contains(at));
+    let mut moved: Vec<T> = left.map(|(_, item)| item.clone()).collect();
+    moved.splice(to..to, items[taken].iter().cloned());
     moved
 }
 
