@@ -217,9 +217,9 @@ pub enum Heard {
     Renamed { from: SessionName, to: SessionName, renamed: Result<(), String> },
     /// Whether zellij let go of the session `session`, one that ended.
     Deleted { session: SessionName, deleted: Result<(), String> },
-    /// The directories zoxide knows on `on`, best first, or why it did not
-    /// list them.
-    Dirs { on: Machine, visited: Result<Vec<Dir>, String> },
+    /// The directories zoxide knows on `on`, best first, as it listed them
+    /// for the picker's ask numbered `ask`, or why it did not list them.
+    Dirs { on: Machine, ask: u64, visited: Result<Vec<Dir>, String> },
     /// What eza listed of the directory `path` of `on`, or why it did not.
     Listed { on: Machine, path: Directory, listed: Result<String, String> },
 }
@@ -241,8 +241,9 @@ pub enum Ask {
     Rename { from: SessionName, to: SessionName },
     /// To let go of the session `session`, one that ended.
     Delete(SessionName),
-    /// The directories zoxide knows on the machine.
-    Dirs(Machine),
+    /// The directories zoxide knows on `on`, for the picker's ask of them
+    /// numbered `ask`: its asks of them count up from 1, of every machine.
+    Dirs { on: Machine, ask: u64 },
     /// What is in the directory at `path` of `on`, as eza lists it.
     List { on: Machine, path: Directory },
 }
@@ -272,14 +273,15 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
                 let deleted = zellij::deleted(&session);
                 Heard::Deleted { session, deleted }
             },
-            Ask::Dirs(on) => {
+            Ask::Dirs { on, ask } => {
                 let visited = match &on {
                     Machine::Local => zoxide::visited(),
-                    Machine::Remote(destination) => {
-                        Away::reach(destination, away::ANSWER).and_then(|mut away| away.dirs())
-                    },
+                    // The notes over the list say why, of each machine.
+                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
+                        .map_err(|why| format!("{destination}: {why}"))
+                        .and_then(|mut away| away.dirs()),
                 };
-                Heard::Dirs { on, visited }
+                Heard::Dirs { on, ask, visited }
             },
             Ask::List { on, path } => {
                 let listed = match &on {
@@ -501,8 +503,8 @@ enum Preview {
 /// What zoxide said of the directories of a machine's.
 #[derive(Debug)]
 enum Visited {
-    /// Nothing yet.
-    Asking,
+    /// Nothing yet, of the ask numbered so: only its answer is taken.
+    Asking(u64),
     /// Best first.
     Listed(Vec<Dir>),
     /// Why it did not list them.
@@ -553,8 +555,10 @@ pub struct Picker {
     /// When `exited` was listed, which its ages count back from.
     exited_at: SystemTime,
     /// What zoxide said of the directories of each machine it was asked of,
-    /// which is each the picker has listed.
+    /// which is each the picker lists.
     visited: HashMap<Machine, Visited>,
+    /// The number of the last ask for a machine's directories.
+    dirs_asked: u64,
     sessions: Rows,
     agents: Rows,
     dirs: Rows,
@@ -566,10 +570,14 @@ pub struct Picker {
     error: Option<String>,
     /// What the picker has yet to ask of zellij, which `asks` hands over.
     asking: Vec<Ask>,
-    /// The machine whose directories the highlight goes to, as they come,
-    /// until a key moves it: the one whose header `Ctrl d` was pressed on,
-    /// or this one.
-    aim: Option<Machine>,
+    /// The machine whose directories the highlight goes to: the one whose
+    /// header `Ctrl d` was pressed on, or this one. To the first of them as
+    /// they come, while `aiming`, and to the best of them that the search
+    /// finds as what is typed changes.
+    aim: Machine,
+    /// Whether the highlight goes to the first of `aim`'s directories as
+    /// they come: until a key moves it.
+    aiming: bool,
 }
 
 impl Picker {
@@ -588,6 +596,7 @@ impl Picker {
             exited_asked: 0,
             exited_at: SystemTime::now(),
             visited: HashMap::new(),
+            dirs_asked: 0,
             sessions: Rows::default(),
             agents: Rows::default(),
             dirs: Rows::default(),
@@ -596,7 +605,8 @@ impl Picker {
             wanted: None,
             error: None,
             asking: Vec::new(),
-            aim: Some(aim),
+            aim,
+            aiming: true,
         };
         picker.ask_exited();
         picker.ask_dirs();
@@ -616,8 +626,8 @@ impl Picker {
     /// Takes in what the sidebar knows of the host now. The sessions zellij
     /// keeps to bring back are asked for again once a session ran that runs
     /// no more, as zellij keeps one killed, and zoxide of a machine listed
-    /// for the first time for its directories, or again since it went off
-    /// the listing.
+    /// for the first time for its directories, or for the first time since
+    /// it went off the listing.
     pub fn listed(&mut self, listing: Listing) {
         let names = |listing: &Listing| -> HashSet<String> {
             listing.sessions.iter().map(|live| live.place.session().to_owned()).collect()
@@ -628,13 +638,10 @@ impl Picker {
             self.ask_exited();
         }
         // What a machine that went off the listing said is of a reach that
-        // ended, and so is why it did not answer. One still asked keeps its
-        // ask, whose answer is the only one to come.
+        // ended, and so is why it did not answer, and what an ask of it that
+        // is still open will say.
         let machines = self.machines();
-        let kept = |on: &Machine, visited: &mut Visited| {
-            matches!(visited, Visited::Asking) || machines.contains(on)
-        };
-        self.visited.retain(kept);
+        self.visited.retain(|on, _| machines.contains(on));
         self.ask_dirs();
         self.rebuild(false);
     }
@@ -650,8 +657,10 @@ impl Picker {
     fn ask_dirs(&mut self) {
         for on in self.machines() {
             if !self.visited.contains_key(&on) {
-                self.visited.insert(on.clone(), Visited::Asking);
-                self.asking.push(Ask::Dirs(on));
+                self.dirs_asked += 1;
+                let ask = self.dirs_asked;
+                self.visited.insert(on.clone(), Visited::Asking(ask));
+                self.asking.push(Ask::Dirs { on, ask });
             }
         }
     }
@@ -722,7 +731,12 @@ impl Picker {
                 }
                 self.ask_exited();
             },
-            Heard::Dirs { on, visited } => {
+            Heard::Dirs { on, ask, visited } => {
+                // What zoxide answered an ask made before its machine went off
+                // the listing is of a reach that ended.
+                if !matches!(self.visited.get(&on), Some(Visited::Asking(asked)) if *asked == ask) {
+                    return Picked::Nothing;
+                }
                 let visited = match visited {
                     Ok(dirs) => Visited::Listed(dirs),
                     Err(why) => Visited::Failed(why),
@@ -748,7 +762,7 @@ impl Picker {
             return Picked::Close;
         }
         self.error = None;
-        self.aim = None;
+        self.aiming = false;
         let picked = match std::mem::replace(&mut self.stage, Stage::Search) {
             Stage::Search => self.search_key(key),
             Stage::Rename { session, input } => self.rename_key(key, session, input),
@@ -773,7 +787,7 @@ impl Picker {
 
     /// Types `text` where you type: in the search, or the new name.
     pub fn paste(&mut self, text: &str) {
-        self.aim = None;
+        self.aiming = false;
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
         match &mut self.stage {
             Stage::Search => {
@@ -787,7 +801,7 @@ impl Picker {
 
     /// Moves the highlight `by` rows, as the wheel does.
     pub fn scroll(&mut self, by: isize) {
-        self.aim = None;
+        self.aiming = false;
         if matches!(self.stage, Stage::Search) {
             self.rows_mut().step(by);
             self.follow();
@@ -807,7 +821,7 @@ impl Picker {
             return Picked::Nothing;
         };
         self.error = None;
-        self.aim = None;
+        self.aiming = false;
         self.rows_mut().at = Some(at);
         self.follow();
         self.enter()
@@ -1167,8 +1181,9 @@ impl Picker {
 
     /// Builds the lists again, of what is typed: the highlight on the row
     /// it was on, or the one that took its place where that went; or else,
-    /// `snap`, as what is typed changed, on the best match, or the first
-    /// session after yours.
+    /// `snap`, as what is typed changed, on the best match, which of the
+    /// directories is the best of the aim's machine's where it has one, or
+    /// on the first session after yours.
     fn rebuild(&mut self, snap: bool) {
         let finder = (!self.term.is_empty()).then(|| Finder::new(&self.term));
         let here = self.listing.here.clone();
@@ -1212,7 +1227,7 @@ impl Picker {
         let (held_session, held_agent) = (held(&self.sessions), held(&self.agents));
         // The aim holds the highlight on its machine's directories, the
         // first of them, once they come.
-        let held_dir = held(&self.dirs).filter(|_| self.aim.is_none());
+        let held_dir = held(&self.dirs).filter(|_| !self.aiming);
         self.sessions.replace(sessions, held_session.as_ref(), session_start);
         self.agents.replace(agents, held_agent.as_ref(), agent_start);
         self.dirs.replace(dirs, held_dir.as_ref(), aimed.unwrap_or(0));
@@ -1224,7 +1239,8 @@ impl Picker {
     /// rule where more than one machine is listed. A row of this machine's
     /// has the session named for it free of the names zellij has here; one
     /// of another's, the name its daemon gave it, free there. And the row the
-    /// first of the machine `aim` aims at is, where it has one.
+    /// first of the machine `aim` names is, which is its best match, where it
+    /// has one.
     fn dir_rows(&self) -> (Vec<Row>, Option<usize>) {
         let matcher = SkimMatcherV2::default();
         let taken = self.taken();
@@ -1249,7 +1265,7 @@ impl Picker {
             if ruled {
                 first.rules.machine = Some(self.machine_name(&on));
             }
-            if self.aim.as_ref() == Some(&on) {
+            if self.aim == on {
                 aimed = Some(rows.len());
             }
             rows.extend(found);
@@ -1502,7 +1518,7 @@ impl Picker {
             List::Dirs => {
                 let visited = self.machines().into_iter().filter_map(|on| self.visited.get(&on));
                 let visited: Vec<&Visited> = visited.collect();
-                if visited.iter().any(|visited| matches!(visited, Visited::Asking)) {
+                if visited.iter().any(|visited| matches!(visited, Visited::Asking(_))) {
                     "asking zoxide…".to_owned()
                 } else if visited.iter().all(|visited| matches!(visited, Visited::Failed(_))) {
                     "no directories".to_owned()
@@ -1628,7 +1644,7 @@ impl Picker {
             caption.push(Span::styled(" · ", Style::new().add_modifier(Modifier::DIM)));
         }
         let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
-        caption.push(Span::styled(sidebar::tail(path.as_str(), room.saturating_sub(1)), grey));
+        caption.push(Span::styled(sidebar::tail(path.as_str(), room), grey));
         let mut lines = vec![Line::from(caption), Line::default()];
         let contents = self.contents.get(&(on.clone(), path.clone()));
         let mut right = String::new();
@@ -2044,9 +2060,10 @@ mod tests {
         Dir { path: directory(path), name: SessionName::parse(name).unwrap() }
     }
 
-    /// What zoxide on this machine said of its directories.
+    /// What zoxide on this machine said of its directories, as the picker
+    /// asks it first.
     fn heard_here(visited: Result<Vec<Dir>, String>) -> Heard {
-        Heard::Dirs { on: Machine::Local, visited }
+        Heard::Dirs { on: Machine::Local, ask: 1, visited }
     }
 
     /// Three sessions that run, `b` the one luneta's zellij is in, `c` the
@@ -2162,7 +2179,7 @@ mod tests {
     #[test]
     fn the_sessions_go_yours_first_then_those_that_run_then_those_that_ended() {
         let listing = Listing { here: Some("b".to_owned()), ..Listing::default() };
-        let asks = vec![Ask::Exited(1), Ask::Dirs(Machine::Local)];
+        let asks = vec![Ask::Exited(1), Ask::Dirs { on: Machine::Local, ask: 1 }];
         assert_eq!(Picker::open(1, List::Sessions, listing, Machine::Local).asks(), asks);
         let mut picker = three();
         assert_eq!(names(&picker), ["b", "c", "a", "ended", "y", "x"]);
@@ -2743,12 +2760,13 @@ mod tests {
     #[test]
     fn every_machine_s_directories_go_under_its_rule_this_one_s_first() {
         let mut picker = Picker::open(1, List::Dirs, two_machines(), Machine::Local);
-        let asks = vec![Ask::Exited(1), Ask::Dirs(Machine::Local), Ask::Dirs(nixos())];
+        let dirs = |on: Machine, ask: u64| Ask::Dirs { on, ask };
+        let asks = vec![Ask::Exited(1), dirs(Machine::Local, 1), dirs(nixos(), 2)];
         assert_eq!(picker.asks(), asks);
         picker.heard(Heard::Exited { ask: 1, exited: Ok(Vec::new()) });
         let api = "/home/me/Projects/api";
         let there = vec![visited(api, "api"), visited("/home/me/blog", "blog-2")];
-        picker.heard(Heard::Dirs { on: nixos(), visited: Ok(there) });
+        picker.heard(Heard::Dirs { on: nixos(), ask: 2, visited: Ok(there) });
         let here = vec![visited("/home/you/luneta", "luneta"), visited("/home/you/blog", "blog")];
         picker.heard(heard_here(Ok(here)));
         let rows = ["── desk", "luneta", "blog", "── nixos", "api", "blog-2"];
@@ -2774,17 +2792,19 @@ mod tests {
 
         typed(&mut picker, "blog");
         assert_eq!(grouped(&picker), ["── desk", "blog", "── nixos", "blog-2"]);
+        assert_eq!(lit(&picker), "blog");
     }
 
     /// `Ctrl d` on a machine's header has the highlight on the first of its
     /// directories once they come, before this machine's or after, until a
-    /// key moves it.
+    /// key moves it; and on the best of them the search finds, as what is
+    /// typed changes, which `Enter` makes there.
     #[test]
     fn ctrl_d_on_a_machine_s_header_has_the_highlight_on_its_directories() {
         let here = || heard_here(Ok(vec![visited("/home/you/notes", "notes")]));
         let there = || {
             let dirs = vec![visited("/home/me/api", "api"), visited("/home/me/blog", "blog")];
-            Heard::Dirs { on: nixos(), visited: Ok(dirs) }
+            Heard::Dirs { on: nixos(), ask: 2, visited: Ok(dirs) }
         };
         let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos());
         picker.heard(here());
@@ -2805,24 +2825,33 @@ mod tests {
         press(&mut picker, KeyCode::Up);
         picker.heard(there());
         assert_eq!(lit(&picker), "notes");
+
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos());
+        picker.heard(heard_here(Ok(vec![visited("/home/you/luneta", "luneta")])));
+        let dirs = vec![visited("/home/me/api", "api"), visited("/home/me/luneta", "luneta")];
+        picker.heard(Heard::Dirs { on: nixos(), ask: 2, visited: Ok(dirs) });
+        typed(&mut picker, "lun");
+        let session = SessionName::parse("luneta").unwrap();
+        let made = Picked::Make { on: nixos(), session, cwd: directory("/home/me/luneta") };
+        assert_eq!(press(&mut picker, KeyCode::Enter), made);
     }
 
     /// zoxide of a machine is asked once, as the picker first lists it.
     /// One that did not list its directories says why over the others'.
-    /// One that goes off the listing and comes back is asked again, but for
-    /// one still asked, whose answer is to come.
+    /// One that goes off the listing and comes back is asked again, and
+    /// what it answers an ask made before is not taken.
     #[test]
     fn each_machine_s_zoxide_is_asked_once_and_says_why_it_listed_none() {
         let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
-        assert_eq!(picker.asks(), [Ask::Exited(1), Ask::Dirs(Machine::Local)]);
+        assert_eq!(picker.asks(), [Ask::Exited(1), Ask::Dirs { on: Machine::Local, ask: 1 }]);
         picker.listed(two_machines());
-        assert_eq!(picker.asks(), [Ask::Dirs(nixos())]);
+        assert_eq!(picker.asks(), [Ask::Dirs { on: nixos(), ask: 2 }]);
         picker.listed(two_machines());
         assert!(picker.asks().is_empty());
         assert_eq!(list(&picker).0, ["asking zoxide…"]);
         picker.heard(heard_here(Ok(vec![visited("/home/you/notes", "notes")])));
         let older = "nixos: its lunetad, or this one, is older than what luneta asked of it";
-        picker.heard(Heard::Dirs { on: nixos(), visited: Err(older.to_owned()) });
+        picker.heard(Heard::Dirs { on: nixos(), ask: 2, visited: Err(older.to_owned()) });
         let (lines, _) = list(&picker);
         assert_eq!(lines[..2].join(" "), older);
         assert_eq!(grouped(&picker)[2..], ["── desk", "notes"]);
@@ -2830,10 +2859,15 @@ mod tests {
         let gone = || Listing { remotes: Vec::new(), ..two_machines() };
         picker.listed(gone());
         picker.listed(two_machines());
-        assert_eq!(picker.asks(), [Ask::Dirs(nixos())]);
+        assert_eq!(picker.asks(), [Ask::Dirs { on: nixos(), ask: 3 }]);
         picker.listed(gone());
         picker.listed(two_machines());
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [Ask::Dirs { on: nixos(), ask: 4 }]);
+        let lost = "nixos: lunetad does not reach nixos now";
+        picker.heard(Heard::Dirs { on: nixos(), ask: 3, visited: Err(lost.to_owned()) });
+        let there = vec![visited("/home/me/api", "api")];
+        picker.heard(Heard::Dirs { on: nixos(), ask: 4, visited: Ok(there) });
+        assert_eq!(grouped(&picker), ["── desk", "notes", "── nixos", "api"]);
     }
 
     /// Where zoxide does not answer, the directories say why, and list none.

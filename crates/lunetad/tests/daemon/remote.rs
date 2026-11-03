@@ -924,9 +924,6 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     });
 }
 
-/// Where a key goes for `pasted` on the machine `on`, as `daemon` hands on
-/// the one answer its stream holds, by places of the panes `pasted` says; or
-/// why there is none.
 /// The directories zoxide knows on another machine are listed there, best
 /// first, each named for the session a luneta makes there now: past the
 /// name of a session that runs there. What is in one is what eza lists
@@ -979,6 +976,9 @@ fn another_machine_s_directories_are_listed_there() {
     });
 }
 
+/// Where a key goes for `pasted` on the machine `on`, as `daemon` hands on
+/// the one answer its stream holds, by places of the panes `pasted` says; or
+/// why there is none.
 async fn pasted_on(
     daemon: &mut DaemonClient<Channel>,
     on: &str,
