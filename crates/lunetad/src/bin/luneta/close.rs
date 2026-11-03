@@ -8,7 +8,8 @@
 //! that is the last to hold its tab open closes the tab, and the last to hold
 //! a session's only tab open deletes the session. The session luneta's zellij
 //! is in goes once its client is in another, which keeps the client on
-//! screen throughout, or with luneta, where it is the only one.
+//! screen throughout, or with the client, where it is its machine's only
+//! one: luneta goes on in another machine's, or ends where none has one.
 
 use std::fmt;
 use std::time::SystemTime;
@@ -139,8 +140,8 @@ pub struct Subject<'a> {
     /// tell them.
     pub agents: Result<Vec<(u32, Doing)>, Untold>,
     /// Where luneta's zellij goes before the session it is in is deleted: the
-    /// newest of the others, which the picker lists first. None for the only
-    /// session, which luneta ends with.
+    /// newest of the others, which the picker lists first. None for its
+    /// machine's only session, which luneta's zellij ends with.
     pub refuge: Option<Place>,
 }
 
@@ -154,9 +155,10 @@ pub enum Act {
     Tab { session: SessionName, tab: u32, panes: Vec<u32> },
     /// Kill the session that started at `started`, and delete it, so that
     /// zellij keeps nothing to bring it back with. A key plans it for a
-    /// session luneta's zellij is not in, or for the only one, which luneta's
-    /// zellij ends with, and luneta with it; `luneta close` for any, as a
-    /// client that ends with its session goes on in another.
+    /// session luneta's zellij is not in, or for its machine's only one,
+    /// which luneta's zellij ends with, to go on in another machine's, or
+    /// with luneta, where none has one; `luneta close` for any, as a client
+    /// that ends with its session goes on in another.
     Kill { session: SessionName, started: SystemTime },
     /// Take luneta's zellij to `to`, and kill and delete `session`, which it
     /// is in, the one that started at `started`, once it has left.
@@ -198,9 +200,9 @@ pub struct Plan {
 /// pane closes, or its tab once nothing else holds the tab open. The last
 /// pane that holds a session's only tab open ends the session with it, and
 /// deletes the session: the session luneta's zellij is in goes once the
-/// client is in another, as it would for a key that deletes it, or with
-/// luneta, where it is the only one; and none goes while luneta cannot tell
-/// which session that is.
+/// client is in another, as it would for a key that deletes it, or with the
+/// client, where it is its machine's only one; and none goes while luneta
+/// cannot tell which session that is.
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
     let (session, started) = (subject.session.name().clone(), subject.session.started());
     let act = match &subject.deletes {
@@ -358,9 +360,10 @@ mod tests {
         assert_eq!(planned(Seat::Elsewhere, Deletes::Session), Ok(kill));
     }
 
-    /// The only session has none to go to first: it is killed with luneta's
-    /// zellij in it, and luneta ends with it. It asks first as any session
-    /// does, by the agents it ends.
+    /// The machine's only session has none there to go to first: it is
+    /// killed with luneta's zellij in it, which goes on in another machine's,
+    /// or ends luneta. It asks first as any session does, by the agents it
+    /// ends.
     #[test]
     fn the_only_session_is_killed_with_luneta_in_it() {
         let luneta = luneta();

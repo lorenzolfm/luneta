@@ -79,7 +79,7 @@ use crate::printed::Printed;
 use crate::pull::{Link, Ready, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
-use crate::zellij::{Closes, Open, SessionName, Tab};
+use crate::zellij::{Closes, Open, SessionName, Tab, Within};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
@@ -675,6 +675,11 @@ enum Heads {
     },
 }
 
+/// The sessions of another machine's that luneta's zellij may go on in,
+/// newest first, one at least, as `Sidebar::refuges_away` lists them; or
+/// why it goes on in none of them.
+pub type Refuges = Result<Vec<SessionName>, String>;
+
 /// Why a machine's header lists none of its sessions: lunetad has none of
 /// them to say.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1267,20 +1272,23 @@ impl Sidebar {
     /// luneta's zellij came, of the go luneta sent it on last, is from once
     /// it had. One that finds zellij did not take it to the pane luneta sent
     /// it to says so: zellij moved another client, the last to type in the
-    /// session, or none.
-    pub fn looked(&mut self, looked: Looked) {
-        if let Some(sent) = &mut self.sent
-            && looked.before.is_some()
-            && sent.look == Some(looked.number)
-        {
-            sent.landed = true;
-        }
+    /// session, or none. Whether it found luneta's zellij in the session it
+    /// was sent to, as zellij listed it there just now.
+    pub fn looked(&mut self, looked: Looked) -> bool {
+        let landed = match &mut self.sent {
+            Some(sent) if looked.before.is_some() && sent.look == Some(looked.number) => {
+                sent.landed = true;
+                true
+            },
+            Some(_) | None => false,
+        };
         let listed = self.own.session().and_then(|session| clients(self.on_sessions(), session));
         let listed = listed.map(<[Client]>::to_vec);
         if self.own.looked(looked, listed.as_deref(), Instant::now()) {
             self.notify("zellij did not take its client to the pane".to_owned());
         }
         self.rebuild();
+        landed
     }
 
     /// luneta takes its zellij to `place`. A look to ask zellij for once it
@@ -1464,6 +1472,54 @@ impl Sidebar {
             _ => self.here().into_iter().collect(),
         };
         seats.into_iter().filter_map(|seat| SessionName::running(seat).ok()).collect()
+    }
+
+    /// The sessions of the other machines but those `tried`, where luneta's
+    /// zellij goes on once the machine it was on has none left: each
+    /// machine's newest first, as the picker lists them, the machines as
+    /// their headers are. Where luneta's own terminal may be `within`
+    /// another machine's zellij, a session that may hold it is left out, as
+    /// `may_hold` says: a client of it would show luneta in itself, and each
+    /// key typed in it would go round again. Or why it goes on in none of
+    /// one's, as where lunetad does not reach it, or listed none of its
+    /// sessions when it last said, or only those that may hold luneta.
+    pub fn refuges_away(
+        &self,
+        tried: &[Destination],
+        within: Within,
+    ) -> Vec<(Destination, Refuges)> {
+        let Some(host) = &self.host else {
+            return Vec::new();
+        };
+        let others = machines(host).others.into_iter();
+        let others = others.filter(|(destination, _)| !tried.contains(destination));
+        let refuges = others.map(|(destination, seen)| {
+            let refuges = match seen {
+                Ok(seen) => {
+                    let (sessions, _) = oldest_first(seen.sessions);
+                    if sessions.is_empty() {
+                        Err("lunetad lists none of its sessions".to_owned())
+                    } else {
+                        let sessions = sessions.into_iter().rev();
+                        let newest: Vec<_> = sessions
+                            .filter(|(_, session)| within == Within::Here || !may_hold(session))
+                            .map(|(listed, _)| listed.name)
+                            .collect();
+                        if newest.is_empty() {
+                            Err("each of its sessions may hold luneta's own terminal".to_owned())
+                        } else {
+                            Ok(newest)
+                        }
+                    }
+                },
+                Err(Away::Reaching) => Err("lunetad is reaching it".to_owned()),
+                Err(Away::Unreached { word, .. }) => {
+                    Err(format!("lunetad does not reach it: {word}"))
+                },
+            };
+            (destination, refuges)
+        });
+        refuges.collect()
     }
 
     /// The pane luneta's zellij is on, in the one session of the name it is
@@ -3636,6 +3692,25 @@ fn pull_requests(pull_requests: &[lunetad::api::PullRequest]) -> HashMap<&str, P
         .iter()
         .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
         .collect()
+}
+
+/// The programs that bring a terminal of another machine's into a pane: ssh,
+/// and luneta, which runs ssh beside its sidebar for another machine's
+/// session.
+const CARRIERS: [&str; 2] = ["ssh", "luneta"];
+
+/// Whether `session`, of another machine's, may hold luneta's own terminal in
+/// one of its panes: one of them runs one of `CARRIERS`, or runs what zellij
+/// there has yet to say, or zellij there has yet to list its panes.
+fn may_hold(session: &Session) -> bool {
+    let Some(panes) = &session.panes else {
+        return true;
+    };
+    panes.panes.iter().any(|pane| {
+        pane.command.as_deref().is_none_or(|command| {
+            icons::program(command).is_some_and(|program| CARRIERS.contains(&program))
+        })
+    })
 }
 
 /// The sessions the daemon lists, as the sidebar tells them apart, oldest
@@ -7555,6 +7630,43 @@ mod tests {
         sidebar.heard(host);
         let kill = Act::Kill { session: session_name("main"), started };
         assert_eq!(delete(&mut sidebar), Asked::Delete { on, act: kill });
+    }
+
+    /// Where the machine luneta's zellij is on has no session left, it goes
+    /// on in another's: as their headers are, but those it tried, each
+    /// machine's newest first. One lunetad does not reach, or is reaching,
+    /// or that has no session, says why it is passed over. Where luneta's
+    /// own terminal may be in a pane of another machine's zellij, a session
+    /// that may hold it is passed over: one with a pane that runs ssh, or a
+    /// luneta, or whose panes zellij there has yet to list.
+    #[test]
+    fn with_no_session_left_zellij_goes_on_in_another_machine_s_newest() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let main = session("main", 20, vec![pane(1, 0, "/w/a", "fish")]);
+        let work = session("work", 30, vec![pane(1, 0, "/w/b", "ssh -t mac")]);
+        let new = Session { panes: None, ..session("new", 40, Vec::new()) };
+        host.remotes[0] = remote("nixos", up(vec![main, work, new], Vec::new()));
+        host.remotes.insert(0, remote("empty", up(Vec::new(), Vec::new())));
+        let luneta = pane(2, 0, "/w", "/run/current-system/sw/bin/luneta");
+        host.remotes[3] = remote("pi", up(vec![session("pi", 10, vec![luneta])], Vec::new()));
+        host.remotes.push(remote("far", Reached::Reaching(remote::Reaching {})));
+        sidebar.heard(host);
+        let none = |why: &str| Err::<Vec<SessionName>, _>(why.to_owned());
+        let empty = || ("empty".parse().unwrap(), none("lunetad lists none of its sessions"));
+        let vps = ("me@vps".parse().unwrap(), none("lunetad does not reach it: unreachable"));
+        let pi = ("pi".parse().unwrap(), Ok(vec![session_name("pi")]));
+        let far = ("far".parse().unwrap(), none("lunetad is reaching it"));
+        let newest = ["new", "work", "main"].map(session_name).to_vec();
+        let all = [empty(), (nixos(), Ok(newest)), vps.clone(), pi, far.clone()];
+        assert_eq!(sidebar.refuges_away(&[], Within::Here), all);
+        let tried = [nixos(), empty().0];
+        let held = none("each of its sessions may hold luneta's own terminal");
+        let held = ("pi".parse().unwrap(), held);
+        let away = sidebar.refuges_away(&[empty().0], Within::MaybeAway);
+        let main = (nixos(), Ok(vec![session_name("main")]));
+        assert_eq!(away, [main, vps.clone(), held.clone(), far.clone()]);
+        assert_eq!(sidebar.refuges_away(&tried, Within::MaybeAway), [vps, held, far]);
     }
 
     /// A delete on another machine's row that waits on your yes deletes

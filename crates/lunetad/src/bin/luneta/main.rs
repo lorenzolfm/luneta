@@ -14,6 +14,7 @@ mod daemon;
 mod dictation;
 mod due;
 mod drive;
+mod fails;
 mod folds;
 mod gruvbox;
 mod host;
