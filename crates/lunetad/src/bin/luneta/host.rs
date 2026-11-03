@@ -42,14 +42,15 @@ use crossterm::event::{
     KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
-use crossterm::terminal::SetTitle;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
+use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::log::{self, Process};
 use lunetad::Destination;
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
-use ratatui::DefaultTerminal;
+use ratatui::{DefaultTerminal, Terminal};
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
@@ -2540,6 +2541,13 @@ impl App {
     }
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        whole(terminal, |terminal| self.frame(terminal))
+    }
+
+    /// Draws the sidebar, open or collapsed, zellij's screen beside it, and
+    /// the box over zellij, where one is, into a frame of luneta's terminal,
+    /// with zellij's cursor while zellij has the keys.
+    fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let now = SystemTime::now();
         terminal.draw(|frame| {
             let collapsed = self.focus.side == Side::Collapsed;
@@ -2607,6 +2615,23 @@ impl App {
     }
 }
 
+/// Writes a frame to `terminal`, as `draw` does, for the terminal to show
+/// whole: one that can holds what it shows from the frame's first write to
+/// its last. A frame goes out in more than one write, and its cursor moves to
+/// where it shows only in the last: a terminal that shows what it has in
+/// between shows the cursor where luneta wrote last, as after a spinner that
+/// turned on a row of the sidebar.
+fn whole<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    draw: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> io::Result<()>,
+) -> io::Result<()> {
+    queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+    let drawn = draw(terminal);
+    // Ended where it failed too, for the terminal to show what it has.
+    let ended = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+    drawn.and(ended)
+}
+
 /// What a client of zellij's on `on` said as it failed, ending `exited`: the
 /// last line on its screen, as an ssh that reached no machine, or a zellij
 /// that could not attach, or make a session of a name taken, writes it as it
@@ -2642,5 +2667,91 @@ fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {
         (CursorShape::Beam, false) => SetCursorStyle::SteadyBar,
         (_, true) => SetCursorStyle::BlinkingBlock,
         (_, false) => SetCursorStyle::SteadyBlock,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::term::test::TermSize;
+    use alacritty_terminal::term::{Config, Term};
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+    use ratatui::{TerminalOptions, Viewport};
+
+    use super::*;
+
+    /// What luneta writes to its terminal, write by write, into `written`:
+    /// each flush is one, as it is to stdout.
+    #[derive(Default)]
+    struct Writes {
+        written: Rc<RefCell<Vec<Vec<u8>>>>,
+        writing: Vec<u8>,
+    }
+
+    impl io::Write for Writes {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writing.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if !self.writing.is_empty() {
+                self.written.borrow_mut().push(std::mem::take(&mut self.writing));
+            }
+            Ok(())
+        }
+    }
+
+    /// A frame with `glyph` at the second column of the second line, and the
+    /// cursor at `cursor`, written whole to `terminal`.
+    fn frame(terminal: &mut Terminal<CrosstermBackend<Writes>>, glyph: &str, cursor: Position) {
+        whole(terminal, |terminal| {
+            terminal.draw(|frame| {
+                frame.buffer_mut()[(1, 1)].set_symbol(glyph);
+                frame.set_cursor_position(cursor);
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Where `screen` shows its cursor, if it shows one.
+    fn shown(screen: &Term<VoidListener>) -> Option<(i32, usize)> {
+        let cursor = screen.renderable_content().cursor;
+        let point = (cursor.point.line.0, cursor.point.column.0);
+        (cursor.shape != CursorShape::Hidden).then_some(point)
+    }
+
+    /// A terminal that shows what it has after each write luneta makes shows
+    /// the cursor only where a frame puts it, as zellij's, and never where
+    /// luneta wrote last, as on a spinner that turned on a row of the
+    /// sidebar: a frame is held until it is all written.
+    #[test]
+    fn the_cursor_shows_only_where_a_frame_puts_it() {
+        let viewport = Viewport::Fixed(Rect::new(0, 0, 20, 4));
+        let writes = Writes::default();
+        let written = Rc::clone(&writes.written);
+        let backend = CrosstermBackend::new(writes);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
+        let mut screen = Term::new(Config::default(), &TermSize::new(20, 4), VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let zellij = Position::new(15, 3);
+        frame(&mut terminal, "⠋", zellij);
+        for write in written.take() {
+            parser.advance(&mut screen, &write);
+        }
+        assert_eq!(shown(&screen), Some((3, 15)));
+        frame(&mut terminal, "⠙", zellij);
+        let writes = written.take();
+        assert!(writes.len() > 1, "a frame goes out in more than one write");
+        for write in writes {
+            parser.advance(&mut screen, &write);
+            assert_eq!(shown(&screen), Some((3, 15)));
+        }
+        assert_eq!(screen.grid()[Point::new(Line(1), Column(1))].c, '⠙');
     }
 }
