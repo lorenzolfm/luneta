@@ -405,11 +405,14 @@ pane, or of the pane you would come to in the highlighted session, as zellij
 on its machine dumps it, or what is in the highlighted directory. `Enter`
 takes zellij there, on its machine, brings back a session that ended, makes
 the session you typed the name of, or makes one in the highlighted directory,
-named for it, on its machine. A name you type that no session of a machine's
-has is a row of its own, `+`, over that machine's sessions, so `↓` and `↑`
-pick the machine `Enter` makes it on: a session the search finds is
-highlighted first, and this machine's `+` where it finds none. `Del` deletes
-the highlighted session, lets go of
+named for it, on its machine. A name you type that a machine has no session
+of is a row of its own, `+`, over all the sessions: a session the search finds
+is highlighted first, and the `+` row where it finds none. `Enter` on it makes
+the session, and where more than one machine is listed, asks which machine
+first: `j` and `k`, or `↓` and `↑`, move through them, `Enter` makes it on the
+highlighted one, and `Esc` goes back to the search. A machine that has a
+session by that name, or whose zellij has yet to say which sessions ended, is
+dimmed, and says why. `Del` deletes the highlighted session, lets go of
 one that ended, or closes the agent's pane, on its machine, and asks first, as
 the menu's delete does, while an agent at work would end: `y` goes ahead.
 `Ctrl r` renames the highlighted session, on its machine. `Esc`, or a click
@@ -846,9 +849,8 @@ is made there, holding the `#123` tab alone, as here. `Ctrl d` on its header
 opens the picker on the directories with the highlight on that machine's,
 which lunetad there lists as its zoxide knows them, and its eza; `Enter` on one
 makes the session there, named as that machine names one. `Ctrl j` on its
-header opens the picker on the sessions with the highlight on that machine's,
-and on its `+` row for a name you type that no session there has, which
-`Enter` makes there. The picker lists its
+header opens the picker on the sessions, and the machines `Enter` on the `+`
+row asks you to pick from start on that one. The picker lists its
 sessions and agents too, under its rule, each previewed as zellij there dumps
 its screen, and the sessions zellij there keeps to bring back: `Enter` on one
 goes there, or brings it back there, and `Del` and `Ctrl r` delete and rename
@@ -1223,7 +1225,7 @@ on the directories. Type, press `Enter`.
 |---|---|
 | *any character* | filter, fuzzily |
 | `↓` / `↑` | move the highlight |
-| `Enter` | act on the highlighted row — the prompt says which action; a `+` row makes the session typed, on its machine |
+| `Enter` | act on the highlighted row — the prompt says which action; on the `+` row, make the session typed, on the machine you pick with `j` / `k` and `Enter` |
 | `Tab` / `Shift-Tab` | next / previous list, keeping the search term |
 | `Ctrl-r` | rename the highlighted session |
 | `Del` | delete a live session, or let go of a dead one; close an agent's pane, and its tab once nothing else holds it open |

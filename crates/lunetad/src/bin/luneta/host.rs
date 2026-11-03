@@ -1387,8 +1387,9 @@ impl App {
         };
         if let Some(list) = list {
             self.pickers += 1;
-            // `SESSIONS` or `DIRS` on a machine's header aims at its sessions,
-            // or its directories.
+            // `SESSIONS` or `DIRS` on a machine's header aims at it: the
+            // machines to make the session typed on start on it, and the
+            // highlight goes to its directories.
             let aim = match (list, self.focus.side) {
                 (List::Sessions | List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
                 _ => None,
