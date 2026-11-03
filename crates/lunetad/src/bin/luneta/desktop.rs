@@ -428,14 +428,22 @@ pub mod notifier {
         Ok(())
     }
 
-    /// Runs terminal-notifier with `args`: whether it ran well, or why not.
+    /// Runs terminal-notifier with `args`: whether it ran well, or why not,
+    /// in the first line it says, as that notifications are turned off for
+    /// it in the system's settings.
     #[cfg(target_os = "macos")]
     fn run(args: &[String]) -> Result<(), String> {
         let mut notifier = Command::new("terminal-notifier");
-        notifier.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        match notifier.status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(format!("terminal-notifier {status}")),
+        notifier.args(args).stdin(Stdio::null());
+        match notifier.output() {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => {
+                let said = String::from_utf8_lossy(&output.stderr);
+                match said.lines().next().map(str::trim).filter(|line| !line.is_empty()) {
+                    Some(line) => Err(format!("terminal-notifier: {line}")),
+                    None => Err(format!("terminal-notifier {}", output.status)),
+                }
+            },
             Err(error) => Err(format!("terminal-notifier: {error}")),
         }
     }
