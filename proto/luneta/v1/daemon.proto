@@ -54,6 +54,13 @@ service Daemon {
   // own where it is a worktree of one, with a `-2` where a session that runs,
   // or one zellij keeps to bring back, has that name.
   rpc NameSession(NameSessionRequest) returns (NameSessionResponse);
+  // The directories zoxide knows, best first, as luneta's picker lists them:
+  // each with the name a session luneta makes there takes now, as
+  // `NameSession` names it.
+  rpc ListDirs(ListDirsRequest) returns (ListDirsResponse);
+  // What is in a directory, as eza lists it for luneta's picker to show: an
+  // entry a line, in colour.
+  rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
   // Has zellij take the client that last typed in a session to a session it
   // makes, that starts in a directory, as `zellij action switch-session
   // --cwd` does: or to one that runs by that name, or one it keeps to bring
@@ -273,6 +280,34 @@ message NameSessionResponse {
   // as `OpenRequest.Tab` takes it for its `alone_since`. A daemon older than
   // this field says none.
   google.protobuf.Timestamp named_at = 2;
+}
+
+message ListDirsRequest {
+  On on = 1;
+}
+
+message ListDirsResponse {
+  // Best first. One no session can be named for, as `/`, is left out.
+  repeated Dir dirs = 1;
+
+  message Dir {
+    // Absolute.
+    string path = 1;
+    // A name zellij takes, as `NameSessionResponse.name` is.
+    string name = 2;
+  }
+}
+
+message ListContentsRequest {
+  On on = 1;
+  // Absolute: one that is not has the question answered as an invalid
+  // argument.
+  string dir = 2;
+}
+
+message ListContentsResponse {
+  // As eza prints it: an entry a line, in its colours, after its icon.
+  string listed = 1;
 }
 
 message StartRequest {

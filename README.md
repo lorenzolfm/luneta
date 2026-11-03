@@ -390,15 +390,17 @@ The picker floats over zellij's side. Its sessions are the one zellij is in,
 then the others that run, newest first, and under them those zellij keeps to
 bring back; its agents are as the
 [agents](#agents) tab lists them, and its directories as the
-[directories](#directories) tab does, luneta running zoxide and eza itself.
+[directories](#directories) tab does, of every machine: each machine's under a
+rule of its own, this one's first, as each machine's zoxide and eza list them.
 `Tab` goes from one list to the next, what you type narrows all three, and the
 preview beside the list shows the screen of the highlighted agent's pane, or
 of the pane you would come to in the highlighted session, or what is in the
 highlighted directory. `Enter` takes zellij there, brings back a session that
 ended, makes the session you typed the name of, or makes one in the
-highlighted directory, named for it. `Del` deletes the highlighted session,
-lets go of one that ended, or closes the agent's pane, and asks first, as the
-menu's delete does, while an agent at work would end: `y` goes ahead. `Ctrl r`
+highlighted directory, named for it, on its machine. `Del` deletes the
+highlighted session, lets go of one that ended, or closes the agent's pane, and
+asks first, as the menu's delete does, while an agent at work would end: `y`
+goes ahead. `Ctrl r`
 renames the highlighted session. `Esc`, or a click off the box, closes it. A
 click on a row does what `Enter` does on it, the wheel moves the highlight,
 and a click on a key the line under the search names presses it, as `<TAB>`.
@@ -823,8 +825,11 @@ machine's to act on: lunetad there finds where its keys go among that
 machine's panes and the clones its zoxide knows, asks its `gh`, and has its
 `luneta worktree` make the worktree there, with the `zoxide`, `gh` and `git` on
 the `PATH` it started with, as for the ask box; a session it makes for the link
-is made there, holding the `#123` tab alone, as here. Moving its sessions comes
-later. `u` marks
+is made there, holding the `#123` tab alone, as here. `Ctrl d` on its header
+opens the picker on the directories with the highlight on that machine's,
+which lunetad there lists as its zoxide knows them, and its eza; `Enter` on one
+makes the session there, named as that machine names one. Moving its sessions
+comes later. `u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.

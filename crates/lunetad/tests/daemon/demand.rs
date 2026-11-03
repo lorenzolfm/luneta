@@ -17,7 +17,8 @@ use lunetad::api::{
     self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
     GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
-    ListClientsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
+    ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
+    ListDirsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
     NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
     RefugeResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
     Version, WatchRequest,
@@ -584,6 +585,20 @@ impl Daemon for StandIn {
         _: Request<NameSessionRequest>,
     ) -> Result<Response<NameSessionResponse>, Status> {
         Err(Status::unimplemented("a stand-in names nothing"))
+    }
+
+    async fn list_dirs(
+        &self,
+        _: Request<ListDirsRequest>,
+    ) -> Result<Response<ListDirsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in knows no directory"))
+    }
+
+    async fn list_contents(
+        &self,
+        _: Request<ListContentsRequest>,
+    ) -> Result<Response<ListContentsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in lists nothing"))
     }
 
     async fn start(&self, _: Request<StartRequest>) -> Result<Response<StartResponse>, Status> {

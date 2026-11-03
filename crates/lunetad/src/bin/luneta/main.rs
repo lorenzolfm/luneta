@@ -12,7 +12,6 @@ mod close;
 mod commands;
 mod daemon;
 mod dictation;
-mod dirs;
 mod due;
 mod drive;
 mod folds;

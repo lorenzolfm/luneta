@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{names, program, SessionName};
+use crate::{names, program, Directory, SessionName};
 
 /// How long zoxide has to list the directories.
 const ANSWER: Duration = Duration::from_secs(2);
@@ -17,7 +17,7 @@ const ANSWER: Duration = Duration::from_secs(2);
 /// A directory zoxide knows, and the session named for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dir {
-    pub path: String,
+    pub path: Directory,
     pub name: SessionName,
 }
 
@@ -33,6 +33,19 @@ pub fn visited() -> Result<Vec<Dir>, String> {
     Ok(dirs_in(&listed))
 }
 
+/// The directories zoxide knows, best first, each with the name a session
+/// luneta makes there takes now: the one `visited` gives it, with a `-2`
+/// where a session has that name, as `names::free_for` names one. Or why
+/// zoxide did not list them, or why luneta cannot tell which names zellij
+/// has.
+pub fn visited_free() -> Result<Vec<Dir>, String> {
+    let visited = visited()?;
+    let sessions = names::named().ok_or("luneta cannot tell which sessions zellij has")?;
+    let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
+    let free = |dir: Dir| Dir { name: dir.name.free(&names), path: dir.path };
+    Ok(visited.into_iter().map(free).collect())
+}
+
 /// The directories of what `zoxide query --list` printed, a path a line. A
 /// line that is no absolute path is no directory of zoxide's, and would be
 /// read from the asker's own. One that is no UTF-8 is of a directory no
@@ -41,12 +54,9 @@ pub fn visited() -> Result<Vec<Dir>, String> {
 /// lists no other way.
 fn dirs_in(listed: &[u8]) -> Vec<Dir> {
     let dir = |line: &[u8]| {
-        let path = std::str::from_utf8(line).ok()?;
-        if !path.starts_with('/') {
-            return None;
-        }
-        let name = names::session_for(Path::new(path))?;
-        Some(Dir { path: path.to_owned(), name })
+        let path = Directory::parse(std::str::from_utf8(line).ok()?.to_owned()).ok()?;
+        let name = names::session_for(Path::new(path.as_str()))?;
+        Some(Dir { path, name })
     };
     listed.split(|byte| *byte == b'\n').filter_map(dir).collect()
 }
@@ -69,7 +79,7 @@ mod tests {
     #[test]
     fn a_line_that_names_no_directory_a_session_can_be_made_in_is_left_out() {
         let dir = |path: &str, name: &str| Dir {
-            path: path.to_owned(),
+            path: Directory::parse(path.to_owned()).unwrap(),
             name: SessionName::parse(name).unwrap(),
         };
         let listed = b"/home/you/luneta\n/\n\nluneta\n/home/you/caf\xe9\n/home/you/notes/\n";

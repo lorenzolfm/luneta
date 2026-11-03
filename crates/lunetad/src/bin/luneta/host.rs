@@ -1296,7 +1296,14 @@ impl App {
         };
         if let Some(list) = list {
             self.pickers += 1;
-            let picker = Box::new(Picker::open(self.pickers, list, self.sidebar.listing()));
+            // `DIRS` on a machine's header aims at its directories.
+            let aim = match (list, self.focus.side) {
+                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
+                _ => None,
+            };
+            let aim = aim.unwrap_or_default();
+            let listing = self.sidebar.listing();
+            let picker = Box::new(Picker::open(self.pickers, list, listing, aim));
             self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
             return;
         }
@@ -1666,8 +1673,14 @@ impl App {
                 self.start(&Machine::Local, &session, None, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Make { session, cwd } => {
-                self.make(zellij::makes(session), &cwd, None);
+            Picked::Make { on, session, cwd } => {
+                let unused = match &on {
+                    Machine::Local => zellij::makes(session),
+                    Machine::Remote(destination) => {
+                        zellij::makes_away(destination, &session, cwd.as_str())
+                    },
+                };
+                self.make(unused, cwd.as_str(), None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { session, deletes } => {
