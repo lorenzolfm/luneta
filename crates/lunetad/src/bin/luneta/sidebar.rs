@@ -1399,6 +1399,11 @@ impl Sidebar {
         self.folds.set(Fold::Session(&self.on, session), false);
     }
 
+    /// What zellij last titled luneta's terminal, which titles its window.
+    pub fn terminal_title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// The machine luneta's zellij's client runs on: this one until a client
     /// on another takes its place, as `swapping` says.
     pub fn on(&self) -> &Machine {
@@ -1553,15 +1558,7 @@ impl Sidebar {
     /// luneta's zellij is, and what runs on this machine and on each other
     /// that lunetad reaches, as `runs` lists it.
     pub fn listing(&self) -> Listing {
-        let here = self.here().map(|session| {
-            let on = self.on.clone();
-            // Its pane only while that is of the session it is in, as `user`
-            // takes it too.
-            match self.here_place() {
-                Ok(place) if place.session.name().as_str() == session => Here::Pane { on, place },
-                Ok(_) | Err(_) => Here::Session { on, session: session.to_owned() },
-            }
-        });
+        let here = self.whereabouts();
         let (away, this) = (self.away.clone(), self.this.clone());
         let mut listing = Listing { away, this, ..Listing::default() };
         if let Some(host) = &self.host {
@@ -1578,6 +1575,18 @@ impl Sidebar {
         }
         listing.here = here;
         listing
+    }
+
+    /// Where luneta's zellij is, as far as the sidebar knows: on the machine
+    /// its client runs on, in the session `here` says, and on its pane there
+    /// while that is of the session it is in, as `user` takes it too.
+    pub fn whereabouts(&self) -> Option<Here> {
+        let session = self.here()?;
+        let on = self.on.clone();
+        Some(match self.here_place() {
+            Ok(place) if place.session.name().as_str() == session => Here::Pane { on, place },
+            Ok(_) | Err(_) => Here::Session { on, session: session.to_owned() },
+        })
     }
 
     /// What runs on `machine`, as its daemon says in `seen`, for the picker:
@@ -1609,6 +1618,8 @@ impl Sidebar {
                     status: status_word(agent),
                     since: marked.since,
                     dir: short_cwd(agent_dir(agent, pane)),
+                    id: agent.session_id.clone(),
+                    waiting_for: agent.waiting_for.clone(),
                 });
             }
             panes.sort_by_key(|pane| (pane.tab, pane.id));

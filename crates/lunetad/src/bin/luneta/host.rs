@@ -52,10 +52,12 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::{DefaultTerminal, Terminal};
 
+use crate::alerts::{self, Alerts};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::close::Act;
+use crate::desktop::{self, Desktop};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::due::Due;
 use crate::fails::{Back, Failed, Fails};
@@ -139,6 +141,10 @@ pub enum Event {
     /// The order of the sidebar's rows was kept: by another luneta, or by
     /// this one.
     Order,
+    /// What a notification says, read for it.
+    Alerted(alerts::Read),
+    /// You clicked the notification of this agent.
+    Clicked(alerts::Key),
 }
 
 /// How often the sidebar is drawn again with nothing else to draw it: every
@@ -636,6 +642,11 @@ struct App {
     /// machine, which zellij lets go of only once the session's server has
     /// ended.
     deleting: Vec<JoinHandle<()>>,
+    /// The agents that want you, of every machine, and their notifications.
+    alerts: Alerts,
+    /// What puts the notifications up, which takes them down as luneta
+    /// ends.
+    desktop: Desktop,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
@@ -828,6 +839,7 @@ fn run_in(
             None
         },
     };
+    let desktop = Desktop::start(&events);
     let mut app = App {
         client,
         started,
@@ -860,6 +872,8 @@ fn run_in(
         dir: dir.to_owned(),
         ended: false,
         deleting: Vec::new(),
+        alerts: Alerts::default(),
+        desktop,
     };
     let ran = run_loop(terminal, &mut app, inbox);
     for deleting in app.deleting.drain(..) {
@@ -910,6 +924,7 @@ fn run_loop(
         }
         app.wait_on(Instant::now());
         app.ticked(Instant::now());
+        app.alerting(Instant::now());
         app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
         app.draw(terminal)?;
     }
@@ -969,6 +984,8 @@ impl App {
             Event::Daemon(Ok(host)) => {
                 let look = self.sidebar.heard(host);
                 self.arrived(look);
+                let acts = self.alerts.heard(&self.sidebar.listing(), Instant::now());
+                self.alert(acts);
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => {
@@ -988,6 +1005,12 @@ impl App {
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
             Event::Folds => self.sidebar.refold(),
+            Event::Alerted(read) => {
+                if self.alerts.read(read.number) {
+                    self.desktop.post(read.alert);
+                }
+            },
+            Event::Clicked(key) => self.clicked(&key),
             Event::Opened { menu, opened } => {
                 let asked = self.sidebar.opened(menu, opened);
                 self.follow(asked);
@@ -1070,12 +1093,49 @@ impl App {
     }
 
     /// When the picker asks zellij for what its preview shows, while it is
-    /// open and is to ask.
+    /// open and is to ask, or an agent's notification is to go up, whichever
+    /// is first.
     fn due(&self) -> Option<Instant> {
-        match &self.focus.over {
+        let picker = match &self.focus.over {
             Some(Over::Picker(picker)) => picker.due(),
             _ => None,
+        };
+        picker.into_iter().chain(self.alerts.due()).min()
+    }
+
+    /// Takes down the notification of an agent in the pane you look at, and
+    /// has those of the agents that have waited on you long enough by `now`
+    /// read for.
+    fn alerting(&mut self, now: Instant) {
+        let here = self.sidebar.whereabouts();
+        let mut acts = self.alerts.looked(here.as_ref(), self.focused);
+        acts.extend(self.alerts.ticked(now));
+        self.alert(acts);
+    }
+
+    /// Does what the notifications are to.
+    fn alert(&mut self, acts: Vec<alerts::Act>) {
+        for act in acts {
+            match act {
+                alerts::Act::Read(due) => {
+                    alerts::read(due, self.claude_folder.clone(), &self.events);
+                },
+                alerts::Act::Close(key) => self.desktop.close(key),
+            }
         }
+    }
+
+    /// Takes zellij's client to the pane of the agent whose notification you
+    /// clicked, as `Enter` on its row does, and brings luneta's window
+    /// forward.
+    fn clicked(&mut self, key: &alerts::Key) {
+        let Some(place) = self.alerts.clicked(key) else {
+            return;
+        };
+        self.desktop.close(key.clone());
+        desktop::raise(self.sidebar.terminal_title());
+        self.go(&key.on, &Place::Pane(place), None);
+        self.leave();
     }
 
     /// Lets the picker ask zellij for what its preview shows, once it is

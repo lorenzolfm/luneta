@@ -183,6 +183,10 @@ pub struct Seated {
     /// it: its directory's last two parts, as a whole path has the letters for
     /// a few typed ones to land on nearly any of it.
     pub dir: String,
+    /// Claude Code's id for its session, which names its transcript.
+    pub id: String,
+    /// What it waits for, in the word Claude Code says it in, where it says.
+    pub waiting_for: Option<String>,
 }
 
 /// A list of the picker's.
@@ -2364,6 +2368,8 @@ mod tests {
             status: "idle".to_owned(),
             since: Some(now() - Duration::from_mins(1)),
             dir: "luneta/main".to_owned(),
+            id: format!("id-{pane}"),
+            waiting_for: None,
         }
     }
 

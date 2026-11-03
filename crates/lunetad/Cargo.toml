@@ -88,6 +88,12 @@ wt = { git = "https://github.com/lorenzolfm/wt", rev = "eb50a4794b7989398751d47e
 [target.'cfg(target_os = "macos")'.dependencies]
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
+# Puts luneta's notifications up on freedesktop's notification server, and
+# hears the clicks on them, over D-Bus: on tokio, which luneta runs already,
+# in place of async-io. macOS has terminal-notifier.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+zbus = { version = "6.2.1", default-features = false, features = ["proxy", "tokio"] }
+
 [build-dependencies]
 tonic-prost-build = "0.14.6"
 
