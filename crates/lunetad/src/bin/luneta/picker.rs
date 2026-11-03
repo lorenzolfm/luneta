@@ -46,7 +46,9 @@ use crate::host::Event;
 use crate::hosted;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
-use crate::sidebar::{self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, Place};
+use crate::sidebar::{
+    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
+};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::{self, Closes, Exited, SessionName};
 
@@ -98,15 +100,38 @@ pub struct Listing {
     pub this: String,
 }
 
-/// Where luneta's zellij is.
+/// Where luneta's zellij is, on `on`, the machine its client runs on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Here {
-    /// The machine its client runs on.
-    pub on: Machine,
-    /// The session it is in there, or on its way to.
-    pub session: String,
+pub enum Here {
+    /// In the session of this name there, or on its way to it, on a pane the
+    /// sidebar does not know.
+    Session { on: Machine, session: String },
+    /// On this pane there, of the one session of its name.
+    Pane { on: Machine, place: PanePlace },
+}
+
+impl Here {
+    pub fn on(&self) -> &Machine {
+        match self {
+            Here::Session { on, .. } | Here::Pane { on, .. } => on,
+        }
+    }
+
+    /// The session it is in, or on its way to.
+    pub fn session(&self) -> &str {
+        match self {
+            Here::Session { session, .. } => session,
+            Here::Pane { place, .. } => place.session.name().as_str(),
+        }
+    }
+
     /// The pane it is on, where the sidebar knows it.
-    pub pane: Option<Place>,
+    pub fn pane(&self) -> Option<&PanePlace> {
+        match self {
+            Here::Session { .. } => None,
+            Here::Pane { place, .. } => Some(place),
+        }
+    }
 }
 
 /// The sessions that run on a machine, and the agents in them.
@@ -146,7 +171,7 @@ pub struct Shown {
 /// An agent, in its pane.
 #[derive(Clone, Debug)]
 pub struct Seated {
-    pub place: Place,
+    pub place: PanePlace,
     /// What the sidebar names its row.
     pub label: String,
     pub mark: Mark,
@@ -211,11 +236,11 @@ pub enum Picked {
     /// that starts in `cwd`, and close the picker; or say why zellij would
     /// make none.
     Make { on: Machine, session: SessionName, cwd: Directory },
-    /// Plan deleting what `deletes` deletes of `session`, and hand the plan
-    /// to `planned`.
-    Plan { session: Listed, deletes: Deletes },
-    /// Have zellij do what a delete planned.
-    Delete(Act),
+    /// Plan deleting what `deletes` deletes of `session`, on `on`, and hand
+    /// the plan to `planned`.
+    Plan { on: Machine, session: Listed, deletes: Deletes },
+    /// Have zellij on `on` do what a delete planned.
+    Delete { on: Machine, act: Act },
 }
 
 /// What zellij answered what the picker asked of it, on threads of their
@@ -227,14 +252,9 @@ pub enum Heard {
     /// The screen of the terminal `asked` of `session` on `on`, or of the
     /// one a client coming there would be on, where it asked of none: the
     /// terminal, and what it shows.
-    Peek {
-        on: Machine,
-        session: SessionName,
-        asked: Option<u32>,
-        peek: Result<(u32, String), String>,
-    },
-    /// What closing the pane at `place` closes, for its delete.
-    Closes { place: Place, closes: Result<Closes, String> },
+    Peek { on: Machine, session: Listed, asked: Option<u32>, peek: Result<(u32, String), String> },
+    /// What closing the pane at `place` on `on` closes, for its delete.
+    Closes { on: Machine, place: PanePlace, closes: Result<Closes, String> },
     /// Whether the session `from` is called `to` now.
     Renamed { from: SessionName, to: SessionName, renamed: Result<(), String> },
     /// Whether zellij let go of the session `session`, one that ended.
@@ -256,9 +276,9 @@ pub enum Ask {
     Exited(u64),
     /// The screen the preview shows: of the terminal `asked` of `session` on
     /// `on`, or else of the one a client coming there would be on.
-    Peek { on: Machine, session: SessionName, asked: Option<u32> },
-    /// What closing the pane at `place` closes.
-    Closes(Place),
+    Peek { on: Machine, session: Listed, asked: Option<u32> },
+    /// What closing the pane at `place` on `on` closes.
+    Closes { on: Machine, place: PanePlace },
     /// To call the session `from` `to`.
     Rename { from: SessionName, to: SessionName },
     /// To let go of the session `session`, one that ended.
@@ -278,17 +298,22 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
         let heard = match ask {
             Ask::Exited(ask) => Heard::Exited { ask, exited: zellij::exited() },
             Ask::Peek { on, session, asked } => {
+                let name = session.name();
                 let peek = match &on {
-                    Machine::Local => screens::dumped(&session, asked),
+                    Machine::Local => screens::dumped(name, asked),
                     Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.screen(&session, asked)),
+                        .and_then(|mut away| away.screen(name, asked)),
                 };
                 Heard::Peek { on, session, asked, peek }
             },
-            Ask::Closes(place) => {
-                let pane = place.pane().ok_or_else(|| "no pane to close".to_owned());
-                let closes = pane.and_then(|pane| zellij::closes_now(place.listed().name(), pane));
-                Heard::Closes { place, closes }
+            Ask::Closes { on, place } => {
+                let (session, pane) = (place.session.name(), place.pane);
+                let closes = match &on {
+                    Machine::Local => zellij::closes_now(session, pane),
+                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
+                        .and_then(|mut away| away.closes(session, pane)),
+                };
+                Heard::Closes { on, place, closes }
             },
             Ask::Rename { from, to } => {
                 let renamed = zellij::renamed(&from, &to);
@@ -341,10 +366,21 @@ pub enum Key {
     /// back.
     Exited(SessionName),
     /// The pane of an agent on `on`.
-    Agent { on: Machine, place: Place },
+    Agent { on: Machine, place: PanePlace },
     /// A directory zoxide knows on `on`, by its path, and the session `Enter`
     /// makes there, or why it makes none yet.
     Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
+}
+
+impl Key {
+    /// The machine of what it stands for: a session that ended is this
+    /// one's.
+    fn machine(&self) -> Machine {
+        match self {
+            Key::Live { on, .. } | Key::Agent { on, .. } | Key::Dir { on, .. } => on.clone(),
+            Key::Exited(_) => Machine::Local,
+        }
+    }
 }
 
 /// A row of a list: what it stands for, the name it shows, the characters
@@ -514,8 +550,9 @@ impl Contents {
 }
 
 /// What a preview shows: the terminal `pane` of `session` on the machine,
-/// or, of none, the one a client coming there would be on.
-type Looked = (Machine, SessionName, Option<u32>);
+/// or, of none, the one a client coming there would be on. A session made
+/// again by the name of one that ended has a screen of its own.
+type Looked = (Machine, Listed, Option<u32>);
 
 /// A directory of a machine's, by its path.
 type Located = (Machine, Directory);
@@ -702,7 +739,7 @@ impl Picker {
     }
 
     /// The agent at `place` on `on`, while it is in its pane.
-    fn seated(&self, on: &Machine, place: &Place) -> Option<&Seated> {
+    fn seated(&self, on: &Machine, place: &PanePlace) -> Option<&Seated> {
         self.runs(on)?.agents.iter().find(|seated| seated.place == *place)
     }
 
@@ -751,22 +788,20 @@ impl Picker {
                 };
                 self.peeks.insert((on, session, asked), peek);
             },
-            Heard::Closes { place, closes } => {
+            Heard::Closes { on, place, closes } => {
                 let planning = matches!(
                     &self.stage,
-                    Stage::Planning { target: Key::Agent { on: Machine::Local, place: at }, .. }
-                        if *at == place
+                    Stage::Planning { target: Key::Agent { on: planned, place: at }, .. }
+                        if (planned, at) == (&on, &place)
                 );
                 if !planning {
                     return Picked::Nothing;
                 }
-                let Some(pane) = place.pane() else {
-                    return Picked::Nothing;
-                };
                 return match closes {
                     Ok(closes) => Picked::Plan {
-                        session: place.listed().clone(),
-                        deletes: Deletes::Pane { pane, closes },
+                        on,
+                        session: place.session,
+                        deletes: Deletes::Pane { pane: place.pane, closes },
                     },
                     Err(why) => {
                         self.stage = Stage::Search;
@@ -903,7 +938,7 @@ impl Picker {
             self.stage = Stage::Asking { target, plan, asks };
             return Picked::Nothing;
         }
-        Picked::Delete(plan.act)
+        Picked::Delete { on: target.machine(), act: plan.act }
     }
 
     /// When the preview asks zellij for the screen it shows, or eza for what
@@ -1081,8 +1116,9 @@ impl Picker {
         };
         match &row.key {
             Key::Live { on, place } if self.is_here(on, place) => Picked::Close,
-            Key::Live { on, place } | Key::Agent { on, place } => {
-                Picked::Go { on: on.clone(), place: place.clone() }
+            Key::Live { on, place } => Picked::Go { on: on.clone(), place: place.clone() },
+            Key::Agent { on, place } => {
+                Picked::Go { on: on.clone(), place: Place::Pane(place.clone()) }
             },
             Key::Exited(name) => Picked::Start(name.clone()),
             Key::Dir { on, path, session: Ok(session) } => {
@@ -1106,10 +1142,10 @@ impl Picker {
     }
 
     /// What `Del` does: plans deleting the session highlighted, or closing the
-    /// pane of the agent highlighted, or lets go of the session highlighted
-    /// that ended. What is typed stays, and the highlight goes on to the row
-    /// after once the row goes: `Del` again deletes the row it shows, not
-    /// one off the top of the list.
+    /// pane of the agent highlighted, of this machine's, or lets go of the
+    /// session highlighted that ended. What is typed stays, and the highlight
+    /// goes on to the row after once the row goes: `Del` again deletes the
+    /// row it shows, not one off the top of the list.
     fn delete(&mut self) -> Picked {
         let Some(key) = self.rows().selected().map(|row| row.key.clone()) else {
             return Picked::Nothing;
@@ -1133,20 +1169,18 @@ impl Picker {
 
     /// Plans deleting what `target` stands for, going ahead once the plan is
     /// `agreed`: of a session, at once; of a pane, once zellij says what
-    /// closing it closes. Of this machine's alone.
+    /// closing it closes, on its machine.
     fn plan(&mut self, target: Key, agreed: Option<Plan>) -> Picked {
         let picked = match &target {
-            Key::Live { on: Machine::Local, place } => {
-                Picked::Plan { session: place.listed().clone(), deletes: Deletes::Session }
+            Key::Live { on, place } => {
+                let (on, session) = (on.clone(), place.listed().clone());
+                Picked::Plan { on, session, deletes: Deletes::Session }
             },
-            Key::Agent { on: Machine::Local, place } => {
-                self.asking.push(Ask::Closes(place.clone()));
+            Key::Agent { on, place } => {
+                self.asking.push(Ask::Closes { on: on.clone(), place: place.clone() });
                 Picked::Nothing
             },
-            Key::Live { on: Machine::Remote(_), .. }
-            | Key::Agent { on: Machine::Remote(_), .. }
-            | Key::Exited(_)
-            | Key::Dir { .. } => return Picked::Nothing,
+            Key::Exited(_) | Key::Dir { .. } => return Picked::Nothing,
         };
         self.stage = Stage::Planning { target, agreed };
         picked
@@ -1318,7 +1352,8 @@ impl Picker {
         let agents = runs.agents.iter().filter(|seated| Some(&seated.place) != yours);
         let agents: Vec<(String, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
-                let also = vec![Some(seated.place.session()), Some(seated.dir.as_str())];
+                let session = seated.place.session.name().as_str();
+                let also = vec![Some(session), Some(seated.dir.as_str())];
                 let key = Key::Agent { on: on.clone(), place: seated.place.clone() };
                 (agent_name(&runs.agents, seated), also, key)
             })
@@ -1372,10 +1407,10 @@ impl Picker {
         let preview = match self.rows().selected().map(|row| &row.key) {
             Some(Key::Live { on, place }) => {
                 let focus = self.live(on, place).and_then(|live| live.focus);
-                Some(Preview::Screen((on.clone(), place.listed().name().clone(), focus)))
+                Some(Preview::Screen((on.clone(), place.listed().clone(), focus)))
             },
             Some(Key::Agent { on, place }) => {
-                Some(Preview::Screen((on.clone(), place.listed().name().clone(), place.pane())))
+                Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.pane))))
             },
             Some(Key::Dir { on, path, .. }) => Some(Preview::Dir((on.clone(), path.clone()))),
             Some(Key::Exited(_)) | None => None,
@@ -1489,14 +1524,14 @@ impl Picker {
     /// The session luneta's zellij is in, or on its way to, where that is
     /// on `on`.
     fn here_session(&self, on: &Machine) -> Option<&str> {
-        let here = self.listing.here.as_ref().filter(|here| here.on == *on)?;
-        Some(here.session.as_str())
+        let here = self.listing.here.as_ref().filter(|here| here.on() == on)?;
+        Some(here.session())
     }
 
     /// The pane luneta's zellij is on, where that is on `on` and the sidebar
     /// knows it.
-    fn here_pane(&self, on: &Machine) -> Option<&Place> {
-        self.listing.here.as_ref().filter(|here| here.on == *on)?.pane.as_ref()
+    fn here_pane(&self, on: &Machine) -> Option<&PanePlace> {
+        self.listing.here.as_ref().filter(|here| here.on() == on)?.pane()
     }
 
     /// Whether `place` on `on` is of the session luneta's zellij is in.
@@ -1508,7 +1543,7 @@ impl Picker {
     /// agents of its machine.
     fn yours(&self) -> Option<(&Seated, &[Seated])> {
         let here = self.listing.here.as_ref()?;
-        let (pane, agents) = (here.pane.as_ref()?, &self.runs(&here.on)?.agents);
+        let (pane, agents) = (here.pane()?, &self.runs(here.on())?.agents);
         Some((agents.iter().find(|seated| seated.place == *pane)?, agents))
     }
 
@@ -1646,7 +1681,7 @@ impl Picker {
                 let panes = live.map_or(0, |live| live.panes.len());
                 let right = if panes == 1 { "1 pane".to_owned() } else { format!("{panes} panes") };
                 let focus = live.and_then(|live| live.focus);
-                (right, None, (on.clone(), place.listed().name().clone(), focus))
+                (right, None, (on.clone(), place.listed().clone(), focus))
             },
             Key::Agent { on, place } => {
                 let caption = self.seated(on, place).map(|seated| {
@@ -1667,7 +1702,7 @@ impl Picker {
                     ]);
                     Line::from(caption)
                 });
-                (String::new(), caption, (on.clone(), place.listed().name().clone(), place.pane()))
+                (String::new(), caption, (on.clone(), place.session.clone(), Some(place.pane)))
             },
         };
         let peek = self.peeks.get(&looked);
@@ -1680,7 +1715,7 @@ impl Picker {
                 _ => *asked,
             };
             let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
-            let live = sessions.iter().find(|live| live.place.listed().name() == session);
+            let live = sessions.iter().find(|live| live.place.listed() == session);
             let panes = live.map_or(&[][..], |live| &live.panes);
             let shown = pane.and_then(|pane| panes.iter().find(|shown| shown.id == pane));
             let mut caption = vec![Span::raw(" ")];
@@ -1862,12 +1897,13 @@ fn plain(key: &KeyEvent) -> bool {
 /// `luneta/main (review:4)`.
 fn agent_name(agents: &[Seated], seated: &Seated) -> String {
     let alike = agents.iter().filter(|other| other.label == seated.label);
-    let sessions: HashSet<&str> = alike.clone().map(|other| other.place.session()).collect();
-    let pane = seated.place.pane().unwrap_or_default();
+    let sessions: HashSet<&SessionName> =
+        alike.clone().map(|other| other.place.session.name()).collect();
+    let (session, pane) = (seated.place.session.name(), seated.place.pane);
     match (alike.count(), sessions.len()) {
         (0 | 1, _) => seated.label.clone(),
         (_, 1) => format!("{}:{pane}", seated.label),
-        _ => format!("{} ({}:{pane})", seated.label, seated.place.session()),
+        _ => format!("{} ({session}:{pane})", seated.label),
     }
 }
 
@@ -2172,7 +2208,7 @@ mod tests {
     /// `started`.
     fn seated(name: &str, started: u64, pane: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: Place::Pane { session: listed(name, started), pane },
+            place: PanePlace { session: listed(name, started), pane },
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
@@ -2183,7 +2219,7 @@ mod tests {
 
     /// luneta's zellij in the session `session` of this machine's.
     fn here(session: &str) -> Here {
-        Here { on: Machine::Local, session: session.to_owned(), pane: None }
+        Here::Session { on: Machine::Local, session: session.to_owned() }
     }
 
     /// The sessions that run on a machine, and no agent.
@@ -2440,7 +2476,8 @@ mod tests {
     #[test]
     fn no_row_is_a_spot_while_a_delete_waits_or_asks() {
         let mut picker = three();
-        let planning = Picked::Plan { session: listed("c", 30), deletes: Deletes::Session };
+        let session = listed("c", 30);
+        let planning = Picked::Plan { on: Machine::Local, session, deletes: Deletes::Session };
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         let (rows, give_up) = clicks(&picker, "<ESC>");
         assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
@@ -2517,8 +2554,9 @@ mod tests {
     #[test]
     fn del_asks_before_ending_an_agent_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
         let mut picker = three();
-        let planning = Picked::Plan { session: listed("c", 30), deletes: Deletes::Session };
         let c = listed("c", 30);
+        let deletes = Deletes::Session;
+        let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes };
         let kill = || Act::Kill { session: c.name().clone(), started: c.started() };
         let plan = |doing: Doing| Plan::of(kill(), Ok(&[(0, doing)]));
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
@@ -2537,7 +2575,7 @@ mod tests {
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), Picked::Nothing);
         assert!(asks(&picker));
         assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
-        let killed = Picked::Delete(kill());
+        let killed = Picked::Delete { on: Machine::Local, act: kill() };
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), killed);
 
         // An idle agent ends without a question.
@@ -2549,7 +2587,7 @@ mod tests {
     /// plans by what it answers: only for that pane, while it waits on it.
     #[test]
     fn del_on_an_agent_asks_zellij_what_closing_its_pane_closes_first() {
-        let place = Place::Pane { session: listed("c", 30), pane: 4 };
+        let place = PanePlace { session: listed("c", 30), pane: 4 };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
@@ -2557,13 +2595,15 @@ mod tests {
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
         picker.asks();
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert_eq!(picker.asks(), vec![Ask::Closes(place.clone())]);
-        let other = Place::Pane { session: listed("c", 30), pane: 5 };
-        let heard = Heard::Closes { place: other, closes: Ok(Closes::Pane) };
-        assert_eq!(picker.heard(heard), Picked::Nothing);
-        let heard = Heard::Closes { place, closes: Ok(Closes::Pane) };
+        let ask = Ask::Closes { on: Machine::Local, place: place.clone() };
+        assert_eq!(picker.asks(), vec![ask]);
+        let heard = |on, place| Heard::Closes { on, place, closes: Ok(Closes::Pane) };
+        let other = PanePlace { session: listed("c", 30), pane: 5 };
+        assert_eq!(picker.heard(heard(Machine::Local, other)), Picked::Nothing);
+        assert_eq!(picker.heard(heard(nixos(), place.clone())), Picked::Nothing);
         let deletes = Deletes::Pane { pane: 4, closes: Closes::Pane };
-        assert_eq!(picker.heard(heard), Picked::Plan { session: listed("c", 30), deletes });
+        let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
+        assert_eq!(picker.heard(heard(Machine::Local, place)), plan);
     }
 
     /// `Del` on a session that ended lets go of it at once, as nothing runs
@@ -2673,9 +2713,9 @@ mod tests {
     /// finds an agent by its session's name, lit where its row shows it.
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
-        let pane = Some(Place::Pane { session: listed("work", 20), pane: 9 });
+        let place = PanePlace { session: listed("work", 20), pane: 9 };
         let listing = Listing {
-            here: Some(Here { on: Machine::Local, session: "work".to_owned(), pane }),
+            here: Some(Here::Pane { on: Machine::Local, place }),
             local: agents(vec![
                 seated("work", 20, 9, "mine", Mark::Busy),
                 seated("work", 20, 1, "fix", Mark::Waiting),
@@ -2748,15 +2788,13 @@ mod tests {
         picker.ticked(due.checked_sub(Duration::from_millis(1)).unwrap());
         assert!(picker.asks().is_empty());
         picker.ticked(due);
-        let peek = |name: &str, asked| {
-            Ask::Peek { on: Machine::Local, session: SessionName::running(name).unwrap(), asked }
-        };
-        assert_eq!(picker.asks(), vec![peek("c", None)]);
+        let peek = |session, asked| Ask::Peek { on: Machine::Local, session, asked };
+        assert_eq!(picker.asks(), vec![peek(listed("c", 30), None)]);
         assert_eq!(picker.due(), None);
         press(&mut picker, KeyCode::Up);
         let due = picker.due().unwrap();
         picker.ticked(due);
-        assert_eq!(picker.asks(), vec![peek("b", Some(1))]);
+        assert_eq!(picker.asks(), vec![peek(listed("b", 20), Some(1))]);
         press(&mut picker, KeyCode::Down);
         assert_eq!(picker.due(), None);
     }
@@ -2769,7 +2807,7 @@ mod tests {
         let mut picker = three();
         let dumped = (1..=40).map(|n| format!("\x1b[mline {n}")).collect::<Vec<_>>().join("\n");
         let peek = Ok((0, format!("{dumped}\n\n\n")));
-        let c = SessionName::running("c").unwrap();
+        let c = listed("c", 30);
         picker.heard(Heard::Peek { on: Machine::Local, session: c, asked: None, peek });
         let buffer = drawn(&picker);
         let area = Picker::area(Rect::new(0, 0, 200, 50));
@@ -3102,7 +3140,7 @@ mod tests {
     /// list. `Enter` on another machine's agent takes zellij there.
     #[test]
     fn luneta_s_zellij_on_another_machine_is_here_among_that_machine_s_rows() {
-        let at = |pane| Place::Pane { session: listed("api", 40), pane };
+        let at = |pane| PanePlace { session: listed("api", 40), pane };
         let there = Runs {
             sessions: vec![live("web", 50, None), live("api", 40, Some(9))],
             agents: vec![
@@ -3111,7 +3149,7 @@ mod tests {
             ],
         };
         let listing = Listing {
-            here: Some(Here { on: nixos(), session: "api".to_owned(), pane: Some(at(9)) }),
+            here: Some(Here::Pane { on: nixos(), place: at(9) }),
             local: Runs {
                 sessions: vec![live("api", 30, None)],
                 agents: vec![seated("api", 30, 1, "fix", Mark::Idle)],
@@ -3144,12 +3182,14 @@ mod tests {
         let named: Vec<String> = lines[1..].iter().map(name).collect();
         assert_eq!(named, ["── desk", "fix", "── nixos", "fix"]);
         press(&mut picker, KeyCode::Down);
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Go { on: nixos(), place: at(2) });
+        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(2)) };
+        assert_eq!(press(&mut picker, KeyCode::Enter), fix);
     }
 
     /// The preview of another machine's session asks zellij there for its
     /// screen, which it shows under the machine's name; a session of the
-    /// same name here has a screen of its own.
+    /// same name here has a screen of its own, and so has one there that
+    /// ended before it started.
     #[test]
     fn the_preview_of_another_machine_s_session_is_its_screen_there() {
         let listing = Listing {
@@ -3160,17 +3200,18 @@ mod tests {
         picker.asks();
         press(&mut picker, KeyCode::Down);
         picker.ticked(picker.due().unwrap());
-        let main = SessionName::running("main").unwrap();
+        let main = listed("main", 40);
         let asked = Some(0);
         assert_eq!(picker.asks(), [Ask::Peek { on: nixos(), session: main.clone(), asked }]);
-        let peek = |on, screen: &str| {
+        let peek = |on, session, screen: &str| {
             let peek = Ok((0, screen.to_owned()));
-            Heard::Peek { on, session: main.clone(), asked, peek }
+            Heard::Peek { on, session, asked, peek }
         };
         let shown = |picker: &Picker| text(&drawn(picker), parts().1);
-        picker.heard(peek(Machine::Local, "here"));
+        picker.heard(peek(Machine::Local, main.clone(), "here"));
+        picker.heard(peek(nixos(), listed("main", 10), "ended"));
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "reading…"]);
-        picker.heard(peek(nixos(), "there"));
+        picker.heard(peek(nixos(), main, "there"));
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "there"]);
     }
 }

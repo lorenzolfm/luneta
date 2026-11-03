@@ -1683,18 +1683,18 @@ impl App {
                 self.make(unused, cwd.as_str(), None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Plan { session, deletes } => {
-                let plan = self.sidebar.plan(&Machine::Local, &session, deletes);
+            Picked::Plan { on, session, deletes } => {
+                let plan = self.sidebar.plan(&on, &session, deletes);
                 if let Some(Over::Picker(picker)) = &mut self.focus.over {
                     let did = picker.planned(plan);
                     self.picked(did);
                 }
             },
-            Picked::Delete(Act::Leave { session, started, to }) => {
-                self.go(&Machine::Local, &to, Some(After::Kill { session, started }));
+            Picked::Delete { on, act: Act::Leave { session, started, to } } => {
+                self.go(&on, &to, Some(After::Kill { session, started }));
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Delete(act) => self.follow(Asked::Delete { on: Machine::Local, act }),
+            Picked::Delete { on, act } => self.follow(Asked::Delete { on, act }),
         }
     }
 
