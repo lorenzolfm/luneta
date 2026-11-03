@@ -16,18 +16,21 @@
 //! a tab that holds more than one. Each session has a colour of its own, as a
 //! browser's group of tabs has, which its name sits on and its brackets are
 //! drawn in. `v` selects the highlighted row's session, `j` and `k` grow the
-//! selection, and `J` and `K` move the sessions it holds, as a visual
-//! selection does in vim; and the mouse drags a session by its row. The order
-//! and the colours are kept for every luneta, and the next.
+//! selection among its machine's sessions, and `J` and `K` move the sessions
+//! it holds, as a visual selection does in vim; and the mouse drags a session
+//! by its row. A session moves among its machine's alone. On a machine's
+//! header, `v` and the mouse move the machines so, each with every row under
+//! it. The order and the colours are kept for every luneta, and the next.
 //!
-//! Over the sessions, a header for each machine: this one first, by its
-//! host's name, and then each machine luneta's hosts file names, which lunetad
-//! watches through ssh, its sessions under it oldest first. A machine folds as
-//! a session does, and `h` on a session folded already folds its machine. One
-//! lunetad does not reach is a dimmed header that says why in a word, and in
-//! the notes while it is highlighted. Another machine's rows are only for
-//! looking, as luneta goes to this one's sessions alone, though their dots
-//! and folds are kept as this one's are.
+//! Over the sessions, a header for each machine: this one, by its host's
+//! name, and each machine luneta's hosts file names, which lunetad watches
+//! through ssh. They go this one first, and the others as the file names
+//! them, until you move them, and each one's sessions as this one's do. A
+//! machine folds as a session does, and `h` on a session folded already
+//! folds its machine. One lunetad does not reach is a dimmed header that says
+//! why in a word, and in the notes while it is highlighted. Another machine's
+//! rows go there as this one's do, and their dots and folds are kept as this
+//! one's are.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU64;
@@ -120,8 +123,8 @@ const BRACKET_FOOT: &str = "╰";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
-/// How long a session the mouse lifted is held on the first line of the rows,
-/// or on their last, for each line they scroll under it.
+/// How long what the mouse lifted is held on the first line of the rows, or
+/// on their last, for each line they scroll under it.
 pub const SCROLL: Duration = Duration::from_millis(60);
 
 /// The colour of what wants you: an agent that waits for you, and the session
@@ -1234,8 +1237,8 @@ impl Sidebar {
     /// sidebar shows or not: it has been on the pane, and the window has had
     /// the focus, since the first tick that found both. And the daemon may
     /// have left a session out of its lists for long enough for what was kept
-    /// of it to go. And a session the mouse lifted may have been held on the
-    /// first line of the rows, or the last, long enough for them to scroll.
+    /// of it to go. And what the mouse lifted may have been held on the first
+    /// line of the rows, or the last, long enough for them to scroll.
     pub fn ticked(&mut self, now: SystemTime, at: Instant, watched: bool) {
         self.hold(at);
         if let Some(session) = self.own.session() {
@@ -1437,9 +1440,10 @@ impl Sidebar {
     /// highlight on from where luneta's zellij is, and it goes back there as
     /// they leave. A search lasts while the sidebar has them: one left open
     /// would keep the rows it hides out of sight. So do the menu, a selection
-    /// and a session lifted, which goes back. A brief or the menu over zellij
-    /// lent the keys leaves all of it as it stands. The menu over zellij
-    /// lasts while its box has the keys, and closes as the box gives them up.
+    /// and what the mouse lifted, which goes back. A brief or the menu over
+    /// zellij lent the keys leaves all of it as it stands. The menu over
+    /// zellij lasts while its box has the keys, and closes as the box gives
+    /// them up.
     pub fn focus(&mut self, keys: Keys) {
         if self.floats() && !matches!(keys, Keys::Menu { .. }) {
             self.close_menu();
@@ -2263,7 +2267,7 @@ impl Sidebar {
 
     /// What a key does while the sidebar has the focus, pressed at `now`. The
     /// left button down on the sidebar takes every key, and `Esc` lets go of
-    /// what it holds: a session lifted goes back, and a click is no longer
+    /// what it holds: what it lifted goes back, and a click is no longer
     /// one. The menu takes every key while it is open. Without it, a
     /// character does what `Top::of` says, which the legend goes by too, and
     /// one it has not is the menu's.
@@ -3179,8 +3183,9 @@ impl Sidebar {
     /// it, folded or not, goes to the session. A click on the notes goes
     /// nowhere, as the rows under them are not on screen. A click that goes
     /// nowhere takes the focus, as any other button does. The left button
-    /// lifts the session whose row it went down on once the mouse moves a
-    /// line, and lets go of it where it shows; and the wheel scrolls.
+    /// lifts the session whose row it went down on, or the machine whose
+    /// header, once the mouse moves a line, and lets go of it where it shows;
+    /// and the wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         // A click or the wheel drops a `g` pressed before it, as a key does.
         // The pointer moving does not: luneta hears every move.
@@ -3212,7 +3217,7 @@ impl Sidebar {
             MouseEventKind::Drag(MouseButton::Left) => self.drag(mouse, area),
             MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area),
             // The button let go where luneta did not hear it, as outside its
-            // window: a session lifted goes back. A selection is the keys'.
+            // window: what it lifted goes back. A selection is the keys'.
             MouseEventKind::Moved => {
                 self.let_go();
                 Asked::Nothing
@@ -3330,7 +3335,7 @@ impl Sidebar {
     }
 
     /// Lets go of what the left button holds on the sidebar, as a release it
-    /// never hears: a session lifted goes back, and the press is no click.
+    /// never hears: what it lifted goes back, and the press is no click.
     /// A selection is the keys', and stays.
     pub fn let_go(&mut self) {
         if self.pressed() {
@@ -3338,12 +3343,13 @@ impl Sidebar {
         }
     }
 
-    /// Whether the rows scroll under a session lifted, as `hold` scrolls them.
+    /// Whether the rows scroll under what the mouse lifted, as `hold` scrolls
+    /// them.
     pub fn scrolling(&self) -> bool {
         self.pull() != 0
     }
 
-    /// Which way the rows scroll under a session lifted that the mouse holds
+    /// Which way the rows scroll under what the mouse lifted, as it holds it
     /// on their first line, or above, or on their last, or below: up while
     /// there are lines above the first, and down while there are below the
     /// last.
@@ -3360,7 +3366,7 @@ impl Sidebar {
         isize::from(down) - isize::from(up)
     }
 
-    /// Scrolls the rows a line under a session lifted that the mouse holds on
+    /// Scrolls the rows a line under what the mouse lifted, as it holds it on
     /// their first line or their last, at `at`, once each `SCROLL`.
     fn hold(&mut self, at: Instant) {
         let by = self.pull();
@@ -3423,10 +3429,11 @@ impl Sidebar {
 
     /// Draws the sidebar into `area`, the highlight on its row: where the keys
     /// took it while the sidebar has the focus, over the rows of each session
-    /// a selection holds, and on the pane luneta's zellij is on while it does
-    /// not, softer, which the view scrolls to show as the pane changes. A
-    /// session the mouse lifted has it, where it lands, the others making room
-    /// for it. Its last column is the edge, drawn as the title's rule is.
+    /// or machine a selection holds, and on the pane luneta's zellij is on
+    /// while it does not, softer, which the view scrolls to show as the pane
+    /// changes. What the mouse lifted has it, where it lands, the others
+    /// making room for it. Its last column is the edge, drawn as the title's
+    /// rule is.
     /// Says the spots on the menu at its bottom, or on the legend.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
         self.drawing(now);
@@ -3445,7 +3452,7 @@ impl Sidebar {
         };
         match highlight {
             Highlight::Lit(at) => {
-                // The mouse scrolls the rows under a session it lifted.
+                // The mouse scrolls the rows under what it lifted.
                 if let Some(at) = at
                     && landing.is_none()
                 {
