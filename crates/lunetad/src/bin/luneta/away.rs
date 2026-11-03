@@ -12,9 +12,10 @@ use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    closes_response, AskResponse, Client, ClosesRequest, GoRequest, KeepPrintedRequest, KillRequest,
-    ListClientsRequest, ListContentsRequest, ListDirsRequest, ListDirsResponse, ListSkillsRequest,
-    NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse, StartRequest,
+    closes_response, AskResponse, Client, ClosesRequest, DumpScreenRequest, GoRequest,
+    KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest, ListDirsRequest,
+    ListDirsResponse, ListSkillsRequest, NameSessionRequest, NameSessionResponse, On,
+    RefugeRequest, RefugeResponse, StartRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
@@ -130,6 +131,20 @@ impl Away {
         let request = ListContentsRequest { on: Some(self.on()), dir: dir.to_string() };
         let listed = self.ask(|mut daemon| async move { daemon.list_contents(request).await })?;
         Ok(listed.listed)
+    }
+
+    /// The screen of the terminal `pane` of `session` there, or of the one a
+    /// client coming there would be on, where it asks of none, as
+    /// `lunetad::screens::dumped` dumps it there: the terminal, and its
+    /// lines; or why zellij did not dump it.
+    pub fn screen(
+        &mut self,
+        session: &SessionName,
+        pane: Option<u32>,
+    ) -> Result<(u32, String), String> {
+        let request = DumpScreenRequest { on: Some(self.on()), session: session.to_string(), pane };
+        let dumped = self.ask(|mut daemon| async move { daemon.dump_screen(request).await })?;
+        Ok((dumped.pane, dumped.screen))
     }
 
     /// The clients of `session` there, as zellij lists them now, or why it

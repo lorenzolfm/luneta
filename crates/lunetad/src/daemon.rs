@@ -56,12 +56,13 @@ use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
     self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
-    GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
-    KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
-    ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
-    ListDirsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    DumpScreenRequest, DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse,
+    KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest,
+    ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
+    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest,
+    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
+    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -77,7 +78,7 @@ use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
     claude, client, clients, closes, eza, git, github, log, metadata, moves, names, opens, panes,
-    printed, release, remote, shells, skills, watch, zellij, zoxide,
+    printed, release, remote, screens, shells, skills, watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -609,6 +610,22 @@ impl Daemon for Host {
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
         Ok(Response::new(ListContentsResponse { listed }))
+    }
+
+    async fn dump_screen(
+        &self,
+        request: Request<DumpScreenRequest>,
+    ) -> Result<Response<DumpScreenResponse>, Status> {
+        let DumpScreenRequest { on, session, pane } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.dump_screen(DumpScreenRequest { on: None, session, pane }).await;
+        }
+        let dumped = task::spawn_blocking(move || screens::dumped(&session, pane)).await;
+        let dumped = dumped.map_err(|error| unfinished(&error))?;
+        let (pane, screen) = dumped.map_err(Status::failed_precondition)?;
+        Ok(Response::new(DumpScreenResponse { pane, screen }))
     }
 
     async fn start(

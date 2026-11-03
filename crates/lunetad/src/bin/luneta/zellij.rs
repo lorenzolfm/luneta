@@ -18,9 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::cli::{
-    answered, done, failure, laid, quiet, unrun, Laid, ANSWER, LEFT_OUT, PANE_VAR, SESSION_VAR,
-};
+use lunetad::cli::{done, failure, quiet, unrun, ANSWER, LEFT_OUT, PANE_VAR, SESSION_VAR};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -898,33 +896,6 @@ fn filled(stream: &mut UnixStream, buffer: &mut [u8], deadline: Instant) -> io::
     Ok(())
 }
 
-/// The terminal of `session` a client coming there would be on, as zellij
-/// lists its panes now: in its first tab, the one focused there, or else the
-/// first, a tiled one before one floating. zellij says which tab a session
-/// is on only while a client is on it.
-pub fn focused(session: &str) -> Result<u32, String> {
-    let laid = laid(session)?;
-    shown(&laid).ok_or_else(|| format!("{session} has no terminal to show"))
-}
-
-/// The terminal among `laid`, the panes of a session, that a client coming
-/// there would be on, as `focused` says.
-fn shown(laid: &[Laid]) -> Option<u32> {
-    let terminal = |laid: &&Laid| !laid.is_plugin && laid.is_selectable && !laid.is_suppressed;
-    let rank = |laid: &&Laid| (laid.tab_position, laid.is_floating, !laid.is_focused);
-    laid.iter().filter(terminal).min_by_key(rank).map(|laid| laid.id)
-}
-
-/// What the terminal `pane` of `session` shows, as zellij dumps it: its
-/// lines, in the colours it shows them in.
-pub fn dumped(session: &str, pane: u32) -> Result<String, String> {
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
-    let pane = format!("terminal_{pane}");
-    command.args(["--session", session, "action", "dump-screen", "--pane-id", &pane, "--ansi"]);
-    answered(&mut command)
-}
-
 /// Asks zellij on `on`, the machine luneta's client runs on, for the
 /// clients of the session `look` is of, on a thread of its own, and hands
 /// back what it answers.
@@ -1469,34 +1440,6 @@ mod tests {
                 assert_eq!(String::from_utf8(said.stdout).unwrap(), name, "{shell}");
             }
         }
-    }
-
-    fn laid(id: u32, tab_id: u32) -> Laid {
-        Laid {
-            id,
-            is_plugin: false,
-            is_selectable: true,
-            is_suppressed: false,
-            is_floating: false,
-            is_focused: false,
-            tab_id,
-            tab_position: tab_id,
-        }
-    }
-
-    /// A session with no client shows the terminal focused in its first tab,
-    /// a tiled one over one floating, or else the first there: no other tab
-    /// is the one zellij says it is on.
-    #[test]
-    fn a_session_with_no_client_shows_the_pane_focused_in_its_first_tab() {
-        let focused = |laid: Laid| Laid { is_focused: true, ..laid };
-        let floating = |laid: Laid| Laid { is_floating: true, ..laid };
-        let plugin = |laid: Laid| Laid { is_plugin: true, ..laid };
-        let tabs = [laid(1, 1), focused(laid(2, 1)), focused(laid(3, 0)), laid(4, 0)];
-        assert_eq!(shown(&tabs), Some(3));
-        let first = [focused(floating(laid(5, 0))), laid(6, 0), laid(7, 0)];
-        assert_eq!(shown(&first), Some(6));
-        assert_eq!(shown(&[plugin(laid(8, 0))]), None);
     }
 
     /// The client leaves out the variable zellij refuses by to attach a pane's

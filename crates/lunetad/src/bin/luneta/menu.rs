@@ -51,7 +51,7 @@ use crate::gruvbox;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::pull::{At, Kind, Link, Ready};
-use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, Place, TAG};
+use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::SessionName;
@@ -1427,7 +1427,7 @@ impl Menu {
         };
         match (at, pull) {
             (At::There((session, pane)), Pull::Worktree) => {
-                Did::Closed(Done::Go(on, Place::Pane { session, pane }))
+                Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
             },
             (At::There((session, pane)), Pull::Agent) => {
                 opening(session, pane, Opens::Pane { beside: pane, command })
@@ -2974,7 +2974,7 @@ mod tests {
             assert!(menu.turning());
         }
         let there = || At::There((other.clone(), 9));
-        let place = Place::Pane { session: other.clone(), pane: 9 };
+        let place = Place::Pane(PanePlace { session: other.clone(), pane: 9 });
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
@@ -3055,7 +3055,7 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let ready = |at| Ok(Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None });
         let row = || Target::Pane(vps(), row());
-        let place = Place::Pane { session: other.clone(), pane: 9 };
+        let place = Place::Pane(PanePlace { session: other.clone(), pane: 9 });
         let there = ready(At::There((other.clone(), 9)));
         assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
         let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(At::Session((other, 7)))));

@@ -61,6 +61,11 @@ service Daemon {
   // What is in a directory, as eza lists it for luneta's picker to show: an
   // entry a line, in colour.
   rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
+  // What a terminal of a session shows, as zellij dumps its screen for
+  // luneta's picker to show, in its colours: the terminal asked, or else the
+  // one a client coming to the session would be on, as zellij lists its
+  // panes now.
+  rpc DumpScreen(DumpScreenRequest) returns (DumpScreenResponse);
   // Has zellij take the client that last typed in a session to a session it
   // makes, that starts in a directory, as `zellij action switch-session
   // --cwd` does: or to one that runs by that name, or one it keeps to bring
@@ -308,6 +313,22 @@ message ListContentsRequest {
 message ListContentsResponse {
   // As eza prints it: an entry a line, in its colours, after its icon.
   string listed = 1;
+}
+
+message DumpScreenRequest {
+  On on = 1;
+  string session = 2;
+  // The terminal, by its id. Absent for the one a client coming to the
+  // session would be on.
+  optional uint32 pane = 3;
+}
+
+message DumpScreenResponse {
+  // The terminal dumped: the one asked, or the one a client coming to the
+  // session would be on.
+  uint32 pane = 1;
+  // As zellij dumps it: its lines, in the colours it shows them in.
+  string screen = 2;
 }
 
 message StartRequest {
