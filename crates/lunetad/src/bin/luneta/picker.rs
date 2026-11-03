@@ -230,8 +230,8 @@ pub enum Picked {
     /// Take zellij's client to `place`, on `on`, and close the picker.
     Go { on: Machine, place: Place },
     /// Take zellij's client to the session of this name, which zellij makes
-    /// on this machine, or brings back where it kept one that ended, and
-    /// close the picker.
+    /// on this machine, of no session it has listed there, nor one that
+    /// ended, and close the picker; or say why zellij would make none.
     Start(SessionName),
     /// Take zellij's client to `session` on `on`, which ended, as zellij
     /// brings it back there, and close the picker.
@@ -621,46 +621,74 @@ enum Ended {
     Heard { exited: Vec<Exited>, at: SystemTime },
     /// As it listed them at `at`, before a session ended, or one was let go
     /// of: they show on, but free no name, as zellij keeps one that ended
-    /// since, and could keep one let go of yet. Asked for again by the ask
-    /// numbered `ask`, where one is open: one that let go of a session asks
-    /// once zellij has.
-    Stale { exited: Vec<Exited>, at: SystemTime, ask: Option<u64> },
+    /// since, and could keep one let go of yet. Asked for again as `next`
+    /// says.
+    Stale { exited: Vec<Exited>, at: SystemTime, next: Next },
     /// Why it did not list them.
     Failed(String),
+}
+
+/// What a list of the sessions zellij keeps waits on, once it went stale.
+#[derive(Debug)]
+enum Next {
+    /// The answer to the ask numbered so.
+    Answer(u64),
+    /// zellij letting go of these sessions, which it has yet to say it did:
+    /// what it lists till then can list them yet. It is asked again once it
+    /// said so of each, and that ask lists those that ended meanwhile too.
+    LettingGo(HashSet<SessionName>),
 }
 
 impl Ended {
     /// What it is once asked for again, by the ask numbered `ask`: what
     /// zellij listed goes stale, as a session can have ended since, or been
-    /// let go of.
+    /// let go of. While zellij is letting go of one, the ask waits, as
+    /// `awaits` says.
     fn asked(self, ask: u64) -> Ended {
         match self {
+            Ended::Stale { exited, at, next: Next::LettingGo(going) } if !going.is_empty() => {
+                Ended::Stale { exited, at, next: Next::LettingGo(going) }
+            },
             Ended::Heard { exited, at } | Ended::Stale { exited, at, .. } => {
-                Ended::Stale { exited, at, ask: Some(ask) }
+                Ended::Stale { exited, at, next: Next::Answer(ask) }
             },
             Ended::Asking(_) | Ended::Failed(_) => Ended::Asking(ask),
         }
     }
 
-    /// What it is once `session` is let go of: off the list, which goes
-    /// stale. What an ask still open says can list it yet, so it is not
-    /// taken, and the ask once zellij let go of it is.
+    /// What it is once zellij is asked to let go of `session`: off the list,
+    /// which goes stale, whatever zellij lists before it said it let go of
+    /// it.
     fn forgot(self, session: &SessionName) -> Ended {
-        match self {
-            Ended::Heard { mut exited, at } | Ended::Stale { mut exited, at, .. } => {
-                exited.retain(|exited| exited.name != *session);
-                Ended::Stale { exited, at, ask: None }
+        let (mut exited, at, mut going) = match self {
+            Ended::Heard { exited, at } | Ended::Stale { exited, at, next: Next::Answer(_) } => {
+                (exited, at, HashSet::new())
             },
-            ended @ (Ended::Asking(_) | Ended::Failed(_)) => ended,
+            Ended::Stale { exited, at, next: Next::LettingGo(going) } => (exited, at, going),
+            ended @ (Ended::Asking(_) | Ended::Failed(_)) => return ended,
+        };
+        exited.retain(|exited| exited.name != *session);
+        going.insert(session.clone());
+        Ended::Stale { exited, at, next: Next::LettingGo(going) }
+    }
+
+    /// What it is once zellij said whether it let go of `session`: one to
+    /// ask for again, as `asked` says, once it said so of each.
+    fn let_go(mut self, session: &SessionName) -> Ended {
+        if let Ended::Stale { next: Next::LettingGo(going), .. } = &mut self {
+            going.remove(session);
         }
+        self
     }
 
     /// Whether the ask numbered `ask` is the one open, whose answer is
     /// taken.
     fn awaits(&self, ask: u64) -> bool {
         match self {
-            Ended::Asking(open) | Ended::Stale { ask: Some(open), .. } => *open == ask,
-            Ended::Stale { ask: None, .. } | Ended::Heard { .. } | Ended::Failed(_) => false,
+            Ended::Asking(open) | Ended::Stale { next: Next::Answer(open), .. } => *open == ask,
+            Ended::Stale { next: Next::LettingGo(_), .. }
+            | Ended::Heard { .. }
+            | Ended::Failed(_) => false,
         }
     }
 
@@ -847,13 +875,16 @@ impl Picker {
     }
 
     /// Asks zellij on `on` for the sessions it keeps to bring back, again,
-    /// where it was asked before, as `Ended::asked` has it.
+    /// where it was asked before, as `Ended::asked` has it: not while it is
+    /// letting go of one, after which it is asked.
     fn ask_exited(&mut self, on: Machine) {
-        self.exited_asked += 1;
-        let ask = self.exited_asked;
+        let ask = self.exited_asked + 1;
         let ended = self.exited.remove(&on).map_or(Ended::Asking(ask), |ended| ended.asked(ask));
-        self.exited.insert(on.clone(), ended);
-        self.asking.push(Ask::Exited { on, ask });
+        if ended.awaits(ask) {
+            self.exited_asked = ask;
+            self.asking.push(Ask::Exited { on: on.clone(), ask });
+        }
+        self.exited.insert(on, ended);
     }
 
     /// Takes in what zellij answered, and says what that leaves luneta to do.
@@ -912,7 +943,8 @@ impl Picker {
                 if let Err(why) = deleted {
                     self.error = Some(format!("{session} stays: {why}"));
                 }
-                if self.exited.contains_key(&on) {
+                if let Some(ended) = self.exited.remove(&on) {
+                    self.exited.insert(on.clone(), ended.let_go(&session));
                     self.ask_exited(on);
                 }
             },
@@ -1227,7 +1259,8 @@ impl Picker {
 
     /// The session typed, which `Enter` makes on this machine: none of
     /// nothing typed, and none of the name of the session luneta's zellij is
-    /// in here.
+    /// in here. None until zellij here said which sessions ended, either: one
+    /// of those is a row of its own once it did, which `Enter` brings back.
     fn new_name(&self) -> Result<Option<SessionName>, &'static str> {
         if self.term.is_empty() {
             return Ok(None);
@@ -1235,7 +1268,9 @@ impl Picker {
         if self.here_session(&Machine::Local) == Some(self.term.as_str()) {
             return Err("you are in it");
         }
-        SessionName::parse(&self.term).map(Some)
+        let name = SessionName::parse(&self.term)?;
+        self.taken(&Machine::Local)?;
+        Ok(Some(name))
     }
 
     /// What `Del` does: plans deleting the session highlighted, or closing the
@@ -2622,10 +2657,11 @@ mod tests {
     }
 
     /// What is typed narrows the list, a name that is what is typed first,
-    /// and `Enter` makes a session of a name no row has, but of one zellij
-    /// refuses, or of yours, or on the agents or the directories, which `Tab`
-    /// goes to one after the other, and back to the sessions, and `Shift Tab`
-    /// the other way round, the rule over the list naming each.
+    /// and `Enter` makes a session of a name no row has, once zellij said
+    /// which sessions ended, as a name it keeps would be a row then; but of
+    /// one zellij refuses, or of yours, or on the agents or the directories,
+    /// which `Tab` goes to one after the other, and back to the sessions, and
+    /// `Shift Tab` the other way round, the rule over the list naming each.
     #[test]
     fn what_is_typed_narrows_the_list_and_enter_makes_a_session_no_row_has() {
         let listing = Listing {
@@ -2642,6 +2678,10 @@ mod tests {
         assert_eq!(names(&picker), ["luneta", "luneta-main"]);
         typed(&mut picker, "-new");
         assert_eq!(list(&picker).0, [r#"no match for "luneta-new""#]);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        let why = "zellij has yet to say which sessions ended";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        picker.heard(kept_here(Ok(Vec::new())));
         let new = SessionName::parse("luneta-new").unwrap();
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Start(new));
         let titled = |picker: &Picker, title: &str| {
@@ -2765,6 +2805,41 @@ mod tests {
         assert_eq!(list(&picker).0, [r#"no match for "x""#]);
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert!(picker.asks().is_empty());
+    }
+
+    /// A session `Del` let go of stays off the list till zellij said it let
+    /// go of it, as what zellij lists before can list it yet: zellij is asked
+    /// again which sessions ended only once it said so of each it was letting
+    /// go of, `Del` on the row after among them, and of one that ended
+    /// meanwhile then.
+    #[test]
+    fn a_session_let_go_of_stays_off_the_list_till_zellij_said_it_let_go() {
+        let mut picker = three();
+        picker.asks();
+        press(&mut picker, KeyCode::Down);
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(lit(&picker), "y");
+        press(&mut picker, KeyCode::Delete);
+        assert_eq!(lit(&picker), "x");
+        press(&mut picker, KeyCode::Delete);
+        picker.asks();
+        let a_ended = Listing {
+            here: Some(here("b")),
+            local: sessions(vec![live("c", 30, None), live("b", 20, Some(1))]),
+            ..Listing::default()
+        };
+        picker.listed(a_ended);
+        assert!(exited_asks(&mut picker).is_empty());
+        let let_go = |picker: &mut Picker, name: &str| {
+            let session = SessionName::running(name).unwrap();
+            picker.heard(Heard::Deleted { on: Machine::Local, session, deleted: Ok(()) });
+            exited_asks(picker)
+        };
+        assert!(let_go(&mut picker, "y").is_empty());
+        assert_eq!(names(&picker), ["b", "c"]);
+        assert_eq!(let_go(&mut picker, "x"), [Ask::Exited { on: Machine::Local, ask: 2 }]);
+        picker.heard(Heard::Exited { on: Machine::Local, ask: 2, exited: Ok(vec![ended("a", 5)]) });
+        assert_eq!(names(&picker), ["b", "c", "ended", "a"]);
     }
 
     /// `Ctrl r` renames the session highlighted, yours or another, to a name

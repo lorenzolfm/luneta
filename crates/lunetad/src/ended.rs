@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::{quiet, unrun, ANSWER};
-use crate::program;
 use crate::zellij::SessionName;
+use crate::{log, program};
 
 /// What `list-sessions` says where no session runs, nor ended to be brought
 /// back, as it fails.
@@ -30,7 +30,8 @@ pub struct Exited {
 
 /// The sessions zellij keeps to bring back, as `list-sessions` lists them
 /// now, or why it did not list them, as in time: zellij's CLI waits on every
-/// session's server, and one that hangs would hold it up for good.
+/// session's server, and one that hangs would hold it up for good. How many
+/// `exited_in` left out goes in the log.
 pub fn exited() -> Result<Vec<Exited>, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
@@ -42,21 +43,29 @@ pub fn exited() -> Result<Vec<Exited>, String> {
         return Ok(Vec::new());
     }
     let listed = ran.answer().map_err(|why| format!("zellij: {why}"))?;
-    Ok(exited_in(&String::from_utf8_lossy(&listed)))
+    let (exited, left_out) = exited_in(&String::from_utf8_lossy(&listed));
+    if left_out > 0 {
+        log::say(&format!("left out {left_out} sessions zellij keeps whose line does not read"));
+    }
+    Ok(exited)
 }
 
 /// The sessions that ended among those `listed` lists, a line each, as
 /// `list-sessions --no-formatting` lists them: `<name> [Created 1day 2h 3m
-/// 4s ago] (EXITED - attach to resurrect)`. A line that does not read so,
-/// or of a name zellij would not take, is left out.
-fn exited_in(listed: &str) -> Vec<Exited> {
-    let exited = |line: &str| {
-        let line = line.trim_end().strip_suffix(EXITED)?.trim_end();
-        let (name, created) = line.rsplit_once(" [Created ")?;
+/// 4s ago] (EXITED - attach to resurrect)`; and how many of the lines of one
+/// that ended it left out, as they do not read so, or are of a name zellij
+/// would not take.
+fn exited_in(listed: &str) -> (Vec<Exited>, usize) {
+    let read = |line: &str| {
+        let (name, created) = line.trim_end().rsplit_once(" [Created ")?;
         let ago = created.strip_suffix(" ago]").and_then(spelled_ago)?;
         Some(Exited { name: SessionName::running(name).ok()?, ago })
     };
-    listed.lines().filter_map(exited).collect()
+    let ended: Vec<&str> =
+        listed.lines().filter_map(|line| line.trim_end().strip_suffix(EXITED)).collect();
+    let exited: Vec<Exited> = ended.iter().copied().filter_map(read).collect();
+    let left_out = ended.len() - exited.len();
+    (exited, left_out)
 }
 
 /// A time as zellij spells one, `1day 2h 3m 4s`, in whole seconds: what it
@@ -88,7 +97,8 @@ mod tests {
 
     /// The sessions that ended are read from what `list-sessions` lists,
     /// with how long ago each was made, to the second; the rest are left
-    /// out: those that run, yours, and a line that does not read.
+    /// out: those that run, yours, and a line that does not read, which is
+    /// counted, as one of a session that ended.
     #[test]
     fn the_sessions_that_ended_are_read_from_what_zellij_lists() {
         let listed = "bipa [Created 1day 5h 24m 9s ago] \n\
@@ -97,9 +107,10 @@ mod tests {
                       a b [Created 3s ago] (EXITED - attach to resurrect)\n\
                       odd [Created 2fortnights ago] (EXITED - attach to resurrect)\n\
                       (EXITED - attach to resurrect)\n";
-        let exited = exited_in(listed);
+        let (exited, left_out) = exited_in(listed);
         let read: Vec<(&str, u64)> =
             exited.iter().map(|exited| (exited.name.as_str(), exited.ago.as_secs())).collect();
         assert_eq!(read, [("nixos", 86_400 + 11 * 60 + 50), ("a b", 3)]);
+        assert_eq!(left_out, 2);
     }
 }

@@ -256,11 +256,19 @@ impl Away {
 
     /// The sessions zellij keeps to bring back there, which ended, as
     /// `lunetad::ended::exited` lists them there, as `exited_of` reads them;
-    /// or why it did not list them.
+    /// or why it did not list them. How many `exited_of` left out goes in the
+    /// log.
     pub fn exited(&mut self) -> Result<Vec<Exited>, String> {
         let request = ListExitedRequest { on: Some(self.on()) };
         let listed = self.ask(|mut daemon| async move { daemon.list_exited(request).await })?;
-        Ok(exited_of(listed))
+        let sent = listed.exited.len();
+        let exited = exited_of(listed);
+        let left_out = sent - exited.len();
+        if left_out > 0 {
+            let on = &self.on;
+            log::say(&format!("{on}: left out {left_out} sessions zellij keeps that do not read"));
+        }
+        Ok(exited)
     }
 
     /// Has zellij there let go of `session`, one that ended, as

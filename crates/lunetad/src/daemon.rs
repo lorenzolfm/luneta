@@ -719,11 +719,17 @@ impl Daemon for Host {
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
         // An age past what a Duration holds, some 292 billion years, is one
-        // zellij said of no session, as a line that does not read.
+        // zellij said of no session, as a line that does not read: how many
+        // go so goes in the log.
         let exited = |ended::Exited { name, ago }| {
             Some(Exited { name: name.to_string(), ago: Some(ago.try_into().ok()?) })
         };
-        let exited = listed.into_iter().filter_map(exited).collect();
+        let read = listed.len();
+        let exited: Vec<Exited> = listed.into_iter().filter_map(exited).collect();
+        let left_out = read - exited.len();
+        if left_out > 0 {
+            log::say(&format!("left out {left_out} kept sessions of an age no Duration holds"));
+        }
         Ok(Response::new(ListExitedResponse { exited }))
     }
 

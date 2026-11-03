@@ -388,20 +388,22 @@ struct Client {
 /// How a client luneta starts comes to its session.
 #[derive(Clone, Copy)]
 enum Joins<'a> {
-    /// It attaches to this one, which runs.
+    /// It attaches to this one, which runs, or which ended, which zellij
+    /// brings back as it does; and fails where zellij has none by its name.
     Attach(&'a SessionName),
-    /// It makes this one, in that directory, or where luneta started, and
-    /// fails where one runs by its name by then, or zellij keeps one by it
-    /// that ended, as `zellij::make` says: luneta found the name unused just
-    /// before. luneta finds it there once zellij titles its terminal in it,
-    /// as `restart` says.
-    Make(&'a SessionName, Option<&'a str>),
+    /// It makes the one luneta found unused just before, in that directory,
+    /// or where luneta started, and fails where one runs by its name by then,
+    /// or zellij keeps one by it that ended, as `zellij::make` says. luneta
+    /// finds it there once zellij titles its terminal in it, as `restart`
+    /// says.
+    Make(&'a Unused, Option<&'a str>),
 }
 
 impl Joins<'_> {
     fn session(&self) -> &SessionName {
         match self {
-            Joins::Attach(session) | Joins::Make(session, _) => session,
+            Joins::Attach(session) => session,
+            Joins::Make(unused, _) => unused.name(),
         }
     }
 }
@@ -1605,7 +1607,7 @@ impl App {
                     Machine::Local => zellij::unused_for(&cwd),
                     Machine::Remote(destination) => zellij::name_away(destination, &cwd),
                 };
-                self.make(unused.map_err(|why| format!("menu: {why}")), &cwd, None);
+                self.make(unused.map_err(|why| format!("menu: {why}")), Some(cwd.as_str()), None);
                 self.leave();
             },
             // The menu waits until zellij has opened it, and takes the keys
@@ -1618,7 +1620,8 @@ impl App {
                         zellij::makes_away(destination, &session, &cwd)
                     },
                 };
-                if !self.make(unused, &cwd, Some((zellij::owed(menu, &self.events), tab))) {
+                let owed = zellij::owed(menu, &self.events);
+                if !self.make(unused, Some(cwd.as_str()), Some((owed, tab))) {
                     self.sidebar.close_menu();
                 }
             },
@@ -1670,7 +1673,9 @@ impl App {
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Start(session) => {
-                self.start(&Machine::Local, &session, None, None);
+                // From another machine, a client that makes it here refuses
+                // a name zellij keeps, which `makes` says first.
+                self.make(zellij::makes(session), None, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::BringBack { on, session } => {
@@ -1684,7 +1689,7 @@ impl App {
                         zellij::makes_away(destination, &session, cwd.as_str())
                     },
                 };
-                self.make(unused, cwd.as_str(), None);
+                self.make(unused, Some(cwd.as_str()), None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { on, session, deletes } => {
@@ -1890,15 +1895,13 @@ impl App {
     }
 
     /// Takes zellij's client to `session` on `machine`, which ended, as zellij
-    /// brings it back: as `start` does, on the machine the client runs on;
-    /// and on another, as a client of it there takes its place, as `swap`
-    /// says, which `attach` brings it back for, where `swap_making`'s would
-    /// refuse a name zellij keeps. Its server is new, as `Before::Made`
-    /// says. Whether it went.
+    /// brings it back: a client of it there takes its place, as `swap` says,
+    /// on the machine the client runs on as well, which `attach` brings it
+    /// back for. `swap_making`'s would refuse a name zellij keeps, and
+    /// `switch-session` would make one zellij let go of since, anew, empty:
+    /// `attach` fails then, which takes luneta's zellij back. Its server is
+    /// new, as `Before::Made` says. Whether it went.
     fn bring_back(&mut self, machine: &Machine, session: &SessionName) -> bool {
-        if machine == self.sidebar.on() {
-            return self.start(machine, session, None, None);
-        }
         let back = self.back();
         match self.restart(machine, Joins::Attach(session), Before::Made, back, None) {
             Ok(()) => true,
@@ -1909,25 +1912,20 @@ impl App {
         }
     }
 
-    /// Takes zellij's client to a session it makes, `session`, on `machine`,
+    /// Takes zellij's client to a session it makes, `unused`, on its machine,
     /// another than the one it runs on, that starts in `cwd`, or where luneta
     /// started: a client that makes it there takes its place, as `swap`
     /// says, and fails where the name is taken by then, as `Joins::Make`
     /// says, which takes luneta's zellij back. Once it is in, the tab of
     /// `alone` opens there, if any, as `Alone` says. Whether it went.
-    fn swap_making(
-        &mut self,
-        machine: &Machine,
-        session: &SessionName,
-        cwd: Option<&str>,
-        alone: Option<Alone>,
-    ) -> bool {
+    fn swap_making(&mut self, unused: &Unused, cwd: Option<&str>, alone: Option<Alone>) -> bool {
         let back = self.back();
-        let joins = Joins::Make(session, cwd);
+        let joins = Joins::Make(unused, cwd);
         let next = alone.map(|alone| Next::After(alone.after()));
-        match self.restart(machine, joins, Before::Made, back, next) {
+        match self.restart(unused.on(), joins, Before::Made, back, next) {
             Ok(()) => true,
             Err(error) => {
+                let session = unused.name();
                 self.sidebar.notify(format!("no client of {session} started: {error}"));
                 false
             },
@@ -1986,12 +1984,12 @@ impl App {
         let ((program, args), dir) = match (machine, joins) {
             (Machine::Local, Joins::Attach(session)) => (zellij::rejoin(session.as_str()), None),
             // zellij's client makes a session in the directory it starts in.
-            (Machine::Local, Joins::Make(session, cwd)) => (zellij::make(session), cwd),
+            (Machine::Local, Joins::Make(unused, cwd)) => (zellij::make(unused.name()), cwd),
             (Machine::Remote(destination), Joins::Attach(session)) => {
                 (zellij::attach_away(destination, session.as_str()), None)
             },
-            (Machine::Remote(destination), Joins::Make(session, cwd)) => {
-                (zellij::make_away(destination, session.as_str(), cwd), None)
+            (Machine::Remote(destination), Joins::Make(unused, cwd)) => {
+                (zellij::make_away(destination, unused.name().as_str(), cwd), None)
             },
         };
         let dir = dir.map_or(self.dir.clone(), PathBuf::from);
@@ -2036,24 +2034,15 @@ impl App {
         }
     }
 
-    /// Takes zellij's client to a session it makes on `machine`, `session`,
-    /// that starts in `cwd`, or where the client started, or brings back,
-    /// where zellij kept one that ended, and opens the tab of `alone` there
-    /// once it is, if any, as `Alone` says. Where zellij makes it, its server
-    /// cannot bear being asked anything before it takes the client: luneta
-    /// asks for the client's arrival there once zellij titles its terminal in
-    /// it. On another machine than the one the client runs on, a client
-    /// there takes its place, as `swap_making` says. Whether it went.
-    fn start(
-        &mut self,
-        machine: &Machine,
-        session: &SessionName,
-        cwd: Option<&str>,
-        alone: Option<Alone>,
-    ) -> bool {
-        if machine != self.sidebar.on() {
-            return self.swap_making(machine, session, cwd, alone);
-        }
+    /// Takes zellij's client to a session it makes on the machine it runs
+    /// on, `session`, that starts in `cwd`, or where the client started, or
+    /// brings back, where zellij kept one that ended since luneta found the
+    /// name unused, and opens the tab of `alone` there once it is, if any, as
+    /// `Alone` says. Where zellij makes it, its server cannot bear being
+    /// asked anything before it takes the client: luneta asks for the
+    /// client's arrival there once zellij titles its terminal in it. Whether
+    /// it went.
+    fn start(&mut self, session: &SessionName, cwd: Option<&str>, alone: Option<Alone>) -> bool {
         let Some(nudged) = self.nudge() else {
             return false;
         };
@@ -2065,22 +2054,27 @@ impl App {
     }
 
     /// Takes zellij's client to a session zellij makes on the machine of
-    /// `unused`, by its name, that starts in `cwd`, and opens `tab` there
-    /// once it is, if any, for the menu owed what it opens, in place of the
-    /// tabs zellij makes it with, as `Alone` says, as `start` does; or says
-    /// why zellij would make none, but take it to one that has the name,
-    /// before the sidebar takes the client for one on its way there. Whether
-    /// it went.
+    /// `unused`, by its name, that starts in `cwd`, or where the client
+    /// started, and opens `tab` there once it is, if any, for the menu owed
+    /// what it opens, in place of the tabs zellij makes it with, as `Alone`
+    /// says, as `start` does, or `swap_making` on another machine than the
+    /// one the client runs on; or says why zellij would make none, but take
+    /// it to one that has the name, before the sidebar takes the client for
+    /// one on its way there. Whether it went.
     fn make(
         &mut self,
         unused: Result<Unused, String>,
-        cwd: &str,
+        cwd: Option<&str>,
         tab: Option<(Due<u32>, Tab)>,
     ) -> bool {
         match unused {
             Ok(unused) => {
                 let alone = tab.map(|(owed, tab)| Alone::new(owed, tab, &unused));
-                self.start(unused.on(), unused.name(), Some(cwd), alone)
+                if unused.on() == self.sidebar.on() {
+                    self.start(unused.name(), cwd, alone)
+                } else {
+                    self.swap_making(&unused, cwd, alone)
+                }
             },
             Err(why) => {
                 self.sidebar.notify(why);
