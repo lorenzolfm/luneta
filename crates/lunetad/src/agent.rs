@@ -8,6 +8,7 @@ use luneta_protocol::said::Said;
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
+use crate::links::Link;
 use crate::zellij::Sessions;
 
 /// An agent that runs on the host.
@@ -27,6 +28,8 @@ pub struct Agent {
     pub entrypoint: Option<Said>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
+    /// The pull request of the review its environment says it runs, if any.
+    pub review: Option<Link>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +215,8 @@ impl Agent {
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
+            // The core adds what it keeps of it.
+            review: None,
         }
     }
 }

@@ -76,6 +76,7 @@ use crate::own::{Before, Look, Looked};
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
+use crate::review;
 use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
@@ -1880,6 +1881,7 @@ impl App {
                     self.sidebar.notify(format!("forget {destination}: {why}"));
                 }
             },
+            Asked::Review { on, pid, does } => review::moved(on, pid, does, &self.events),
         }
     }
 

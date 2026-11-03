@@ -195,6 +195,14 @@ case "$*" in
     "action dump-screen "*)
         exec cat "{panes}/$session.dump"
         ;;
+    "action paste "* | "action send-keys "*)
+        if [ -f "{panes}/$session.refused" ]; then
+            echo "zellij refused to write in $session" >&2
+            exit 1
+        fi
+        echo "$asked" >> "{panes}/written"
+        exit 0
+        ;;
     "list-sessions --no-formatting")
         listed=
         for dir in "$cache"/contract_version_1/session_info/*/; do
@@ -317,6 +325,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// it was asked.
     pub fn renamed(&self) -> Vec<String> {
         self.lines("renamed")
+    }
+
+    /// What zellij was asked to write in panes, a line to each, as it was
+    /// asked.
+    pub fn written(&self) -> Vec<String> {
+        self.lines("written")
     }
 
     /// Has zellij dump `text` of any pane of `session` from now on.

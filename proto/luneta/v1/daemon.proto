@@ -128,6 +128,10 @@ service Daemon {
   // cut five seconds after the question. The stream ends after the answer,
   // or with why there is none.
   rpc Paste(PasteRequest) returns (stream PasteResponse);
+  // Moves the review an agent runs, as a key of luneta's menu does: the
+  // daemon of the agent's machine keeps it. One that the agent does not run,
+  // or that has no skill left for this, is answered as a failed precondition.
+  rpc MoveReview(MoveReviewRequest) returns (MoveReviewResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -1084,7 +1088,76 @@ message Agent {
     // Code has, as `sandbox request`, or a newer Claude Code's.
     string other_waiting_for = 12;
   }
+  // The review of a pull request it runs, a skill at a time. Absent where it
+  // runs none, or the last skill of one is done, or the daemon started after
+  // it did: a daemon keeps a review in memory.
+  Review review = 14;
 }
+
+// A review of a pull request that one agent runs: the same skills, in the same
+// order, one at a time, each given the pull request's page. A skill's turn
+// ends with what it found, for you to read, and the next goes as a turn of
+// yours ends.
+message Review {
+  // The pull request's page.
+  string link = 1;
+  // Which of the skills it is on, from 1, and how many there are, of those
+  // you skip too.
+  uint32 step = 2;
+  uint32 steps = 3;
+  // The skill it is on, as a prompt starts it: `/tigerstyle`.
+  string skill = 4;
+  // The skill that comes next. Absent on the last: the review ends as that
+  // one stops.
+  optional string next = 5;
+  // What the next one waits for, while it is not `held`.
+  ReviewWaits waits = 6;
+  // You hold it: nothing is sent until you say.
+  bool held = 7;
+}
+
+enum ReviewWaits {
+  // Never sent. A client that finds it, or a number it does not know, has a
+  // word a newer daemon knows.
+  REVIEW_WAITS_UNSPECIFIED = 0;
+  // The skill it is on, which is at work.
+  REVIEW_WAITS_SKILL = 1;
+  // You: the skill stopped, and the next goes as a turn of yours ends.
+  REVIEW_WAITS_YOU = 2;
+  // A moment: it goes as a turn at work stops, or a stop has been quiet for a
+  // while.
+  REVIEW_WAITS_TURN = 3;
+  // What you have typed in the agent's prompt, which it would join.
+  REVIEW_WAITS_DRAFT = 4;
+  // A prompt to write in, which zellij did not show the daemon, or did not
+  // let it write in. The daemon's log says which.
+  REVIEW_WAITS_PROMPT = 5;
+}
+
+// A move of a review, as the keys of luneta's menu have them.
+enum ReviewMove {
+  // Never sent. A daemon that finds it answers it as invalid.
+  REVIEW_MOVE_UNSPECIFIED = 0;
+  // Send nothing until told otherwise.
+  REVIEW_MOVE_HOLD = 1;
+  // Go on from there.
+  REVIEW_MOVE_RESUME = 2;
+  // Send the next skill as soon as the agent can take it, with no turn of
+  // yours first, and go on from a hold.
+  REVIEW_MOVE_NEXT = 3;
+  // Take the next skill out of the review. Where it was the last, and the
+  // agent is on no skill now, the review ends.
+  REVIEW_MOVE_SKIP = 4;
+}
+
+message MoveReviewRequest {
+  On on = 1;
+  // The agent's process id, as `Agent.pid` says.
+  uint32 pid = 2;
+  ReviewMove does = 3;
+}
+
+message MoveReviewResponse {}
 
 enum Status {
   // Never sent. A client that finds it, or a number it does not know, has the

@@ -19,6 +19,8 @@ mod host;
 #[cfg(test)]
 mod remote;
 #[cfg(test)]
+mod reviews;
+#[cfg(test)]
 mod sessions;
 #[cfg(test)]
 mod shells;

@@ -27,7 +27,8 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{Agent, Name, Named, Source, Status, Unread};
-use crate::{log, process};
+use crate::links::Link;
+use crate::{log, process, reviews};
 use crate::watch::{self, Troubles};
 
 /// How long a file that does not read still says what it said before. Claude
@@ -124,9 +125,9 @@ pub struct SessionFiles {
     domain: process::Domain,
     /// Each file, by the pid it is named for, as it last read.
     seen: HashMap<u32, Seen>,
-    /// The pane each process's environment names. The environment a process
-    /// shows is the one it started with, so it is read once.
-    panes: HashMap<(u32, String), Option<Named>>,
+    /// What each process's environment says. The environment a process shows
+    /// is the one it started with, so it is read once.
+    environments: HashMap<(u32, String), Environment>,
     /// What went wrong in listing the folder.
     troubles: Troubles,
     /// Whether the folder has been read: a file that does not read in the
@@ -141,7 +142,7 @@ impl SessionFiles {
             dir: claude.join("sessions"),
             domain: process::Domain::here(),
             seen: HashMap::new(),
-            panes: HashMap::new(),
+            environments: HashMap::new(),
             troubles: Troubles::default(),
             scanned: false,
         }
@@ -183,13 +184,13 @@ impl SessionFiles {
         }
         self.seen = seen;
 
-        let mut panes = HashMap::with_capacity(self.seen.len());
-        // The pane of each process, read from its environment once.
-        let mut pane = |pid: u32, start: String| {
+        let mut environments = HashMap::with_capacity(self.seen.len());
+        // What each process's environment says, read once.
+        let mut environment = |pid: u32, start: String| {
             let key = (pid, start);
-            let pane = self.panes.remove(&key).unwrap_or_else(|| pane_of(pid));
-            panes.insert(key, pane.clone());
-            pane
+            let environment = self.environments.remove(&key).unwrap_or_else(|| Environment::of(pid));
+            environments.insert(key, environment.clone());
+            environment
         };
         let mut agents = Vec::with_capacity(self.seen.len());
         let mut unread = Vec::new();
@@ -205,7 +206,8 @@ impl SessionFiles {
                 Seen::Unread => {
                     if let Some(start) = process::start(pid) {
                         let started = process::started(pid);
-                        unread.push(Unread { pid, started, pane: pane(pid, start) });
+                        let pane = environment(pid, start).pane;
+                        unread.push(Unread { pid, started, pane });
                     }
                     continue;
                 },
@@ -219,9 +221,9 @@ impl SessionFiles {
             if process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            agents.push(agent(pid, file, pane(pid, start)));
+            agents.push(agent(pid, file, environment(pid, start)));
         }
-        self.panes = panes;
+        self.environments = environments;
         assert!(agents.len() + unread.len() <= self.seen.len());
         Scan { agents, unread }
     }
@@ -287,7 +289,7 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
 /// The agent a file stands for. Its status is dated where Claude Code dates
 /// the status, and by nothing else: when the file was written, or the session
 /// started, is not when the agent came to what it is doing.
-fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
+fn agent(pid: u32, file: &File, environment: Environment) -> Agent {
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
@@ -300,7 +302,8 @@ fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),
-        pane,
+        pane: environment.pane,
+        review: environment.review,
     }
 }
 
@@ -309,17 +312,35 @@ fn moment(millis: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(millis)
 }
 
-/// The pane the environment of `pid` names, if it names one.
-fn pane_of(pid: u32) -> Option<Named> {
-    let (mut session, mut pane) = (None, None);
-    for entry in process::environ(pid)? {
-        let entry = entry.as_bytes();
-        if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
-            session = Some(String::from_utf8_lossy(name).into_owned());
-        } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
-            pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
+/// What the environment of a process says of it.
+#[derive(Clone, Debug, Default)]
+struct Environment {
+    /// The pane it names, if it names one.
+    pane: Option<Named>,
+    /// The pull request of the review it says the agent runs, if any.
+    review: Option<Link>,
+}
+
+impl Environment {
+    /// What the environment of `pid` says.
+    fn of(pid: u32) -> Self {
+        let Some(entries) = process::environ(pid) else {
+            return Environment::default();
+        };
+        let (mut session, mut pane, mut review) = (None, None, None);
+        let review_var = format!("{}=", reviews::VAR);
+        for entry in entries {
+            let entry = entry.as_bytes();
+            if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
+                session = Some(String::from_utf8_lossy(name).into_owned());
+            } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
+                pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
+            } else if let Some(link) = entry.strip_prefix(review_var.as_bytes()) {
+                review = std::str::from_utf8(link).ok().and_then(reviews::of_variable);
+            }
         }
+        let session = session.filter(|session| !session.is_empty());
+        let pane = session.zip(pane).map(|(session, pane)| Named { session, pane });
+        Environment { pane, review }
     }
-    let session = session.filter(|session| !session.is_empty())?;
-    Some(Named { session, pane: pane? })
 }
