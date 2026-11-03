@@ -33,6 +33,7 @@
 //! one's are.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime};
@@ -682,7 +683,31 @@ enum Heads {
 /// The sessions of another machine's that luneta's zellij may go on in,
 /// newest first, one at least, as `Sidebar::refuges_away` lists them; or
 /// why it goes on in none of them.
-pub type Refuges = Result<Vec<SessionName>, String>;
+pub type Refuges = Result<Vec<SessionName>, NoRefuge>;
+
+/// Why luneta's zellij goes on in none of another machine's sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoRefuge {
+    /// lunetad listed none of them when it last said.
+    NoneListed,
+    /// Each of them may hold luneta's own terminal, as `may_hold` says.
+    Held,
+    /// The first ssh to it runs.
+    Reaching,
+    /// lunetad does not reach it, for what this says in a word.
+    Unreached(&'static str),
+}
+
+impl fmt::Display for NoRefuge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NoRefuge::NoneListed => f.write_str("lunetad lists none of its sessions"),
+            NoRefuge::Held => f.write_str("each of its sessions may hold luneta's own terminal"),
+            NoRefuge::Reaching => f.write_str("lunetad is reaching it"),
+            NoRefuge::Unreached(word) => write!(f, "lunetad does not reach it: {word}"),
+        }
+    }
+}
 
 /// Why a machine's header lists none of its sessions: lunetad has none of
 /// them to say.
@@ -1618,7 +1643,7 @@ impl Sidebar {
                 Ok(seen) => {
                     let (sessions, _) = oldest_first(seen.sessions);
                     if sessions.is_empty() {
-                        Err("lunetad lists none of its sessions".to_owned())
+                        Err(NoRefuge::NoneListed)
                     } else {
                         let sessions = sessions.into_iter().rev();
                         let newest: Vec<_> = sessions
@@ -1626,20 +1651,42 @@ impl Sidebar {
                             .map(|(listed, _)| listed.name)
                             .collect();
                         if newest.is_empty() {
-                            Err("each of its sessions may hold luneta's own terminal".to_owned())
+                            Err(NoRefuge::Held)
                         } else {
                             Ok(newest)
                         }
                     }
                 },
-                Err(Away::Reaching) => Err("lunetad is reaching it".to_owned()),
-                Err(Away::Unreached { word, .. }) => {
-                    Err(format!("lunetad does not reach it: {word}"))
-                },
+                Err(Away::Reaching) => Err(NoRefuge::Reaching),
+                Err(Away::Unreached { word, .. }) => Err(NoRefuge::Unreached(word)),
             };
             (destination, refuges)
         });
         refuges.collect()
+    }
+
+    /// The other machines that luneta has yet to hear enough of to choose
+    /// among their sessions, as `refuges_away` does: those lunetad has yet to
+    /// reach or give up on, and, where luneta's own terminal may be `within`
+    /// another machine's zellij, those with a session whose panes zellij
+    /// there has yet to list, which `may_hold` goes by. None until lunetad
+    /// has said anything.
+    pub fn unheard(&self, within: Within) -> Option<Vec<Destination>> {
+        let others = machines(self.host.as_ref()?).others.into_iter();
+        let unheard = others.filter(|(_, seen)| match seen {
+            Ok(seen) => {
+                let unlisted = |session: &Session| session.panes.is_none();
+                within != Within::Here && seen.sessions.iter().any(unlisted)
+            },
+            Err(Away::Reaching) => true,
+            Err(Away::Unreached { .. }) => false,
+        });
+        Some(unheard.map(|(destination, _)| destination).collect())
+    }
+
+    /// What you saw in each pane, as this luneta knows it.
+    pub fn news(&self) -> &News {
+        &self.news
     }
 
     /// The pane luneta's zellij is on, in the one session of the name it is
@@ -7833,21 +7880,40 @@ mod tests {
         host.remotes[3] = remote("pi", up(vec![session("pi", 10, vec![luneta])], Vec::new()));
         host.remotes.push(remote("far", Reached::Reaching(remote::Reaching {})));
         sidebar.heard(host);
-        let none = |why: &str| Err::<Vec<SessionName>, _>(why.to_owned());
-        let empty = || ("empty".parse().unwrap(), none("lunetad lists none of its sessions"));
-        let vps = ("me@vps".parse().unwrap(), none("lunetad does not reach it: unreachable"));
+        let none = Err::<Vec<SessionName>, _>;
+        let empty = || ("empty".parse().unwrap(), none(NoRefuge::NoneListed));
+        let vps = ("me@vps".parse().unwrap(), none(NoRefuge::Unreached("unreachable")));
         let pi = ("pi".parse().unwrap(), Ok(vec![session_name("pi")]));
-        let far = ("far".parse().unwrap(), none("lunetad is reaching it"));
+        let far = ("far".parse().unwrap(), none(NoRefuge::Reaching));
         let newest = ["new", "work", "main"].map(session_name).to_vec();
         let all = [empty(), (nixos(), Ok(newest)), vps.clone(), pi, far.clone()];
         assert_eq!(sidebar.refuges_away(&[], Within::Here), all);
         let tried = [nixos(), empty().0];
-        let held = none("each of its sessions may hold luneta's own terminal");
-        let held = ("pi".parse().unwrap(), held);
+        let held = ("pi".parse().unwrap(), none(NoRefuge::Held));
         let away = sidebar.refuges_away(&[empty().0], Within::MaybeAway);
         let main = (nixos(), Ok(vec![session_name("main")]));
         assert_eq!(away, [main, vps.clone(), held.clone(), far.clone()]);
         assert_eq!(sidebar.refuges_away(&tried, Within::MaybeAway), [vps, held, far]);
+    }
+
+    /// luneta has heard all it needs of a machine once lunetad has its
+    /// sessions, or has given up on it, and has yet to hear of one the first
+    /// ssh to runs. Where its terminal may be in another machine's zellij,
+    /// it has yet to hear of one too whose panes are unlisted, as they say
+    /// whether a session may hold it. It has heard nothing before lunetad
+    /// says anything.
+    #[test]
+    fn luneta_waits_for_machines_lunetad_is_reaching() {
+        let mut sidebar = fresh();
+        assert_eq!(sidebar.unheard(Within::Here), None);
+        let mut host = machines();
+        let unlisted = Session { panes: None, ..session("new", 40, Vec::new()) };
+        host.remotes.push(remote("far", up(vec![unlisted], Vec::new())));
+        sidebar.heard(host);
+        let (pi, far): (Destination, Destination) =
+            ("pi".parse().unwrap(), "far".parse().unwrap());
+        assert_eq!(sidebar.unheard(Within::Here), Some(vec![pi.clone()]));
+        assert_eq!(sidebar.unheard(Within::MaybeAway), Some(vec![pi, far]));
     }
 
     /// A delete on another machine's row that waits on your yes deletes

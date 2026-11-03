@@ -7,7 +7,9 @@
 //! luneta sees you only on the pane its own zellij is on, and only while its
 //! window has the focus: one you are not looking at sees nothing for you. It
 //! keeps what you saw in a `Ledger`, the same for every luneta of its daemon:
-//! up to when you saw each pane. What finished there by then, you saw.
+//! up to when you saw each pane. What finished there by then, you saw. Each
+//! time you are in a pane dates it, whatever finished there, which says the
+//! session you looked at last to a luneta that starts with none named.
 //!
 //! What finished is dated as the daemon says: by Claude Code, as an agent
 //! comes to `idle`, and by the shell's hook, as a command ends. Both date it
@@ -29,6 +31,7 @@
 //! those sockets do.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
@@ -103,6 +106,12 @@ impl News {
         self.unread.get(key).is_some()
     }
 
+    /// When you were last in a pane of the session whose socket `socket` was
+    /// made at `started`, if you were, in any luneta of its daemon.
+    pub fn last_seen(&self, started: SystemTime, socket: u64) -> Option<SystemTime> {
+        self.seen.latest(Session::new(started, NonZeroU64::new(socket)?)?)
+    }
+
     /// Marks the pane of `key` unread at `now`.
     pub fn mark_unread(&mut self, key: Key, now: SystemTime) {
         self.unread.set(key, Some(now));
@@ -147,7 +156,7 @@ impl News {
 
     /// You were in the pane of `key` from `since` until `now`, and what
     /// finished there last did at `finished`. Says whether that changed
-    /// anything.
+    /// anything. The pane is dated once a visit, with nothing new in it too.
     fn visit(
         &mut self,
         key: Key,
@@ -156,6 +165,10 @@ impl News {
         now: SystemTime,
     ) -> bool {
         let mut changed = self.saw(key, finished, now);
+        if self.seen.get(key).is_none_or(|seen| seen < since) {
+            self.seen.set(key, Some(now));
+            changed = true;
+        }
         if self.unread.get(key).is_some_and(|marked| marked < since) {
             self.unread.set(key, None);
             changed = true;
@@ -269,6 +282,36 @@ mod tests {
 
         let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
         assert!([1, 2].iter().all(|id| news.is_new(pane(*id), later(pane(*id)))));
+    }
+
+    /// The session you looked at last is the one you stayed on last, with
+    /// nothing new in it too: one you only passed through does not count, a
+    /// long stay is dated once, and coming back dates it again. What finishes
+    /// there after you last looked is still new.
+    #[test]
+    fn a_stay_dates_the_session_with_nothing_new_in_it() {
+        let last_seen = |news: &News, started| news.last_seen(at(started), NonZeroU64::MIN.get());
+        let other = |pane: u32| Key { session: session(20), pane };
+        let nothing = |_: Key| None;
+        let mut news = News::default();
+
+        // Through the session at 10, and on to the one at 20, to stay.
+        news.dwell(Some(pane(3)), nothing, at(200), steady(at(200)));
+        news.dwell(Some(other(3)), nothing, ms(200_500), steady(ms(200_500)));
+        assert!(news.dwell(Some(other(3)), nothing, ms(201_500), steady(ms(201_500))));
+        assert_eq!(last_seen(&news, 10), None);
+        assert_eq!(last_seen(&news, 20), Some(ms(201_500)));
+
+        // Dated once as it stays.
+        assert!(!news.dwell(Some(other(3)), nothing, at(900), steady(at(900))));
+        assert_eq!(last_seen(&news, 20), Some(ms(201_500)));
+
+        // Back to the one at 10, which is the last you looked at now, and
+        // what finishes in it from then on is new.
+        news.dwell(Some(pane(3)), nothing, at(1_000), steady(at(1_000)));
+        assert!(news.dwell(Some(pane(3)), nothing, at(1_001), steady(at(1_001))));
+        assert_eq!(last_seen(&news, 10), Some(at(1_001)));
+        assert!(news.is_new(pane(3), Some(at(1_002))));
     }
 
     /// A clock set forward is no time spent: a pane luneta's zellij passes

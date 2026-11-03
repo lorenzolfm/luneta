@@ -23,4 +23,6 @@ mod sessions;
 #[cfg(test)]
 mod shells;
 #[cfg(test)]
+mod starts;
+#[cfg(test)]
 mod worktree;

@@ -45,26 +45,40 @@ use crate::worktree::{cloned_as_wt, git};
 /// what the daemons say, or where it could ask for a password, which no one
 /// would answer: without `-T` and `BatchMode=yes`, it ends so too. It notes
 /// each time it is run to a destination, for `runs`, and the pid of each
-/// bridge it runs, for `bridges`.
-struct FakeSsh {
+/// bridge it runs, for `bridges`. Run with `-t`, as luneta runs a client of a
+/// session there, it runs nothing: it notes the command, for `clients`, and
+/// ends well, as a client that detached does, or as ssh does that failed,
+/// where a test had it `refuse` clients.
+pub struct FakeSsh {
     to: PathBuf,
 }
 
 impl FakeSsh {
     /// Writes the `ssh` in `bin`.
-    fn new(bin: &Path) -> Self {
+    pub fn new(bin: &Path) -> Self {
         let ssh = FakeSsh { to: bin.join("ssh-to") };
         fs::create_dir(&ssh.to).unwrap();
         let text = format!(
-            r#"quiet= batch=
+            r#"quiet= batch= client=
 while [ $# -gt 0 ]; do
     case "$1" in
         -T) quiet=yes; shift ;;
+        -t) client=yes; shift ;;
         -o) [ "$2" = BatchMode=yes ] && batch=yes; shift 2 ;;
         -*) echo "this ssh knows no $1" >&2; exit 255 ;;
         *) break ;;
     esac
 done
+if [ -n "$client" ] && [ -z "$quiet" ]; then
+    destination="$1"
+    shift
+    echo "$*" >> "{to}/$destination.clients"
+    if [ -f "{to}/$destination.refused" ]; then
+        echo "ssh: connect to host $destination port 22: Connection refused" >&2
+        exit 255
+    fi
+    exit 0
+fi
 if [ -z "$quiet" ] || [ -z "$batch" ]; then
     echo "this ssh runs nothing on a terminal, or where it could ask" >&2
     exit 255
@@ -90,7 +104,7 @@ exec "{to}/$destination"
     }
 
     /// Has ssh reach the host whose variables are `vars` as `destination`.
-    fn reaches(&self, destination: &str, vars: Vars) {
+    pub fn reaches(&self, destination: &str, vars: Vars) {
         let bridge = vars.command(LUNETA);
         let (mut unset, mut set) = (String::new(), String::new());
         for (name, value) in bridge.get_envs() {
@@ -102,6 +116,25 @@ exec "{to}/$destination"
         }
         let text = format!("exec env{unset}{set} {} bridge\n", quoted(LUNETA));
         script(&self.to.join(destination), &text);
+    }
+
+    /// Has ssh wait on `destination` for good, saying nothing, as it does on
+    /// a machine that is off.
+    pub fn waits_on(&self, destination: &str) {
+        script(&self.to.join(destination), "exec sleep 60\n");
+    }
+
+    /// Has a client of a session on `destination` fail from now on, as ssh
+    /// does that loses the machine.
+    pub fn refuses_clients(&self, destination: &str) {
+        fs::write(self.to.join(format!("{destination}.refused")), "").unwrap();
+    }
+
+    /// The command of each client of a session on `destination` that was
+    /// started, in the order they were.
+    pub fn clients(&self, destination: &str) -> Vec<String> {
+        let clients = fs::read_to_string(self.to.join(format!("{destination}.clients")));
+        clients.unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
     /// Has ssh reach `destination` no more, as one that cannot resolve it.
@@ -130,7 +163,7 @@ fn quoted(text: &str) -> String {
 
 /// Has `host`'s daemon watch the machines `text` names, as its hosts file,
 /// written whole before the daemon can read it.
-fn hosts(host: &Host, text: &str) {
+pub fn hosts(host: &Host, text: &str) {
     let dir = host.home.path().join(".local/state/luneta");
     fs::create_dir_all(&dir).unwrap();
     let writing = dir.join("hosts.writing");

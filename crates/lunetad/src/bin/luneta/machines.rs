@@ -63,6 +63,13 @@ pub fn forget(destination: &Destination) -> Result<bool, String> {
     forget_in(&file()?, destination)
 }
 
+/// The machines luneta's hosts file names now: none where it does not read,
+/// or there is none to look for, as lunetad watches none then either.
+pub fn named() -> Vec<Destination> {
+    let text = file().and_then(|file| read(&file));
+    text.map_or_else(|_| Vec::new(), |text| lunetad::hosts_named(&text, |_| {}).machines)
+}
+
 /// Where luneta's hosts file is.
 fn file() -> Result<std::path::PathBuf, String> {
     state::path(HOSTS_FILE).map_err(|unset| unset.to_string())

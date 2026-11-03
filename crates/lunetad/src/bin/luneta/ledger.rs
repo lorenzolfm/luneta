@@ -183,6 +183,12 @@ impl Ledger {
         self.moments.get(&key).copied()
     }
 
+    /// The last moment of any pane of `session`, if it has one.
+    pub fn latest(&self, session: Session) -> Option<SystemTime> {
+        let panes = Key { session, pane: u32::MIN }..=Key { session, pane: u32::MAX };
+        self.moments.range(panes).map(|(_, moment)| *moment).max()
+    }
+
     /// The sessions it keeps a moment of, and those its folder has only
     /// leftovers of.
     pub fn sessions(&self) -> impl Iterator<Item = Session> + '_ {
@@ -384,6 +390,21 @@ mod tests {
             ledger.set(key(10, 4), Some(at(1)));
             assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 4)), Some(at(1)));
         }
+    }
+
+    /// A session's last moment is the last of its panes', whichever pane
+    /// that is, and none of another session's, though it started at the same
+    /// moment.
+    #[test]
+    fn a_session_s_last_moment_is_the_last_of_its_panes() {
+        let mut ledger = Ledger::default();
+        let (session_of, twin) = (session(10, 1), session(10, 2));
+        assert_eq!(ledger.latest(session_of), None);
+        ledger.set(Key { session: session_of, pane: u32::MIN }, Some(at(7)));
+        ledger.set(Key { session: session_of, pane: 5 }, Some(at(9)));
+        ledger.set(Key { session: session_of, pane: u32::MAX }, Some(at(8)));
+        ledger.set(Key { session: twin, pane: 1 }, Some(at(20)));
+        assert_eq!(ledger.latest(session_of), Some(at(9)));
     }
 
     /// A session forgotten takes its panes' moments with it, for every

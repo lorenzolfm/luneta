@@ -25,7 +25,7 @@ use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
-use lunetad::{clients, moves, Destination};
+use lunetad::{clients, moves, Destination, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
@@ -288,6 +288,35 @@ pub fn within() -> Within {
     }
 }
 
+/// The session luneta's terminal is a pane of, as its environment says, by
+/// the name it had as the pane opened, which zellij's check goes by too.
+pub fn current() -> Option<String> {
+    env::var(SESSION_VAR).ok()
+}
+
+/// The sessions that run on this machine, as zellij's sockets say, once none
+/// is so new that its server may have yet to take its first client, which a
+/// call of zellij's CLI would kill, as `Before::Made` says. Another luneta can
+/// be making one as this one starts. None where not all of zellij's folder
+/// reads.
+pub fn settled() -> Option<Vec<(String, SocketId)>> {
+    let folder = lunetad::zellij_folder();
+    loop {
+        let running = lunetad::zellij_sockets(&folder)?;
+        let started = running.iter().map(|(_, id)| id.started());
+        match lunetad::newborn(started, SystemTime::now()) {
+            Some(left) => thread::sleep(left),
+            None => return Some(running),
+        }
+    }
+}
+
+/// The first of `sessions`, of this machine's, whose clients zellij lists, as
+/// `lunetad::moves::answering` tries them: a socket can outlive its server.
+pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
+    moves::answering(sessions, |session| clients(session.as_str()).ok())
+}
+
 /// This machine's newest session, as `lunetad::moves::newest` finds it,
 /// where luneta's zellij goes on once its client ended on another machine:
 /// never the session luneta's terminal is a pane of.
@@ -298,15 +327,17 @@ pub fn newest() -> Option<Refuge> {
     })
 }
 
-/// The first of `sessions` of `destination` whose clients its daemon
-/// lists, as `lunetad::moves::answering` tries them, where luneta's zellij
-/// goes on once the machine it was on has no session left; or why luneta
-/// does not reach the daemon it watches, to ask. None where none answers.
+/// The first of `sessions` of `destination` whose clients its daemon lists,
+/// each within `limit`, as `lunetad::moves::answering` tries them, where
+/// luneta's zellij goes on once the machine it was on has no session left; or
+/// why luneta does not reach the daemon it watches, to ask. None where none
+/// answers.
 pub fn answering_away(
     destination: &Destination,
     sessions: Vec<SessionName>,
+    limit: Duration,
 ) -> Result<Option<Refuge>, String> {
-    let mut away = Away::reach(destination, away::QUICK)?;
+    let mut away = Away::reach(destination, limit)?;
     Ok(moves::answering(sessions, |session| away.clients(session.as_str()).ok()))
 }
 

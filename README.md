@@ -354,13 +354,30 @@ is doing.
      elo/main                   │
 ```
 
-`luneta` attaches to the session named for the directory you are in, as the
-picker's [directories](#directories) name it, `luneta-main` in a worktree of
-`luneta`, and makes it if none runs; `luneta <name>` attaches to that one.
+`luneta` joins a session that runs, and makes one only where none runs
+anywhere. It starts in the first of these that exists:
+
+1. A session on this machine: the one named for the directory you are in, as
+   the picker's [directories](#directories) name it, `luneta-main` in a
+   worktree of `luneta`; or else the one you were in last, in any luneta; or
+   else the newest.
+2. A session on [another machine](#other-machines): the newest of the first by
+   the sidebar's headers that lunetad reaches. With no session here, luneta
+   waits to hear what runs on them, for 5 seconds at the most, and says so; a
+   machine it has not heard of by then counts as having none.
+3. The session named for the directory you are in, made. A session that ended
+   counts as none running, and comes back here if it has that name.
+
+`luneta <name>` attaches to that one, and makes it if none runs: naming a
+session is asking for it. Inside luneta, `n s` or the picker makes one.
+
 Run in a pane of zellij, luneta will not attach to the session that pane is
-in, as zellij will not: name another. When zellij detaches, luneta ends. When
-the session zellij is in ends, as zellij quits, its last pane exits, or it is
-killed, luneta attaches zellij to the newest session that runs, which the
+in, as zellij will not. Where sessions run but luneta will join none of them,
+it makes none: it says so and ends, for you to name one.
+
+When zellij detaches, luneta ends. When the session zellij is in ends, as
+zellij quits, its last pane exits, or it is killed, luneta attaches zellij to
+the newest session that runs, which the
 picker lists first, but never to the one luneta's own pane is in; where none
 is left, to the newest of [another machine's](#other-machines), the first by
 the sidebar's headers that lunetad reaches and last listed one of, and ends

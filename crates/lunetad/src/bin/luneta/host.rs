@@ -49,12 +49,15 @@ use lunetad::asks::User;
 use lunetad::log::{self, Process};
 use lunetad::Destination;
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
 use crate::alerts::{self, Alerts};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
+use crate::away;
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::close::Act;
 use crate::desktop::{self, Desktop};
@@ -78,6 +81,7 @@ use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
 use crate::skills::{self, Skill};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
+use crate::starts::{self, First, Start};
 use crate::width::Width;
 use crate::zellij::{
     self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused,
@@ -169,6 +173,13 @@ const WAITING_MAX: Duration = Duration::from_secs(2);
 /// zellij: what zellij draws as luneta draws brings no `Said::Drew` of its
 /// own.
 const WAITING_LOOK: Duration = Duration::from_millis(50);
+
+/// How long a luneta with no session to join here waits to hear what runs on
+/// the other machines, from when it starts to. A machine it has not heard of
+/// by then counts as having none: lunetad gives ssh `lunetad::REACH`, and a
+/// machine that is off would hold up each start for all of that, with nothing
+/// but this to see. One that is on takes a second or two.
+const HEARING: Duration = Duration::from_secs(5);
 
 /// What ssh ends with where it failed itself, and not the command it ran on
 /// the machine: as where it reached none, or lost its connection.
@@ -653,11 +664,12 @@ struct App {
     desktop: Desktop,
 }
 
-/// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
-/// its client detaches or fails, or its session ends and no other runs, on
-/// any machine lunetad reaches. Where another does, a client of the newest
-/// takes the place of the one that ended, of its machine's first. The sidebar
-/// is of what the daemon in `folder` says, which is started if none runs.
+/// Runs zellij beside the sidebar, attached to `session`, or to the session
+/// `starts` finds where none is named, until zellij ends: its client detaches
+/// or fails, or its session ends and no other runs, on any machine lunetad
+/// reaches. Where another does, a client of the newest takes the place of the
+/// one that ended, of its machine's first. The sidebar is of what the daemon
+/// in `folder` says, which is started if none runs.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -666,11 +678,22 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             return ExitCode::FAILURE;
         },
     };
-    let session = session.or_else(|| zellij::session_for(&dir));
-    if let Some(refusal) = session.as_ref().and_then(zellij::refusal) {
-        eprintln!("luneta: {refusal}");
-        return ExitCode::FAILURE;
-    }
+    // Kept beside the daemon, which lists the sessions it is kept of.
+    let news = match &folder {
+        Ok(runtime) => News::within(runtime),
+        Err(why) => News::unshared(why),
+    };
+    let start = match session {
+        Some(session) => starts::named(session),
+        None => starts::bare(zellij::session_for(&dir), &news),
+    };
+    let start = match start {
+        Ok(start) => start,
+        Err(refusal) => {
+            eprintln!("luneta: {refusal}");
+            return ExitCode::FAILURE;
+        },
+    };
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -726,7 +749,8 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         }
         run_in(
             &mut terminal,
-            session.as_ref(),
+            start,
+            news,
             folder,
             unkept,
             &dir,
@@ -777,14 +801,15 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
     )
 }
 
-/// Runs zellij beside the sidebar until it ends, and says what it said as it
-/// failed, if it did. zellij's terminal answers it with `colours`, until
-/// luneta's terminal says others, which says when a key is let go where
-/// `releases` says. `unkept` is why what goes wrong is kept in no log, where
-/// it is not.
+/// Runs zellij beside the sidebar until it ends, from where `start` says, and
+/// says what it said as it failed, if it did, or why luneta started no client.
+/// zellij's terminal answers it with `colours`, until luneta's terminal says
+/// others, which says when a key is let go where `releases` says. `unkept` is
+/// why what goes wrong is kept in no log, where it is not.
 fn run_in(
     terminal: &mut DefaultTerminal,
-    session: Option<&SessionName>,
+    start: Start,
+    news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
     dir: &Path,
@@ -794,13 +819,7 @@ fn run_in(
     inbox: &mut Inbox,
 ) -> io::Result<Option<String>> {
     let (width, width_unread) = Width::kept();
-    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let folds = Folds::shared();
-    // Kept beside the daemon, which lists the sessions it is kept of.
-    let news = match &folder {
-        Ok(runtime) => News::within(runtime),
-        Err(why) => News::unshared(why),
-    };
     let order = Order::shared();
     let folds_dirs = folds.dirs();
     let folds_watched =
@@ -830,22 +849,33 @@ fn run_in(
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
     }
-    let arrival = session.and_then(|session| {
-        let before = zellij::before(session.as_str());
-        let look = sidebar.sending(session)?;
-        Some(Arrival::new(Machine::Local, look, before, None))
-    });
-    let (program, args) = zellij::client(session);
-    let started = 1;
-    let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
-    let client = Client::new(hosted, Fails::End, arrival, None);
-    let daemon = match folder {
+    let mut daemon = match folder {
         Ok(folder) => Some(folder),
         Err(why) => {
             sidebar.lost(why);
             None
         },
     };
+    let first = match start {
+        Start::Now(first) => first,
+        Start::Hear { machines, named } => {
+            // No session runs here for a daemon that starts to trouble, as
+            // `App::ask` says.
+            if let Some(folder) = daemon.take() {
+                crate::watch::start(folder, events.clone());
+                hear(terminal, &mut sidebar, width.columns(), machines, inbox)?;
+            }
+            match starts::heard(named, &sidebar) {
+                Ok(first) => first,
+                Err(refusal) => return Ok(Some(format!("luneta: {refusal}"))),
+            }
+        },
+    };
+    let ((program, args), fails, arrival) = first_client(first, &mut sidebar);
+    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
+    let started = 1;
+    let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
+    let client = Client::new(hosted, fails, arrival, None);
     let desktop = Desktop::start(&events);
     let mut app = App {
         client,
@@ -889,6 +919,106 @@ fn run_in(
     }
     ran?;
     Ok(app.failure())
+}
+
+/// Draws the sidebar, and what luneta waits for where zellij will show, until
+/// lunetad has said what runs on each of `machines`, or does not answer, or
+/// `HEARING` has gone by. What else comes meanwhile, the keys among it, waits
+/// in `inbox` for the loop, with what the daemon said, in the order it came,
+/// so that the loop hears of it all as it hears of it from then on.
+fn hear(
+    terminal: &mut DefaultTerminal,
+    sidebar: &mut Sidebar,
+    columns: u16,
+    machines: Vec<Destination>,
+    inbox: &mut Inbox,
+) -> io::Result<()> {
+    let within = zellij::within();
+    let until = Instant::now() + HEARING;
+    let mut unheard = machines;
+    while !unheard.is_empty() {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        whole(terminal, |terminal| {
+            terminal.draw(|frame| {
+                let now = SystemTime::now();
+                let (beside, zellij) = areas(frame.area(), columns);
+                let buffer = frame.buffer_mut();
+                sidebar.draw(buffer, beside, now);
+                draw_hearing(buffer, zellij, &unheard, now);
+            })?;
+            Ok(())
+        })?;
+        match inbox.events.recv_timeout(left.min(sidebar::SPIN)) {
+            Ok(Event::InputEnded(error)) => return Err(error),
+            Ok(event) => {
+                match &event {
+                    // luneta's zellij has come to no session for it to look for.
+                    Event::Daemon(Ok(host)) => {
+                        let _ = sidebar.heard(host.clone());
+                        unheard = sidebar.unheard(within).unwrap_or(unheard);
+                    },
+                    Event::Daemon(Err(why)) => {
+                        sidebar.lost(why.clone());
+                        unheard.clear();
+                    },
+                    _ => {},
+                }
+                inbox.aside.push_back(event);
+            },
+            Err(RecvTimeoutError::Timeout) => {},
+            Err(RecvTimeoutError::Disconnected) => {
+                unreachable!("the caller holds a sender, for zellij's client")
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Says in `area`, where zellij will show, that luneta waits to hear what runs
+/// on `machines`, with the spinner at `now`.
+fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: SystemTime) {
+    let names: Vec<String> = machines.iter().map(ToString::to_string).collect();
+    let doing = format!("Waiting to hear what runs on {}…", names.join(", "));
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let lines = menu::waiting(&doing, usize::from(area.width), dim, sidebar::frame(now));
+    for (line, y) in lines.iter().zip(area.y + 1..area.bottom()) {
+        buffer.set_line(area.x, y, line, area.width);
+    }
+}
+
+/// The program of luneta's first client, and its arguments, where luneta's
+/// zellij goes where it fails, and the look for its arrival, if luneta looks
+/// for it: as `first` says, of which the sidebar hears.
+fn first_client(
+    first: First,
+    sidebar: &mut Sidebar,
+) -> ((String, Vec<String>), Fails, Option<Arrival>) {
+    match first {
+        First::Make(session) => {
+            let arrival = session.as_ref().and_then(|session| {
+                let before = zellij::before(session.as_str());
+                let look = sidebar.sending(session)?;
+                Some(Arrival::new(Machine::Local, look, before, None))
+            });
+            (zellij::client(session.as_ref()), Fails::End, arrival)
+        },
+        First::Here(Refuge { session, before }) => {
+            let look = sidebar.sending(&session);
+            let before = Before::Listed(before);
+            let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
+            (zellij::rejoin(session.as_str()), Fails::End, arrival)
+        },
+        First::Away(destination, Refuge { session, before }) => {
+            let program = zellij::attach_away(&destination, session.as_str());
+            let machine = Machine::Remote(destination);
+            let look = sidebar.swapping(&machine, &session);
+            let arrival = Arrival::new(machine, look, Before::Listed(before), None);
+            (program, Fails::Onward(Vec::new()), Some(arrival))
+        },
+    }
 }
 
 /// Draws a frame for each batch of events, until zellij ends with no client
@@ -2579,31 +2709,15 @@ impl App {
     /// ends where no machine has one, and where it does not reach lunetad to
     /// ask; the log says why it passed each machine over.
     fn newest_away(&mut self, tried: &[Destination]) -> io::Result<()> {
-        for (destination, refuges) in self.sidebar.refuges_away(tried, zellij::within()) {
-            let sessions = match refuges {
-                Ok(sessions) => sessions,
-                Err(why) => {
-                    log::say(&format!("{destination}: no session to go on in: {why}"));
-                    continue;
-                },
-            };
-            match zellij::answering_away(&destination, sessions) {
-                Ok(Some(Refuge { session, before })) => {
-                    let (machine, joins) = (Machine::Remote(destination), Joins::Attach(&session));
-                    let fails = Fails::Onward(tried.to_vec());
-                    return self.restart(&machine, joins, Before::Listed(before), fails, None);
-                },
-                Ok(None) => {
-                    log::say(&format!("{destination}: no session to go on in answers"));
-                },
-                Err(why) => {
-                    log::say(&format!("no session of another machine's to go on in: {why}"));
-                    break;
-                },
-            }
-        }
-        self.ended = true;
-        Ok(())
+        let Some((destination, Refuge { session, before })) =
+            starts::away(&self.sidebar, tried, away::QUICK).found
+        else {
+            self.ended = true;
+            return Ok(());
+        };
+        let (machine, joins) = (Machine::Remote(destination), Joins::Attach(&session));
+        let fails = Fails::Onward(tried.to_vec());
+        self.restart(&machine, joins, Before::Listed(before), fails, None)
     }
 
     /// Takes in what luneta's terminal answered, or said of itself unasked.

@@ -122,7 +122,9 @@ pub fn script(path: &Path, text: &str) {
 /// each session it keeps how it was laid out of in the home, and that has no
 /// socket, as one that ended, which a test had it `keep`, made an hour, two
 /// minutes and three seconds before. It notes each rename it is asked for,
-/// for `renamed`, and renames nothing. It knows no other command.
+/// for `renamed`, and renames nothing. It notes each client that is started,
+/// with `attach`, for `attached`, which ends at once as one that detached
+/// does. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -212,6 +214,10 @@ case "$*" in
         echo "$asked" >> "{panes}/renamed"
         exit 0
         ;;
+    "attach "*)
+        echo "$asked" >> "{panes}/attached"
+        exit 0
+        ;;
     "delete-session "*)
         if [ -S "$socket" ]; then
             echo "A session by the name \"$session\" exists and is active, use --force to delete it."
@@ -293,6 +299,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// were, in the order it was asked.
     pub fn went(&self) -> Vec<String> {
         self.lines("went")
+    }
+
+    /// Each client of zellij's that was started, as its arguments were, in
+    /// the order they were.
+    pub fn attached(&self) -> Vec<String> {
+        self.lines("attached")
     }
 
     /// Each pane and tab zellij was asked to open, in the order it was
