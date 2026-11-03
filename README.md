@@ -386,22 +386,24 @@ mode and `Ctrl q` to quit. luneta takes all eight first: if you use those,
 bind them to other keys, in zellij's config or in Claude Code's
 `~/.claude/keybindings.json`.
 
-The picker floats over zellij's side. Its sessions are the one zellij is in,
-then the others that run, newest first, and under them those zellij keeps to
-bring back; its agents are as the
-[agents](#agents) tab lists them, and its directories as the
-[directories](#directories) tab does, of every machine: each machine's under a
-rule of its own, this one's first, as each machine's zoxide and eza list them.
-`Tab` goes from one list to the next, what you type narrows all three, and the
-preview beside the list shows the screen of the highlighted agent's pane, or
-of the pane you would come to in the highlighted session, or what is in the
-highlighted directory. `Enter` takes zellij there, brings back a session that
-ended, makes the session you typed the name of, or makes one in the
-highlighted directory, named for it, on its machine. `Del` deletes the
-highlighted session, lets go of one that ended, or closes the agent's pane, and
-asks first, as the menu's delete does, while an agent at work would end: `y`
-goes ahead. `Ctrl r`
-renames the highlighted session. `Esc`, or a click off the box, closes it. A
+The picker floats over zellij's side. It lists the sessions, the agents and
+the directories of every machine, each machine's under a rule of its own, this
+one's first. Its sessions are the one zellij is in, then the others that run,
+newest first, and under this machine's those zellij keeps to bring back; its
+agents are as the [agents](#agents) tab lists them, and its directories as the
+[directories](#directories) tab does, as each machine's zoxide and eza list
+them. `Tab` goes from one list to the next, what you type narrows all three,
+and the preview beside the list shows the screen of the highlighted agent's
+pane, or of the pane you would come to in the highlighted session, as zellij
+on its machine dumps it, or what is in the highlighted directory. `Enter`
+takes zellij there, on its machine, brings back a session that ended, makes
+the session you typed the name of, or makes one in the highlighted directory,
+named for it, on its machine. `Del` deletes the highlighted session, lets go of
+one that ended, or closes the agent's pane, and asks first, as the menu's
+delete does, while an agent at work would end: `y` goes ahead. `Ctrl r`
+renames the highlighted session. Both are this machine's alone, for now: on
+another machine's row, the menu's `d s` and `d d` delete there. `Esc`, or a
+click off the box, closes it. A
 click on a row does what `Enter` does on it, the wheel moves the highlight,
 and a click on a key the line under the search names presses it, as `<TAB>`.
 
@@ -828,8 +830,10 @@ the `PATH` it started with, as for the ask box; a session it makes for the link
 is made there, holding the `#123` tab alone, as here. `Ctrl d` on its header
 opens the picker on the directories with the highlight on that machine's,
 which lunetad there lists as its zoxide knows them, and its eza; `Enter` on one
-makes the session there, named as that machine names one. Moving its sessions
-comes later. `u` marks
+makes the session there, named as that machine names one. The picker lists its
+sessions and agents too, under its rule, each previewed as zellij there dumps
+its screen, and `Enter` on one goes there. Moving its sessions comes later.
+`u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.

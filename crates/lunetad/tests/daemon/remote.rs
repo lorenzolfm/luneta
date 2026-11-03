@@ -18,10 +18,10 @@ use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
-    self, AskRequest, Client, CloseRequest, ClosesRequest, GoRequest, KeepPrintedRequest,
-    KillRequest, ListClientsRequest, ListContentsRequest, ListDirsRequest, ListSkillsRequest,
-    NameSessionRequest, On, OpenRequest, RefugeRequest, StartRequest, TranscriptEndsRequest,
-    WatchRequest,
+    self, AskRequest, Client, CloseRequest, ClosesRequest, DumpScreenRequest, GoRequest,
+    KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest, ListDirsRequest,
+    ListSkillsRequest, NameSessionRequest, On, OpenRequest, RefugeRequest, StartRequest,
+    TranscriptEndsRequest, WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::links::{self, At, Link, Pasted, Ready};
@@ -490,16 +490,17 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
 /// daemon, through the bridge it watches it on, which asks zellij there, or
 /// looks there: where to take a client, a session's clients, where a client
 /// goes on once its session ended, a pane or a tab to open, the skills of a
-/// directory, what a pane's shell printed, which it keeps there, and the
-/// name a session for a directory takes there, and to start it, and what
-/// closing a pane closes there, to close it, and a session to kill, and the
-/// ends of transcripts in Claude Code's folder there. Without a machine, it
-/// asks its own; of one it does not reach, it says so. A question that names
-/// a directory by no absolute path, an empty line typed, a tab by an empty
-/// name, a tab to close of no terminal, or a transcript by no session's id,
-/// or more of the transcripts than a brief keeps, or none of them, is
-/// invalid here; no tab opens there in a session no client is in, and
-/// nothing closes there that zellij lists otherwise than the close says.
+/// directory, what a pane's shell printed, which it keeps there, what a
+/// terminal shows there, and the name a session for a directory takes
+/// there, and to start it, and what closing a pane closes there, to close
+/// it, and a session to kill, and the ends of transcripts in Claude Code's
+/// folder there. Without a machine, it asks its own; of one it does not
+/// reach, it says so. A question that names a directory by no absolute path,
+/// an empty line typed, a screen of no session, a tab by an empty name, a
+/// tab to close of no terminal, or a transcript by no session's id, or more
+/// of the transcripts than a brief keeps, or none of them, is invalid here;
+/// no tab opens there in a session no client is in, and nothing closes
+/// there that zellij lists otherwise than the close says.
 #[test]
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
@@ -629,6 +630,18 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let (session, typed) = ("work".to_owned(), String::new());
         let untyped = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
         invalid(daemon.keep_printed(untyped).await.unwrap_err());
+
+        // A screen there is dumped there: of the terminal asked, or else of
+        // the one a client coming to the session would be on, as zellij there
+        // lists its panes.
+        let dump = |pane| DumpScreenRequest { on: on("far"), session: "work".to_owned(), pane };
+        let asked = daemon.dump_screen(dump(Some(2))).await.unwrap().into_inner();
+        let shown = daemon.dump_screen(dump(None)).await.unwrap().into_inner();
+        let screen = "~> cargo test\nerror[E0308]\n~>\n";
+        assert_eq!((asked.pane, asked.screen.as_str()), (2, screen));
+        assert_eq!((shown.pane, shown.screen.as_str()), (4, screen));
+        let nameless = DumpScreenRequest { session: String::new(), ..dump(None) };
+        invalid(daemon.dump_screen(nameless).await.unwrap_err());
 
         // A directory named for a session that runs there takes the name after.
         let work = dir.path().join("work");

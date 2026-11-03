@@ -32,6 +32,7 @@ mod process;
 pub mod program;
 pub mod release;
 mod remote;
+pub mod screens;
 mod shells;
 pub mod skills;
 pub mod state;

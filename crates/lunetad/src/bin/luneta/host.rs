@@ -1665,8 +1665,8 @@ impl App {
         match picked {
             Picked::Nothing => {},
             Picked::Close => self.give(Focus::on(self.focus.side)),
-            Picked::Go(place) => {
-                self.go(&Machine::Local, &place, None);
+            Picked::Go { on, place } => {
+                self.go(&on, &place, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Start(session) => {

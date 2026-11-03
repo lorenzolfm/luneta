@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
-    GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse,
-    KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest,
-    ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
-    ListDirsResponse, ListSkillsRequest, ListSkillsResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
-    Version, WatchRequest,
+    DumpScreenRequest, DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse,
+    KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest,
+    ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
+    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest,
+    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
+    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -599,6 +599,13 @@ impl Daemon for StandIn {
         _: Request<ListContentsRequest>,
     ) -> Result<Response<ListContentsResponse>, Status> {
         Err(Status::unimplemented("a stand-in lists nothing"))
+    }
+
+    async fn dump_screen(
+        &self,
+        _: Request<DumpScreenRequest>,
+    ) -> Result<Response<DumpScreenResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has no screen"))
     }
 
     async fn start(&self, _: Request<StartRequest>) -> Result<Response<StartResponse>, Status> {

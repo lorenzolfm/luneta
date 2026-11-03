@@ -74,7 +74,7 @@ use crate::menu::{
 use crate::news::News;
 use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
-use crate::picker::{Listing, Live, Seated, Shown};
+use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
 use crate::pull::{Link, Ready, Worked};
 use crate::skills::{Name, Skill};
@@ -1422,12 +1422,6 @@ impl Sidebar {
             .or_else(|| Some(title.split_once(" | ").map_or(title, |(session, _)| session)))
     }
 
-    /// The session luneta's zellij is in, as `here` says, while that is one
-    /// of this machine's.
-    fn here_local(&self) -> Option<&str> {
-        self.here().filter(|_| self.on == Machine::Local)
-    }
-
     /// Where you are, for the ask box's agent on `machine` to go by: on
     /// another machine while luneta's zellij is; or else on the pane
     /// luneta's zellij is on, by its session's name now, while it is on its
@@ -1488,29 +1482,46 @@ impl Sidebar {
         }
     }
 
-    /// What the picker lists, as the sidebar knows the host now: every
-    /// session newest first, each with its panes in the order of their tabs,
-    /// and the agents in them, those of the session luneta's zellij is in
-    /// first, then those of the others newest first, each session's in the
-    /// order their panes opened.
+    /// What the picker lists, as the sidebar knows each machine now: where
+    /// luneta's zellij is, and what runs on this machine and on each other
+    /// that lunetad reaches, as `runs` lists it.
     pub fn listing(&self) -> Listing {
-        let here = self.here_local().map(str::to_owned);
-        let mut listing = Listing {
-            here_pane: self.here_place().ok().filter(|_| self.on == Machine::Local),
-            away: self.away.clone(),
-            this: self.this.clone(),
-            ..Listing::default()
-        };
-        let Some(host) = &self.host else {
-            listing.here = here;
-            return listing;
-        };
-        let others = machines(host).others.into_iter();
-        listing.remotes = others.filter(|(_, seen)| seen.is_ok()).map(|(at, _)| at).collect();
-        let seated = seated(&host.agents, &host.sessions);
-        let here_key =
-            listing.here_pane.as_ref().and_then(|place| Some(place.listed().key(place.pane()?)));
-        let (sessions, _) = oldest_first(&host.sessions);
+        let here = self.here().map(|session| Here {
+            on: self.on.clone(),
+            session: session.to_owned(),
+            pane: self.here_place().ok(),
+        });
+        let (away, this) = (self.away.clone(), self.this.clone());
+        let mut listing = Listing { away, this, ..Listing::default() };
+        if let Some(host) = &self.host {
+            for (machine, seen) in machines(host).each() {
+                let Ok(seen) = seen else {
+                    continue;
+                };
+                let runs = self.runs(&machine, &seen, here.as_ref());
+                match machine {
+                    Machine::Local => listing.local = runs,
+                    Machine::Remote(destination) => listing.remotes.push((destination, runs)),
+                }
+            }
+        }
+        listing.here = here;
+        listing
+    }
+
+    /// What runs on `machine`, as its daemon says in `seen`, for the picker:
+    /// every session newest first, each with its panes in the order of their
+    /// tabs, and the agents in them, those of the session luneta's zellij is
+    /// in first, where `here` says it is in one of these, then those of the
+    /// others newest first, each session's in the order their panes opened.
+    fn runs(&self, machine: &Machine, seen: &Seen<'_>, here: Option<&Here>) -> Runs {
+        let here = here.filter(|here| here.on == *machine);
+        let here_key = here
+            .and_then(|here| here.pane.as_ref())
+            .and_then(|place| Some(place.listed().key(place.pane()?)));
+        let seated = seated(seen.agents, seen.sessions);
+        let mut runs = Runs::default();
+        let (sessions, _) = oldest_first(seen.sessions);
         for (listed, session) in sessions.into_iter().rev() {
             let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
             panes.sort_by_key(|pane| pane.id);
@@ -1522,7 +1533,7 @@ impl Sidebar {
                 let key = listed.key(pane.id);
                 let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
                 waiting += usize::from(marked.mark == Mark::Waiting);
-                listing.agents.push(Seated {
+                runs.agents.push(Seated {
                     place: Place::Pane { session: listed.clone(), pane: pane.id },
                     label: label(Some(agent), pane),
                     mark: marked.mark,
@@ -1538,19 +1549,19 @@ impl Sidebar {
                 label: label(seated.get(&(session.name.as_str(), pane.id)).copied(), pane),
             };
             let mut clients = session.clients.iter().flat_map(|clients| &clients.clients);
-            listing.sessions.push(Live {
+            runs.sessions.push(Live {
                 started: listed.kept.started(),
                 panes: panes.iter().map(shown).collect(),
-                on: clients.find_map(|client| client.pane),
+                focus: clients.find_map(|client| client.pane),
                 waiting,
                 place: Place::Session(listed),
             });
         }
         // Those of the session luneta's zellij is in first, and the rest as
         // they are.
-        listing.agents.sort_by_key(|seated| here.as_deref() != Some(seated.place.session()));
-        listing.here = here;
-        listing
+        let here = here.map(|here| here.session.as_str());
+        runs.agents.sort_by_key(|seated| here != Some(seated.place.session()));
+        runs
     }
 
     /// Says what went wrong, in the notes until the next key, and in the log.
@@ -5557,7 +5568,7 @@ mod tests {
             vec![session("s", 10, vec![pane(1, 0, "/home/me/src/luneta/pr-12", "claude"), unsaid])],
             vec![agent("s", 1, Status::Idle, None), agent("s", 2, Status::Idle, None)],
         ));
-        let agents = sidebar.listing().agents;
+        let agents = sidebar.listing().local.agents;
         let dirs: Vec<&str> = agents.iter().map(|seated| seated.dir.as_str()).collect();
         assert_eq!(dirs, ["luneta/pr-12", "luneta/main"]);
     }
@@ -5603,7 +5614,7 @@ mod tests {
             ]
         );
         assert!(!dimmed(&mut sidebar, 3, 5, moment(160_000)));
-        assert_eq!(sidebar.listing().agents[0].mark, Mark::Finished);
+        assert_eq!(sidebar.listing().local.agents[0].mark, Mark::Finished);
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         assert!(lines(&mut sidebar, moment(160_000))[4].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
@@ -5628,7 +5639,7 @@ mod tests {
             ]
         );
         assert!(dimmed(&mut sidebar, 3, 5, moment(162_000)));
-        assert_eq!(sidebar.listing().agents[0].mark, Mark::Idle);
+        assert_eq!(sidebar.listing().local.agents[0].mark, Mark::Idle);
 
         sidebar.went(&s(2));
         lines(&mut sidebar, moment(163_000));
@@ -7552,10 +7563,10 @@ mod tests {
     /// takes the place of its own, is in that machine's session, though this
     /// one has one of its name: the pane it is on there has the mark, and
     /// `Alt Tab` goes among that machine's panes, never to this one's. The
-    /// menu over zellij is for that pane, of that machine; the picker and the
-    /// ask box are this machine's, and know of no pane luneta's zellij is on.
-    /// A tab of this machine's opens once luneta's zellij is in its session,
-    /// as one of another session's of the same machine does.
+    /// menu over zellij is for that pane, of that machine, and the picker has
+    /// luneta's zellij there too, on that pane. A tab of this machine's opens
+    /// once luneta's zellij is in its session, as one of another session's of
+    /// the same machine does.
     #[test]
     fn luneta_s_zellij_on_another_machine_is_in_that_machine_s_session() {
         let mut sidebar = fresh();
@@ -7588,8 +7599,8 @@ mod tests {
             panic!("the menu is for {floating:?}");
         };
         assert_eq!(on, Machine::Remote(nixos()));
-        let listing = sidebar.listing();
-        assert_eq!((listing.here, listing.here_pane), (None, None));
+        let (on, session, pane) = (Machine::Remote(nixos()), "main".to_owned(), Some(there(2)));
+        assert_eq!(sidebar.listing().here, Some(Here { on, session, pane }));
 
         sidebar.focus(Keys::Sidebar);
         let here = Place::Pane { session: listed("main", 10), pane: 1 };
@@ -7603,14 +7614,24 @@ mod tests {
     }
 
     /// The picker lists the machines lunetad reaches, by this one's name,
-    /// and none it is reaching or does not reach. The highlight on a
-    /// machine's header is on that machine, and on a row of it, on none.
+    /// each with its sessions and their agents, and none it is reaching or
+    /// does not reach. The highlight on a machine's header is on that
+    /// machine, and on a row of it, on none.
     #[test]
     fn the_picker_lists_the_machines_lunetad_reaches() {
         let mut sidebar = fresh();
         sidebar.heard(machines());
         let listing = sidebar.listing();
-        assert_eq!((listing.this.as_str(), listing.remotes), ("mac", vec![nixos()]));
+        let names = |runs: &Runs| {
+            let sessions = runs.sessions.iter().map(|live| live.place.session().to_owned());
+            let agents = runs.agents.iter().map(|seated| seated.label.clone());
+            (sessions.collect::<Vec<_>>(), agents.collect::<Vec<_>>())
+        };
+        let here = (vec!["main".to_owned()], Vec::new());
+        assert_eq!((listing.this.as_str(), names(&listing.local)), ("mac", here));
+        let remotes: Vec<_> = listing.remotes.iter().map(|(at, runs)| (at, names(runs))).collect();
+        let there = (vec!["main".to_owned()], vec!["fix".to_owned()]);
+        assert_eq!(remotes, [(&nixos(), there)]);
         sidebar.cursor = Some(Spot::Machine(Machine::Remote(nixos())));
         assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));

@@ -56,7 +56,7 @@ const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 /// A name zellij can make a session of, or made one of, on any machine.
 /// `parse` and `running` are the ways to make one, so a name that reaches
 /// zellij as one has been held to what zellij takes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionName(String);
 
 impl SessionName {
