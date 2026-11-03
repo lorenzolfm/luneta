@@ -182,12 +182,12 @@ mod freedesktop {
     /// then.
     pub async fn serve(orders: UnboundedReceiver<Order>, events: &Sender<Event>) {
         let mut said = false;
-        let (proxy, clicks, closes) = match connect().await {
+        let (proxy, signals) = match connect().await {
             Ok(connected) => connected,
             Err(error) => return say(events, &mut said, &error.to_string()),
         };
         let orders = UnboundedReceiverStream::new(orders).map(Heard::Order);
-        let mut heard = orders.chain(stream::once(Heard::Ended)).merge(clicks).merge(closes);
+        let mut heard = orders.chain(stream::once(Heard::Ended)).merge(signals);
         let (mut up, mut held) = (HashMap::<Key, u32>::new(), None);
         while let Some(heard) = heard.next().await {
             match heard {
@@ -230,19 +230,27 @@ mod freedesktop {
 
     type Signals = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Heard> + Send>>;
 
-    /// The server, and what it says of clicks and of what it closed.
-    async fn connect() -> zbus::Result<(Proxy<'static>, Signals, Signals)> {
+    /// The server, and what it says of clicks and of what it closed, in the
+    /// order it says them: one stream, as a click is said before the close
+    /// it makes, and would find nothing to go to after it.
+    async fn connect() -> zbus::Result<(Proxy<'static>, Signals)> {
         let connection = Connection::session().await?;
         let proxy = Proxy::new(&connection, SERVER, PATH, SERVER).await?;
-        let clicks = proxy.receive_signal("ActionInvoked").await?.filter_map(|signal| {
-            let (id, action) = signal.body().deserialize::<(u32, String)>().ok()?;
-            Some(Heard::Clicked(id, action))
+        let signals = proxy.receive_all_signals().await?.filter_map(|signal| {
+            let body = signal.body();
+            match signal.header().member()?.as_str() {
+                "ActionInvoked" => {
+                    let (id, action) = body.deserialize::<(u32, String)>().ok()?;
+                    Some(Heard::Clicked(id, action))
+                },
+                "NotificationClosed" => {
+                    let (id, _why) = body.deserialize::<(u32, u32)>().ok()?;
+                    Some(Heard::Closed(id))
+                },
+                _ => None,
+            }
         });
-        let closes = proxy.receive_signal("NotificationClosed").await?.filter_map(|signal| {
-            let (id, _why) = signal.body().deserialize::<(u32, u32)>().ok()?;
-            Some(Heard::Closed(id))
-        });
-        Ok((proxy, Box::pin(clicks), Box::pin(closes)))
+        Ok((proxy, Box::pin(signals)))
     }
 
     /// Puts `alert` up in the place of the notification `replaces`, if it is

@@ -39,6 +39,8 @@ picker over it with sessions, agents and directories tabs.
   agent you're talking to, or [luneta's sidebar](#from-lunetas-sidebar)
 * [Dictate](#dictate) to an agent, or to the ask box, by a speech model that
   runs on your machine: hold `Alt r` and talk
+* Get a [notification](#notifications) when an agent on any of your machines
+  wants you, gone as soon as it no longer does
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -1052,6 +1054,39 @@ luneta records on the machine it runs on, the one you sit at, whichever machine
 the agent you talk to runs on: Claude Code's own `/voice` records on the
 machine Claude Code runs on, which over ssh has no microphone of yours.
 
+### Notifications
+
+luneta tells your desktop when an agent wants you, on this machine or on
+[another](#other-machines): one that waits on you, once it has waited 6
+seconds, as long as Claude Code waits before it tells its hooks, and one done
+with its turn, at once. Each says what the agent wants, from the end of its
+transcript:
+
+| it reads | when the agent |
+|---|---|
+| `needs permission`, and the tool, as `Bash: Run the tests` | asks to run a tool |
+| `has a plan for you` | asks you to take its plan |
+| `asked you something`, and the question | asks you a question |
+| `needs you` | waits on anything else, but a dialog of Claude Code's you opened |
+| `done`, and what it said last | finished its turn |
+
+A notification goes as soon as the agent no longer wants it, so that one auto
+mode answered on its own, or one you answered in the pane, is not left up. None
+comes of the pane you look at, while luneta's window has the focus and its
+zellij is on that pane, and one up goes once you look there. A click on one
+takes luneta's zellij to the agent's pane, as `Enter` on its row does, and
+brings luneta's window forward: through Hyprland on Linux, and on macOS by the
+Notification Center, which brings Ghostty forward.
+
+They go up on freedesktop's notification server on Linux, as swaync, dunst or
+mako, with Claude's mark where `~/.local/share/icons/notifications/claude.png`
+is one, and the freedesktop sounds through `pw-play`; on macOS through
+[`terminal-notifier`](https://github.com/julienXX/terminal-notifier). One
+luneta of a machine puts them up: another's would be the same. A luneta that
+runs over ssh puts none up, as the desktop of the machine it runs on is not the
+one you sit at, nor does any while no luneta runs. luneta takes down what it
+put up as it ends, its window closed too.
+
 ## Getting started
 
 ### Requirements
@@ -1069,6 +1104,7 @@ machine Claude Code runs on, which over ssh has no microphone of yours.
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
 | a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
+| a freedesktop notification server on Linux, [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) on macOS | optional | [notifications](#notifications) |
 
 The sessions need nothing but zellij. The optional tools are looked up by
 name on the `PATH` luneta starts with, which the daemon it starts has too, but

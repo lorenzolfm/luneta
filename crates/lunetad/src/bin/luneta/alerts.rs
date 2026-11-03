@@ -636,20 +636,27 @@ mod tests {
         let now = Instant::now();
         let busy = |pane| seated(pane, Mark::Busy, None, 1);
         alerts.heard(&listing(vec![busy(1), busy(2)]), now);
-        let waits = |pane| seated(pane, Mark::Waiting, Some("input needed"), 2);
-        alerts.heard(&listing(vec![waits(1), waits(2)]), now);
-        let on_one = Here::Pane { on: Machine::Local, place: place(1) };
-        assert_eq!(alerts.looked(Some(&on_one), false), []);
+        let waits = |pane, since| seated(pane, Mark::Waiting, Some("input needed"), since);
+        alerts.heard(&listing(vec![waits(1, 2), waits(2, 2)]), now);
+        let on = |pane| Here::Pane { on: Machine::Local, place: place(pane) };
+        assert_eq!(alerts.looked(Some(&on(1)), false), []);
         let elsewhere = Here::Pane { on: Machine::Remote(nixos()), place: place(2) };
         assert_eq!(alerts.looked(Some(&elsewhere), true), []);
-        assert_eq!(alerts.looked(Some(&on_one), true), []);
         let acts = alerts.ticked(now + HELD);
-        assert_eq!(reads(&acts), [(2, Want::Wait(Some("input needed".to_owned())))]);
-        let Act::Read(due) = &acts[0] else { unreachable!() };
-        assert!(alerts.read(due.number));
-        let on_two = Here::Pane { on: Machine::Local, place: place(2) };
-        assert_eq!(closes(&alerts.looked(Some(&on_two), true)), [key(2)]);
-        assert_eq!(alerts.looked(Some(&on_two), true), [], "it went once");
+        let mut read = reads(&acts);
+        read.sort_by_key(|(pane, _)| *pane);
+        assert_eq!(read.iter().map(|(pane, _)| *pane).collect::<Vec<_>>(), [1, 2]);
+        for act in &acts {
+            let Act::Read(due) = act else { unreachable!() };
+            assert!(alerts.read(due.number));
+        }
+        assert_eq!(closes(&alerts.looked(Some(&on(2)), true)), [key(2)]);
+        assert_eq!(alerts.looked(Some(&on(2)), true), [], "it went once");
+
+        let later = now + HELD * 2;
+        alerts.heard(&listing(vec![waits(1, 3), waits(2, 2)]), later);
+        assert_eq!(closes(&alerts.looked(Some(&on(1)), true)), [], "a new wait is held");
+        assert_eq!(alerts.ticked(later + HELD), [], "one seen as it was held");
     }
 
     /// An agent that ends takes its notification with it; one of a machine
