@@ -1071,12 +1071,14 @@ transcript:
 | `done`, and what it said last | finished its turn |
 
 A notification goes as soon as the agent no longer wants it, so that one auto
-mode answered on its own, or one you answered in the pane, is not left up. None
-comes of the pane you look at, while luneta's window has the focus and its
-zellij is on that pane, and one up goes once you look there. A click on one
-takes luneta's zellij to the agent's pane, as `Enter` on its row does, and
-brings luneta's window forward: through Hyprland on Linux, and on macOS by the
-Notification Center, which brings Ghostty forward.
+mode answered on its own, or one you answered in the pane, is not left up, nor
+one of a machine you forget. What an agent did before luneta could see it, as a
+wait it began before luneta started, says nothing. None comes of the pane you
+look at, while luneta's window has the focus and its zellij is on that pane,
+and one up goes once you look there. A click on one takes luneta's zellij to
+the agent's pane, as `Enter` on its row does, and brings luneta's window
+forward: through Hyprland on Linux, and on macOS by the Notification Center,
+which brings Ghostty forward.
 
 They go up on freedesktop's notification server on Linux, as swaync, dunst or
 mako, with Claude's mark where `~/.local/share/icons/notifications/claude.png`

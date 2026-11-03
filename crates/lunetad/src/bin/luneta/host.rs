@@ -984,8 +984,10 @@ impl App {
             Event::Daemon(Ok(host)) => {
                 let look = self.sidebar.heard(host);
                 self.arrived(look);
-                let acts = self.alerts.heard(&self.sidebar.listing(), Instant::now());
-                self.alert(acts);
+                if let Some(machines) = self.sidebar.reaches() {
+                    let acts = self.alerts.heard(machines, Instant::now());
+                    self.alert(acts);
+                }
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => {
@@ -1006,7 +1008,7 @@ impl App {
             Event::Notice(notice) => self.sidebar.notify(notice),
             Event::Folds => self.sidebar.refold(),
             Event::Alerted(read) => {
-                if self.alerts.read(read.number) {
+                if self.alerts.read(&read) {
                     self.desktop.post(read.alert);
                 }
             },

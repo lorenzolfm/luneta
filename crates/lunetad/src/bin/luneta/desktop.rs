@@ -35,8 +35,9 @@ enum Order {
 /// turn: a notification taken down after it was put up goes, however long
 /// putting it up took.
 pub struct Desktop {
-    orders: Option<UnboundedSender<Order>>,
-    worker: Option<JoinHandle<()>>,
+    /// What takes the orders to the thread, and the thread: none where
+    /// luneta runs over ssh, nor once it ends.
+    serving: Option<(UnboundedSender<Order>, JoinHandle<()>)>,
 }
 
 impl Desktop {
@@ -47,12 +48,12 @@ impl Desktop {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         });
         if elsewhere {
-            return Desktop { orders: None, worker: None };
+            return Desktop { serving: None };
         }
         let (orders, taken) = channel::unbounded_channel();
         let events = events.clone();
         let worker = thread::spawn(move || serve(taken, &events));
-        Desktop { orders: Some(orders), worker: Some(worker) }
+        Desktop { serving: Some((orders, worker)) }
     }
 
     pub fn post(&self, alert: Alert) {
@@ -64,7 +65,7 @@ impl Desktop {
     }
 
     fn order(&self, order: Order) {
-        if let Some(orders) = &self.orders {
+        if let Some((orders, _)) = &self.serving {
             // A desktop that failed said so, and takes no more.
             let _ = orders.send(order);
         }
@@ -75,8 +76,8 @@ impl Drop for Desktop {
     /// Takes down every notification this luneta put up, and waits until it
     /// has, as luneta ends.
     fn drop(&mut self) {
-        drop(self.orders.take());
-        if let Some(worker) = self.worker.take() {
+        if let Some((orders, worker)) = self.serving.take() {
+            drop(orders);
             // What a thread that panicked left up stays so.
             let _ = worker.join();
         }
@@ -141,6 +142,7 @@ fn serve(orders: UnboundedReceiver<Order>, events: &Sender<Event>) {
 #[cfg(not(target_os = "macos"))]
 mod freedesktop {
     use std::collections::HashMap;
+    use std::num::NonZeroU32;
     use std::path::Path;
     use std::process::Stdio;
     use std::sync::mpsc::Sender;
@@ -149,6 +151,7 @@ mod freedesktop {
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio_stream::wrappers::UnboundedReceiverStream;
     use tokio_stream::{self as stream, StreamExt as _};
+    use zbus::names::UniqueName;
     use zbus::{Connection, Proxy, Variant};
 
     use super::{ours, say, Order};
@@ -169,12 +172,21 @@ mod freedesktop {
     /// The action a click on a notification is.
     const CLICK: &str = "default";
 
-    /// What the thread hears: an order of luneta's, what the server says of
-    /// a notification, or that luneta ended.
+    /// A notification up, by the server that put it up: its id means nothing
+    /// to another, as one that started since, which gives out the same ids
+    /// again.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Posted {
+        by: UniqueName<'static>,
+        id: NonZeroU32,
+    }
+
+    /// What the thread hears: an order of luneta's, what a server says of a
+    /// notification, or that luneta ended.
     enum Heard {
         Order(Order),
-        Clicked(u32, String),
-        Closed(u32),
+        Clicked(Posted, String),
+        Closed(Posted),
         Ended,
     }
 
@@ -188,43 +200,46 @@ mod freedesktop {
         };
         let orders = UnboundedReceiverStream::new(orders).map(Heard::Order);
         let mut heard = orders.chain(stream::once(Heard::Ended)).merge(signals);
-        let (mut up, mut held) = (HashMap::<Key, u32>::new(), None);
+        let (mut up, mut held) = (HashMap::<Key, Posted>::new(), None);
         while let Some(heard) = heard.next().await {
             match heard {
                 Heard::Order(Order::Post(alert)) => {
                     if !ours(&mut held) {
                         continue;
                     }
-                    let replaces = up.get(&alert.key).copied().unwrap_or(0);
-                    match notify(&proxy, &alert, replaces).await {
-                        Ok(id) => {
-                            up.insert(alert.key.clone(), id);
+                    match notify(&proxy, &alert).await {
+                        Ok(posted) => {
+                            // What a server that has gone since put up went
+                            // with it.
+                            up.retain(|_, was| was.by == posted.by);
+                            up.insert(alert.key.clone(), posted);
                             sound(alert.kind);
                         },
                         Err(error) => say(events, &mut said, &error.to_string()),
                     }
                 },
                 Heard::Order(Order::Close(key)) => {
-                    if let Some(id) = up.remove(&key) {
-                        // One the server has let go of is gone.
-                        let _ = close(&proxy, id).await;
+                    if let Some(posted) = up.remove(&key) {
+                        // One the server has let go of, or a server that has
+                        // gone, is gone.
+                        let _ = close(proxy.connection(), &posted).await;
                     }
                 },
-                Heard::Clicked(id, action) => {
-                    let clicked = up.iter().find(|(_, up)| **up == id).map(|(key, _)| key.clone());
+                Heard::Clicked(posted, action) => {
+                    let clicked = up.iter().find(|(_, up)| **up == posted).map(|(key, _)| key);
                     if action == CLICK
                         && let Some(key) = clicked
                     {
                         // luneta is on its way out.
-                        let _ = events.send(Event::Clicked(key));
+                        let _ = events.send(Event::Clicked(key.clone()));
                     }
                 },
-                Heard::Closed(id) => up.retain(|_, up| *up != id),
+                Heard::Closed(posted) => up.retain(|_, up| *up != posted),
                 Heard::Ended => break,
             }
         }
-        for id in up.into_values() {
-            let _ = tokio::time::timeout(CLOSING, close(&proxy, id)).await;
+        for posted in up.into_values() {
+            let _ = tokio::time::timeout(CLOSING, close(proxy.connection(), &posted)).await;
         }
     }
 
@@ -237,15 +252,16 @@ mod freedesktop {
         let connection = Connection::session().await?;
         let proxy = Proxy::new(&connection, SERVER, PATH, SERVER).await?;
         let signals = proxy.receive_all_signals().await?.filter_map(|signal| {
-            let body = signal.body();
-            match signal.header().member()?.as_str() {
+            let (header, body) = (signal.header(), signal.body());
+            let by = header.sender()?.to_owned();
+            match header.member()?.as_str() {
                 "ActionInvoked" => {
                     let (id, action) = body.deserialize::<(u32, String)>().ok()?;
-                    Some(Heard::Clicked(id, action))
+                    Some(Heard::Clicked(Posted { by, id: NonZeroU32::new(id)? }, action))
                 },
                 "NotificationClosed" => {
                     let (id, _why) = body.deserialize::<(u32, u32)>().ok()?;
-                    Some(Heard::Closed(id))
+                    Some(Heard::Closed(Posted { by, id: NonZeroU32::new(id)? }))
                 },
                 _ => None,
             }
@@ -253,9 +269,10 @@ mod freedesktop {
         Ok((proxy, Box::pin(signals)))
     }
 
-    /// Puts `alert` up in the place of the notification `replaces`, if it is
-    /// up still: its id.
-    async fn notify(proxy: &Proxy<'_>, alert: &Alert, replaces: u32) -> zbus::Result<u32> {
+    /// Puts `alert` up: the server that did, and the id it gave it. It goes
+    /// up in the place of none, as luneta takes down what was up of its
+    /// agent before it puts up another.
+    async fn notify(proxy: &Proxy<'_>, alert: &Alert) -> zbus::Result<Posted> {
         let urgency: u8 = match alert.kind {
             Kind::Done => 1,
             Kind::Asked | Kind::Plan | Kind::Permission | Kind::Wants => 2,
@@ -264,13 +281,22 @@ mod freedesktop {
         let icon = icon();
         let body = escaped(&alert.body);
         let actions = [CLICK, "Go to the pane"];
-        let asked = ("luneta", replaces, icon.as_str(), alert.title.as_str(), body.as_str());
+        let asked = ("luneta", 0_u32, icon.as_str(), alert.title.as_str(), body.as_str());
         let told = (asked.0, asked.1, asked.2, asked.3, asked.4, &actions[..], hints, -1_i32);
-        proxy.call("Notify", &told).await
+        let answer = proxy.call_method("Notify", &told).await?;
+        let unsaid = |what: &str| zbus::Error::Failure(format!("the server's answer {what}"));
+        let by = answer.header().sender().ok_or_else(|| unsaid("names no sender"))?.to_owned();
+        let id = answer.body().deserialize::<u32>()?;
+        let id = NonZeroU32::new(id).ok_or_else(|| unsaid("gives the notification no id"))?;
+        Ok(Posted { by, id })
     }
 
-    async fn close(proxy: &Proxy<'_>, id: u32) -> zbus::Result<()> {
-        proxy.call("CloseNotification", &(id,)).await
+    /// Takes `posted` down: through the server that put it up, and no other,
+    /// so that one that started since takes down none of its own of that id.
+    async fn close(connection: &Connection, posted: &Posted) -> zbus::Result<()> {
+        let (to, id) = (Some(&posted.by), (posted.id.get(),));
+        connection.call_method(to, PATH, Some(SERVER), "CloseNotification", &id).await?;
+        Ok(())
     }
 
     /// Claude's mark, where the dotfiles keep it for notifications, or none.
@@ -339,11 +365,15 @@ pub fn raise(title: Option<&str>) {
 /// The Notification Center of macOS, through `terminal-notifier`, which puts
 /// a notification up and ends: a click on it has the Notification Center
 /// start it again, which runs the command it was given then, as `sh` does.
-/// That is luneta's own, which tells this one of the click through a socket
-/// of its.
+/// That is luneta's own, which tells the luneta that puts notifications up
+/// of the click, through a socket of its. A notification goes by a group
+/// named for its agent, which the click names: one that a luneta left up as
+/// it was killed goes to that agent's pane too, and goes once the luneta
+/// that puts them up now takes that agent's down.
 #[cfg(any(target_os = "macos", test))]
 mod notifier {
-    use std::collections::HashMap;
+    #[cfg(target_os = "macos")]
+    use std::collections::HashSet;
     use std::fs;
     use std::io::{self, BufRead as _, BufReader};
     use std::os::unix::net::UnixListener;
@@ -353,18 +383,41 @@ mod notifier {
     #[cfg(target_os = "macos")]
     use std::process::{Command, Stdio};
     use std::sync::mpsc::Sender;
-    use std::sync::{Arc, Mutex, PoisonError};
     use std::thread;
 
     use crate::alerts::{Alert, Key, Kind};
     use crate::host::Event;
+    use crate::machines::Machine;
 
     /// The terminal a click brings forward: Ghostty.
     const TERMINAL: &str = "com.mitchellh.ghostty";
 
-    /// The notifications up, by the group terminal-notifier names each by,
-    /// which a click names, shared with the thread that hears the clicks.
-    type Groups = Arc<Mutex<HashMap<String, Key>>>;
+    /// What each group luneta names is led by.
+    const GROUPS: &str = "luneta-";
+
+    /// The socket a click is told on, in luneta's runtime folder: the luneta
+    /// that puts notifications up listens on it, which holds their lock.
+    #[cfg(target_os = "macos")]
+    const SOCKET: &str = "alerts.sock";
+
+    /// The group the notification of `key`'s agent goes by: its pid, and the
+    /// machine it runs on, where that is another.
+    pub fn group(key: &Key) -> String {
+        match &key.on {
+            Machine::Local => format!("{GROUPS}{}", key.pid),
+            Machine::Remote(destination) => format!("{GROUPS}{}-{destination}", key.pid),
+        }
+    }
+
+    /// The agent `group` names, where it names one.
+    pub fn key_of(group: &str) -> Option<Key> {
+        let named = group.strip_prefix(GROUPS)?;
+        let (pid, on) = match named.split_once('-') {
+            Some((pid, destination)) => (pid, Machine::Remote(destination.parse().ok()?)),
+            None => (named, Machine::Local),
+        };
+        Some(Key { on, pid: pid.parse().ok()? })
+    }
 
     /// The arguments that put `alert` up as the group `group`, in the place
     /// of the one of the group up still, if any, and run `clicked` in `sh` on
@@ -404,10 +457,11 @@ mod notifier {
         format!("{} clicked --socket {} {}", quoted(&luneta), quoted(&socket), quoted(group))
     }
 
-    /// Hears on `socket`, for as long as luneta runs, each group clicked of
-    /// those `groups` has, which it hands `events`.
-    pub fn listen(socket: &Path, groups: Groups, events: Sender<Event>) -> io::Result<()> {
-        // One left by a luneta of this pid that ended is no one's.
+    /// Hears on `socket`, for as long as luneta runs, each group clicked,
+    /// which it hands `events` as the click of the agent it names. One that
+    /// names none it leaves.
+    pub fn listen(socket: &Path, events: Sender<Event>) -> io::Result<()> {
+        // One left by a luneta that held the lock before is no one's.
         let _ = fs::remove_file(socket);
         let listener = UnixListener::bind(socket)?;
         thread::spawn(move || {
@@ -416,12 +470,12 @@ mod notifier {
                 if BufReader::new(stream).read_line(&mut line).is_err() {
                     continue;
                 }
-                let groups = groups.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(key) = groups.get(line.trim_end()) {
-                    // luneta is on its way out.
-                    if events.send(Event::Clicked(key.clone())).is_err() {
-                        return;
-                    }
+                let Some(key) = key_of(line.trim_end()) else {
+                    continue;
+                };
+                // luneta is on its way out.
+                if events.send(Event::Clicked(key)).is_err() {
+                    return;
                 }
             }
         });
@@ -448,6 +502,13 @@ mod notifier {
         }
     }
 
+    /// Takes the group of `key`'s agent down, whoever put it up.
+    #[cfg(target_os = "macos")]
+    fn remove(key: &Key) {
+        // One clicked, or gone, is gone.
+        let _ = run(&["-remove".to_owned(), group(key)]);
+    }
+
     /// Takes `orders` in turn, until luneta ends, and takes down what is up
     /// then.
     #[cfg(target_os = "macos")]
@@ -458,8 +519,9 @@ mod notifier {
         use super::{ours, say, Order};
 
         let (mut said, mut held) = (false, None);
-        let groups: Groups = Arc::default();
-        let mut by_key: HashMap<Key, String> = HashMap::new();
+        // The agents whose notifications this luneta put up, to take down as
+        // it ends.
+        let mut posted: HashSet<Key> = HashSet::new();
         let mut socket: Option<PathBuf> = None;
         while let Some(order) = orders.blocking_recv() {
             match order {
@@ -468,7 +530,7 @@ mod notifier {
                         continue;
                     }
                     if socket.is_none() {
-                        match listening(&groups, events) {
+                        match listening(events) {
                             Ok(listening) => socket = Some(listening),
                             Err(why) => say(events, &mut said, &why),
                         }
@@ -476,28 +538,24 @@ mod notifier {
                     let (Some(at), Ok(luneta)) = (&socket, std::env::current_exe()) else {
                         continue;
                     };
-                    let count = by_key.len();
-                    let group = by_key
-                        .entry(alert.key.clone())
-                        .or_insert_with(|| format!("luneta-{}-{count}", std::process::id()))
-                        .clone();
-                    let mut up = groups.lock().unwrap_or_else(PoisonError::into_inner);
-                    up.insert(group.clone(), alert.key.clone());
-                    drop(up);
+                    let group = group(&alert.key);
+                    posted.insert(alert.key.clone());
                     if let Err(why) = run(&posting(&alert, &group, &clicked(&luneta, at, &group))) {
                         say(events, &mut said, &why);
                     }
                 },
+                // The luneta that puts them up takes them down, and with
+                // them what another left up of the agent.
                 Order::Close(key) => {
-                    if let Some(group) = by_key.get(&key) {
-                        // One clicked, or gone, is gone.
-                        let _ = run(&["-remove".to_owned(), group.clone()]);
+                    if held.is_some() {
+                        posted.remove(&key);
+                        remove(&key);
                     }
                 },
             }
         }
-        for group in by_key.into_values() {
-            let _ = run(&["-remove".to_owned(), group]);
+        for key in &posted {
+            remove(key);
         }
         if let Some(socket) = socket {
             let _ = fs::remove_file(socket);
@@ -507,11 +565,11 @@ mod notifier {
     /// The socket a click is told on, which luneta hears on now, in luneta's
     /// runtime folder; or why there is none.
     #[cfg(target_os = "macos")]
-    fn listening(groups: &Groups, events: &Sender<Event>) -> Result<PathBuf, String> {
+    fn listening(events: &Sender<Event>) -> Result<PathBuf, String> {
         let folder = lunetad::folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set")?;
         let folder = lunetad::folder::make(&folder).map_err(|refusal| refusal.to_string())?;
-        let socket = folder.path().join(format!("alerts-{}.sock", std::process::id()));
-        listen(&socket, Arc::clone(groups), events.clone()).map_err(|error| error.to_string())?;
+        let socket = folder.path().join(SOCKET);
+        listen(&socket, events.clone()).map_err(|error| error.to_string())?;
         Ok(socket)
     }
 
@@ -521,11 +579,30 @@ mod notifier {
         use std::time::Duration;
 
         use super::*;
-        use crate::machines::Machine;
+
+        fn key(pid: u32) -> Key {
+            Key { on: Machine::Local, pid }
+        }
 
         fn alert(kind: Kind, body: &str) -> Alert {
-            let key = Key { on: Machine::Local, id: "id-1".to_owned() };
-            Alert { key, kind, title: "fix — needs permission".to_owned(), body: body.to_owned() }
+            let title = "fix — needs permission".to_owned();
+            Alert { key: key(41), kind, title, body: body.to_owned() }
+        }
+
+        /// The group of an agent names it back: its pid, and another
+        /// machine, whatever its name has in it. What names no agent, as
+        /// another program's group, names none.
+        #[test]
+        fn an_agent_s_group_names_it() {
+            let remote = Key { on: Machine::Remote("me@my-vps".parse().unwrap()), pid: 7 };
+            assert_eq!(group(&key(41)), "luneta-41");
+            assert_eq!(group(&remote), "luneta-7-me@my-vps");
+            for key in [key(41), remote] {
+                assert_eq!(key_of(&group(&key)), Some(key));
+            }
+            for named in ["luneta-x", "luneta-", "other-41", "luneta-7--x"] {
+                assert_eq!(key_of(named), None, "{named}");
+            }
         }
 
         /// A notification goes up by its group, which a click runs luneta
@@ -534,16 +611,16 @@ mod notifier {
         #[test]
         fn a_notification_goes_up_by_its_group_and_runs_luneta_on_a_click() {
             let luneta = Path::new("/nix/x/bin/luneta");
-            let clicked = clicked(luneta, Path::new("/var/it's/alerts-1.sock"), "luneta-1-0");
-            let socket = r"'/var/it'\''s/alerts-1.sock'";
-            let said = format!("'/nix/x/bin/luneta' clicked --socket {socket} 'luneta-1-0'");
+            let clicked = clicked(luneta, Path::new("/var/it's/alerts.sock"), "luneta-41");
+            let socket = r"'/var/it'\''s/alerts.sock'";
+            let said = format!("'/nix/x/bin/luneta' clicked --socket {socket} 'luneta-41'");
             assert_eq!(clicked, said);
-            let args = posting(&alert(Kind::Permission, "-rf: rm"), "luneta-1-0", &clicked);
+            let args = posting(&alert(Kind::Permission, "-rf: rm"), "luneta-41", &clicked);
             let value = |flag: &str| {
                 let at = args.iter().position(|arg| arg == flag).expect("the flag is there");
                 args[at + 1].clone()
             };
-            assert_eq!(value("-group"), "luneta-1-0");
+            assert_eq!(value("-group"), "luneta-41");
             assert_eq!(value("-message"), " -rf: rm");
             assert_eq!(value("-title"), "fix — needs permission");
             assert_eq!((value("-sound").as_str(), value("-activate").as_str()), ("Ping", TERMINAL));
@@ -551,23 +628,19 @@ mod notifier {
         }
 
         /// What a click tells the socket reaches luneta as the click of the
-        /// agent whose group it names; a group luneta does not know, as an
-        /// older luneta's, reaches nothing.
+        /// agent its group names; one that names none reaches nothing.
         #[test]
         fn a_click_told_on_the_socket_is_the_click_of_its_agent() {
             let folder = tempfile::tempdir().expect("a folder");
-            let socket = folder.path().join("alerts-1.sock");
-            let groups: Groups = Arc::default();
-            let key = Key { on: Machine::Local, id: "id-1".to_owned() };
-            groups.lock().expect("unpoisoned").insert("luneta-1-0".to_owned(), key.clone());
+            let socket = folder.path().join("alerts.sock");
             let (events, heard) = mpsc::channel();
-            listen(&socket, groups, events).expect("it listens");
-            super::super::tell(&socket, "luneta-0-0").expect("it is told");
-            super::super::tell(&socket, "luneta-1-0").expect("it is told");
+            listen(&socket, events).expect("it listens");
+            super::super::tell(&socket, "luneta-x").expect("it is told");
+            super::super::tell(&socket, &group(&key(41))).expect("it is told");
             let Ok(Event::Clicked(clicked)) = heard.recv_timeout(Duration::from_secs(5)) else {
                 panic!("luneta heard no click");
             };
-            assert_eq!(clicked, key);
+            assert_eq!(clicked, key(41));
             assert!(heard.try_recv().is_err());
         }
     }

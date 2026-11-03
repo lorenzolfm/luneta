@@ -59,6 +59,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::alerts::{self, Reach};
 use crate::brief::{Brief, Note, Over};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
@@ -1577,6 +1578,31 @@ impl Sidebar {
         listing
     }
 
+    /// What runs on each machine lunetad watches, for the notifications, or
+    /// nothing before lunetad has said: on this machine and on each other it
+    /// reaches, the agents in the panes zellij there has listed, and the
+    /// sessions it has listed the panes of, and those it has not yet. One it
+    /// does not reach just now is away, and one it no longer watches is not
+    /// among them.
+    pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
+        let host = self.host.as_ref()?;
+        let here = self.whereabouts();
+        let reach = |machine: &Machine, seen: Result<Seen<'_>, Away>| {
+            let Ok(seen) = seen else {
+                return Reach::Away;
+            };
+            let (sessions, _) = oldest_first(seen.sessions);
+            let (listed, unlisted): (Vec<_>, Vec<_>) =
+                sessions.into_iter().partition(|(_, session)| session.panes.is_some());
+            let agents = self.runs(machine, &seen, here.as_ref()).agents;
+            let listed = listed.into_iter().map(|(listed, _)| listed).collect();
+            let unlisted = unlisted.into_iter().map(|(listed, _)| listed).collect();
+            Reach::Heard { agents, listed, unlisted }
+        };
+        let each = machines(host).each();
+        Some(each.map(|(machine, seen)| (machine.clone(), reach(&machine, seen))).collect())
+    }
+
     /// Where luneta's zellij is, as far as the sidebar knows: on the machine
     /// its client runs on, in the session `here` says, and on its pane there
     /// while that is of the session it is in, as `user` takes it too.
@@ -1618,8 +1644,9 @@ impl Sidebar {
                     status: status_word(agent),
                     since: marked.since,
                     dir: short_cwd(agent_dir(agent, pane)),
-                    id: agent.session_id.clone(),
-                    waiting_for: agent.waiting_for.clone(),
+                    pid: agent.pid,
+                    transcript: SessionId::parse(&agent.session_id),
+                    doing: alerts::Doing::of(agent),
                 });
             }
             panes.sort_by_key(|pane| (pane.tab, pane.id));
