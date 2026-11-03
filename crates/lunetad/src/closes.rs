@@ -272,6 +272,7 @@ mod tests {
             is_focused: false,
             tab_id,
             tab_position: tab_id,
+            pane_command: None,
         }
     }
 

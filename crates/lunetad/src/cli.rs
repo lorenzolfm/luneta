@@ -74,7 +74,8 @@ pub fn unrun(error: &io::Error) -> String {
 }
 
 /// A pane as `zellij action list-panes --json` lists it, as much of it as
-/// says what it holds open, and whether a client coming there is on it.
+/// says what it holds open, whether a client coming there is on it, and what
+/// runs in it.
 #[derive(Clone, Deserialize)]
 #[expect(clippy::struct_excessive_bools, reason = "zellij lists each as a bool of its own")]
 pub struct Laid {
@@ -92,6 +93,9 @@ pub struct Laid {
     /// Where its tab stands among the session's, from the first.
     #[serde(default)]
     pub tab_position: u32,
+    /// What runs in its foreground: none where zellij took too long to say,
+    /// which does not mean nothing runs.
+    pub pane_command: Option<String>,
 }
 
 impl Laid {
@@ -145,6 +149,7 @@ mod tests {
             is_focused: false,
             tab_id,
             tab_position: tab_id,
+            pane_command: None,
         }
     }
 

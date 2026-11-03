@@ -220,8 +220,16 @@ pub fn scan(folder: &Path, troubles: &mut Troubles) -> Scan {
 /// says nothing of what went wrong: its screen is zellij's.
 #[must_use]
 pub fn running(folder: &Path) -> Option<Vec<(String, SystemTime)>> {
+    let sockets = sockets(folder)?.into_iter();
+    Some(sockets.map(|(name, id)| (name, id.started())).collect())
+}
+
+/// `running`, each by its name and which session it is, as its socket keeps
+/// through a rename.
+#[must_use]
+pub fn sockets(folder: &Path) -> Option<Vec<(String, Id)>> {
     let scan = read(folder, &mut |_| {});
-    let sockets = scan.sockets.into_iter().map(|socket| (socket.name, socket.id.started()));
+    let sockets = scan.sockets.into_iter().map(|socket| (socket.name, socket.id));
     (scan.unread == 0).then(|| sockets.collect())
 }
 

@@ -40,6 +40,7 @@ mod sidebar;
 mod skills;
 mod speech;
 mod spots;
+mod starts;
 mod state;
 mod watch;
 mod width;
@@ -63,7 +64,10 @@ use crate::zellij::SessionName;
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// The session to attach to, made if none runs by that name. Without
-    /// one, the session named for this directory, as the picker names it.
+    /// one, luneta joins a session that runs: the one named for this
+    /// directory, as the picker names it, or else the one you looked at last;
+    /// or, with none on this machine, another machine's. It makes the one
+    /// named for this directory only where none runs anywhere.
     session: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,

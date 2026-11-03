@@ -326,7 +326,8 @@ fn ask(
 /// `NEWBORN`, at `now`, where one is. One that started after `now`, by a clock
 /// set back since, is taken for old: it would hold the sweep up for as long
 /// as the clock went back.
-fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
+#[must_use]
+pub fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
     let left = |started| NEWBORN.checked_sub(now.duration_since(started).ok()?);
     started.filter_map(left).filter(|left| !left.is_zero()).max()
 }

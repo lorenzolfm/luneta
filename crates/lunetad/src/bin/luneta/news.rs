@@ -7,7 +7,11 @@
 //! luneta sees you only on the pane its own zellij is on, and only while its
 //! window has the focus: one you are not looking at sees nothing for you. It
 //! keeps what you saw in a `Ledger`, the same for every luneta of its daemon:
-//! up to when you saw each pane. What finished there by then, you saw.
+//! up to when you saw each pane. What finished there by then, you saw. It keeps
+//! in another when you were last in each, whatever finished there, which says
+//! the session you looked at last to a luneta that starts with none named: you
+//! can mark a pane read from anywhere, and it says what you saw, not where you
+//! were.
 //!
 //! What finished is dated as the daemon says: by Claude Code, as an agent
 //! comes to `idle`, and by the shell's hook, as a command ends. Both date it
@@ -48,6 +52,8 @@ const DWELL: Duration = Duration::from_secs(1);
 pub struct News {
     /// Up to when you saw each pane.
     seen: Ledger,
+    /// When you were last in each pane, dated once a visit.
+    been: Ledger,
     /// When you marked each pane unread.
     unread: Ledger,
     /// The pane luneta's zellij is on, as the last `dwell` found it, and since
@@ -67,6 +73,7 @@ impl News {
         match folder::make(runtime) {
             Ok(folder) => News {
                 seen: Ledger::within(folder.path().join("seen")),
+                been: Ledger::within(folder.path().join("been")),
                 unread: Ledger::within(folder.path().join("unread")),
                 ..News::default()
             },
@@ -78,17 +85,18 @@ impl News {
     /// for `why`.
     pub fn unshared(why: &str) -> Self {
         let unshared = || Ledger::unshared(why.to_owned());
-        News { seen: unshared(), unread: unshared(), ..News::default() }
+        News { seen: unshared(), been: unshared(), unread: unshared(), ..News::default() }
     }
 
     /// Why the news is this luneta's alone, where a folder failed it.
     pub fn lost(&self) -> Option<&str> {
-        self.seen.lost().or(self.unread.lost())
+        self.seen.lost().or(self.been.lost()).or(self.unread.lost())
     }
 
     /// Takes up what the other lunetas saw and marked since, and says whether
-    /// that changed anything.
+    /// that changed anything that shows: where you were, no row does.
     pub fn reload(&mut self) -> bool {
+        self.been.reload();
         let seen = self.seen.reload();
         self.unread.reload() || seen
     }
@@ -103,13 +111,20 @@ impl News {
         self.unread.get(key).is_some()
     }
 
+    /// When you were last in a pane of `session`, if you were, in any luneta
+    /// of its daemon.
+    pub fn last_seen(&self, session: Session) -> Option<SystemTime> {
+        self.been.latest(session)
+    }
+
     /// Marks the pane of `key` unread at `now`.
     pub fn mark_unread(&mut self, key: Key, now: SystemTime) {
         self.unread.set(key, Some(now));
     }
 
-    /// Marks the pane of `key` read at `now`, as a visit would: what finished
-    /// there last, at `finished`, you saw, and its unread mark goes.
+    /// Marks the pane of `key` read at `now`, as a visit would for its dot:
+    /// what finished there last, at `finished`, you saw, and its unread mark
+    /// goes. It says nothing of where you were.
     pub fn read(&mut self, key: Key, finished: Option<SystemTime>, now: SystemTime) {
         self.saw(key, finished, now);
         if self.is_unread(key) {
@@ -147,7 +162,7 @@ impl News {
 
     /// You were in the pane of `key` from `since` until `now`, and what
     /// finished there last did at `finished`. Says whether that changed
-    /// anything.
+    /// anything that shows.
     fn visit(
         &mut self,
         key: Key,
@@ -155,6 +170,9 @@ impl News {
         finished: Option<SystemTime>,
         now: SystemTime,
     ) -> bool {
+        if self.been.get(key).is_none_or(|been| been < since) {
+            self.been.set(key, Some(now));
+        }
         let mut changed = self.saw(key, finished, now);
         if self.unread.get(key).is_some_and(|marked| marked < since) {
             self.unread.set(key, None);
@@ -179,18 +197,20 @@ impl News {
     /// clock, or none, as it does not answer. What was kept of a session
     /// that has ended since, as `Missing` tells, goes, for every luneta.
     pub fn listed(&mut self, live: Option<&Lists>, at: Instant) {
-        let kept: BTreeSet<Session> = self.seen.sessions().chain(self.unread.sessions()).collect();
+        let ledgers = [&self.seen, &self.been, &self.unread];
+        let kept: BTreeSet<Session> = ledgers.into_iter().flat_map(Ledger::sessions).collect();
         let gone = self.missing.gone(&kept, live, at);
         if gone.is_empty() {
             return;
         }
         self.seen.forget(&gone);
+        self.been.forget(&gone);
         self.unread.forget(&gone);
     }
 
     /// The folders the news is shared through, while it is.
     fn dirs(&self) -> Vec<&Path> {
-        [self.seen.dir(), self.unread.dir()].into_iter().flatten().collect()
+        [self.seen.dir(), self.been.dir(), self.unread.dir()].into_iter().flatten().collect()
     }
 }
 
@@ -271,6 +291,35 @@ mod tests {
         assert!([1, 2].iter().all(|id| news.is_new(pane(*id), later(pane(*id)))));
     }
 
+    /// The session you looked at last is the one you stayed on last, with
+    /// nothing new in it too: one you only passed through does not count, a
+    /// long stay is dated once, and coming back dates it again. What finishes
+    /// there after you last looked is still new.
+    #[test]
+    fn a_stay_dates_the_session_with_nothing_new_in_it() {
+        let other = |pane: u32| Key { session: session(20), pane };
+        let nothing = |_: Key| None;
+        let mut news = News::default();
+
+        // Through the session at 10, and on to the one at 20, to stay.
+        news.dwell(Some(pane(3)), nothing, at(200), steady(at(200)));
+        news.dwell(Some(other(3)), nothing, ms(200_500), steady(ms(200_500)));
+        news.dwell(Some(other(3)), nothing, ms(201_500), steady(ms(201_500)));
+        assert_eq!(news.last_seen(session(10)), None);
+        assert_eq!(news.last_seen(session(20)), Some(ms(201_500)));
+
+        // Dated once as it stays.
+        news.dwell(Some(other(3)), nothing, at(900), steady(at(900)));
+        assert_eq!(news.last_seen(session(20)), Some(ms(201_500)));
+
+        // Back to the one at 10, which is the last you looked at now, and
+        // what finishes in it from then on is new.
+        news.dwell(Some(pane(3)), nothing, at(1_000), steady(at(1_000)));
+        news.dwell(Some(pane(3)), nothing, at(1_001), steady(at(1_001)));
+        assert_eq!(news.last_seen(session(10)), Some(at(1_001)));
+        assert!(news.is_new(pane(3), Some(at(1_002))));
+    }
+
     /// A clock set forward is no time spent: a pane luneta's zellij passes
     /// through as the host's clock jumps an hour keeps its dot.
     #[test]
@@ -306,11 +355,12 @@ mod tests {
         assert!(!news.is_unread(pane(3)));
     }
 
-    /// A pane marked read is one you were just in, whatever is new in it:
-    /// what finished there you saw, though the hook dates its end after now,
-    /// and its unread mark goes. What finishes there after is new again.
+    /// A pane marked read has its dot go as if you were just in it, whatever
+    /// is new in it: what finished there you saw, though the hook dates its
+    /// end after now, and its unread mark goes. What finishes there after is
+    /// new again.
     #[test]
-    fn a_pane_marked_read_is_one_you_were_just_in() {
+    fn a_pane_marked_read_loses_its_dot_until_something_new_finishes() {
         let mut news = News::default();
         news.mark_unread(pane(2), at(101));
         news.read(pane(1), finished(pane(1)), ms(101_500));
@@ -320,6 +370,15 @@ mod tests {
 
         let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
         assert!([1, 2].iter().all(|id| news.is_new(pane(*id), later(pane(*id)))));
+    }
+
+    /// `u` on a pane says what you saw there, from wherever you are: it does
+    /// not make that the session you looked at last.
+    #[test]
+    fn marking_a_pane_read_does_not_say_you_were_in_it() {
+        let mut news = News::default();
+        news.read(pane(1), finished(pane(1)), at(200));
+        assert_eq!(news.last_seen(session(10)), None);
     }
 
     /// A session the daemon has not listed for `GONE` takes what you saw and
@@ -345,11 +404,13 @@ mod tests {
         news.listed(Some(&other), steady(at(231)));
         assert_eq!(new(&news), [false, true]);
         assert!(news.is_unread(pane(2)));
+        assert_eq!(news.last_seen(session(10)), Some(at(201)));
 
         news.listed(Some(&other), steady(at(240)));
         news.listed(Some(&other), steady(at(241)));
         assert_eq!(new(&news), [true, true]);
         assert!(!news.is_unread(pane(2)));
+        assert_eq!(news.last_seen(session(10)), None);
     }
 
     /// The news of a luneta that comes before any daemon makes luneta's
@@ -361,7 +422,7 @@ mod tests {
         let runtime = scratch.path().join("luneta");
         let news = News::within(&runtime);
         assert!(matches!(folder::open(&runtime), Ok(Some(_))));
-        assert_eq!((news.lost(), news.dirs().len()), (None, 2));
+        assert_eq!((news.lost(), news.dirs().len()), (None, 3));
 
         fs::set_permissions(&runtime, Permissions::from_mode(0o755)).unwrap();
         let news = News::within(&runtime);

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::cli::{done, failure, quiet, unrun, LEFT_OUT, PANE_VAR, SESSION_VAR};
+use lunetad::cli::{done, failure, laid, quiet, unrun, LEFT_OUT, PANE_VAR, SESSION_VAR};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -25,12 +25,13 @@ use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
-use lunetad::{clients, moves, Destination};
+use lunetad::{clients, moves, Destination, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::{Event, Nudged};
+use crate::icons;
 use crate::machines::Machine;
 use crate::own::{Before, Look, Looked};
 
@@ -254,12 +255,24 @@ fn quoted(word: &str) -> String {
 
 /// What became of the session luneta's zellij's client ended in, of
 /// `seats`, the sessions it may have been in, and where it goes on on this
-/// machine, as `lunetad::moves::refuge` finds them here: never the session
-/// luneta's terminal is a pane of, as `refusal` says.
+/// machine, as `lunetad::moves::refuge` finds them here: never a session that
+/// may hold luneta's terminal, as `clients_of_refuge` says.
 pub fn ended(seats: &[SessionName]) -> Ended {
     let current = env::var(SESSION_VAR).ok();
     let folder = lunetad::zellij_folder();
-    moves::refuge(&folder, seats, current.as_deref(), |session| clients(session.as_str()).ok())
+    moves::refuge(&folder, seats, current.as_deref(), clients_of_refuge)
+}
+
+/// What zellij lists of the clients of `session`, where luneta's zellij may go
+/// on in it: none of one that may hold luneta's terminal, as
+/// `may_hold_terminal` says, which `lunetad::moves` passes over as it does one
+/// that does not answer. Its name in the pane's environment would not do, as a
+/// rename leaves it behind.
+fn clients_of_refuge(session: &SessionName) -> Option<Vec<Client>> {
+    if may_hold_terminal(session.as_str()) {
+        return None;
+    }
+    clients(session.as_str()).ok()
 }
 
 /// What sshd sets in a session it runs: in every one, and in one with a
@@ -288,25 +301,71 @@ pub fn within() -> Within {
     }
 }
 
-/// This machine's newest session, as `lunetad::moves::newest` finds it,
-/// where luneta's zellij goes on once its client ended on another machine:
-/// never the session luneta's terminal is a pane of.
-pub fn newest() -> Option<Refuge> {
-    let current = env::var(SESSION_VAR).ok();
-    moves::newest(&lunetad::zellij_folder(), current.as_deref(), |session| {
-        clients(session.as_str()).ok()
+/// Whether `session`, which runs here, may hold luneta's terminal in a pane: it
+/// has the name the pane opened under, or zellij lists the pane there running
+/// luneta, or what it has yet to say, or will not list its panes. The name
+/// alone will not do: a rename leaves it behind in the pane, and another
+/// session can take it. Nor can the list tell the pane of a script that runs
+/// luneta, which it lists as that script.
+pub fn may_hold_terminal(session: &str) -> bool {
+    if env::var(SESSION_VAR).is_ok_and(|named| named == session) {
+        return true;
+    }
+    let Some(pane) = env::var(PANE_VAR).ok().and_then(|pane| pane.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Ok(laid) = laid(session) else {
+        return true;
+    };
+    laid.iter().filter(|listed| !listed.is_plugin && listed.id == pane).any(|listed| {
+        let runs = listed.pane_command.as_deref();
+        runs.is_none_or(|command| icons::program(command) == Some("luneta"))
     })
 }
 
-/// The first of `sessions` of `destination` whose clients its daemon
-/// lists, as `lunetad::moves::answering` tries them, where luneta's zellij
-/// goes on once the machine it was on has no session left; or why luneta
-/// does not reach the daemon it watches, to ask. None where none answers.
+/// The sessions that run on this machine, as zellij's sockets say, once none
+/// is so new that its server may have yet to take its first client, which a
+/// call of zellij's CLI would kill, as `Before::Made` says. Another luneta can
+/// be making one as this one starts. None where not all of zellij's folder
+/// reads.
+pub fn settled() -> Option<Vec<(String, SocketId)>> {
+    let folder = lunetad::zellij_folder();
+    loop {
+        let running = lunetad::zellij_sockets(&folder)?;
+        let started = running.iter().map(|(_, id)| id.started());
+        match lunetad::newborn(started, SystemTime::now()) {
+            Some(left) => thread::sleep(left),
+            None => return Some(running),
+        }
+    }
+}
+
+/// The first of `sessions`, of this machine's, whose clients zellij lists, as
+/// `lunetad::moves::answering` tries them: a socket can outlive its server.
+pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
+    moves::answering(sessions, |session| clients(session.as_str()).ok())
+}
+
+/// This machine's newest session, as `lunetad::moves::newest` finds it,
+/// where luneta's zellij goes on once its client ended on another machine:
+/// never a session that may hold luneta's terminal, as `clients_of_refuge`
+/// says.
+pub fn newest() -> Option<Refuge> {
+    let current = env::var(SESSION_VAR).ok();
+    moves::newest(&lunetad::zellij_folder(), current.as_deref(), clients_of_refuge)
+}
+
+/// The first of `sessions` of `destination` whose clients its daemon lists,
+/// each within `limit`, as `lunetad::moves::answering` tries them, where
+/// luneta's zellij goes on once the machine it was on has no session left; or
+/// why luneta does not reach the daemon it watches, to ask. None where none
+/// answers.
 pub fn answering_away(
     destination: &Destination,
     sessions: Vec<SessionName>,
+    limit: Duration,
 ) -> Result<Option<Refuge>, String> {
-    let mut away = Away::reach(destination, away::QUICK)?;
+    let mut away = Away::reach(destination, limit)?;
     Ok(moves::answering(sessions, |session| away.clients(session.as_str()).ok()))
 }
 

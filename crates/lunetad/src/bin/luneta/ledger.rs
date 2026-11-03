@@ -17,6 +17,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lunetad::SocketId;
 use serde::{Deserialize, Serialize};
 
 use crate::state;
@@ -39,6 +40,12 @@ impl Session {
     /// before 1970 or after 2554, which no file can be named for.
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
         Some(Session { started: nanos(started)?, socket })
+    }
+
+    /// The session of the socket `id`, or none as `new` says, or for a socket
+    /// of no inode, which no file system gives one.
+    pub fn of(id: SocketId) -> Option<Self> {
+        Session::new(id.started(), NonZeroU64::new(id.socket())?)
     }
 
     /// When its socket was made.
@@ -181,6 +188,12 @@ impl Ledger {
 
     pub fn get(&self, key: Key) -> Option<SystemTime> {
         self.moments.get(&key).copied()
+    }
+
+    /// The last moment of any pane of `session`, if it has one.
+    pub fn latest(&self, session: Session) -> Option<SystemTime> {
+        let panes = Key { session, pane: u32::MIN }..=Key { session, pane: u32::MAX };
+        self.moments.range(panes).map(|(_, moment)| *moment).max()
     }
 
     /// The sessions it keeps a moment of, and those its folder has only
@@ -384,6 +397,21 @@ mod tests {
             ledger.set(key(10, 4), Some(at(1)));
             assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 4)), Some(at(1)));
         }
+    }
+
+    /// A session's last moment is the last of its panes', whichever pane
+    /// that is, and none of another session's, though it started at the same
+    /// moment.
+    #[test]
+    fn a_session_s_last_moment_is_the_last_of_its_panes() {
+        let mut ledger = Ledger::default();
+        let (session_of, twin) = (session(10, 1), session(10, 2));
+        assert_eq!(ledger.latest(session_of), None);
+        ledger.set(Key { session: session_of, pane: u32::MIN }, Some(at(7)));
+        ledger.set(Key { session: session_of, pane: 5 }, Some(at(9)));
+        ledger.set(Key { session: session_of, pane: u32::MAX }, Some(at(8)));
+        ledger.set(Key { session: twin, pane: 1 }, Some(at(20)));
+        assert_eq!(ledger.latest(session_of), Some(at(9)));
     }
 
     /// A session forgotten takes its panes' moments with it, for every
