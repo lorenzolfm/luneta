@@ -410,8 +410,10 @@ pub enum Key {
     /// A directory zoxide knows on `on`, by its path, and the session `Enter`
     /// makes there, or why it makes none yet.
     Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
-    /// The session typed, which `Enter` makes on `on`, as `new_name` says.
-    New { on: Machine },
+    /// The session typed, `session`, which `Enter` makes on `on` once zellij
+    /// there said which sessions ended, as `taken` says. Every change that
+    /// gives the name to a session there builds the rows again, without it.
+    New { on: Machine, session: SessionName },
 }
 
 impl Key {
@@ -422,7 +424,7 @@ impl Key {
             | Key::Exited { on, .. }
             | Key::Agent { on, .. }
             | Key::Dir { on, .. }
-            | Key::New { on } => on,
+            | Key::New { on, .. } => on,
         }
     }
 }
@@ -502,9 +504,28 @@ enum Stage {
     /// Waiting on zellij, or on the plan, to delete what `target` stands
     /// for: going ahead with the plan once it is `agreed`, what you said yes
     /// to, or else asking first, if it asks.
-    Planning { target: Key, agreed: Option<Plan> },
+    Planning { target: Target, agreed: Option<Plan> },
     /// Asking whether to go ahead with `plan`, as `asks`.
-    Asking { target: Key, plan: Plan, asks: String },
+    Asking { target: Target, plan: Plan, asks: String },
+}
+
+/// What a delete is planned for, on its machine: a session that runs, or
+/// an agent's pane. One that ended is let go of at once, with no plan.
+#[derive(Debug)]
+enum Target {
+    /// The session at `place` on `on`, as its row stands for it.
+    Session { on: Machine, place: Place },
+    /// The pane of an agent on `on`, as its row stands for it.
+    Pane { on: Machine, place: PanePlace },
+}
+
+impl Target {
+    /// The machine it is deleted on.
+    fn machine(&self) -> &Machine {
+        match self {
+            Target::Session { on, .. } | Target::Pane { on, .. } => on,
+        }
+    }
 }
 
 /// Lines as a terminal shows them, in the colours they say, on a screen of
@@ -929,7 +950,7 @@ impl Picker {
             Heard::Closes { on, place, closes } => {
                 let planning = matches!(
                     &self.stage,
-                    Stage::Planning { target: Key::Agent { on: planned, place: at }, .. }
+                    Stage::Planning { target: Target::Pane { on: planned, place: at }, .. }
                         if (planned, at) == (&on, &place)
                 );
                 if !planning {
@@ -1265,20 +1286,19 @@ impl Picker {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
             Key::Dir { session: Err(_), .. } => Picked::Nothing,
-            Key::New { on } => match self.new_name(on) {
-                Some(Ok(session)) => Picked::Start { on: on.clone(), session },
-                Some(Err(_)) | None => Picked::Nothing,
+            Key::New { on, session } => match self.taken(on) {
+                Ok(_) => Picked::Start { on: on.clone(), session: session.clone() },
+                Err(_) => Picked::Nothing,
             },
         }
     }
 
-    /// The session typed, which `Enter` on `on`'s row for it makes there, or
-    /// why it makes none yet: zellij there has yet to say which sessions
-    /// ended, or did not say. None where what is typed is no name zellij
-    /// takes, or the name of a session there, the one luneta's zellij is in,
-    /// or one that runs, or one that ended, which is a row of its own:
-    /// `Enter` goes to it, or brings it back.
-    fn new_name(&self, on: &Machine) -> Option<Result<SessionName, &'static str>> {
+    /// The session typed, which a row of `on`'s for it makes there, as
+    /// `Key::New` says. None where what is typed is no name zellij takes, or
+    /// the name of a session there, the one luneta's zellij is in, or one
+    /// that runs, or one that ended, which is a row of its own: `Enter` goes
+    /// to it, or brings it back.
+    fn new_name(&self, on: &Machine) -> Option<SessionName> {
         let name = SessionName::parse(&self.term).ok()?;
         if self.here_session(on) == Some(name.as_str()) {
             return None;
@@ -1289,8 +1309,7 @@ impl Picker {
         }
         match self.taken(on) {
             Ok(taken) if taken.contains(&name.as_str()) => None,
-            Ok(_) => Some(Ok(name)),
-            Err(why) => Some(Err(why)),
+            Ok(_) | Err(_) => Some(name),
         }
     }
 
@@ -1312,25 +1331,25 @@ impl Picker {
                 self.rebuild(false);
                 Picked::Nothing
             },
+            Key::Live { on, place } => self.plan(Target::Session { on, place }, None),
+            Key::Agent { on, place } => self.plan(Target::Pane { on, place }, None),
             Key::Dir { .. } | Key::New { .. } => Picked::Nothing,
-            target => self.plan(target, None),
         }
     }
 
     /// Plans deleting what `target` stands for, going ahead once the plan is
     /// `agreed`: of a session, at once; of a pane, once zellij says what
     /// closing it closes, on its machine.
-    fn plan(&mut self, target: Key, agreed: Option<Plan>) -> Picked {
+    fn plan(&mut self, target: Target, agreed: Option<Plan>) -> Picked {
         let picked = match &target {
-            Key::Live { on, place } => {
+            Target::Session { on, place } => {
                 let (on, session) = (on.clone(), place.listed().clone());
                 Picked::Plan { on, session, deletes: Deletes::Session }
             },
-            Key::Agent { on, place } => {
+            Target::Pane { on, place } => {
                 self.asking.push(Ask::Closes { on: on.clone(), place: place.clone() });
                 Picked::Nothing
             },
-            Key::Exited { .. } | Key::Dir { .. } | Key::New { .. } => return Picked::Nothing,
         };
         self.stage = Stage::Planning { target, agreed };
         picked
@@ -1507,8 +1526,8 @@ impl Picker {
         if let Some(first) = first {
             first.rules.ended = true;
         }
-        if self.new_name(on).is_some() {
-            let key = Key::New { on: on.clone() };
+        if let Some(session) = self.new_name(on) {
+            let key = Key::New { on: on.clone(), session };
             let made = Row { key, name: self.term.clone(), hits: Vec::new(), rules: Rules::default() };
             sessions.insert(0, made);
         }
@@ -1793,9 +1812,9 @@ impl Picker {
             Key::Dir { path, .. } => return dir_line(row, path.as_str(), width),
             // Dim until zellij there said which sessions ended, as `Enter`
             // makes it only then.
-            Key::New { on } => {
+            Key::New { on, .. } => {
                 let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
-                let style = if matches!(self.new_name(on), Some(Ok(_))) { bold } else { dim };
+                let style = if self.taken(on).is_ok() { bold } else { dim };
                 (Some(lead), style, vec![Span::styled("new", Style::new().fg(gruvbox::GREY))])
             },
         };
@@ -1880,15 +1899,15 @@ impl Picker {
                 self.draw_contents(buffer, area, &row.name, on, path);
                 return;
             },
-            Key::New { on } => {
+            Key::New { on, .. } => {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 caption.push(Span::styled("new", grey));
                 let mut lines = vec![Line::from(caption), Line::default()];
                 let machine = self.machine_name(on);
-                let said = match self.new_name(on) {
-                    Some(Err(why)) => why.to_owned(),
-                    Some(Ok(_)) | None => format!(
+                let said = match self.taken(on) {
+                    Err(why) => why.to_owned(),
+                    Ok(_) => format!(
                         "no session on {machine} has this name, nor one that ended there: Enter \
                          makes it there, and takes zellij to it"
                     ),
@@ -2028,10 +2047,9 @@ impl Picker {
                     Ok(there(&format!("Make \"{session}\""), on))
                 },
                 Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
-                Key::New { on } => match self.new_name(on) {
-                    Some(Ok(name)) => Ok(there(&format!("Make \"{name}\""), on)),
-                    Some(Err(why)) => Err(why.to_owned()),
-                    None => Ok(String::new()),
+                Key::New { on, session } => match self.taken(on) {
+                    Ok(_) => Ok(there(&format!("Make \"{session}\""), on)),
+                    Err(why) => Err(why.to_owned()),
                 },
             },
             // What is typed makes a session on no machine: as it is no name

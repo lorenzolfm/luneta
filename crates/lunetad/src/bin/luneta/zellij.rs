@@ -914,7 +914,7 @@ pub fn makes(to: SessionName) -> Result<Unused, String> {
 pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused, String> {
     let checked = Away::reach(destination, away::QUICK).and_then(|mut away| away.check(&to));
     let since = checked.map_err(|why| format!("no session made: {why}"))?;
-    Ok(Unused { on: Machine::Remote(destination.clone()), name: to, since })
+    Ok(Unused { on: Machine::Remote(destination.clone()), name: to, since: Some(since) })
 }
 
 /// `to`, as a name zellij on `destination` would make a session of now, for

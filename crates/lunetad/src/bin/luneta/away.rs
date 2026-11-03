@@ -112,11 +112,15 @@ impl Away {
 
     /// The time just before zellij there read which names it has, by that
     /// machine's clock, where it would make a session called `to` now, as
-    /// `lunetad::names::unused` says there; or why it would make none.
-    pub fn check(&mut self, to: &SessionName) -> Result<Option<SystemTime>, String> {
+    /// `lunetad::names::unused` says there; or why it would make none. Every
+    /// daemon that answers this says when: an answer without the time is of
+    /// one that did not do what its answer says, and is refused.
+    pub fn check(&mut self, to: &SessionName) -> Result<SystemTime, String> {
         let request = CheckNameRequest { on: Some(self.on()), name: to.to_string() };
         let checked = self.ask(|mut daemon| async move { daemon.check_name(request).await })?;
-        Ok(checked.named_at.and_then(|at| SystemTime::try_from(at).ok()))
+        let on = &self.on;
+        let at = checked.named_at.ok_or_else(|| format!("{on}: lunetad checked {to} at no time"))?;
+        SystemTime::try_from(at).map_err(|why| format!("{on}: lunetad checked {to} at {why}"))
     }
 
     /// The directories zoxide knows there, best first, each with the name a
