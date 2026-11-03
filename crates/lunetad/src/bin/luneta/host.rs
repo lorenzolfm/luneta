@@ -672,14 +672,8 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
     let restore = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         log::panicked(panic);
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            DisableFocusChange,
-            DisableThemeChange
-        );
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        let _ = put_back(&mut io::stdout());
         restore(panic);
     }));
     // Not a `sync_channel` of a bound: alacritty hands on what the program
@@ -726,14 +720,7 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
     // one said.
     let popped =
         if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
-    let restored = execute!(
-        io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        DisableFocusChange,
-        DisableThemeChange,
-        SetCursorStyle::DefaultUserShape
-    );
+    let restored = put_back(&mut io::stdout());
     let left = ratatui::try_restore();
     match ran.and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
@@ -747,6 +734,24 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             ExitCode::FAILURE
         },
     }
+}
+
+/// Puts luneta's `terminal` back as luneta found it, all but the kitty
+/// keyboard flags, the screen and raw mode, however luneta ends: out of the
+/// update of a frame, where a panic ended luneta in one, with the modes
+/// luneta turned on off, and the cursor in your own style. The panic hook and
+/// the end of `run` both put back what this does, for them to put back the
+/// same.
+fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
+    execute!(
+        terminal,
+        EndSynchronizedUpdate,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        DisableFocusChange,
+        DisableThemeChange,
+        SetCursorStyle::DefaultUserShape
+    )
 }
 
 /// Runs zellij beside the sidebar until it ends, and says what it said as it
@@ -2753,5 +2758,26 @@ mod tests {
             assert_eq!(shown(&screen), Some((3, 15)));
         }
         assert_eq!(screen.grid()[Point::new(Line(1), Column(1))].c, '⠙');
+    }
+
+    /// A frame luneta ended in, as a panic in one ends it, shows once luneta
+    /// puts its terminal back, which a terminal holds till then, and your
+    /// cursor is in your own style again.
+    #[test]
+    fn putting_back_shows_a_frame_luneta_ended_in() {
+        let mut screen = Term::new(Config::default(), &TermSize::new(20, 4), VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let mut ended = Vec::new();
+        execute!(ended, SetCursorStyle::SteadyBar, BeginSynchronizedUpdate).unwrap();
+        ended.extend_from_slice("⠙".as_bytes());
+        parser.advance(&mut screen, &ended);
+        let spinner = Point::new(Line(0), Column(0));
+        assert_eq!(screen.grid()[spinner].c, ' ', "the frame is held");
+        assert_eq!(screen.cursor_style().shape, CursorShape::Beam);
+        let mut put = Vec::new();
+        put_back(&mut put).unwrap();
+        parser.advance(&mut screen, &put);
+        assert_eq!(screen.grid()[spinner].c, '⠙');
+        assert_eq!(screen.cursor_style(), Config::default().default_cursor_style);
     }
 }
