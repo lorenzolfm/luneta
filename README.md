@@ -362,7 +362,10 @@ killed, luneta attaches zellij to the newest session that runs, which the
 picker lists first, but never to the one luneta's own pane is in; where none
 is left, to the newest of [another machine's](#other-machines), the first by
 the sidebar's headers that lunetad reaches and last listed one of, and ends
-where none is. When zellij fails, luneta ends and says what zellij said.
+where none is. Run through ssh, or in a pane of zellij, luneta passes over a
+session of another machine's that may hold its own terminal, through ssh: one
+with a pane that runs ssh or luneta. When zellij fails, luneta ends and says
+what zellij said.
 zellij's keys are yours as they were, but eight, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
@@ -811,9 +814,10 @@ attaches here again. Where that ssh fails, as where the machine went away,
 luneta goes back to the session you left, and the notes say what ssh said.
 Where the session there ends, luneta goes on in the newest session of that
 machine's, or of this one's where it has none left, or of the next machine's
-that has one. Where ssh then fails to a machine luneta went on to, it goes on
-to the next, and the notes say what ssh said; `luneta.log` says why luneta
-passed over each machine it did.
+that has one. Where ssh then fails to a machine luneta went on to, at once or
+an hour later, it goes on to the next, but to none whose ssh failed since
+zellij was last in a session, and the notes say what ssh said; `luneta.log`
+says why luneta passed over each machine it did.
 
 The menu on another machine's pane opens what it opens here, there: `n p`,
 `n t` and the agents of the Claude group open in zellij on that machine, `c f`

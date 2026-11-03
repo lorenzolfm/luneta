@@ -57,6 +57,7 @@ use crate::brief::{self, Asking, Briefing, Written};
 use crate::close::Act;
 use crate::dictation::{self, Dictated, Dictation};
 use crate::due::Due;
+use crate::fails::{Back, Failed, Fails};
 use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::input;
@@ -413,29 +414,6 @@ enum Next {
     Pane(Place),
     /// What it does there, which opens what it goes to, as `After` says.
     After(After),
-}
-
-/// A session luneta's zellij was in, on `machine`.
-#[derive(Clone)]
-struct Back {
-    machine: Machine,
-    session: SessionName,
-}
-
-/// Where luneta's zellij goes where its client fails, as where ssh does not
-/// reach its machine, or zellij cannot attach.
-#[derive(Clone)]
-enum Fails {
-    /// Nowhere: luneta ends, and says what zellij said.
-    End,
-    /// Back to the session it was in before, on another machine.
-    Back(Back),
-    /// On to the newest session of another machine's but those `tried`, as
-    /// `App::newest_here` finds it: since the session luneta's zellij was in
-    /// last ended, the machine it ended on, where it had none after it, and
-    /// each whose client failed since. Of a client of a session luneta's
-    /// zellij goes on in on another machine, which luneta picked itself.
-    Onward(Vec<Destination>),
 }
 
 /// A key zellij's client typed in `session`, at `at`: one of yours, or
@@ -983,7 +961,9 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => {
-                self.sidebar.looked(looked);
+                if self.sidebar.looked(looked) {
+                    self.client.fails.came_in();
+                }
                 self.on_to_pane();
             },
             Event::Stayed(look) => {
@@ -2334,17 +2314,24 @@ impl App {
             let destination = destination.clone();
             return self.ended_away(&destination);
         }
-        let failed = self.client.exited.is_none_or(|status| !status.success());
-        // A client here goes back where it fails, if anywhere: one of a
-        // session luneta went on in here ends luneta, as `Fails::Onward` is of
-        // another machine's.
-        if failed && let Fails::Back(back) = self.client.fails.clone() {
-            self.failed(&Machine::Local);
-            return self.go_back(&Machine::Local, back);
+        if self.client.exited.is_none_or(|status| !status.success()) {
+            // A client here goes back where it fails, if anywhere: one of a
+            // session luneta went on in here ends luneta, as `Fails::Onward`
+            // is of another machine's.
+            return match self.client.fails.clone().failed(&Machine::Local) {
+                Failed::Back(back) => {
+                    self.failed(&Machine::Local);
+                    self.go_back(&Machine::Local, back)
+                },
+                Failed::End | Failed::Onward(_) => {
+                    self.ended = true;
+                    Ok(())
+                },
+            };
         }
+        // With none, it is in no session that could have gone with it.
         let seats = self.sidebar.seats();
-        let ended = self.client.exited.filter(ExitStatus::success).filter(|_| !seats.is_empty());
-        let refuge = match ended.map(|_| zellij::ended(&seats)) {
+        let refuge = match (!seats.is_empty()).then(|| zellij::ended(&seats)) {
             Some(Ended::Went(refuge)) => refuge,
             Some(Ended::Kept) | None => {
                 self.ended = true;
@@ -2372,21 +2359,20 @@ impl App {
     /// to the newest session of a machine it has yet to try. luneta ends
     /// where the client detached, and where it failed with nowhere to go.
     fn ended_away(&mut self, destination: &Destination) -> io::Result<()> {
-        let fails = self.client.fails.clone();
+        let mut fails = self.client.fails.clone();
         let on = Machine::Remote(destination.clone());
         if self.client.exited.is_none_or(|status| !status.success()) {
-            return match fails {
-                Fails::End => {
+            return match fails.failed(&on) {
+                Failed::End => {
                     self.ended = true;
                     Ok(())
                 },
-                Fails::Back(back) => {
+                Failed::Back(back) => {
                     self.failed(&on);
                     self.go_back(&on, back)
                 },
-                Fails::Onward(mut tried) => {
+                Failed::Onward(tried) => {
                     self.failed(&on);
-                    tried.push(destination.clone());
                     self.newest_here(&tried)
                 },
             };
@@ -2409,12 +2395,9 @@ impl App {
                 None
             },
         };
-        // The machines tried before luneta's zellij was in this session are
-        // tried again: what failed there may not fail now.
-        let fails = match fails {
-            Fails::Onward(_) => Fails::Onward(Vec::new()),
-            Fails::End | Fails::Back(_) => fails,
-        };
+        // It was in the session that ended, whether or not zellij listed it
+        // there yet.
+        fails.came_in();
         match refuge {
             Some(Refuge { session, before }) => {
                 let joins = Joins::Attach(&session);
@@ -2482,12 +2465,13 @@ impl App {
     /// Has a client of the newest session that answers of another machine's
     /// take the place of zellij's client, as the machine it was on has no
     /// session left: of the first machine lunetad reaches, by the sidebar's
-    /// headers, but those `tried`, as `Fails::Onward` says. Where that client
-    /// fails, luneta's zellij goes on to the next. luneta ends where no
-    /// machine has one, and where it does not reach lunetad to ask; the log
-    /// says why it passed each machine over.
+    /// headers, but those `tried`, as `Fails::Onward` says, and never one
+    /// that may hold luneta's own terminal, as `Sidebar::refuges_away` says.
+    /// Where that client fails, luneta's zellij goes on to the next. luneta
+    /// ends where no machine has one, and where it does not reach lunetad to
+    /// ask; the log says why it passed each machine over.
     fn newest_away(&mut self, tried: &[Destination]) -> io::Result<()> {
-        for (destination, refuges) in self.sidebar.refuges_away(tried) {
+        for (destination, refuges) in self.sidebar.refuges_away(tried, zellij::within()) {
             let sessions = match refuges {
                 Ok(sessions) => sessions,
                 Err(why) => {

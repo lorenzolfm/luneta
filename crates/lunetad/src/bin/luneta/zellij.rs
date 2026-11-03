@@ -263,6 +263,32 @@ pub fn ended(seats: &[SessionName]) -> Ended {
     moves::refuge(&folder, seats, current.as_deref(), |session| clients(session.as_str()).ok())
 }
 
+/// What sshd sets in a session it runs: in every one, and in one with a
+/// terminal.
+const SSH_VARS: [&str; 2] = ["SSH_CONNECTION", "SSH_TTY"];
+
+/// Where luneta's own terminal may be, as luneta's environment says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Within {
+    /// On this machine, in no pane of zellij's, nor through ssh: no session
+    /// of another machine's holds it.
+    Here,
+    /// Maybe in a pane of another machine's zellij: luneta runs in an ssh
+    /// session, or in a pane of zellij here, whose client may come through
+    /// ssh in its turn. Which session holds it, luneta cannot tell from here.
+    MaybeAway,
+}
+
+/// Where luneta's own terminal may be, as `Within` says.
+pub fn within() -> Within {
+    let set = |var: &&str| env::var_os(var).is_some();
+    if SSH_VARS.iter().any(set) || ["ZELLIJ", SESSION_VAR].iter().any(set) {
+        Within::MaybeAway
+    } else {
+        Within::Here
+    }
+}
+
 /// This machine's newest session, as `lunetad::moves::newest` finds it,
 /// where luneta's zellij goes on once its client ended on another machine:
 /// never the session luneta's terminal is a pane of.
