@@ -226,9 +226,10 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
 }
 
 /// What Claude Code says in words the daemon knows, it lists as those; a word
-/// it does not know comes through as Claude Code wrote it, and what Claude
-/// Code does not say, the daemon does not either: a status it does not date
-/// has no date, though the file says when the session started.
+/// it does not know comes through as Claude Code wrote it, as what it waits
+/// for always does, and what Claude Code does not say, the daemon does not
+/// either: a status it does not date has no date, though the file says when
+/// the session started.
 #[test]
 fn the_daemon_says_what_claude_code_says_and_no_more() {
     let host = Host::new();
@@ -240,9 +241,10 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
     let mut said = file_for("newer", &newer, "Compacting");
     said["nameSource"] = json!("someone");
     said["entrypoint"] = json!("claude-vscode");
+    said["waitingFor"] = json!("Permission Prompt");
     host.write(newer.pid(), &said);
     let mut said = file_for("older", &older, "");
-    for unsaid in ["status", "statusUpdatedAt", "nameSource", "entrypoint"] {
+    for unsaid in ["status", "statusUpdatedAt", "nameSource", "entrypoint", "waitingFor"] {
         said.as_object_mut().unwrap().remove(unsaid);
     }
     host.write(older.pid(), &said);
@@ -256,16 +258,19 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
             let name = agent.name.as_ref();
             let source = name.and_then(|name| name.source.is_some().then(|| name.source()));
             let (id, dated) = (agent.session_id.as_str(), agent.status_since.is_some());
-            (id, agent.status.clone(), dated, source, agent.entrypoint.as_deref())
+            let (entrypoint, waits) = (agent.entrypoint.as_deref(), agent.waiting_for.as_deref());
+            (id, agent.status.clone(), dated, source, entrypoint, waits)
         })
         .collect();
     let other = |word: &str| Some(Reported::OtherStatus(word.to_owned()));
+    let shell = Some(known(Status::Shell));
+    let newer = (Some(NameSource::Other), Some("claude-vscode"), Some("Permission Prompt"));
     assert_eq!(
         seen,
         [
-            ("newer", other("Compacting"), true, Some(NameSource::Other), Some("claude-vscode")),
-            ("older", None, false, None, None),
-            ("shell", Some(known(Status::Shell)), true, Some(NameSource::User), Some("sdk-cli")),
+            ("newer", other("Compacting"), true, newer.0, newer.1, newer.2),
+            ("older", None, false, None, None, None),
+            ("shell", shell, true, Some(NameSource::User), Some("sdk-cli"), None),
         ]
     );
 }
@@ -285,9 +290,12 @@ fn the_daemon_follows_the_files_as_they_change() {
     host.write(two.pid(), &file("two", two.pid(), &two_start, "idle"));
     let _daemon = start(host.vars()).unwrap();
 
-    host.write(one.pid(), &file("one", one.pid(), &one_start, "waiting"));
+    let mut waiting = file("one", one.pid(), &one_start, "waiting");
+    waiting["waitingFor"] = json!("input needed");
+    host.write(one.pid(), &waiting);
     let waits = Some(known(Status::Waiting));
-    eventually("one waits", || host.agent("one").filter(|agent| agent.status == waits));
+    let asks = |agent: &Agent| agent.waiting_for.as_deref() == Some("input needed");
+    eventually("one waits", || host.agent("one").filter(|a| a.status == waits && asks(a)));
 
     // `two`'s new status shows once the daemon has read the folder again, and
     // that read finds `one` half written, and `three` half made.

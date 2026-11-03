@@ -1056,6 +1056,13 @@ message Agent {
   optional string entrypoint = 8;
   // Where it runs in zellij, absent when it runs outside zellij.
   Zellij zellij = 9;
+  // What it waits for, as Claude Code says while its status is waiting,
+  // verbatim: `permission prompt` for a tool it asks to run, a plan it asks
+  // you to take too; `input needed` for a question of its own, or of a
+  // server's; `dialog open` for the rest of its dialogs; and a word of its
+  // own for each it adds. Absent where it does not say, as while it does not
+  // wait.
+  optional string waiting_for = 11;
 }
 
 enum Status {

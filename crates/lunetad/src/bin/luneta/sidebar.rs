@@ -4454,6 +4454,7 @@ mod tests {
                 session: Some(session.to_owned()),
                 pane,
             }),
+            waiting_for: None,
         }
     }
 

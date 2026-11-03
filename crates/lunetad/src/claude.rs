@@ -64,6 +64,7 @@ struct File {
     /// them. A file from a container that shares the folder names another.
     pid_domain: Option<String>,
     status: Option<String>,
+    waiting_for: Option<String>,
     status_updated_at: Option<u64>,
     started_at: Option<u64>,
     name: Option<String>,
@@ -295,6 +296,7 @@ fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
         session_id: file.session_id.clone(),
         cwd: file.cwd.clone(),
         status: Status::of(file.status.as_deref()),
+        waiting_for: word(&file.waiting_for),
         status_since: file.status_updated_at.map(moment),
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),

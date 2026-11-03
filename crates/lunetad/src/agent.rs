@@ -18,6 +18,8 @@ pub struct Agent {
     /// Where it works.
     pub cwd: Said,
     pub status: Status,
+    /// What it waits for, in the agent's own word, where it says.
+    pub waiting_for: Option<Said>,
     /// When it came to its status, as the agent dates it.
     pub status_since: Option<SystemTime>,
     pub started_at: Option<SystemTime>,
@@ -160,6 +162,7 @@ impl Agent {
                 api::Name { text: name.text.clone().into(), source }
             }),
             entrypoint: self.entrypoint.clone().map(String::from),
+            waiting_for: self.waiting_for.clone().map(String::from),
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
