@@ -1770,6 +1770,19 @@ impl Sidebar {
         }
     }
 
+    /// The machine and the directory of the Claude Code agent started at a
+    /// prompt in the pane luneta's zellij is on, if one is there. A `claude
+    /// -p` that a shell started is no agent to talk to: the shell has the keys.
+    pub fn here_agent(&self) -> Option<(Machine, String)> {
+        let place = self.here_place().ok()?;
+        let seen = self.seen(&self.on)?;
+        let seated = seated(seen.agents, seen.sessions);
+        let agent = seated.get(&(place.session.name().as_str(), place.pane))?;
+        let pane = self.pane_of(&self.on, &place.session, place.pane)?;
+        (agent.entrypoint.as_deref() == Some("cli"))
+            .then(|| (self.on.clone(), agent_dir(agent, pane).to_owned()))
+    }
+
     /// The machine whose header the highlight is on, if it is on one.
     pub fn on_header(&self) -> Option<Machine> {
         match self.cursor.as_ref()? {
@@ -7274,6 +7287,33 @@ mod tests {
 
     /// What goes wrong with what the menu over zellij does is said over
     /// zellij, where you look, and the sidebar collapsed has no room for:
+    /// What you say can name a skill only to an agent started at a prompt in
+    /// the pane luneta's zellij is on, of that agent's directory as zellij
+    /// says it: not to a shell, nor to one where a shell ran `claude -p`.
+    #[test]
+    fn the_agent_here_is_the_one_in_the_pane_luneta_s_zellij_is_on() {
+        let on_pane = |id: u32| {
+            let mut sidebar = fresh();
+            let panes = vec![
+                pane(1, 0, "/w/a", "claude"),
+                pane(2, 0, "/w/b", "fish"),
+                pane(3, 0, "/w/c", "fish"),
+            ];
+            let printing = agent("s", 3, Status::Busy, None);
+            let printing = Agent { entrypoint: Some("sdk-cli".to_owned()), ..printing };
+            let agents = vec![agent("s", 1, Status::Idle, None), printing];
+            sidebar.heard(host(vec![session("s", 10, panes)], agents));
+            assert_eq!(sidebar.here_agent(), None);
+            let look = sidebar.titled("s | fish".to_owned()).expect("a look");
+            let clients = vec![Client { id: 1, pane: Some(id) }];
+            sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
+            sidebar.here_agent()
+        };
+        assert_eq!(on_pane(1), Some((Machine::Local, "/w/a".to_owned())));
+        assert_eq!(on_pane(2), None);
+        assert_eq!(on_pane(3), None);
+    }
+
     /// luneta takes it once, and it stays out of the notes, but for what
     /// luneta did not take as the box gave up the keys. The menu at the bottom
     /// says it in the notes. What went wrong before goes from the notes as the
@@ -8448,6 +8488,7 @@ mod tests {
 
         let there = |pane| pane_of("main", 20, pane);
         assert_eq!(sidebar.here_row, Some(Spot::Remote(nixos(), there(1))));
+        assert_eq!(sidebar.here_agent(), Some((Machine::Remote(nixos()), "/w/b".to_owned())));
         let lines = screen(&mut sidebar, false, 32, 12);
         assert_eq!(lines[5], "     \u{e795} w/a");
         assert_eq!(lines[8], "▌╭ ✓ \u{ec82} fix                  1m");

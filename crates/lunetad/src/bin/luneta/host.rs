@@ -80,7 +80,7 @@ use crate::printed::{self, Printed};
 use crate::review;
 use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
-use crate::skills::{self, Skill};
+use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
 use crate::starts::{self, First, Sought, Start};
@@ -142,6 +142,9 @@ pub enum Event {
     Picker { number: u64, heard: picker::Heard },
     /// What the speech model said of the dictation numbered `number`.
     Spoken { number: u64, spoken: Spoken },
+    /// The skills that the dictation numbered `number` can name, or why the
+    /// finder found none.
+    Nameable { number: u64, skills: Result<Vec<Skill>, String> },
     /// How the fetch of the speech model goes.
     Fetched(Fetched),
     /// A fold was made or taken away where the folds are kept: by another
@@ -1216,6 +1219,17 @@ impl App {
                     self.undictate(Some(dictated));
                 }
             },
+            Event::Nameable { number, skills } => {
+                if let Err(why) = &skills {
+                    self.sidebar.notify(why.clone());
+                }
+                if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
+                    && dictation.number() == number
+                    && let Some(dictated) = dictation.found(skills)
+                {
+                    self.undictate(Some(dictated));
+                }
+            },
             Event::Fetched(fetched) => self.fetched(&fetched),
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
@@ -1934,7 +1948,9 @@ impl App {
             Asked::Pull { menu, on, link, worked } => {
                 pull::prepare(menu, on, link, worked, &self.events);
             },
-            Asked::Find { menu, on, cwd } => skills::find(menu, &on, &cwd, &self.events),
+            Asked::Find { menu, on, cwd } => {
+                skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });
+            },
             Asked::Printed { menu, on, session, pane, ended } => {
                 printed::read(menu, &on, &session, pane, ended, &self.events);
             },
@@ -2060,9 +2076,10 @@ impl App {
         self.dictations += 1;
         let number = self.dictations;
         let dictation = if speech::fetched() {
+            let skills = self.nameable(number, &under);
             let speech = self.speech.get_or_insert_with(Speech::start);
             let listening = speech.listen(number, &self.events);
-            Dictation::hearing(number, listening, self.releases, Instant::now())
+            Dictation::hearing(number, listening, skills, self.releases, Instant::now())
         } else {
             let events = &self.events;
             let fetching = || Fetch { _asking: speech::fetch(events), got: 0 };
@@ -2073,12 +2090,32 @@ impl App {
         true
     }
 
+    /// The skills that the dictation numbered `number`, into `under`, can name,
+    /// which the finder is asked for: those of the directory of the Claude
+    /// Code agent in the pane zellij is on. None elsewhere: in a shell, "slash"
+    /// is more likely part of a path, and the ask box's agent runs in safe
+    /// mode, where none of your skills are.
+    fn nameable(&self, number: u64, under: &Where) -> Skills {
+        let agent = match under {
+            Where::Zellij => self.sidebar.here_agent(),
+            Where::Ask(_) => None,
+        };
+        let Some((on, cwd)) = agent else {
+            return Skills::Found(Vec::new());
+        };
+        skills::find(&on, &cwd, &self.events, move |skills| Event::Nameable { number, skills });
+        Skills::Finding
+    }
+
     /// Closes the dictation box, which gives up the dictation it is at, if it
     /// is still at one, and gives the keys back to what it was over. What you
     /// `dictated`, if anything, is written there as it closes: pasted in the
     /// pane zellij is on, with a space after it for what you say next, or on
-    /// the ask box's line. Then it is sent, as `Enter` would send it, where
-    /// you ended the dictation with `Enter`.
+    /// the ask box's line. A slash command is typed, and only what it is given
+    /// is pasted: Claude Code folds a long paste to `[Pasted text #1]`, and
+    /// takes a prompt that is only that for words, whatever the paste starts
+    /// with. Then it is sent, as `Enter` would send it, where you ended the
+    /// dictation with `Enter`.
     fn undictate(&mut self, dictated: Option<Dictated>) {
         let had = self.focus.zellij_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Dictation(..)));
@@ -2089,11 +2126,21 @@ impl App {
         match under {
             Where::Zellij => {
                 self.give_from(had, Focus::on(side));
-                let Some(Dictated { text, sends }) = dictated else {
+                let Some(Dictated { written, sends }) = dictated else {
                     return;
                 };
                 let mode = self.client.hosted.mode();
-                self.client.hosted.send(keys::paste(&format!("{text} "), mode));
+                if let Some(command) = &written.command {
+                    for c in format!("/{command} ").chars() {
+                        let typed = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+                        if let Some(bytes) = keys::key(&typed, mode) {
+                            self.client.hosted.send(bytes);
+                        }
+                    }
+                }
+                if !written.text.is_empty() {
+                    self.client.hosted.send(keys::paste(&format!("{} ", written.text), mode));
+                }
                 let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
                 if sends && let Some(bytes) = keys::key(&enter, mode) {
                     self.client.hosted.send(bytes);
@@ -2102,7 +2149,7 @@ impl App {
             },
             Where::Ask(mut ask) => {
                 if let Some(dictated) = &dictated {
-                    ask.dictated(&dictated.text);
+                    ask.dictated(&dictated.written.to_string());
                 }
                 self.give_from(had, Focus { side, over: Some(Over::Ask(ask)) });
                 if dictated.is_some_and(|dictated| dictated.sends) {

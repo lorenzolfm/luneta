@@ -31,6 +31,7 @@ mod live;
 mod machines;
 mod menu;
 mod mic;
+mod named;
 mod news;
 mod order;
 mod own;

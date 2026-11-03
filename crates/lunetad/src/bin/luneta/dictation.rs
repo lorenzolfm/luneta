@@ -22,6 +22,11 @@
 //! it presses again as the key is held is the key repeating, which does
 //! nothing.
 //!
+//! Into a pane with a Claude Code agent in it, a skill you name is written as
+//! its slash command, as `named` has it, and the box shows it so as you say
+//! it. The finder says which skills there are while you talk: what you said
+//! waits on it only if it has a mark in it, a word that can name a skill.
+//!
 //! The first time, the model is fetched, which the box says as it goes. The
 //! fetch goes on with the box closed, and dictation waits for it.
 
@@ -35,7 +40,9 @@ use ratatui::text::{Line, Span};
 
 use crate::brief;
 use crate::menu::{self, Hint};
+use crate::named::{self, Written};
 use crate::sidebar::{self, ACCENT};
+use crate::skills::{Skill, Skills};
 use crate::speech::{self, Fetched, Listening, Spoken};
 
 /// The key that dictates, held or tapped.
@@ -54,6 +61,9 @@ const REPEATS: Duration = Duration::from_millis(150);
 /// What the rule along the box's top names it.
 const TITLE: &str = "Dictate";
 
+/// What the box says from when you are done until what you said is written.
+const WRITING: &str = "Writing what you said…";
+
 /// How many of the last levels of the microphone the box shows.
 const LEVELS: usize = 8;
 
@@ -63,7 +73,7 @@ const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 /// What you said, for luneta to write where the box was opened over.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Dictated {
-    pub text: String,
+    pub written: Written,
     /// Whether it is sent once written, as `Enter` ended the dictation.
     pub sends: bool,
 }
@@ -110,6 +120,9 @@ pub struct Dictation {
     /// Its number among the dictations luneta has opened, which what the
     /// model says of it carries.
     number: u64,
+    /// The skills what you say can name: none, where it is written into what
+    /// runs none.
+    skills: Skills,
     stage: Stage,
 }
 
@@ -121,6 +134,9 @@ enum Stage {
     /// The model came.
     Fetched,
     Hearing(Hearing),
+    /// The model wrote what you said, which has a mark in it, and the finder
+    /// has yet to say what it can name. It is sent then, as `sends` says.
+    Naming { said: String, sends: bool },
     /// What went wrong: why the dictation wrote nothing, or why the model
     /// did not come.
     Wrong(String),
@@ -165,10 +181,16 @@ enum Model {
 
 impl Dictation {
     /// The box numbered `number`, for the dictation `listening`, from
-    /// `now`, as the key went down. Where luneta's terminal tells it when a
-    /// key is let go, as `releases` says, the key is held until then; else it
-    /// was tapped.
-    pub fn hearing(number: u64, listening: Listening, releases: bool, now: Instant) -> Self {
+    /// `now`, as the key went down, of what can name `skills`. Where luneta's
+    /// terminal tells it when a key is let go, as `releases` says, the key is
+    /// held until then; else it was tapped.
+    pub fn hearing(
+        number: u64,
+        listening: Listening,
+        skills: Skills,
+        releases: bool,
+        now: Instant,
+    ) -> Self {
         let key = if releases { Key::Down(now) } else { Key::Tapped };
         let hearing = Hearing {
             key,
@@ -177,13 +199,13 @@ impl Dictation {
             words: String::new(),
             listening,
         };
-        Dictation { number, stage: Stage::Hearing(hearing) }
+        Dictation { number, skills, stage: Stage::Hearing(hearing) }
     }
 
     /// The box numbered `number`, while the model is on its way: `got` bytes
     /// of it are in.
     pub fn fetching(number: u64, got: u64) -> Self {
-        Dictation { number, stage: Stage::Fetching(got) }
+        Dictation { number, skills: Skills::Found(Vec::new()), stage: Stage::Fetching(got) }
     }
 
     pub fn number(&self) -> u64 {
@@ -199,15 +221,21 @@ impl Dictation {
     pub fn key(&mut self, key: &KeyEvent, now: Instant) -> Keyed {
         let pressed = key.kind == KeyEventKind::Press;
         let chord = (key.code, key.modifiers);
-        let Stage::Hearing(hearing) = &mut self.stage else {
-            return match (pressed, chord == KEY) {
-                (true, true) => Keyed::Dictate,
-                (true, false) => Keyed::Close,
-                (false, _) => Keyed::Nothing,
-            };
-        };
         let closes = chord == (KeyCode::Esc, KeyModifiers::NONE)
             || chord == (KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let hearing = match &mut self.stage {
+            Stage::Hearing(hearing) => hearing,
+            Stage::Naming { .. } => {
+                return if pressed && closes { Keyed::Close } else { Keyed::Nothing };
+            },
+            Stage::Fetching(_) | Stage::Fetched | Stage::Wrong(_) => {
+                return match (pressed, chord == KEY) {
+                    (true, true) => Keyed::Dictate,
+                    (true, false) => Keyed::Close,
+                    (false, _) => Keyed::Nothing,
+                };
+            },
+        };
         if pressed && closes {
             return Keyed::Close;
         }
@@ -266,11 +294,28 @@ impl Dictation {
             // still down, or tapped, and is not sent.
             Spoken::Ended(Ok(text)) => {
                 let sends = hearing.key == Key::Done { sends: true };
-                return Some(Dictated { text, sends });
+                if self.skills == Skills::Finding && named::marked(&text) {
+                    self.stage = Stage::Naming { said: text, sends };
+                    return None;
+                }
+                return Some(Dictated { written: written(&text, &self.skills), sends });
             },
             Spoken::Ended(Err(why)) => self.stage = Stage::Wrong(why),
         }
         None
+    }
+
+    /// Takes in the skills the finder found, or why it found none, and gives
+    /// what you said to be written, if it waited on them.
+    pub fn found(&mut self, skills: Result<Vec<Skill>, String>) -> Option<Dictated> {
+        self.skills = match skills {
+            Ok(skills) => Skills::Found(skills),
+            Err(why) => Skills::Failed(why),
+        };
+        let Stage::Naming { said, sends } = &self.stage else {
+            return None;
+        };
+        Some(Dictated { written: written(said, &self.skills), sends: *sends })
     }
 
     /// Takes in how the model's fetch goes.
@@ -288,7 +333,7 @@ impl Dictation {
     /// Whether its spinner turns, and its clock: while it hears you, or
     /// writes what you said.
     pub fn turning(&self) -> bool {
-        matches!(self.stage, Stage::Hearing(_))
+        matches!(self.stage, Stage::Hearing(_) | Stage::Naming { .. })
     }
 
     /// Draws it in a box along the bottom of `over`, zellij's columns, at
@@ -308,7 +353,14 @@ impl Dictation {
                 (lines, keys, String::new())
             },
             Stage::Wrong(why) => wrong(why, inner),
-            Stage::Hearing(hearing) => hearing.lines(inner, now),
+            Stage::Hearing(hearing) => hearing.lines(&self.skills, inner, now),
+            Stage::Naming { said, .. } => {
+                let mut lines = menu::wrap(said.trim(), inner, Style::new());
+                lines.push(Line::default());
+                let dim = Style::new().add_modifier(Modifier::DIM);
+                lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.0)));
+                (lines, vec![(Hint::Esc, "Cancel")], String::new())
+            },
         };
         let mut lines = lines;
         let footer = [Line::default(), menu::keys_line(inner, &keys)];
@@ -338,16 +390,18 @@ impl Hearing {
 
     /// Its lines, `inner` wide, at `now`, the keys under them, and what its
     /// rule says on the right: how long the model has heard you, and how
-    /// loud the microphone heard you last.
-    fn lines(&self, inner: usize, now: (SystemTime, Instant)) -> Shown {
+    /// loud the microphone heard you last. What you said so far shows as it
+    /// would be written, what it names of `skills` too.
+    fn lines(&self, skills: &Skills, inner: usize, now: (SystemTime, Instant)) -> Shown {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let frame = sidebar::frame(now.0);
-        let mut lines = menu::wrap(self.words.trim(), inner, Style::new());
-        if self.words.trim().is_empty() {
+        let words = written(self.words.trim(), skills).to_string();
+        let mut lines = menu::wrap(&words, inner, Style::new());
+        if words.is_empty() {
             lines.clear();
         }
         let doing = match self.model {
-            _ if matches!(self.key, Key::Done { .. }) => Some("Writing what you said…"),
+            _ if matches!(self.key, Key::Done { .. }) => Some(WRITING),
             Model::Opening => Some("Opening the microphone…"),
             Model::Loading => Some("Reading the speech model in: go on talking…"),
             Model::Listening(_) if lines.is_empty() => {
@@ -378,6 +432,15 @@ impl Hearing {
         let seconds = heard.as_secs();
         let bars: String = self.levels.iter().map(|level| bar(*level)).collect();
         (lines, keys, format!("● {}:{:02} {bars}", seconds / 60, seconds % 60))
+    }
+}
+
+/// What was `said`, as it is written, what it names of `skills`, once the finder
+/// has said them, as what runs it.
+fn written(said: &str, skills: &Skills) -> Written {
+    match skills {
+        Skills::Found(skills) => named::written(said, skills),
+        Skills::Finding | Skills::Failed(_) => Written::said(said),
     }
 }
 
@@ -430,6 +493,7 @@ mod tests {
 
     use super::*;
     use crate::gruvbox;
+    use crate::skills::Name;
 
     fn alt_r(kind: KeyEventKind) -> KeyEvent {
         KeyEvent::new_with_kind(KeyCode::Char('r'), KeyModifiers::ALT, kind)
@@ -443,8 +507,21 @@ mod tests {
     /// is let go, as `releases` says, and what the thread that hears you is
     /// told: to finish, or, as it drops, to give up.
     fn hearing(releases: bool, at: Instant) -> (Dictation, Receiver<()>) {
+        hearing_of(Skills::Found(Vec::new()), releases, at)
+    }
+
+    /// As `hearing`, for what can name `skills`.
+    fn hearing_of(skills: Skills, releases: bool, at: Instant) -> (Dictation, Receiver<()>) {
         let (listening, stop) = Listening::new();
-        (Dictation::hearing(1, listening, releases, at), stop)
+        (Dictation::hearing(1, listening, skills, releases, at), stop)
+    }
+
+    fn skills(names: &[&str]) -> Vec<Skill> {
+        let skill = |name: &&str| Skill {
+            name: Name::new((*name).to_owned()).expect("a name"),
+            description: String::new(),
+        };
+        names.iter().map(skill).collect()
     }
 
     fn ended(dictation: &mut Dictation, text: &str) -> Option<Dictated> {
@@ -452,7 +529,13 @@ mod tests {
     }
 
     fn written(text: &str, sends: bool) -> Dictated {
-        Dictated { text: text.to_owned(), sends }
+        Dictated { written: Written::said(text), sends }
+    }
+
+    /// As `written`, but for the slash command of the skill `name` first.
+    fn runs(name: &str, text: &str, sends: bool) -> Dictated {
+        let command = Name::new(name.to_owned());
+        Dictated { written: Written { command, text: text.to_owned() }, sends }
     }
 
     /// The key held as you talk repeats, and does nothing, until it is let
@@ -623,6 +706,71 @@ mod tests {
                 Z,
             ]
         );
+    }
+
+    /// You see the command as it will be written, before `Enter` sends it,
+    /// and what `Enter` sends is that.
+    #[test]
+    fn the_box_shows_a_skill_named_as_its_command() {
+        let at = Instant::now();
+        let (mut dictation, stop) = hearing(false, at);
+        dictation.skills = Skills::Found(skills(&["thermo-nuclear-review"]));
+        dictation.spoken(Spoken::Listening, at);
+        let said = "review this with the thermonuclear review skill";
+        dictation.spoken(Spoken::Words(said.to_owned()), at);
+        let lines = shown(&dictation, 60, 7, at);
+        assert_eq!(lines[2], "│ /thermo-nuclear-review review this                       │");
+        let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(dictation.key(&enter, at), Keyed::Nothing);
+        assert_eq!(stop.try_recv(), Ok(()));
+        assert_eq!(
+            ended(&mut dictation, "Review this with the thermonuclear review skill."),
+            Some(runs("thermo-nuclear-review", "Review this", true))
+        );
+    }
+
+    /// What you said, and it names a skill, waits for the finder, with the
+    /// box open. It then writes what the finder's skills make of it, and
+    /// sends it if `Enter` ended it. Only `Esc` and `Ctrl c` do anything to
+    /// it meanwhile.
+    #[test]
+    fn what_may_name_a_skill_waits_for_the_finder() {
+        let at = Instant::now();
+        let (mut dictation, _stop) = hearing_of(Skills::Finding, false, at);
+        let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
+        dictation.key(&enter, at);
+        assert_eq!(ended(&mut dictation, "Slash hand off."), None);
+        assert!(dictation.turning());
+        let lines = shown(&dictation, 60, 9, at);
+        assert_eq!(lines[2], "│ Slash hand off.                                          │");
+        assert!(lines[4].contains("Writing what you said…"), "{lines:?}");
+        assert_eq!(dictation.key(&enter, at), Keyed::Nothing);
+        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Nothing);
+        assert_eq!(dictation.found(Ok(skills(&["handoff"]))), Some(runs("handoff", "", true)));
+
+        let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
+        assert_eq!(ended(&mut dictation, "Slash hand off."), None);
+        let esc = pressed(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(dictation.key(&esc, at), Keyed::Close);
+    }
+
+    /// A finder that fails leaves what you said as you said it, and nothing
+    /// waits on one that is yet to say, where no word can name a skill. An
+    /// answer with nothing waiting on it just fills the box.
+    #[test]
+    fn the_finder_holds_up_only_what_it_can_change() {
+        let at = Instant::now();
+        let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
+        assert_eq!(ended(&mut dictation, "Slash hand off."), None);
+        let failed = Err("skills: no answer".to_owned());
+        assert_eq!(dictation.found(failed), Some(written("Slash hand off.", false)));
+
+        let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
+        assert_eq!(ended(&mut dictation, "Run the tests."), Some(written("Run the tests.", false)));
+
+        let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
+        assert_eq!(dictation.found(Ok(skills(&["handoff"]))), None);
+        assert_eq!(ended(&mut dictation, "Slash hand off."), Some(runs("handoff", "", false)));
     }
 
     #[test]
