@@ -428,7 +428,7 @@ type Reads<'a> =
 /// where the daemon said it reads Claude Code's sessions, or none where it
 /// said nothing; another's as its daemon reads them there, through this
 /// one's, or why it read none.
-fn read(
+pub fn read(
     on: &Machine,
     reading: &Reading,
     projects: Option<&Path>,
@@ -615,7 +615,7 @@ fn step(block: &Value) -> Option<String> {
 /// What a tool was run on, by the field that says it for the tools Claude
 /// Code has: what a command or a subagent is for, which says more than the
 /// command does, a command, a file, a pattern, a question asked of you.
-fn on_what(input: &Value) -> Option<&str> {
+pub fn on_what(input: &Value) -> Option<&str> {
     const FIELDS: [&str; 7] =
         ["description", "command", "file_path", "pattern", "url", "query", "prompt"];
     FIELDS
@@ -626,7 +626,7 @@ fn on_what(input: &Value) -> Option<&str> {
 
 /// `text` on one line, its runs of white space one space each, and no longer
 /// than `chars`, ending in `…` where it was cut.
-fn one_line(text: &str, chars: usize) -> String {
+pub fn one_line(text: &str, chars: usize) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
     let line = words.join(" ");
     if line.chars().count() <= chars {

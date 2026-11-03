@@ -3,6 +3,7 @@
 //! has zellij open, move and close what the sidebar's menu does, for the
 //! agent of its ask box among others.
 
+mod alerts;
 mod answers;
 mod ask;
 mod away;
@@ -11,6 +12,7 @@ mod brief;
 mod close;
 mod commands;
 mod daemon;
+mod desktop;
 mod dictation;
 mod due;
 mod drive;
@@ -30,6 +32,7 @@ mod mic;
 mod news;
 mod order;
 mod own;
+mod peers;
 mod picker;
 mod printed;
 mod pull;
@@ -87,6 +90,14 @@ enum Command {
         #[arg(value_parser = pull::Of::parse, value_name = "BRANCH")]
         of: pull::Of,
     },
+    /// Tell the luneta listening on a socket that its notification of a
+    /// group was clicked, as a click on one runs on macOS.
+    #[command(hide = true)]
+    Clicked {
+        #[arg(long, value_name = "PATH")]
+        socket: PathBuf,
+        group: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -106,6 +117,15 @@ fn main() -> ExitCode {
     let command = match command {
         // It asks no lunetad, and so needs no folder to find one in.
         Command::Worktree { repo, of } => return pull::make(&repo, &of),
+        Command::Clicked { socket, group } => {
+            return match peers::tell(&socket, &group) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("luneta: {}: {error}", socket.display());
+                    ExitCode::FAILURE
+                },
+            };
+        },
         Command::Asked(command) => command,
     };
     match folder {

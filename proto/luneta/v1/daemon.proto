@@ -1056,6 +1056,15 @@ message Agent {
   optional string entrypoint = 8;
   // Where it runs in zellij, absent when it runs outside zellij.
   Zellij zellij = 9;
+  // What it waits for, as Claude Code says while its status is waiting.
+  // Neither while it does not wait, nor where it does not say.
+  oneof waiting_for {
+    // A word the daemon knows.
+    WaitingFor known_waiting_for = 11;
+    // A word it does not, as Claude Code wrote it: one of the others Claude
+    // Code has, as `sandbox request`, or a newer Claude Code's.
+    string other_waiting_for = 12;
+  }
 }
 
 enum Status {
@@ -1070,6 +1079,20 @@ enum Status {
   STATUS_WAITING = 3;
   // It is a shell.
   STATUS_SHELL = 4;
+}
+
+// What an agent waits for, in the words Claude Code says it in, in any case.
+enum WaitingFor {
+  // Never sent. A client that finds it, or a number it does not know, has a
+  // word a newer daemon knows.
+  WAITING_FOR_UNSPECIFIED = 0;
+  // `permission prompt`: a tool it asks to run, or a plan it asks you to
+  // take.
+  WAITING_FOR_PERMISSION_PROMPT = 1;
+  // `input needed`: a question of its own, or of a server's.
+  WAITING_FOR_INPUT_NEEDED = 2;
+  // `dialog open`: one of its own dialogs, which you opened.
+  WAITING_FOR_DIALOG_OPEN = 3;
 }
 
 message Name {

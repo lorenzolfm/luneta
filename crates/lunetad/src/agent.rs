@@ -7,6 +7,7 @@ use luneta_protocol::said::Said;
 
 use crate::api;
 use crate::api::agent::Status as Reported;
+use crate::api::agent::WaitingFor as Waits;
 use crate::zellij::Sessions;
 
 /// An agent that runs on the host.
@@ -32,7 +33,8 @@ pub struct Agent {
 pub enum Status {
     Busy,
     Idle,
-    Waiting,
+    /// It waits on you, for what it says, where it says.
+    Waiting(Option<WaitingFor>),
     Shell,
     /// A word not known here, as the agent wrote it: a newer agent's.
     Other(Said),
@@ -41,20 +43,61 @@ pub enum Status {
 }
 
 impl Status {
-    /// Claude Code's word for it, in any case.
+    /// Claude Code's word for it, and for what it waits for, where it waits,
+    /// in any case.
     #[must_use]
-    pub fn of(word: Option<&str>) -> Self {
-        let Some(word) = word.map(|word| word.trim().to_owned()).and_then(Said::new) else {
+    pub fn of(word: Option<&str>, waiting_for: Option<&str>) -> Self {
+        let Some(word) = said(word) else {
             return Status::Unreported;
         };
         match word.as_str().to_ascii_lowercase().as_str() {
             "busy" => Status::Busy,
             "idle" => Status::Idle,
-            "waiting" => Status::Waiting,
+            "waiting" => Status::Waiting(said(waiting_for).map(WaitingFor::of)),
             "shell" => Status::Shell,
             _ => Status::Other(word),
         }
     }
+}
+
+/// What an agent waits for, in the words Claude Code says it in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaitingFor {
+    /// A tool it asks to run, or a plan it asks you to take.
+    PermissionPrompt,
+    /// A question of its own, or of a server's.
+    InputNeeded,
+    /// One of its own dialogs, which you opened.
+    DialogOpen,
+    /// A word not known here, as the agent wrote it.
+    Other(Said),
+}
+
+impl WaitingFor {
+    /// Claude Code's word for it, in any case.
+    fn of(word: Said) -> Self {
+        match word.as_str().to_ascii_lowercase().as_str() {
+            "permission prompt" => WaitingFor::PermissionPrompt,
+            "input needed" => WaitingFor::InputNeeded,
+            "dialog open" => WaitingFor::DialogOpen,
+            _ => WaitingFor::Other(word),
+        }
+    }
+
+    fn to_api(&self) -> Waits {
+        let known = |waits: api::WaitingFor| Waits::KnownWaitingFor(waits.into());
+        match self {
+            WaitingFor::PermissionPrompt => known(api::WaitingFor::PermissionPrompt),
+            WaitingFor::InputNeeded => known(api::WaitingFor::InputNeeded),
+            WaitingFor::DialogOpen => known(api::WaitingFor::DialogOpen),
+            WaitingFor::Other(word) => Waits::OtherWaitingFor(word.clone().into()),
+        }
+    }
+}
+
+/// `word` without the white space around it, where that leaves any.
+fn said(word: Option<&str>) -> Option<Said> {
+    Said::new(word?.trim().to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,13 +172,16 @@ impl Agent {
         // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
         let known = |status: api::Status| Some(Reported::KnownStatus(status.into()));
-        let status = match &self.status {
-            Status::Busy => known(api::Status::Busy),
-            Status::Idle => known(api::Status::Idle),
-            Status::Waiting => known(api::Status::Waiting),
-            Status::Shell => known(api::Status::Shell),
-            Status::Other(word) => Some(Reported::OtherStatus(word.clone().into())),
-            Status::Unreported => None,
+        // What it waits for goes only with a wait.
+        let (status, waiting_for) = match &self.status {
+            Status::Busy => (known(api::Status::Busy), None),
+            Status::Idle => (known(api::Status::Idle), None),
+            Status::Waiting(waits) => {
+                (known(api::Status::Waiting), waits.as_ref().map(WaitingFor::to_api))
+            },
+            Status::Shell => (known(api::Status::Shell), None),
+            Status::Other(word) => (Some(Reported::OtherStatus(word.clone().into())), None),
+            Status::Unreported => (None, None),
         };
         let source = |source| -> api::NameSource {
             match source {
@@ -160,6 +206,7 @@ impl Agent {
                 api::Name { text: name.text.clone().into(), source }
             }),
             entrypoint: self.entrypoint.clone().map(String::from),
+            waiting_for,
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),

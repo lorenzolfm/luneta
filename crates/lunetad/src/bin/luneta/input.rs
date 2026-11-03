@@ -17,14 +17,17 @@ use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _};
 use std::os::fd::AsFd as _;
 use std::str;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::thread;
 
 use crossterm::event::{
     Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton,
     MouseEvent, MouseEventKind,
 };
-use signal_hook::consts::SIGWINCH;
+use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
+use signal_hook::flag;
 use signal_hook::iterator::Signals;
 
 use crate::answers::{self, Answer, Theme};
@@ -45,6 +48,7 @@ const COLOUR_LONGEST: usize = 32;
 /// for as long as it can, and hands on what it sends.
 pub fn read(events: Sender<Event>) {
     resizes(events.clone());
+    hangups(events.clone());
     thread::spawn(move || {
         if let Err(error) = listen(&events) {
             // luneta is on its way out.
@@ -96,6 +100,32 @@ fn resizes(events: Sender<Event>) {
             if events.send(Event::Input(Input::Resize(columns, rows))).is_err() {
                 return;
             }
+        }
+    });
+}
+
+/// Says that luneta's terminal hung up, as it does once its window closes,
+/// or that luneta was told to end, as its terminal not to be read any more:
+/// luneta ends as it does then, and takes down what it put up, as the
+/// notifications on the desktop, which the signal would have left up. A
+/// second signal ends luneta at once, as the first did before.
+fn hangups(events: Sender<Event>) {
+    const ENDS: [i32; 2] = [SIGHUP, SIGTERM];
+    let Ok(mut signals) = Signals::new(ENDS) else {
+        return;
+    };
+    let ending = Arc::new(AtomicBool::new(false));
+    for signal in ENDS {
+        // Where one cannot be had, the second signal does what the first
+        // does.
+        let _ = flag::register_conditional_default(signal, Arc::clone(&ending));
+        let _ = flag::register(signal, Arc::clone(&ending));
+    }
+    thread::spawn(move || {
+        if let Some(signal) = signals.forever().next() {
+            let ended = io::Error::other(format!("ended by signal {signal}"));
+            // luneta is on its way out.
+            let _ = events.send(Event::InputEnded(ended));
         }
     });
 }

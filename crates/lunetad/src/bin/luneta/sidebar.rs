@@ -59,6 +59,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::alerts::{self, Reach};
 use crate::brief::{Brief, Note, Over};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
@@ -1399,6 +1400,11 @@ impl Sidebar {
         self.folds.set(Fold::Session(&self.on, session), false);
     }
 
+    /// What zellij last titled luneta's terminal, which titles its window.
+    pub fn terminal_title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// The machine luneta's zellij's client runs on: this one until a client
     /// on another takes its place, as `swapping` says.
     pub fn on(&self) -> &Machine {
@@ -1553,15 +1559,7 @@ impl Sidebar {
     /// luneta's zellij is, and what runs on this machine and on each other
     /// that lunetad reaches, as `runs` lists it.
     pub fn listing(&self) -> Listing {
-        let here = self.here().map(|session| {
-            let on = self.on.clone();
-            // Its pane only while that is of the session it is in, as `user`
-            // takes it too.
-            match self.here_place() {
-                Ok(place) if place.session.name().as_str() == session => Here::Pane { on, place },
-                Ok(_) | Err(_) => Here::Session { on, session: session.to_owned() },
-            }
-        });
+        let here = self.whereabouts();
         let (away, this) = (self.away.clone(), self.this.clone());
         let mut listing = Listing { away, this, ..Listing::default() };
         if let Some(host) = &self.host {
@@ -1578,6 +1576,43 @@ impl Sidebar {
         }
         listing.here = here;
         listing
+    }
+
+    /// What runs on each machine lunetad watches, for the notifications, or
+    /// nothing before lunetad has said: on this machine and on each other it
+    /// reaches, the agents in the panes zellij there has listed, and the
+    /// sessions it has listed the panes of, and those it has not yet. One it
+    /// does not reach just now is away, and one it no longer watches is not
+    /// among them.
+    pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
+        let host = self.host.as_ref()?;
+        let here = self.whereabouts();
+        let reach = |machine: &Machine, seen: Result<Seen<'_>, Away>| {
+            let Ok(seen) = seen else {
+                return Reach::Away;
+            };
+            let (sessions, _) = oldest_first(seen.sessions);
+            let (listed, unlisted): (Vec<_>, Vec<_>) =
+                sessions.into_iter().partition(|(_, session)| session.panes.is_some());
+            let agents = self.runs(machine, &seen, here.as_ref()).agents;
+            let listed = listed.into_iter().map(|(listed, _)| listed).collect();
+            let unlisted = unlisted.into_iter().map(|(listed, _)| listed).collect();
+            Reach::Heard { agents, listed, unlisted }
+        };
+        let each = machines(host).each();
+        Some(each.map(|(machine, seen)| (machine.clone(), reach(&machine, seen))).collect())
+    }
+
+    /// Where luneta's zellij is, as far as the sidebar knows: on the machine
+    /// its client runs on, in the session `here` says, and on its pane there
+    /// while that is of the session it is in, as `user` takes it too.
+    pub fn whereabouts(&self) -> Option<Here> {
+        let session = self.here()?;
+        let on = self.on.clone();
+        Some(match self.here_place() {
+            Ok(place) if place.session.name().as_str() == session => Here::Pane { on, place },
+            Ok(_) | Err(_) => Here::Session { on, session: session.to_owned() },
+        })
     }
 
     /// What runs on `machine`, as its daemon says in `seen`, for the picker:
@@ -1609,6 +1644,9 @@ impl Sidebar {
                     status: status_word(agent),
                     since: marked.since,
                     dir: short_cwd(agent_dir(agent, pane)),
+                    pid: agent.pid,
+                    transcript: SessionId::parse(&agent.session_id),
+                    doing: alerts::Doing::of(agent),
                 });
             }
             panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -4454,6 +4492,7 @@ mod tests {
                 session: Some(session.to_owned()),
                 pane,
             }),
+            waiting_for: None,
         }
     }
 

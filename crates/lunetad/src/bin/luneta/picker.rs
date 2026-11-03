@@ -36,9 +36,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory};
 
+use crate::alerts::Doing;
 use crate::away::{self, Away};
 use crate::close::{Act, Deletes, Plan};
 use crate::gruvbox;
@@ -183,6 +185,12 @@ pub struct Seated {
     /// it: its directory's last two parts, as a whole path has the letters for
     /// a few typed ones to land on nearly any of it.
     pub dir: String,
+    /// Its process.
+    pub pid: u32,
+    /// The id of its session, which names its transcript, where it is one.
+    pub transcript: Option<SessionId>,
+    /// What it does, of what its notifications are of.
+    pub doing: Doing,
 }
 
 /// A list of the picker's.
@@ -2364,6 +2372,9 @@ mod tests {
             status: "idle".to_owned(),
             since: Some(now() - Duration::from_mins(1)),
             dir: "luneta/main".to_owned(),
+            pid: pane,
+            transcript: None,
+            doing: crate::alerts::Doing::Idle,
         }
     }
 

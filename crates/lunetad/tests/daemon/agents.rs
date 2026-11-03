@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lunetad::api::agent::Status as Reported;
+use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{
-    Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, UnreadFile, Zellij,
+    Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor,
+    Zellij,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -228,11 +229,13 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
 /// What Claude Code says in words the daemon knows, it lists as those; a word
 /// it does not know comes through as Claude Code wrote it, and what Claude
 /// Code does not say, the daemon does not either: a status it does not date
-/// has no date, though the file says when the session started.
+/// has no date, though the file says when the session started. What an agent
+/// waits for comes with a wait alone.
 #[test]
 fn the_daemon_says_what_claude_code_says_and_no_more() {
     let host = Host::new();
     let (shell, newer, older) = (process(None), process(None), process(None));
+    let waits = process(None);
     let mut said = file_for("shell", &shell, "shell");
     said["nameSource"] = json!("user");
     said["entrypoint"] = json!("sdk-cli");
@@ -240,9 +243,13 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
     let mut said = file_for("newer", &newer, "Compacting");
     said["nameSource"] = json!("someone");
     said["entrypoint"] = json!("claude-vscode");
+    said["waitingFor"] = json!("input needed");
     host.write(newer.pid(), &said);
+    let mut said = file_for("waits", &waits, "WAITING");
+    said["waitingFor"] = json!("Sandbox Request");
+    host.write(waits.pid(), &said);
     let mut said = file_for("older", &older, "");
-    for unsaid in ["status", "statusUpdatedAt", "nameSource", "entrypoint"] {
+    for unsaid in ["status", "statusUpdatedAt", "nameSource", "entrypoint", "waitingFor"] {
         said.as_object_mut().unwrap().remove(unsaid);
     }
     host.write(older.pid(), &said);
@@ -256,16 +263,21 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
             let name = agent.name.as_ref();
             let source = name.and_then(|name| name.source.is_some().then(|| name.source()));
             let (id, dated) = (agent.session_id.as_str(), agent.status_since.is_some());
-            (id, agent.status.clone(), dated, source, agent.entrypoint.as_deref())
+            let entrypoint = agent.entrypoint.as_deref();
+            (id, agent.status.clone(), dated, source, entrypoint, agent.waiting_for.clone())
         })
         .collect();
     let other = |word: &str| Some(Reported::OtherStatus(word.to_owned()));
+    let (shell, waiting) = (Some(known(Status::Shell)), Some(known(Status::Waiting)));
+    let sandbox = Some(Waits::OtherWaitingFor("Sandbox Request".to_owned()));
+    let newer = (Some(NameSource::Other), Some("claude-vscode"));
     assert_eq!(
         seen,
         [
-            ("newer", other("Compacting"), true, Some(NameSource::Other), Some("claude-vscode")),
-            ("older", None, false, None, None),
-            ("shell", Some(known(Status::Shell)), true, Some(NameSource::User), Some("sdk-cli")),
+            ("newer", other("Compacting"), true, newer.0, newer.1, None),
+            ("older", None, false, None, None, None),
+            ("shell", shell, true, Some(NameSource::User), Some("sdk-cli"), None),
+            ("waits", waiting, true, Some(NameSource::Derived), Some("cli"), sandbox),
         ]
     );
 }
@@ -285,9 +297,13 @@ fn the_daemon_follows_the_files_as_they_change() {
     host.write(two.pid(), &file("two", two.pid(), &two_start, "idle"));
     let _daemon = start(host.vars()).unwrap();
 
-    host.write(one.pid(), &file("one", one.pid(), &one_start, "waiting"));
+    let mut waiting = file("one", one.pid(), &one_start, "waiting");
+    waiting["waitingFor"] = json!("Permission Prompt");
+    host.write(one.pid(), &waiting);
     let waits = Some(known(Status::Waiting));
-    eventually("one waits", || host.agent("one").filter(|agent| agent.status == waits));
+    let asks = Some(Waits::KnownWaitingFor(WaitingFor::PermissionPrompt.into()));
+    let asking = |agent: &Agent| agent.status == waits && agent.waiting_for == asks;
+    eventually("one waits", || host.agent("one").filter(asking));
 
     // `two`'s new status shows once the daemon has read the folder again, and
     // that read finds `one` half written, and `three` half made.

@@ -63,7 +63,7 @@ impl Reading {
     /// The ends of the transcripts of `ids`, `share` bytes of each at the
     /// most, or why not: they are too many, or together too long, or it
     /// keeps nothing of each, which would read as an end that says nothing.
-    fn new(ids: Vec<SessionId>, share: usize) -> Result<Reading, String> {
+    pub fn new(ids: Vec<SessionId>, share: usize) -> Result<Reading, String> {
         if ids.len() > IDS_MAX {
             return Err(too_many(ids.len()));
         }
