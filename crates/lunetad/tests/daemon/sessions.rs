@@ -524,6 +524,19 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
     }
 }
 
+/// Waits for git to say that `cwd`, where a pane works, is in no work tree.
+fn in_no_work_tree(host: &Host, cwd: &str) {
+    eventually("git says the directory is in no work tree", || {
+        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+        (tree.stands == Some(Stands::Outside(Outside {}))).then_some(())
+    });
+}
+
+/// Whether the branch `name` is checked out.
+fn on_branch(name: &'static str) -> impl Fn(&Checkout) -> bool {
+    move |it| matches!(&it.head, Some(Head::Branch(branch)) if branch.name == name)
+}
+
 /// Has `change` made, and waits for the work tree to stand as `shows` takes
 /// it to where a pane works in `cwd`: within 4s of the change's start, though
 /// git would not be asked again on its sweep for 5s, as each change comes as
@@ -657,13 +670,10 @@ fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
     let _daemon = start(host.vars()).unwrap();
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
-    let on = |name: &'static str| {
-        move |it: &Checkout| matches!(&it.head, Some(Head::Branch(branch)) if branch.name == name)
-    };
     let made = || assert!(git(&src, &["init", "-q", "-b", "inner"]));
-    shows_at_once(&host, &cwd, "a work tree made in src", made, on("inner"));
+    shows_at_once(&host, &cwd, "a work tree made in src", made, on_branch("inner"));
     let switched = || assert!(git(&src, &["switch", "-q", "-c", "other"]));
-    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on("other"));
+    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on_branch("other"));
 }
 
 /// A `.git` folder in a directory of a work tree that does not read, as one
@@ -691,6 +701,75 @@ fn a_git_folder_that_does_not_read_leaves_the_work_tree_it_is_in_watched() {
     let edited = || fs::write(src.join("lib.rs"), "edited\n").unwrap();
     shows_at_once(&host, &cwd, "an edit beside it", edited, modified);
     mode(0o755);
+}
+
+/// A directory in no work tree that becomes one, as `git init` makes one
+/// there, is watched as that one from then on: the work tree shows at once,
+/// and so does a branch checked out in it, which writes nothing but the
+/// `HEAD` in its own git folder.
+#[test]
+fn git_says_at_once_as_a_work_tree_begins_where_there_was_none() {
+    let host = Host::new();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    in_no_work_tree(&host, &cwd);
+
+    let made = || assert!(git(dir.path(), &["init", "-q", "-b", "first"]));
+    let first = on_branch("first");
+    shows_at_once(&host, &cwd, "a work tree made where there was none", made, first);
+    let switched = || assert!(git(dir.path(), &["switch", "-q", "-c", "other"]));
+    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on_branch("other"));
+}
+
+/// A directory in no work tree that is taken away and made again where a
+/// pane works is watched as the one made: git is asked about it again at
+/// once, and a work tree that `git init` makes in it after shows at once.
+#[test]
+fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
+    let host = Host::new();
+    let noted = host.note_git();
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir(&work).unwrap();
+    let cwd = work.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    in_no_work_tree(&host, &cwd);
+
+    let (asked, started) = (noted.statuses(), Instant::now());
+    fs::remove_dir(&work).unwrap();
+    fs::create_dir(&work).unwrap();
+    eventually("git is asked again", || (noted.statuses() > asked).then_some(()));
+    assert!(started.elapsed() < Duration::from_secs(4), "asked again: {:?}", started.elapsed());
+    let made = || assert!(git(&work, &["init", "-q", "-b", "first"]));
+    shows_at_once(&host, &cwd, "a work tree made in it", made, on_branch("first"));
+}
+
+/// A pane that works in a repository's own folder, which git places in no
+/// work tree, has git asked nothing as git writes there, as a commit does.
+#[test]
+fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
+    let host = Host::new();
+    let noted = host.note_git();
+    let tree = tempfile::tempdir().unwrap();
+    let top = tree.path();
+    assert!(git(top, &["init", "-q", "-b", "main"]));
+    let cwd = top.join(".git").display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    in_no_work_tree(&host, &cwd);
+
+    let asked = noted.statuses();
+    for step in 0..5 {
+        commit(top, "lib.rs", &format!("{step}\n"));
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(noted.statuses(), asked, "git was asked as git wrote in its folder");
 }
 
 /// A directory that moves into a work tree, in the place of one git tracks

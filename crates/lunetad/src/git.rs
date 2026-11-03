@@ -7,17 +7,22 @@
 //! file is written, made or taken away. Those folders are watched, and the
 //! directories of the work tree that hold a path git tracks, but none that
 //! holds only what git ignores, as a `target` that a build writes in all
-//! along. Where the work tree is, and which folders git keeps it in, git is
+//! along. A directory in no work tree is watched for a `.git` to come in it,
+//! as `git init` or `git clone` makes one, and watched anew as it is made
+//! again. Where the work tree is, and which folders git keeps it in, git is
 //! asked each time, as `git init` can make a directory of one a work tree of
 //! its own, and git can come to keep one in other folders. A directory is
 //! asked about again as its work tree changes, once git has rested from it
 //! for as long as it took over it, and once git has rested from it for a
 //! sweep besides, for what changes with no word to a watched folder: a file
-//! in a directory new to git, or a work tree across the network. One
+//! in a directory new to git; a work tree across the network; or one whose
+//! `.git` is a file, as `git worktree add` makes, which git writes before the
+//! folder it names is whole, where git is asked about it in between. One
 //! directory at a time, and one git has said nothing of yet first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
@@ -138,7 +143,8 @@ struct Place {
 
 /// Where the work tree that `dir` is in is, or none where git does not say,
 /// as of a directory in no repository, or in a repository's own folder.
-fn place(dir: &str) -> Option<Place> {
+/// Unanswered where git said nothing at all.
+fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
     let mut git = Command::new("git");
     local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir])).args([
         "rev-parse",
@@ -147,14 +153,32 @@ fn place(dir: &str) -> Option<Place> {
         "--git-dir",
         "--git-common-dir",
     ]);
-    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
-    // Each path as the bytes it is, as a folder of git's needs to be UTF-8
-    // no more than a directory does. One with a newline in it makes more
-    // lines than three.
-    let lines = said.strip_suffix(b"\n")?.split(|byte| *byte == b'\n');
-    let [top, own, common]: [&[u8]; 3] = lines.collect::<Vec<_>>().try_into().ok()?;
-    let real = |path: &[u8]| fs::canonicalize(OsStr::from_bytes(path)).ok();
-    Some(Place { top: real(top)?, own: real(own)?, common: real(common)? })
+    match program::run(&mut git, LIMIT) {
+        Ok(Ran::Ended { status, stdout, .. }) if status.success() => Ok(Place::parse(&stdout)),
+        // git ran there and failed: the directory is in no work tree, or in
+        // one git cannot read.
+        Ok(Ran::Ended { .. }) => Ok(None),
+        Ok(Ran::Stuck) | Err(_) => Err(Unanswered),
+    }
+}
+
+/// That git said nothing of where a directory is: it did not answer in time,
+/// as on a mount that does not answer, or it could not be run.
+struct Unanswered;
+
+impl Place {
+    /// The place that `said`, as `place` has git say it: the top, the work
+    /// tree's own folder and the repository's, a line each. None where it
+    /// says something else, or one of them is not there.
+    fn parse(said: &[u8]) -> Option<Place> {
+        // Each path as the bytes it is, as a folder of git's needs to be UTF-8
+        // no more than a directory does. One with a newline in it makes more
+        // lines than three.
+        let lines = said.strip_suffix(b"\n")?.split(|byte| *byte == b'\n');
+        let [top, own, common]: [&[u8]; 3] = lines.collect::<Vec<_>>().try_into().ok()?;
+        let real = |path: &[u8]| fs::canonicalize(OsStr::from_bytes(path)).ok();
+        Some(Place { top: real(top)?, own: real(own)?, common: real(common)? })
+    }
 }
 
 /// What git tracks in the work tree at `top`, as `git ls-files -z` says it:
@@ -289,18 +313,70 @@ fn watcher(
             Word::Dirs => came_or_went.store(true, Ordering::SeqCst),
             Word::Change => {},
         }
-        heard.store(true, Ordering::SeqCst);
-        match wake.try_send(()) {
-            // A full channel holds a wake-up already, and one that no one
-            // hears is the thread's that has ended.
-            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
-        }
+        hear(&heard, &wake);
     };
     // No link is followed under what is watched with all under it: one among
     // the refs could lead anywhere, as to `/`, and each directory there would
     // take a watch of the kernel's.
     let config = notify::Config::default().with_follow_symlinks(false);
     let mut watcher = RecommendedWatcher::new(handler, config)?;
+    add(&mut watcher, paths)?;
+    Ok(watcher)
+}
+
+/// A watcher of the directory at `ground`, which git placed in no work tree,
+/// and of the `.git` folder in it too where `ground` has one, that sets
+/// `heard`, and wakes the thread on `wake`, as a `.git` comes in it, changes
+/// or goes, and as git writes in that; and sets `went` too as the directory
+/// could have gone or moved away, which takes its watch with it, or words the
+/// kernel dropped, which could have been that.
+fn beginning(
+    ground: &Ground,
+    heard: Arc<AtomicBool>,
+    went: Arc<AtomicBool>,
+    wake: SyncSender<()>,
+) -> notify::Result<RecommendedWatcher> {
+    let (dir, git) = (ground.real.clone(), ground.real.join(".git"));
+    // Each by where it really is, as a watcher names a path, so that git
+    // writing in a directory that is a `.git` itself, as a repository's own
+    // folder that a pane works in, wakes no one.
+    let of_git = {
+        let git = git.clone();
+        move |path: &Path| path == git || path.parent() == Some(git.as_path())
+    };
+    let left = |kind: EventKind| {
+        matches!(kind, EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)))
+    };
+    let itself = dir.clone();
+    let handler = move |event: notify::Result<Event>| {
+        let gone = match &event {
+            Ok(event) => {
+                event.need_rescan() || (left(event.kind) && event.paths.contains(&itself))
+            },
+            Err(_) => true,
+        };
+        if gone {
+            went.store(true, Ordering::SeqCst);
+        } else if event.is_ok_and(|event| !watch::worth_a_read(&event, &of_git)) {
+            return;
+        }
+        hear(&heard, &wake);
+    };
+    let mut watcher = notify::recommended_watcher(handler)?;
+    let mut paths = BTreeMap::from([(dir, RecursiveMode::NonRecursive)]);
+    if ground.git {
+        paths.insert(git, RecursiveMode::NonRecursive);
+    }
+    add(&mut watcher, &paths)?;
+    Ok(watcher)
+}
+
+/// Has `watcher` watch each of `paths` as its mode says, but for any that
+/// went since it was found.
+fn add(
+    watcher: &mut RecommendedWatcher,
+    paths: &BTreeMap<PathBuf, RecursiveMode>,
+) -> notify::Result<()> {
     let mut adding = watcher.paths_mut();
     for (path, mode) in paths {
         match adding.add(path, *mode) {
@@ -313,8 +389,17 @@ fn watcher(
             Err(error) => return Err(error),
         }
     }
-    adding.commit()?;
-    Ok(watcher)
+    adding.commit()
+}
+
+/// Sets `heard`, and wakes the thread on `wake`.
+fn hear(heard: &AtomicBool, wake: &SyncSender<()>) {
+    heard.store(true, Ordering::SeqCst);
+    match wake.try_send(()) {
+        // A full channel holds a wake-up already, and one that no one hears
+        // is the thread's that has ended.
+        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
+    }
 }
 
 /// A work tree that a pane works in, as it is watched.
@@ -413,6 +498,149 @@ impl Tree {
     }
 }
 
+/// A directory that git placed in no work tree, as it is watched for one to
+/// begin there: for a `.git` that `git init` or `git clone` makes in it, and
+/// in that `.git` once it is there, as git makes the folder first and writes
+/// the rest in it after, and asked about before the folder is whole, the
+/// directory is still in none.
+struct Outside {
+    /// Set as the directory goes or moves away, or a `.git` comes in it or
+    /// changes, and taken as the directory is due again.
+    heard: Arc<AtomicBool>,
+    watching: Beginning,
+}
+
+/// A directory that git placed in no work tree, as it was when it began to be
+/// watched: where it really is, as a watcher names what changes in it, and
+/// whether a `.git` folder is in it.
+#[derive(PartialEq, Eq)]
+struct Ground {
+    real: PathBuf,
+    git: bool,
+}
+
+impl Ground {
+    /// `dir` as it is now, or none where there is no directory there. What
+    /// else goes wrong in finding it, as a folder above it that does not
+    /// read, the error says.
+    fn of(dir: &Path) -> io::Result<Option<Ground>> {
+        let real = match fs::canonicalize(dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            real => real?,
+        };
+        let git = real.join(".git").is_dir();
+        Ok(Some(Ground { real, git }))
+    }
+}
+
+/// What of a directory that git placed in no work tree is watched, with the
+/// watcher held for as long as it is watched so.
+enum Beginning {
+    /// The directory as `ground` has it, and the `.git` folder in it where
+    /// `ground` has one and it reads, until `went` is set: one made in the
+    /// place of one that went can be the same file to the filesystem, with
+    /// the inode of the one before, which no watch of that one sees.
+    Watched { ground: Ground, went: Arc<AtomicBool>, _watcher: RecommendedWatcher },
+    /// Nothing, as there is no directory there: one made there later waits
+    /// for the sweep.
+    Gone,
+    /// Nothing, which leaves the directory to the sweep, and why: one whose
+    /// watch went wrong, until it no longer stands as `ground` has it, as one
+    /// made again would go wrong again; or, with no `ground`, one that was not
+    /// found where it really is.
+    Sweep { ground: Option<Ground>, why: String },
+}
+
+impl Beginning {
+    /// Whether it is what is to be watched of the directory as `now` has it:
+    /// not where the directory went, moved away or was made anew, a `.git`
+    /// came in it or went from it since, or it was not found; and where it
+    /// was left to the sweep, only while it stands as it did then.
+    fn covers(&self, now: &io::Result<Option<Ground>>) -> bool {
+        match (self, now) {
+            (Beginning::Watched { ground, went, .. }, Ok(Some(now))) => {
+                !went.load(Ordering::SeqCst) && ground == now
+            },
+            (Beginning::Sweep { ground: Some(ground), .. }, Ok(Some(now))) => ground == now,
+            (Beginning::Gone, Ok(None)) => true,
+            (Beginning::Watched { .. } | Beginning::Gone | Beginning::Sweep { .. }, _) => false,
+        }
+    }
+
+    /// Why the directory is not watched, where it is there and is not.
+    fn trouble(&self) -> Option<&String> {
+        match self {
+            Beginning::Watched { .. } | Beginning::Gone => None,
+            Beginning::Sweep { why, .. } => Some(why),
+        }
+    }
+}
+
+impl Outside {
+    /// `dir`, which git placed in no work tree, watched, and whether a watch
+    /// of it began anew: `before` as it is, where it is what is watched of
+    /// `dir` as it is now; else watched anew, with what it heard before kept,
+    /// and waking the thread on `wake`. What goes wrong, `troubles` says.
+    fn watch(
+        dir: &Path,
+        before: Option<Outside>,
+        wake: &SyncSender<()>,
+        troubles: &mut Troubles,
+    ) -> (Outside, bool) {
+        let now = Ground::of(dir);
+        let heard = match before {
+            Some(outside) if outside.watching.covers(&now) => return (outside, false),
+            // The watcher before lets go of its watches first.
+            Some(Outside { heard, watching }) => {
+                drop(watching);
+                heard
+            },
+            None => Arc::default(),
+        };
+        let sweep = |ground: Option<Ground>, error: &dyn fmt::Display| Beginning::Sweep {
+            ground,
+            why: format!("{} is read on the sweep alone: {error}", dir.display()),
+        };
+        let watching = match now {
+            Ok(Some(ground)) => {
+                let went = Arc::new(AtomicBool::new(false));
+                match beginning(&ground, heard.clone(), went.clone(), wake.clone()) {
+                    Ok(watcher) => Beginning::Watched { ground, went, _watcher: watcher },
+                    Err(error) => sweep(Some(ground), &error),
+                }
+            },
+            Ok(None) => Beginning::Gone,
+            Err(error) => sweep(None, &error),
+        };
+        if let Some(trouble) = watching.trouble() {
+            troubles.say(trouble.clone());
+        }
+        let anew = matches!(watching, Beginning::Watched { .. });
+        (Outside { heard, watching }, anew)
+    }
+}
+
+/// Where git placed a directory it was asked about, and so what wakes it.
+enum Placed {
+    /// In the work tree with this top, which `trees` watches.
+    In(PathBuf),
+    /// In none that git would say, as of a directory in no repository.
+    Outside(Outside),
+    /// Nowhere git has said, as git has not answered yet when asked: nothing
+    /// wakes it but the sweep.
+    Unsaid,
+}
+
+impl Placed {
+    /// The top of the work tree it is in, if any.
+    fn top(&self) -> Option<&Path> {
+        match self {
+            Placed::In(top) => Some(top),
+            Placed::Outside(_) | Placed::Unsaid => None,
+        }
+    }
+}
+
 /// Where git stands with a directory it has been asked about.
 struct Asked {
     /// When git was done with it last.
@@ -422,8 +650,8 @@ struct Asked {
     /// Whether its work tree changed since, or git placed it in another as
     /// it was asked.
     changed: bool,
-    /// The top of the work tree git placed it in then, if any.
-    top: Option<PathBuf>,
+    /// Where git placed it then.
+    placed: Placed,
     /// What went wrong then, if anything did.
     trouble: Option<String>,
 }
@@ -440,36 +668,53 @@ impl Asked {
 
     /// Whether git placed it in the work tree with this top.
     fn within(&self, top: &Path) -> bool {
-        self.top.as_deref() == Some(top)
+        self.placed.top() == Some(top)
     }
 }
 
-/// Asks git where the work tree that `dir` is in is, and how it stands. The
-/// work tree is watched first, so that a change while git reads it is heard.
-/// What to watch hangs on where the work tree is, so git is asked that before
-/// it is watched; where it is watched anew, git is asked again after, as `dir`
-/// could have come to be in another unheard in between: one that `git init`
-/// makes in `dir` can be whole by the time its folder is watched. The top
-/// of the work tree, which `trees` has, where `dir` is in one; what git said;
-/// and whether git placed `dir` elsewhere since, which has it due again.
+/// Asks git where the work tree that `dir` is in is, and how it stands. What
+/// wakes `dir` is watched first, so that a change while git reads it is
+/// heard: its work tree, or `dir` itself where it is in none, as `before`
+/// watched it where it was in none then too. What to watch hangs on where the
+/// work tree is, so git is asked that before it is watched; where it is
+/// watched anew, git is asked again after, as `dir` could have come to be in
+/// another unheard in between: one that `git init` makes in `dir` can be
+/// whole by the time its folder is watched. Where git does not answer,
+/// nothing of `dir` is read here, and where git placed it before stands.
+/// Where git placed `dir`, with the work tree in `trees` where it is in one;
+/// what git said; and whether git placed `dir` elsewhere since, which has it
+/// due again.
 fn ask(
     dir: &str,
+    before: Option<Placed>,
     trees: &mut HashMap<PathBuf, Tree>,
     wake: &SyncSender<()>,
     troubles: &mut Troubles,
-) -> (Option<PathBuf>, Result<WorkTree, String>, bool) {
-    let (top, anew) = match place(dir) {
-        Some(place) => {
+) -> (Placed, Result<WorkTree, String>, bool) {
+    let (placed, anew) = match place(dir) {
+        Ok(Some(place)) => {
             let top = place.top.clone();
             let (tree, anew) = Tree::watch(trees.remove(&top), place, wake, troubles);
             trees.insert(top.clone(), tree);
-            (Some(top), anew)
+            (Placed::In(top), anew)
         },
-        None => (None, false),
+        Ok(None) => {
+            let before = match before {
+                Some(Placed::Outside(outside)) => Some(outside),
+                Some(Placed::In(_) | Placed::Unsaid) | None => None,
+            };
+            let (outside, anew) = Outside::watch(Path::new(dir), before, wake, troubles);
+            (Placed::Outside(outside), anew)
+        },
+        // git is killed once it has not answered in time, but a read here of
+        // a mount that does not answer would hold this thread, and each
+        // directory with it, for as long as the mount does not.
+        Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false),
     };
     let said = status(dir);
-    let moved = anew && place(dir).map(|place| place.top) != top;
-    (top, said, moved)
+    let elsewhere = |now: Option<Place>| now.map(|place| place.top).as_deref() != placed.top();
+    let moved = anew && place(dir).is_ok_and(elsewhere);
+    (placed, said, moved)
 }
 
 /// Asks git how the work tree stands in each directory a pane works in, in a
@@ -503,6 +748,13 @@ pub fn follow(
                     within.for_each(|was| was.changed = true);
                 }
             }
+            for was in asked.values_mut() {
+                if let Placed::Outside(outside) = &was.placed
+                    && outside.heard.swap(false, Ordering::SeqCst)
+                {
+                    was.changed = true;
+                }
+            }
             let now = Instant::now();
             let due = |dir: &&String| asked.get(*dir).is_none_or(|was| was.due(sweep) <= now);
             let mut due: Vec<String> = dirs.iter().filter(due).cloned().collect();
@@ -510,10 +762,11 @@ pub fn follow(
             due.sort_by_key(|dir| asked.get(dir).map(|was| was.due(sweep)));
             for dir in due {
                 let started = Instant::now();
-                let (top, said, moved) = ask(&dir, &mut trees, &wake, &mut troubles);
+                let before = asked.remove(&dir).map(|was| was.placed);
+                let (placed, said, moved) = ask(&dir, before, &mut trees, &wake, &mut troubles);
                 let (took, ended) = (started.elapsed(), Instant::now());
                 let trouble = said.as_ref().err().cloned();
-                asked.insert(dir.clone(), Asked { ended, took, changed: moved, top, trouble });
+                asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
                 match said {
                     Ok(tree) => {
                         if core.send(core::Command::WorkTree { dir, tree }).is_err() {
@@ -532,8 +785,12 @@ pub fn follow(
             // What went wrong with one that git rests from has not gone right
             // since, and is not said again.
             let asking = asked.values().filter_map(|was| was.trouble.clone());
+            let outside = asked.values().filter_map(|was| match &was.placed {
+                Placed::Outside(outside) => outside.watching.trouble().cloned(),
+                Placed::In(_) | Placed::Unsaid => None,
+            });
             let watching = trees.values().filter_map(|tree| tree.watching.trouble().cloned());
-            for trouble in asking.chain(watching) {
+            for trouble in asking.chain(outside).chain(watching) {
                 troubles.say(trouble);
             }
             troubles.done();
