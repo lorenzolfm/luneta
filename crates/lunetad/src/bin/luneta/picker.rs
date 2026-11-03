@@ -557,14 +557,13 @@ impl Refused {
         }
     }
 
-    /// Why no session called `name` is made on `machine`, as the search's
-    /// line says it: of no machine by name where it is the only one listed.
+    /// Why no session called `name` is made on `machine`, nor renamed to it,
+    /// as the search's line says it: of no machine by name where it is the
+    /// only one listed, nor as you rename a session of it.
     fn why(self, name: &SessionName, machine: Option<&str>) -> String {
         let on = machine.map(|machine| format!(" on {machine}")).unwrap_or_default();
         match self {
-            Refused::Here => machine.map_or("you are in it".to_owned(), |machine| {
-                format!("you are in {name} on {machine}")
-            }),
+            Refused::Here => format!("you are in {name}{on}"),
             Refused::Runs => format!("{name} runs{on} already"),
             Refused::Ended => format!("zellij{on} keeps {name}, which ended, to bring back"),
             Refused::Asking => format!("zellij{on} has yet to say which sessions ended"),
@@ -1556,28 +1555,28 @@ impl Picker {
     }
 
     /// The name `session` on `on` takes, of what was typed, or why it takes
-    /// none.
+    /// none: one no other session there has, as `makes_on` says of a session
+    /// made by it.
     fn rename_to(
         &self,
         on: &Machine,
         session: &SessionName,
         name: &str,
-    ) -> Result<SessionName, &'static str> {
-        let name = SessionName::parse(name)?;
+    ) -> Result<SessionName, String> {
+        let name = SessionName::parse(name).map_err(str::to_owned)?;
         if name == *session {
-            return Err("already called that");
+            return Err("already called that".to_owned());
         }
-        if self.taken(on)?.contains(&name.as_str()) {
-            return Err("a session by that name already exists");
-        }
+        self.makes_on(on, &name).map_err(|refused| refused.why(&name, None))?;
         Ok(name)
     }
 
-    /// The names of the sessions of `on` that run and of those that ended,
-    /// which no other session there can take; or why they are not known
-    /// yet, as zellij there has yet to list those that ended, or to list them
-    /// again since. A name zellij has yet to say ended is one
-    /// `switch-session` would bring back.
+    /// The names zellij on `on` makes no session of now, as `makes_on` says
+    /// of each: the session luneta's zellij is in or on its way to there,
+    /// those that run there, and those that ended, which zellij keeps; or
+    /// why they are not known yet, as zellij there has yet to list those that
+    /// ended, or to list them again since. A name zellij has yet to say
+    /// ended is one `switch-session` would bring back.
     fn taken(&self, on: &Machine) -> Result<Vec<&str>, &'static str> {
         let exited = match self.exited.get(on) {
             Some(Ended::Heard { exited, .. }) => exited,
@@ -1588,7 +1587,8 @@ impl Picker {
         };
         let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
         let live = sessions.iter().map(|live| live.place.session());
-        Ok(live.chain(exited.iter().map(|exited| exited.name.as_str())).collect())
+        let ended = exited.iter().map(|exited| exited.name.as_str());
+        Ok(self.here_session(on).into_iter().chain(live).chain(ended).collect())
     }
 
     /// The sessions zellij on `on` keeps to bring back, as far as it said,
@@ -2272,7 +2272,7 @@ impl Picker {
         }
         let width = usize::from(layout.input.width.saturating_sub(2));
         let action = self.rename_to(on, session, input).map(|_| there("Rename", on));
-        draw_input(buffer, layout, "Rename", typed(input, action.map_err(str::to_owned), width));
+        draw_input(buffer, layout, "Rename", typed(input, action, width));
         self.draw_help(buffer, layout.help)
     }
 
@@ -3164,8 +3164,9 @@ mod tests {
     }
 
     /// `Ctrl r` renames the session highlighted, yours or another, to a name
-    /// no session has, those that ended among them. zellij renames none that
-    /// ended.
+    /// no session has, yours and those that ended among them, and says why
+    /// it takes no other, as the row that makes a session would. zellij
+    /// renames none that ended.
     #[test]
     fn ctrl_r_renames_the_highlighted_session_to_a_name_no_session_has() {
         let mut picker = three();
@@ -3176,10 +3177,17 @@ mod tests {
         };
         control(&mut picker, 'r');
         assert!(renaming(&picker));
-        for taken in ["a", "x", "c"] {
+        let refused = [
+            ("a", "a runs already"),
+            ("b", "you are in b"),
+            ("x", "zellij keeps x, which ended, to bring back"),
+            ("c", "already called that"),
+        ];
+        for (taken, why) in refused {
             typed(&mut picker, taken);
             press(&mut picker, KeyCode::Enter);
             assert!(picker.asks().is_empty(), "{taken}");
+            assert!(said(&picker).contains(why), "{taken}: {}", said(&picker));
             press(&mut picker, KeyCode::Backspace);
         }
         typed(&mut picker, "d");
@@ -3388,6 +3396,30 @@ mod tests {
         picker.asks();
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert!(picker.asks().is_empty());
+    }
+
+    /// The session luneta's zellij is on its way to, which zellij has yet to
+    /// list, has its name as one that runs does: a directory of that name is
+    /// named past it, and no session is renamed to it.
+    #[test]
+    fn no_session_takes_the_name_luneta_s_zellij_is_on_its_way_to() {
+        let listing = Listing {
+            here: Some(here("notes")),
+            local: sessions(vec![live("luneta", 10, None)]),
+            ..Listing::default()
+        };
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
+        picker.heard(kept_here(Ok(Vec::new())));
+        picker.heard(heard_here(Ok(vec![visited("/home/you/notes", "notes")])));
+        assert_eq!(names(&picker), ["notes-2"]);
+        press(&mut picker, KeyCode::Tab);
+        assert_eq!(lit(&picker), "luneta");
+        picker.asks();
+        control(&mut picker, 'r');
+        typed(&mut picker, "notes");
+        press(&mut picker, KeyCode::Enter);
+        assert!(picker.asks().is_empty());
+        assert!(said(&picker).contains("you are in notes"), "{}", said(&picker));
     }
 
     /// Where zoxide answers before zellij says which sessions ended, or
@@ -3880,6 +3912,31 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         let place = PanePlace { session: listed("api", 40), pane: 2 };
         assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place }]);
+    }
+
+    /// A session of a machine that goes off the listing as you rename it
+    /// takes no name, as the search's line says: the machine is listed no
+    /// more.
+    #[test]
+    fn a_session_of_a_machine_listed_no_more_takes_no_name() {
+        let listing = || Listing {
+            local: sessions(vec![live("here", 30, None)]),
+            ..on_nixos(sessions(vec![live("api", 40, None)]))
+        };
+        let mut picker = Picker::open(1, List::Sessions, listing(), Machine::Local);
+        picker.heard(kept_here(Ok(Vec::new())));
+        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(Vec::new()) });
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(lit(&picker), "api");
+        control(&mut picker, 'r');
+        typed(&mut picker, "fresh");
+        assert!(said(&picker).contains("Rename on nixos"), "{}", said(&picker));
+        picker.listed(Listing { remotes: Vec::new(), ..listing() });
+        picker.asks();
+        press(&mut picker, KeyCode::Enter);
+        assert!(picker.asks().is_empty());
+        let why = "the machine is listed no more";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
     }
 
     /// zellij of a machine is asked which sessions ended as the picker first
