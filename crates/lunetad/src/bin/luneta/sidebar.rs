@@ -1466,6 +1466,24 @@ impl Sidebar {
         seats.into_iter().filter_map(|seat| SessionName::running(seat).ok()).collect()
     }
 
+    /// The sessions of the other machines lunetad reaches, but `left`, where
+    /// luneta's zellij goes on once the machine it was on has none left:
+    /// each machine's newest first, as the picker lists them, the machines
+    /// as their headers are, and none with no session.
+    pub fn refuges_away(&self, left: Option<&Destination>) -> Vec<(Destination, Vec<SessionName>)> {
+        let Some(host) = &self.host else {
+            return Vec::new();
+        };
+        let others = machines(host).others.into_iter();
+        let others = others.filter(|(destination, _)| Some(destination) != left);
+        let reached = others.filter_map(|(destination, seen)| Some((destination, seen.ok()?)));
+        let refuges = reached.map(|(destination, seen)| {
+            let (sessions, _) = oldest_first(seen.sessions);
+            (destination, sessions.into_iter().rev().map(|(listed, _)| listed.name).collect())
+        });
+        refuges.filter(|(_, sessions): &(_, Vec<_>)| !sessions.is_empty()).collect()
+    }
+
     /// The pane luneta's zellij is on, in the one session of the name it is
     /// in: both as luneta last followed its client, so that the pane is one
     /// of that session's, whose ids another session has too. Or else why the
@@ -7555,6 +7573,24 @@ mod tests {
         sidebar.heard(host);
         let kill = Act::Kill { session: session_name("main"), started };
         assert_eq!(delete(&mut sidebar), Asked::Delete { on, act: kill });
+    }
+
+    /// Where the machine luneta's zellij is on has no session left, it goes
+    /// on in another's: of those lunetad reaches, as their headers are, but
+    /// the one it left, those with a session, each machine's newest first.
+    #[test]
+    fn with_no_session_left_zellij_goes_on_in_another_machine_s_newest() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let (main, work) = (session("main", 20, Vec::new()), session("work", 30, Vec::new()));
+        host.remotes[0] = remote("nixos", up(vec![main, work], Vec::new()));
+        host.remotes.insert(0, remote("empty", up(Vec::new(), Vec::new())));
+        host.remotes[3] = remote("pi", up(vec![session("pi", 10, Vec::new())], Vec::new()));
+        sidebar.heard(host);
+        let pi = || ("pi".parse().unwrap(), vec![session_name("pi")]);
+        let newest = (nixos(), vec![session_name("work"), session_name("main")]);
+        assert_eq!(sidebar.refuges_away(None), [newest, pi()]);
+        assert_eq!(sidebar.refuges_away(Some(&nixos())), [pi()]);
     }
 
     /// A delete on another machine's row that waits on your yes deletes

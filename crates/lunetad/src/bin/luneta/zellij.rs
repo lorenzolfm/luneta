@@ -253,21 +253,14 @@ fn quoted(word: &str) -> String {
     quoted
 }
 
-/// Where luneta's zellij goes on once its client ended in one of `seats`,
-/// the sessions it may have been in, as `lunetad::moves::refuge` finds it on
-/// this machine: never the session luneta's terminal is a pane of, as
-/// `refusal` says. None where the client's session runs still, as it
-/// detached, or none answers.
-pub fn refuge(seats: &[SessionName]) -> Option<Refuge> {
+/// What became of the session luneta's zellij's client ended in, of
+/// `seats`, the sessions it may have been in, and where it goes on on this
+/// machine, as `lunetad::moves::refuge` finds them here: never the session
+/// luneta's terminal is a pane of, as `refusal` says.
+pub fn ended(seats: &[SessionName]) -> Ended {
     let current = env::var(SESSION_VAR).ok();
     let folder = lunetad::zellij_folder();
-    let ended = moves::refuge(&folder, seats, current.as_deref(), |session| {
-        clients(session.as_str()).ok()
-    });
-    let Ended::Went(found) = ended else {
-        return None;
-    };
-    found
+    moves::refuge(&folder, seats, current.as_deref(), |session| clients(session.as_str()).ok())
 }
 
 /// This machine's newest session, as `lunetad::moves::newest` finds it,
@@ -278,6 +271,18 @@ pub fn newest() -> Option<Refuge> {
     moves::newest(&lunetad::zellij_folder(), current.as_deref(), |session| {
         clients(session.as_str()).ok()
     })
+}
+
+/// The first of `sessions` of `destination` whose clients its daemon
+/// lists, as `lunetad::moves::answering` tries them, where luneta's zellij
+/// goes on once the machine it was on has no session left; or why luneta
+/// does not reach the daemon it watches, to ask. None where none answers.
+pub fn answering_away(
+    destination: &Destination,
+    sessions: Vec<SessionName>,
+) -> Result<Option<Refuge>, String> {
+    let mut away = Away::reach(destination, away::QUICK)?;
+    Ok(moves::answering(sessions, |session| away.clients(session.as_str()).ok()))
 }
 
 /// What became of the session luneta's zellij's client ended in, of

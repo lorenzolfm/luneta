@@ -640,16 +640,17 @@ struct App {
     dir: PathBuf,
     ended: bool,
     /// What kills and deletes the sessions luneta's keys delete, which
-    /// luneta waits for as it ends: it ends with its only session, which
-    /// zellij lets go of only once the session's server has ended.
+    /// luneta waits for as it ends: it ends with the last session of every
+    /// machine, which zellij lets go of only once the session's server has
+    /// ended.
     deleting: Vec<JoinHandle<()>>,
 }
 
 /// Runs zellij, attached to `session`, beside the sidebar, until zellij ends:
-/// its client detaches or fails, or its session ends and no other runs. Where
-/// another does, a client of the newest takes the place of the one that
-/// ended. The sidebar is of what the daemon in `folder` says, which is
-/// started if none runs.
+/// its client detaches or fails, or its session ends and no other runs, on
+/// any machine lunetad reaches. Where another does, a client of the newest
+/// takes the place of the one that ended, of its machine's first. The sidebar
+/// is of what the daemon in `folder` says, which is started if none runs.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -2308,11 +2309,12 @@ impl App {
     /// zellij's client ended. Where it ended well, and its session with it, as
     /// zellij quits, the session's last pane exits, or the session is killed,
     /// a client of the newest session that answers takes its place, and
-    /// luneta goes on. luneta ends where none does, and where the client
-    /// detached, or failed, as where zellij cannot attach; but one that took
-    /// the place of a client on another machine goes back there where it
-    /// failed, and the notes say what it said. A client on another machine
-    /// ends as `ended_away` says.
+    /// luneta goes on: of another machine's, as `newest_away` finds it, where
+    /// none of this one's does. luneta ends where none does, and where the
+    /// client detached, or failed, as where zellij cannot attach; but one
+    /// that took the place of a client on another machine goes back there
+    /// where it failed, and the notes say what it said. A client on another
+    /// machine ends as `ended_away` says.
     fn client_ended(&mut self) -> io::Result<()> {
         if let Machine::Remote(destination) = self.sidebar.on() {
             let destination = destination.clone();
@@ -2324,9 +2326,15 @@ impl App {
         }
         let seats = self.sidebar.seats();
         let ended = self.client.exited.filter(ExitStatus::success).filter(|_| !seats.is_empty());
-        let Some(Refuge { session: to, before }) = ended.and_then(|_| zellij::refuge(&seats)) else {
-            self.ended = true;
-            return Ok(());
+        let refuge = match ended.map(|_| zellij::ended(&seats)) {
+            Some(Ended::Went(refuge)) => refuge,
+            Some(Ended::Kept) | None => {
+                self.ended = true;
+                return Ok(());
+            },
+        };
+        let Some(Refuge { session: to, before }) = refuge else {
+            return self.newest_away(None);
         };
         let hosted = self.start_of(&Machine::Local, Joins::Attach(&to))?;
         let look = self.sidebar.rejoining(&to);
@@ -2338,7 +2346,8 @@ impl App {
     /// zellij's client on `destination` ended, or the ssh it ran through did.
     /// Where it ended well, as its session there ended, a client of the
     /// newest session there that answers takes its place, or else of this
-    /// machine's newest, where none there does, or its daemon does not say.
+    /// machine's newest, where none there does, or its daemon does not say,
+    /// or of another machine's, as `newest_here` says.
     /// Where it failed, as where ssh lost the machine, or zellij there could
     /// not attach, luneta's zellij goes back to the session it was in before,
     /// and the notes say what was said. luneta ends where the client
@@ -2376,7 +2385,7 @@ impl App {
                 let joins = Joins::Attach(&session);
                 self.restart(&machine, joins, Before::Listed(before), back, None)
             },
-            None => self.newest_here(),
+            None => self.newest_here(Some(destination)),
         }
     }
 
@@ -2404,12 +2413,12 @@ impl App {
 
     /// Has a client of `back` take the place of zellij's client, which failed
     /// on another machine: of this machine's newest session where it was of
-    /// this machine's and is gone.
+    /// this machine's and is gone, as `newest_here` says.
     fn go_back(&mut self, back: Back) -> io::Result<()> {
         let Back { machine, session } = back;
         let before = match &machine {
             Machine::Local => match zellij::before(session.as_str()) {
-                Before::Made => return self.newest_here(),
+                Before::Made => return self.newest_here(None),
                 before => before,
             },
             Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
@@ -2419,14 +2428,38 @@ impl App {
 
     /// Has a client of this machine's newest session that answers take the
     /// place of zellij's client, as one of another machine's that ended: or
-    /// luneta ends, where none does.
-    fn newest_here(&mut self) -> io::Result<()> {
+    /// of another machine's but `left`, as `newest_away` says, where none
+    /// does.
+    fn newest_here(&mut self, left: Option<&Destination>) -> io::Result<()> {
         let Some(Refuge { session, before }) = zellij::newest() else {
-            self.ended = true;
-            return Ok(());
+            return self.newest_away(left);
         };
         let joins = Joins::Attach(&session);
         self.restart(&Machine::Local, joins, Before::Listed(before), None, None)
+    }
+
+    /// Has a client of the newest session that answers of another machine's
+    /// take the place of zellij's client, as the machine it was on has no
+    /// session left: of the first machine lunetad reaches, by the sidebar's
+    /// headers, but `left`, whose session ended with none after it. luneta
+    /// ends where no machine has one, and where it does not reach lunetad to
+    /// ask.
+    fn newest_away(&mut self, left: Option<&Destination>) -> io::Result<()> {
+        for (destination, sessions) in self.sidebar.refuges_away(left) {
+            match zellij::answering_away(&destination, sessions) {
+                Ok(Some(Refuge { session, before })) => {
+                    let (machine, joins) = (Machine::Remote(destination), Joins::Attach(&session));
+                    return self.restart(&machine, joins, Before::Listed(before), None, None);
+                },
+                Ok(None) => {},
+                Err(why) => {
+                    log::say(&format!("no session of another machine's to go on in: {why}"));
+                    break;
+                },
+            }
+        }
+        self.ended = true;
+        Ok(())
     }
 
     /// Takes in what luneta's terminal answered, or said of itself unasked.

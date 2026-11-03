@@ -359,8 +359,10 @@ Run in a pane of zellij, luneta will not attach to the session that pane is
 in, as zellij will not: name another. When zellij detaches, luneta ends. When
 the session zellij is in ends, as zellij quits, its last pane exits, or it is
 killed, luneta attaches zellij to the newest session that runs, which the
-picker lists first, but never to the one luneta's own pane is in, and ends
-where none is left. When zellij fails, luneta ends and says what zellij said.
+picker lists first, but never to the one luneta's own pane is in; where none
+is left, to the newest of [another machine's](#other-machines), the first by
+the sidebar's headers that has one, and ends only where no machine has one.
+When zellij fails, luneta ends and says what zellij said.
 zellij's keys are yours as they were, but eight, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
@@ -545,14 +547,15 @@ deletes the session too: zellij would leave an empty tab in a session with no
 client, and end the one zellij is in. The session zellij is in is deleted once
 zellij is in another, the newest, so that zellij stays on screen throughout,
 and the sidebar says where zellij goes until then; with no other, it is
-deleted with zellij in it, and luneta ends. When that would end an
-agent that is busy, waiting on you, or that says nothing luneta knows, the
-menu asks first, as it does for one whose session file lunetad cannot read, in
-the pane its process runs in, which the sidebar says at its bottom. So does
-every delete while lunetad does not answer, as what it said last of the agents
-may be out of date, and while it cannot tell which session the process of such
-a file runs in, which may be any: `y`, or the key again, goes ahead, and `n` or
-`Backspace` goes back.
+deleted with zellij in it, and luneta goes on in another machine's newest,
+[as when a session ends](#luneta-in-your-terminal), or ends where no machine
+has one left. When that would end an agent that is busy, waiting on you, or
+that says nothing luneta knows, the menu asks first, as it does for one whose
+session file lunetad cannot read, in the pane its process runs in, which the
+sidebar says at its bottom. So does every delete while lunetad does not
+answer, as what it said last of the agents may be out of date, and while it
+cannot tell which session the process of such a file runs in, which may be
+any: `y`, or the key again, goes ahead, and `n` or `Backspace` goes back.
 luneta asks zellij what a pane takes along as you press the key, and again as
 you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
 and is not closed with it. A delete leaves you in the sidebar, the highlight on
@@ -807,7 +810,8 @@ sessions of that machine, zellij there moves the client, as it does here, and
 attaches here again. Where that ssh fails, as where the machine went away,
 luneta goes back to the session you left, and the notes say what ssh said.
 Where the session there ends, luneta goes on in the newest session of that
-machine's, or of this one's where it has none left.
+machine's, or of this one's where it has none left, or of the next machine's
+that has one.
 
 The menu on another machine's pane opens what it opens here, there: `n p`,
 `n t` and the agents of the Claude group open in zellij on that machine, `c f`
