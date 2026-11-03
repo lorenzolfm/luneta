@@ -153,8 +153,8 @@ pub enum Command {
     /// Marks the highlighted pane read while its row has the dot, or else
     /// unread.
     Unread,
-    /// Selects the session of the highlighted row, for `Top::Shift` to move,
-    /// and ends the selection.
+    /// Selects the session of the highlighted row, or the machine of the
+    /// highlighted header, for `Top::Shift` to move, and ends the selection.
     Reorder,
 }
 
@@ -200,8 +200,8 @@ pub enum Top {
     /// `gg`. Pressed once, the sidebar waits for the second, and any other
     /// key drops the first: `Esc` does only that, as in vim.
     First,
-    /// Moves the sessions a selection holds so many places down, or up.
-    /// Without a selection, nothing.
+    /// Moves the sessions, or the machines, a selection holds so many places
+    /// down, or up. Without a selection, nothing.
     Shift(isize),
     /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     Fold(Option<bool>),

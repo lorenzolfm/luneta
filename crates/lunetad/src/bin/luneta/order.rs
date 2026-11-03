@@ -1,13 +1,21 @@
-//! The order the sidebar lists the sessions in, as you moved them, and the
-//! colour of each, the same in every luneta on the host, and kept for the
-//! next.
+//! The order the sidebar lists the machines in, and each machine's sessions,
+//! as you moved them, and the colour of each session, the same in every
+//! luneta on the host, and kept for the next.
 //!
 //! A session goes by its name, as a fold does, so that one started again under
-//! it comes back to its place, and the sessions that share one go together. A
+//! it comes back to its place, and the sessions that share one go together.
+//! Each machine's sessions have an order of their own: a session moves among
+//! those of its machine, and two machines can each run one of a name. A
 //! session the order does not have goes after those it has, oldest first: with
 //! nothing moved, the rows go as they always went. A session's panes go in the
 //! order of their tabs: zellij numbers a session's panes from 0 each time it
 //! starts, so no id would keep a pane's place in one started again.
+//!
+//! A machine goes by its destination, and this one by `-`, which no
+//! destination starts with, as its fold does. One the order does not have
+//! goes after those it has: this one first, and the others as luneta's hosts
+//! file names them. What the file keeps for what names no machine, as a
+//! person may spell it, reads as nothing, as a colour of no session does.
 //!
 //! A session takes a colour as a browser's group of tabs does as it opens:
 //! the first that no other session has. A colour goes by the session itself,
@@ -24,31 +32,57 @@
 //! name of its writer's own, before it takes its own, so that no luneta reads
 //! it halfway written. A move is made to the order as the file has it then,
 //! and what the file has that this luneta does not know of, as a luneta of a
-//! later build may keep there, is written back as it was. Each luneta watches
-//! the file, and takes up a move another makes as it makes it. Of two that
-//! move sessions at once, the last to write holds the order.
+//! later build may keep there, is written back as it was. A luneta changes it
+//! under the lock of `order.lock`, beside it, from the read to the write, so
+//! that of two that change it at once, as one moves a session while another
+//! gives one a colour, the second changes what the first wrote. Where the
+//! lock cannot be had, it changes it without. Each luneta watches the file,
+//! and takes up a move another makes as it makes it.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs::{self, File};
+use std::hash::Hash;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use lunetad::Destination;
 use notify::RecommendedWatcher;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::host::Event;
 use crate::ledger;
 use crate::live::{Lists, Missing};
+use crate::machines::Machine;
 use crate::state;
+
+/// How the order names this machine, which no destination is spelled as.
+const LOCAL: &str = "-";
+
+/// The lock a luneta holds as it changes the file, beside it.
+const LOCK: &str = "order.lock";
 
 /// The order as its file has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct Kept {
-    /// The sessions, by name.
+    /// This machine's sessions, by name.
     sessions: Vec<String>,
+    /// Each other machine's sessions, by name, by its destination.
+    #[serde(
+        deserialize_with = "remotes_known",
+        serialize_with = "remotes_named",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    remote_sessions: BTreeMap<Destination, Vec<String>>,
+    /// The machines, each once, this one by `LOCAL`.
+    #[serde(
+        deserialize_with = "machines_known",
+        serialize_with = "machines_named",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    machines: Vec<Machine>,
     /// The colour of each session that runs, by the session's name in the
     /// ledger.
     #[serde(deserialize_with = "known", skip_serializing_if = "BTreeMap::is_empty")]
@@ -163,22 +197,40 @@ impl Order {
         true
     }
 
-    /// Puts `sessions` in the order: those it has first, as it has them, by
-    /// the `name` of each, and the rest after, as they came.
-    pub fn sessions<T>(&self, sessions: &mut [T], name: impl Fn(&T) -> &str) {
-        sessions.sort_by_key(|session| rank(&self.kept.sessions, name(session)));
+    /// Puts `sessions`, of `machine`, in the order: those it has first, as it
+    /// has them, by the `name` of each, and the rest after, as they came.
+    pub fn sessions<T>(&self, machine: &Machine, sessions: &mut [T], name: impl Fn(&T) -> &str) {
+        let order = self.kept.sessions_of(machine);
+        sessions.sort_by_key(|session| rank(order, name(session)));
     }
 
-    /// Keeps `sessions`, the names of those that run, in their order now, for
-    /// every luneta. A session the order has that does not run stays after
-    /// the one it came after, to come back there once it runs again. Those
-    /// that run go as `sessions` has them, whatever the file has: a move is
-    /// to be made to them as `reload` takes them up just before, or it undoes
-    /// one made elsewhere since this luneta last heard.
-    pub fn keep_sessions(&mut self, mut sessions: Vec<String>) {
-        let mut named = BTreeSet::new();
-        sessions.retain(|name| named.insert(name.clone()));
-        self.keep(|kept| kept.sessions = merged(&kept.sessions, &sessions));
+    /// Keeps `sessions`, the names of those that run on `machine`, in their
+    /// order now, for every luneta. A session the order has that does not
+    /// run stays after the one it came after, to come back there once it
+    /// runs again. Those that run go as `sessions` has them, whatever the
+    /// file has: a move is to be made to them as `reload` takes them up just
+    /// before, or it undoes one made elsewhere since this luneta last heard.
+    pub fn keep_sessions(&mut self, machine: &Machine, sessions: Vec<String>) {
+        let sessions = once_each(sessions);
+        self.keep(|kept| {
+            let order = kept.sessions_in(machine);
+            *order = merged(order, &sessions);
+        });
+    }
+
+    /// Puts `machines` in the order: those it has first, as it has them, by
+    /// the `machine` of each, and the rest after, as they came.
+    pub fn machines<T>(&self, machines: &mut [T], machine: impl Fn(&T) -> &Machine) {
+        machines.sort_by_key(|it| rank(&self.kept.machines, machine(it)));
+    }
+
+    /// Keeps `machines`, those listed, in their order now, for every luneta,
+    /// as `keep_sessions` keeps a machine's sessions: one the order has that
+    /// is not listed, as one taken out of the hosts file, stays after the one
+    /// it came after, to come back there once it is again.
+    pub fn keep_machines(&mut self, machines: &[Machine]) {
+        let machines = once_each(machines.to_vec());
+        self.keep(|kept| kept.machines = merged(&kept.machines, &machines));
     }
 
     /// Gives each of `running`, the sessions that run, in its order, that
@@ -232,6 +284,7 @@ impl Order {
     /// that fails a write is given up, and the order is this luneta's from
     /// then on, rather than undone by the next `reload`.
     fn keep(&mut self, change: impl FnOnce(&mut Kept)) {
+        let _held = self.lock();
         self.reload();
         self.write_kept(change);
     }
@@ -241,12 +294,26 @@ impl Order {
     /// over, and the change is this luneta's alone until then: luneta keeps
     /// a colour without being asked, which is not to undo what the file has.
     fn keep_read(&mut self, change: impl FnOnce(&mut Kept)) {
+        let _held = self.lock();
         self.reload();
         if self.unread.is_some() {
             change(&mut self.kept);
             return;
         }
         self.write_kept(change);
+    }
+
+    /// Holds `order.lock`, beside the file, until what it gives back is
+    /// dropped, for `keep` to read the file and write it under: of two
+    /// lunetas that change it at once, the second reads what the first wrote,
+    /// and undoes none of it. Where the lock cannot be had, as on a
+    /// filesystem that has no locks, the change is made without it, as a
+    /// luneta of an earlier build makes it, which takes none: the file is
+    /// still shared, and given up only as a write fails.
+    fn lock(&self) -> Option<File> {
+        let lock = File::create(self.file.as_ref()?.with_file_name(LOCK)).ok()?;
+        lock.lock().ok()?;
+        Some(lock)
     }
 
     /// Makes `change` to the order as this luneta last took it up, and
@@ -265,6 +332,35 @@ impl Order {
     }
 }
 
+impl Kept {
+    /// The sessions of `machine`, by name, as the order has them.
+    fn sessions_of(&self, machine: &Machine) -> &[String] {
+        match machine {
+            Machine::Local => &self.sessions,
+            Machine::Remote(destination) => {
+                self.remote_sessions.get(destination).map_or(&[], Vec::as_slice)
+            },
+        }
+    }
+
+    /// The sessions of `machine`, by name, for a move to change.
+    fn sessions_in(&mut self, machine: &Machine) -> &mut Vec<String> {
+        match machine {
+            Machine::Local => &mut self.sessions,
+            Machine::Remote(destination) => {
+                self.remote_sessions.entry(destination.clone()).or_default()
+            },
+        }
+    }
+}
+
+/// `items`, each the first time it comes.
+fn once_each<T: Eq + Hash + Clone>(mut items: Vec<T>) -> Vec<T> {
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(item.clone()));
+    items
+}
+
 /// Where `item` goes in `order`: where it stands there, or after all of it.
 fn rank<T: PartialEq<U>, U: ?Sized>(order: &[T], item: &U) -> usize {
     order.iter().position(|it| it == item).unwrap_or(usize::MAX)
@@ -272,10 +368,10 @@ fn rank<T: PartialEq<U>, U: ?Sized>(order: &[T], item: &U) -> usize {
 
 /// `running`, the sessions that run in their order now, with each of `kept`
 /// that does not run after the one it came after there, or first where none
-/// came before it.
-fn merged(kept: &[String], running: &[String]) -> Vec<String> {
-    let runs = |name: &&String| running.contains(name);
-    let mut merged: Vec<String> = kept.iter().take_while(|name| !runs(name)).cloned().collect();
+/// came before it. And so of the machines: those listed, and those kept.
+fn merged<T: PartialEq + Clone>(kept: &[T], running: &[T]) -> Vec<T> {
+    let runs = |name: &&T| running.contains(name);
+    let mut merged: Vec<T> = kept.iter().take_while(|name| !runs(name)).cloned().collect();
     for name in running {
         merged.push(name.clone());
         if let Some(at) = kept.iter().position(|it| it == name) {
@@ -324,6 +420,49 @@ fn known<'de, D: Deserializer<'de>>(
     Ok(known.collect())
 }
 
+/// The other machines' sessions kept, by the destination of each. One kept
+/// for what names no destination, as `LOCAL`, whose sessions are `sessions`,
+/// or a list that is not of names, reads as none, as a colour of no session
+/// does.
+fn remotes_known<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<Destination, Vec<String>>, D::Error> {
+    let kept = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    let known = kept.into_iter().filter_map(|(destination, sessions)| {
+        Some((destination.parse().ok()?, serde_json::from_value(sessions).ok()?))
+    });
+    Ok(known.collect())
+}
+
+/// The other machines' sessions, by the destination of each, as ssh is told
+/// it.
+fn remotes_named<S: Serializer>(
+    remotes: &BTreeMap<Destination, Vec<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let named = remotes.iter().map(|(destination, sessions)| (destination.to_string(), sessions));
+    serializer.collect_map(named)
+}
+
+/// The machines kept, each the first time it comes, this one by `LOCAL`.
+/// One that names no machine reads as none, as a colour of no session does.
+fn machines_known<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Machine>, D::Error> {
+    let kept = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let known = kept.iter().filter_map(|named| match named.as_str()? {
+        LOCAL => Some(Machine::Local),
+        destination => Some(Machine::Remote(destination.parse().ok()?)),
+    });
+    Ok(once_each(known.collect()))
+}
+
+/// The machines, this one by `LOCAL`, and another by its destination.
+fn machines_named<S: Serializer>(machines: &[Machine], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(machines.iter().map(|machine| match machine {
+        Machine::Local => LOCAL.to_owned(),
+        Machine::Remote(destination) => destination.to_string(),
+    }))
+}
+
 /// Writes `kept` to `file`, first under a name of this luneta's own beside
 /// it. Says why it could not.
 fn write(file: &Path, kept: &Kept) -> Result<(), String> {
@@ -349,11 +488,11 @@ pub fn watch(file: &Path, events: Sender<Event>) -> notify::Result<RecommendedWa
 mod tests {
     use std::num::NonZeroU64;
     use std::sync::mpsc;
+    use std::thread;
     use std::time::{Duration, SystemTime};
 
     use super::*;
     use crate::live::GONE;
-    use crate::machines::Machine;
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -382,7 +521,7 @@ mod tests {
     /// The sessions `order` puts `listed` in, as they came oldest first.
     fn sorted(order: &Order, listed: &[&str]) -> Vec<String> {
         let mut sessions = names(listed);
-        order.sessions(&mut sessions, String::as_str);
+        order.sessions(&Machine::Local, &mut sessions, String::as_str);
         sessions
     }
 
@@ -397,7 +536,7 @@ mod tests {
         let mut there = Order::within(file.clone());
         assert_eq!(sorted(&there, &["a", "b", "c"]), ["a", "b", "c"]);
 
-        here.keep_sessions(names(&["b", "a"]));
+        here.keep_sessions(&Machine::Local, names(&["b", "a"]));
         assert!(there.reload());
         assert!(!there.reload());
         assert_eq!(sorted(&there, &["a", "b", "c"]), ["b", "a", "c"]);
@@ -415,11 +554,11 @@ mod tests {
         let file = scratch.path().join("order");
         let mut here = Order::within(file.clone());
         // Another luneta puts x first, and x ends, before this one hears.
-        Order::within(file.clone()).keep_sessions(names(&["x", "b", "a"]));
+        Order::within(file.clone()).keep_sessions(&Machine::Local, names(&["x", "b", "a"]));
         let text = fs::read_to_string(&file).unwrap();
         fs::write(&file, text.replacen('{', r#"{"tabs": {"a": [2, 1]},"#, 1)).unwrap();
 
-        here.keep_sessions(names(&["a", "b"]));
+        here.keep_sessions(&Machine::Local, names(&["a", "b"]));
         let text = fs::read_to_string(&file).unwrap();
         let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(kept, serde_json::json!({"sessions": ["x", "a", "b"], "tabs": {"a": [2, 1]}}));
@@ -431,10 +570,141 @@ mod tests {
     #[test]
     fn a_session_that_is_not_running_keeps_its_place() {
         let mut order = Order::default();
-        order.keep_sessions(names(&["y", "a", "b", "x", "c"]));
-        order.keep_sessions(names(&["c", "a", "b"]));
+        order.keep_sessions(&Machine::Local, names(&["y", "a", "b", "x", "c"]));
+        order.keep_sessions(&Machine::Local, names(&["c", "a", "b"]));
         let listed = ["a", "b", "c", "x", "y", "new"];
         assert_eq!(sorted(&order, &listed), ["y", "c", "a", "b", "x", "new"]);
+    }
+
+    /// Each machine's sessions keep an order of their own, by the machine's
+    /// destination, which a move of one machine's leaves the others' as it
+    /// was: two machines can each run a session of a name. The machines keep
+    /// theirs, this one by `-`, those the order does not have after, as they
+    /// came. A luneta started later starts with both.
+    #[test]
+    fn each_machine_s_sessions_and_the_machines_keep_orders_of_their_own() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let mut order = Order::within(file.clone());
+        let nixos = Machine::Remote("nixos".parse().unwrap());
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        order.keep_sessions(&Machine::Local, names(&["b", "a"]));
+        order.keep_sessions(&nixos, names(&["a", "c", "b"]));
+        order.keep_machines(&[nixos.clone(), Machine::Local]);
+
+        let later = Order::within(file.clone());
+        let in_order = |machine: &Machine| {
+            let mut sessions = names(&["a", "b", "c"]);
+            later.sessions(machine, &mut sessions, String::as_str);
+            sessions
+        };
+        assert_eq!(in_order(&Machine::Local), ["b", "a", "c"]);
+        assert_eq!(in_order(&nixos), ["a", "c", "b"]);
+        assert_eq!(in_order(&vps), ["a", "b", "c"]);
+        let mut machines = [Machine::Local, vps.clone(), nixos.clone()];
+        later.machines(&mut machines, |machine| machine);
+        assert_eq!(machines, [nixos, Machine::Local, vps]);
+
+        let text = fs::read_to_string(&file).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let expected = serde_json::json!({
+            "sessions": ["b", "a"],
+            "remote_sessions": {"nixos": ["a", "c", "b"]},
+            "machines": ["nixos", "-"],
+        });
+        assert_eq!(kept, expected);
+    }
+
+    /// A machine the order has that is not listed, as one taken out of the
+    /// hosts file, keeps its place after the one listed it came after, as a
+    /// session that does not run does, and comes back there.
+    #[test]
+    fn a_machine_that_is_not_listed_keeps_its_place() {
+        let mut order = Order::default();
+        let remote = |it: &str| Machine::Remote(it.parse().unwrap());
+        let [nixos, vps, pi] = ["nixos", "me@vps", "pi"].map(remote);
+        order.keep_machines(&[nixos.clone(), vps.clone(), Machine::Local]);
+        order.keep_machines(&[Machine::Local, nixos.clone()]);
+        let mut machines = [pi.clone(), vps.clone(), nixos.clone(), Machine::Local];
+        order.machines(&mut machines, |machine| machine);
+        assert_eq!(machines, [Machine::Local, nixos, vps, pi]);
+    }
+
+    /// What the file keeps for what names no machine, as a person may spell
+    /// it, reads as nothing, and the next change leaves it out: `-` names
+    /// this machine, whose sessions are `sessions`, and no destination.
+    #[test]
+    fn what_names_no_machine_reads_as_nothing() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let text = r#"{
+            "sessions": ["b", "a"],
+            "remote_sessions": {"-": ["a", "b"], "a b": ["x"], "nixos": ["d", "c"], "pi": 7},
+            "machines": ["pi", "", "-", 3, "pi", "nixos"]
+        }"#;
+        fs::write(&file, text).unwrap();
+        let mut order = Order::within(file.clone());
+        assert_eq!(order.unread(), None);
+        assert_eq!(sorted(&order, &["a", "b"]), ["b", "a"]);
+        let [nixos, pi] = ["nixos", "pi"].map(|it| Machine::Remote(it.parse().unwrap()));
+        let mut machines = [Machine::Local, nixos.clone(), pi.clone()];
+        order.machines(&mut machines, |machine| machine);
+        assert_eq!(machines, [pi.clone(), Machine::Local, nixos]);
+
+        order.keep_sessions(&pi, names(&["e"]));
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let expected = serde_json::json!({
+            "sessions": ["b", "a"],
+            "remote_sessions": {"nixos": ["d", "c"], "pi": ["e"]},
+            "machines": ["pi", "-", "nixos"],
+        });
+        assert_eq!(kept, expected);
+    }
+
+    /// A luneta changes the file under the lock of `order.lock`: one that
+    /// keeps the order while another holds it waits for it, and then changes
+    /// what the other wrote under it, rather than write over it.
+    #[test]
+    fn a_change_waits_for_the_lock_and_keeps_what_was_written_under_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let mut here = Order::within(file.clone());
+        let lock = File::create(scratch.path().join(LOCK)).unwrap();
+        lock.lock().unwrap();
+        let moving = thread::spawn(move || here.keep_sessions(&Machine::Local, names(&["b", "a"])));
+        thread::sleep(Duration::from_millis(100));
+        assert!(!file.exists());
+        // Another luneta moves nixos's sessions under the lock.
+        fs::write(&file, r#"{"remote_sessions": {"nixos": ["d", "c"]}}"#).unwrap();
+        drop(lock);
+        moving.join().unwrap();
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let expected = serde_json::json!({
+            "sessions": ["b", "a"],
+            "remote_sessions": {"nixos": ["d", "c"]},
+        });
+        assert_eq!(kept, expected);
+    }
+
+    /// A lock that cannot be had, as where `order.lock` is a folder, or on a
+    /// filesystem that has no locks, leaves the file shared: a colour given
+    /// and a move are kept without it, as a luneta of an earlier build keeps
+    /// them, which takes none.
+    #[test]
+    fn a_lock_that_cannot_be_had_leaves_the_file_shared() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        fs::create_dir(scratch.path().join(LOCK)).unwrap();
+        let mut here = Order::within(file.clone());
+        let [a, b] = [1, 2].map(session);
+        assert_eq!(colour(&mut here, &[a, b]), [Colour::Blue, Colour::Yellow]);
+        here.keep_sessions(&Machine::Local, names(&["b", "a"]));
+        assert_eq!((here.lost(), here.file()), (None, Some(file.as_path())));
+        let mut later = Order::within(file);
+        assert_eq!(colour(&mut later, &[b, a]), [Colour::Yellow, Colour::Blue]);
+        assert_eq!(sorted(&later, &["a", "b"]), ["b", "a"]);
     }
 
     /// A file that does not read as an order leaves the order as it was, and
@@ -445,12 +715,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("order");
         let mut order = Order::within(file.clone());
-        order.keep_sessions(names(&["b", "a"]));
+        order.keep_sessions(&Machine::Local, names(&["b", "a"]));
         fs::write(&file, "not JSON").unwrap();
         assert!(!order.reload());
         assert!(order.unread().is_some_and(|why| why.contains("order")));
         assert_eq!(sorted(&order, &["a", "b"]), ["b", "a"]);
-        order.keep_sessions(names(&["a", "b"]));
+        order.keep_sessions(&Machine::Local, names(&["a", "b"]));
         assert_eq!(order.unread(), None);
         assert_eq!(sorted(&Order::within(file), &["b", "a"]), ["a", "b"]);
 
@@ -458,7 +728,7 @@ mod tests {
         fs::write(&blocker, "").unwrap();
         let mut order = Order::within(blocker.join("order"));
         assert!(order.lost().is_some_and(|lost| lost.contains("not a folder")));
-        order.keep_sessions(names(&["b", "a"]));
+        order.keep_sessions(&Machine::Local, names(&["b", "a"]));
         assert_eq!(sorted(&order, &["a", "b"]), ["b", "a"]);
     }
 
@@ -517,7 +787,7 @@ mod tests {
         let [a, b] = [1, 2].map(session);
         assert_eq!(colour(&mut here, &[b, a]), [Colour::Blue, Colour::Yellow]);
         assert!(there.reload());
-        there.keep_sessions(names(&["a", "b"]));
+        there.keep_sessions(&Machine::Local, names(&["a", "b"]));
         let mut later = Order::within(file.clone());
         assert_eq!(colour(&mut later, &[a, b]), [Colour::Yellow, Colour::Blue]);
         assert_eq!(sorted(&later, &["b", "a"]), ["a", "b"]);
@@ -610,7 +880,7 @@ mod tests {
         here.reload();
         assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
 
-        Order::within(file).keep_sessions(names(&["b", "a"]));
+        Order::within(file).keep_sessions(&Machine::Local, names(&["b", "a"]));
         assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Order)));
         assert!(here.reload());
     }

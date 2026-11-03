@@ -89,8 +89,9 @@ const SOCKET_MAKING: usize = 17;
 /// around it. One with white space or a control character in it is no
 /// destination, as ssh would take it for more than one word, and nor is one
 /// led by a `-`, which ssh would take for an option. One spelled with `parse`
-/// is one the daemon reads from the file, whoever wrote it there.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// is one the daemon reads from the file, whoever wrote it there. They go in
+/// the order of their spelling.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Destination(String);
 
 impl FromStr for Destination {

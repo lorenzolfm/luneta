@@ -729,33 +729,41 @@ every luneta opens that wide from its next start: one already running keeps
 its own. Collapsed, the strip stays four columns wide, and opens to the width
 you dragged.
 
-You can move the sessions; their panes stay in the order of their tabs. `v`
-selects the session of the highlighted row, `j` and `k` grow the selection
-from session to session, folded or not, and `J` and `K` move the sessions it
-holds, each with its panes, one down or one up, as a visual selection and
-`:m` do in vim. They stay selected, so `JJJ` goes on. `v` or `Esc` ends the
-selection, `Esc` doing nothing else; any other key ends it and does what it
-does.
+You can move the sessions, of any machine, and the machines; panes stay in
+the order of their tabs. `v` selects the session of the highlighted row, `j`
+and `k` grow the selection from session to session of its machine, folded or
+not, and `J` and `K` move the sessions it holds, each with its panes, one down
+or one up, as a visual selection and `:m` do in vim. A session moves among
+its machine's alone: never under another machine's header. On a machine's
+header, which the highlight stops on while the machine is folded or lists no
+session, `v` selects the machine, this one too, `j` and `k` grow the
+selection from header to header, and `J` and `K` move the machines it holds,
+each with every row under its header. They stay selected, so `JJJ` goes on.
+`v` or `Esc` ends the selection, `Esc` doing nothing else; any other key ends
+it and does what it does.
 
-With the mouse, a press on a session's row lifts the session once the mouse
-moves a line, and the sidebar takes the keys. It shows where it lands, lit,
-with its panes, the sessions around it making room. Held on the first or last
-line of the rows, it scrolls them. Let go, it stays there. Let go off the
-sidebar, or press `Esc`, and it goes back. A press on a pane's row lifts
-nothing. What the mouse holds stays with the sidebar until it lets go, over
-zellij too, and while the button is down the sidebar does nothing with a key
-but `Esc`, which lets go. So a click is a press let go on the line it went
-down on, and acts as it lets go.
-While the search has something typed, no session lifts.
+With the mouse, a press on a session's row, or on a machine's header, lifts
+it once the mouse moves a line, and the sidebar takes the keys. It shows where
+it lands, lit, with the rows under it, the others around it making room, a
+session among its machine's alone. Held on the first or last line of the
+rows, it scrolls them. Let go, it stays there. Let go off the sidebar, or
+press `Esc`, and it goes back. A press on a pane's row lifts nothing. What the
+mouse holds stays with the sidebar until it lets go, over zellij too, and
+while the button is down the sidebar does nothing with a key but `Esc`, which
+lets go. So a click is a press let go on the line it went down on, and acts
+as it lets go. While the search has something typed, nothing lifts.
 
 The order is the same in every luneta on the host, and lasts: it is kept in
 `$XDG_STATE_HOME/luneta/order`, or `~/.local/state/luneta/order`, which every
 luneta watches. A session keeps its place by its name, as a fold does, so one
 started again under it comes back there, and two that share one, as zellij
-versions with sockets of their own can each run, move together. A move is made
-to the order as it is kept then, so it undoes none that another luneta made,
-heard or not. A session the order does not have
-goes after those it has, as a new session always went last. The order is the
+versions with sockets of their own can each run, move together. Each machine's
+sessions have an order of their own, another machine's by what you typed ssh
+to it, kept on this host as its folds are: the luneta on that machine keeps
+its own. A move is made to the order as it is kept then, so it undoes none
+that another luneta made, heard or not. A session the order does not have
+goes after those it has, as a new session always went last, and so does a
+machine. The order is the
 sidebar's only: zellij's tabs keep theirs. The sessions' colours are kept in
 the same file, by the session rather than its name, so a renamed one keeps its
 own, and given up once the daemon has not listed a session for 10 seconds.
@@ -777,12 +785,13 @@ the session it is in.
 
 The sidebar lists your other machines' sessions too, a header over each
 machine's: this one first, by its host's name, and then each machine you
-added, as you typed it. lunetad reaches each one through
-`ssh <machine> luneta bridge`, so ssh does the auth and nothing listens on the
-network, and the machine needs `luneta` on its `PATH`. Add one with `n m` in
-the menu, on a row of this machine's or on any machine's header, and type what
-you type ssh to it: a Tailscale name, a `Host` of your ssh config, or
-`me@vps`. Or from a shell:
+added, as you typed it, until you move them, as
+[luneta in your terminal](#luneta-in-your-terminal) says. lunetad reaches
+each one through `ssh <machine> luneta bridge`, so ssh does the auth and
+nothing listens on the network, and the machine needs `luneta` on its `PATH`.
+Add one with `n m` in the menu, on a row of this machine's or on any
+machine's header, and type what you type ssh to it: a Tailscale name, a
+`Host` of your ssh config, or `me@vps`. Or from a shell:
 
 ```sh
 luneta ssh nixos    # nixos: added to luneta's hosts file
