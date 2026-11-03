@@ -1638,7 +1638,13 @@ impl Sidebar {
         };
         let others = machines(host).others.into_iter();
         let others = others.filter(|(destination, _)| !tried.contains(destination));
-        let refuges = others.map(|(destination, seen)| {
+        let others = others.map(|(destination, seen)| {
+            (Machine::Remote(destination.clone()), destination, seen)
+        });
+        let mut others: Vec<_> = others.collect();
+        // In the order of their headers, as you moved them.
+        self.order.machines(&mut others, |(machine, ..)| machine);
+        let refuges = others.into_iter().map(|(_, destination, seen)| {
             let refuges = match seen {
                 Ok(seen) => {
                     let (sessions, _) = oldest_first(seen.sessions);
@@ -7893,6 +7899,20 @@ mod tests {
         let main = (nixos(), Ok(vec![session_name("main")]));
         assert_eq!(away, [main, vps.clone(), held.clone(), far.clone()]);
         assert_eq!(sidebar.refuges_away(&tried, Within::MaybeAway), [vps, held, far]);
+    }
+
+    /// zellij goes on by the machines as the sidebar's headers have them, as
+    /// you moved them, and not as the hosts file names them.
+    #[test]
+    fn zellij_goes_on_by_the_machines_as_you_moved_them() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "hhvJjJ");
+        assert_eq!(machines_listed(&sidebar), ["nixos", "pi", "mac", "me@vps"]);
+        let refuges = sidebar.refuges_away(&[], Within::Here);
+        let order: Vec<String> = refuges.iter().map(|(machine, _)| machine.to_string()).collect();
+        assert_eq!(order, ["nixos", "pi", "me@vps"]);
     }
 
     /// luneta has heard all it needs of a machine once lunetad has its

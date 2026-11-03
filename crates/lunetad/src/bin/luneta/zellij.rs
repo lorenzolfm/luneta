@@ -255,12 +255,24 @@ fn quoted(word: &str) -> String {
 
 /// What became of the session luneta's zellij's client ended in, of
 /// `seats`, the sessions it may have been in, and where it goes on on this
-/// machine, as `lunetad::moves::refuge` finds them here: never the session
-/// luneta's terminal is a pane of, as `refusal` says.
+/// machine, as `lunetad::moves::refuge` finds them here: never a session that
+/// may hold luneta's terminal, as `clients_of_refuge` says.
 pub fn ended(seats: &[SessionName]) -> Ended {
     let current = env::var(SESSION_VAR).ok();
     let folder = lunetad::zellij_folder();
-    moves::refuge(&folder, seats, current.as_deref(), |session| clients(session.as_str()).ok())
+    moves::refuge(&folder, seats, current.as_deref(), clients_of_refuge)
+}
+
+/// What zellij lists of the clients of `session`, where luneta's zellij may go
+/// on in it: none of one that may hold luneta's terminal, as
+/// `may_hold_terminal` says, which `lunetad::moves` passes over as it does one
+/// that does not answer. Its name in the pane's environment would not do, as a
+/// rename leaves it behind.
+fn clients_of_refuge(session: &SessionName) -> Option<Vec<Client>> {
+    if may_hold_terminal(session.as_str()) {
+        return None;
+    }
+    clients(session.as_str()).ok()
 }
 
 /// What sshd sets in a session it runs: in every one, and in one with a
@@ -336,12 +348,11 @@ pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
 
 /// This machine's newest session, as `lunetad::moves::newest` finds it,
 /// where luneta's zellij goes on once its client ended on another machine:
-/// never the session luneta's terminal is a pane of.
+/// never a session that may hold luneta's terminal, as `clients_of_refuge`
+/// says.
 pub fn newest() -> Option<Refuge> {
     let current = env::var(SESSION_VAR).ok();
-    moves::newest(&lunetad::zellij_folder(), current.as_deref(), |session| {
-        clients(session.as_str()).ok()
-    })
+    moves::newest(&lunetad::zellij_folder(), current.as_deref(), clients_of_refuge)
 }
 
 /// The first of `sessions` of `destination` whose clients its daemon lists,

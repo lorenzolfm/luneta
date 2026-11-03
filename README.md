@@ -364,7 +364,9 @@ anywhere. It starts in the first of these that exists:
 2. A session on [another machine](#other-machines): the newest of the first by
    the sidebar's headers that lunetad reaches. With no session here, luneta
    waits to hear what runs on them, for 5 seconds at the most, and says so; a
-   machine it has not heard of by then counts as having none.
+   machine it has not heard of by then counts as having none. Where zellij
+   fails there, luneta goes on to the next machine, and where it fails on each,
+   it makes none: it says so and ends, for you to name one.
 3. The session named for the directory you are in, made. A session that ended
    counts as none running, and comes back here if it has that name.
 
@@ -372,9 +374,11 @@ anywhere. It starts in the first of these that exists:
 session is asking for it. Inside luneta, `n s` or the picker makes one.
 
 Run in a pane of zellij, luneta will not attach to the session that pane is
-in, as zellij will not. A bare `luneta` knows that session under a new name
-too: zellij lists its pane there running luneta. Where sessions run but luneta
-will join none of them, it makes none: it says so and ends, for you to name one.
+in, as zellij will not. Where it chooses a session itself, as a bare `luneta`
+does, or as it goes on after one ended, luneta knows that session under a new
+name too: zellij lists its pane there running luneta. Where sessions run but
+luneta will join none of them, it makes none: it says so and ends, for you to
+name one.
 
 When zellij detaches, luneta ends. When the session zellij is in ends, as
 zellij quits, its last pane exits, or it is killed, luneta attaches zellij to

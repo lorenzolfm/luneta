@@ -9,8 +9,9 @@
 //!    newest of those it has no word of.
 //! 2. A session of another machine's, as `App::newest_away` goes on in one: of
 //!    the first machine by the sidebar's headers that lunetad reaches, its
-//!    newest that answers, going on to the next where a client fails. The news
-//!    goes unread here: it dates a pane of another machine's by either
+//!    newest that answers, going on to the next where a client fails, and
+//!    ending where every one does, for you to name a session, as sessions run.
+//!    The news goes unread here: it dates a pane of another machine's by either
 //!    machine's clock, which may not compare. luneta has to hear what runs on
 //!    them first, as `Start::Hear` says.
 //! 3. The session named for the directory, made, as `zellij::client` has it.

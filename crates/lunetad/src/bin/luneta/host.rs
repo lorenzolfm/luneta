@@ -2748,8 +2748,11 @@ impl App {
     }
 
     /// What zellij said as it failed, to be said again once luneta's screen is
-    /// gone: the text on its terminal, and how it ended. None for a zellij that
-    /// detached or quit, or that ended in a way its terminal could not tell.
+    /// gone: the text on its terminal, and how it ended, and where luneta took
+    /// it to a session by itself, with none left to go on in, how to start in
+    /// one all the same: a bare luneta would look for the same again. None for
+    /// a zellij that detached or quit, or that ended in a way its terminal
+    /// could not tell.
     fn failure(&self) -> Option<String> {
         let status = self.client.exited.filter(|status| !status.success())?;
         let ended = match self.sidebar.on() {
@@ -2757,6 +2760,12 @@ impl App {
             Machine::Remote(destination) => {
                 format!("luneta: zellij on {destination} ended ({status})")
             },
+        };
+        let ended = match self.client.fails {
+            Fails::Onward(_) => format!(
+                "{ended}\nluneta: name a session to start there, made if none runs: luneta <name>"
+            ),
+            Fails::End | Fails::Back(_) => ended,
         };
         let said = self.client.hosted.text();
         Some(if said.is_empty() { ended } else { format!("{said}\n{ended}") })

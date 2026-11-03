@@ -220,6 +220,23 @@ fn a_bare_luneta_never_joins_its_own_session_once_that_is_renamed() {
     assert_eq!(host.zellij.attached(), ["attach other"]);
 }
 
+/// Its session gone, luneta goes on in another, but not in the one its terminal
+/// is a pane of under a new name. This zellij makes no session, so that the one
+/// named has gone with its client.
+#[test]
+fn luneta_never_goes_on_in_its_own_session_once_that_is_renamed() {
+    let host = Host::new();
+    let _renamed = host.serve("renamed");
+    host.zellij.list("renamed", &pane_running("luneta"));
+    let dir = directory("project");
+    let mut named = luneta(host.vars(), &dir.path);
+    named.arg("named").env("ZELLIJ_SESSION_NAME", "opened-as").env("ZELLIJ_PANE_ID", "1");
+
+    let ended = on_terminal(named);
+    assert_eq!(host.zellij.attached(), ["attach --create named"]);
+    assert!(ended.status.success(), "{}", ended.said);
+}
+
 /// A hosts file that does not read is said to be so, as it leaves luneta
 /// looking on no other machine, which is not to say that none is named.
 #[test]
@@ -285,6 +302,47 @@ fn a_bare_luneta_goes_on_to_the_next_machine_where_a_client_fails() {
     assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
     assert_eq!(ssh.clients("next"), ["zellij attach 'later'"]);
     assert!(here.zellij.attached().is_empty());
+}
+
+/// Where every machine's client fails, a bare luneta makes nothing, as sessions
+/// run, and says how to start in one all the same: by naming it.
+#[test]
+fn a_bare_luneta_says_to_name_a_session_where_every_client_fails() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = machine(&ssh, "far", "work", &json!([]));
+    ssh.refuses_clients("far");
+    hosts(&here, "far\n");
+    let _daemon = start(here.vars()).unwrap();
+
+    let ended = on_terminal(luneta(here.vars(), &directory("project").path));
+    assert!(ended.said.contains("Connection refused"), "{}", ended.said);
+    assert!(ended.said.contains("luneta <name>"), "{}", ended.said);
+    assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
+    assert!(here.zellij.attached().is_empty());
+}
+
+/// Where a client of another machine's session fails, a bare luneta goes on in
+/// this machine's newest, but not in the one its terminal is a pane of under a
+/// new name.
+#[test]
+fn a_bare_luneta_whose_client_failed_never_goes_on_in_its_own_renamed_session() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = machine(&ssh, "far", "work", &json!([]));
+    ssh.refuses_clients("far");
+    hosts(&here, "far\n");
+    let _renamed = here.serve("renamed");
+    here.zellij.list("renamed", &pane_running("luneta"));
+    let _daemon = start(here.vars()).unwrap();
+    let dir = directory("project");
+    let mut bare = luneta(here.vars(), &dir.path);
+    bare.env("ZELLIJ_SESSION_NAME", "opened-as").env("ZELLIJ_PANE_ID", "1");
+
+    let ended = on_terminal(bare);
+    assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
+    assert!(here.zellij.attached().is_empty(), "{:?}", here.zellij.attached());
+    assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
 }
 
 /// With no session anywhere, a bare luneta makes its directory's, though a
