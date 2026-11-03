@@ -42,14 +42,15 @@ use crossterm::event::{
     KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
-use crossterm::terminal::SetTitle;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
+use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::log::{self, Process};
 use lunetad::Destination;
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
-use ratatui::DefaultTerminal;
+use ratatui::{DefaultTerminal, Terminal};
 
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
@@ -662,6 +663,11 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             return ExitCode::FAILURE;
         },
     };
+    // The cursor shows where a frame puts it, and nowhere before the first,
+    // as luneta waits for its terminal's answers. ratatui's own, for it to
+    // know the cursor is hidden: the first frame shows it at zellij's, and
+    // ratatui shows it again as luneta ends.
+    let hidden = terminal.hide_cursor();
     // Before the hook, so that no panic of the sidebar's goes by the log. Why
     // there is none is for the sidebar to say, once it has its notes.
     let unkept = log::start(Process::Luneta).err();
@@ -671,14 +677,8 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
     let restore = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         log::panicked(panic);
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            DisableFocusChange,
-            DisableThemeChange
-        );
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        let _ = put_back(&mut io::stdout());
         restore(panic);
     }));
     // Not a `sync_channel` of a bound: alacritty hands on what the program
@@ -725,16 +725,9 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
     // one said.
     let popped =
         if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
-    let restored = execute!(
-        io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        DisableFocusChange,
-        DisableThemeChange,
-        SetCursorStyle::DefaultUserShape
-    );
+    let restored = put_back(&mut io::stdout());
     let left = ratatui::try_restore();
-    match ran.and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
+    match hidden.and(ran).and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
         // What zellij said as it failed went with luneta's screen.
         Ok(Some(failed)) => {
@@ -746,6 +739,24 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             ExitCode::FAILURE
         },
     }
+}
+
+/// Puts luneta's `terminal` back as luneta found it, all but the kitty
+/// keyboard flags, the screen and raw mode, however luneta ends: out of the
+/// update of a frame, where a panic ended luneta in one, with the modes
+/// luneta turned on off, and the cursor in your own style. The panic hook and
+/// the end of `run` both put back what this does, for them to put back the
+/// same.
+fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
+    execute!(
+        terminal,
+        EndSynchronizedUpdate,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        DisableFocusChange,
+        DisableThemeChange,
+        SetCursorStyle::DefaultUserShape
+    )
 }
 
 /// Runs zellij beside the sidebar until it ends, and says what it said as it
@@ -2540,6 +2551,13 @@ impl App {
     }
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        whole(terminal, |terminal| self.frame(terminal))
+    }
+
+    /// Draws the sidebar, open or collapsed, zellij's screen beside it, and
+    /// the box over zellij, where one is, into a frame of luneta's terminal,
+    /// with zellij's cursor while zellij has the keys.
+    fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let now = SystemTime::now();
         terminal.draw(|frame| {
             let collapsed = self.focus.side == Side::Collapsed;
@@ -2607,6 +2625,23 @@ impl App {
     }
 }
 
+/// Writes a frame to `terminal`, as `draw` does, for the terminal to show
+/// whole: one that can holds what it shows from the frame's first write to
+/// its last. A frame goes out in more than one write, and its cursor moves to
+/// where it shows only in the last: a terminal that shows what it has in
+/// between shows the cursor where luneta wrote last, as after a spinner that
+/// turned on a row of the sidebar.
+fn whole<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    draw: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> io::Result<()>,
+) -> io::Result<()> {
+    queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+    let drawn = draw(terminal);
+    // Ended where it failed too, for the terminal to show what it has.
+    let ended = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+    drawn.and(ended)
+}
+
 /// What a client of zellij's on `on` said as it failed, ending `exited`: the
 /// last line on its screen, as an ssh that reached no machine, or a zellij
 /// that could not attach, or make a session of a name taken, writes it as it
@@ -2642,5 +2677,112 @@ fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {
         (CursorShape::Beam, false) => SetCursorStyle::SteadyBar,
         (_, true) => SetCursorStyle::BlinkingBlock,
         (_, false) => SetCursorStyle::SteadyBlock,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::term::test::TermSize;
+    use alacritty_terminal::term::{Config, Term};
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+    use ratatui::{TerminalOptions, Viewport};
+
+    use super::*;
+
+    /// What luneta writes to its terminal, write by write, into `written`:
+    /// each flush is one, as it is to stdout.
+    #[derive(Default)]
+    struct Writes {
+        written: Rc<RefCell<Vec<Vec<u8>>>>,
+        writing: Vec<u8>,
+    }
+
+    impl io::Write for Writes {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writing.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if !self.writing.is_empty() {
+                self.written.borrow_mut().push(std::mem::take(&mut self.writing));
+            }
+            Ok(())
+        }
+    }
+
+    /// A frame with `glyph` at the second column of the second line, and the
+    /// cursor at `cursor`, written whole to `terminal`.
+    fn frame(terminal: &mut Terminal<CrosstermBackend<Writes>>, glyph: &str, cursor: Position) {
+        whole(terminal, |terminal| {
+            terminal.draw(|frame| {
+                frame.buffer_mut()[(1, 1)].set_symbol(glyph);
+                frame.set_cursor_position(cursor);
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Where `screen` shows its cursor, if it shows one.
+    fn shown(screen: &Term<VoidListener>) -> Option<(i32, usize)> {
+        let cursor = screen.renderable_content().cursor;
+        let point = (cursor.point.line.0, cursor.point.column.0);
+        (cursor.shape != CursorShape::Hidden).then_some(point)
+    }
+
+    /// A terminal that shows what it has after each write luneta makes shows
+    /// the cursor only where a frame puts it, as zellij's, and never where
+    /// luneta wrote last, as on a spinner that turned on a row of the
+    /// sidebar: a frame is held until it is all written.
+    #[test]
+    fn the_cursor_shows_only_where_a_frame_puts_it() {
+        let viewport = Viewport::Fixed(Rect::new(0, 0, 20, 4));
+        let writes = Writes::default();
+        let written = Rc::clone(&writes.written);
+        let backend = CrosstermBackend::new(writes);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
+        let mut screen = Term::new(Config::default(), &TermSize::new(20, 4), VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let zellij = Position::new(15, 3);
+        frame(&mut terminal, "⠋", zellij);
+        for write in written.take() {
+            parser.advance(&mut screen, &write);
+        }
+        assert_eq!(shown(&screen), Some((3, 15)));
+        frame(&mut terminal, "⠙", zellij);
+        let writes = written.take();
+        assert!(writes.len() > 1, "a frame goes out in more than one write");
+        for write in writes {
+            parser.advance(&mut screen, &write);
+            assert_eq!(shown(&screen), Some((3, 15)));
+        }
+        assert_eq!(screen.grid()[Point::new(Line(1), Column(1))].c, '⠙');
+    }
+
+    /// A frame luneta ended in, as a panic in one ends it, shows once luneta
+    /// puts its terminal back, which a terminal holds till then, and your
+    /// cursor is in your own style again.
+    #[test]
+    fn putting_back_shows_a_frame_luneta_ended_in() {
+        let mut screen = Term::new(Config::default(), &TermSize::new(20, 4), VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let mut ended = Vec::new();
+        execute!(ended, SetCursorStyle::SteadyBar, BeginSynchronizedUpdate).unwrap();
+        ended.extend_from_slice("⠙".as_bytes());
+        parser.advance(&mut screen, &ended);
+        let spinner = Point::new(Line(0), Column(0));
+        assert_eq!(screen.grid()[spinner].c, ' ', "the frame is held");
+        assert_eq!(screen.cursor_style().shape, CursorShape::Beam);
+        let mut put = Vec::new();
+        put_back(&mut put).unwrap();
+        parser.advance(&mut screen, &put);
+        assert_eq!(screen.grid()[spinner].c, '⠙');
+        assert_eq!(screen.cursor_style(), Config::default().default_cursor_style);
     }
 }
