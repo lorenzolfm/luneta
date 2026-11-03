@@ -32,6 +32,7 @@ mod mic;
 mod news;
 mod order;
 mod own;
+mod peers;
 mod picker;
 mod printed;
 mod pull;
@@ -117,7 +118,7 @@ fn main() -> ExitCode {
         // It asks no lunetad, and so needs no folder to find one in.
         Command::Worktree { repo, of } => return pull::make(&repo, &of),
         Command::Clicked { socket, group } => {
-            return match desktop::tell(&socket, &group) {
+            return match peers::tell(&socket, &group) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("luneta: {}: {error}", socket.display());

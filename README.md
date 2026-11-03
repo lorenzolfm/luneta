@@ -1084,10 +1084,14 @@ They go up on freedesktop's notification server on Linux, as swaync, dunst or
 mako, with Claude's mark where `~/.local/share/icons/notifications/claude.png`
 is one, and the freedesktop sounds through `pw-play`; on macOS through
 [`terminal-notifier`](https://github.com/julienXX/terminal-notifier). One
-luneta of a machine puts them up: another's would be the same. A luneta that
-runs over ssh puts none up, as the desktop of the machine it runs on is not the
-one you sit at, nor does any while no luneta runs. luneta takes down what it
-put up as it ends, its window closed too.
+luneta of a machine puts them up, another's would be the same, and each other
+luneta of the machine tells it what you look at in its window: none comes of a
+pane you look at in any of them, and a click goes to the one whose window had
+the focus last. A luneta that runs over ssh puts none up, as the desktop of the
+machine it runs on is not the one you sit at, nor does any while no luneta
+runs. luneta takes down what it put up as it ends, its window closed too, and
+another luneta of the machine puts up again what still wants you, without a
+sound.
 
 ## Getting started
 

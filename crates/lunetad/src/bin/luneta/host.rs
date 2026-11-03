@@ -70,6 +70,7 @@ use crate::menu::{self, Choice};
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
+use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Ready};
@@ -145,6 +146,9 @@ pub enum Event {
     Alerted(alerts::Read),
     /// You clicked the notification of this agent.
     Clicked(alerts::Key),
+    /// What came of the lock that the luneta of this machine that puts the
+    /// notifications up holds, or of another luneta of the machine.
+    Peers(peers::Heard),
 }
 
 /// How often the sidebar is drawn again with nothing else to draw it: every
@@ -738,15 +742,18 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
     let restored = put_back(&mut io::stdout());
     let left = ratatui::try_restore();
+    // A terminal that hung up, as one whose window closed, is told nothing:
+    // `eprintln!` would panic on it.
+    let mut said = io::stderr();
     match hidden.and(ran).and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
         // What zellij said as it failed went with luneta's screen.
         Ok(Some(failed)) => {
-            eprintln!("{failed}");
+            let _ = writeln!(said, "{failed}");
             ExitCode::FAILURE
         },
         Err(error) => {
-            eprintln!("luneta: {error}");
+            let _ = writeln!(said, "luneta: {error}");
             ExitCode::FAILURE
         },
     }
@@ -1013,6 +1020,12 @@ impl App {
                 }
             },
             Event::Clicked(key) => self.clicked(&key),
+            Event::Peers(heard) => {
+                if self.desktop.heard(heard, self.focused) {
+                    let acts = self.alerts.again();
+                    self.alert(acts);
+                }
+            },
             Event::Opened { menu, opened } => {
                 let asked = self.sidebar.opened(menu, opened);
                 self.follow(asked);
@@ -1105,12 +1118,17 @@ impl App {
         picker.into_iter().chain(self.alerts.due()).min()
     }
 
-    /// Takes down the notification of an agent in the pane you look at, and
-    /// has those of the agents that have waited on you long enough by `now`
-    /// read for.
+    /// Takes down the notification of an agent in a pane you look at, in
+    /// luneta's window, which has the focus, or in another luneta's of this
+    /// machine, and has those of the agents that have waited on you long
+    /// enough by `now` read for.
     fn alerting(&mut self, now: Instant) {
         let here = self.sidebar.whereabouts();
-        let mut acts = self.alerts.looked(here.as_ref(), self.focused);
+        let mine = if self.focused { self.alerts.at(here.as_ref()) } else { Vec::new() };
+        self.desktop.looking(&mine);
+        let mut looked = self.desktop.looks();
+        looked.extend(mine);
+        let mut acts = self.alerts.looked(&looked);
         acts.extend(self.alerts.ticked(now));
         self.alert(acts);
     }
@@ -1129,12 +1147,16 @@ impl App {
 
     /// Takes zellij's client to the pane of the agent whose notification you
     /// clicked, as `Enter` on its row does, and brings luneta's window
-    /// forward.
+    /// forward: this luneta's, or the one of this machine whose window had
+    /// the focus last, which goes there.
     fn clicked(&mut self, key: &alerts::Key) {
         let Some(place) = self.alerts.clicked(key) else {
             return;
         };
         self.desktop.close(key.clone());
+        if self.desktop.hand(key) {
+            return;
+        }
         desktop::raise(self.sidebar.terminal_title());
         self.go(&key.on, &Place::Pane(place), None);
         self.leave();
@@ -2307,6 +2329,7 @@ impl App {
 
     fn focus_window(&mut self, focused: bool) {
         self.focused = focused;
+        self.desktop.focus(focused);
         if !focused && let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
             dictation.unfocused();
         }

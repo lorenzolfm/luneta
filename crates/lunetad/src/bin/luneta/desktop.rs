@@ -3,15 +3,14 @@
 //! through `terminal-notifier`, as nix-darwin puts it on the `PATH`. A click
 //! on one comes back to luneta as `Event::Clicked`.
 //!
-//! One luneta of a machine puts them up, the first to have one to put up,
-//! which holds a lock for as long as it runs: another's would be the same
-//! again. And none puts any up while it runs over ssh: the desktop of the
-//! machine it runs on is not the one you sit at.
+//! One luneta of a machine puts them up, which holds a lock for as long as
+//! it runs, and the others have their say through it, as `peers` says:
+//! another's would be the same again. And none puts any up while it runs
+//! over ssh: the desktop of the machine it runs on is not the one you sit
+//! at.
 
-use std::fs::File;
-use std::io::{self, Write as _};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::fs::{self, File};
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
@@ -19,16 +18,15 @@ use tokio::sync::mpsc::{self as channel, UnboundedReceiver, UnboundedSender};
 
 use crate::alerts::{Alert, Key};
 use crate::host::Event;
-
-/// The file the luneta that puts notifications up holds a lock on, in
-/// luneta's runtime folder.
-const LOCK: &str = "alerts.lock";
+use crate::peers::{self, Heard, Peers, Reaching};
 
 /// What luneta has the desktop do.
 #[derive(Debug)]
 enum Order {
     Post(Alert),
     Close(Key),
+    /// Put the notifications up from now on, as this luneta holds the lock.
+    Hold,
 }
 
 /// The desktop, through a thread of its own, which takes luneta's orders in
@@ -38,6 +36,21 @@ pub struct Desktop {
     /// What takes the orders to the thread, and the thread: none where
     /// luneta runs over ssh, nor once it ends.
     serving: Option<(UnboundedSender<Order>, JoinHandle<()>)>,
+    /// What this luneta is of those of its machine.
+    role: Role,
+    /// Where luneta hears what its threads say.
+    events: Sender<Event>,
+}
+
+/// What a luneta is of those of its machine.
+enum Role {
+    /// It does not know yet, or never will, as it runs over ssh.
+    Unsure,
+    /// Another holds the lock: this one tells it where it looks.
+    Peer(Reaching),
+    /// It holds the lock, and puts the notifications up: with the socket it
+    /// hears the others on, where it hears on one, and what they said.
+    Holder { _lock: File, socket: Option<PathBuf>, peers: Peers },
 }
 
 impl Desktop {
@@ -47,13 +60,15 @@ impl Desktop {
         let elsewhere = ["SSH_CONNECTION", "SSH_TTY"].into_iter().any(|name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         });
+        let events = events.clone();
         if elsewhere {
-            return Desktop { serving: None };
+            return Desktop { serving: None, role: Role::Unsure, events };
         }
         let (orders, taken) = channel::unbounded_channel();
-        let events = events.clone();
-        let worker = thread::spawn(move || serve(taken, &events));
-        Desktop { serving: Some((orders, worker)) }
+        let serving = events.clone();
+        let worker = thread::spawn(move || serve(taken, &serving));
+        peers::wait(events.clone());
+        Desktop { serving: Some((orders, worker)), role: Role::Unsure, events }
     }
 
     pub fn post(&self, alert: Alert) {
@@ -70,42 +85,98 @@ impl Desktop {
             let _ = orders.send(order);
         }
     }
+
+    /// What came of the lock, or of another luneta of this machine, whose
+    /// window has the focus as `focused` says: whether this one has come to
+    /// hold the lock, and so is to put up again what another put up, which
+    /// that one took down as it ended.
+    pub fn heard(&mut self, heard: Heard, focused: bool) -> bool {
+        match heard {
+            Heard::Holding(lock) => {
+                // It reaches for no other now.
+                self.role = Role::Unsure;
+                let socket = match peers::listening(&self.events) {
+                    Ok(socket) => Some(socket),
+                    Err(why) => {
+                        // luneta is on its way out.
+                        let _ = self.events.send(Event::Notice(format!(
+                            "a click on a notification goes nowhere: {why}"
+                        )));
+                        None
+                    },
+                };
+                self.order(Order::Hold);
+                self.role = Role::Holder { _lock: lock, socket, peers: Peers::default() };
+                true
+            },
+            Heard::Peering => {
+                if let (Role::Unsure, Ok(socket)) = (&self.role, peers::socket()) {
+                    self.role = Role::Peer(Reaching::to(socket, focused, self.events.clone()));
+                }
+                false
+            },
+            Heard::Peer(number, peered) => {
+                if let Role::Holder { peers, .. } = &mut self.role {
+                    peers.heard(number, peered);
+                }
+                false
+            },
+        }
+    }
+
+    /// luneta's window took the focus, or let it go, as `focused` says.
+    pub fn focus(&mut self, focused: bool) {
+        match &mut self.role {
+            Role::Peer(reaching) => reaching.focus(focused),
+            Role::Holder { peers, .. } if focused => peers.here(),
+            Role::Holder { .. } | Role::Unsure => {},
+        }
+    }
+
+    /// You look at the panes of the agents of `keys` in luneta's window,
+    /// which has the focus, or at none.
+    pub fn looking(&mut self, keys: &[Key]) {
+        if let Role::Peer(reaching) = &mut self.role {
+            reaching.looks(keys);
+        }
+    }
+
+    /// The agents whose panes you look at in another luneta's window, which
+    /// has the focus.
+    pub fn looks(&self) -> Vec<Key> {
+        match &self.role {
+            Role::Holder { peers, .. } => peers.looks(),
+            Role::Peer(_) | Role::Unsure => Vec::new(),
+        }
+    }
+
+    /// Hands a click on the notification of `key`'s agent to the luneta whose
+    /// window had the focus last, where that is another, which goes to its
+    /// pane: whether it did.
+    pub fn hand(&mut self, key: &Key) -> bool {
+        match &mut self.role {
+            Role::Holder { peers, .. } => peers.hand(key),
+            Role::Peer(_) | Role::Unsure => false,
+        }
+    }
 }
 
 impl Drop for Desktop {
     /// Takes down every notification this luneta put up, and waits until it
-    /// has, as luneta ends.
+    /// has, as luneta ends; and only then lets go of the lock, so that the
+    /// luneta that takes it next puts up what still wants you once these
+    /// went.
     fn drop(&mut self) {
         if let Some((orders, worker)) = self.serving.take() {
             drop(orders);
             // What a thread that panicked left up stays so.
             let _ = worker.join();
         }
+        // The next to hold the lock hears on a socket of the same path.
+        if let Role::Holder { socket: Some(socket), .. } = &self.role {
+            let _ = fs::remove_file(socket);
+        }
     }
-}
-
-/// Whether this luneta puts notifications up, as it does once it holds the
-/// lock, which it takes on the first it has, and holds in `held` from then
-/// on.
-fn ours(held: &mut Option<File>) -> bool {
-    if held.is_some() {
-        return true;
-    }
-    let Some(folder) = lunetad::folder::find() else {
-        return false;
-    };
-    let Ok(folder) = lunetad::folder::make(&folder) else {
-        return false;
-    };
-    let Ok(lock) = File::create(folder.path().join(LOCK)) else {
-        return false;
-    };
-    // Let go of as `lock` closes, as luneta ends.
-    if lock.try_lock().is_err() {
-        return false;
-    }
-    *held = Some(lock);
-    true
 }
 
 /// Says what went wrong with the desktop, once: the sidebar says it.
@@ -115,13 +186,6 @@ fn say(events: &Sender<Event>, said: &mut bool, why: &str) {
         // luneta is on its way out.
         let _ = events.send(Event::Notice(format!("no notifications: {why}")));
     }
-}
-
-/// Tells the luneta listening on `socket` that the notification of the
-/// group `group` was clicked, as `luneta clicked` does, which a click on one
-/// runs on macOS.
-pub fn tell(socket: &Path, group: &str) -> io::Result<()> {
-    writeln!(UnixStream::connect(socket)?, "{group}")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -142,6 +206,7 @@ fn serve(orders: UnboundedReceiver<Order>, events: &Sender<Event>) {
 #[cfg(not(target_os = "macos"))]
 mod freedesktop {
     use std::collections::HashMap;
+    use std::io;
     use std::num::NonZeroU32;
     use std::path::Path;
     use std::process::Stdio;
@@ -151,15 +216,21 @@ mod freedesktop {
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio_stream::wrappers::UnboundedReceiverStream;
     use tokio_stream::{self as stream, StreamExt as _};
+    use zbus::connection::Builder;
     use zbus::names::UniqueName;
     use zbus::{Connection, Proxy, Variant};
 
-    use super::{ours, say, Order};
+    use super::{say, Order};
     use crate::alerts::{Alert, Key, Kind};
     use crate::host::Event;
 
     const SERVER: &str = "org.freedesktop.Notifications";
     const PATH: &str = "/org/freedesktop/Notifications";
+
+    /// How long luneta waits for the server to answer what it asks of it,
+    /// as to put a notification up: one that does not answer holds up what
+    /// luneta has it do next no longer, nor luneta's end.
+    const ANSWER: Duration = Duration::from_secs(5);
 
     /// How long luneta waits, as it ends, for each notification it takes
     /// down to go: a server that does not answer keeps it from ending no
@@ -196,15 +267,16 @@ mod freedesktop {
         let mut said = false;
         let (proxy, signals) = match connect().await {
             Ok(connected) => connected,
-            Err(error) => return say(events, &mut said, &error.to_string()),
+            Err(error) => return say(events, &mut said, &why(&error)),
         };
         let orders = UnboundedReceiverStream::new(orders).map(Heard::Order);
         let mut heard = orders.chain(stream::once(Heard::Ended)).merge(signals);
-        let (mut up, mut held) = (HashMap::<Key, Posted>::new(), None);
+        let (mut up, mut holding) = (HashMap::<Key, Posted>::new(), false);
         while let Some(heard) = heard.next().await {
             match heard {
+                Heard::Order(Order::Hold) => holding = true,
                 Heard::Order(Order::Post(alert)) => {
-                    if !ours(&mut held) {
+                    if !holding {
                         continue;
                     }
                     match notify(&proxy, &alert).await {
@@ -213,9 +285,11 @@ mod freedesktop {
                             // with it.
                             up.retain(|_, was| was.by == posted.by);
                             up.insert(alert.key.clone(), posted);
-                            sound(alert.kind);
+                            if alert.sounds {
+                                sound(alert.kind);
+                            }
                         },
-                        Err(error) => say(events, &mut said, &error.to_string()),
+                        Err(error) => say(events, &mut said, &why(&error)),
                     }
                 },
                 Heard::Order(Order::Close(key)) => {
@@ -249,7 +323,7 @@ mod freedesktop {
     /// order it says them: one stream, as a click is said before the close
     /// it makes, and would find nothing to go to after it.
     async fn connect() -> zbus::Result<(Proxy<'static>, Signals)> {
-        let connection = Connection::session().await?;
+        let connection = Builder::session().method_timeout(ANSWER).build().await?;
         let proxy = Proxy::new(&connection, SERVER, PATH, SERVER).await?;
         let signals = proxy.receive_all_signals().await?.filter_map(|signal| {
             let (header, body) = (signal.header(), signal.body());
@@ -289,6 +363,17 @@ mod freedesktop {
         let id = answer.body().deserialize::<u32>()?;
         let id = NonZeroU32::new(id).ok_or_else(|| unsaid("gives the notification no id"))?;
         Ok(Posted { by, id })
+    }
+
+    /// What went wrong, in words: a server that did not answer in time says
+    /// so.
+    fn why(error: &zbus::Error) -> String {
+        match error {
+            zbus::Error::InputOutput(error) if error.kind() == io::ErrorKind::TimedOut => {
+                format!("the notification server did not answer in {}s", ANSWER.as_secs())
+            },
+            error => error.to_string(),
+        }
     }
 
     /// Takes `posted` down: through the server that put it up, and no other,
@@ -366,87 +451,64 @@ pub fn raise(title: Option<&str>) {
 /// a notification up and ends: a click on it has the Notification Center
 /// start it again, which runs the command it was given then, as `sh` does.
 /// That is luneta's own, which tells the luneta that puts notifications up
-/// of the click, through a socket of its. A notification goes by a group
-/// named for its agent, which the click names: one that a luneta left up as
-/// it was killed goes to that agent's pane too, and goes once the luneta
-/// that puts them up now takes that agent's down.
+/// of the click, through the socket it hears the others on, as `peers` says.
+/// A notification goes by the group `peers` names its agent by, which the
+/// click names: one that a luneta left up as it was killed goes to that
+/// agent's pane too, and goes once the luneta that puts them up now takes
+/// that agent's down.
 #[cfg(any(target_os = "macos", test))]
 mod notifier {
     #[cfg(target_os = "macos")]
     use std::collections::HashSet;
-    use std::fs;
-    use std::io::{self, BufRead as _, BufReader};
-    use std::os::unix::net::UnixListener;
     use std::path::Path;
     #[cfg(target_os = "macos")]
     use std::path::PathBuf;
     #[cfg(target_os = "macos")]
     use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
     use std::sync::mpsc::Sender;
-    use std::thread;
 
-    use crate::alerts::{Alert, Key, Kind};
+    use crate::alerts::{Alert, Kind};
+    #[cfg(target_os = "macos")]
+    use crate::alerts::Key;
+    #[cfg(target_os = "macos")]
     use crate::host::Event;
-    use crate::machines::Machine;
+    #[cfg(target_os = "macos")]
+    use crate::peers::group;
 
     /// The terminal a click brings forward: Ghostty.
     const TERMINAL: &str = "com.mitchellh.ghostty";
 
-    /// What each group luneta names is led by.
-    const GROUPS: &str = "luneta-";
-
-    /// The socket a click is told on, in luneta's runtime folder: the luneta
-    /// that puts notifications up listens on it, which holds their lock.
-    #[cfg(target_os = "macos")]
-    const SOCKET: &str = "alerts.sock";
-
-    /// The group the notification of `key`'s agent goes by: its pid, and the
-    /// machine it runs on, where that is another.
-    pub fn group(key: &Key) -> String {
-        match &key.on {
-            Machine::Local => format!("{GROUPS}{}", key.pid),
-            Machine::Remote(destination) => format!("{GROUPS}{}-{destination}", key.pid),
-        }
-    }
-
-    /// The agent `group` names, where it names one.
-    pub fn key_of(group: &str) -> Option<Key> {
-        let named = group.strip_prefix(GROUPS)?;
-        let (pid, on) = match named.split_once('-') {
-            Some((pid, destination)) => (pid, Machine::Remote(destination.parse().ok()?)),
-            None => (named, Machine::Local),
-        };
-        Some(Key { on, pid: pid.parse().ok()? })
-    }
-
     /// The arguments that put `alert` up as the group `group`, in the place
     /// of the one of the group up still, if any, and run `clicked` in `sh` on
-    /// a click.
-    pub fn posting(alert: &Alert, group: &str, clicked: &str) -> Vec<String> {
-        let sound = match alert.kind {
-            Kind::Asked | Kind::Plan => "Glass",
-            Kind::Permission | Kind::Wants => "Ping",
-            Kind::Done => "Hero",
-        };
-        let args = [
-            ("-group", group),
-            ("-title", &guarded(&alert.title)),
-            ("-message", &guarded(&alert.body)),
-            ("-sound", sound),
-            ("-activate", TERMINAL),
-            ("-execute", clicked),
+    /// a click, where there is one to run.
+    pub fn posting(alert: &Alert, group: &str, clicked: Option<&str>) -> Vec<String> {
+        let mut args = vec![
+            ("-group", group.to_owned()),
+            ("-title", guarded(&alert.title)),
+            ("-message", guarded(&alert.body)),
+            ("-activate", TERMINAL.to_owned()),
         ];
-        args.into_iter().flat_map(|(flag, value)| [flag.to_owned(), value.to_owned()]).collect()
+        if alert.sounds {
+            let sound = match alert.kind {
+                Kind::Asked | Kind::Plan => "Glass",
+                Kind::Permission | Kind::Wants => "Ping",
+                Kind::Done => "Hero",
+            };
+            args.push(("-sound", sound.to_owned()));
+        }
+        args.extend(clicked.map(|clicked| ("-execute", clicked.to_owned())));
+        args.into_iter().flat_map(|(flag, value)| [flag.to_owned(), value]).collect()
     }
 
-    /// `text` as terminal-notifier takes it for a value: macOS reads its
-    /// arguments as defaults, which take a word led by a `-` for an option,
-    /// and one led by a `(`, a `{` or a `<` for a list.
+    /// `text` as terminal-notifier takes it for a value, whatever it starts
+    /// with: macOS reads its arguments as defaults, which take a word led by
+    /// a `-` for an option, and one led by a `[`, a `(`, a `{`, a `<` or a
+    /// quote for a list or another kind than text, and terminal-notifier
+    /// reads none of those. A word led by a `\` is text, and terminal-notifier
+    /// takes that `\` off.
     fn guarded(text: &str) -> String {
-        match text.chars().next() {
-            Some('-' | '(' | '{' | '<') => format!(" {text}"),
-            _ => text.to_owned(),
-        }
+        format!("\\{text}")
     }
 
     /// The command a click runs, in `sh`: `luneta`, which tells the luneta
@@ -455,31 +517,6 @@ mod notifier {
         let quoted = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
         let (luneta, socket) = (luneta.to_string_lossy(), socket.to_string_lossy());
         format!("{} clicked --socket {} {}", quoted(&luneta), quoted(&socket), quoted(group))
-    }
-
-    /// Hears on `socket`, for as long as luneta runs, each group clicked,
-    /// which it hands `events` as the click of the agent it names. One that
-    /// names none it leaves.
-    pub fn listen(socket: &Path, events: Sender<Event>) -> io::Result<()> {
-        // One left by a luneta that held the lock before is no one's.
-        let _ = fs::remove_file(socket);
-        let listener = UnixListener::bind(socket)?;
-        thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let mut line = String::new();
-                if BufReader::new(stream).read_line(&mut line).is_err() {
-                    continue;
-                }
-                let Some(key) = key_of(line.trim_end()) else {
-                    continue;
-                };
-                // luneta is on its way out.
-                if events.send(Event::Clicked(key)).is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(())
     }
 
     /// Runs terminal-notifier with `args`: whether it ran well, or why not,
@@ -516,31 +553,30 @@ mod notifier {
         mut orders: tokio::sync::mpsc::UnboundedReceiver<super::Order>,
         events: &Sender<Event>,
     ) {
-        use super::{ours, say, Order};
+        use super::{say, Order};
 
-        let (mut said, mut held) = (false, None);
+        let mut said = false;
+        // The socket a click is told on, once this luneta holds the lock,
+        // where there is one.
+        let mut held: Option<Option<PathBuf>> = None;
         // The agents whose notifications this luneta put up, to take down as
         // it ends.
         let mut posted: HashSet<Key> = HashSet::new();
-        let mut socket: Option<PathBuf> = None;
+        let luneta = std::env::current_exe();
         while let Some(order) = orders.blocking_recv() {
             match order {
+                Order::Hold => held = Some(crate::peers::socket().ok()),
                 Order::Post(alert) => {
-                    if !ours(&mut held) {
-                        continue;
-                    }
-                    if socket.is_none() {
-                        match listening(events) {
-                            Ok(listening) => socket = Some(listening),
-                            Err(why) => say(events, &mut said, &why),
-                        }
-                    }
-                    let (Some(at), Ok(luneta)) = (&socket, std::env::current_exe()) else {
+                    let Some(socket) = &held else {
                         continue;
                     };
                     let group = group(&alert.key);
+                    let clicked = match (socket, &luneta) {
+                        (Some(at), Ok(luneta)) => Some(clicked(luneta, at, &group)),
+                        (None, _) | (_, Err(_)) => None,
+                    };
                     posted.insert(alert.key.clone());
-                    if let Err(why) = run(&posting(&alert, &group, &clicked(&luneta, at, &group))) {
+                    if let Err(why) = run(&posting(&alert, &group, clicked.as_deref())) {
                         say(events, &mut said, &why);
                     }
                 },
@@ -557,57 +593,22 @@ mod notifier {
         for key in &posted {
             remove(key);
         }
-        if let Some(socket) = socket {
-            let _ = fs::remove_file(socket);
-        }
-    }
-
-    /// The socket a click is told on, which luneta hears on now, in luneta's
-    /// runtime folder; or why there is none.
-    #[cfg(target_os = "macos")]
-    fn listening(events: &Sender<Event>) -> Result<PathBuf, String> {
-        let folder = lunetad::folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set")?;
-        let folder = lunetad::folder::make(&folder).map_err(|refusal| refusal.to_string())?;
-        let socket = folder.path().join(SOCKET);
-        listen(&socket, events.clone()).map_err(|error| error.to_string())?;
-        Ok(socket)
     }
 
     #[cfg(test)]
     mod tests {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
         use super::*;
+        use crate::alerts::Key;
+        use crate::machines::Machine;
 
-        fn key(pid: u32) -> Key {
-            Key { on: Machine::Local, pid }
-        }
-
-        fn alert(kind: Kind, body: &str) -> Alert {
-            let title = "fix — needs permission".to_owned();
-            Alert { key: key(41), kind, title, body: body.to_owned() }
-        }
-
-        /// The group of an agent names it back: its pid, and another
-        /// machine, whatever its name has in it. What names no agent, as
-        /// another program's group, names none.
-        #[test]
-        fn an_agent_s_group_names_it() {
-            let remote = Key { on: Machine::Remote("me@my-vps".parse().unwrap()), pid: 7 };
-            assert_eq!(group(&key(41)), "luneta-41");
-            assert_eq!(group(&remote), "luneta-7-me@my-vps");
-            for key in [key(41), remote] {
-                assert_eq!(key_of(&group(&key)), Some(key));
-            }
-            for named in ["luneta-x", "luneta-", "other-41", "luneta-7--x"] {
-                assert_eq!(key_of(named), None, "{named}");
-            }
+        fn alert(kind: Kind, body: &str, sounds: bool) -> Alert {
+            let (key, title) = (Key { on: Machine::Local, pid: 41 }, "fix — needs permission");
+            Alert { key, kind, title: title.to_owned(), body: body.to_owned(), sounds }
         }
 
         /// A notification goes up by its group, which a click runs luneta
-        /// with, quoted for `sh`; and what reads as an option or a list to
-        /// macOS is not one.
+        /// with, quoted for `sh`; what it says is text to macOS whatever it
+        /// starts with, and it sounds but where it was up before.
         #[test]
         fn a_notification_goes_up_by_its_group_and_runs_luneta_on_a_click() {
             let luneta = Path::new("/nix/x/bin/luneta");
@@ -615,33 +616,23 @@ mod notifier {
             let socket = r"'/var/it'\''s/alerts.sock'";
             let said = format!("'/nix/x/bin/luneta' clicked --socket {socket} 'luneta-41'");
             assert_eq!(clicked, said);
-            let args = posting(&alert(Kind::Permission, "-rf: rm"), "luneta-41", &clicked);
-            let value = |flag: &str| {
-                let at = args.iter().position(|arg| arg == flag).expect("the flag is there");
-                args[at + 1].clone()
+            let rm = alert(Kind::Permission, "-rf: rm", true);
+            let args = posting(&rm, "luneta-41", Some(&clicked));
+            let value = |args: &[String], flag: &str| {
+                let at = args.iter().position(|arg| arg == flag)?;
+                Some(args[at + 1].clone())
             };
-            assert_eq!(value("-group"), "luneta-41");
-            assert_eq!(value("-message"), " -rf: rm");
-            assert_eq!(value("-title"), "fix — needs permission");
-            assert_eq!((value("-sound").as_str(), value("-activate").as_str()), ("Ping", TERMINAL));
-            assert_eq!(value("-execute"), clicked);
-        }
-
-        /// What a click tells the socket reaches luneta as the click of the
-        /// agent its group names; one that names none reaches nothing.
-        #[test]
-        fn a_click_told_on_the_socket_is_the_click_of_its_agent() {
-            let folder = tempfile::tempdir().expect("a folder");
-            let socket = folder.path().join("alerts.sock");
-            let (events, heard) = mpsc::channel();
-            listen(&socket, events).expect("it listens");
-            super::super::tell(&socket, "luneta-x").expect("it is told");
-            super::super::tell(&socket, &group(&key(41))).expect("it is told");
-            let Ok(Event::Clicked(clicked)) = heard.recv_timeout(Duration::from_secs(5)) else {
-                panic!("luneta heard no click");
-            };
-            assert_eq!(clicked, key(41));
-            assert!(heard.try_recv().is_err());
+            let said = |flag| value(&args, flag).expect("the flag is there");
+            assert_eq!(said("-group"), "luneta-41");
+            assert_eq!(said("-message"), r"\-rf: rm");
+            assert_eq!(said("-title"), r"\fix — needs permission");
+            assert_eq!((said("-sound").as_str(), said("-activate").as_str()), ("Ping", TERMINAL));
+            assert_eq!(said("-execute"), clicked);
+            for text in ["[x] done", "(wip) fix", "{a = b;}", "<b>it</b>", "\"Done\" said", r"\n"] {
+                assert_eq!(guarded(text), format!("\\{text}"));
+            }
+            let again = posting(&alert(Kind::Done, "All done.", false), "luneta-41", None);
+            assert_eq!((value(&again, "-sound"), value(&again, "-execute")), (None, None));
         }
     }
 }
