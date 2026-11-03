@@ -832,11 +832,14 @@ impl Daemon for Host {
         &self,
         request: Request<MoveReviewRequest>,
     ) -> Result<Response<MoveReviewResponse>, Status> {
-        let MoveReviewRequest { on, pid, does: asked } = request.into_inner();
-        let does = ReviewMove::try_from(asked).ok().and_then(Move::of);
-        let does = does.ok_or_else(|| Status::invalid_argument("does: no move of a review"))?;
+        let MoveReviewRequest { on, pid, does: asked, next } = request.into_inner();
+        let does = ReviewMove::try_from(asked).ok().and_then(|does| Move::of(does, &next));
+        let does = does.ok_or_else(|| {
+            Status::invalid_argument("does: no move of a review, or of no skill it names")
+        })?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.move_review(MoveReviewRequest { on: None, pid, does: asked }).await;
+            let forward = MoveReviewRequest { on: None, pid, does: asked, next };
+            return daemon.move_review(forward).await;
         }
         let moved = self.ask(|answer| Command::MoveReview { pid, does, answer }).await?;
         moved.map_err(|refused| Status::failed_precondition(refused.to_string()))?;

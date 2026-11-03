@@ -15,6 +15,9 @@ use crate::zellij::Sessions;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: u32,
+    /// When its process started, as the system says it: the system can give
+    /// its pid to another once it has ended.
+    pub start: String,
     /// The agent's own id for its session.
     pub session_id: Said,
     /// Where it works.
@@ -170,7 +173,7 @@ impl Agent {
     /// The agent as the API gives it, in the session `sessions` say its pane
     /// is in now.
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions) -> api::Agent {
+    pub fn to_api(&self, sessions: &Sessions, review: Option<api::Review>) -> api::Agent {
         // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
         // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
@@ -215,8 +218,7 @@ impl Agent {
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
-            // The core adds what it keeps of it.
-            review: None,
+            review,
         }
     }
 }

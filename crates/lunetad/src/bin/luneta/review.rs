@@ -5,7 +5,7 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use lunetad::api::{MoveReviewRequest, On};
+use lunetad::api::On;
 use lunetad::reviews::Move;
 
 use crate::away;
@@ -35,7 +35,7 @@ fn asked(on: &Machine, pid: u32, does: Move) -> Result<(), String> {
         Machine::Local => None,
         Machine::Remote(destination) => Some(On { destination: destination.to_string() }),
     };
-    let request = MoveReviewRequest { on, pid, does: does.to_api().into() };
+    let request = does.request(on, pid);
     commands::runtime()?.block_on(async {
         let asking = async {
             let mut daemon = daemon::reach(&folder, Reach::Running).await?;

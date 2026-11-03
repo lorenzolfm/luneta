@@ -295,6 +295,7 @@ fn agent(pid: u32, file: &File, environment: Environment) -> Agent {
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
     Agent {
         pid,
+        start: file.proc_start.spelled(),
         session_id: file.session_id.clone(),
         cwd: file.cwd.clone(),
         status: Status::of(file.status.as_deref(), file.waiting_for.as_deref()),
@@ -336,7 +337,7 @@ impl Environment {
             } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
                 pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
             } else if let Some(link) = entry.strip_prefix(review_var.as_bytes()) {
-                review = std::str::from_utf8(link).ok().and_then(reviews::of_variable);
+                review = std::str::from_utf8(link).ok().and_then(reviews::pull_request);
             }
         }
         let session = session.filter(|session| !session.is_empty());

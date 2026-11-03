@@ -196,7 +196,7 @@ case "$*" in
         exec cat "{panes}/$session.dump"
         ;;
     "action paste "* | "action send-keys "*)
-        if [ -f "{panes}/$session.refused" ]; then
+        if [ -f "{panes}/$session.refused" ] || [ -f "{panes}/$session.$2.refused" ]; then
             echo "zellij refused to write in $session" >&2
             exit 1
         fi
@@ -375,6 +375,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
+    }
+
+    /// Has zellij write what is pasted in the panes of `session` from now on,
+    /// and fail to send a key there, which would send it.
+    pub fn refuse_keys(&self, session: &str) {
+        self.write(&format!("{session}.send-keys.refused"), "");
     }
 
     /// Has zellij kill the session `session` from now on and keep nothing of

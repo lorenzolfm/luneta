@@ -39,7 +39,7 @@ use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{Turn, User};
 use lunetad::cli::quiet;
-use lunetad::links::{At, Kind, Link, Pasted, Ready};
+use lunetad::links::{At, Link, Pasted, Ready};
 use lunetad::{clients, reviews};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
@@ -399,8 +399,8 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
 
 /// A pull request's page, as `review` takes it.
 pub fn pull_request(spelled: &str) -> Result<Link, String> {
-    let link = Link::parse(spelled).filter(|link| link.kind() == Kind::Pull);
-    link.ok_or_else(|| format!("{spelled} is no pull request's page on GitHub"))
+    reviews::pull_request(spelled)
+        .ok_or_else(|| format!("{spelled} is no pull request's page on GitHub"))
 }
 
 /// Starts a review of the pull request `link`, and says the pane of its

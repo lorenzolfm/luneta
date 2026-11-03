@@ -620,7 +620,7 @@ impl Keys {
         match &entries[at] {
             Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
             Entry::Last(last) => return Pressed::Last(*last),
-            Entry::Review { does, .. } => return Pressed::Review(*does),
+            Entry::Review { does, .. } => return Pressed::Review(does.clone()),
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, session, scope } => {
                 return Pressed::Delete { key: *key, session: session.clone(), scope: *scope };
@@ -821,8 +821,8 @@ impl Reviewing {
         let skip = format!("skip {}", self.next);
         vec![
             Entry::Review { key: REVIEW_HOLD, does: hold, says },
-            Entry::Review { key: REVIEW_NEXT, does: Move::Next, says: next },
-            Entry::Review { key: REVIEW_SKIP, does: Move::Skip, says: skip },
+            Entry::Review { key: REVIEW_NEXT, does: Move::Next(self.next.clone()), says: next },
+            Entry::Review { key: REVIEW_SKIP, does: Move::Skip(self.next.clone()), says: skip },
         ]
     }
 }
@@ -2928,8 +2928,9 @@ mod tests {
         let moved = |does| Done::Review(Machine::Local, 33, does);
         assert_eq!(pressed(false, 'h'), moved(Move::Hold));
         assert_eq!(pressed(true, 'h'), moved(Move::Resume));
-        assert_eq!(pressed(false, 'n'), moved(Move::Next));
-        assert_eq!(pressed(false, 's'), moved(Move::Skip));
+        let skill = || "/tigerstyle".to_owned();
+        assert_eq!(pressed(false, 'n'), moved(Move::Next(skill())));
+        assert_eq!(pressed(false, 's'), moved(Move::Skip(skill())));
         let (held, _) = stays(opened(reviewing("/tigerstyle", true), Some('r')));
         assert!(lines(&held).contains(&" h  go on".to_owned()));
 

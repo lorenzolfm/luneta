@@ -821,14 +821,19 @@ goes. The agent's row says which skill it is on, as `2/3
 make-illegal-states-unrepresentable`, and what the next waits for: `you`; `next`
 as what is at work stops; `draft`, while you have something typed in the agent's
 prompt, which it would join; or `held`. `stuck` says that zellij has shown no
-prompt to write in, or would not write there, and lunetad's log says why. The
-last skill's stop ends the review.
+prompt to write in, or would not write there, or that the transcript does not
+say who began a turn, and lunetad's log says why. The last skill's stop ends the
+review.
 
 | key | does |
 |---|---|
 | `r h` | holds the review, or goes on from a hold: nothing goes while you hold it |
 | `r n` | sends the next skill, with no turn of yours first: for a skill that found nothing |
 | `r s` | skips the next skill: skipping the last ends the review |
+
+Each key moves what you were shown. A review that has gone on since refuses
+`r n` and `r s`, and one whose next skill is on its way into the pane refuses
+`r h`, and the notes say so.
 
 What moves it on is a turn you began and let finish, as Claude Code's transcript
 says, and only that: a background task that wakes the agent is none, nor is a

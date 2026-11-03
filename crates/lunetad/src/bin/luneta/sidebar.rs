@@ -432,7 +432,9 @@ enum NextSkill {
     Soon,
     /// What you have typed in the agent's prompt.
     Draft,
-    /// A prompt to write in, which lunetad does not find: its log says why.
+    /// What lunetad cannot get past by itself, a prompt it finds no way to
+    /// write in, or a transcript that does not say who began a turn: its log
+    /// says why.
     Stuck,
 }
 
@@ -458,15 +460,16 @@ impl ReviewRow {
         let review = agent.review.as_ref()?;
         let skill = review.skill.strip_prefix('/').unwrap_or(&review.skill);
         let on = format!("{}/{} {skill}", review.step, review.steps);
-        let next = match ReviewWaits::try_from(review.waits) {
-            _ if review.next.is_none() => NextSkill::Nothing,
-            _ if review.held => NextSkill::Held,
-            Ok(ReviewWaits::You) => NextSkill::You,
-            Ok(ReviewWaits::Turn) => NextSkill::Soon,
-            Ok(ReviewWaits::Draft) => NextSkill::Draft,
-            Ok(ReviewWaits::Prompt) => NextSkill::Stuck,
-            Ok(ReviewWaits::Skill | ReviewWaits::Unspecified) | Err(_) => NextSkill::Nothing,
-        };
+        let next = review.next.as_ref().map_or(NextSkill::Nothing, |next| {
+            match ReviewWaits::try_from(next.waits) {
+                _ if next.held => NextSkill::Held,
+                Ok(ReviewWaits::You) => NextSkill::You,
+                Ok(ReviewWaits::Turn) => NextSkill::Soon,
+                Ok(ReviewWaits::Draft) => NextSkill::Draft,
+                Ok(ReviewWaits::Prompt | ReviewWaits::Transcript) => NextSkill::Stuck,
+                Ok(ReviewWaits::Skill | ReviewWaits::Unspecified) | Err(_) => NextSkill::Nothing,
+            }
+        });
         Some(ReviewRow { on, next })
     }
 }
@@ -2674,9 +2677,8 @@ impl Sidebar {
         let ran = self.ran_in(machine, &session, pane);
         let agent = agents.as_ref().and_then(|agents| agents.get(&(session.name.as_str(), pane)));
         let reviewing = agent.and_then(|agent| {
-            let review = agent.review.as_ref()?;
-            let next = review.next.clone()?;
-            Some(Reviewing { pid: agent.pid, next, held: review.held })
+            let next = agent.review.as_ref()?.next.as_ref()?;
+            Some(Reviewing { pid: agent.pid, next: next.skill.clone(), held: next.held })
         });
         Target::Pane(machine.clone(), PaneRow { session, pane, cwd, branch, ran, reviewing })
     }
@@ -4765,19 +4767,20 @@ mod tests {
     fn review(step: u32, waits: ReviewWaits, held: bool) -> api::Review {
         let skills = lunetad::reviews::SKILLS;
         api::Review {
-            link: "https://github.com/o/app/pull/7".to_owned(),
             step,
             steps: 3,
             skill: skills[step as usize - 1].to_owned(),
-            next: skills.get(step as usize).map(|skill| (*skill).to_owned()),
-            waits: waits.into(),
-            held,
+            next: skills.get(step as usize).map(|skill| api::review::Next {
+                skill: (*skill).to_owned(),
+                waits: waits.into(),
+                held,
+            }),
         }
     }
 
     /// An agent on a review has a line under its row that says which skill
     /// it is on, and, by the end, what the next waits for: you, a moment,
-    /// your draft, or a prompt it cannot find. It says nothing while the skill
+    /// your draft, or what lunetad cannot get past. It says nothing while the skill
     /// is at work, as the mark says that, nor once none is left to go; and
     /// that you hold it, whatever else it waits for. A word of a newer daemon's
     /// says nothing.
@@ -4790,10 +4793,12 @@ mod tests {
         assert_eq!(next(ReviewWaits::Turn, false), NextSkill::Soon);
         assert_eq!(next(ReviewWaits::Draft, false), NextSkill::Draft);
         assert_eq!(next(ReviewWaits::Prompt, false), NextSkill::Stuck);
+        assert_eq!(next(ReviewWaits::Transcript, false), NextSkill::Stuck);
         assert_eq!(next(ReviewWaits::You, true), NextSkill::Held);
         let last = ReviewRow::of(&with(review(3, ReviewWaits::You, true))).unwrap();
         assert_eq!(last, ReviewRow { on: "3/3 tigerstyle".to_owned(), next: NextSkill::Nothing });
-        let newer = api::Review { waits: 99, ..review(2, ReviewWaits::You, false) };
+        let mut newer = review(2, ReviewWaits::You, false);
+        newer.next.as_mut().unwrap().waits = 99;
         assert_eq!(ReviewRow::of(&with(newer)).unwrap().next, NextSkill::Nothing);
         assert_eq!(ReviewRow::of(&agent("s", 1, Status::Idle, None)), None);
 

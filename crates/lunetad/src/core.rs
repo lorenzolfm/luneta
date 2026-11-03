@@ -416,9 +416,8 @@ impl Known {
 
     /// Each agent, with what is kept of the review it runs.
     fn agents(&self) -> Vec<api::Agent> {
-        let agent = |agent: &crate::agent::Agent| api::Agent {
-            review: self.reviews.to_api(agent.pid),
-            ..agent.to_api(&self.sessions)
+        let agent = |agent: &crate::agent::Agent| {
+            agent.to_api(&self.sessions, self.reviews.to_api(agent.pid))
         };
         self.found.agents.iter().map(agent).collect()
     }

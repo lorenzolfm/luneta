@@ -1178,22 +1178,25 @@ fn a_review_on_another_machine_is_moved_there() {
     fs::write(file, file_for("aa-1", &agent, "idle").to_string()).unwrap();
     let review = |host: &remote::Host| host.agents.iter().find_map(|it| it.review.clone());
     let first = review(&reached(&here, "far", |far| review(far).is_some())).unwrap();
-    assert_eq!((first.step, first.held), (1, false));
+    let next = first.next.unwrap();
+    assert_eq!((first.step, next.held), (1, false));
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let moved = |on: &str| MoveReviewRequest {
+        let moved = |on: &str, does: ReviewMove| MoveReviewRequest {
             on: Some(On { destination: on.to_owned() }),
             pid: agent.pid(),
-            does: ReviewMove::Hold.into(),
+            does: does.into(),
+            next: next.skill.clone(),
         };
-        daemon.move_review(moved("far")).await.unwrap();
-        let nowhere = daemon.move_review(moved("nowhere")).await.unwrap_err();
+        daemon.move_review(moved("far", ReviewMove::Skip)).await.unwrap();
+        let nowhere = daemon.move_review(moved("nowhere", ReviewMove::Hold)).await.unwrap_err();
         assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
     });
-    reached(&here, "far", |far| review(far).is_some_and(|review| review.held));
+    let skipped = |review: api::Review| review.next.is_some_and(|it| it.skill != next.skill);
+    reached(&here, "far", |far| review(far).is_some_and(skipped));
 }
 
 /// A tab asked to open alone in a session of another machine takes the
