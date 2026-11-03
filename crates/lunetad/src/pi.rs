@@ -7,12 +7,17 @@
 //! has run on the machine, and reads the files.
 //!
 //! A file outlives its process when the process is killed, and a pid can come
-//! back as another process's. So a file stands for an agent only while a
-//! process with its pid runs that started before the file was last written,
-//! which one that came by the pid since did not. As with Claude Code's files,
-//! the file does not say what zellij pane the agent is in, and the process's
-//! environment does. Neither does it say when the process started, as the
-//! system does.
+//! back as another process's. So a file stands for an agent only while the
+//! process that runs by its pid is the one that wrote it. On Linux the file
+//! says when that process started, as the system spells it. A date would not
+//! do there: `process::started` works one out from the clock as it is now, and
+//! a clock set forward would make a process look newer than what it wrote. On
+//! macOS, where the extension cannot read that so simply, and the date is one
+//! the kernel kept, the process must have started before the file was last
+//! written, which one that came by the pid since did not.
+//!
+//! As with Claude Code's files, the file does not say what zellij pane the
+//! agent is in, and the process's environment does.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -54,7 +59,7 @@ pub fn folder() -> Option<PathBuf> {
 }
 
 /// A file of the extension, as much of it as the adapter reads. A file without
-/// the first two does not read as one.
+/// the first four does not read as one, as the extension always writes them.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct File {
@@ -62,9 +67,13 @@ struct File {
     session_id: Said,
     #[serde(deserialize_with = "nonempty")]
     cwd: Said,
-    status: Option<String>,
-    status_since: Option<u64>,
-    entrypoint: Option<String>,
+    #[serde(deserialize_with = "nonempty")]
+    status: Said,
+    status_since: u64,
+    /// When its process started, as `process::start` spells it, on Linux.
+    proc_start: Option<String>,
+    /// The mode pi runs in, in pi's word.
+    mode: Option<String>,
 }
 
 /// What a process says of itself, which does not change while it runs, and so
@@ -140,10 +149,14 @@ impl AgentFiles {
                 started: process::started(pid),
                 pane: Environment::of(pid).pane,
             });
+            let file = read(&path, &key.1, found.started);
             processes.insert(key.clone(), found.clone());
-            match read(&path, found.started) {
+            match file {
                 Ok(Some(file)) => agents.push(agent(key, file, found)),
-                Ok(None) => {},
+                Ok(None) => {
+                    let why = format!("{}: no process of its pid wrote it", path.display());
+                    self.troubles.say(why);
+                },
                 // A file gone since the folder was listed is gone.
                 Err(error) if error.kind() == ErrorKind::NotFound => {},
                 Err(error) => self.troubles.say(format!("{}: {error}", path.display())),
@@ -174,19 +187,20 @@ fn install(pi: &Path) -> io::Result<()> {
     })
 }
 
-/// What the file at `path` says, if it stands for the process that `started`
-/// then: one last written before that was left behind by another of its pid.
-/// Where the system does not say, no process can be ruled out.
-fn read(path: &Path, started: Option<SystemTime>) -> io::Result<Option<File>> {
-    if let Some(started) = started {
-        let written = fs::metadata(path)?.modified()?;
-        if written + DATED_LATE < started {
-            return Ok(None);
-        }
-    }
-    serde_json::from_slice(&file_text(path)?)
-        .map(Some)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+/// What the file at `path` says, if it stands for the process that runs by its
+/// pid, whose start the system spells `start` and dates `started`. A file names
+/// the start of the process that wrote it, or else, where the extension cannot
+/// tell it, one last written before that date was left behind by another of its
+/// pid. Where the system does not say, no process can be ruled out.
+fn read(path: &Path, start: &str, started: Option<SystemTime>) -> io::Result<Option<File>> {
+    let file: File = serde_json::from_slice(&file_text(path)?)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let stands = match (&file.proc_start, started) {
+        (Some(recorded), _) => recorded == start,
+        (None, Some(started)) => started <= fs::metadata(path)?.modified()? + DATED_LATE,
+        (None, None) => true,
+    };
+    Ok(stands.then_some(file))
 }
 
 /// The agent a file stands for, in the process that wrote it.
@@ -197,12 +211,20 @@ fn agent((pid, start): (u32, String), file: File, process: Process) -> Agent {
         harness: Harness::Pi,
         session_id: file.session_id,
         cwd: file.cwd,
-        status: Status::of(file.status.as_deref(), None),
-        status_since: file.status_since.map(moment),
+        status: Status::of(Some(file.status.as_str()), None),
+        status_since: Some(moment(file.status_since)),
         started_at: process.started,
         name: None,
-        entrypoint: file.entrypoint.and_then(|word| Said::new(word.trim().to_owned())),
+        entrypoint: file.mode.as_deref().and_then(entrypoint),
         pane: process.pane,
         review: None,
     }
+}
+
+/// How an agent was started, by the mode its pi runs in: `tui` is the agent a
+/// person talks to at a prompt, which goes by Claude Code's word for it, `cli`,
+/// the one lunetad's clients seat in a pane before any other.
+fn entrypoint(mode: &str) -> Option<Said> {
+    let mode = mode.trim();
+    Said::new(if mode == "tui" { "cli" } else { mode }.to_owned())
 }

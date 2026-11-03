@@ -22,7 +22,6 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lunetad::api::Harness;
 use lunetad::program::{self, Ran};
 use lunetad::transcripts::{Reading, SessionId, IDS_MAX};
 use lunetad::Destination;
@@ -253,10 +252,28 @@ pub struct Note {
     pub since: Option<SystemTime>,
     pub branch: Option<String>,
     pub cwd: String,
-    /// The harness it runs in: only Claude Code's transcripts can be read.
-    pub harness: Harness,
-    /// The id of its Claude Code session, which names its transcript.
-    pub transcript: Option<SessionId>,
+    pub transcript: Transcript,
+}
+
+/// What can be read of an agent's transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Transcript {
+    /// The id of its Claude Code session, which names it.
+    Named(SessionId),
+    /// It runs in Claude Code, which names none for it.
+    Unnamed,
+    /// It runs in another harness, whose transcripts luneta does not read.
+    NotRead,
+}
+
+impl Transcript {
+    /// The id that names it, if one does.
+    pub fn named(self) -> Option<SessionId> {
+        match self {
+            Transcript::Named(id) => Some(id),
+            Transcript::Unnamed | Transcript::NotRead => None,
+        }
+    }
 }
 
 /// A brief asked for: what it covers, and the agents it covers.
@@ -311,7 +328,7 @@ impl Brief {
                 Over::Agent(..) => "brief: no agent in this pane".to_owned(),
             });
         };
-        if notes.iter().all(|note| note.harness != Harness::ClaudeCode) {
+        if notes.iter().all(|note| note.transcript == Transcript::NotRead) {
             return Err(format!("brief: {ONLY_CLAUDE_CODE}"));
         }
         let title = match &over {
@@ -344,11 +361,13 @@ impl Brief {
         let mut machines: HashMap<&Machine, Vec<(usize, SessionId)>> = HashMap::new();
         for (at, note) in self.notes.iter().take(MAX_NOTES).enumerate() {
             match &note.transcript {
-                Some(id) => machines.entry(&note.on).or_default().push((at, id.clone())),
-                None if note.harness != Harness::ClaudeCode => {
+                Transcript::Named(id) => {
+                    machines.entry(&note.on).or_default().push((at, id.clone()));
+                },
+                Transcript::Unnamed => told.push((at, Told::NoId)),
+                Transcript::NotRead => {
                     told.push((at, Told::Unread(ONLY_CLAUDE_CODE.to_owned())));
                 },
-                None => told.push((at, Told::NoId)),
             }
         }
         let groups = machines.into_iter().map(|(machine, placed)| {
@@ -948,8 +967,9 @@ mod tests {
             since: Some(SystemTime::UNIX_EPOCH),
             branch: (pane == 4).then(|| "feat/fold".to_owned()),
             cwd: format!("/w/{session}"),
-            harness: Harness::ClaudeCode,
-            transcript: transcript.map(|id| SessionId::parse(id).expect("a UUID")),
+            transcript: transcript.map_or(Transcript::Unnamed, |id| {
+                Transcript::Named(SessionId::parse(id).expect("a UUID"))
+            }),
         }
     }
 
@@ -1123,8 +1143,7 @@ Its transcript is unknown: Claude Code names none for it.
             since: None,
             branch: None,
             cwd: "/w".to_owned(),
-            harness: Harness::ClaudeCode,
-            transcript: Some(SessionId::parse(id).expect("a UUID")),
+            transcript: Transcript::Named(SessionId::parse(id).expect("a UUID")),
         };
         let notes = ids.iter().enumerate().map(note).collect();
         let brief = Brief::new(every(&["a"]), notes).expect("a brief");
@@ -1163,8 +1182,7 @@ Its transcript is unknown: Claude Code names none for it.
             since: None,
             branch: None,
             cwd: "/w".to_owned(),
-            harness: Harness::ClaudeCode,
-            transcript: None,
+            transcript: Transcript::Unnamed,
         };
         let session = |pane: usize| if pane < MAX_NOTES { "a" } else { "b" };
         let many = (0..MAX_NOTES + 2).map(|pane| note(session(pane), pane, format!("agent {pane}")));
@@ -1299,7 +1317,7 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
     /// nor a session with none.
     #[test]
     fn a_brief_tells_of_an_agent_of_another_harness_without_its_transcript() {
-        let of = |pane: u32, name: &str, harness: Harness| Note {
+        let of = |pane: u32, name: &str, transcript: Transcript| Note {
             on: Machine::Local,
             session: named("a"),
             pane,
@@ -1308,10 +1326,9 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
             since: None,
             branch: None,
             cwd: "/w/a".to_owned(),
-            harness,
-            transcript: None,
+            transcript,
         };
-        let notes = vec![of(1, "fold", Harness::Pi), of(2, "tree", Harness::ClaudeCode)];
+        let notes = vec![of(1, "fold", Transcript::NotRead), of(2, "tree", Transcript::Unnamed)];
         let brief = Brief::new(every(&["a"]), notes).expect("a brief");
         let prompt = brief.prompt(&none_read, SystemTime::now).expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;

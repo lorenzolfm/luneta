@@ -28,3 +28,18 @@ pub mod unread;
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/luneta.v1.rs"));
 }
+
+impl v1::Agent {
+    /// The harness it runs in, as its daemon says: Claude Code, where it does
+    /// not say, as a daemon older than the word knows no other; and
+    /// `Unspecified` for a number only a newer daemon knows. prost's `harness()`
+    /// is not this: it takes a daemon that does not say for one that says what
+    /// it cannot read.
+    #[must_use]
+    pub fn runs_in(&self) -> v1::Harness {
+        match self.harness {
+            None => v1::Harness::ClaudeCode,
+            Some(said) => v1::Harness::try_from(said).unwrap_or(v1::Harness::Unspecified),
+        }
+    }
+}

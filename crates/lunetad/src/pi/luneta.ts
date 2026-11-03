@@ -6,7 +6,7 @@
 // whole as it changes, and gone as pi quits. lunetad tells one that a killed pi
 // left behind by the process its name names.
 
-import { existsSync, lstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Status = "busy" | "idle" | "waiting";
@@ -43,6 +43,22 @@ function fileOfThisProcess(): string | undefined {
   return join(folder, "pi", `${process.pid}.json`);
 }
 
+/**
+ * When this process started, as lunetad reads it on Linux: field 22 of its
+ * `stat`, counted from the `)` that ends its name. Elsewhere this fails, and
+ * lunetad goes by when the file was written.
+ */
+function procStart(): string | undefined {
+  const stat = readFileSync("/proc/self/stat", "utf8");
+  return stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+}
+
+/** What this process's file says it is doing, if there is one. */
+function statusInFile(): Status | undefined {
+  const file = fileOfThisProcess();
+  return file ? (JSON.parse(readFileSync(file, "utf8")) as { status: Status }).status : undefined;
+}
+
 /** Does `work`, and leaves pi be if it fails: no row is all that comes of it. */
 function quietly<T>(work: () => T): T | undefined {
   try {
@@ -53,13 +69,14 @@ function quietly<T>(work: () => T): T | undefined {
 }
 
 export default function (pi: Pi): void {
+  const started = quietly(procStart);
+  /** What this process's file says, as the last write that worked left it. */
   let status: Status | undefined;
   let shutDown = false;
 
-  /** Says the agent came to `now`, unless that is what it is doing. */
+  /** Says the agent came to `now`, unless that is what its file says. */
   function say(now: Status, ctx: Context): void {
     if (now === status || shutDown) return;
-    status = now;
     quietly(() => {
       const file = fileOfThisProcess();
       if (!file) return;
@@ -68,24 +85,20 @@ export default function (pi: Pi): void {
         cwd: ctx.cwd,
         status: now,
         statusSince: Date.now(),
-        // `cli` is the agent a person talks to at a prompt, as Claude Code says
-        // it, and the one lunetad's clients seat in a pane before any other.
-        entrypoint: ctx.mode === "tui" ? "cli" : ctx.mode,
+        mode: ctx.mode,
+        procStart: started,
       };
       writeFileSync(`${file}.new`, JSON.stringify(said));
       renameSync(`${file}.new`, file);
+      status = now;
     });
   }
 
   pi.on("session_start", (event, ctx) => {
     // A reload is no turn: what the file says stands, and since when. One with
     // no file yet writes it, as how a pi that runs first takes this extension.
-    const said = quietly(() => {
-      const file = fileOfThisProcess();
-      return file !== undefined && existsSync(file);
-    });
-    if (event.reason === "reload" && said) return;
-    say("idle", ctx);
+    status = event.reason === "reload" ? quietly(statusInFile) : undefined;
+    if (status === undefined) say("idle", ctx);
   });
 
   // `agent_end` is no idle: a retry or a queued message can follow it.

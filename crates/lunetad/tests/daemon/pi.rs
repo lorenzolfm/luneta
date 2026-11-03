@@ -3,9 +3,10 @@
 //! extension as the daemon put it, as pi would, so that what it writes is what
 //! the daemon reads.
 
-use std::fs::{self, FileTimes};
+use std::fs::{self, FileTimes, Permissions};
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, SystemTime};
 
@@ -112,6 +113,25 @@ fn file_of(host: &Host, pid: u32) -> PathBuf {
     host.runtime().join(format!("luneta/pi/{pid}.json"))
 }
 
+/// What a file of the extension holds, as one that cannot tell its process's
+/// start writes it.
+fn says(id: &str) -> Value {
+    json!({ "sessionId": id, "cwd": "/w", "status": "idle", "statusSince": 1_000 })
+}
+
+/// Dates the file at `path` an hour back.
+fn backdate(path: &Path) {
+    let long_ago = SystemTime::now() - Duration::from_hours(1);
+    let times = FileTimes::new().set_modified(long_ago);
+    fs::File::options().write(true).open(path).unwrap().set_times(times).unwrap();
+}
+
+/// What the file at `path` says the agent is doing.
+fn status_in(path: &Path) -> String {
+    let said: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    said["status"].as_str().unwrap().to_owned()
+}
+
 /// The daemon puts the extension where pi finds it once pi has run on the
 /// machine, as it can have long after the daemon started, and nothing before
 /// that: a machine with no pi gets no folder of pi's. What is there under its
@@ -145,7 +165,7 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     let before = SystemTime::now();
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     let idle = as_status(&host, pid, Status::Idle);
-    assert_eq!(idle.harness(), Harness::Pi);
+    assert_eq!(idle.runs_in(), Harness::Pi);
     assert_eq!((idle.session_id.as_str(), idle.cwd.as_str()), ("first", "/home/you/work"));
     assert_eq!(idle.entrypoint.as_deref(), Some("cli"));
     let zellij = idle.zellij.clone().unwrap();
@@ -232,44 +252,120 @@ fn a_pi_at_no_prompt_says_how_it_runs() {
     assert_eq!(agent.entrypoint.as_deref(), Some("print"));
 }
 
-/// A file stands for an agent only while a process with its pid runs that
-/// started before the file was written: a killed pi leaves it behind, and its
-/// pid comes back as another process's. A file that does not read says nothing,
-/// nor counts among Claude Code's that do not, and only a file named for a pid
-/// stands for one.
+/// A file stands for an agent only while the process that runs by its pid wrote
+/// it. A killed pi leaves its file behind, and its pid comes back as another
+/// process's, which started after the file was written. A pi in a container
+/// that shares the folder names a start that is no process's here. A file that
+/// does not read says nothing, nor counts among Claude Code's that do not, and
+/// only a file named for a pid stands for one.
 #[test]
 fn a_file_stands_only_for_the_process_that_wrote_it() {
     let host = Host::new();
     let _daemon = start(host.vars()).unwrap();
     let folder = host.runtime().join("luneta/pi");
     let file = |pid: u32| folder.join(format!("{pid}.json"));
-    let says = |id: &str| json!({ "sessionId": id, "cwd": "/w", "status": "idle" }).to_string();
 
     let killed = process(None);
     let killed_pid = killed.pid();
     drop(killed);
-    fs::write(file(killed_pid), says("killed")).unwrap();
+    fs::write(file(killed_pid), says("killed").to_string()).unwrap();
 
     let reused = process(None);
-    fs::write(file(reused.pid()), says("reused")).unwrap();
-    let long_ago = SystemTime::now() - Duration::from_hours(1);
-    let times = FileTimes::new().set_modified(long_ago);
-    fs::File::options().write(true).open(file(reused.pid())).unwrap().set_times(times).unwrap();
+    fs::write(file(reused.pid()), says("reused").to_string()).unwrap();
+    backdate(&file(reused.pid()));
 
-    let torn = process(None);
-    fs::write(file(torn.pid()), r#"{"cwd":"/w"}"#).unwrap();
+    let contained = process(None);
+    let mut of_another = says("contained");
+    of_another["procStart"] = json!("1");
+    fs::write(file(contained.pid()), of_another.to_string()).unwrap();
+
+    // No session, no status and no date, which the extension always writes.
+    let unread = [
+        json!({ "cwd": "/w", "status": "idle", "statusSince": 1_000 }),
+        json!({ "sessionId": "no status", "cwd": "/w", "statusSince": 1_000 }),
+        json!({ "sessionId": "no date", "cwd": "/w", "status": "idle" }),
+    ];
+    let _unread: Vec<Running> = unread
+        .iter()
+        .map(|said| {
+            let running = process(None);
+            fs::write(file(running.pid()), said.to_string()).unwrap();
+            running
+        })
+        .collect();
 
     let copied = process(None);
-    fs::write(folder.join(format!("{}-copy.json", copied.pid())), says("copied")).unwrap();
+    let copy = folder.join(format!("{}-copy.json", copied.pid()));
+    fs::write(copy, says("copied").to_string()).unwrap();
 
     // The last written, so that the read that finds it has found the rest.
     let running = process(None);
-    fs::write(file(running.pid()), says("running")).unwrap();
+    fs::write(file(running.pid()), says("running").to_string()).unwrap();
     let found = eventually("the agent is listed", || {
         let list = host.list();
-        (!list.agents.is_empty()).then_some(list)
+        list.agents.iter().any(|agent| agent.session_id == "running").then_some(list)
     });
     let ids: Vec<&str> = found.agents.iter().map(|agent| agent.session_id.as_str()).collect();
     assert_eq!(ids, ["running"]);
     assert_eq!(found.unread, 0);
+}
+
+/// A clock set forward makes a process look newer than what it wrote, and its
+/// file look left behind. On Linux the extension names its process's start,
+/// which no clock moves, and the agent stays listed. On macOS it does not, and
+/// there the date of a process is one that no clock moves either.
+#[test]
+fn a_file_that_names_its_process_s_start_stands_however_old_it_looks() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    backdate(&file_of(&host, pid));
+
+    // The last written, so that the read that finds it has found the rest.
+    let running = process(None);
+    fs::write(file_of(&host, running.pid()), says("running").to_string()).unwrap();
+    let agents = eventually("the other agent is listed", || {
+        let agents = host.agents();
+        agents.iter().any(|agent| agent.session_id == "running").then_some(agents)
+    });
+    assert_eq!(agents.iter().any(|agent| agent.pid == pid), cfg!(target_os = "linux"));
+}
+
+/// A status that could not be written is written when it next comes, as a retry
+/// brings `agent_start` again: the file is not taken to say it meanwhile.
+#[test]
+fn a_status_that_could_not_be_written_is_written_when_it_next_comes() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    let file = file_of(&host, pi.process.pid());
+    let folder = file.parent().unwrap();
+
+    fs::set_permissions(folder, Permissions::from_mode(0o500)).unwrap();
+    pi.event("agent_start");
+    fs::set_permissions(folder, Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(status_in(&file), "idle");
+
+    pi.event("agent_start");
+    assert_eq!(status_in(&file), "busy");
+}
+
+/// A reload in a turn, as an extension's command in RPC mode can ask for, goes
+/// on with the turn, by what the file says: a prompt in the rest of it counts.
+#[test]
+fn a_turn_goes_on_through_a_reload() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "rpc");
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    pi.event("agent_start");
+
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    let file = file_of(&host, pi.process.pid());
+    assert_eq!(status_in(&file), "busy");
+
+    pi.event("ui_prompt_start");
+    assert_eq!(status_in(&file), "waiting");
 }

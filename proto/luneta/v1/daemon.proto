@@ -1108,10 +1108,11 @@ message Agent {
   google.protobuf.Timestamp started_at = 6;
   // The name its harness gives the session, if any.
   Name name = 7;
-  // How its harness says it was started, verbatim: `cli` for the agent a person
-  // talks to at a prompt, in either harness; `sdk-cli` for a `claude -p`, and a
-  // word of its own for each of the many other ways, which Claude Code adds to;
-  // `print`, `json` or `rpc` for pi's other modes. Absent when it does not say.
+  // How it was started: `cli` for the agent a person talks to at a prompt,
+  // whichever its harness. Or else in its harness's word, verbatim: `sdk-cli`
+  // for a `claude -p`, and a word of its own for each of the many other ways,
+  // which Claude Code adds to; `print`, `json` or `rpc` for pi's other modes.
+  // Absent when it does not say.
   optional string entrypoint = 8;
   // Where it runs in zellij, absent when it runs outside zellij.
   Zellij zellij = 9;
@@ -1125,7 +1126,8 @@ message Agent {
     string other_waiting_for = 12;
   }
   // The harness it runs in. Absent from a daemon older than this field, whose
-  // agents are all Claude Code's.
+  // agents are all Claude Code's: so absent is not `HARNESS_UNSPECIFIED`, as an
+  // enum's default would take it.
   optional Harness harness = 13;
   // The review of a pull request it runs, a skill at a time. Absent where it
   // runs none, or the last skill of one is done, or the daemon started after
