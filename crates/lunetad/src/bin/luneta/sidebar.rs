@@ -675,6 +675,11 @@ enum Heads {
     },
 }
 
+/// The sessions of another machine's that luneta's zellij may go on in,
+/// newest first, one at least, as `Sidebar::refuges_away` lists them; or
+/// why it goes on in none of them.
+pub type Refuges = Result<Vec<SessionName>, String>;
+
 /// Why a machine's header lists none of its sessions: lunetad has none of
 /// them to say.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1466,22 +1471,38 @@ impl Sidebar {
         seats.into_iter().filter_map(|seat| SessionName::running(seat).ok()).collect()
     }
 
-    /// The sessions of the other machines lunetad reaches, but `left`, where
-    /// luneta's zellij goes on once the machine it was on has none left:
-    /// each machine's newest first, as the picker lists them, the machines
-    /// as their headers are, and none with no session.
-    pub fn refuges_away(&self, left: Option<&Destination>) -> Vec<(Destination, Vec<SessionName>)> {
+    /// The sessions of the other machines but those `tried`, where luneta's
+    /// zellij goes on once the machine it was on has none left: each
+    /// machine's newest first, as the picker lists them, the machines as
+    /// their headers are. Or why it goes on in none of one's, as where
+    /// lunetad does not reach it, or listed none of its sessions when it
+    /// last said.
+    pub fn refuges_away(&self, tried: &[Destination]) -> Vec<(Destination, Refuges)> {
         let Some(host) = &self.host else {
             return Vec::new();
         };
         let others = machines(host).others.into_iter();
-        let others = others.filter(|(destination, _)| Some(destination) != left);
-        let reached = others.filter_map(|(destination, seen)| Some((destination, seen.ok()?)));
-        let refuges = reached.map(|(destination, seen)| {
-            let (sessions, _) = oldest_first(seen.sessions);
-            (destination, sessions.into_iter().rev().map(|(listed, _)| listed.name).collect())
+        let others = others.filter(|(destination, _)| !tried.contains(destination));
+        let refuges = others.map(|(destination, seen)| {
+            let refuges = match seen {
+                Ok(seen) => {
+                    let (sessions, _) = oldest_first(seen.sessions);
+                    let newest: Vec<_> =
+                        sessions.into_iter().rev().map(|(listed, _)| listed.name).collect();
+                    if newest.is_empty() {
+                        Err("lunetad lists none of its sessions".to_owned())
+                    } else {
+                        Ok(newest)
+                    }
+                },
+                Err(Away::Reaching) => Err("lunetad is reaching it".to_owned()),
+                Err(Away::Unreached { word, .. }) => {
+                    Err(format!("lunetad does not reach it: {word}"))
+                },
+            };
+            (destination, refuges)
         });
-        refuges.filter(|(_, sessions): &(_, Vec<_>)| !sessions.is_empty()).collect()
+        refuges.collect()
     }
 
     /// The pane luneta's zellij is on, in the one session of the name it is
@@ -7576,8 +7597,9 @@ mod tests {
     }
 
     /// Where the machine luneta's zellij is on has no session left, it goes
-    /// on in another's: of those lunetad reaches, as their headers are, but
-    /// the one it left, those with a session, each machine's newest first.
+    /// on in another's: as their headers are, but those it tried, each
+    /// machine's newest first. One lunetad does not reach, or is reaching,
+    /// or that has no session, says why it is passed over.
     #[test]
     fn with_no_session_left_zellij_goes_on_in_another_machine_s_newest() {
         let mut sidebar = fresh();
@@ -7586,11 +7608,18 @@ mod tests {
         host.remotes[0] = remote("nixos", up(vec![main, work], Vec::new()));
         host.remotes.insert(0, remote("empty", up(Vec::new(), Vec::new())));
         host.remotes[3] = remote("pi", up(vec![session("pi", 10, Vec::new())], Vec::new()));
+        host.remotes.push(remote("far", Reached::Reaching(remote::Reaching {})));
         sidebar.heard(host);
-        let pi = || ("pi".parse().unwrap(), vec![session_name("pi")]);
-        let newest = (nixos(), vec![session_name("work"), session_name("main")]);
-        assert_eq!(sidebar.refuges_away(None), [newest, pi()]);
-        assert_eq!(sidebar.refuges_away(Some(&nixos())), [pi()]);
+        let none = |why: &str| Err::<Vec<SessionName>, _>(why.to_owned());
+        let empty = || ("empty".parse().unwrap(), none("lunetad lists none of its sessions"));
+        let vps = ("me@vps".parse().unwrap(), none("lunetad does not reach it: unreachable"));
+        let pi = ("pi".parse().unwrap(), Ok(vec![session_name("pi")]));
+        let far = ("far".parse().unwrap(), none("lunetad is reaching it"));
+        let newest = (nixos(), Ok(vec![session_name("work"), session_name("main")]));
+        let all = [empty(), newest, vps.clone(), pi.clone(), far.clone()];
+        assert_eq!(sidebar.refuges_away(&[]), all);
+        let tried = [nixos(), empty().0];
+        assert_eq!(sidebar.refuges_away(&tried), [vps, pi, far]);
     }
 
     /// A delete on another machine's row that waits on your yes deletes
