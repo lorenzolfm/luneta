@@ -56,15 +56,16 @@ use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
-    self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
-    DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest, DumpScreenResponse, GoRequest,
-    GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
-    KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
-    ListContentsRequest, ListContentsResponse, ListDirsRequest, ListDirsResponse,
-    ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
-    NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, PasteRequest,
-    PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, RenameSessionResponse,
-    StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
+    ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
+    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest,
+    KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse,
+    ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
+    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
+    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
+    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
+    RenameSessionResponse, StartRequest, StartResponse, TranscriptEndsRequest,
+    TranscriptEndsResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -582,6 +583,23 @@ impl Daemon for Host {
         let (name, since) = named.map_err(Status::failed_precondition)?;
         let named_at = Some(since.into());
         Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at }))
+    }
+
+    async fn check_name(
+        &self,
+        request: Request<CheckNameRequest>,
+    ) -> Result<Response<CheckNameResponse>, Status> {
+        let CheckNameRequest { on, name } = request.into_inner();
+        let name = SessionName::parse(&name)
+            .map_err(|why| Status::invalid_argument(format!("name: {why}")))?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let name = name.to_string();
+            return daemon.check_name(CheckNameRequest { on: None, name }).await;
+        }
+        let checked = task::spawn_blocking(move || names::unused(&name)).await;
+        let checked = checked.map_err(|error| unfinished(&error))?;
+        let since = checked.map_err(Status::failed_precondition)?;
+        Ok(Response::new(CheckNameResponse { named_at: Some(since.into()) }))
     }
 
     async fn list_dirs(

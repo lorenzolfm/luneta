@@ -1387,9 +1387,10 @@ impl App {
         };
         if let Some(list) = list {
             self.pickers += 1;
-            // `DIRS` on a machine's header aims at its directories.
+            // `SESSIONS` or `DIRS` on a machine's header aims at its sessions,
+            // or its directories.
             let aim = match (list, self.focus.side) {
-                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
+                (List::Sessions | List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
                 _ => None,
             };
             let aim = aim.unwrap_or_default();
@@ -1761,10 +1762,15 @@ impl App {
                 self.go(&on, &place, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Start(session) => {
-                // From another machine, a client that makes it here refuses
-                // a name zellij keeps, which `makes` says first.
-                self.make(zellij::makes(session), None, None);
+            Picked::Start { on, session } => {
+                // From another machine, a client that makes it refuses a name
+                // zellij keeps, which `makes` says first, as the daemon of
+                // the machine it makes it on says there.
+                let unused = match &on {
+                    Machine::Local => zellij::makes(session),
+                    Machine::Remote(destination) => zellij::makes_there(destination, session),
+                };
+                self.make(unused, None, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::BringBack { on, session } => {

@@ -14,16 +14,16 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, AskRequest, AskResponse, CloseRequest, CloseResponse, ClosesRequest, ClosesResponse,
-    DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest, DumpScreenResponse, GoRequest,
-    GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest,
-    KillResponse, ListAgentsRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse,
-    ListContentsRequest, ListContentsResponse, ListDirsRequest, ListDirsResponse,
-    ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
-    NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, PasteRequest,
-    PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, RenameSessionResponse,
-    StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse, Version,
-    WatchRequest,
+    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
+    ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
+    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest,
+    KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse,
+    ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
+    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
+    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
+    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
+    RenameSessionResponse, StartRequest, StartResponse, TranscriptEndsRequest,
+    TranscriptEndsResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -587,6 +587,13 @@ impl Daemon for StandIn {
         _: Request<NameSessionRequest>,
     ) -> Result<Response<NameSessionResponse>, Status> {
         Err(Status::unimplemented("a stand-in names nothing"))
+    }
+
+    async fn check_name(
+        &self,
+        _: Request<CheckNameRequest>,
+    ) -> Result<Response<CheckNameResponse>, Status> {
+        Err(Status::unimplemented("a stand-in checks nothing"))
     }
 
     async fn list_dirs(

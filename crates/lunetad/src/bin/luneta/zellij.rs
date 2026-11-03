@@ -23,7 +23,6 @@ pub use lunetad::ended::{exited, Exited};
 pub use lunetad::renames::renamed;
 use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
-use lunetad::names::kept;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::{clients, moves, Destination};
@@ -904,15 +903,18 @@ fn runs(session: &str) -> Option<bool> {
 /// directory it was to make it in unused. zellij makes a session only by
 /// `switch-session`, which does either, so luneta asks just before.
 pub fn makes(to: SessionName) -> Result<Unused, String> {
-    let cannot = || format!("no session made: luneta cannot tell whether one is called {to}");
-    let since = SystemTime::now();
-    if runs(to.as_str()).ok_or_else(cannot)? {
-        return Err(format!("no session made: {to} runs already"));
-    }
-    if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
-        return Err(format!("no session made: zellij keeps {to}, which ended, to bring back"));
-    }
+    let since = lunetad::names::unused(&to).map_err(|why| format!("no session made: {why}"))?;
     Ok(Unused { on: Machine::Local, name: to, since: Some(since) })
+}
+
+/// `to`, as a name zellij on `destination` would make a session of now, as
+/// `makes` says of this machine's, as its daemon there says within
+/// `away::QUICK`, as luneta's screen waits on it; or why zellij there would
+/// make none.
+pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused, String> {
+    let checked = Away::reach(destination, away::QUICK).and_then(|mut away| away.check(&to));
+    let since = checked.map_err(|why| format!("no session made: {why}"))?;
+    Ok(Unused { on: Machine::Remote(destination.clone()), name: to, since })
 }
 
 /// `to`, as a name zellij on `destination` would make a session of now, for

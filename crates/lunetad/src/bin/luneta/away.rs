@@ -12,10 +12,10 @@ use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    closes_response, AskResponse, Client, ClosesRequest, DeleteExitedRequest, DumpScreenRequest,
-    GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest, ListContentsRequest,
-    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
-    NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
+    closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
+    DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
+    ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
+    ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
     RenameSessionRequest, StartRequest,
 };
 use lunetad::asks::{self, Asked, Step};
@@ -108,6 +108,15 @@ impl Away {
         let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
         let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
         named_by(&self.on, named)
+    }
+
+    /// The time just before zellij there read which names it has, by that
+    /// machine's clock, where it would make a session called `to` now, as
+    /// `lunetad::names::unused` says there; or why it would make none.
+    pub fn check(&mut self, to: &SessionName) -> Result<Option<SystemTime>, String> {
+        let request = CheckNameRequest { on: Some(self.on()), name: to.to_string() };
+        let checked = self.ask(|mut daemon| async move { daemon.check_name(request).await })?;
+        Ok(checked.named_at.and_then(|at| SystemTime::try_from(at).ok()))
     }
 
     /// The directories zoxide knows there, best first, each with the name a
