@@ -46,7 +46,7 @@ use crate::api::paste_request::Worked as AskedWorked;
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::program::{self, Ran};
-use crate::{git, names, zoxide, SessionName};
+use crate::{git, github, names, zoxide, SessionName};
 
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
@@ -852,6 +852,14 @@ fn worktree(dir: &str, link: &Link) -> Result<String, String> {
             MAKING.as_secs() / 60
         )),
     }
+}
+
+/// The pull request of the branch checked out in `dir`, as gh says now, where
+/// it says one, for what cannot wait for the daemon's gh, which rests from a
+/// branch for a while. It asks GitHub, across the network.
+#[must_use]
+pub fn pull_request_in(dir: &str) -> Option<Link> {
+    Link::parse(&github::pull_request_in(dir).ok()??.url?)
 }
 
 /// The `luneta` that makes the worktree: the one this runs as, or else the

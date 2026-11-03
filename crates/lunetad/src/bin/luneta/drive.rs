@@ -39,7 +39,7 @@ use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{Turn, User};
 use lunetad::cli::quiet;
-use lunetad::links::{At, Link, Pasted, Ready};
+use lunetad::links::{self, At, Link, Pasted, Ready};
 use lunetad::{clients, reviews};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
@@ -420,10 +420,13 @@ fn reviewing(link: &Link, folder: &Path) -> Result<String, String> {
     let host = commands::current_host(folder)?;
     let running = zellij::running()?;
     let here = seat(Some(&host.agents), &running).ok().and_then(|seat| seat.pane().ok().flatten());
-    let here = here.as_ref().map(|pane| pane.session.as_str());
+    let session = here.as_ref().map(|pane| pane.session.as_str());
     let (sessions, _) = sidebar::oldest_first(&host.sessions);
-    let worked =
-        sidebar::worked_in(sessions, &host.agents, &host.sessions, &host.pull_requests, here);
+    let mut worked =
+        sidebar::worked_in(sessions, &host.agents, &host.sessions, &host.pull_requests, session);
+    if let Some(here) = &here {
+        asks_gh_here(&mut worked, link, here);
+    }
     let apart = |Worked { session, pane, works }| ((session, pane), works);
     let (panes, worked): (Vec<(Listed, u32)>, Vec<_>) = worked.into_iter().map(apart).unzip();
     let ready = Pasted::new(link.clone(), worked).ready()?;
@@ -457,6 +460,24 @@ fn reviewing(link: &Link, folder: &Path) -> Result<String, String> {
     };
     let opened = zellij::opening(&open)?.terminal;
     Ok(Pane { session, pane: opened }.to_string())
+}
+
+/// Has gh say the pull request of the pane this runs in, `here`, among `worked`,
+/// where no pane has `link`'s: this runs right after `gh pr create`, and
+/// lunetad's gh rests from a branch for a minute. Only a pane that has it goes
+/// by it in a clone git made, in whose `.git` wt would make a worktree. Where gh
+/// does not say, `Pasted::ready` finds what it can without.
+fn asks_gh_here(worked: &mut [Worked], link: &Link, here: &Pane) {
+    let has_it = |it: &Worked| it.works.pull.as_ref().is_some_and(|pull| pull.is(link));
+    if worked.iter().any(has_it) {
+        return;
+    }
+    let is_here = |it: &&mut Worked| {
+        it.pane == here.pane && it.session.name().as_str() == here.session
+    };
+    if let Some(it) = worked.iter_mut().find(is_here) {
+        it.works.pull = links::pull_request_in(&it.works.dir);
+    }
 }
 
 /// What a close exits with where it closes nothing, as it was not told yes to

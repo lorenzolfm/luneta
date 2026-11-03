@@ -254,9 +254,11 @@ fn asked(host: &Host, vars: &[(&str, &str)], args: &[&str]) -> Output {
 }
 
 /// `luneta review` opens an agent on the first skill of a review, beside the
-/// pane that has the pull request's branch checked out, with nobody moved, and
-/// says which it is; the agent carries the review for lunetad to find. It
-/// takes a pull request's page alone.
+/// pane it runs in, which has the pull request's branch checked out, with
+/// nobody moved, and says which it is; the agent carries the review for
+/// lunetad to find. It goes right after `gh pr create`, which lunetad's gh rests
+/// from hearing of for a minute, and in a clone git made, which wt would make
+/// no worktree in. It takes a pull request's page alone.
 #[test]
 fn a_review_opens_an_agent_beside_the_pane_on_the_pull_request_s_branch() {
     const LINK: &str = "https://github.com/o/app/pull/7";
@@ -268,14 +270,15 @@ fn a_review_opens_an_agent_beside_the_pane_on_the_pull_request_s_branch() {
     fs::create_dir(&tree).unwrap();
     git(&tree, &["init", "-q", "-b", "feat"]);
     git(&tree, &["commit", "-q", "--allow-empty", "-m", "one"]);
-    host.gh.open("feat", &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": LINK }));
+    git(&tree, &["remote", "add", "origin", "https://github.com/o/app.git"]);
     let spelled = tree.display().to_string();
     host.zellij.list("work", &json!([listed(2, "claude", (0, "Tab #1"), Some(&spelled))]));
     let _work = host.serve("work");
     let _daemon = host::start(host.vars()).unwrap();
-    host::eventually("gh finds the pull request", || {
-        (!host.host().pull_requests.is_empty()).then_some(())
+    host::eventually("lunetad's gh has asked of the branch", || {
+        (!host.gh.asked().is_empty()).then_some(())
     });
+    host.gh.open("feat", &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": LINK }));
 
     let review = |link: &str| {
         let mut command = host.vars().command(host::LUNETA);
