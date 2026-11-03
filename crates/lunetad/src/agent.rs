@@ -1,15 +1,27 @@
-//! What the daemon knows of an agent, whichever adapter found it. Claude Code's
-//! is the only one so far.
+//! What the daemon knows of an agent, whichever adapter found it: Claude Code's,
+//! or pi's. And what those adapters' files have in common: each agent has one,
+//! named for its pid, that says little.
 
-use std::time::SystemTime;
+use std::fs;
+use std::io::{self, ErrorKind, Read as _};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use luneta_protocol::said::Said;
+use serde::Deserialize as _;
 
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
 use crate::links::Link;
+use crate::process;
+use crate::reviews;
 use crate::zellij::Sessions;
+
+/// The most an agent's file holds that an adapter reads. Each holds a few hundred
+/// bytes: a file past this is no agent's.
+const FILE_BYTES_MAX: u64 = 64 * 1024;
 
 /// An agent that runs on the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +30,8 @@ pub struct Agent {
     /// When its process started, as the system says it: the system can give
     /// its pid to another once it has ended.
     pub start: String,
+    /// The harness it runs in, whose adapter found it.
+    pub harness: Harness,
     /// The agent's own id for its session.
     pub session_id: Said,
     /// Where it works.
@@ -35,6 +49,22 @@ pub struct Agent {
     pub review: Option<Link>,
 }
 
+/// A harness an agent can run in, as the adapter for it knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Harness {
+    ClaudeCode,
+    Pi,
+}
+
+impl Harness {
+    fn to_api(self) -> api::Harness {
+        match self {
+            Harness::ClaudeCode => api::Harness::ClaudeCode,
+            Harness::Pi => api::Harness::Pi,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Busy,
@@ -49,8 +79,8 @@ pub enum Status {
 }
 
 impl Status {
-    /// Claude Code's word for it, and for what it waits for, where it waits,
-    /// in any case.
+    /// Claude Code's word for it, which luneta's extension for pi speaks too,
+    /// and for what it waits for, where it waits, in any case.
     #[must_use]
     pub fn of(word: Option<&str>, waiting_for: Option<&str>) -> Self {
         let Some(word) = said(word) else {
@@ -169,6 +199,81 @@ pub struct Named {
     pub pane: u32,
 }
 
+/// What the environment of a process says of it.
+#[derive(Clone, Debug, Default)]
+pub struct Environment {
+    /// The pane it names, if it names one.
+    pub pane: Option<Named>,
+    /// The pull request of the review it says the agent runs, if any.
+    pub review: Option<Link>,
+}
+
+impl Environment {
+    /// What the environment of `pid` says.
+    #[must_use]
+    pub fn of(pid: u32) -> Self {
+        let Some(entries) = process::environ(pid) else {
+            return Environment::default();
+        };
+        let (mut session, mut pane, mut review) = (None, None, None);
+        let review_var = format!("{}=", reviews::VAR);
+        for entry in entries {
+            let entry = entry.as_bytes();
+            if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
+                session = Some(String::from_utf8_lossy(name).into_owned());
+            } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
+                pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
+            } else if let Some(link) = entry.strip_prefix(review_var.as_bytes()) {
+                review = std::str::from_utf8(link).ok().and_then(reviews::pull_request);
+            }
+        }
+        let session = session.filter(|session| !session.is_empty());
+        let pane = session.zip(pane).map(|(session, pane)| Named { session, pane });
+        Environment { pane, review }
+    }
+}
+
+/// The pid an agent's file is named for: `<pid>.json`, spelled as a harness
+/// spells a pid, which is how it reads one back. Any other file in the folder,
+/// a copy of one too, names no agent.
+pub fn named_pid(path: &Path) -> Option<u32> {
+    if path.extension()? != "json" {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let pid = stem.parse::<u32>().ok()?;
+    if pid.to_string() != stem {
+        return None;
+    }
+    // No agent runs as the kernel's pid 0 or as init's 1.
+    (pid > 1).then_some(pid)
+}
+
+/// What a file holds, if it holds no more than an agent's file does.
+pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
+    let mut text = Vec::new();
+    fs::File::open(path)?.take(FILE_BYTES_MAX + 1).read_to_end(&mut text)?;
+    let bytes = u64::try_from(text.len()).expect("a length under a u64 limit fits a u64");
+    if bytes <= FILE_BYTES_MAX {
+        Ok(text)
+    } else {
+        let why = format!("it holds more than {FILE_BYTES_MAX} bytes");
+        Err(io::Error::new(ErrorKind::FileTooLarge, why))
+    }
+}
+
+/// Text an agent's file holds where it must hold some, as `Said`: an empty
+/// string is none.
+pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
+    Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
+}
+
+/// A time as an agent's file has it, in milliseconds since the epoch.
+#[must_use]
+pub fn moment(millis: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(millis)
+}
+
 impl Agent {
     /// The agent as the API gives it, in the session `sessions` say its pane
     /// is in now.
@@ -202,6 +307,7 @@ impl Agent {
         };
         api::Agent {
             pid: self.pid,
+            harness: Some(self.harness.to_api().into()),
             session_id: self.session_id.clone().into(),
             cwd: self.cwd.clone().into(),
             status,

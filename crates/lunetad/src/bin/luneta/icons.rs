@@ -1,7 +1,7 @@
 //! The icon on a pane's row in the sidebar, for the program that runs in the
-//! pane: Claude's for an agent, a terminal for a shell, neovim's for nvim.
+//! pane: its harness's for an agent, a terminal for a shell, neovim's for nvim.
 //!
-//! The program is the agent in the pane, or else what the daemon says the
+//! The program is the agent's harness, or else what the daemon says the
 //! pane's terminal runs in the foreground: the process group in front, or the
 //! shell itself at its prompt. The icons are Nerd Fonts', which only a Nerd
 //! Font draws, with the terminal for each shell a row is named as one for:
@@ -10,8 +10,7 @@
 use std::iter::Peekable;
 use std::str::SplitWhitespace;
 
-/// The program an agent runs, by its binary's name.
-pub const AGENT: &str = "claude";
+use lunetad::api::Harness;
 
 /// How many columns an icon takes: one, as each of these does in a font whose
 /// name ends in "Mono". Each pane's row keeps that many for one, whether its
@@ -38,8 +37,9 @@ const GIT: &str = "\u{e702}";
 /// as Nerd Fonts 3.5 numbers them. Claude's came with Nerd Fonts 3.5.0, and
 /// ssh's with 3.3.0: an older font has neither, and the terminal draws a box
 /// or nothing for them.
-const ICONS: [(&str, &str); 11] = [
-    (AGENT, "\u{ec82}"), // `cod-claude`
+const ICONS: [(&str, &str); 12] = [
+    ("claude", "\u{ec82}"), // `cod-claude`
+    ("pi", "\u{f03ff}"),    // `md-pi`
     ("nvim", NEOVIM),
     ("vim", NEOVIM),
     ("cargo", "\u{e7a8}"), // `dev-rust`
@@ -51,6 +51,16 @@ const ICONS: [(&str, &str); 11] = [
     ("lazygit", GIT),
     ("htop", "\u{eb31}"), // `cod-pulse`
 ];
+
+/// The program an agent runs in `harness`, by its binary's name, if luneta
+/// knows of that harness.
+pub fn agent(harness: Harness) -> Option<&'static str> {
+    match harness {
+        Harness::ClaudeCode => Some("claude"),
+        Harness::Pi => Some("pi"),
+        Harness::Unspecified => None,
+    }
+}
 
 /// The icon of `program`, by its binary's name, if it has one.
 pub fn of(program: &str) -> Option<&'static str> {

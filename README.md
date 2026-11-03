@@ -106,7 +106,22 @@ Agent support, today:
 | agent | status |
 |---|---|
 | [Claude Code](https://claude.com/claude-code) | supported, through the file it keeps for each agent in `~/.claude/sessions` |
+| [pi](https://github.com/earendil-works/pi), 0.84.4 or later | its agents on their rows, through an extension of luneta's |
 | anything else | not yet |
+
+pi keeps no file for each agent, so lunetad puts an extension where pi finds it,
+`extensions/luneta.ts` in `~/.pi/agent`, or in `PI_CODING_AGENT_DIR`, on any
+machine where pi has run, and writes it over an older luneta's as it starts. A
+pi that already runs takes it with `/reload`. The extension keeps a file for the
+agent in luneta's folder, as the shell hook does, and what goes by an agent and
+its status goes by that: its row and mark, the picker, the dots, `d d`, `luneta
+go`, the notifications, and all of it on [another machine](#other-machines).
+
+The rest is Claude Code's so far. A pi agent's row goes by its tab or its
+directory, as pi has no topic that luneta reads; its notification does not say
+its last words, or what it waits for; and `b` on nothing but pi's agents leaves
+a note, as luneta reads only Claude Code's transcripts. The keys that start an
+agent start Claude Code.
 
 ### Directories
 
@@ -321,12 +336,14 @@ may tell fewer steps of each. It is asked to use those alone. luneta reads the
 transcripts in the folder lunetad reads Claude Code's sessions in, where the
 agents it lists come from, whatever `CLAUDE_CONFIG_DIR` luneta has, by the
 session id Claude Code gives; the model is told when one was not found there.
-An agent of [another machine](#other-machines) is told of with its machine, as
-`luneta on nixos`, and lunetad there reads its transcript in its own folder and
-hands the end back, every machine at once; haiku still runs here, so `b z` is
-one brief over every machine's agents. Where lunetad there does not hand it
-back in time, or is older than the question, the agent is told of without it,
-and the model is told why; a machine lunetad does not reach is told of as one
+An agent of pi's is told of by what its row shows alone, and on nothing but
+those, `b` leaves a note. An agent of [another machine](#other-machines) is told
+of with its machine, as `luneta on nixos`, and lunetad there reads its
+transcript in its own folder and hands the end back, every machine at once;
+haiku still runs here, so `b z` is one brief over every machine's agents. Where
+lunetad there does not hand it back in time, or is older than the question, the
+agent is told of without it, and the model is told why; a machine lunetad does
+not reach is told of as one
 whose sessions are unknown. Two agents a session names alike are told apart by
 their panes, as `luneta/main:4`, and a brief tells of 32 agents at most, and
 says how many it leaves out.
@@ -472,10 +489,10 @@ so that every label starts at the same column and the dot can take a colour:
 `●` in the accent for `waiting`, `✓` for `idle`, the spinner for `busy`, and
 `$`, dimmed, for `shell`. Any other status shows its initial.
 
-After the dot, an icon says what runs in the pane: Claude's for an agent, a
-terminal for a shell, neovim's for nvim. It has a column of its own, so every
-label still starts at the same column, and a program with no icon leaves the
-column blank. What runs is the agent the daemon finds in the pane, or else
+After the dot, an icon says what runs in the pane: Claude's or pi's for an
+agent, a terminal for a shell, neovim's for nvim. It has a column of its own, so
+every label still starts at the same column, and a program with no icon leaves
+the column blank. What runs is the agent the daemon finds in the pane, or else
 what zellij says the pane's terminal has in front, by its binary's name: the
 program you started, or the shell itself at its prompt. `sudo`, `env` and
 `nix run` give way to what they run. lunetad asks zellij every few seconds, so
@@ -483,7 +500,8 @@ a program shows its icon a few seconds after it starts.
 
 | icon | Nerd Fonts name | for |
 |---|---|---|
-| Claude | `cod-claude` | an agent, and `claude` |
+| Claude | `cod-claude` | a Claude Code agent, and `claude` |
+| pi | `md-pi` | a pi agent, and `pi` |
 | a terminal | `dev-terminal` | `bash`, `dash`, `elvish`, `fish`, `nu`, `sh`, `zsh` |
 | neovim | `custom-neovim` | `nvim`, `vim` |
 | rust | `dev-rust` | `cargo` |
@@ -496,8 +514,8 @@ a program shows its icon a few seconds after it starts.
 The icons are a [Nerd Font](https://www.nerdfonts.com)'s, as the directory
 preview's are. Claude's came with Nerd Fonts 3.5.0, and ssh's with 3.3.0: an
 older font has neither, and the terminal draws a box or nothing for them, on
-every agent's row for Claude's. In a font whose name ends in "Mono", an icon
-takes one column; in the others it can spill into the space after it. The
+every Claude Code agent's row for Claude's. In a font whose name ends in "Mono",
+an icon takes one column; in the others it can spill into the space after it. The
 sidebars drawn on this page leave the icons out. luneta has no configuration
 yet to change them.
 
@@ -1052,8 +1070,8 @@ zellij, and you tell the agent there:
 
 What you type goes to `claude -p --model sonnet`, on your Claude Code login,
 with luneta's skill, in the directory of the highlighted row's pane, or the one
-luneta started in on a session's row. The agent is told which row is
-highlighted, and with each thing you send, which pane you are in: the one
+luneta started in on a session's row, whichever harness that row's agent runs
+in. The agent is told which row is highlighted, and with each thing you send, which pane you are in: the one
 luneta's zellij is on, which the commands take for the pane they run in, as
 `LUNETA_PANE` names it. The box shows each command the agent runs, with a red
 `✗` for one Claude Code denied it, which ran nothing, and what it says. Once a

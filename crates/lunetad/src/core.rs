@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use luneta_protocol::git::{Head, WorkTree};
 use tokio::sync::oneshot;
 
+use crate::agent::Agent;
 use crate::api;
 use crate::claude::Scan;
 use crate::clients::Client;
@@ -26,6 +27,8 @@ use crate::zellij::{Id, Sessions, Socket};
 pub enum Command {
     /// What Claude Code's files say now.
     Agents(Scan),
+    /// What the files of luneta's extension for pi say now.
+    PiAgents(Vec<Agent>),
     /// The zellij sessions that run now, and how many of zellij's folders and
     /// sockets could not be read, any of which could be another's.
     Sockets { sockets: Vec<Socket>, unread: u32 },
@@ -123,6 +126,8 @@ pub fn start(wakes: Wakes, acts: SyncSender<Act>) -> io::Result<SyncSender<Comma
 /// What the core knows.
 struct Known {
     found: Scan,
+    /// The agents pi's adapter found.
+    pi: Vec<Agent>,
     sessions: Sessions,
     /// How many of zellij's folders and sockets the last scan could not read.
     unread_sockets: u32,
@@ -161,6 +166,7 @@ struct Known {
 fn run(commands: &Receiver<Command>, wakes: &Wakes, acts: &SyncSender<Act>) {
     let mut known = Known {
         found: Scan { agents: Vec::new(), unread: Vec::new() },
+        pi: Vec::new(),
         sessions: Sessions::default(),
         unread_sockets: 0,
         panes: HashMap::new(),
@@ -186,6 +192,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes, acts: &SyncSender<Act>) {
                 assert_eq!(pids.len(), now.agents.len(), "an agent's pid comes twice");
                 known.found = now;
                 known.review(acts);
+            },
+            Command::PiAgents(now) => {
+                // The adapter keys its files by the pid each is named for.
+                let pids: HashSet<u32> = now.iter().map(|agent| agent.pid).collect();
+                assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
+                known.pi = now;
             },
             Command::Sockets { sockets, unread } => {
                 known.unread_sockets = unread;
@@ -419,13 +431,13 @@ impl Known {
         let agent = |agent: &crate::agent::Agent| {
             agent.to_api(&self.sessions, self.reviews.to_api(agent.pid))
         };
-        self.found.agents.iter().map(agent).collect()
+        self.found.agents.iter().chain(&self.pi).map(agent).collect()
     }
 
-    /// Has the reviews look at the agents that run now, and hands on what they
-    /// need done. The thread that does it answers through the core, which so
-    /// never waits for it: what it has no room for is asked for again on the
-    /// next look.
+    /// Has the reviews look at the agents that run now, Claude Code's, as a
+    /// review runs its skills, and hands on what they need done. The thread
+    /// that does it answers through the core, which so never waits for it:
+    /// what it has no room for is asked for again on the next look.
     fn review(&mut self, acts: &SyncSender<Act>) {
         let mut act = |act| acts.try_send(act).is_ok();
         self.reviews.saw(&self.found.agents, &self.sessions, Instant::now(), &mut act);

@@ -22,6 +22,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lunetad::api::Harness;
 use lunetad::program::{self, Ran};
 use lunetad::transcripts::{Reading, SessionId, IDS_MAX};
 use lunetad::Destination;
@@ -58,6 +59,10 @@ const GIVING_UP: Duration = Duration::from_millis(100);
 /// Variables that the model must not have: with them, the daemon places it in
 /// the pane they name, as an agent of its own.
 const LEFT_OUT: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
+
+/// What is said of an agent of another harness than Claude Code, to you where
+/// it is all a brief would cover, and to the model where others go with it.
+const ONLY_CLAUDE_CODE: &str = "luneta reads only Claude Code's transcripts so far";
 
 /// The most agents a brief tells of: the transcripts of no more than a
 /// reading takes.
@@ -248,6 +253,8 @@ pub struct Note {
     pub since: Option<SystemTime>,
     pub branch: Option<String>,
     pub cwd: String,
+    /// The harness it runs in: only Claude Code's transcripts can be read.
+    pub harness: Harness,
     /// The id of its Claude Code session, which names its transcript.
     pub transcript: Option<SessionId>,
 }
@@ -304,6 +311,9 @@ impl Brief {
                 Over::Agent(..) => "brief: no agent in this pane".to_owned(),
             });
         };
+        if notes.iter().all(|note| note.harness != Harness::ClaudeCode) {
+            return Err(format!("brief: {ONLY_CLAUDE_CODE}"));
+        }
         let title = match &over {
             Over::Sessions { .. } => "Brief of every session".to_owned(),
             Over::Machine(on, _) => format!("Brief of every session on {}", machine_named(on)),
@@ -335,6 +345,9 @@ impl Brief {
         for (at, note) in self.notes.iter().take(MAX_NOTES).enumerate() {
             match &note.transcript {
                 Some(id) => machines.entry(&note.on).or_default().push((at, id.clone())),
+                None if note.harness != Harness::ClaudeCode => {
+                    told.push((at, Told::Unread(ONLY_CLAUDE_CODE.to_owned())));
+                },
                 None => told.push((at, Told::NoId)),
             }
         }
@@ -935,6 +948,7 @@ mod tests {
             since: Some(SystemTime::UNIX_EPOCH),
             branch: (pane == 4).then(|| "feat/fold".to_owned()),
             cwd: format!("/w/{session}"),
+            harness: Harness::ClaudeCode,
             transcript: transcript.map(|id| SessionId::parse(id).expect("a UUID")),
         }
     }
@@ -1109,6 +1123,7 @@ Its transcript is unknown: Claude Code names none for it.
             since: None,
             branch: None,
             cwd: "/w".to_owned(),
+            harness: Harness::ClaudeCode,
             transcript: Some(SessionId::parse(id).expect("a UUID")),
         };
         let notes = ids.iter().enumerate().map(note).collect();
@@ -1148,6 +1163,7 @@ Its transcript is unknown: Claude Code names none for it.
             since: None,
             branch: None,
             cwd: "/w".to_owned(),
+            harness: Harness::ClaudeCode,
             transcript: None,
         };
         let session = |pane: usize| if pane < MAX_NOTES { "a" } else { "b" };
@@ -1276,6 +1292,45 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
         let nowhere = Over::Sessions { sessions: Vec::new(), unknown: unknown.into() };
         let said = "brief: no agents to brief you on; lunetad does not reach pi, me@vps now";
         assert_eq!(Brief::new(nowhere, Vec::new()).err().as_deref(), Some(said));
+    }
+
+    /// A brief tells the model of an agent of another harness by what its row
+    /// shows, and that its transcript is not read: it is no agent gone missing,
+    /// nor a session with none.
+    #[test]
+    fn a_brief_tells_of_an_agent_of_another_harness_without_its_transcript() {
+        let of = |pane: u32, name: &str, harness: Harness| Note {
+            on: Machine::Local,
+            session: named("a"),
+            pane,
+            name: name.to_owned(),
+            status: "idle".to_owned(),
+            since: None,
+            branch: None,
+            cwd: "/w/a".to_owned(),
+            harness,
+            transcript: None,
+        };
+        let notes = vec![of(1, "fold", Harness::Pi), of(2, "tree", Harness::ClaudeCode)];
+        let brief = Brief::new(every(&["a"]), notes).expect("a brief");
+        let prompt = brief.prompt(&none_read, SystemTime::now).expect("a reading");
+        let notes = prompt.split_once("The notes:\n").expect("the notes").1;
+        assert_eq!(
+            notes,
+            "
+Sessions, in order: a
+
+Agent \"fold\" in session a
+Status: idle
+Works in /w/a
+Its transcript was not read: luneta reads only Claude Code's transcripts so far
+
+Agent \"tree\" in session a
+Status: idle
+Works in /w/a
+Its transcript is unknown: Claude Code names none for it.
+"
+        );
     }
 
     /// What `claude` wrote is the brief, and a run that wrote nothing but

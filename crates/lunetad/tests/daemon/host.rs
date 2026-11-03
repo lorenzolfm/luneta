@@ -54,6 +54,7 @@ impl<'a> Vars<'a> {
             "TMPDIR",
             "HOME",
             "CLAUDE_CONFIG_DIR",
+            "PI_CODING_AGENT_DIR",
             "ZELLIJ_SOCKET_DIR",
         ];
         let panes =

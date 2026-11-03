@@ -1042,9 +1042,9 @@ message InfoResponse {
   // older than this field, which could not say.
   optional bytes zellij_folder = 4;
   // The folder it reads Claude Code's sessions in, as its environment named it
-  // when it started, in the bytes of its path. Its agents are those of this
-  // folder alone, and their transcripts are in it. Absent when its environment
-  // named none, and from a daemon older than this field.
+  // when it started, in the bytes of its path. Its Claude Code agents are those
+  // of this folder alone, and their transcripts are in it. Absent when its
+  // environment named none, and from a daemon older than this field.
   optional bytes claude_folder = 5;
   // When the commit it was built from was made, in seconds since the epoch,
   // as the flake stamps each build of a commit. Absent from a cargo build of a
@@ -1084,38 +1084,39 @@ message UnreadFile {
   Zellij zellij = 2;
 }
 
-// A Claude Code agent: the one process of it that runs, and its session.
+// An agent: the one process of it that runs, and its session.
 message Agent {
   uint32 pid = 1;
-  // Claude Code's id for the session, which names its transcript. Never
-  // empty: the daemon reads a session file that names none as no agent's.
+  // Its harness's id for the session. Claude Code's names its transcript.
+  // Never empty: the daemon reads a file that names none as no agent's.
   string session_id = 2;
   // Where it works. Never empty, as `session_id` is not.
   string cwd = 3;
-  // What it is doing, as Claude Code says. Neither when it says nothing.
+  // What it is doing, as its harness says. Neither when it says nothing.
   oneof status {
     // A status the daemon knows.
     Status known_status = 4;
-    // A word it does not, as Claude Code wrote it: a newer Claude Code's.
+    // A word it does not, as its harness wrote it: a newer harness's.
     string other_status = 10;
   }
-  // When it came to its status, as Claude Code dates it. Absent where it
-  // does not: when it last wrote the session file, or when the session
-  // started, is no date of the status.
+  // When it came to its status, as its harness dates it. Absent where it
+  // does not: when it last wrote its file, or when the session started, is no
+  // date of the status.
   google.protobuf.Timestamp status_since = 5;
-  // When its session started.
+  // When its session started. A pi agent's process goes on through the sessions
+  // it moves between, and this is when that started.
   google.protobuf.Timestamp started_at = 6;
-  // The name Claude Code gives the session, if any.
+  // The name its harness gives the session, if any.
   Name name = 7;
-  // How Claude Code says it was started, verbatim: `cli` for the agent a person
-  // talks to at a prompt, `sdk-cli` for a `claude -p`, and a word of its own
-  // for each of the many other ways, which it adds to. Absent when it does not
-  // say.
+  // How its harness says it was started, verbatim: `cli` for the agent a person
+  // talks to at a prompt, in either harness; `sdk-cli` for a `claude -p`, and a
+  // word of its own for each of the many other ways, which Claude Code adds to;
+  // `print`, `json` or `rpc` for pi's other modes. Absent when it does not say.
   optional string entrypoint = 8;
   // Where it runs in zellij, absent when it runs outside zellij.
   Zellij zellij = 9;
   // What it waits for, as Claude Code says while its status is waiting.
-  // Neither while it does not wait, nor where it does not say.
+  // Neither while it does not wait, nor where it does not say, as pi does not.
   oneof waiting_for {
     // A word the daemon knows.
     WaitingFor known_waiting_for = 11;
@@ -1123,10 +1124,22 @@ message Agent {
     // Code has, as `sandbox request`, or a newer Claude Code's.
     string other_waiting_for = 12;
   }
+  // The harness it runs in. Absent from a daemon older than this field, whose
+  // agents are all Claude Code's.
+  optional Harness harness = 13;
   // The review of a pull request it runs, a skill at a time. Absent where it
   // runs none, or the last skill of one is done, or the daemon started after
   // it did: a daemon keeps a review in memory.
   Review review = 14;
+}
+
+// A harness an agent runs in.
+enum Harness {
+  // Never sent. A client that finds it, or a number it does not know, has an
+  // agent of a harness only a newer daemon knows.
+  HARNESS_UNSPECIFIED = 0;
+  HARNESS_CLAUDE_CODE = 1;
+  HARNESS_PI = 2;
 }
 
 // A review of a pull request that one agent runs: the same skills, in the same

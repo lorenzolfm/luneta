@@ -51,8 +51,8 @@ use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{
-    Agent, Client, Front, Host, NameSource, Pane, ReviewWaits, Session, Shell, Status, UnreadFile,
-    Zellij,
+    Agent, Client, Front, Harness, Host, NameSource, Pane, ReviewWaits, Session, Shell, Status,
+    UnreadFile, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::links;
@@ -1884,7 +1884,7 @@ impl Sidebar {
                     since: marked.since,
                     dir: short_cwd(agent_dir(agent, pane)),
                     pid: agent.pid,
-                    transcript: SessionId::parse(&agent.session_id),
+                    transcript: transcript(agent),
                     doing: alerts::Doing::of(agent),
                 });
             }
@@ -2116,13 +2116,12 @@ impl Sidebar {
                         checkout(&tree, pull_requests.get(cwd))
                     });
                     let command = pane.command.as_deref();
-                    // An agent's pane runs Claude Code, whatever its terminal
+                    // An agent's pane runs its harness, whatever its terminal
                     // has in front. It goes by the agent, as the label does,
                     // and not by the mark: a mark need not be an agent's.
-                    let program = match agent(pane.id) {
-                        Some(_) => Some(icons::AGENT),
-                        None => command.and_then(icons::program),
-                    };
+                    let program = agent(pane.id)
+                        .and_then(|agent| icons::agent(harness(agent)))
+                        .or_else(|| command.and_then(icons::program));
                     let label = match ran {
                         Some(ran) => ran.to_owned(),
                         None => label(agent(pane.id), pane),
@@ -3032,9 +3031,10 @@ impl Sidebar {
     /// it, a folded session's or machine's too, by the name, the status and
     /// the branch on its row, and by its machine, whose daemon reads its
     /// transcript. A machine lunetad does not reach now is told of as one
-    /// whose sessions are unknown. With no agent there, or no word of its
-    /// machine, as of one it does not reach, or no longer watches, the
-    /// sidebar says so where the menu was.
+    /// whose sessions are unknown. With no agent there, or none whose
+    /// transcript luneta can read, or no word of its machine, as of one it
+    /// does not reach, or no longer watches, the sidebar says so where the
+    /// menu was.
     fn brief(&mut self, briefed: Briefed) -> Asked {
         let Some(host) = &self.host else {
             return Asked::Nothing;
@@ -3080,7 +3080,8 @@ impl Sidebar {
                         since: agent.status_since.and_then(|at| at.try_into().ok()),
                         branch,
                         cwd: cwd.to_owned(),
-                        transcript: SessionId::parse(&agent.session_id),
+                        harness: harness(agent),
+                        transcript: transcript(agent),
                     });
                 }
             }
@@ -4103,9 +4104,28 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
+/// The harness `agent` runs in, as its daemon says: Claude Code, where it does
+/// not say, as a daemon older than the word knows no other; and none luneta
+/// knows of for a number only a newer daemon does.
+fn harness(agent: &Agent) -> Harness {
+    match agent.harness {
+        None => Harness::ClaudeCode,
+        Some(said) => Harness::try_from(said).unwrap_or(Harness::Unspecified),
+    }
+}
+
+/// The id that names `agent`'s transcript, of those luneta can read: Claude
+/// Code's alone. Another harness's id is no name of one of its.
+fn transcript(agent: &Agent) -> Option<SessionId> {
+    match harness(agent) {
+        Harness::ClaudeCode => SessionId::parse(&agent.session_id),
+        Harness::Pi | Harness::Unspecified => None,
+    }
+}
+
 /// Where an agent works, as its row, the picker and a search say it: where
 /// zellij says its pane works, which its branch is found by, or else, while
-/// zellij has not said, where Claude Code says.
+/// zellij has not said, where its harness says.
 fn agent_dir<'a>(agent: &'a Agent, pane: &'a Pane) -> &'a str {
     pane.cwd.as_deref().unwrap_or(&agent.cwd)
 }
@@ -4891,6 +4911,7 @@ mod tests {
     fn agent(session: &str, pane: u32, status: Status, name: Option<&str>) -> Agent {
         Agent {
             pid: pane,
+            harness: Some(Harness::ClaudeCode.into()),
             session_id: format!("id-{pane}"),
             cwd: "/w/luneta/main".to_owned(),
             status: Some(Reported::KnownStatus(status.into())),
@@ -5925,6 +5946,28 @@ mod tests {
                 "       make",
                 "     \u{e795} w/d",
             ]
+        );
+    }
+
+    /// An agent's icon is its harness's: pi's, or Claude's from a daemon that
+    /// says none, older than the word, whose every agent is Claude Code's. Of
+    /// a harness only a newer daemon knows, it is what the terminal has in
+    /// front, as luneta has no icon for the agent.
+    #[test]
+    fn an_agent_s_icon_is_its_harness_s() {
+        let mut sidebar = fresh();
+        let of = |id: u32, harness: Option<i32>| Agent {
+            harness,
+            ..agent("s", id, Status::Idle, Some("x"))
+        };
+        let panes = (1..=3).map(|id| pane(id, id, "/w/a", "nvim")).collect();
+        let agents = vec![of(1, Some(Harness::Pi.into())), of(2, None), of(3, Some(99))];
+        sidebar.heard(host(vec![session("s", 10, panes)], agents));
+        let start = |line: &String| line.chars().take(8).collect::<String>();
+        let lines = screen(&mut sidebar, false, 32, 9);
+        assert_eq!(
+            lines[5..8].iter().map(start).collect::<Vec<_>>(),
+            ["  •✓ \u{f03ff} x", "  •✓ \u{ec82} x", "  •✓ \u{e6ae} x"]
         );
     }
 
@@ -7253,6 +7296,7 @@ mod tests {
             since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
             branch: Some("feat/brief".to_owned()),
             cwd: "/w/luneta/main".to_owned(),
+            harness: Harness::ClaudeCode,
             transcript: SessionId::parse(id),
         };
         let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fold.clone()]).unwrap());
@@ -7288,6 +7332,64 @@ mod tests {
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(here(["newer", "older"])));
     }
 
+    /// `b` on what only pi's agents cover leaves a note: luneta does not read
+    /// their transcripts, and an id of pi's names none of Claude Code's. On a
+    /// session with agents of both, the brief goes on, and tells of pi's by
+    /// its row alone.
+    #[test]
+    fn a_brief_of_pi_s_agents_alone_leaves_a_note() {
+        let mut sidebar = fresh();
+        // Each id one of a transcript's could be, whichever harness's it is.
+        let (of_pi_id, of_claude_id) = ("01a05a24-2bcb-7198", "7c22-5d4c-3b2a");
+        let of_pi = |agent: Agent| Agent {
+            harness: Some(Harness::Pi.into()),
+            session_id: of_pi_id.to_owned(),
+            ..agent
+        };
+        let pi = of_pi(agent("both", 1, Status::Idle, Some("pi")));
+        let claude = Agent {
+            session_id: of_claude_id.to_owned(),
+            ..agent("both", 2, Status::Idle, Some("claude"))
+        };
+        let alone = of_pi(agent("alone", 3, Status::Idle, Some("alone")));
+        let sessions = vec![
+            session("both", 10, vec![pane(1, 0, "/w/a", "pi"), pane(2, 1, "/w/b", "claude")]),
+            session("alone", 20, vec![pane(3, 0, "/w/c", "pi")]),
+        ];
+        sidebar.heard(host(sessions, vec![pi, claude, alone]));
+        sidebar.focus(Keys::Sidebar);
+        let note = "brief: luneta reads only Claude Code's transcripts so far";
+
+        for (place, key) in [(pane_of("both", 10, 1), 'h'), (pane_of("alone", 20, 3), 's')] {
+            sidebar.cursor = Some(Spot::Local(place));
+            type_in(&mut sidebar, "b");
+            assert_eq!(sidebar.key(&char(key), moment(160_000)), Asked::Nothing, "{key}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note), "{key}");
+        }
+
+        sidebar.cursor = Some(Spot::Local(pane_of("both", 10, 1)));
+        type_in(&mut sidebar, "b");
+        let told = |id: u32, name: &str, cwd: &str, harness, transcript| Note {
+            on: Machine::Local,
+            session: SessionName::parse("both").unwrap(),
+            pane: id,
+            name: name.to_owned(),
+            status: "idle".to_owned(),
+            since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+            branch: None,
+            cwd: cwd.to_owned(),
+            harness,
+            transcript,
+        };
+        let notes = vec![
+            told(1, "pi", "/w/a", Harness::Pi, None),
+            told(2, "claude", "/w/b", Harness::ClaudeCode, SessionId::parse(of_claude_id)),
+        ];
+        let over = Over::Session(Machine::Local, SessionName::parse("both").unwrap());
+        let brief = Asked::Brief(Brief::new(over, notes).unwrap());
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), brief);
+    }
+
     /// `b z` briefs you on every session in the rows' order, as you moved
     /// the machines and the sessions of each.
     #[test]
@@ -7318,6 +7420,7 @@ mod tests {
             since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
             branch: None,
             cwd: "/w/b".to_owned(),
+            harness: Harness::ClaudeCode,
             transcript: None,
         };
         let every = Brief::new(Over::Sessions { sessions, unknown }, vec![fix]).unwrap();
@@ -7348,6 +7451,7 @@ mod tests {
             since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
             branch: None,
             cwd: "/w/b".to_owned(),
+            harness: Harness::ClaudeCode,
             transcript: None,
         };
         let brief = |over: Over| Asked::Brief(Brief::new(over, vec![fix.clone()]).unwrap());
