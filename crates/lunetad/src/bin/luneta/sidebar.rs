@@ -765,6 +765,42 @@ impl<'a> Machines<'a> {
     }
 }
 
+/// A machine, as the rows list it: what its daemon says of it, or why it
+/// says nothing, and its sessions, each with what tells it from another of
+/// its name, in the order of their rows.
+struct Arranged<'a> {
+    machine: Machine,
+    reached: Result<Seen<'a>, Away>,
+    sessions: Vec<(Listed, &'a Session)>,
+}
+
+impl<'a> Machines<'a> {
+    /// Each, in the order of the rows, as `order` has them: the machines it
+    /// has first, and the rest as `each` goes, each with its sessions, those
+    /// `order` has first, and the rest oldest first. And how many of their
+    /// sessions `Listed` leaves out.
+    fn arranged(self, order: &Order) -> (Vec<Arranged<'a>>, usize) {
+        let mut unlisted = 0;
+        let mut arranged: Vec<Arranged<'a>> = self
+            .each()
+            .map(|(machine, reached)| {
+                let mut sessions = match &reached {
+                    Ok(seen) => {
+                        let (sessions, left_out) = oldest_first(seen.sessions);
+                        unlisted += left_out;
+                        sessions
+                    },
+                    Err(_) => Vec::new(),
+                };
+                order.sessions(&machine, &mut sessions, |(listed, _)| listed.name.as_str());
+                Arranged { machine, reached, sessions }
+            })
+            .collect();
+        order.machines(&mut arranged, |it| &it.machine);
+        (arranged, unlisted)
+    }
+}
+
 /// Each machine lunetad says of in `host`, as `Machines` has them.
 fn machines(host: &Host) -> Machines<'_> {
     let here = Seen {
@@ -971,7 +1007,8 @@ pub struct Sidebar {
     /// to the first row once pressed again. Any other key drops it, `Esc`
     /// doing nothing else, and so do a click, the wheel and the focus going.
     first_pressed: bool,
-    /// What `v` and the left button do to the sessions' order.
+    /// What `v` and the left button do to the order of the machines and
+    /// their sessions.
     moving: Moving,
     /// The `here_row` the view last scrolled to show while the sidebar did
     /// not have the focus, after which the wheel can scroll it out of sight.
@@ -1013,29 +1050,64 @@ struct Closing {
     after: Option<Spot>,
 }
 
-/// What `v` and the left button do to the sessions' order: one thing at a
-/// time, so that no selection lasts under a session the mouse lifted.
+/// What `v` and the left button do to the order of the machines and their
+/// sessions: one thing at a time, so that no selection lasts under a row the
+/// mouse lifted.
 #[derive(Debug, Default)]
 enum Moving {
     #[default]
     Still,
-    /// `v` selected the session `anchor`: the selection holds it, the
-    /// highlight's session, and those between, each with its panes.
-    Selected(Listed),
+    /// `v` selected `anchor`: the selection holds it, the highlight's
+    /// session, or machine, and those between, each with its rows.
+    Selected(Movable),
     /// The left button is down on the sidebar at `at`, on luneta's terminal:
     /// a click once it lets go on the line it went down on. On a session's
-    /// row, `session` says which, and goes with the mouse once that moves a
-    /// line, if it is this machine's. A pane's row goes nowhere, nor a
-    /// machine's header.
-    Down { at: Position, session: Option<Spot> },
+    /// row, or a machine's header, `lifts` says what is there, which goes
+    /// with the mouse once that moves a line. A pane's row goes nowhere.
+    Down { at: Position, lifts: Option<Movable> },
     Lifted(Lift),
 }
 
-/// A session the mouse lifted by its row, which goes where the mouse takes
-/// it, with its panes, once it lets go.
+/// What moves, with the rows under it: a machine, among the machines, or a
+/// session, among those of its machine, and never to another's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Movable {
+    Machine(Machine),
+    Session(Machine, Listed),
+}
+
+impl Movable {
+    /// What moves by the row of `spot`: a machine's header, or a session's
+    /// row. A pane's row moves nothing.
+    fn of(spot: Spot) -> Option<Movable> {
+        match spot {
+            Spot::Machine(machine) => Some(Movable::Machine(machine)),
+            Spot::Local(Place::Session(session)) => {
+                Some(Movable::Session(Machine::Local, session))
+            },
+            Spot::Remote(destination, Place::Session(session)) => {
+                Some(Movable::Session(Machine::Remote(destination), session))
+            },
+            Spot::Local(Place::Pane(_)) | Spot::Remote(_, Place::Pane(_)) => None,
+        }
+    }
+
+    /// Its row.
+    fn spot(&self) -> Spot {
+        match self {
+            Movable::Machine(machine) => Spot::Machine(machine.clone()),
+            Movable::Session(machine, session) => {
+                Spot::on(machine, Place::Session(session.clone()))
+            },
+        }
+    }
+}
+
+/// A machine or a session the mouse lifted by its row, which goes where the
+/// mouse takes it, with the rows under it, once it lets go.
 #[derive(Debug)]
 struct Lift {
-    session: Listed,
+    lifted: Movable,
     /// The line of the sidebar the mouse is on.
     line: u16,
     /// Whether the mouse is over the sidebar. Let go anywhere else, the row
@@ -1717,38 +1789,24 @@ impl Sidebar {
         let here = self.here().map(str::to_owned);
         let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
         let mut due: Option<SystemTime> = None;
-        // Each machine, and the sessions of each lunetad lists: this one's
-        // in the order you moved them to, and another's oldest first.
-        let machines = machines(host);
-        let unlisted_machines = machines.left_out;
-        let (mut here_sessions, mut unlisted) = oldest_first(machines.here.sessions);
-        self.order.sessions(&mut here_sessions, |(listed, _)| listed.name.as_str());
-        let others_sessions: Vec<Vec<(Listed, &Session)>> = machines
-            .others
-            .iter()
-            .map(|(_, reached)| {
-                let Ok(reached) = reached else {
-                    return Vec::new();
-                };
-                let (sessions, left_out) = oldest_first(reached.sessions);
-                unlisted += left_out;
-                sessions
-            })
-            .collect();
-        let running_of = |here_sessions: &[(Listed, &Session)]| {
-            let sessions = here_sessions.iter().chain(others_sessions.iter().flatten());
+        // Each machine, and the sessions of each lunetad lists, in the order
+        // you moved them to.
+        let listed = machines(host);
+        let unlisted_machines = listed.left_out;
+        let (mut arranged, mut unlisted) = listed.arranged(&self.order);
+        let running_of = |arranged: &[Arranged<'_>]| {
+            let sessions = arranged.iter().flat_map(|machine| &machine.sessions);
             sessions.map(|(listed, _)| listed.kept).collect::<Vec<ledger::Session>>()
         };
-        let mut running = running_of(&here_sessions);
+        let mut running = running_of(&arranged);
         // What the daemon said last, while it does not answer, can list a
         // session that has ended since, whose colour another luneta gave up.
         // A colour kept takes up the order as another luneta left it, which
         // the rows go in.
         if self.away.is_none() && self.order.colour_sessions(&running) {
-            self.order.sessions(&mut here_sessions, |(listed, _)| listed.name.as_str());
-            running = running_of(&here_sessions);
+            (arranged, unlisted) = machines(host).arranged(&self.order);
+            running = running_of(&arranged);
         }
-        let sessions = std::iter::once(here_sessions).chain(others_sessions);
         let mut colours = self.order.colours(&running).into_iter();
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
@@ -1765,7 +1823,7 @@ impl Sidebar {
                 best = Some((at, fit));
             }
         };
-        for ((machine, reached), sessions) in machines.each().zip(sessions) {
+        for Arranged { machine, reached, sessions } in arranged {
             // The machine luneta's zellij is on, which has its pane.
             let on = machine == self.on;
             let name = match &machine {
@@ -1994,10 +2052,11 @@ impl Sidebar {
         self.finished = finished;
         let here_spot = here_pane.map(|place| Spot::on(&self.on, Place::Pane(place)));
         self.here_row = here_spot.and_then(|spot| self.row_for(&spot));
-        // A selection, and a session lifted, go with the session they
+        // A selection, and what the mouse lifted, go with the row they
         // started on.
-        if let Moving::Selected(session) | Moving::Lifted(Lift { session, .. }) = &self.moving
-            && self.session_at(session).is_none()
+        if let Moving::Selected(movable) | Moving::Lifted(Lift { lifted: movable, .. }) =
+            &self.moving
+            && self.row_of(&movable.spot()).is_none()
         {
             self.moving = Moving::Still;
         }
@@ -2040,12 +2099,16 @@ impl Sidebar {
         self.cursor = stop.map(|index| self.rows[index].spot());
     }
 
-    /// Whether the highlight stops on the row `at`: while a selection lasts,
-    /// a session's of this machine's, and otherwise one that `Row::stops`.
+    /// Whether the highlight stops on the row `at`: while a selection of
+    /// machines lasts, a machine's header; while one of sessions does, a
+    /// session's of their machine; and otherwise one that `Row::stops`.
     fn stops(&self, at: usize) -> bool {
         let row = &self.rows[at];
-        match self.moving {
-            Moving::Selected(_) => matches!(row, Row::Session { machine: Machine::Local, .. }),
+        match &self.moving {
+            Moving::Selected(Movable::Machine(_)) => matches!(row, Row::Machine { .. }),
+            Moving::Selected(Movable::Session(of, _)) => {
+                matches!(row, Row::Session { machine, .. } if machine == of)
+            },
             Moving::Still | Moving::Down { .. } | Moving::Lifted(_) => row.stops(),
         }
     }
@@ -2222,9 +2285,10 @@ impl Sidebar {
     }
 
     /// What a key does while a selection lasts: `j` and `k` move its end at
-    /// the highlight, `J` and `K` move the sessions it holds, and `v` and
-    /// `Esc` end it, `Esc` doing nothing else, as in vim. Any other key ends
-    /// it too, and does what it does without one, for which it is None.
+    /// the highlight, `J` and `K` move the sessions, or the machines, it
+    /// holds, and `v` and `Esc` end it, `Esc` doing nothing else, as in vim.
+    /// Any other key ends it too, and does what it does without one, for
+    /// which it is None.
     fn selected_key(&mut self, key: &KeyEvent) -> Option<Asked> {
         match key.code {
             KeyCode::Down => self.step(1),
@@ -2247,27 +2311,20 @@ impl Sidebar {
         Some(Asked::Nothing)
     }
 
-    /// Selects the session of the highlighted row, for `J` and `K` to move,
-    /// with the sessions `j` and `k` grow the selection to, each with its
-    /// panes. Another machine's sessions stay as they go, oldest first, and
-    /// the notes say so.
+    /// Selects, for `J` and `K` to move, the session of the highlighted row,
+    /// of whichever machine, with the sessions of that machine `j` and `k`
+    /// grow the selection to, each with its panes; or on a machine's header,
+    /// the machine, with the machines `j` and `k` grow it to, each with every
+    /// row under its header.
     fn select(&mut self) {
-        match self.cursor.clone() {
-            Some(Spot::Local(place)) => {
-                let session = place.listed().clone();
-                self.cursor = Some(Spot::Local(Place::Session(session.clone())));
-                self.moving = Moving::Selected(session);
-            },
-            Some(Spot::Remote(destination, _)) => self.unmoved(&destination),
-            Some(Spot::Machine(_)) | None => {},
-        }
-    }
-
-    /// Says in the notes that `destination`'s sessions do not move.
-    fn unmoved(&mut self, destination: &Destination) {
-        self.notice = Some(format!(
-            "luneta moves only this machine's sessions; {destination}'s go oldest first"
-        ));
+        let Some(spot) = self.cursor.clone() else {
+            return;
+        };
+        let Some(movable) = Movable::of(spot.session().unwrap_or(spot)) else {
+            return;
+        };
+        self.cursor = Some(movable.spot());
+        self.moving = Moving::Selected(movable);
     }
 
     /// Ends the selection, the highlight on a row it stops on without one.
@@ -2278,104 +2335,137 @@ impl Sidebar {
         }
     }
 
-    /// Moves the sessions the selection holds `by` places down, or up, and
-    /// no further than the ends, among the rows as the order is kept now: a
+    /// Moves what the selection holds `by` places down, or up, and no
+    /// further than the ends, among the rows as the order is kept now: a
     /// move another luneta made stays, though this one has yet to hear of
-    /// it, or never will, as one whose watcher failed. They stay selected,
-    /// for the next move.
+    /// it, or never will, as one whose watcher failed. A session goes no
+    /// further than the first of its machine's, or the last. They stay
+    /// selected, for the next move.
     fn shift(&mut self, by: isize) {
         self.reorder();
-        let Some((sessions, held)) = self.selected() else {
+        let Moving::Selected(anchor) = &self.moving else {
             return;
         };
-        let to = held.start.saturating_add_signed(by).min(sessions.len() - held.len());
+        let anchor = anchor.clone();
+        let Some((spans, held)) = self.selected() else {
+            return;
+        };
+        let to = held.start.saturating_add_signed(by).min(spans.len() - held.len());
         if to != held.start {
-            self.keep(&moved(&sessions, held, to));
+            self.keep(&anchor, &moved(&spans, held, to));
         }
     }
 
-    /// The sessions, each by the rows it spans, and which of them the
-    /// selection holds, while it lasts.
+    /// What the selection moves among, each by the rows it spans, and which
+    /// of them it holds, while it lasts.
     fn selected(&self) -> Option<(Vec<Range<usize>>, Range<usize>)> {
         let Moving::Selected(anchor) = &self.moving else {
             return None;
         };
-        let sessions = self.sessions();
-        let index = |at: usize| sessions.iter().position(|span| span.contains(&at));
-        let (from, to) = (index(self.session_at(anchor)?)?, index(self.cursor_index()?)?);
-        Some((sessions, from.min(to)..from.max(to) + 1))
+        let spans = self.spans(anchor);
+        let index = |at: usize| spans.iter().position(|span| span.contains(&at));
+        let (from, to) = (index(self.row_of(&anchor.spot())?)?, index(self.cursor_index()?)?);
+        Some((spans, from.min(to)..from.max(to) + 1))
     }
 
-    /// This machine's sessions, each by the rows it spans: its own and its
-    /// panes', up to the next machine's header. Sessions of one name next to
-    /// each other go as one, as the order goes by name, and cannot move one
-    /// without the other.
-    fn sessions(&self) -> Vec<Range<usize>> {
-        let remote = |row: &Row| matches!(row, Row::Machine { machine: Machine::Remote(_), .. });
-        let end = self.rows.iter().position(remote).unwrap_or(self.rows.len());
+    /// What `movable` moves among, each by the rows it spans: the machines,
+    /// or the sessions of its machine.
+    fn spans(&self, movable: &Movable) -> Vec<Range<usize>> {
+        match movable {
+            Movable::Machine(_) => self.machines_spanned(),
+            Movable::Session(machine, _) => self.sessions(machine),
+        }
+    }
+
+    /// The machines, each by the rows it spans: its header, and every row
+    /// under it, up to the next machine's.
+    fn machines_spanned(&self) -> Vec<Range<usize>> {
+        let header = |(at, row): (usize, &Row)| matches!(row, Row::Machine { .. }).then_some(at);
+        let starts: Vec<usize> = self.rows.iter().enumerate().filter_map(header).collect();
+        let ends = starts.iter().skip(1).copied().chain([self.rows.len()]);
+        starts.iter().zip(ends).map(|(start, end)| *start..end).collect()
+    }
+
+    /// The sessions of `machine`, each by the rows it spans: its own and its
+    /// panes', up to the next session's, or the next machine's header.
+    /// Sessions of one name next to each other go as one, as the order goes
+    /// by name, and cannot move one without the other.
+    fn sessions(&self, machine: &Machine) -> Vec<Range<usize>> {
+        let Some(span) = self.machines_spanned().into_iter().find(|span| {
+            matches!(&self.rows[span.start], Row::Machine { machine: it, .. } if it == machine)
+        }) else {
+            return Vec::new();
+        };
         let mut starts = Vec::new();
         let mut named: Option<&str> = None;
-        for (at, row) in self.rows[..end].iter().enumerate() {
-            if let Row::Session { session, .. } = row
+        for at in span.start + 1..span.end {
+            if let Row::Session { session, .. } = &self.rows[at]
                 && named.replace(session.name.as_str()) != Some(session.name.as_str())
             {
                 starts.push(at);
             }
         }
-        let ends = starts.iter().skip(1).copied().chain([end]);
+        let ends = starts.iter().skip(1).copied().chain([span.end]);
         starts.iter().zip(ends).map(|(start, end)| *start..end).collect()
     }
 
-    /// The row of `session`, of this machine's, while it has one.
-    fn session_at(&self, session: &Listed) -> Option<usize> {
-        self.row_of(&Spot::Local(Place::Session(session.clone())))
-    }
-
-    /// Keeps `sessions`, each by the rows it spans, in their order now, for
-    /// every luneta, and builds the rows again in it.
-    fn keep(&mut self, sessions: &[Range<usize>]) {
-        let name = |span: &Range<usize>| {
-            let spot = self.rows[span.start].spot();
-            spot.place().expect("a session's span starts at its row").session().to_owned()
-        };
-        self.order.keep_sessions(sessions.iter().map(name).collect());
+    /// Keeps the sessions of the machine of `movable`, or the machines, each
+    /// by the rows it spans in `spans`, in their order now, for every luneta,
+    /// and builds the rows again in it.
+    fn keep(&mut self, movable: &Movable, spans: &[Range<usize>]) {
+        let spots = spans.iter().map(|span| self.rows[span.start].spot());
+        match movable {
+            Movable::Machine(_) => {
+                let machines: Vec<Machine> = spots.map(|spot| spot.machine()).collect();
+                self.order.keep_machines(&machines);
+            },
+            Movable::Session(machine, _) => {
+                let name = |spot: Spot| {
+                    spot.place().expect("a session's span starts at its row").session().to_owned()
+                };
+                let sessions = spots.map(name).collect();
+                self.order.keep_sessions(machine, sessions);
+            },
+        }
         self.rebuild();
     }
 
-    /// The rows, by their index, in the order they show while `sessions`, as
-    /// `landing` has them, go in theirs: those before this machine's
-    /// sessions, its sessions so, and those after.
-    fn landed(&self, sessions: &[Range<usize>]) -> Vec<usize> {
-        let start = sessions.iter().map(|span| span.start).min().unwrap_or(0);
-        let end = sessions.iter().map(|span| span.end).max().unwrap_or(0);
-        let moved = sessions.iter().flat_map(Clone::clone);
+    /// The rows, by their index, in the order they show while `spans`, as
+    /// `landing` has them, go in theirs: those before them, they so, and
+    /// those after.
+    fn landed(&self, spans: &[Range<usize>]) -> Vec<usize> {
+        let start = spans.iter().map(|span| span.start).min().unwrap_or(0);
+        let end = spans.iter().map(|span| span.end).max().unwrap_or(0);
+        let moved = spans.iter().flat_map(Clone::clone);
         (0..start).chain(moved).chain(end..self.rows.len()).collect()
     }
 
-    /// Where `lift` lands as things stand: the sessions, each by the rows it
-    /// spans, in the order they take once the mouse lets go, and the rows the
-    /// lifted one spans, with those of its name next to it, which go with it.
-    /// It lands where its row is nearest to the line the mouse holds it on,
+    /// Where `lift` lands as things stand: what it moves among, each by the
+    /// rows it spans, in the order they take once the mouse lets go, and the
+    /// rows the lifted one spans, with a session those of its name next to
+    /// it, which go with it. It lands where its row is nearest to the line
+    /// the mouse holds it on, a session among those of its machine alone,
     /// and goes back while the mouse is off the sidebar.
     fn landing(&self, lift: &Lift) -> Option<(Vec<Range<usize>>, Range<usize>)> {
-        let at = self.session_at(&lift.session)?;
-        let sessions = self.sessions();
-        let from = sessions.iter().position(|span| span.contains(&at))?;
-        let lifted = sessions[from].clone();
+        let at = self.row_of(&lift.lifted.spot())?;
+        let spans = self.spans(&lift.lifted);
+        let from = spans.iter().position(|span| span.contains(&at))?;
+        let lifted = spans[from].clone();
         if !lift.over {
-            return Some((sessions, lifted));
+            return Some((spans, lifted));
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
-        // The line the lifted rows start on: the mouse holds the row of the
-        // session it lifted, under any of its name it goes with.
+        // The line the lifted rows start on: the mouse holds the row it
+        // lifted, under any session of its name it goes with.
         let above = HEADER + lines(lifted.start..at);
         let top = (self.top + usize::from(lift.line)) as isize - above as isize;
         // The line each place among the others starts on, with the lifted
-        // rows out of them, and the line after the last: from where this
-        // machine's sessions start, under its header.
-        let mut line = lines(0..sessions[0].start);
-        let mut gaps = Vec::with_capacity(sessions.len());
-        for (index, span) in sessions.iter().enumerate() {
+        // rows out of them, and the line after the last: from where the
+        // first of them starts, under the header of their machine for
+        // sessions.
+        let mut line = lines(0..spans[0].start);
+        let mut gaps = Vec::with_capacity(spans.len());
+        for (index, span) in spans.iter().enumerate() {
             if index != from {
                 gaps.push(line);
                 line += lines(span.clone());
@@ -2384,7 +2474,7 @@ impl Sidebar {
         gaps.push(line);
         let distance = |gap: &usize| ((gaps[*gap] as isize - top).unsigned_abs(), *gap != from);
         let to = (0..gaps.len()).min_by_key(distance).unwrap_or(from);
-        Some((moved(&sessions, from..from + 1, to), lifted))
+        Some((moved(&spans, from..from + 1, to), lifted))
     }
 
     /// Opens the menu for the highlighted row, on the group `key` opens, or on
@@ -2701,11 +2791,8 @@ impl Sidebar {
         let agents = seated(seen.agents, seen.sessions);
         let pulls = pull_requests(seen.pull_requests);
         let (mut sessions, _) = oldest_first(seen.sessions);
-        // This machine's sessions go in the order you moved them to, and
-        // another's oldest first, as their rows do.
-        if *on == Machine::Local {
-            self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
-        }
+        // In the order you moved them to, as their rows go.
+        self.order.sessions(on, &mut sessions, |(listed, _)| listed.name.as_str());
         let mut worked = Vec::new();
         for (listed, session) in sessions {
             let mut panes: Vec<&Pane> =
@@ -2797,14 +2884,13 @@ impl Sidebar {
                 Err(away) => unknown.push((destination, away.said().0)),
             }
         }
+        // In the order of their rows, as you moved them.
+        self.order.machines(&mut reached, |(machine, _)| machine);
         let mut every: Vec<(Machine, SessionName)> = Vec::new();
         let mut notes = Vec::new();
         for (machine, seen) in &reached {
-            // In the order of their rows: this machine's as you moved them.
             let (mut sessions, _) = oldest_first(seen.sessions);
-            if *machine == Machine::Local {
-                self.order.sessions(&mut sessions, |(listed, _)| listed.name.as_str());
-            }
+            self.order.sessions(machine, &mut sessions, |(listed, _)| listed.name.as_str());
             let agents = seated(seen.agents, seen.sessions);
             let trees: HashMap<&str, &lunetad::api::WorkTree> =
                 seen.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
@@ -3081,12 +3167,9 @@ impl Sidebar {
                 self.close_menu();
                 self.unselect();
                 let row = self.line_of(mouse.row, area).and_then(|line| self.row_at(line));
-                let session = row.and_then(|at| match &self.rows[at] {
-                    row @ Row::Session { .. } => Some(row.spot()),
-                    Row::Machine { .. } | Row::Pane { .. } => None,
-                });
+                let lifts = row.and_then(|at| Movable::of(self.rows[at].spot()));
                 let at = Position::new(mouse.column, mouse.row);
-                self.moving = Moving::Down { at, session };
+                self.moving = Moving::Down { at, lifts };
                 Asked::Nothing
             },
             MouseEventKind::Down(_) => Asked::Take,
@@ -3102,44 +3185,33 @@ impl Sidebar {
         }
     }
 
-    /// The mouse moves with the left button down: a session lifted goes with
-    /// it, and one pressed on its row is lifted once the mouse moves a line,
-    /// and takes the focus, for `Esc` to put it back. What is typed in the
-    /// search lifts none: it leaves out of sight the places a session could
-    /// take. Another machine's session stays, and the notes say so.
+    /// The mouse moves with the left button down: what it lifted goes with
+    /// it, and a session pressed on its row, or a machine on its header, is
+    /// lifted once the mouse moves a line, and takes the focus, for `Esc` to
+    /// put it back. What is typed in the search lifts none: it leaves out of
+    /// sight the places it could take.
     fn drag(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let line = mouse.row.saturating_sub(area.y);
         let over = (area.left()..area.right()).contains(&mouse.column);
-        let session = match &mut self.moving {
+        let lifts = match &mut self.moving {
             Moving::Lifted(lift) => {
                 lift.line = line;
                 lift.over = over;
                 return Asked::Nothing;
             },
-            Moving::Down { at, session } if mouse.row != at.y => session.clone(),
+            Moving::Down { at, lifts: Some(lifts) } if mouse.row != at.y => lifts.clone(),
             Moving::Down { .. } | Moving::Selected(_) | Moving::Still => return Asked::Nothing,
         };
-        let session = match session {
-            Some(Spot::Local(Place::Session(session))) => session,
-            Some(Spot::Remote(destination, _)) => {
-                self.moving = Moving::Still;
-                self.unmoved(&destination);
-                return Asked::Take;
-            },
-            Some(Spot::Machine(_) | Spot::Local(Place::Pane(_))) | None => {
-                return Asked::Nothing;
-            },
-        };
         let typed = matches!(self.search, Some(Search::Typed { .. }));
-        if typed || self.session_at(&session).is_none() {
+        if typed || self.row_of(&lifts.spot()).is_none() {
             return Asked::Nothing;
         }
-        self.moving = Moving::Lifted(Lift { session, line, over, scrolled: None });
+        self.moving = Moving::Lifted(Lift { lifted: lifts, line, over, scrolled: None });
         Asked::Take
     }
 
     /// The left button lets go: a press that is on the line it went down on
-    /// is a click there, and a session lifted lands where it shows, the
+    /// is a click there, and what it lifted lands where it shows, the
     /// highlight on it, among the rows as the order is kept now, as `shift`
     /// moves them.
     fn release(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
@@ -3150,9 +3222,11 @@ impl Sidebar {
                 lift.line = mouse.row.saturating_sub(area.y);
                 lift.over = over;
                 self.reorder();
-                self.cursor = Some(Spot::Local(Place::Session(lift.session.clone())));
+                self.cursor = Some(lift.lifted.spot());
                 match self.landing(&lift) {
-                    Some((sessions, _)) if sessions != self.sessions() => self.keep(&sessions),
+                    Some((spans, _)) if spans != self.spans(&lift.lifted) => {
+                        self.keep(&lift.lifted, &spans);
+                    },
                     _ => self.settle(None, false),
                 }
                 Asked::Nothing
@@ -4766,7 +4840,7 @@ mod tests {
             host(sessions.collect(), Vec::new())
         };
         sidebar.heard(listing(&[("a", 1), ("b", 2)]));
-        Order::within(file).keep_sessions(vec!["b".to_owned(), "a".to_owned()]);
+        Order::within(file).keep_sessions(&Machine::Local, vec!["b".to_owned(), "a".to_owned()]);
         sidebar.heard(listing(&[("a", 1), ("b", 2), ("c", 3)]));
         assert_eq!(rows_shown(&mut sidebar), [" ▾ b", " ▾ a", " ▾ c"]);
         sidebar.reorder();
@@ -6847,6 +6921,42 @@ mod tests {
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(here(["newer", "older"])));
     }
 
+    /// `b z` briefs you on every session in the rows' order, as you moved
+    /// the machines and the sessions of each.
+    #[test]
+    fn the_brief_goes_in_the_order_you_moved_the_rows_to() {
+        let mut sidebar = fresh();
+        sidebar.heard(two_each());
+        let on = || Machine::Remote(nixos());
+        sidebar.order.keep_machines(&[on(), Machine::Local]);
+        sidebar.order.keep_sessions(&on(), vec!["dev".to_owned(), "main".to_owned()]);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Machine(on()));
+        type_in(&mut sidebar, "b");
+        let name = |name: &str| SessionName::parse(name).unwrap();
+        let sessions = vec![
+            (on(), name("dev")),
+            (on(), name("main")),
+            (Machine::Local, name("main")),
+            (Machine::Local, name("work")),
+        ];
+        let unknown = [("me@vps", "unreachable"), ("pi", "reaching…")];
+        let unknown = unknown.map(|(it, word)| (it.parse().unwrap(), word)).into();
+        let fix = Note {
+            on: on(),
+            session: name("main"),
+            pane: 1,
+            name: "fix".to_owned(),
+            status: "waiting".to_owned(),
+            since: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+            branch: None,
+            cwd: "/w/b".to_owned(),
+            transcript: None,
+        };
+        let every = Brief::new(Over::Sessions { sessions, unknown }, vec![fix]).unwrap();
+        assert_eq!(sidebar.key(&char('z'), moment(160_000)), Asked::Brief(every));
+    }
+
     /// The Brief group's keys brief you on another machine's agents as on
     /// this one's: `b z` on every session of every machine, in the rows'
     /// order, and on each machine lunetad does not reach as one whose
@@ -7493,11 +7603,10 @@ mod tests {
 
     /// Another machine's rows go there, as this one's do: `Enter` and a click
     /// on its pane ask luneta to take its zellij there. The menu on its pane
-    /// is for that pane, of that machine, which opens what a key opens, and
-    /// `v` and the mouse that would move its session move none: the notes
-    /// say why. `u` takes the dot from its pane as from this machine's. A
-    /// link pasted on its row opens the menu for the link on that pane, of
-    /// that machine, as every key of the menu acts there.
+    /// is for that pane, of that machine, which opens what a key opens. `u`
+    /// takes the dot from its pane as from this machine's. A link pasted on
+    /// its row opens the menu for the link on that pane, of that machine, as
+    /// every key of the menu acts there.
     #[test]
     fn another_machine_s_rows_go_there_and_open_there() {
         let mut sidebar = fresh();
@@ -7528,20 +7637,11 @@ mod tests {
         let asked = Asked::Open { menu: number, on: on.clone(), open };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), asked);
         sidebar.close_menu();
-        type_in(&mut sidebar, "v");
-        assert!(matches!(sidebar.moving, Moving::Still));
-        let unmoved = "luneta moves only this machine's sessions; nixos's go oldest first";
-        assert_eq!(sidebar.notice.as_deref(), Some(unmoved));
 
         let area = Rect::new(0, 0, 32, 24);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[8], "  •✓ \u{ec82} fix                  1m");
         assert_eq!(click(&mut sidebar, 10, 8, area), there);
-        let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 7), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area), Asked::Take);
-        assert!(!sidebar.pressed());
-        assert_eq!(sidebar.notice.as_deref(), Some(unmoved));
 
         type_in(&mut sidebar, "u");
         let lines = screen(&mut sidebar, true, area.width, area.height);
@@ -7935,22 +8035,149 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some(stays));
     }
 
-    /// `v` moves this machine's sessions alone: the last of them moves no
-    /// further than the next machine's header, and the other machine's
-    /// sessions stay where they were under theirs.
-    #[test]
-    fn this_machine_s_sessions_move_among_themselves() {
-        let mut sidebar = fresh();
+    /// This machine, `mac`, with the sessions `main` and `work`, and the
+    /// machines of `machines`, `nixos` with a session `dev` after its `main`.
+    fn two_each() -> Host {
         let mut host = machines();
         host.sessions.push(session("work", 30, vec![pane(1, 0, "/w/c", "fish")]));
-        sidebar.heard(host);
+        let Some(Reached::Host(nixos)) = &mut host.remotes[0].reached else {
+            panic!("nixos is reached");
+        };
+        nixos.sessions.push(session("dev", 40, vec![pane(1, 0, "/w/d", "fish")]));
+        host
+    }
+
+    /// `v` moves the sessions of any machine, each among its own: the last
+    /// of this machine's moves no further than the next machine's header,
+    /// nor the first of another's than its own, and the other machines'
+    /// sessions stay where they were under theirs. The order outlasts the
+    /// daemon's next list.
+    #[test]
+    fn each_machine_s_sessions_move_among_themselves() {
+        let mut sidebar = fresh();
+        sidebar.heard(two_each());
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "jvJJ");
-        assert_eq!(names_listed(&sidebar), ["main", "work", "main"]);
+        assert_eq!(names_listed(&sidebar), ["main", "work", "main", "dev"]);
         type_in(&mut sidebar, "K");
-        assert_eq!(names_listed(&sidebar), ["work", "main", "main"]);
+        assert_eq!(names_listed(&sidebar), ["work", "main", "main", "dev"]);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        sidebar.key(&esc, moment(160_000));
+
+        // nixos's dev, from its pane, over its main and no further.
+        type_in(&mut sidebar, "Gkk");
+        assert_eq!(sidebar.cursor, Some(Spot::Remote(nixos(), pane_of("dev", 40, 1))));
+        type_in(&mut sidebar, "vKK");
+        assert_eq!(names_listed(&sidebar), ["work", "main", "dev", "main"]);
+        assert_eq!(drawn_rows(&mut sidebar).1, [5, 6]);
+        sidebar.key(&esc, moment(160_000));
         let rows = rows_shown(&mut sidebar);
         assert_eq!(rows[4], " ▾ \u{f108} nixos ════════════════ ●1");
+        assert_eq!(rows[5], " ▾ dev");
+        sidebar.heard(two_each());
+        assert_eq!(names_listed(&sidebar), ["work", "main", "dev", "main"]);
+    }
+
+    /// Another machine's session lifted by its row shows, and lands, among
+    /// that machine's alone: held over this machine's, first of its own, and
+    /// over the machines after, last.
+    #[test]
+    fn another_machine_s_session_dragged_lands_among_its_own() {
+        let mut sidebar = fresh();
+        sidebar.heard(two_each());
+        let area = Rect::new(0, 0, 32, 24);
+        screen(&mut sidebar, true, area.width, area.height);
+        let left = MouseButton::Left;
+        // dev's row, under nixos's main, up over mac's.
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area), Asked::Take);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        assert_eq!((lines[9].as_str(), lit), (" ▾ dev ───────────────────────", vec![9, 10]));
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
+        assert_eq!(names_listed(&sidebar), ["main", "work", "dev", "main"]);
+        // dev, now nixos's first, down past every machine.
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 9), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 16), area);
+        assert_eq!(seen(&mut sidebar, true, 32, 24).1, [11, 12]);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 16), area);
+        assert_eq!(names_listed(&sidebar), ["main", "work", "main", "dev"]);
+        let rows = rows_shown(&mut sidebar);
+        assert_eq!(rows[7], " ▾ dev");
+        assert_eq!(rows[9], " ▸ \u{f108} me@vps · unreachable   1m");
+    }
+
+    /// The names of the machines the rows list, in their order.
+    fn machines_listed(sidebar: &Sidebar) -> Vec<&str> {
+        let rows = sidebar.rows.iter();
+        rows.filter_map(|row| match row {
+            Row::Machine { name, .. } => Some(name.as_str()),
+            Row::Session { .. } | Row::Pane { .. } => None,
+        })
+        .collect()
+    }
+
+    /// `v` on a machine's header selects the machine, this one too: `j` and
+    /// `k` grow the selection from header to header, and `J` and `K` move
+    /// what it holds, each machine with every row under its header, lit, no
+    /// further than the ends. The order outlasts the daemon's next list, and
+    /// `Esc` ends the selection.
+    #[test]
+    fn v_on_a_machine_s_header_moves_the_machine() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        // This machine's main, folded, then the machine.
+        type_in(&mut sidebar, "hh");
+        assert_eq!(sidebar.cursor, Some(Spot::Machine(Machine::Local)));
+        type_in(&mut sidebar, "vJ");
+        assert_eq!(machines_listed(&sidebar), ["nixos", "mac", "me@vps", "pi"]);
+        assert_eq!(seen(&mut sidebar, true, 32, 24).1, [6]);
+        type_in(&mut sidebar, "jJ");
+        assert_eq!(machines_listed(&sidebar), ["nixos", "pi", "mac", "me@vps"]);
+        assert_eq!(seen(&mut sidebar, true, 32, 24).1, [7, 8]);
+        type_in(&mut sidebar, "KKK");
+        assert_eq!(machines_listed(&sidebar), ["mac", "me@vps", "nixos", "pi"]);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        assert_eq!(lit, [3, 4]);
+        assert_eq!(lines[5], " ▾ \u{f108} nixos ════════════════ ●1");
+        sidebar.heard(machines());
+        assert_eq!(machines_listed(&sidebar), ["mac", "me@vps", "nixos", "pi"]);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Nothing);
+        assert!(matches!(sidebar.moving, Moving::Still));
+    }
+
+    /// A machine's header lifts the machine once the mouse moves a line,
+    /// with every row under it, lit, and it lands where it shows, this one
+    /// too. Let go on the line it went down on, it is a click, which folds
+    /// the machine.
+    #[test]
+    fn a_machine_dragged_by_its_header_lands_where_it_shows() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        let area = Rect::new(0, 0, 32, 24);
+        screen(&mut sidebar, true, area.width, area.height);
+        let left = MouseButton::Left;
+        // nixos's header, to the top.
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area), Asked::Take);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        assert_eq!(lines[HEADER], " ▾ \u{f108} nixos ════════════════ ●1");
+        assert_eq!(lit, [3, 4, 5]);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
+        assert_eq!(machines_listed(&sidebar), ["nixos", "mac", "me@vps", "pi"]);
+
+        // mac's header, now under nixos's rows, to the bottom.
+        screen(&mut sidebar, true, area.width, area.height);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 12), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 12), area);
+        assert_eq!(machines_listed(&sidebar), ["nixos", "me@vps", "pi", "mac"]);
+
+        screen(&mut sidebar, true, area.width, area.height);
+        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Take);
+        assert!(sidebar.folds.contains(Fold::Machine(&Machine::Remote(nixos()))));
+        assert_eq!(machines_listed(&sidebar), ["nixos", "me@vps", "pi", "mac"]);
     }
 
     /// A search looks through every machine's sessions, a folded machine's
