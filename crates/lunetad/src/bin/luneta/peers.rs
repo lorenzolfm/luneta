@@ -15,9 +15,10 @@
 //! that agent's pane. A group names an agent, as `group` says, and names
 //! its notification on macOS too. And `selected` and what you selected, in
 //! base64, or nothing, as you press `Alt u` in a luneta that does not hold the
-//! lock: the one that does reads aloud for them all. And `dictating` and
-//! `dictated`, as you begin and end dictating in one, as what plays waits on
-//! the microphone, wherever it is you dictate.
+//! lock: the one that does reads aloud for them all. And `stopped`, as you press
+//! `Alt Shift u` in one. And `dictating` and `dictated`, as you begin and end
+//! dictating in one, as what plays waits on the microphone, wherever it is you
+//! dictate.
 
 use std::collections::HashMap;
 use base64::Engine as _;
@@ -98,6 +99,8 @@ enum Line {
     Clicked(Key),
     /// `Alt u`, with what is selected there, which may be nothing.
     Selected(String),
+    /// `Alt Shift u`.
+    Stopped,
     /// You dictate there, or no longer do.
     Dictating(bool),
 }
@@ -118,6 +121,7 @@ impl Line {
                 let selected = SELECTION.decode(words.next().unwrap_or_default()).ok()?;
                 Line::Selected(String::from_utf8(selected).ok()?)
             },
+            "stopped" => Line::Stopped,
             "dictating" => Line::Dictating(true),
             "dictated" => Line::Dictating(false),
             _ => return None,
@@ -134,6 +138,7 @@ impl Line {
             },
             Line::Clicked(key) => format!("clicked {}\n", group(key)),
             Line::Selected(selected) => format!("selected {}\n", SELECTION.encode(selected)),
+            Line::Stopped => "stopped\n".to_owned(),
             Line::Dictating(true) => "dictating\n".to_owned(),
             Line::Dictating(false) => "dictated\n".to_owned(),
         }
@@ -240,6 +245,7 @@ fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
         let event = match line {
             Line::Clicked(key) => Event::Clicked(key),
             Line::Selected(selected) => Event::ReadAloud(selected),
+            Line::Stopped => Event::StopAloud,
             Line::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
             Line::Looks(keys) => Event::Peers(Heard::Peer(number, Peered::Looks(keys))),
             Line::Dictating(now) => Event::Peers(Heard::Peer(number, Peered::Dictating(now))),
@@ -376,6 +382,7 @@ enum Tell {
     Focus(bool),
     Looks(Vec<Key>),
     Selected(String),
+    Stopped,
     Dictating(bool),
 }
 
@@ -401,6 +408,12 @@ impl Reaching {
         let end = selected.floor_char_boundary(SELECTED_BYTES);
         // A thread that ended takes no more.
         let _ = self.told.send(Tell::Selected(selected[..end].to_owned()));
+    }
+
+    /// You pressed `Alt Shift u`.
+    pub fn stopped(&self) {
+        // A thread that ended takes no more.
+        let _ = self.told.send(Tell::Stopped);
     }
 
     /// You look at the panes of the agents of `looks`, in luneta's window,
@@ -439,7 +452,7 @@ fn reach(socket: &Path, telling: &Receiver<Tell>, mut focused: bool, events: &Se
             Ok(Tell::Looks(now)) => looks = now,
             Ok(Tell::Dictating(now)) => dictating = now,
             // The luneta it was for is gone, and its voice with it.
-            Ok(Tell::Selected(_)) | Err(RecvTimeoutError::Timeout) => {},
+            Ok(Tell::Selected(_) | Tell::Stopped) | Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -488,6 +501,7 @@ fn talk(
                 talking = tell(Line::Looks(looks.clone()));
             },
             Ok(Tell::Selected(selected)) => talking = tell(Line::Selected(selected)),
+            Ok(Tell::Stopped) => talking = tell(Line::Stopped),
             Ok(Tell::Dictating(now)) => {
                 *dictating = now;
                 talking = tell(Line::Dictating(now));
@@ -543,6 +557,7 @@ mod tests {
             Line::Looks(vec![key(41), far(7)]),
             Line::Selected(String::new()),
             Line::Selected("two words\nand a line é".to_owned()),
+            Line::Stopped,
             Line::Dictating(true),
             Line::Dictating(false),
             Line::Clicked(far(7)),
@@ -631,6 +646,25 @@ mod tests {
         while !done(peers) {
             let (number, peered) = next(heard);
             peers.heard(number, peered);
+        }
+    }
+
+    /// `Alt Shift u` in a luneta that does not read aloud reaches the one that
+    /// does, which is the only one that has anything to stop.
+    #[test]
+    fn the_key_that_stops_reaches_the_luneta_that_holds_the_lock() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("it listens");
+        let (clicks, _clicked) = mpsc::channel();
+        let reaching = Reaching::to(socket, false, clicks);
+        reaching.stopped();
+        loop {
+            let event = heard.recv_timeout(Duration::from_secs(5)).expect("it hears");
+            if matches!(event, Event::StopAloud) {
+                break;
+            }
         }
     }
 

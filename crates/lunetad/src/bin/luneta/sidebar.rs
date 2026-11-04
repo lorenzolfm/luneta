@@ -1201,6 +1201,8 @@ pub struct Sidebar {
     image_going: Option<Destination>,
     /// What is being read aloud, or what that waits for.
     aloud: Option<aloud::Shown>,
+    /// The buttons on its line, as last drawn: none on the sidebar collapsed.
+    aloud_buttons: Spots<aloud::Button>,
     /// What went wrong as the menu floated over zellij, for luneta to say
     /// there, where you look, and the sidebar collapsed has no room for.
     said: Option<String>,
@@ -2034,6 +2036,11 @@ impl Sidebar {
             self.aloud = shown;
             self.rebuild();
         }
+    }
+
+    /// The buttons on the line of what is being read aloud, as last drawn.
+    pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
+        &self.aloud_buttons
     }
 
     /// Says what went wrong, in the notes until the next key, and in the log.
@@ -3815,7 +3822,7 @@ impl Sidebar {
         let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width, frame));
-        let (notes, spotted) = self.notes(width, height, frame);
+        let (notes, spotted, buttons) = self.notes(width, height, frame);
         let room = height.saturating_sub(HEADER + notes.len());
         self.room = room;
         let highlight = self.highlight();
@@ -3903,6 +3910,7 @@ impl Sidebar {
         // The rows and the notes go short of the edge, the notes along the
         // bottom.
         let inside = Rect { width: area.width.saturating_sub(1), ..area };
+        self.aloud_buttons = buttons.down(notes_from).placed(inside);
         Drawn::Sidebar {
             numbers: spots.placed(inside),
             bottom: Box::new(spotted.placed(notes_from, inside)),
@@ -3911,12 +3919,14 @@ impl Sidebar {
 
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
-    /// to the room it has. Its last column is the edge, as the sidebar's is.
-    /// The rule is in `ERROR` while the daemon does not answer, or `NAME` while
-    /// an image is on its way, as the note that says so is, which the strip has
-    /// no room for.
+    /// to the room it has, and a pause of what is read aloud, which you cannot
+    /// hear, as the icon of its button. Its last column is the edge, as the
+    /// sidebar's is. The rule is in `ERROR` while the daemon does not answer, or
+    /// `NAME` while an image is on its way, as the note that says so is, which
+    /// the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
+        self.aloud_buttons = Spots::default();
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
             Style::new().fg(ERROR)
@@ -3932,6 +3942,9 @@ impl Sidebar {
             }
             let count = cut(&count.to_string(), width.saturating_sub(glyph.width()));
             lines.push(Line::from(vec![Span::styled(glyph, style), Span::styled(count, style)]));
+        }
+        if self.aloud.as_ref().is_some_and(aloud::Shown::paused) {
+            lines.push(Line::styled(aloud::PLAY, Style::new().fg(ACCENT)));
         }
         put(buffer, area, &lines, self.framing());
     }
@@ -4022,9 +4035,14 @@ impl Sidebar {
     /// the focus.
     /// The menu, the search and the legend leave the rows a line. And what has
     /// the mouse there, the menu or the keys of the search or the legend, with
-    /// the spots on it by their line among the notes. A spinner on the menu
-    /// shows `frame`.
-    fn notes(&self, width: usize, height: usize, frame: usize) -> (Vec<Line<'static>>, Drawn) {
+    /// the spots on it by their line among the notes, and the buttons of what
+    /// is being read aloud by theirs. A spinner on the menu shows `frame`.
+    fn notes(
+        &self,
+        width: usize,
+        height: usize,
+        frame: usize,
+    ) -> (Vec<Line<'static>>, Drawn, Spots<aloud::Button>) {
         let mut notes = Vec::new();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -4086,8 +4104,11 @@ impl Sidebar {
             let going = format!("Going to {session}; this session ends once you are there");
             notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
         }
+        let mut buttons = Spots::default();
         if let Some(aloud) = &self.aloud {
-            notes.push(aloud.line(width));
+            let (line, spots) = aloud.line(width);
+            buttons = spots.down(notes.len());
+            notes.push(line);
         }
         let room = height.saturating_sub(HEADER + 1 + notes.len());
         let above = notes.len();
@@ -4112,7 +4133,7 @@ impl Sidebar {
             Bottom::Nothing => (Vec::new(), Drawn::Nothing),
         };
         notes.extend(lines);
-        (notes, spotted)
+        (notes, spotted, buttons)
     }
 
     /// The search at the bottom, in at most `room` lines `width` wide, as a
@@ -9832,7 +9853,7 @@ mod tests {
         let speaker = Zellij { named: "old".to_owned(), session: Some("work".to_owned()), pane: 2 };
         let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
         let text = "the tests pass".to_owned();
-        sidebar.aloud(Some(aloud::Shown::Reading { whose, text }));
+        sidebar.aloud(Some(aloud::Shown::Reading { whose, text, paused: false }));
         let rows = marked(&mut sidebar);
         assert_eq!(rows.len(), 2, "{rows:#?}");
         assert!(rows[0].contains("two"), "{rows:#?}");
@@ -9840,5 +9861,65 @@ mod tests {
 
         sidebar.aloud(None);
         assert_eq!(marked(&mut sidebar), [""; 0]);
+    }
+
+    /// A click on an icon on the line of what is read aloud hits what it shows,
+    /// and the icon that pauses gives way to the one that goes on, however
+    /// narrow the sidebar; and the sidebar collapsed has neither.
+    #[test]
+    fn the_buttons_of_what_is_read_aloud_are_where_they_show() {
+        let reading = |paused| {
+            let (whose, text) = (aloud::Whose::Selection, "the tests pass".repeat(9));
+            Some(aloud::Shown::Reading { whose, text, paused })
+        };
+        for width in [NARROWEST, 40] {
+            let area = Rect::new(2, 1, width, 12);
+            let mut sidebar = Sidebar::default();
+            let at = |buffer: &Buffer, icon: &str| {
+                let found = buffer.content().iter().position(|cell| cell.symbol() == icon)?;
+                let (x, y) = buffer.pos_of(found);
+                Some(Position::new(x, y))
+            };
+            for (paused, toggle, other, button) in [
+                (false, aloud::PAUSE, aloud::PLAY, aloud::Button::Pause),
+                (true, aloud::PLAY, aloud::PAUSE, aloud::Button::GoOn),
+            ] {
+                let mut buffer = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
+                sidebar.aloud(reading(paused));
+                let _ = sidebar.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+                assert_eq!(at(&buffer, other), None);
+                let toggle = at(&buffer, toggle).expect("the button shows");
+                let stop = at(&buffer, aloud::STOP).expect("the button shows");
+                assert_eq!(toggle.y, stop.y);
+                let hit = |x, y| sidebar.aloud_buttons().at(Position::new(x, y)).copied();
+                assert_eq!(hit(toggle.x, toggle.y), Some(button));
+                assert_eq!(hit(stop.x, stop.y), Some(aloud::Button::Stop));
+                assert_eq!(hit(toggle.x, toggle.y - 1), None);
+                assert_eq!(hit(toggle.x - 2, toggle.y), None, "on what it says");
+                assert_eq!(usize::from(stop.x), usize::from(area.right()) - 3, "at the right");
+            }
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw_collapsed(&mut buffer, area, SystemTime::UNIX_EPOCH);
+            assert_eq!(sidebar.aloud_buttons(), &Spots::default());
+        }
+    }
+
+    /// The sidebar collapsed has no line of what is read aloud, and what plays
+    /// you can hear: a pause is all it has to say.
+    #[test]
+    fn a_pause_shows_on_the_sidebar_collapsed() {
+        let marked = |shown| {
+            let area = Rect::new(0, 0, COLLAPSED, 6);
+            let mut sidebar = Sidebar::default();
+            sidebar.aloud(Some(shown));
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw_collapsed(&mut buffer, area, SystemTime::UNIX_EPOCH);
+            buffer.content().iter().any(|cell| cell.symbol() == aloud::PLAY)
+        };
+        for paused in [false, true] {
+            let (whose, text) = (aloud::Whose::Selection, String::new());
+            assert_eq!(marked(aloud::Shown::Reading { whose, text, paused }), paused);
+            assert_eq!(marked(aloud::Shown::Fetching { got: 0, paused }), paused);
+        }
     }
 }

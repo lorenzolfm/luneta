@@ -173,6 +173,18 @@ impl Desktop {
         }
     }
 
+    /// Hands `Alt Shift u` to the luneta of this machine that reads aloud,
+    /// where another does: whether it did.
+    pub fn hand_stop(&self) -> bool {
+        match &self.role {
+            Role::Peer(reaching) => {
+                reaching.stopped();
+                true
+            },
+            Role::Holder { .. } | Role::Unsure => false,
+        }
+    }
+
     /// You look at the panes of the agents of `keys` in luneta's window,
     /// which has the focus, or at none.
     pub fn looking(&mut self, keys: &[Key]) {

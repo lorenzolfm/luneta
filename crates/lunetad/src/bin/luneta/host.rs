@@ -16,8 +16,8 @@
 //! dictates, held or tapped, into the pane zellij is on or the ask box, in a
 //! box along the bottom of zellij that has the keys and the mouse until what
 //! you said is written. What the mouse drags on zellij stays with zellij
-//! under a box too. `Alt u` reads aloud what zellij copied last, and stops
-//! what is being read.
+//! under a box too. `Alt u` reads aloud what zellij copied last, and pauses
+//! what is being read and has it go on, and `Alt Shift u` stops it.
 //! A click on an entry of the menu, a key a line of keys names, a skill the
 //! menu's search finds, or a row of the picker, does what its key does, or
 //! `Enter` on it, as each said where it drew them; and the one under the
@@ -89,7 +89,7 @@ use crate::pull::{self, Link, Ready};
 use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
-use crate::spots::{Burst, Drawn, Hit};
+use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::starts::{self, First, Sought, Start};
 use crate::width::Width;
 use crate::zellij::{
@@ -171,6 +171,8 @@ pub enum Event {
     VoiceFetched(Fetched),
     /// `Alt u` in another luneta of this machine, with what is selected there.
     ReadAloud(String),
+    /// `Alt Shift u` in another luneta of this machine.
+    StopAloud,
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -192,6 +194,9 @@ pub enum Event {
 /// How often the sidebar is drawn again with nothing else to draw it: every
 /// second for the ages, and at each turn of the spinner while one turns.
 const TICK: Duration = Duration::from_secs(1);
+
+/// Why the keys of what is read aloud do nothing, in a luneta over ssh.
+const NO_SPEAKERS: &str = "this luneta reads nothing aloud: it has no speakers of yours";
 
 /// The most events that go into one frame. Those that come faster wait for the
 /// next, so that luneta draws at least once each this many events, however
@@ -356,8 +361,8 @@ enum Held {
     Edge { dragged: bool },
     /// A press luneta took for itself: one that closed a box over zellij, as
     /// the menu or a brief, one on a spot, or one of a burst of clicks that
-    /// is none. What it drags, and its release, go nowhere, as zellij heard
-    /// no press of it.
+    /// is none, or right as buttons came or went. What it drags, and its
+    /// release, go nowhere, as zellij heard no press of it.
     Taken,
 }
 
@@ -636,6 +641,9 @@ struct App {
     /// pressed a spot, or next to it, that come fast after it, onto what
     /// that drew there.
     burst: Option<Burst>,
+    /// Where the buttons of what is read aloud came or went just now, where a
+    /// click is on nothing.
+    settling: Settling,
     /// What has the mouse drew last: the box over zellij, where one is, or
     /// else the sidebar, with the spots on its menu or legend, which a click
     /// goes to while it has the mouse still.
@@ -935,6 +943,7 @@ fn run_in(
         // of its window's focus has you in it all along.
         focused: true,
         burst: None,
+        settling: Settling::default(),
         drawn: Drawn::Nothing,
         pointer: None,
         cursor: None,
@@ -1306,6 +1315,7 @@ impl App {
                 let read = self.aloud.key(Some(&selected));
                 self.read_aloud_went(read);
             },
+            Event::StopAloud => self.aloud.press(aloud::Button::Stop),
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
         }
@@ -1549,7 +1559,7 @@ impl App {
         // No key going up reaches what is under the box, nor the key that
         // dictates, held down past the box it opened, as it repeats: it
         // would type itself there, or open the box again. Nor does the key
-        // that reads aloud repeat, which would read and stop by turns.
+        // that reads aloud repeat, which would pause and go on by turns.
         if key.kind == KeyEventKind::Release
             || (key.kind == KeyEventKind::Repeat
                 && (chord == dictation::KEY || chord == aloud::KEY))
@@ -1561,6 +1571,10 @@ impl App {
         }
         if chord == aloud::KEY {
             self.read_aloud();
+            return;
+        }
+        if aloud::stops(chord) {
+            self.stop_aloud();
             return;
         }
         match &mut self.focus.over {
@@ -1763,11 +1777,19 @@ impl App {
                 return;
             }
             self.burst = None;
+            // Nor is a click right as the buttons of what is read aloud came
+            // or went, which they do by themselves.
+            if self.settling.takes(at, Instant::now()) {
+                self.held = Held::Taken;
+                self.burst = Some(Burst::new(at, Instant::now()));
+                return;
+            }
         }
         // A click on a spot of what has the mouse, and the keys, does what the
         // spot says, and nothing else.
+        let button = || self.sidebar.aloud_buttons().at(at).copied().map(Hit::Aloud);
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(hit) = self.drawn.at(at)
+            && let Some(hit) = self.drawn.at(at).or_else(button)
         {
             self.let_go();
             self.sidebar.let_go();
@@ -1927,6 +1949,7 @@ impl App {
             },
             // A box opened over what drew it since.
             Hit::Menu(..) => {},
+            Hit::Aloud(button) => self.aloud.press(button),
         }
     }
 
@@ -2208,16 +2231,25 @@ impl App {
         Skills::Finding
     }
 
-    /// `Alt u`: what plays stops, and else what zellij copied last is read, by
-    /// this luneta where it is the one of its machine that reads aloud, or by
-    /// the one that is. A luneta over ssh has no speakers of yours.
+    /// `Alt u`: what plays pauses or goes on, and else what zellij copied last
+    /// is read, by this luneta where it is the one of its machine that reads
+    /// aloud, or by the one that is. A luneta over ssh has no speakers of yours.
     fn read_aloud(&mut self) {
         if self.desktop.reads_aloud() {
             let read = self.aloud.key(self.copied.as_deref());
             self.read_aloud_went(read);
         } else if !self.desktop.hand_read(self.copied.as_deref().unwrap_or_default()) {
-            let why = "this luneta reads nothing aloud: it has no speakers of yours";
-            self.sidebar.notify(why.to_owned());
+            self.sidebar.notify(NO_SPEAKERS.to_owned());
+        }
+    }
+
+    /// `Alt Shift u`: what plays stops, and what waits goes, by whichever
+    /// luneta `read_aloud` says.
+    fn stop_aloud(&mut self) {
+        if self.desktop.reads_aloud() {
+            self.aloud.press(aloud::Button::Stop);
+        } else if !self.desktop.hand_stop() {
+            self.sidebar.notify(NO_SPEAKERS.to_owned());
         }
     }
 
@@ -3050,6 +3082,7 @@ impl App {
             } else {
                 self.sidebar.draw(buffer, sidebar, now)
             };
+            self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
             let cursor = self.client.hosted.draw(buffer, zellij);
             // What has the mouse is the box over zellij, where one is, or else
             // the sidebar.
@@ -3082,6 +3115,7 @@ impl App {
             };
             if let Some(pointer) = self.pointer {
                 drawn.light(buffer, pointer);
+                self.sidebar.aloud_buttons().light(buffer, pointer);
             }
             // zellij's cursor shows while zellij has the keys, under no box.
             if self.focus.zellij()

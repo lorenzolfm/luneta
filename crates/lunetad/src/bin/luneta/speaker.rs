@@ -28,7 +28,8 @@ const STALLED: Duration = Duration::from_secs(5);
 pub struct Quiet {
     /// Everything is cut off: what waits is never heard.
     pub cut: Arc<AtomicBool>,
-    /// What waits waits, for as long as this is on, as you dictate.
+    /// What waits waits, for as long as this is on, as you dictate, or have
+    /// it paused.
     pub held: Arc<AtomicBool>,
 }
 
