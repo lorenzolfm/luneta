@@ -31,7 +31,7 @@ use tonic::transport::Channel;
 
 use crate::bridge;
 use crate::daemon::{self, Reach};
-use crate::drive::{self, Address, Agreed, Opening};
+use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added};
 use crate::zellij::{self, Seat};
 
@@ -90,6 +90,12 @@ pub enum Command {
         #[arg(value_parser = drive::address)]
         to: Address,
     },
+    /// Turn a pane into a tab, or a tab into panes of another, as the menu's
+    /// Turn group does. What runs in them runs on.
+    Turn {
+        #[command(subcommand)]
+        what: Turning,
+    },
     /// Close panes and delete sessions, as the menu's Delete group does. The
     /// panes of a session close together: a tab goes once nothing left holds
     /// it open, and the session once all its tabs do. Without `--yes`, say
@@ -140,6 +146,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Here => drive::here(folder),
         Command::Open { what } => drive::open(what, folder),
         Command::Go { to } => drive::go(to, folder),
+        Command::Turn { what } => drive::turn(what),
         Command::Close { what, yes } => drive::close(what, *yes, folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
     }

@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, and close panes or delete sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, or close sessions, tabs or panes, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, and close panes or delete sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, or close sessions, tabs or panes, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -48,6 +48,8 @@ luneta open pane [--beside <session>:<pane>] [--cwd <dir>] [-- <command>...]
 luneta open tab [--session <session>] [--cwd <dir>] [--name <name>] [-- <command>...]
 luneta open session [--cwd <dir>] [--name <name>]
 luneta go <session>[:<pane>]
+luneta turn pane <session>:<pane>
+luneta turn tab <session>:<pane> --into <session>:<pane>
 luneta close <session>[:<pane>]... [--yes <plan>]
 ```
 
@@ -65,6 +67,7 @@ luneta close <session>[:<pane>]... [--yes <plan>]
   which is the user who just typed to you. If the user has left your session
   since, they fail with "zellij moved nobody". Tell the user where things are
   instead.
+- `turn` moves panes that are running: see [Turn panes and tabs](#turn-panes-and-tabs).
 - `close` takes a pane's tab along when nothing else holds the tab open, and
   the session when that was its only tab. The panes of a session given
   together close together: give every pane of a tab and the tab closes. It
@@ -118,6 +121,33 @@ luneta open session --cwd <that directory>
 
 If a session for X already runs (`luneta sessions`), say so, and `luneta go`
 there instead, unless the user asked for a new one.
+
+## Turn panes and tabs
+
+Name panes as `luneta here` and `luneta sessions` print them, one command at a
+time:
+
+```sh
+luneta here                                 # luneta:11
+luneta turn pane luneta:11                  # that pane, into a tab of its own
+luneta turn tab luneta:11 --into luneta:4   # the panes of its tab, into the tab of pane 4
+```
+
+- `turn tab` moves every pane of the tab, floating ones too, and the tab they
+  left goes. `--into` takes a pane of the same session, because two tabs can
+  share a name: find it in `luneta sessions`.
+- What runs in the panes keeps running, your own pane too, and each keeps its
+  `<session>:<pane>`. Both print the pane they were given.
+- `turn` moves nobody. A user on a pane that moves goes with it. If `turn` adds
+  that the user may not be on the pane they were on, tell them.
+- `turn` fails and says why for a pane alone in its tab, a pane that alone holds
+  a tab with floating panes open, or no room in the tab. Tell the user: don't
+  work around it with `zellij action`, where the wrong order ends floating panes.
+- If `turn tab` says it turned only some of the panes, those stay moved. Tell the
+  user how many, and where.
+- `turn pane` needs a client in that session, as `open tab` does, and moves
+  nothing without one. Tell the user: `go` there and try again only if they want
+  that. `turn tab` needs no client.
 
 ## Closing
 

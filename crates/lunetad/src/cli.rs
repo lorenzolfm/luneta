@@ -4,6 +4,7 @@
 //! them.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
@@ -171,6 +172,12 @@ pub struct Laid {
 }
 
 impl Laid {
+    /// The pane it is, as zellij's CLI names it.
+    #[must_use]
+    pub fn pane_id(&self) -> PaneId {
+        if self.is_plugin { PaneId::Plugin(self.id) } else { PaneId::Terminal(self.id) }
+    }
+
     /// Whether it is tiled in its tab, for you to go to: a plugin's as well.
     #[must_use]
     pub fn is_tiled(&self) -> bool {
@@ -184,6 +191,34 @@ impl Laid {
     #[must_use]
     pub fn holds_tab(&self) -> bool {
         self.is_tiled() || (self.is_suppressed && !self.is_plugin)
+    }
+}
+
+/// A pane as zellij's CLI names it. It numbers terminals and plugins apart, so
+/// that a session can have one of each by an id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneId {
+    Terminal(u32),
+    Plugin(u32),
+}
+
+impl PaneId {
+    /// The terminal it is, or none: it is a plugin's.
+    #[must_use]
+    pub fn terminal(self) -> Option<u32> {
+        match self {
+            PaneId::Terminal(id) => Some(id),
+            PaneId::Plugin(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for PaneId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PaneId::Terminal(id) => write!(f, "terminal_{id}"),
+            PaneId::Plugin(id) => write!(f, "plugin_{id}"),
+        }
     }
 }
 

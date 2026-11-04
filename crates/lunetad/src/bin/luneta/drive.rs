@@ -1,7 +1,7 @@
 //! What the CLI has zellij do, for an agent you tell what you want in words:
-//! open a pane, a tab or a session, take you to one, and close them, as the
-//! menu's New and Delete groups do. luneta's skill, `skills/luneta`, says how
-//! an agent goes about it.
+//! open a pane, a tab or a session, take you to one, turn a pane into a tab or
+//! a tab into panes, and close them, as the menu's New, Turn and Delete groups
+//! do. luneta's skill, `skills/luneta`, says how an agent goes about it.
 //!
 //! A command run in a pane of zellij knows the session and the pane it runs
 //! in, by the name zellij gave the session as the pane opened, which lunetad
@@ -16,6 +16,13 @@
 //! there a close takes none of yours along, and `go` moves none of your
 //! clients. Claude Code runs what that agent runs without asking you, so a
 //! pane it opens runs your shell or Claude Code, and no other command.
+//!
+//! A turn moves nobody, as an open does, though zellij takes the client that
+//! last typed in a session to each pane it moves there: the turn then takes that
+//! client back, as `moved_from` says. One refused before it asked zellij to move
+//! anything has nobody to take back. zellij holds no condition on where a client
+//! is, so a key you press as a turn runs, onto a pane that moves, reads as zellij
+//! taking you there, and you go back.
 //!
 //! A close says what it would close, and which agents it would end, and
 //! closes nothing until it is told yes to that plan, by the word it prints
@@ -38,6 +45,10 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{Turn, User};
+use lunetad::cli::PaneId;
+use lunetad::clients::Client;
+use lunetad::opens;
+use lunetad::turns::{self, IntoPanes};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
@@ -390,6 +401,130 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
         zellij::taken(&at, to.session(), pane)
     });
     said(went.map(|()| String::new()))
+}
+
+/// What `luneta turn` turns. What runs in the panes runs on, and each keeps its
+/// id wherever it goes, so each says the pane it was given, as
+/// `<session>:<pane>`.
+#[derive(Subcommand)]
+pub enum Turning {
+    /// Turn a pane into a tab of its own, named as the tab it leaves is, if
+    /// someone named that one, with nobody moved. zellij makes a tab as big
+    /// as a client of its session, so a client must be in it.
+    Pane {
+        /// The pane, as `<session>:<pane>`.
+        #[arg(value_parser = pane_address)]
+        pane: Pane,
+    },
+    /// Turn the panes of a tab into panes of another tab of its session, with
+    /// nobody moved. The tab they left goes.
+    Tab {
+        /// A pane of the tab they leave, as `<session>:<pane>`.
+        #[arg(value_parser = pane_address)]
+        pane: Pane,
+        /// A pane of the tab they go into, as `<session>:<pane>`: two tabs can
+        /// share a name, and a pane is of one.
+        #[arg(long, value_parser = pane_address)]
+        into: Pane,
+    },
+}
+
+/// Turns what `what` says, and says the pane it was given.
+pub fn turn(what: &Turning) -> ExitCode {
+    said(match what {
+        Turning::Pane { pane } => pane_into_tab(pane),
+        Turning::Tab { pane, into } => tab_into_panes(pane, into),
+    })
+}
+
+/// Turns the pane `given` into a tab of its own. In a session no client is in,
+/// nothing moves and it says so, as `open tab` does: a verb that took you there
+/// to make room would move you.
+fn pane_into_tab(given: &Pane) -> Result<String, String> {
+    let session = session_named(&given.session)?;
+    let started = started(&given.session, &zellij::running()?)?;
+    let Some(leaving) = turns::pane_leaving(&session, started, given.pane)? else {
+        return Err(opens::no_client(&session));
+    };
+    let before = zellij::clients_on_panes(&given.session)?;
+    let turned = leaving.turn(&session);
+    take_back(&given.session, &before, &[leaving.pane()]);
+    turned?;
+    Ok(given.to_string())
+}
+
+/// Turns the panes of the tab of `given` into panes of the tab of `into`. Where
+/// zellij runs out of room partway, those that moved stay moved, and it fails
+/// saying how many did.
+fn tab_into_panes(given: &Pane, into: &Pane) -> Result<String, String> {
+    if into.session != given.session {
+        return Err(format!(
+            "{into} is of another session than {given}, and a tab turns into panes of another \
+             tab of its own session"
+        ));
+    }
+    let session = session_named(&given.session)?;
+    let started = started(&given.session, &zellij::running()?)?;
+    let moving = turns::panes_moving(&session, started, given.pane, into.pane)?;
+    let before = zellij::clients_on_panes(&given.session)?;
+    let came = moving.turn(&session);
+    take_back(&given.session, &before, moving.panes());
+    match came? {
+        IntoPanes::Done => Ok(given.to_string()),
+        IntoPanes::Partly { moved, of, why } => Err(format!(
+            "turned {moved} of the {of} panes of the tab of {given} into panes of the tab of \
+             {into}, and those stay moved: {why}"
+        )),
+    }
+}
+
+/// Takes the client zellij took to one of `moved`, the panes of `session` a turn
+/// asked it to move, back to the pane it was on `before`, and says where it could
+/// not: what turned stays turned either way.
+fn take_back(session: &str, before: &[Client], moved: &[PaneId]) {
+    if let Err(why) = taken_back(session, before, moved) {
+        eprintln!("luneta: the user may not be on the pane they were on before: {why}");
+    }
+}
+
+/// What `take_back` does, or why it did not. zellij acts for the same client
+/// as it moves the focus as it did as it stacked a pane, and for no other: one
+/// whose pane left without it, or whose tab went, stays where zellij put it.
+fn taken_back(session: &str, before: &[Client], moved: &[PaneId]) -> Result<(), String> {
+    let mut now = zellij::clients_on_panes(session)?;
+    if let Some(was) = moved_from(before, &now, moved) {
+        zellij::focused(session, was.pane)?;
+        now = zellij::clients_on_panes(session)?;
+    }
+    let is_elsewhere = |was: &Client| now.iter().any(|now| now.id == was.id && now.pane != was.pane);
+    if before.iter().any(is_elsewhere) {
+        return Err(
+            "a client left its pane as the panes moved, and zellij moves back only the client \
+             that last typed in the session"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Who zellij took to a pane a turn moved, as it was `before`, by what it lists
+/// `after`, or none: `moved` are the panes it asked zellij to move. zellij takes
+/// the client that last typed in a session to each pane it stacks, and says not
+/// which that is, so it is one on a pane of those now that was elsewhere. One on
+/// a pane that moved stays on it, as it goes with it, and so is on it still.
+///
+/// Another can land on one of those without typing, as the tab it was on goes:
+/// it is the one that came from outside them that zellij took. Between two
+/// from among them, it could be either, and going back to either's pane keeps
+/// the one zellij took in the tab they went to.
+fn moved_from(before: &[Client], after: &[Client], moved: &[PaneId]) -> Option<Client> {
+    let taken = |was: &&Client| {
+        let now = after.iter().find(|now| now.id == was.id);
+        now.is_some_and(|now| now.pane != was.pane && moved.contains(&now.pane))
+    };
+    let taken: Vec<&Client> = before.iter().filter(taken).collect();
+    let outside = taken.iter().find(|was| !moved.contains(&was.pane));
+    outside.or(taken.first()).map(|was| **was)
 }
 
 /// What a close exits with where it closes nothing, as it was not told yes to
@@ -812,6 +947,45 @@ mod tests {
         assert_eq!(address(":3"), session(":3"));
         assert!(address("").is_err());
         assert!(pane_address("work").is_err());
+    }
+
+    /// zellij names no client it moved: of a list before and after a turn of
+    /// panes 1 and 2 and the plugin's 1, only one on any of them now that was
+    /// elsewhere is the one it took, and of two of those, the one that came from
+    /// outside them, as the other's tab may have gone from under it.
+    #[test]
+    fn the_client_zellij_took_is_the_one_on_a_moved_pane_it_came_to() {
+        let (on, plugin) = (PaneId::Terminal, PaneId::Plugin);
+        let at = |id, pane| Client { id, pane };
+        let moved = [on(1), on(2), plugin(1)];
+        let was = Some(at(1, on(7)));
+        let taken = |before: &[Client], after: &[Client]| moved_from(before, after, &moved);
+        assert_eq!(taken(&[at(1, on(7))], &[at(1, on(1))]), was);
+        // Stayed where it was, or went with its pane.
+        assert_eq!(taken(&[at(1, on(7))], &[at(1, on(7))]), None);
+        assert_eq!(taken(&[at(1, on(1))], &[at(1, on(1))]), None);
+        assert_eq!(taken(&[at(1, plugin(1))], &[at(1, plugin(1))]), None);
+        // It lost its pane to another tab, and is on one that stayed.
+        assert_eq!(taken(&[at(1, on(1))], &[at(1, on(3))]), None);
+        assert_eq!(taken(&[at(1, on(1))], &[at(1, plugin(3))]), None);
+        // It came, or left, as the panes moved.
+        assert_eq!(taken(&[], &[at(1, on(1))]), None);
+        assert_eq!(taken(&[at(1, on(7))], &[]), None);
+        // The last pane to move can be a plugin's, from a plugin's as well.
+        assert_eq!(taken(&[at(1, on(7))], &[at(1, plugin(1))]), was);
+        let from_a_plugin = Some(at(1, plugin(5)));
+        assert_eq!(taken(&[at(1, plugin(5))], &[at(1, plugin(1))]), from_a_plugin);
+        assert_eq!(taken(&[at(1, plugin(5))], &[at(1, on(1))]), from_a_plugin);
+        // A terminal and a plugin's pane of one id are two panes.
+        assert_eq!(taken(&[at(1, on(5))], &[at(1, plugin(5))]), None);
+        // Whichever id comes first, the one from outside is the one it took.
+        let (lands, came) = (at(2, on(1)), at(1, on(7)));
+        let after = [at(1, on(2)), lands];
+        assert_eq!(taken(&[came, at(2, on(2))], &after), Some(came));
+        assert_eq!(taken(&[at(2, on(2)), came], &after), Some(came));
+        // Both from among them: either goes back to a pane of the same tab.
+        let either = taken(&[at(1, on(1)), at(2, on(2))], &[at(1, on(2)), at(2, on(1))]);
+        assert!(either.is_some());
     }
 
     /// A directory given with a `.` or a `..` in it is the one it leads to,

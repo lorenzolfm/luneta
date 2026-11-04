@@ -1043,6 +1043,8 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta open tab [--session S] [--cwd D] [--name N] [-- CMD…]` | opens a tab of the session it runs in, or of `S` |
 | `luneta open session [--cwd D] [--name N]` | makes a session and takes you there |
 | `luneta go S[:P]` | takes you to a session, or to a pane of one |
+| `luneta turn pane S:P` | turns a pane into a tab of its own |
+| `luneta turn tab S:P --into S:Q` | turns the panes of the tab of `P` into panes of the tab of `Q` |
 | `luneta close S[:P]… [--yes PLAN]` | closes panes and deletes sessions |
 | `luneta here` | says which pane it runs in, as `S:P` |
 | `luneta say [TEXT]` | [reads it aloud](#read-aloud) on the machine you sit at, once what is before it has been |
@@ -1070,6 +1072,19 @@ zellij moves no other, as it does for luneta's own sidebar. They wait to see
 you there, and say that zellij moved nobody where you have left that session
 since. zellij's client makes the session, so what runs in it has your
 environment, not the agent's.
+
+`turn` does what `t t` and `t p` do, and refuses what they refuse, saying why.
+What runs in the panes goes on, an agent turning the pane it runs in too, and
+each pane keeps its id, so `turn` says the pane it was given. `--into` takes a
+pane of the tab, of the same session, as two tabs can share a name. It moves
+nobody: zellij takes the client that last typed in that session to each pane it
+moves, so you may see the other tab for a moment, and `turn` takes you back to
+the pane you were on. On a pane that moves, you stay on it, and go with it. Where
+it can't take you back, as where you have typed nothing in that session since you
+came and your pane moves, it says so. As with `open tab`, `turn pane` needs someone in the session to make room for the tab, and says so
+otherwise, where `t t` would go there: `turn tab` needs no one. Where `turn tab`
+runs out of room partway, the panes that moved stay moved, and it fails saying
+how many did.
 
 `close` takes a pane's tab along once nothing else holds the tab open, and the
 session where that is its only tab, as `d d` does. What it is given in a
@@ -1137,8 +1152,8 @@ nothing while the box is open. Nothing is kept: the next `a` starts afresh.
 
 The agent runs in safe mode, so none of your hooks, `CLAUDE.md` or MCP servers
 come into it, and in Claude Code's `dontAsk` permission mode, with Bash its only
-tool. It may run `luneta here`, `sessions`, `agents`, `open`, `go` and `close`,
-`zoxide query`, `gh issue` and `gh pr` `view` and `list`, `luneta worktree`,
+tool. It may run `luneta here`, `sessions`, `agents`, `open`, `go`, `turn` and
+`close`, `zoxide query`, `gh issue` and `gh pr` `view` and `list`, `luneta worktree`,
 which makes a worktree as the sidebar's paste does, and `git worktree add` and
 `list`, and what the permission rules of your own Claude Code settings let it.
 Those of the directory it runs in don't come into it, as a repository can
