@@ -43,8 +43,6 @@ picker over it with sessions, agents and directories tabs.
   machines tell you how its work goes, out of the speakers where you sit
 * Get a [notification](#notifications) when an agent on any of your machines
   wants you, gone as soon as it no longer does
-* Have your review skills [run in turn](#a-review-in-turn) on a new pull request,
-  each as you have acted on the last
 
 | `Tab` | list | `Enter` |
 |---|---|---|
@@ -673,8 +671,8 @@ own code, which luneta is built with, and opens a tab there, named `#123`, in
 the session that works in its repository: the one zellij is in, or else
 another, or else a session luneta makes in a clone of it that zoxide knows,
 named as the picker's directories name it. `r` does the
-same and starts a [review](#a-review-in-turn) of it in the tab, on
-`/thermo-nuclear-review` and the link, named for the branch. Where a pane has the pull request's
+same and starts Claude Code in the tab on `/thermo-nuclear-review` and the
+link, named for the skill and the branch. Where a pane has the pull request's
 branch checked out already, `w` takes zellij there, and `r` starts the agent
 beside it. A repository is the pull request's where any of its remotes is the
 pull request's repository on GitHub, by GitHub's name or, by ssh, another your
@@ -910,46 +908,6 @@ last typed in it. With
 read that key, and the sidebar takes it somewhere only once you have typed in
 the session it is in.
 
-### A review in turn
-
-`luneta review <link>` starts an agent on a pull request's review, and so does
-the `r` of its pasted link: three skills, one after the other, on that one
-agent, each given the link: `/thermo-nuclear-review`,
-`/make-illegal-states-unrepresentable` and `/tigerstyle`. The skill in
-[`skills/luneta`](skills/luneta/SKILL.md) has an agent run it right after `gh
-pr create`.
-
-A skill's turn ends with what it found, for you to read, and nothing goes until
-you have acted on it: ask for changes, and as that turn ends, the next skill
-goes. The agent's row says which skill it is on, as `2/3
-make-illegal-states-unrepresentable`, and what the next waits for: `you`; `next`
-as what is at work stops; `draft`, while you have something typed in the agent's
-prompt, which it would join; or `held`. `stuck` says that zellij has shown no
-prompt to write in, or would not write there, or that the transcript does not
-say who began a turn, and lunetad's log says why. The last skill's stop ends the
-review.
-
-| key | does |
-|---|---|
-| `r h` | holds the review, or goes on from a hold: nothing goes while you hold it |
-| `r n` | sends the next skill, with no turn of yours first: for a skill that found nothing |
-| `r s` | skips the next skill: skipping the last ends the review |
-
-Each key moves what you were shown. A review that has gone on since refuses
-`r n` and `r s`, and one whose next skill is on its way into the pane refuses
-`r h`, and the notes say so.
-
-What moves it on is a turn you began and let finish, as Claude Code's transcript
-says, and only that: a background task that wakes the agent is none, nor is a
-turn you interrupted or that an API error ended, and it waits for you again. So
-a question of yours moves it on too, as lunetad cannot tell it from the changes
-you asked for: hold it first. It goes five seconds after the agent stops, and
-only while the agent is idle: not at work, not running a background shell, not
-waiting on a question of its own.
-
-lunetad keeps a review, in memory, so it goes on with no luneta window open, and
-ends as lunetad restarts.
-
 ### Other machines
 
 The sidebar lists your other machines' sessions too, a header over each
@@ -1087,7 +1045,6 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta go S[:P]` | takes you to a session, or to a pane of one |
 | `luneta close S[:P]… [--yes PLAN]` | closes panes and deletes sessions |
 | `luneta here` | says which pane it runs in, as `S:P` |
-| `luneta review LINK` | starts a [review](#a-review-in-turn) of a pull request, on a new agent in its worktree |
 | `luneta say [TEXT]` | [reads it aloud](#read-aloud) on the machine you sit at, once what is before it has been |
 
 They are for a pane of zellij, where an agent runs, and take what it runs in

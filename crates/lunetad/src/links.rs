@@ -68,7 +68,7 @@ use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::program::{self, Ran};
-use crate::{git, github, names, zoxide, Destination, Directory, SessionName};
+use crate::{git, names, zoxide, Destination, Directory, SessionName};
 
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
@@ -693,14 +693,6 @@ pub enum Unready {
 }
 
 impl Unready {
-    /// What it says, of any.
-    #[must_use]
-    pub fn said(self) -> String {
-        match self {
-            Unready::Nowhere(why) | Unready::Failed(why) | Unready::InDoubt(why) => why,
-        }
-    }
-
     /// Why the daemon of `on` found nowhere for a key of the menu to go, as
     /// `status` says, before the answer's stream or in it: `Code::NotFound` is
     /// its machine having none of the repository, which a daemon older than
@@ -1372,14 +1364,6 @@ fn worktree_said(ran: Ran) -> Result<String, Unready> {
             MAKING.as_secs() / 60
         ))),
     }
-}
-
-/// The pull request of the branch checked out in `dir`, as gh says now, where
-/// it says one, for what cannot wait for the daemon's gh, which rests from a
-/// branch for a while. It asks GitHub, across the network.
-#[must_use]
-pub fn pull_request_in(dir: &str) -> Option<Link> {
-    Link::parse(&github::pull_request_in(dir).ok()??.url?)
 }
 
 /// The `luneta` that makes the worktree: the one this runs as, or else the

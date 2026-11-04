@@ -696,13 +696,6 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in makes no worktree"))
     }
 
-    async fn move_review(
-        &self,
-        _: Request<api::MoveReviewRequest>,
-    ) -> Result<Response<api::MoveReviewResponse>, Status> {
-        Err(Status::unimplemented("a stand-in keeps no review"))
-    }
-
     type KeepImageStream = tokio_stream::Empty<Result<KeepImageResponse, Status>>;
 
     async fn keep_image(

@@ -53,12 +53,11 @@ use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{
-    Agent, Client, Front, Harness, Host, NameSource, Pane, ReviewWaits, Saying, Session, Shell,
-    Status, UnreadFile, Zellij,
+    Agent, Client, Front, Harness, Host, NameSource, Pane, Saying, Session, Shell, Status,
+    UnreadFile, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::links;
-use lunetad::reviews::Move;
 use lunetad::transcripts::SessionId;
 use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
@@ -79,8 +78,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::Machine;
 use crate::menu::{
-    self, Briefed, Choice, Command, Did, Done, Hint, Menu, Opening, Opens, PaneRow, Ran, Reviewing,
-    Target, Top, Wants,
+    self, Briefed, Choice, Command, Did, Done, Hint, Menu, Opening, Opens, PaneRow, Ran, Target,
+    Top, Wants,
 };
 use crate::news::News;
 use crate::order::{Colour, Order};
@@ -428,70 +427,6 @@ fn initial(word: &str) -> Option<char> {
     (initial.width() == Some(MARK)).then_some(initial)
 }
 
-/// The review an agent runs, as its row shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReviewRow {
-    /// Which skill it is on, as `2/3 tigerstyle`.
-    on: String,
-    next: NextSkill,
-}
-
-/// What the next skill of a review waits for, as an agent's row says it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NextSkill {
-    /// Nothing to say: none is to go, or the skill it is on is at work, as its
-    /// mark says, and what it finds will be for you.
-    Nothing,
-    /// You: it goes as a turn of yours ends.
-    You,
-    /// You hold the review.
-    Held,
-    /// A moment: it goes as what is at work stops, or a stop is quiet.
-    Soon,
-    /// What you have typed in the agent's prompt.
-    Draft,
-    /// What lunetad cannot get past by itself, a prompt it finds no way to
-    /// write in, or a transcript that does not say who began a turn: its log
-    /// says why.
-    Stuck,
-}
-
-impl NextSkill {
-    /// The word its row says it in, by the end of the line, and its style.
-    fn word(self) -> (&'static str, Style) {
-        let dim = Style::new().add_modifier(Modifier::DIM);
-        match self {
-            NextSkill::Nothing => ("", dim),
-            NextSkill::You => ("you", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            NextSkill::Held => ("held", Style::new().fg(TAG)),
-            NextSkill::Soon => ("next", dim),
-            NextSkill::Draft => ("draft", Style::new().fg(TAG)),
-            NextSkill::Stuck => ("stuck", Style::new().fg(ERROR)),
-        }
-    }
-}
-
-impl ReviewRow {
-    /// The review `agent` runs, as its row shows it, if it runs one. A word
-    /// of a newer daemon's says nothing.
-    fn of(agent: &Agent) -> Option<Self> {
-        let review = agent.review.as_ref()?;
-        let skill = review.skill.strip_prefix('/').unwrap_or(&review.skill);
-        let on = format!("{}/{} {skill}", review.step, review.steps);
-        let next = review.next.as_ref().map_or(NextSkill::Nothing, |next| {
-            match ReviewWaits::try_from(next.waits) {
-                _ if next.held => NextSkill::Held,
-                Ok(ReviewWaits::You) => NextSkill::You,
-                Ok(ReviewWaits::Turn) => NextSkill::Soon,
-                Ok(ReviewWaits::Draft) => NextSkill::Draft,
-                Ok(ReviewWaits::Prompt | ReviewWaits::Transcript) => NextSkill::Stuck,
-                Ok(ReviewWaits::Skill | ReviewWaits::Unspecified) | Err(_) => NextSkill::Nothing,
-            }
-        });
-        Some(ReviewRow { on, next })
-    }
-}
-
 /// What a pane's row marks, as it shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Marked {
@@ -658,8 +593,6 @@ enum Row {
         hits: Vec<usize>,
         /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
-        /// The review its agent runs.
-        review: Option<ReviewRow>,
         /// Where it sits among the panes listed of its tab, if it shares it,
         /// and the colour of its session, which the bracket is drawn in.
         bracket: Option<(Bracket, Color)>,
@@ -751,13 +684,10 @@ impl Row {
         }
     }
 
-    /// How many lines it takes: a pane in a repository has its branch under
-    /// it, and an agent on a review which skill it is on.
+    /// How many lines it takes: a pane in a repository has its branch under it.
     fn height(&self) -> usize {
         match self {
-            Row::Pane { checkout, review, .. } => {
-                1 + usize::from(checkout.is_some()) + usize::from(review.is_some())
-            },
+            Row::Pane { checkout: Some(_), .. } => 2,
             _ => 1,
         }
     }
@@ -1014,8 +944,6 @@ pub enum Asked {
     Nothing,
     /// Take zellij's client to `place`, on `on`.
     Go { on: Machine, place: Place },
-    /// Move the review of the agent `pid`, on `on`.
-    Review { on: Machine, pid: u32, does: Move },
     /// Take the focus from zellij, as a click on the sidebar does.
     Take,
     /// Put this on the clipboard of luneta's terminal.
@@ -2284,7 +2212,6 @@ impl Sidebar {
                     let here = on && here_pane.as_ref() == Some(&place);
                     let icon = program.and_then(icons::of);
                     let (machine, session) = (machine.clone(), listed.clone());
-                    let review = agent(pane.id).and_then(ReviewRow::of);
                     let speaks = aloud.is_some_and(|(on, named, id)| {
                         *on == machine && named == session.name().as_str() && id == pane.id
                     });
@@ -2299,7 +2226,6 @@ impl Sidebar {
                         label,
                         hits: hits.unwrap_or_default(),
                         checkout,
-                        review,
                         bracket,
                         speaks,
                     };
@@ -2909,12 +2835,7 @@ impl Sidebar {
         let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
         let branch = checkout.map(|checkout| checkout.branch);
         let ran = self.ran_in(machine, &session, pane);
-        let agent = agents.as_ref().and_then(|agents| agents.get(&(session.name.as_str(), pane)));
-        let reviewing = agent.and_then(|agent| {
-            let next = agent.review.as_ref()?.next.as_ref()?;
-            Some(Reviewing { pid: agent.pid, next: next.skill.clone(), held: next.held })
-        });
-        Target::Pane(machine.clone(), PaneRow { session, pane, cwd, branch, ran, reviewing })
+        Target::Pane(machine.clone(), PaneRow { session, pane, cwd, branch, ran })
     }
 
     /// What the shell in the pane `pane` of `session`, of `machine`, said it
@@ -3088,7 +3009,6 @@ impl Sidebar {
                     Done::Ask(target) => Asked::Ask(target),
                     Done::Ssh(destination) => Asked::Ssh(destination),
                     Done::Forget(destination) => Asked::Forget(destination),
-                    Done::Review(on, pid, does) => Asked::Review { on, pid, does },
                 };
             },
         };
@@ -3194,10 +3114,31 @@ impl Sidebar {
             };
         };
         let here = self.here().filter(|_| self.on == *on);
+        let agents = seated(seen.agents, seen.sessions);
+        let pulls = pull_requests(seen.pull_requests);
         let (mut sessions, _) = oldest_first(seen.sessions);
         // In the order you moved them to, as their rows go.
         self.order.sessions(on, &mut sessions, |(listed, _)| listed.name.as_str());
-        Ok(worked_in(sessions, seen.agents, seen.sessions, seen.pull_requests, here))
+        let mut worked = Vec::new();
+        for (listed, session) in sessions {
+            let mut panes: Vec<&Pane> =
+                session.panes.iter().flat_map(|panes| &panes.panes).collect();
+            panes.sort_by_key(|pane| (pane.tab, pane.id));
+            for pane in panes {
+                let dir = match agents.get(&(session.name.as_str(), pane.id)) {
+                    Some(agent) => Some(agent_dir(agent, pane)),
+                    None => pane.cwd.as_deref(),
+                };
+                let Some(dir) = dir else {
+                    continue;
+                };
+                let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
+                let here = here == Some(session.name.as_str());
+                let it = links::Worked { dir: dir.to_owned(), pull, here };
+                worked.push(Worked { session: listed.clone(), pane: pane.id, works: it });
+            }
+        }
+        Ok(worked)
     }
 
     /// Each machine other than `on`, in the order of the rows, with what
@@ -4353,7 +4294,7 @@ fn may_hold(session: &Session) -> bool {
 /// The sessions the daemon lists, as the sidebar tells them apart, oldest
 /// first, so that a row never moves under your eye or your mouse but as you
 /// move it; and how many it lists that `Listed` leaves out.
-pub fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
+fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
     let mut listed: Vec<(Listed, &Session)> = sessions
         .iter()
         .filter_map(|session| Some((Listed::of(session)?, session)))
@@ -4776,9 +4717,7 @@ fn row_lines(
             }
             (vec![Line::from(spans)], None)
         },
-        Row::Pane {
-            here, unread, marked, icon, label, hits, checkout, review, bracket, speaks, ..
-        } => {
+        Row::Pane { here, unread, marked, icon, label, hits, checkout, bracket, speaks, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
@@ -4828,10 +4767,6 @@ fn row_lines(
                 let link = checkout.pull_request.as_ref().and_then(Numbered::link);
                 let number_at = |(columns, link)| NumberAt { line: at, columns, link };
                 number = columns.zip(link).map(number_at);
-            }
-            if let Some(review) = review {
-                let at = lines.len();
-                lines.push(review_line(*here, gutter(*bracket, at, height), review, width));
             }
             (lines, number)
         },
@@ -4979,64 +4914,6 @@ fn checkout_line(
     spans.push(Span::raw(" ".repeat(gap)));
     spans.push(Span::raw(status.clone()));
     (Line::from(spans), columns)
-}
-
-/// The panes of `listed`, among `all` the sessions of a machine and its
-/// `agents` and `pull_requests`, in their order, as luneta knows them for a
-/// link: each where its agent works, or where it works, by its tab, and with
-/// the session it is in told by `here`.
-pub fn worked_in(
-    listed: Vec<(Listed, &Session)>,
-    agents: &[Agent],
-    all: &[Session],
-    pull_requests_of: &[lunetad::api::PullRequest],
-    here: Option<&str>,
-) -> Vec<Worked> {
-    let agents = seated(agents, all);
-    let pulls = pull_requests(pull_requests_of);
-    let mut worked = Vec::new();
-    for (listed, session) in listed {
-        let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
-        panes.sort_by_key(|pane| (pane.tab, pane.id));
-        for pane in panes {
-            let dir = match agents.get(&(session.name.as_str(), pane.id)) {
-                Some(agent) => Some(agent_dir(agent, pane)),
-                None => pane.cwd.as_deref(),
-            };
-            let Some(dir) = dir else {
-                continue;
-            };
-            let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
-            let here = here == Some(session.name.as_str());
-            let it = links::Worked { dir: dir.to_owned(), pull, here };
-            worked.push(Worked { session: listed.clone(), pane: pane.id, works: it });
-        }
-    }
-    worked
-}
-
-/// The line under a pane's row for the agent's review, `width` wide: which
-/// skill it is on, and at the end what the next waits for, which is cut last.
-/// The mark of the pane luneta's zellij is on, `here`, runs down it too, and
-/// the `gutter` after it.
-fn review_line(
-    here: bool,
-    gutter: Span<'static>,
-    review: &ReviewRow,
-    width: usize,
-) -> Line<'static> {
-    let (word, style) = review.next.word();
-    let reserve = if word.is_empty() { 0 } else { word.width() + 1 };
-    let skill = cut(&review.on, width.saturating_sub(LABEL + reserve + 1));
-    let gap = width.saturating_sub(LABEL + skill.width() + word.width() + 1);
-    Line::from(vec![
-        margin(here),
-        gutter,
-        Span::raw(" ".repeat(LABEL - 2)),
-        Span::styled(skill, Style::new().fg(gruvbox::GREY)),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(word, style),
-    ])
 }
 
 /// `text` cut to `room` columns, with a `…` for what it took.
@@ -5188,90 +5065,6 @@ mod tests {
         sidebar.folds.contains(Fold::Session(&Machine::Local, &session_name(name)))
     }
 
-    /// A review on the skill `step` of 3, with `waits` for what the next
-    /// waits for, and none to go after the last.
-    fn review(step: u32, waits: ReviewWaits, held: bool) -> api::Review {
-        let skills = lunetad::reviews::SKILLS;
-        api::Review {
-            step,
-            steps: 3,
-            skill: skills[step as usize - 1].to_owned(),
-            next: skills.get(step as usize).map(|skill| api::review::Next {
-                skill: (*skill).to_owned(),
-                waits: waits.into(),
-                held,
-            }),
-        }
-    }
-
-    /// An agent on a review has a line under its row that says which skill
-    /// it is on, and, by the end, what the next waits for: you, a moment,
-    /// your draft, or what lunetad cannot get past. It says nothing while the skill
-    /// is at work, as the mark says that, nor once none is left to go; and
-    /// that you hold it, whatever else it waits for. A word of a newer daemon's
-    /// says nothing.
-    #[test]
-    fn an_agent_s_row_says_which_skill_of_its_review_it_is_on() {
-        let with = |review| Agent { review: Some(review), ..agent("s", 1, Status::Idle, None) };
-        let next = |waits, held| ReviewRow::of(&with(review(2, waits, held))).unwrap().next;
-        assert_eq!(next(ReviewWaits::Skill, false), NextSkill::Nothing);
-        assert_eq!(next(ReviewWaits::You, false), NextSkill::You);
-        assert_eq!(next(ReviewWaits::Turn, false), NextSkill::Soon);
-        assert_eq!(next(ReviewWaits::Draft, false), NextSkill::Draft);
-        assert_eq!(next(ReviewWaits::Prompt, false), NextSkill::Stuck);
-        assert_eq!(next(ReviewWaits::Transcript, false), NextSkill::Stuck);
-        assert_eq!(next(ReviewWaits::You, true), NextSkill::Held);
-        let last = ReviewRow::of(&with(review(3, ReviewWaits::You, true))).unwrap();
-        assert_eq!(last, ReviewRow { on: "3/3 tigerstyle".to_owned(), next: NextSkill::Nothing });
-        let mut newer = review(2, ReviewWaits::You, false);
-        newer.next.as_mut().unwrap().waits = 99;
-        assert_eq!(ReviewRow::of(&with(newer)).unwrap().next, NextSkill::Nothing);
-        assert_eq!(ReviewRow::of(&agent("s", 1, Status::Idle, None)), None);
-
-        let mut sidebar = fresh();
-        let on = with(review(2, ReviewWaits::You, false));
-        let panes = vec![pane(1, 0, "/w/luneta/main", "claude"), pane(2, 0, "/w/a", "fish")];
-        sidebar.heard(host(vec![session("s", 10, panes)], vec![on]));
-        sidebar.titled("s | fish".to_owned());
-        let now = moment(160_000);
-        sidebar.ticked(now, steady(now), true);
-        let lines = seen_at(&mut sidebar, false, 32, 8, now).0;
-        // The tab's bracket runs down it, as it does down a branch's line.
-        assert_eq!(lines[6], " │     2/3 make-illegal-s… you", "{lines:?}");
-        assert_eq!(lines[7], " ╰   \u{e795} w/a", "{lines:?}");
-    }
-
-    /// The menu for the row of an agent on a review keys it by the agent's
-    /// pid, with what it needs to say what its keys do; one with no skill to
-    /// go has no use for the group.
-    #[test]
-    fn the_menu_knows_the_review_of_its_row_s_agent() {
-        let mut sidebar = fresh();
-        let mut on = agent("s", 1, Status::Idle, None);
-        on.review = Some(review(2, ReviewWaits::You, true));
-        let panes = vec![pane(1, 0, "/w/luneta/main", "claude")];
-        sidebar.heard(host(vec![session("s", 10, panes.clone())], vec![on.clone()]));
-        sidebar.titled("s | fish".to_owned());
-        let now = moment(160_000);
-        sidebar.ticked(now, steady(now), true);
-        sidebar.focus(Keys::Sidebar);
-        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        sidebar.key(&down, now);
-        sidebar.key(&char('r'), now);
-        let reviewing = Reviewing { pid: 1, next: "/tigerstyle".to_owned(), held: true };
-        let Some(Target::Pane(_, row)) = sidebar.menu.as_ref().map(Menu::target) else {
-            panic!("no menu for the pane's row");
-        };
-        assert_eq!(row.reviewing, Some(reviewing));
-        let asked = sidebar.key(&char('h'), now);
-        assert_eq!(asked, Asked::Review { on: Machine::Local, pid: 1, does: Move::Resume });
-
-        on.review = Some(review(3, ReviewWaits::Skill, false));
-        sidebar.heard(host(vec![session("s", 10, panes)], vec![on]));
-        assert_eq!(sidebar.key(&char('r'), now), Asked::Nothing);
-        assert!(sidebar.menu.is_none());
-    }
-
     /// Folds this machine's session `name`, as another luneta would.
     fn fold(sidebar: &mut Sidebar, name: &str) {
         sidebar.folds.set(Fold::Session(&Machine::Local, &session_name(name)), true);
@@ -5294,7 +5087,6 @@ mod tests {
                 pane,
             }),
             waiting_for: None,
-            review: None,
         }
     }
 
@@ -7883,7 +7675,7 @@ mod tests {
         assert_eq!(lines[12..], [
             "─ #5 ────── lorenzolfm/luneta ─",
             " w  worktree",
-            " r  review",
+            " r  /thermo-nuclear-review",
             " <ESC> - Close",
         ]);
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
@@ -8127,7 +7919,6 @@ mod tests {
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             ran: Ran::Unhooked,
-            reviewing: None,
         })));
 
         let (older, cwd) = (session_name("older"), "/w/luneta/main".to_owned());
@@ -9124,8 +8915,7 @@ mod tests {
         type_in(&mut sidebar, "mn");
         let on = Machine::Remote(nixos());
         let (session, cwd) = (listed("main", 20), Some("/w/b".to_owned()));
-        let ran = Ran::Unhooked;
-        let row = PaneRow { session, pane: 1, cwd, branch: None, ran, reviewing: None };
+        let row = PaneRow { session, pane: 1, cwd, branch: None, ran: Ran::Unhooked };
         let menu = sidebar.menu.as_ref().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
         let number = menu.number();
