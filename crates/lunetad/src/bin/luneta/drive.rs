@@ -32,15 +32,20 @@ use std::env;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Component, Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::SystemTime;
 
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{Turn, User};
+use lunetad::cli::quiet;
+use lunetad::links::{self, At, Link, Pasted, Ready};
+use lunetad::{clients, reviews};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
+use crate::pull::Worked;
+use crate::sidebar::{self, Listed};
 use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
 
 /// A session, or a pane of one, as the CLI names them: `<session>`, or
@@ -390,6 +395,89 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
         zellij::taken(&at, to.session(), pane)
     });
     said(went.map(|()| String::new()))
+}
+
+/// A pull request's page, as `review` takes it.
+pub fn pull_request(spelled: &str) -> Result<Link, String> {
+    reviews::pull_request(spelled)
+        .ok_or_else(|| format!("{spelled} is no pull request's page on GitHub"))
+}
+
+/// Starts a review of the pull request `link`, and says the pane of its
+/// agent. What runs in the pane this runs in, and the panes that work in its
+/// repository, lunetad in `folder` says.
+pub fn review(link: &Link, folder: &Path) -> ExitCode {
+    said(reviewing(link, folder))
+}
+
+/// Opens an agent on the first skill of a review of `link`, as `Pull::Agent`
+/// of the menu has one opened: beside a pane that has its branch checked out,
+/// as the agent that opened it does, or in a tab of a session that works in
+/// its repository, with nobody moved. It opens a pane in a session no client
+/// is in, as no tab has room there; and makes no session, as that would take
+/// you there: it says what would.
+fn reviewing(link: &Link, folder: &Path) -> Result<String, String> {
+    let host = commands::current_host(folder)?;
+    let running = zellij::running()?;
+    let here = seat(Some(&host.agents), &running).ok().and_then(|seat| seat.pane().ok().flatten());
+    let session = here.as_ref().map(|pane| pane.session.as_str());
+    let (sessions, _) = sidebar::oldest_first(&host.sessions);
+    let mut worked =
+        sidebar::worked_in(sessions, &host.agents, &host.sessions, &host.pull_requests, session);
+    if let Some(here) = &here {
+        asks_gh_here(&mut worked, link, here);
+    }
+    let apart = |Worked { session, pane, works }| ((session, pane), works);
+    let (panes, worked): (Vec<(Listed, u32)>, Vec<_>) = worked.into_iter().map(apart).unzip();
+    let ready = Pasted::new(link.clone(), worked).ready()?;
+    let ready = ready.placed(&panes).map_err(|at| format!("no pane {at} was asked of"))?;
+    let Ready { at, worktree: cwd, branch } = ready;
+    let command = reviews::command(link, branch.as_deref());
+    let open = match at {
+        At::There((session, beside)) => {
+            Open::Pane { session: session.name().clone(), beside, cwd, command }
+        },
+        At::Session((session, beside)) => {
+            let session = session.name().clone();
+            let mut asks = Command::new("zellij");
+            quiet(&mut asks);
+            if clients::list(asks, session.as_str()).is_ok_and(|clients| !clients.is_empty()) {
+                let tab = Tab { cwd, name: Some(link.tab()), command };
+                Open::Tab { session, tab, alone_since: None }
+            } else {
+                Open::Pane { session, beside, cwd, command }
+            }
+        },
+        At::Clone { cwd, .. } => {
+            return Err(format!(
+                "no session works in the repository of {link}: `luneta open session --cwd {cwd}` \
+                 makes one, and takes the user there; run this again in it"
+            ));
+        },
+    };
+    let session = match &open {
+        Open::Pane { session, .. } | Open::Tab { session, .. } => session.to_string(),
+    };
+    let opened = zellij::opening(&open)?.terminal;
+    Ok(Pane { session, pane: opened }.to_string())
+}
+
+/// Has gh say the pull request of the pane this runs in, `here`, among `worked`,
+/// where no pane has `link`'s: this runs right after `gh pr create`, and
+/// lunetad's gh rests from a branch for a minute. Only a pane that has it goes
+/// by it in a clone git made, in whose `.git` wt would make a worktree. Where gh
+/// does not say, `Pasted::ready` finds what it can without.
+fn asks_gh_here(worked: &mut [Worked], link: &Link, here: &Pane) {
+    let has_it = |it: &Worked| it.works.pull.as_ref().is_some_and(|pull| pull.is(link));
+    if worked.iter().any(has_it) {
+        return;
+    }
+    let is_here = |it: &&mut Worked| {
+        it.pane == here.pane && it.session.name().as_str() == here.session
+    };
+    if let Some(it) = worked.iter_mut().find(is_here) {
+        it.works.pull = links::pull_request_in(&it.works.dir);
+    }
 }
 
 /// What a close exits with where it closes nothing, as it was not told yes to

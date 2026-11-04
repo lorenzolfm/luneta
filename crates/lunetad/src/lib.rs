@@ -34,6 +34,7 @@ pub mod program;
 pub mod release;
 mod remote;
 pub mod renames;
+pub mod reviews;
 pub mod screens;
 mod shells;
 pub mod skills;

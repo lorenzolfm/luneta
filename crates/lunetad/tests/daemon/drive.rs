@@ -11,8 +11,9 @@ use std::process::Output;
 use serde_json::json;
 
 use crate::agents::{file_for, now_in, process, Host};
-use crate::host::{answered, eventually, start, LUNETA};
+use crate::host::{self, answered, eventually, start, LUNETA};
 use crate::sessions::listed;
+use crate::worktree::git;
 
 /// The CLI, run with `args` in the pane `here`, as an agent there runs it.
 fn luneta(host: &Host, here: (&str, u32), args: &[&str]) -> Output {
@@ -250,6 +251,53 @@ fn what_goes_by_the_session_it_runs_in_refuses_where_none_runs_by_its_name() {
 fn asked(host: &Host, vars: &[(&str, &str)], args: &[&str]) -> Output {
     let mut command = host.vars().command(LUNETA);
     answered(command.envs(vars.iter().copied()).args(args))
+}
+
+/// `luneta review` opens an agent on the first skill of a review, beside the
+/// pane it runs in, which has the pull request's branch checked out, with
+/// nobody moved, and says which it is; the agent carries the review for
+/// lunetad to find. It goes right after `gh pr create`, which lunetad's gh rests
+/// from hearing of for a minute, and in a clone git made, which wt would make
+/// no worktree in. It takes a pull request's page alone.
+#[test]
+fn a_review_opens_an_agent_beside_the_pane_on_the_pull_request_s_branch() {
+    const LINK: &str = "https://github.com/o/app/pull/7";
+    let host = host::Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    // As the kernel says a directory, by its real path, as on macOS, where
+    // the temporary folder is through a link.
+    let tree = scratch.path().canonicalize().unwrap().join("app");
+    fs::create_dir(&tree).unwrap();
+    git(&tree, &["init", "-q", "-b", "feat"]);
+    git(&tree, &["commit", "-q", "--allow-empty", "-m", "one"]);
+    git(&tree, &["remote", "add", "origin", "https://github.com/o/app.git"]);
+    let spelled = tree.display().to_string();
+    host.zellij.list("work", &json!([listed(2, "claude", (0, "Tab #1"), Some(&spelled))]));
+    let _work = host.serve("work");
+    let _daemon = host::start(host.vars()).unwrap();
+    host::eventually("lunetad's gh has asked of the branch", || {
+        (!host.gh.asked().is_empty()).then_some(())
+    });
+    host.gh.open("feat", &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": LINK }));
+
+    let review = |link: &str| {
+        let mut command = host.vars().command(host::LUNETA);
+        command.env("ZELLIJ_SESSION_NAME", "work").env("ZELLIJ_PANE_ID", "2");
+        answered(command.args(["review", link]))
+    };
+    let opened = review(LINK);
+    assert!(opened.status.success(), "{}", String::from_utf8_lossy(&opened.stderr));
+    assert_eq!(String::from_utf8_lossy(&opened.stdout), "work:9\n");
+    let asked = host.zellij.opened();
+    assert_eq!(asked, [format!(
+        "2 --session work action new-pane --no-focus --cwd {spelled} -- env LUNETA_REVIEW={LINK} \
+         claude --name review: feat /thermo-nuclear-review {LINK}"
+    )]);
+
+    let refused = review("https://github.com/o/app/issues/7");
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("no pull request's page"));
+    assert_eq!(host.zellij.opened().len(), 1);
 }
 
 /// The agent luneta's ask box runs is in no pane, and goes by the pane you

@@ -8,12 +8,16 @@ use luneta_protocol::said::Said;
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
+use crate::links::Link;
 use crate::zellij::Sessions;
 
 /// An agent that runs on the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: u32,
+    /// When its process started, as the system says it: the system can give
+    /// its pid to another once it has ended.
+    pub start: String,
     /// The agent's own id for its session.
     pub session_id: Said,
     /// Where it works.
@@ -27,6 +31,8 @@ pub struct Agent {
     pub entrypoint: Option<Said>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
+    /// The pull request of the review its environment says it runs, if any.
+    pub review: Option<Link>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,7 +173,7 @@ impl Agent {
     /// The agent as the API gives it, in the session `sessions` say its pane
     /// is in now.
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions) -> api::Agent {
+    pub fn to_api(&self, sessions: &Sessions, review: Option<api::Review>) -> api::Agent {
         // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
         // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
@@ -212,6 +218,7 @@ impl Agent {
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
+            review,
         }
     }
 }

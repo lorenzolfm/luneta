@@ -85,28 +85,32 @@ enum Answer {
     Moved,
 }
 
-/// What gh says of the pull request of `branch`, checked out in `dir`: the
-/// one it finds, or none, or that `branch` is no longer checked out there.
-/// When gh did not say, as it is not logged in, or did not answer in time,
-/// what is to be said of it instead.
+/// What gh says of the pull request of the branch checked out in `dir`: the
+/// one it finds, or none. When gh did not say, as it is not logged in, or did
+/// not answer in time, what is to be said of it instead.
 ///
 /// gh finds it as it does in a shell in `dir`: by the work tree's remotes,
-/// and the branch's config for where it pushes the branch. It reads what is
-/// checked out as it starts, where git can have last looked a sweep before,
-/// so what is checked out is read again once gh has answered.
-fn view(dir: &str, branch: &str) -> Result<Answer, String> {
+/// and the branch's config for where it pushes the branch.
+pub fn pull_request_in(dir: &str) -> Result<Option<PullRequest>, String> {
     let mut gh = Command::new("gh");
     git::local(gh.args(["pr", "view", "--json", VIEWED]).current_dir(dir));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh pr view in {dir} could not be run: {error}"))?;
-    let found = match ran.answer() {
-        Ok(said) => Some(
-            parse(&said)
-                .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}"))?,
-        ),
-        Err(why) if why.starts_with(NONE) => None,
-        Err(why) => return Err(format!("gh pr view in {dir}: {why}")),
-    };
+    match ran.answer() {
+        Ok(said) => parse(&said)
+            .map(Some)
+            .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}")),
+        Err(why) if why.starts_with(NONE) => Ok(None),
+        Err(why) => Err(format!("gh pr view in {dir}: {why}")),
+    }
+}
+
+/// What gh says of the pull request of `branch`, checked out in `dir`, as
+/// `pull_request_in` does, or that `branch` is no longer checked out there. gh
+/// reads what is checked out as it starts, where git can have last looked a
+/// sweep before, so what is checked out is read again once gh has answered.
+fn view(dir: &str, branch: &str) -> Result<Answer, String> {
+    let found = pull_request_in(dir)?;
     if git::branch(dir).as_deref() != Some(branch) {
         return Ok(Answer::Moved);
     }

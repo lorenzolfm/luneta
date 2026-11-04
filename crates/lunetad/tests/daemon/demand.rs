@@ -672,6 +672,13 @@ impl Daemon for StandIn {
     async fn paste(&self, _: Request<PasteRequest>) -> Result<Response<Self::PasteStream>, Status> {
         Err(Status::unimplemented("a stand-in makes no worktree"))
     }
+
+    async fn move_review(
+        &self,
+        _: Request<api::MoveReviewRequest>,
+    ) -> Result<Response<api::MoveReviewResponse>, Status> {
+        Err(Status::unimplemented("a stand-in keeps no review"))
+    }
 }
 
 /// The daemon ends once zellij has had no session, and no client has watched

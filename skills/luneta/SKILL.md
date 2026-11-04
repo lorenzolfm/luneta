@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, and close panes or delete sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, or close sessions, tabs or panes, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), start a review of a new pull request, take the user to a session or pane, and close panes or delete sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, or close sessions, tabs or panes, and right after you open a pull request with `gh pr create`, when `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -34,7 +34,7 @@ zoxide query -l   # the directories the user works in, most used first; `zoxide 
 
 `sessions` and `agents` need lunetad, which luneta starts. The verbs below ask
 zellij themselves and work without it. Only `close` then can't tell which
-agents end.
+agents end, and `review` starts it, as it keeps the review.
 
 `here`, `go`, `open session`, `close`, and `open pane`/`open tab` without
 `--beside`/`--session` need to know which session you run in. If your session
@@ -49,6 +49,7 @@ luneta open tab [--session <session>] [--cwd <dir>] [--name <name>] [-- <command
 luneta open session [--cwd <dir>] [--name <name>]
 luneta go <session>[:<pane>]
 luneta close <session>[:<pane>]... [--yes <plan>]
+luneta review <pull request link>
 ```
 
 - `open pane` opens beside your pane by default, in its tab. `open tab` opens
@@ -108,6 +109,23 @@ own, or they edit the same files:
 Find the pane whose branch is the PR's in `luneta sessions` and open a pane
 beside it. If no pane has the branch, make a worktree for the PR (`luneta
 worktree --repo <dir> <PR link>` takes a link), then open a tab there.
+
+## Right after you open a pull request
+
+Right after `gh pr create`, start its review, with the link it printed:
+
+```sh
+luneta review https://github.com/o/app/pull/42
+```
+
+It opens a new agent beside you, in the pull request's worktree, on the first
+of the user's review skills, with nobody moved, and prints its pane as
+`<session>:<pane>`. lunetad sends that agent the next skill each time it stops
+after the user has acted on the last. Tell the user which pane it opened. Don't
+run the skills yourself, and don't send that agent anything.
+
+Run it once per pull request, for one you opened, and not when the user tells
+you not to. If it fails, say why, and leave it to the user.
 
 ## New session to work on X
 

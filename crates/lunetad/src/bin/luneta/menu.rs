@@ -37,6 +37,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
+use lunetad::reviews::{self, Move, SKILLS as REVIEW_SKILLS};
 use lunetad::Destination;
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
@@ -72,18 +73,28 @@ const ASK_DOES: &str = "Ask";
 const SKILLS: char = 'c';
 const SKILLS_NAME: &str = "Claude";
 const SKILL_KEYS: [(char, &str); 3] = [
-    ('t', REVIEW),
-    ('m', "/make-illegal-states-unrepresentable"),
-    ('s', "/tigerstyle"),
+    ('t', REVIEW_SKILLS[0]),
+    ('m', REVIEW_SKILLS[1]),
+    ('s', REVIEW_SKILLS[2]),
 ];
 
-/// The skill an agent reviews a pull request with: the Claude group's `t`,
-/// and the `r` of the menu for a pull request, which gives it the link.
-const REVIEW: &str = "/thermo-nuclear-review";
+/// What the `r` of the menu for a pull request says it does: it starts an
+/// agent on a review of it, the skills above in turn.
+const REVIEW_DOES: &str = "review";
 
 /// What the `t` of the menu for an issue tells an agent, before the link: in
 /// words, as you would, with no skill.
 const TACKLE: &str = "Tackle";
+
+/// The key of the Review group, for the row of an agent on a review, and its
+/// name.
+const REVIEW: char = 'r';
+const REVIEW_NAME: &str = "Review";
+
+/// The keys of the Review group.
+const REVIEW_HOLD: char = 'h';
+const REVIEW_NEXT: char = 'n';
+const REVIEW_SKIP: char = 's';
 
 /// The key of luneta's own New group, and its name.
 const NEW: char = 'n';
@@ -246,7 +257,8 @@ const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
         let key = Command::ALL[at].key();
-        let group = key == ASK || key == SKILLS || key == NEW || key == DELETE || key == BRIEF;
+        let group = key == ASK || key == SKILLS || key == REVIEW || key == NEW || key == DELETE
+            || key == BRIEF;
         assert!(!group, "a command on a key of luneta's groups");
         assert!(Top::moves(key).is_none(), "a command on a key the sidebar moves with");
         at += 1;
@@ -376,7 +388,7 @@ impl Pull {
     const fn does(self, kind: Kind) -> &'static str {
         match (self, kind) {
             (Pull::Worktree, _) => "worktree",
-            (Pull::Agent, Kind::Pull) => REVIEW,
+            (Pull::Agent, Kind::Pull) => REVIEW_DOES,
             (Pull::Agent, Kind::Issue) => "tackle",
         }
     }
@@ -400,6 +412,8 @@ enum Entry {
     /// A key of the Claude group: starts an agent on what the command the
     /// pane's shell ran last printed.
     Last(Last),
+    /// A key of the Review group: moves the review, as `says` says.
+    Review { key: char, does: Move, says: String },
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
     /// A key of the Delete group: closes the pane the menu is for, or deletes
@@ -425,7 +439,10 @@ enum Entry {
 impl Entry {
     fn key(&self) -> char {
         match self {
-            Entry::Group { key, .. } | Entry::Start { key, .. } | Entry::Close { key, .. } => *key,
+            Entry::Group { key, .. }
+            | Entry::Start { key, .. }
+            | Entry::Review { key, .. }
+            | Entry::Close { key, .. } => *key,
             Entry::Forget(_) => DELETE_ROW,
             Entry::New(new) => new.key(),
             Entry::Last(last) => last.key(),
@@ -450,6 +467,8 @@ enum Pressed {
     Start(String),
     /// Starts an agent on what the pane's shell printed last.
     Last(Last),
+    /// Moves the review the menu's row's agent runs.
+    Review(Move),
     /// Opens a pane, a tab or a session.
     New(New),
     /// Closes the pane the menu is for, or deletes its session, `session`,
@@ -485,10 +504,12 @@ impl Keys {
     /// what the menu is for, as `removes` says, and `d s` deletes its
     /// session, or on a machine's header `d d` alone forgets the machine, and
     /// `b z`, `b s` and `b h` brief you on every session, its session and
-    /// what the menu is for, or on a machine's header, its sessions.
-    fn new(removes: Removes) -> Self {
+    /// what the menu is for, or on a machine's header, its sessions. On the
+    /// row of an agent on a review with a skill still to go, `r h` holds it,
+    /// or goes on from a hold, `r n` sends the next skill and `r s` skips it.
+    fn new(removes: Removes, reviewing: Option<&Reviewing>) -> Self {
         let start = |(key, prompt)| Entry::Start { key, prompt };
-        let root = vec![
+        let mut root = vec![
             Entry::Search,
             Entry::Ask,
             Entry::Group {
@@ -500,6 +521,13 @@ impl Keys {
                     .chain(Last::ALL.map(Entry::Last))
                     .collect(),
             },
+        ];
+        root.extend(reviewing.map(|reviewing| Entry::Group {
+            key: REVIEW,
+            name: REVIEW_NAME,
+            entries: reviewing.entries(),
+        }));
+        root.extend([
             Entry::Group {
                 key: NEW,
                 name: NEW_NAME,
@@ -521,7 +549,7 @@ impl Keys {
                 name: BRIEF_NAME,
                 entries: brief::Scope::ALL.into_iter().map(Entry::Brief).collect(),
             },
-        ];
+        ]);
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -532,7 +560,8 @@ impl Keys {
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
-        root.extend(Keys::new(Removes::Machine(Machine::Local)).root.into_iter().filter(shown));
+        let keys = Keys::new(Removes::Machine(Machine::Local), None);
+        root.extend(keys.root.into_iter().filter(shown));
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -591,6 +620,7 @@ impl Keys {
         match &entries[at] {
             Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
             Entry::Last(last) => return Pressed::Last(*last),
+            Entry::Review { does, .. } => return Pressed::Review(does.clone()),
             Entry::New(new) => return Pressed::New(*new),
             Entry::Close { key, session, scope } => {
                 return Pressed::Delete { key: *key, session: session.clone(), scope: *scope };
@@ -763,6 +793,38 @@ pub struct PaneRow {
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub ran: Ran,
+    /// The review its agent runs, where a skill is still to go: the Review
+    /// group's keys have nothing to do on the last.
+    pub reviewing: Option<Reviewing>,
+}
+
+/// A review the agent of the menu's row runs, for the Review group's keys: by
+/// the agent's pid, as the daemon of its machine keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reviewing {
+    pub pid: u32,
+    /// The skill that goes next.
+    pub next: String,
+    /// You hold it.
+    pub held: bool,
+}
+
+impl Reviewing {
+    /// The Review group's keys, each saying what it does to this one.
+    fn entries(&self) -> Vec<Entry> {
+        let (hold, says) = if self.held {
+            (Move::Resume, "go on".to_owned())
+        } else {
+            (Move::Hold, "hold".to_owned())
+        };
+        let next = format!("send {}", self.next);
+        let skip = format!("skip {}", self.next);
+        vec![
+            Entry::Review { key: REVIEW_HOLD, does: hold, says },
+            Entry::Review { key: REVIEW_NEXT, does: Move::Next(self.next.clone()), says: next },
+            Entry::Review { key: REVIEW_SKIP, does: Move::Skip(self.next.clone()), says: skip },
+        ]
+    }
 }
 
 /// What the shell in the pane of the menu's row said last through luneta's
@@ -833,6 +895,14 @@ impl Target {
                 Removes::Row { session: row.session.clone(), scope: Scope::Pane(row.pane) }
             },
             Target::Machine(machine) => Removes::Machine(machine.clone()),
+        }
+    }
+
+    /// The review the agent of its row runs, where one has a skill to go.
+    fn reviewing(&self) -> Option<&Reviewing> {
+        match self {
+            Target::Pane(_, row) => row.reviewing.as_ref(),
+            Target::Session(..) | Target::Machine(_) => None,
         }
     }
 
@@ -1043,6 +1113,8 @@ pub enum Done {
     Ssh(Destination),
     /// Have lunetad stop watching this machine.
     Forget(Destination),
+    /// Move the review of the agent `pid`, on the machine.
+    Review(Machine, u32, Move),
 }
 
 /// What a key of the Brief group briefs you on, by the row the menu was for.
@@ -1152,7 +1224,7 @@ impl Menu {
     /// group leaves the sidebar to do. None, and no menu, for a key the menu
     /// has not.
     pub fn open(number: u64, target: Target, key: Option<char>) -> Option<Did> {
-        let keys = Keys::new(target.removes());
+        let keys = Keys::new(target.removes(), target.reviewing());
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
@@ -1165,7 +1237,7 @@ impl Menu {
 
     /// The menu numbered `number` for `target`, on its first group.
     pub fn new(number: u64, target: Target) -> Menu {
-        let keys = Keys::new(target.removes());
+        let keys = Keys::new(target.removes(), target.reviewing());
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
@@ -1309,6 +1381,12 @@ impl Menu {
                     Did::Closed(Done::Forget(destination))
                 },
                 Pressed::Forget(Machine::Local) => Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned())),
+                Pressed::Review(does) => match target.reviewing() {
+                    Some(Reviewing { pid, .. }) => {
+                        Did::Closed(Done::Review(target.machine().clone(), *pid, does))
+                    },
+                    None => Did::Closed(Done::Nothing),
+                },
                 Pressed::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
                 Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
             },
@@ -1409,16 +1487,15 @@ impl Menu {
         };
         let command = match (pull, link.kind()) {
             (Pull::Worktree, _) => Vec::new(),
-            (Pull::Agent, Kind::Pull) => {
-                claude(&format!("{REVIEW} {}", link.url()), branch.as_deref())
-            },
+            (Pull::Agent, Kind::Pull) => reviews::command(&link, branch.as_deref()),
             (Pull::Agent, Kind::Issue) => {
                 claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
-            let row = PaneRow { session: session.clone(), pane, cwd, branch, ran };
+            let reviewing = None;
+            let row = PaneRow { session: session.clone(), pane, cwd, branch, ran, reviewing };
             let target = Target::Pane(on.clone(), row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { link: link.clone(), step };
@@ -1874,6 +1951,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         },
         Entry::Start { prompt, .. } => spans.push(does(prompt)),
         Entry::Last(last) => spans.push(does(last.does())),
+        Entry::Review { says, .. } => spans.push(does(says)),
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
         Entry::Forget(_) => spans.push(does(FORGET_DOES)),
@@ -2091,6 +2169,7 @@ mod tests {
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             ran: Ran::Unhooked,
+            reviewing: None,
         }
     }
 
@@ -2823,6 +2902,45 @@ mod tests {
         })
     }
 
+    /// A row of an agent on a review, the skill `next` still to go.
+    fn reviewing(next: &str, held: bool) -> Target {
+        let next = next.to_owned();
+        let reviewing = Some(Reviewing { pid: 33, next, held });
+        Target::Pane(Machine::Local, PaneRow { reviewing, ..row() })
+    }
+
+    /// The row of an agent on a review has a Review group, whose keys say
+    /// what they do to it, and move that one; a key `h` holds it, or goes on
+    /// from a hold. A row with no review to move has no such group.
+    #[test]
+    fn the_review_group_moves_the_review_of_the_row_s_agent() {
+        let lines = |menu: &Menu| text(&menu.lines(31, 12, 0).0);
+        let (menu, wants) = stays(opened(reviewing("/tigerstyle", false), Some('r')));
+        assert_eq!(wants, Wants::Nothing);
+        let shown = lines(&menu);
+        assert!(shown.contains(&" h  hold".to_owned()), "{shown:?}");
+        assert!(shown.contains(&" n  send /tigerstyle".to_owned()), "{shown:?}");
+        assert!(shown.contains(&" s  skip /tigerstyle".to_owned()), "{shown:?}");
+        let pressed = |held, key| {
+            let (menu, _) = stays(opened(reviewing("/tigerstyle", held), Some('r')));
+            closed(menu.key(&char(key)))
+        };
+        let moved = |does| Done::Review(Machine::Local, 33, does);
+        assert_eq!(pressed(false, 'h'), moved(Move::Hold));
+        assert_eq!(pressed(true, 'h'), moved(Move::Resume));
+        let skill = || "/tigerstyle".to_owned();
+        assert_eq!(pressed(false, 'n'), moved(Move::Next(skill())));
+        assert_eq!(pressed(false, 's'), moved(Move::Skip(skill())));
+        let (held, _) = stays(opened(reviewing("/tigerstyle", true), Some('r')));
+        assert!(lines(&held).contains(&" h  go on".to_owned()));
+
+        assert!(Menu::open(1, pane_row(), Some('r')).is_none());
+        let first = lines(&Menu::new(1, reviewing("/tigerstyle", false)));
+        assert!(first.iter().any(|line| line.contains("Review ▸")), "{first:?}");
+        let first = lines(&Menu::new(1, pane_row()));
+        assert!(!first.iter().any(|line| line.contains("Review")), "{first:?}");
+    }
+
     /// The spot a click on `text` hits, of the menu floating over zellij's
     /// side, 50 by 10 past 10 columns of the sidebar's: the menu's own.
     fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
@@ -2921,7 +3039,7 @@ mod tests {
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " w  worktree",
-                " r  /thermo-nuclear-review",
+                " r  review",
                 " <ESC> - Close",
             ]
         );
@@ -2953,14 +3071,7 @@ mod tests {
         let worktree = "/w/cdk/feat-x".to_owned();
         let branch = Some("feat/x".to_owned());
         let ready = |at| Ok(Ready { at, worktree: worktree.clone(), branch: branch.clone() });
-        let review = [
-            "claude",
-            "--name",
-            "thermo-nuclear-review: feat/x",
-            "/thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
-        ]
-        .map(str::to_owned)
-        .to_vec();
+        let review = reviews::command(&link(), Some("feat/x"));
         let session = || At::Session((other.clone(), 7));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));

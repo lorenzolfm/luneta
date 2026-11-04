@@ -62,10 +62,10 @@ use crate::api::{
     KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse,
     ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
-    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
-    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
-    RenameSessionResponse, StartRequest, StartResponse, TranscriptEndsRequest,
-    TranscriptEndsResponse,
+    ListSkillsResponse, MoveReviewRequest, MoveReviewResponse, NameSessionRequest,
+    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
+    RefugeResponse, RenameSessionRequest, RenameSessionResponse, ReviewMove, StartRequest,
+    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -74,6 +74,7 @@ use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::links::{Pasted, Ready};
 use crate::remote::{Bridges, Destination};
+use crate::reviews::Move;
 use crate::watch::Troubles;
 use crate::zellij::SessionName;
 use crate::opens::{Open, Tab};
@@ -81,7 +82,8 @@ use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, log, metadata, moves, names, opens,
-    panes, printed, release, remote, renames, screens, shells, skills, watch, zellij, zoxide,
+    panes, printed, release, remote, renames, reviews, screens, shells, skills, watch, zellij,
+    zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -112,6 +114,10 @@ const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(1);
 const WATCH: Duration = Duration::from_secs(4);
 
 const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
+
+/// The most that the reviews have waiting to be read or written at once: the
+/// core asks again for what there is no room for.
+const ACTS_MAX: usize = 32;
 
 /// The most questions a client has open at once on one connection, which
 /// HTTP/2 tells it: `luneta` asks one.
@@ -196,12 +202,14 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
     let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github: wake_github };
-    let core = core::start(wakes)?;
+    let (acts, acted) = mpsc::sync_channel(ACTS_MAX);
+    let core = core::start(wakes, acts)?;
     let (end, ending) = oneshot::channel();
     // Read once, so that the folders the daemon says it reads are the ones it
     // does.
     let sockets = zellij::folder();
     let claude_folder = claude::folder();
+    reviews::follow(core.clone(), acted, claude_folder.clone())?;
     let watchers = Arc::new(Watchers::default());
     let folders = (claude_folder.clone(), sockets.clone());
     follow(&core, &claim.folder, folders, watchers.clone(), end)?;
@@ -819,6 +827,24 @@ impl Daemon for Host {
     }
 
     type PasteStream = Pin<Box<dyn Stream<Item = Result<PasteResponse, Status>> + Send>>;
+
+    async fn move_review(
+        &self,
+        request: Request<MoveReviewRequest>,
+    ) -> Result<Response<MoveReviewResponse>, Status> {
+        let MoveReviewRequest { on, pid, does: asked, next } = request.into_inner();
+        let does = ReviewMove::try_from(asked).ok().and_then(|does| Move::of(does, &next));
+        let does = does.ok_or_else(|| {
+            Status::invalid_argument("does: no move of a review, or of no skill it names")
+        })?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let forward = MoveReviewRequest { on: None, pid, does: asked, next };
+            return daemon.move_review(forward).await;
+        }
+        let moved = self.ask(|answer| Command::MoveReview { pid, does, answer }).await?;
+        moved.map_err(|refused| Status::failed_precondition(refused.to_string()))?;
+        Ok(Response::new(MoveReviewResponse {}))
+    }
 
     async fn paste(
         &self,

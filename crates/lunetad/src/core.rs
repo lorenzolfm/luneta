@@ -8,7 +8,7 @@ use std::io;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::git::{Head, WorkTree};
 use tokio::sync::oneshot;
@@ -19,6 +19,7 @@ use crate::clients::Client;
 use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
+use crate::reviews::{Act, Answer, Move, Refused, Reviews};
 use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
 
@@ -43,6 +44,11 @@ pub enum Command {
     Hosts(Named),
     /// What the watch of `destination` has of it now.
     Remote { destination: Destination, reached: Reached },
+    /// What came of what the reviews asked for with `ticket`, of the agent
+    /// `pid`.
+    Reviewed { pid: u32, ticket: u64, answer: Answer },
+    /// Moves the review of the agent `pid`, and says why not where it did not.
+    MoveReview { pid: u32, does: Move, answer: oneshot::Sender<Result<(), Refused>> },
     /// Asks for the sessions zellij can be asked about, for their panes.
     Sessions(oneshot::Sender<Vec<Addressed>>),
     /// Asks for the directories the panes work in, for git to be asked about.
@@ -106,9 +112,11 @@ pub fn ask<T>(
 }
 
 /// Starts the core, which runs until no one is left to send it a command.
-pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
+/// What the reviews need done goes on `acts`, which it does not wait on.
+pub fn start(wakes: Wakes, acts: SyncSender<Act>) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
-    thread::Builder::new().name("core".to_owned()).spawn(move || run(&commands, &wakes))?;
+    let run = move || run(&commands, &wakes, &acts);
+    thread::Builder::new().name("core".to_owned()).spawn(run)?;
     Ok(send)
 }
 
@@ -146,9 +154,11 @@ struct Known {
     seq: u64,
     /// The clients that wait for the host to change.
     waiting: Vec<oneshot::Sender<Option<api::Host>>>,
+    /// The reviews the agents run.
+    reviews: Reviews,
 }
 
-fn run(commands: &Receiver<Command>, wakes: &Wakes) {
+fn run(commands: &Receiver<Command>, wakes: &Wakes, acts: &SyncSender<Act>) {
     let mut known = Known {
         found: Scan { agents: Vec::new(), unread: Vec::new() },
         sessions: Sessions::default(),
@@ -165,6 +175,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         host: api::Host::default(),
         seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
+        reviews: Reviews::new(SystemTime::now()),
     };
     known.host = api::Host { version: Some(known.version()), ..known.built() };
     for command in commands {
@@ -174,6 +185,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let pids: HashSet<u32> = now.agents.iter().map(|agent| agent.pid).collect();
                 assert_eq!(pids.len(), now.agents.len(), "an agent's pid comes twice");
                 known.found = now;
+                known.review(acts);
             },
             Command::Sockets { sockets, unread } => {
                 known.unread_sockets = unread;
@@ -224,6 +236,16 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     continue;
                 };
                 *was = reached;
+            },
+            Command::Reviewed { pid, ticket, answer } => {
+                known.reviews.answered(pid, ticket, answer, Instant::now());
+                known.review(acts);
+            },
+            Command::MoveReview { pid, does, answer } => {
+                let moved = known.reviews.moved(pid, does, Instant::now());
+                known.review(acts);
+                // One who stopped waiting has no use for the answer.
+                let _ = answer.send(moved);
             },
             Command::Sessions(answer) => {
                 let sessions = known.addressed().into_iter().map(|(id, name)| Addressed {
@@ -392,8 +414,21 @@ impl Known {
         self.trees.keys().filter_map(branch).collect()
     }
 
+    /// Each agent, with what is kept of the review it runs.
     fn agents(&self) -> Vec<api::Agent> {
-        self.found.agents.iter().map(|agent| agent.to_api(&self.sessions)).collect()
+        let agent = |agent: &crate::agent::Agent| {
+            agent.to_api(&self.sessions, self.reviews.to_api(agent.pid))
+        };
+        self.found.agents.iter().map(agent).collect()
+    }
+
+    /// Has the reviews look at the agents that run now, and hands on what they
+    /// need done. The thread that does it answers through the core, which so
+    /// never waits for it: what it has no room for is asked for again on the
+    /// next look.
+    fn review(&mut self, acts: &SyncSender<Act>) {
+        let mut act = |act| acts.try_send(act).is_ok();
+        self.reviews.saw(&self.found.agents, &self.sessions, Instant::now(), &mut act);
     }
 
     /// How many session files do not read, and each, as the API gives them:

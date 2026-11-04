@@ -195,6 +195,14 @@ case "$*" in
     "action dump-screen "*)
         exec cat "{panes}/$session.dump"
         ;;
+    "action paste "* | "action send-keys "*)
+        if [ -f "{panes}/$session.refused" ] || [ -f "{panes}/$session.$2.refused" ]; then
+            echo "zellij refused to write in $session" >&2
+            exit 1
+        fi
+        echo "$asked" >> "{panes}/written"
+        exit 0
+        ;;
     "list-sessions --no-formatting")
         listed=
         for dir in "$cache"/contract_version_1/session_info/*/; do
@@ -319,6 +327,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("renamed")
     }
 
+    /// What zellij was asked to write in panes, a line to each, as it was
+    /// asked.
+    pub fn written(&self) -> Vec<String> {
+        self.lines("written")
+    }
+
     /// Has zellij dump `text` of any pane of `session` from now on.
     pub fn dumps(&self, session: &str, text: &str) {
         self.write(&format!("{session}.dump"), text);
@@ -361,6 +375,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
+    }
+
+    /// Has zellij write what is pasted in the panes of `session` from now on,
+    /// and fail to send a key there, which would send it.
+    pub fn refuse_keys(&self, session: &str) {
+        self.write(&format!("{session}.send-keys.refused"), "");
     }
 
     /// Has zellij kill the session `session` from now on and keep nothing of

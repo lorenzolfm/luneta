@@ -36,6 +36,7 @@ mod peers;
 mod picker;
 mod printed;
 mod pull;
+mod review;
 mod sidebar;
 mod skills;
 mod speech;
