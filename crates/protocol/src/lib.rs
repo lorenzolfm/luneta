@@ -42,4 +42,17 @@ impl v1::Agent {
             Some(said) => v1::Harness::try_from(said).unwrap_or(v1::Harness::Unspecified),
         }
     }
+
+    /// Whether it is the agent a person talks to at a prompt, which each harness
+    /// has a word of its own for. Of a harness only a newer daemon knows, luneta
+    /// cannot tell.
+    #[must_use]
+    pub fn at_a_prompt(&self) -> bool {
+        let word = match self.runs_in() {
+            v1::Harness::ClaudeCode => "cli",
+            v1::Harness::Pi => "tui",
+            v1::Harness::Unspecified => return false,
+        };
+        self.entrypoint.as_deref() == Some(word)
+    }
 }

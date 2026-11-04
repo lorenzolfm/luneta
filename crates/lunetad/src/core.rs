@@ -426,12 +426,14 @@ impl Known {
         self.trees.keys().filter_map(branch).collect()
     }
 
-    /// Each agent, with what is kept of the review it runs.
+    /// Each agent: Claude Code's with what is kept of the review it runs, as no
+    /// other harness's runs one, whichever pid it goes by.
     fn agents(&self) -> Vec<api::Agent> {
-        let agent = |agent: &crate::agent::Agent| {
+        let claude = self.found.agents.iter().map(|agent| {
             agent.to_api(&self.sessions, self.reviews.to_api(agent.pid))
-        };
-        self.found.agents.iter().chain(&self.pi).map(agent).collect()
+        });
+        let pi = self.pi.iter().map(|agent| agent.to_api(&self.sessions, None));
+        claude.chain(pi).collect()
     }
 
     /// Has the reviews look at the agents that run now, Claude Code's, as a

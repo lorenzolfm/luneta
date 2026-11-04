@@ -3,7 +3,7 @@
 //! pi keeps no file for each agent that runs, and its transcripts name no pid.
 //! An extension of luneta's does: `pi/<pid>.json` in luneta's folder, which is
 //! the daemon's own, moved into place whole as the agent's status changes, and
-//! gone as pi quits. The adapter puts the extension where pi finds it, with that
+//! gone as pi quits. The adapter keeps the extension where pi finds it, with that
 //! folder written in, once pi has run on the machine, and reads the files.
 //!
 //! A file outlives its process when the process is killed, and a pid can come
@@ -83,7 +83,7 @@ struct File {
 /// is read once.
 #[derive(Clone)]
 struct Process {
-    started: Option<SystemTime>,
+    started: SystemTime,
     pane: Option<Named>,
 }
 
@@ -92,8 +92,8 @@ pub struct AgentFiles {
     /// The daemon's folder, which the extension is told of.
     luneta: PathBuf,
     dir: PathBuf,
-    /// pi's folder, until the extension is in it.
-    uninstalled: Option<PathBuf>,
+    /// pi's folder, which the extension is kept in, if there is one to find.
+    pi: Option<PathBuf>,
     /// What each process says of itself, by its pid and when it started.
     processes: HashMap<(u32, String), Process>,
     /// What went wrong in reading the folder, or in putting the extension.
@@ -116,7 +116,7 @@ impl AgentFiles {
         AgentFiles {
             luneta: luneta.to_owned(),
             dir,
-            uninstalled: pi,
+            pi,
             processes: HashMap::new(),
             troubles: Troubles::default(),
         }
@@ -128,16 +128,15 @@ impl AgentFiles {
     }
 
     /// The agents that run, by the files as they are now. On the way, puts the
-    /// extension where pi finds it, if pi has come to the machine since the
-    /// last scan: the daemon can run for a long time before it does.
+    /// extension where pi finds it, where it is not this daemon's: pi can come
+    /// to the machine long after the daemon started, and a daemon in another
+    /// folder can take the extension and go, after which each pi that starts
+    /// would tell a folder no daemon reads.
     pub fn scan(&mut self) -> Vec<Agent> {
-        if let Some(pi) = self.uninstalled.as_ref().filter(|pi| pi.is_dir()) {
-            match install(pi, &self.luneta) {
-                Ok(()) => self.uninstalled = None,
-                Err(error) => {
-                    self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
-                },
-            }
+        if let Some(pi) = self.pi.as_ref().filter(|pi| pi.is_dir())
+            && let Err(error) = install(pi, &self.luneta)
+        {
+            self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
         }
         let paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
@@ -156,10 +155,14 @@ impl AgentFiles {
                 continue;
             };
             let key = (pid, start);
-            let found = self.processes.remove(&key).unwrap_or_else(|| Process {
-                started: process::started(pid),
-                pane: Environment::of(pid).pane,
+            let found = self.processes.remove(&key).or_else(|| {
+                Some(Process { started: process::started(pid)?, pane: Environment::of(pid).pane })
             });
+            // The system said when it started, and now does not: it has ended,
+            // and if not, the next scan asks again.
+            let Some(found) = found else {
+                continue;
+            };
             let file = read(&path, &key.1, found.started);
             processes.insert(key.clone(), found.clone());
             match file {
@@ -214,14 +217,13 @@ fn install(pi: &Path, luneta: &Path) -> io::Result<()> {
 /// pid, whose start the system spells `start` and dates `started`. A file names
 /// the start of the process that wrote it, or else, where the extension cannot
 /// tell it, one last written before that date was left behind by another of its
-/// pid. Where the system does not say, no process can be ruled out.
-fn read(path: &Path, start: &str, started: Option<SystemTime>) -> io::Result<Option<File>> {
+/// pid.
+fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File>> {
     let file: File = serde_json::from_slice(&file_text(path)?)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let stands = match (&file.proc_start, started) {
-        (Some(recorded), _) => recorded == start,
-        (None, Some(started)) => started <= fs::metadata(path)?.modified()? + DATED_LATE,
-        (None, None) => true,
+    let stands = match &file.proc_start {
+        Some(recorded) => recorded == start,
+        None => started <= fs::metadata(path)?.modified()? + DATED_LATE,
     };
     Ok(stands.then_some(file))
 }
@@ -236,18 +238,10 @@ fn agent((pid, start): (u32, String), file: File, process: Process) -> Agent {
         cwd: file.cwd,
         status: Status::of(Some(file.status.as_str()), None),
         status_since: Some(moment(file.status_since)),
-        started_at: process.started,
+        started_at: Some(process.started),
         name: None,
-        entrypoint: file.mode.as_deref().and_then(entrypoint),
+        entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
         pane: process.pane,
         review: None,
     }
-}
-
-/// How an agent was started, by the mode its pi runs in: `tui` is the agent a
-/// person talks to at a prompt, which goes by Claude Code's word for it, `cli`,
-/// the one lunetad's clients seat in a pane before any other.
-fn entrypoint(mode: &str) -> Option<Said> {
-    let mode = mode.trim();
-    Said::new(if mode == "tui" { "cli" } else { mode }.to_owned())
 }

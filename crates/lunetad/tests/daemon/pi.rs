@@ -193,19 +193,24 @@ fn a_folder_s_spelling_is_no_code_in_the_extension() {
     assert!(root.join(format!("luneta/pi/{}.json", pi.process.pid())).is_file());
 }
 
-/// A daemon that starts in another folder puts the extension there anew, for
-/// the agents that start after it to tell that folder: the one that reads them
-/// now. Nothing else would say that the extension on disk names the wrong one.
+/// A daemon that starts in another folder takes the extension over, as nothing
+/// else would say that the one on disk names the wrong folder. Once it has gone,
+/// the daemon that still runs takes it back, or each pi that starts after would
+/// tell a folder no daemon reads, and get no row, with nothing said of it.
 #[test]
-fn a_daemon_in_another_folder_takes_the_extension_over() {
-    let host = Host::new();
-    fs::create_dir_all(host.pi_folder()).unwrap();
+fn a_daemon_takes_the_extension_back_from_one_that_took_it_and_went() {
+    let (host, _daemon) = with_pi();
+    let its_own = fs::read_to_string(extension(&host)).unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
-    let daemon = start(Vars { runtime: Some(elsewhere.path()), ..host.vars() }).unwrap();
-    eventually("the extension is there", || extension(&host).is_file().then_some(()));
-    drop(daemon);
+    let other = start(Vars { runtime: Some(elsewhere.path()), ..host.vars() }).unwrap();
+    eventually("the other daemon has the extension", || {
+        (fs::read_to_string(extension(&host)).unwrap() != its_own).then_some(())
+    });
+    drop(other);
 
-    let _daemon = start(host.vars()).unwrap();
+    eventually("the daemon has it back", || {
+        (fs::read_to_string(extension(&host)).unwrap() == its_own).then_some(())
+    });
     let mut pi = Pi::start(&host, "tui");
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     as_status(&host, pi.process.pid(), Status::Idle);
@@ -226,7 +231,8 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     let idle = as_status(&host, pid, Status::Idle);
     assert_eq!(idle.runs_in(), Harness::Pi);
     assert_eq!((idle.session_id.as_str(), idle.cwd.as_str()), ("first", "/home/you/work"));
-    assert_eq!(idle.entrypoint.as_deref(), Some("cli"));
+    assert_eq!(idle.entrypoint.as_deref(), Some("tui"));
+    assert!(idle.at_a_prompt());
     let zellij = idle.zellij.clone().unwrap();
     assert_eq!((zellij.named.as_str(), zellij.pane), ("work", 3));
     let since: SystemTime = idle.status_since.unwrap().try_into().unwrap();

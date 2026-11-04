@@ -4056,7 +4056,7 @@ fn seated<'a>(agents: &'a [Agent], sessions: &'a [Session]) -> HashMap<(&'a str,
         };
         let rank = |agent: &Agent| {
             let started = agent.started_at.as_ref().map(|at| (at.seconds, at.nanos));
-            (agent.entrypoint.as_deref() != Some("cli"), started)
+            (!agent.at_a_prompt(), started)
         };
         seated
             .entry((session, zellij.pane))
@@ -6068,6 +6068,47 @@ mod tests {
                 .map(|name| name.text.as_str()),
             Some("prompt")
         );
+    }
+
+    /// A pane holds a pi agent at a prompt, by pi's word for that, before one
+    /// that started first and runs on its own.
+    #[test]
+    fn a_pane_holds_the_pi_agent_started_at_a_prompt() {
+        let of = |name: &str, mode: &str, started: i64| Agent {
+            harness: Some(Harness::Pi.into()),
+            entrypoint: Some(mode.to_owned()),
+            started_at: Some(Timestamp { seconds: started, nanos: 0 }),
+            ..agent("s", 1, Status::Idle, Some(name))
+        };
+        let agents = [of("on its own", "print", 10), of("prompt", "tui", 90)];
+        let seated = seated(&agents, &[]);
+        let name = seated.get(&("s", 1)).and_then(|agent| agent.name.as_ref());
+        assert_eq!(name.map(|name| name.text.as_str()), Some("prompt"));
+    }
+
+    /// The agent at a prompt goes by its harness's own word, as a word means
+    /// nothing apart from it. A daemon that says no harness is older than any but
+    /// Claude Code's, and luneta knows no word of one only a newer daemon knows.
+    #[test]
+    fn an_agent_is_at_a_prompt_by_its_harness_s_word() {
+        let (claude, pi) = (Some(Harness::ClaudeCode.into()), Some(Harness::Pi.into()));
+        let cases = [
+            (claude, "cli", true),
+            (None, "cli", true),
+            (pi, "tui", true),
+            (claude, "tui", false),
+            (pi, "cli", false),
+            (pi, "print", false),
+            (Some(99), "cli", false),
+        ];
+        for (harness, word, at) in cases {
+            let agent = Agent {
+                harness,
+                entrypoint: Some(word.to_owned()),
+                ..agent("s", 1, Status::Idle, None)
+            };
+            assert_eq!(agent.at_a_prompt(), at, "{harness:?} {word}");
+        }
     }
 
     /// A pane at its prompt, in `/w/luneta/main`, whose shell said `doing`,

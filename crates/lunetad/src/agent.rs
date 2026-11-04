@@ -41,8 +41,9 @@ pub struct Agent {
     pub status_since: Option<SystemTime>,
     pub started_at: Option<SystemTime>,
     pub name: Option<Name>,
-    /// How it was started: `cli` for the agent a person talks to at a prompt,
-    /// whichever its harness, or else in the agent's own word.
+    /// How it was started, in its harness's word, which only its harness tells
+    /// the meaning of: `cli` is Claude Code's for the agent a person talks to at
+    /// a prompt, and `tui` is pi's.
     pub entrypoint: Option<Said>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,

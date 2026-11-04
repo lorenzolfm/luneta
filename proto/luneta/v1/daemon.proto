@@ -1108,11 +1108,11 @@ message Agent {
   google.protobuf.Timestamp started_at = 6;
   // The name its harness gives the session, if any.
   Name name = 7;
-  // How it was started: `cli` for the agent a person talks to at a prompt,
-  // whichever its harness. Or else in its harness's word, verbatim: `sdk-cli`
-  // for a `claude -p`, and a word of its own for each of the many other ways,
-  // which Claude Code adds to; `print`, `json` or `rpc` for pi's other modes.
-  // Absent when it does not say.
+  // How it was started, in its harness's word, verbatim, so that only `harness`
+  // tells what a word means. The agent a person talks to at a prompt is `cli` in
+  // Claude Code's and `tui` in pi's. Claude Code has `sdk-cli` for a `claude -p`,
+  // and a word of its own for each of the many other ways, which it adds to; pi
+  // has `print`, `json` and `rpc`. Absent when it does not say.
   optional string entrypoint = 8;
   // Where it runs in zellij, absent when it runs outside zellij.
   Zellij zellij = 9;

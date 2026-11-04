@@ -1,6 +1,6 @@
 // luneta's extension for pi: keeps a file that says what this agent is doing,
-// for lunetad to list it by. lunetad puts this file where pi finds it, over any
-// other of its name, each time it starts, with its folder written in.
+// for lunetad to list it by. lunetad keeps this file where pi finds it, over any
+// other of its name, with its folder written in.
 //
 // One file to a process, `pi/<pid>.json` in that folder, moved into place whole
 // as it changes, and gone as pi quits. lunetad tells one that a killed pi left
