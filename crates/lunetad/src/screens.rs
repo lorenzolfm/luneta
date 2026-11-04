@@ -53,6 +53,8 @@ mod tests {
             is_focused: false,
             tab_id,
             tab_position: tab_id,
+            tab_name: String::new(),
+            pane_rows: 0,
             pane_command: None,
         }
     }

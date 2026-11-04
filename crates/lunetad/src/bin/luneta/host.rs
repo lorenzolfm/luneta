@@ -47,6 +47,7 @@ use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::log::{self, Process};
+use lunetad::turns::OtherTab;
 use lunetad::Destination;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -80,7 +81,7 @@ use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::review;
 use crate::pull::{self, Ready};
-use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
@@ -126,6 +127,12 @@ pub enum Event {
     /// What closing the pane of the menu numbered `menu` closes, as zellij
     /// lists its session, or why it does not say.
     Closes { menu: u64, closes: Result<Closes, String> },
+    /// The tabs the tab of the pane of the menu numbered `menu` can turn into,
+    /// as zellij lists its session, or why it does not say.
+    Tabs { menu: u64, tabs: Result<Vec<OtherTab>, String> },
+    /// A pane of a session no client is in stays, for the menu numbered `menu`
+    /// owed it, until a client there makes room for its tab.
+    NoClient { menu: u64, owed: Due<u32>, on: Machine, place: PanePlace },
     /// The skills the directory of the menu numbered `menu` can run, or why
     /// the finder found none.
     Skills { menu: u64, skills: Result<Vec<Skill>, String> },
@@ -1182,6 +1189,20 @@ impl App {
                 let asked = self.sidebar.closes(menu, closes);
                 self.follow(asked);
             },
+            Event::Tabs { menu, tabs } => {
+                let asked = self.sidebar.tabs(menu, tabs);
+                self.follow(asked);
+            },
+            // A menu closed since is no longer what you are on, and takes
+            // luneta's client nowhere.
+            Event::NoClient { menu, owed, on, place } => {
+                if self.sidebar.waits_on(menu) {
+                    let after = After::IntoTab(owed, place.session.name().clone(), place.pane);
+                    if !self.go(&on, &Place::Pane(place), Some(after)) {
+                        self.sidebar.close_menu();
+                    }
+                }
+            },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
             Event::Pulled { menu, ready } => {
                 let asked = self.sidebar.pulled(menu, ready);
@@ -1924,6 +1945,12 @@ impl App {
                     self.sidebar.close_menu();
                 }
             },
+            Asked::Tabs { menu, on, session, pane } => {
+                zellij::other_tabs(menu, &on, session, pane, &self.events);
+            },
+            Asked::Turn { menu, on, place, turn } => {
+                zellij::turn(menu, &on, place, turn, &self.events);
+            },
             Asked::Start { on, cwd } => {
                 let unused = match &on {
                     Machine::Local => zellij::unused_for(&cwd),
@@ -2212,7 +2239,7 @@ impl App {
             // The session it leaves ends once it has left it, which the
             // sidebar says until then.
             Some(After::Kill { .. }) => self.sidebar.leaving(place),
-            Some(After::Open(..)) | None => self.sidebar.went(place),
+            Some(After::Open(..) | After::IntoTab(..)) | None => self.sidebar.went(place),
         };
         zellij::go(&nudged, place.listed().name(), place.pane(), then, after, &self.events);
         true

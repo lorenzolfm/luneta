@@ -93,20 +93,31 @@ pub struct Laid {
     /// Where its tab stands among the session's, from the first.
     #[serde(default)]
     pub tab_position: u32,
+    /// What its tab is called, as you pick a tab for another's panes by it.
+    #[serde(default)]
+    pub tab_name: String,
+    /// How many rows it takes, its frame's among them.
+    #[serde(default)]
+    pub pane_rows: u32,
     /// What runs in its foreground: none where zellij took too long to say,
     /// which does not mean nothing runs.
     pub pane_command: Option<String>,
 }
 
 impl Laid {
+    /// Whether it is tiled in its tab, for you to go to: a plugin's as well.
+    #[must_use]
+    pub fn is_tiled(&self) -> bool {
+        self.is_selectable && !self.is_suppressed && !self.is_floating
+    }
+
     /// Whether it keeps its tab open: a tiled pane you can go to, a plugin's
     /// as well, or a terminal another took the place of, which zellij brings
     /// back once that one closes. A floating pane goes with the tab, and so
     /// does a bar, which you cannot go to.
     #[must_use]
     pub fn holds_tab(&self) -> bool {
-        let tiled = self.is_selectable && !self.is_suppressed && !self.is_floating;
-        tiled || (self.is_suppressed && !self.is_plugin)
+        self.is_tiled() || (self.is_suppressed && !self.is_plugin)
     }
 }
 
@@ -149,6 +160,8 @@ mod tests {
             is_focused: false,
             tab_id,
             tab_position: tab_id,
+            tab_name: String::new(),
+            pane_rows: 0,
             pane_command: None,
         }
     }

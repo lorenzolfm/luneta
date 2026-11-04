@@ -145,8 +145,8 @@ A session is named for its directory. A git worktree is named for its repository
 ### Menu
 
 Keys, pressed one after another, that start an agent on a skill, beside the
-agent whose work it is for, open a pane, a tab or a session where it works, or
-delete what you are done with. The menu shows the keys of the group you are in
+agent whose work it is for, open a pane, a tab or a session where it works,
+turn a pane into a tab and a tab into panes, or delete what you are done with. The menu shows the keys of the group you are in
 and what each does, as which-key does in neovim.
 
 ```text
@@ -268,6 +268,19 @@ when a session has that name.
 │                          │
 │ <BS> Back  <ESC> Close   │
 ╰──────────────────────────╯
+```
+
+The Turn group, under `t`, moves panes that are running, and what runs in them
+goes on where it was: `t t` turns the pane into a tab of its own, and `t p` its
+tab into panes of another tab of the session, as
+[luneta's sidebar](#luneta-in-your-terminal) tells.
+
+```text
+╭─ Into tab ──── luneta/sidebar ─╮
+│ 1  auth                        │
+│ 2  Tab #3                      │
+│ <BS> - Back, <ESC> - Close     │
+╰────────────────────────────────╯
 ```
 
 The Delete group, under `d`, closes the pane with `d d`, and deletes its
@@ -597,6 +610,18 @@ first group, where `/` searches the skills the pane's directory can run, and
 `Enter` starts Claude Code on the one highlighted, beside the pane, as `c`'s
 keys do, and so does a click on a skill. The wheel over them moves the
 highlight.
+
+`t t` turns the highlighted pane into a tab of its own, in its session, and the
+tab it left keeps its other panes. The new tab takes the name of the tab it
+left, if someone named that one, and zellij numbers it otherwise. A pane alone
+in its tab has nothing to do, and so stays, as does one whose tab only it holds
+open beside floating panes, which would end with the tab. In a session with no
+client, zellij goes there first, as a new tab needs one to make room for it.
+`t p` turns the tab of the highlighted pane into panes of another tab, and the
+tab they left goes, with its name, its floating panes tiled beside the rest.
+The menu lists the session's other tabs on a key each, or goes straight to the
+only one. Either way what runs in them goes on, each pane keeps its dot, and
+zellij goes to the highlighted pane, with the keys.
 
 `d d` closes the highlighted pane, or its tab once nothing else holds the tab
 open, floating panes and all. `d s` deletes its session: luneta kills it, and
@@ -953,7 +978,8 @@ The menu on another machine's pane opens what it opens here, there: `n p`,
 and `c e` keep what the pane printed in a file there, for the agent there to
 read, `/` finds the skills of the pane's directory there, and `n s` makes a
 session there, named as that machine names one; luneta's zellij goes to what
-opened, as `Enter` would. `d d` and `d s` close and delete there what they
+opened, as `Enter` would. `t t` and `t p` turn panes there, and luneta's zellij
+goes to the pane they turned. `d d` and `d s` close and delete there what they
 do here, and ask first by that machine's agents. The session luneta's zellij is
 in there is deleted once zellij is in the newest other session of that
 machine's; with none, it is deleted with zellij in it, and luneta goes on as it
@@ -1427,6 +1453,8 @@ on the directories. Type, press `Enter`.
 | `n t` | open a tab of the pane's session |
 | `n s` | start a session where the pane works, and go there |
 | `n m` | add a machine, by what you type ssh to it |
+| `t t` | turn the pane into a tab of its own |
+| `t p` | turn the pane's tab into panes of another tab, which you pick where it has several |
 | `d d` | close the pane |
 | `d s` | kill the pane's session |
 | `y`, or the key again | go ahead with a delete that asked first |

@@ -89,7 +89,7 @@ fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
 
 /// The terminals in the tab `tab` among `laid`, the panes of its session,
 /// the floating ones too, as zellij lists them.
-fn terminals(laid: &[Laid], tab: u32) -> Vec<u32> {
+pub(crate) fn terminals(laid: &[Laid], tab: u32) -> Vec<u32> {
     let terminals = laid.iter().filter(|laid| laid.tab_id == tab && !laid.is_plugin);
     terminals.map(|laid| laid.id).collect()
 }
@@ -272,6 +272,8 @@ mod tests {
             is_focused: false,
             tab_id,
             tab_position: tab_id,
+            tab_name: String::new(),
+            pane_rows: 0,
             pane_command: None,
         }
     }

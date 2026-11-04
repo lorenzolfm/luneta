@@ -12,12 +12,13 @@ use std::time::{Duration, Instant, SystemTime};
 use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_printed_response::{self, File};
+use lunetad::api::other_tabs_response;
 use lunetad::api::{
     closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
     DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
-    ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, RefugeRequest, RefugeResponse,
-    RenameSessionRequest,
+    ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, OtherTabsRequest,
+    RefugeRequest, RefugeResponse, RenameSessionRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
@@ -28,6 +29,7 @@ use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
+use lunetad::turns::{OtherTab, Turn, Turned};
 use lunetad::zoxide::Dir;
 use lunetad::{log, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
@@ -249,6 +251,28 @@ impl Away {
     pub fn close(&mut self, session: &SessionName, close: &Close) -> Result<(), String> {
         let request = close.asked(Some(self.on()), session);
         self.ask(|mut daemon| async move { daemon.close(request).await }).map(|_| ())
+    }
+
+    /// The tabs of `session` there other than that of its terminal `pane`, as
+    /// `lunetad::turns::other_tabs` says there, or why it does not say.
+    pub fn other_tabs(
+        &mut self,
+        session: &SessionName,
+        pane: u32,
+    ) -> Result<Vec<OtherTab>, String> {
+        let request = OtherTabsRequest { on: Some(self.on()), session: session.to_string(), pane };
+        let listed = self.ask(|mut daemon| async move { daemon.other_tabs(request).await })?;
+        let tab = |tab: other_tabs_response::Tab| OtherTab { id: tab.id, name: tab.name };
+        Ok(listed.tabs.into_iter().map(tab).collect())
+    }
+
+    /// Has zellij there turn the terminal `pane` of `session` as `turn` says,
+    /// as `lunetad::turns::turned` does there, and says what came of it, or
+    /// why it did not.
+    pub fn turn(&mut self, session: &SessionName, pane: u32, turn: Turn) -> Result<Turned, String> {
+        let request = turn.asked(Some(self.on()), session, pane);
+        let answer = self.ask(|mut daemon| async move { daemon.turn(request).await })?;
+        Ok(if answer.no_client { Turned::NoClient } else { Turned::Done })
     }
 
     /// Has zellij there kill `session`, the one that started at `started`,

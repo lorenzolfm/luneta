@@ -43,6 +43,7 @@ mod shells;
 pub mod skills;
 pub mod state;
 pub mod transcripts;
+pub mod turns;
 mod watch;
 mod zellij;
 pub mod zoxide;

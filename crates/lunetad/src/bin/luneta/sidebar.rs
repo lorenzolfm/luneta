@@ -58,6 +58,7 @@ use lunetad::asks::User;
 use lunetad::links;
 use lunetad::reviews::Move;
 use lunetad::transcripts::SessionId;
+use lunetad::turns::{OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -982,6 +983,14 @@ pub enum Asked {
     /// open this once it is there: a tab of another session, which may have
     /// no client to make room for it.
     OpenThere { menu: u64, on: Machine, place: Place, open: Open },
+    /// Ask zellij on `on` which tabs of `session` are not that of its pane
+    /// `pane`, for the menu numbered `menu` to turn that tab into.
+    Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
+    /// Have zellij on `on` turn the pane `place` as `turn` says, for the menu
+    /// numbered `menu`, which takes its client there once zellij says it did.
+    /// A session with no client to make room for a tab has it come there
+    /// first, while what stays takes it nowhere.
+    Turn { menu: u64, on: Machine, place: PanePlace, turn: Turn },
     /// Take zellij's client to a session it makes on `on`, that starts in
     /// `cwd`, named for it as the picker's directories name it, with a `-2`
     /// where a session has that name: one that runs, or one that ended, which
@@ -2939,6 +2948,12 @@ impl Sidebar {
                     Asked::OpenThere { menu: number, on, place, open }
                 }
             },
+            Wants::Tabs { session, pane } => {
+                Asked::Tabs { menu: number, on, session: session.name, pane }
+            },
+            Wants::Turn { session, pane, turn } => {
+                Asked::Turn { menu: number, on, place: PanePlace { session, pane }, turn }
+            },
             Wants::Pull(work) => match self.worked(&on) {
                 Ok(worked) => Asked::Pull { menu: number, on, work, worked },
                 Err(why) => self.pulled(number, Err(why)),
@@ -3195,12 +3210,16 @@ impl Sidebar {
         let pane = match opened {
             Ok(pane) => pane,
             Err(why) => {
-                self.say(format!("menu: nothing opened: {why}"));
+                let said = match opening {
+                    Opening::Turned(_) => "not turned",
+                    Opening::In(_) | Opening::Made(_) => "nothing opened",
+                };
+                self.say(format!("menu: {said}: {why}"));
                 return Asked::Nothing;
             },
         };
         let made = match opening {
-            Opening::In(session) => {
+            Opening::In(session) | Opening::Turned(session) => {
                 let place = Place::Pane(PanePlace { session: session.clone(), pane });
                 return Asked::Go { on, place };
             },
@@ -3213,6 +3232,23 @@ impl Sidebar {
         }
         self.say(format!("menu: zellij opened pane {pane} in {made}, which luneta cannot tell"));
         Asked::Nothing
+    }
+
+    /// Whether the menu numbered `menu` still waits for zellij to open what a
+    /// key asked for, or to turn it: one closed since is no longer what you
+    /// are on.
+    pub fn waits_on(&self, menu: u64) -> bool {
+        self.menu.as_ref().is_some_and(|it| it.number() == menu && it.opening().is_some())
+    }
+
+    /// zellij said which tabs the tab of the pane of the menu numbered `menu`
+    /// can turn into, or why it could not: the menu goes on, while it waits
+    /// on it.
+    pub fn tabs(&mut self, menu: u64, tabs: Result<Vec<OtherTab>, String>) -> Asked {
+        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.listing()) else {
+            return Asked::Nothing;
+        };
+        self.menu_did(waiting.tabs(tabs))
     }
 
     /// zellij said what closing the pane of the menu numbered `menu` closes,
@@ -5488,10 +5524,10 @@ mod tests {
         assert_eq!(lit, [6, 7]);
         // The legend leaves the rows four lines, which scroll a line for
         // the pane to show whole, and stay so once the focus goes.
-        let (_, lit) = seen(&mut sidebar, true, 32, 16);
+        let (_, lit) = seen(&mut sidebar, true, 32, 17);
         assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 16);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 17);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[5].as_str(), lit.as_slice()), (nvim, &[4][..]));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
@@ -5549,7 +5585,7 @@ mod tests {
         }
         assert_eq!(cursor(&sidebar), second);
         // Tall enough for the legend to leave newer's row on screen.
-        let area = Rect::new(0, 0, 32, 17);
+        let area = Rect::new(0, 0, 32, 18);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -5738,7 +5774,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the title and the rule along the top and the
         // legend at the bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 14)[3..5].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 15)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -5824,7 +5860,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 14);
+        let area = Rect::new(0, 0, 32, 15);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[5].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
@@ -6448,7 +6484,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 15, now).0[4].clone()
+            seen_at(sidebar, true, 32, 16, now).0[4].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -6938,12 +6974,12 @@ mod tests {
     /// Each line of the sidebar drawn 32 by 16, from the line `from` down, as
     /// text, and what a click a few columns into it hits.
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
-        let area = Rect::new(0, 0, 32, 16);
+        let area = Rect::new(0, 0, 32, 17);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         let text = |y| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let click = |y| (text(y).trim_end().to_owned(), drawn.at(Position::new(4, y)));
-        (from..16).map(click).collect()
+        (from..17).map(click).collect()
     }
 
     fn on_legend(c: char) -> Hit {
@@ -6975,11 +7011,12 @@ mod tests {
             (" a  Ask", Some(on_legend('a'))),
             (" c  Claude ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
+            (" t  Turn ▸", Some(on_legend('t'))),
             (" d  Delete ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
         sidebar.keys_clicked(Keyed::Legend, &char('n'), moment(160_000));
-        let clicked = clicks(&mut sidebar, 10);
+        let clicked = clicks(&mut sidebar, 11);
         let menu: Vec<(&str, Option<Hit>)> =
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         assert_eq!(menu, [
@@ -7000,11 +7037,11 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
-        let delete = clicks(&mut sidebar, 13);
+        let delete = clicks(&mut sidebar, 14);
         assert_eq!(delete[0].1, Some(on_menu(KeyCode::Char('d'))), "{delete:?}");
         let clicked = sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
-        assert_eq!(clicks(&mut sidebar, 13), delete);
+        assert_eq!(clicks(&mut sidebar, 14), delete);
         let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
         assert_ne!(deleted, Asked::Nothing);
     }
@@ -7027,7 +7064,7 @@ mod tests {
             runs: crate::skills::Runs::ForAnyone,
         };
         sidebar.found(1, Ok(vec![skill("code-review"), skill("tigerstyle")]));
-        let clicked = clicks(&mut sidebar, 11);
+        let clicked = clicks(&mut sidebar, 12);
         let skills: Vec<(&str, Option<Hit>)> =
             clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
@@ -7087,6 +7124,39 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
+    }
+
+    /// A key of the Turn group is for the highlighted row, of whatever session,
+    /// and what it turns is where luneta goes, once zellij says it did. Only
+    /// the menu waiting on the tabs goes on with them.
+    #[test]
+    fn a_key_of_the_turn_group_turns_the_pane_of_the_highlighted_row() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let on = Machine::Local;
+        let older = PanePlace { session: listed("older", 10), pane: 1 };
+        let turn = Turn::PaneIntoTab;
+        let turned = Asked::Turn { menu: 1, on: on.clone(), place: older, turn };
+        type_in(&mut sidebar, "t");
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), turned);
+        assert!(sidebar.waits_on(1));
+        assert_eq!(sidebar.opened(1, Ok(1)), go_here(pane_of("older", 10, 1)));
+        assert!(!sidebar.waits_on(1));
+        assert_eq!(sidebar.opened(1, Ok(1)), Asked::Nothing);
+
+        sidebar.step(2);
+        type_in(&mut sidebar, "t");
+        let newer = || PanePlace { session: listed("newer", 20), pane: 1 };
+        let tabs = Asked::Tabs { menu: 2, on: on.clone(), session: session_name("newer"), pane: 1 };
+        assert_eq!(sidebar.key(&char('p'), moment(160_000)), tabs);
+        let other = || OtherTab { id: 5, name: "Tab #2".to_owned() };
+        assert_eq!(sidebar.tabs(1, Ok(vec![other()])), Asked::Nothing);
+        let turn = Turn::TabIntoPanes { to: 5 };
+        let turned = Asked::Turn { menu: 2, on, place: newer(), turn };
+        assert_eq!(sidebar.tabs(2, Ok(vec![other()])), turned);
+        assert_eq!(sidebar.opened(2, Err("zellij found no room".to_owned())), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        assert_eq!(sidebar.notice.as_deref(), Some("menu: not turned: zellij found no room"));
     }
 
     /// A pull request's link pasted with the sidebar's keys opens the menu
@@ -7937,7 +8007,7 @@ mod tests {
     /// The rows the sidebar draws under this machine's header, focused, with
     /// no rule after a session's name, and which of them the highlight is on.
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
-        let (lines, lit) = seen(sidebar, true, 32, 23);
+        let (lines, lit) = seen(sidebar, true, 32, 24);
         let from = sessions_from(&lines);
         let rows = lines[from..].iter().take_while(|line| !line.is_empty());
         let rows = rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect();
@@ -7958,7 +8028,7 @@ mod tests {
         type_in(&mut sidebar, "vjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, (0..6).collect::<Vec<_>>());
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 22));
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 24));
         // Shift and all, as a terminal sends it as text.
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         sidebar.key(&shifted('J'), moment(160_000));
@@ -8002,7 +8072,7 @@ mod tests {
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 23);
+        let area = Rect::new(0, 0, 32, 24);
         let (before, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
@@ -8042,7 +8112,7 @@ mod tests {
     #[test]
     fn a_session_lifted_goes_back_off_the_sidebar_or_on_esc() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 23);
+        let area = Rect::new(0, 0, 32, 24);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
@@ -8075,7 +8145,7 @@ mod tests {
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
-        let area = Rect::new(0, 0, 32, 23);
+        let area = Rect::new(0, 0, 32, 24);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
@@ -8117,8 +8187,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 16);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 16)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 17);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 17)[HEADER].clone();
         assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
@@ -9042,7 +9112,7 @@ mod tests {
 
         // zed to the bottom, there, by its row, as it lists bipa over notes
         // still.
-        let area = Rect::new(0, 0, 32, 23);
+        let area = Rect::new(0, 0, 32, 24);
         drawn_rows(&mut there);
         let left = MouseButton::Left;
         there.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
