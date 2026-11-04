@@ -54,11 +54,16 @@ pub struct Speaker {
 }
 
 impl Speaker {
+    /// Whether there are speakers to open, or why not: for a model that would
+    /// play on them to be fetched only where there are.
+    pub fn there() -> Result<(), String> {
+        by_default(&default_output()?).map(drop)
+    }
+
     /// The default output on, for what comes as `rate` samples a second of one
     /// channel, or why there is none.
     pub fn open(rate: u32, quiet: Quiet) -> Result<Speaker, String> {
-        let host = cpal::default_host();
-        let device = host.default_output_device().ok_or("this machine has no speakers")?;
+        let device = default_output()?;
         let config = chosen(&device, rate)?;
         let feed = Arc::new(Feed::default());
         let stream = match config.sample_format() {
@@ -110,6 +115,20 @@ impl Speaker {
     }
 }
 
+/// The system's default output, or why it has none.
+fn default_output() -> Result<Device, String> {
+    crate::hush::alsa_errors();
+    let device = cpal::default_host().default_output_device();
+    device.ok_or_else(|| "this machine has no speakers".to_owned())
+}
+
+/// How `device` plays by default, or why it does not say.
+fn by_default(device: &Device) -> Result<SupportedStreamConfig, String> {
+    device
+        .default_output_config()
+        .map_err(|error| format!("the speakers say nothing of how they play: {error}"))
+}
+
 /// How `device` is asked to play: as it comes, where it can, as ALSA's default
 /// does where `PipeWire` or `PulseAudio` serve it, and else as it plays by
 /// default, which `Up` brings what comes to.
@@ -122,9 +141,7 @@ fn chosen(device: &Device, rate: u32) -> Result<SupportedStreamConfig, String> {
     });
     match as_it_comes {
         Some(config) => Ok(config),
-        None => device
-            .default_output_config()
-            .map_err(|error| format!("the speakers say nothing of how they play: {error}")),
+        None => by_default(device),
     }
 }
 

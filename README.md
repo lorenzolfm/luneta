@@ -1312,7 +1312,8 @@ plays, on two threads, with the first sound in about 160 ms. The model is 65 MB,
 and the first thing to read fetches it from Hugging Face, once, as
 [dictation's](#dictate) is, into `luneta/models`. The speakers are the system's
 default output: ALSA's on Linux, which PipeWire and PulseAudio serve, and
-CoreAudio's on macOS, open only while something plays.
+CoreAudio's on macOS, open only while something plays. A machine with none says
+so on the sidebar, and fetches nothing.
 
 ### Notifications
 

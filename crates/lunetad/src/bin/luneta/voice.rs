@@ -4,11 +4,11 @@
 //! for its end.
 //!
 //! The model is 65 MB, which luneta fetches the first time it has something to
-//! read, as `models` says. One thread of luneta's runs it, from then until
-//! luneta ends. What it reads is a job for it: it opens the speakers, plays
-//! what the model makes as the model makes it, and says how it ended. The first
-//! job reads the model in, in tens of milliseconds. One job at a time: the next
-//! waits.
+//! read, where it has speakers to read it on, as `models` says. One thread of
+//! luneta's runs it, from then until luneta ends. What it reads is a job for
+//! it: it opens the speakers, plays what the model makes as the model makes it,
+//! and says how it ended. The first job reads the model in, in tens of
+//! milliseconds. One job at a time: the next waits.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -94,10 +94,10 @@ pub fn fetched() -> bool {
     models::fetched(&PINS)
 }
 
-/// Fetches the model, and tells `events` how it goes, for as long as what it
-/// returns is kept.
+/// Fetches the model, where there are speakers for it to play on, and tells
+/// `events` how it goes, for as long as what it returns is kept.
 pub fn fetch(events: &Sender<Event>) -> Asking {
-    models::fetch(&PINS, events, Event::VoiceFetched)
+    models::fetch(&PINS, events, Event::VoiceFetched, Speaker::there)
 }
 
 /// The thread that runs the model, for as long as it is kept.

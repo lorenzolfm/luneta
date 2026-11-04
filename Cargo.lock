@@ -1368,6 +1368,7 @@ name = "lunetad"
 version = "0.2.2"
 dependencies = [
  "alacritty_terminal",
+ "alsa",
  "base64 0.22.1",
  "clap",
  "cpal",

@@ -107,15 +107,17 @@ pub const fn bytes(pins: &[Pin]) -> u64 {
     bytes
 }
 
-/// Fetches the model `pins` name, and tells `events` how it goes, in the
-/// events `event` makes, on a thread of its own, for as long as what it
-/// returns is kept: dropped, as luneta ends, curl is killed, and what it
-/// fetched thrown away, by the time the drop returns, so that no luneta leaves
-/// a fetch going, or half a model, behind.
+/// Fetches the model `pins` name, unless `useful` says why it would be of no
+/// use, which it asks on the same thread, as it may take a while. It tells
+/// `events` how it goes, in the events `event` makes, on a thread of its own,
+/// for as long as what it returns is kept: dropped, as luneta ends, curl is
+/// killed, and what it fetched thrown away, by the time the drop returns, so
+/// that no luneta leaves a fetch going, or half a model, behind.
 pub fn fetch(
     pins: &'static [Pin],
     events: &Sender<Event>,
     event: fn(Fetched) -> Event,
+    useful: fn() -> Result<(), String>,
 ) -> Asking {
     let due = Due::new(events, move |ended| event(Fetched::Ended(ended)));
     let events = events.clone();
@@ -124,7 +126,7 @@ pub fn fetch(
             // luneta is on its way out.
             let _ = events.send(event(Fetched::Got(got)));
         };
-        due.pay(all(pins, wanted, &tell));
+        due.pay(useful().and_then(|()| all(pins, wanted, &tell)));
     })
 }
 
@@ -261,5 +263,19 @@ mod tests {
     #[test]
     fn a_model_is_as_many_bytes_as_its_files() {
         assert_eq!(bytes(&[PIN, Pin { bytes: 1, ..PIN }]), 1025);
+    }
+
+    /// A machine with no speakers fetches no voice: it hears why at once, and
+    /// nothing of how much is in.
+    #[test]
+    fn a_model_of_no_use_is_not_fetched() {
+        let (events, heard) = std::sync::mpsc::channel();
+        let no_use = || Err("this machine has no speakers".to_owned());
+        let _asking = fetch(&[PIN], &events, Event::VoiceFetched, no_use);
+        let Ok(Event::VoiceFetched(fetched)) = heard.recv_timeout(Duration::from_secs(10)) else {
+            panic!("it says how the fetch went");
+        };
+        let why = "this machine has no speakers".to_owned();
+        assert_eq!(fetched, Fetched::Ended(Err(why)));
     }
 }

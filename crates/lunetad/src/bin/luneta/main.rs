@@ -23,6 +23,7 @@ mod folds;
 mod gruvbox;
 mod host;
 mod hosted;
+mod hush;
 mod icons;
 mod images;
 mod input;

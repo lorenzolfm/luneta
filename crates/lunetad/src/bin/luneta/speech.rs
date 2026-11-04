@@ -100,7 +100,7 @@ pub fn fetched() -> bool {
 /// Fetches the model, and tells `events` how it goes, for as long as what it
 /// returns is kept.
 pub fn fetch(events: &Sender<Event>) -> Asking {
-    models::fetch(&PINS, events, Event::Fetched)
+    models::fetch(&PINS, events, Event::Fetched, || Ok(()))
 }
 
 /// The thread that runs the model, for as long as it is kept.
