@@ -18,12 +18,11 @@ use lunetad::api::remote::Reached;
 use lunetad::api::say::{Does, Stop};
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, Host, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Say, SayRequest,
+    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Say, SayRequest,
     Session, Status, UnreadFile, Utterance, Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
-use lunetad::links::Link;
 pub use lunetad::log::causes;
 use lunetad::sayings::BYTES_MAX;
 use lunetad::{release, Destination};
@@ -38,9 +37,8 @@ use crate::zellij::{self, Seat};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
 /// `bridge` start a lunetad where none runs, as a program reads the host by
-/// them, and `review`, which needs one to keep what it starts: the rest say
-/// that none does, or, for `close`, that it cannot tell the agents, or, for
-/// `ssh`, that it reaches the machine once one runs.
+/// them: the rest say that none does, or, for `close`, that it cannot tell the
+/// agents, or, for `ssh`, that it reaches the machine once one runs.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -105,17 +103,6 @@ pub enum Command {
         #[arg(long, value_name = "PLAN", value_parser = drive::agreed)]
         yes: Option<Agreed>,
     },
-    /// Start a review of a pull request, as the `r` of a pasted link does: a
-    /// new agent in its worktree, with nobody moved, on the first of the
-    /// review's skills, which lunetad sends the next of as you act on each.
-    /// Say which pane it opened, as `<session>:<pane>`. lunetad is started
-    /// where none runs, and again where an older one does, as it keeps the
-    /// review.
-    Review {
-        /// The pull request's page.
-        #[arg(value_parser = drive::pull_request)]
-        link: Link,
-    },
     /// Read text aloud on the machine you sit at, whichever machine this runs
     /// on: queue it, after what waits to be read, and return once lunetad has
     /// it, without waiting for it to be read. It fails at once where no
@@ -154,7 +141,6 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Open { what } => drive::open(what, folder),
         Command::Go { to } => drive::go(to, folder),
         Command::Close { what, yes } => drive::close(what, *yes, folder),
-        Command::Review { link } => drive::review(link, folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
     }
 }
@@ -327,29 +313,6 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
     })
 }
-
-/// The host as lunetad says it, with the panes of each session it lists,
-/// where it says them within `PANES`: a lunetad that just started asks zellij
-/// after it lists the sessions. It starts one, as a review needs one.
-pub fn current_host(folder: &Path) -> Result<Host, String> {
-    runtime()?.block_on(async {
-        let mut daemon = daemon::reach(folder, Reach::Current).await?;
-        let deadline = tokio::time::Instant::now() + PANES;
-        let mut after = None;
-        loop {
-            let asked = daemon.watch(WatchRequest { after, kept: None }).await;
-            let host = asked.map_err(|error| causes(&error))?.into_inner();
-            let listed = host.sessions.iter().all(|session| session.panes.is_some());
-            if listed || tokio::time::Instant::now() >= deadline {
-                return Ok(host);
-            }
-            after = host.version;
-        }
-    })
-}
-
-/// How long `current_host` waits for lunetad to say the panes.
-const PANES: Duration = Duration::from_secs(5);
 
 async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let info = daemon.info(InfoRequest {}).await?.into_inner();

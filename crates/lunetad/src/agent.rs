@@ -14,9 +14,7 @@ use serde::Deserialize as _;
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
-use crate::links::Link;
 use crate::process;
-use crate::reviews;
 use crate::zellij::Sessions;
 
 /// The most an agent's file holds that an adapter reads. Each holds a few hundred
@@ -27,9 +25,6 @@ const FILE_BYTES_MAX: u64 = 64 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: u32,
-    /// When its process started, as the system says it: the system can give
-    /// its pid to another once it has ended.
-    pub start: String,
     /// The harness it runs in, whose adapter found it.
     pub harness: Harness,
     /// The agent's own id for its session.
@@ -47,8 +42,6 @@ pub struct Agent {
     pub entrypoint: Option<Said>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
-    /// The pull request of the review its environment says it runs, if any.
-    pub review: Option<Link>,
 }
 
 /// A harness an agent can run in, as the adapter for it knows.
@@ -201,38 +194,20 @@ pub struct Named {
     pub pane: u32,
 }
 
-/// What the environment of a process says of it.
-#[derive(Clone, Debug, Default)]
-pub struct Environment {
-    /// The pane it names, if it names one.
-    pub pane: Option<Named>,
-    /// The pull request of the review it says the agent runs, if any.
-    pub review: Option<Link>,
-}
-
-impl Environment {
-    /// What the environment of `pid` says.
-    #[must_use]
-    pub fn of(pid: u32) -> Self {
-        let Some(entries) = process::environ(pid) else {
-            return Environment::default();
-        };
-        let (mut session, mut pane, mut review) = (None, None, None);
-        let review_var = format!("{}=", reviews::VAR);
-        for entry in entries {
-            let entry = entry.as_bytes();
-            if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
-                session = Some(String::from_utf8_lossy(name).into_owned());
-            } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
-                pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
-            } else if let Some(link) = entry.strip_prefix(review_var.as_bytes()) {
-                review = std::str::from_utf8(link).ok().and_then(reviews::pull_request);
-            }
+/// The pane the environment of `pid` names, if it names one.
+#[must_use]
+pub fn pane_of(pid: u32) -> Option<Named> {
+    let (mut session, mut pane) = (None, None);
+    for entry in process::environ(pid)? {
+        let entry = entry.as_bytes();
+        if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
+            session = Some(String::from_utf8_lossy(name).into_owned());
+        } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
+            pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
         }
-        let session = session.filter(|session| !session.is_empty());
-        let pane = session.zip(pane).map(|(session, pane)| Named { session, pane });
-        Environment { pane, review }
     }
+    let session = session.filter(|session| !session.is_empty())?;
+    Some(Named { session, pane: pane? })
 }
 
 /// The pid an agent's file is named for: `<pid>.json`, spelled as a harness
@@ -280,7 +255,7 @@ impl Agent {
     /// The agent as the API gives it, in the session `sessions` say its pane
     /// is in now.
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions, review: Option<api::Review>) -> api::Agent {
+    pub fn to_api(&self, sessions: &Sessions) -> api::Agent {
         // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
         // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
@@ -326,7 +301,6 @@ impl Agent {
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
-            review,
         }
     }
 }

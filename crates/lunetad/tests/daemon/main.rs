@@ -21,8 +21,6 @@ mod pi;
 #[cfg(test)]
 mod remote;
 #[cfg(test)]
-mod reviews;
-#[cfg(test)]
 mod say;
 #[cfg(test)]
 mod sessions;

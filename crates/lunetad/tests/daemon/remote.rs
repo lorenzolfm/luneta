@@ -28,9 +28,8 @@ use lunetad::api::{
     DumpScreenRequest, GoRequest, KeepImageRequest, KeepPrintedRequest, KillRequest,
     ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
-    MoveReviewRequest, NameSessionRequest, On, OpenRequest, OtherTabsRequest, RefugeRequest,
-    RenameSessionRequest, ReviewMove, StartRequest, TranscriptEndsRequest, TurnIntoPanesRequest,
-    TurnIntoTabRequest, WatchRequest,
+    NameSessionRequest, On, OpenRequest, OtherTabsRequest, RefugeRequest, RenameSessionRequest,
+    StartRequest, TranscriptEndsRequest, TurnIntoPanesRequest, TurnIntoTabRequest, WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
@@ -42,9 +41,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use crate::agents::file_for;
 use crate::demand::{stop, Detached};
-use crate::host::{answered, eventually, folder_in, script, start, Host, Running, Vars, LUNETA};
+use crate::host::{answered, eventually, folder_in, script, start, Host, Vars, LUNETA};
 use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
@@ -1777,53 +1775,6 @@ fn rev_parse_verify(dir: &Path, what: &str) -> Option<String> {
         .output()
         .unwrap();
     said.status.success().then(|| String::from_utf8(said.stdout).unwrap().trim().to_owned())
-}
-
-/// An agent's review on another machine is that machine's daemon's to keep:
-/// its row shows it through the daemon luneta watches, and a key moves it, on
-/// the machine the question names. One for a machine it does not reach is
-/// refused.
-#[test]
-fn a_review_on_another_machine_is_moved_there() {
-    let here = Host::new();
-    let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    fs::create_dir_all(far.home.path().join(".claude/sessions")).unwrap();
-    let _work = far.serve("work");
-    let _far = start(far.vars()).unwrap();
-    hosts(&here, "far\n");
-    let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
-    let mut sleeps = Command::new("sleep");
-    sleeps
-        .arg("600")
-        .env("ZELLIJ_SESSION_NAME", "work")
-        .env("ZELLIJ_PANE_ID", "2")
-        .env("LUNETA_REVIEW", "https://github.com/o/app/pull/7");
-    let agent = Running::spawn(&mut sleeps);
-    let file = far.home.path().join(format!(".claude/sessions/{}.json", agent.pid()));
-    fs::write(file, file_for("aa-1", &agent, "idle").to_string()).unwrap();
-    let review = |host: &remote::Host| host.agents.iter().find_map(|it| it.review.clone());
-    let first = review(&reached(&here, "far", |far| review(far).is_some())).unwrap();
-    let next = first.next.unwrap();
-    assert_eq!((first.step, next.held), (1, false));
-
-    let folder = folder_in(here.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let moved = |on: &str, does: ReviewMove| MoveReviewRequest {
-            on: Some(On { destination: on.to_owned() }),
-            pid: agent.pid(),
-            does: does.into(),
-            next: next.skill.clone(),
-        };
-        daemon.move_review(moved("far", ReviewMove::Skip)).await.unwrap();
-        let nowhere = daemon.move_review(moved("nowhere", ReviewMove::Hold)).await.unwrap_err();
-        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
-    });
-    let skipped = |review: api::Review| review.next.is_some_and(|it| it.skill != next.skill);
-    reached(&here, "far", |far| review(far).is_some_and(skipped));
 }
 
 /// A tab asked to open alone in a session of another machine takes the

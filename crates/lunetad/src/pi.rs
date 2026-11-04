@@ -30,7 +30,7 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    file_text, moment, named_pid, nonempty, Agent, Environment, Harness, Named, Status,
+    file_text, moment, named_pid, nonempty, pane_of, Agent, Harness, Named, Status,
 };
 use crate::watch::{self, Troubles};
 use crate::{log, process};
@@ -156,7 +156,7 @@ impl AgentFiles {
             };
             let key = (pid, start);
             let found = self.processes.remove(&key).or_else(|| {
-                Some(Process { started: process::started(pid)?, pane: Environment::of(pid).pane })
+                Some(Process { started: process::started(pid)?, pane: pane_of(pid) })
             });
             // The system said when it started, and now does not: it has ended,
             // and if not, the next scan asks again.
@@ -164,9 +164,9 @@ impl AgentFiles {
                 continue;
             };
             let file = read(&path, &key.1, found.started);
-            processes.insert(key.clone(), found.clone());
+            processes.insert(key, found.clone());
             match file {
-                Ok(Some(file)) => agents.push(agent(key, file, found)),
+                Ok(Some(file)) => agents.push(agent(pid, file, found)),
                 Ok(None) => {
                     let why = format!("{}: no process of its pid wrote it", path.display());
                     self.troubles.say(why);
@@ -229,10 +229,9 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File
 }
 
 /// The agent a file stands for, in the process that wrote it.
-fn agent((pid, start): (u32, String), file: File, process: Process) -> Agent {
+fn agent(pid: u32, file: File, process: Process) -> Agent {
     Agent {
         pid,
-        start,
         harness: Harness::Pi,
         session_id: file.session_id,
         cwd: file.cwd,
@@ -242,6 +241,5 @@ fn agent((pid, start): (u32, String), file: File, process: Process) -> Agent {
         name: None,
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
         pane: process.pane,
-        review: None,
     }
 }

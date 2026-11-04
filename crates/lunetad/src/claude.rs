@@ -25,7 +25,7 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    file_text, moment, named_pid, nonempty, Agent, Environment, Harness, Name, Source, Status,
+    file_text, moment, named_pid, nonempty, pane_of, Agent, Harness, Name, Named, Source, Status,
     Unread,
 };
 use crate::{log, process};
@@ -125,9 +125,9 @@ pub struct SessionFiles {
     domain: process::Domain,
     /// Each file, by the pid it is named for, as it last read.
     seen: HashMap<u32, Seen>,
-    /// What each process's environment says. The environment a process shows
-    /// is the one it started with, so it is read once.
-    environments: HashMap<(u32, String), Environment>,
+    /// The pane each process's environment names. The environment a process
+    /// shows is the one it started with, so it is read once.
+    panes: HashMap<(u32, String), Option<Named>>,
     /// What went wrong in listing the folder.
     troubles: Troubles,
     /// Whether the folder has been read: a file that does not read in the
@@ -142,7 +142,7 @@ impl SessionFiles {
             dir: claude.join("sessions"),
             domain: process::Domain::here(),
             seen: HashMap::new(),
-            environments: HashMap::new(),
+            panes: HashMap::new(),
             troubles: Troubles::default(),
             scanned: false,
         }
@@ -184,13 +184,13 @@ impl SessionFiles {
         }
         self.seen = seen;
 
-        let mut environments = HashMap::with_capacity(self.seen.len());
-        // What each process's environment says, read once.
-        let mut environment = |pid: u32, start: String| {
+        let mut panes = HashMap::with_capacity(self.seen.len());
+        // The pane of each process, read from its environment once.
+        let mut pane = |pid: u32, start: String| {
             let key = (pid, start);
-            let environment = self.environments.remove(&key).unwrap_or_else(|| Environment::of(pid));
-            environments.insert(key, environment.clone());
-            environment
+            let pane = self.panes.remove(&key).unwrap_or_else(|| pane_of(pid));
+            panes.insert(key, pane.clone());
+            pane
         };
         let mut agents = Vec::with_capacity(self.seen.len());
         let mut unread = Vec::new();
@@ -206,8 +206,7 @@ impl SessionFiles {
                 Seen::Unread => {
                     if let Some(start) = process::start(pid) {
                         let started = process::started(pid);
-                        let pane = environment(pid, start).pane;
-                        unread.push(Unread { pid, started, pane });
+                        unread.push(Unread { pid, started, pane: pane(pid, start) });
                     }
                     continue;
                 },
@@ -221,9 +220,9 @@ impl SessionFiles {
             if process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            agents.push(agent(pid, file, environment(pid, start)));
+            agents.push(agent(pid, file, pane(pid, start)));
         }
-        self.environments = environments;
+        self.panes = panes;
         assert!(agents.len() + unread.len() <= self.seen.len());
         Scan { agents, unread }
     }
@@ -260,13 +259,12 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
 /// The agent a file stands for. Its status is dated where Claude Code dates
 /// the status, and by nothing else: when the file was written, or the session
 /// started, is not when the agent came to what it is doing.
-fn agent(pid: u32, file: &File, environment: Environment) -> Agent {
+fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
     Agent {
         pid,
-        start: file.proc_start.spelled(),
         harness: Harness::ClaudeCode,
         session_id: file.session_id.clone(),
         cwd: file.cwd.clone(),
@@ -275,7 +273,6 @@ fn agent(pid: u32, file: &File, environment: Environment) -> Agent {
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),
-        pane: environment.pane,
-        review: environment.review,
+        pane,
     }
 }

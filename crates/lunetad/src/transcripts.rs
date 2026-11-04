@@ -122,10 +122,17 @@ impl Reading {
     /// does not read, has none.
     #[must_use]
     pub fn ends(&self, projects: &Path) -> HashMap<SessionId, String> {
-        let dirs = project_dirs(projects);
+        let mut dirs: Vec<PathBuf> = fs::read_dir(projects)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .collect();
+        dirs.sort();
         let mut ends = HashMap::new();
         for id in &self.ids {
-            let Some(path) = path_in(&dirs, id) else {
+            let file = format!("{}.jsonl", id.as_str());
+            let Some(path) = dirs.iter().map(|dir| dir.join(&file)).find(|path| path.is_file())
+            else {
                 continue;
             };
             if let Ok(end) = end(&path, self.share) {
@@ -134,29 +141,6 @@ impl Reading {
         }
         ends
     }
-}
-
-/// Where the transcript of the session `id` is, in `projects`, if it is there.
-#[must_use]
-pub fn path_of(projects: &Path, id: &SessionId) -> Option<PathBuf> {
-    path_in(&project_dirs(projects), id)
-}
-
-/// The directories of `projects`, one for each place a session started in.
-fn project_dirs(projects: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = fs::read_dir(projects)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .collect();
-    dirs.sort();
-    dirs
-}
-
-/// Where the transcript of the session `id` is, among `dirs`.
-fn path_in(dirs: &[PathBuf], id: &SessionId) -> Option<PathBuf> {
-    let file = format!("{}.jsonl", id.as_str());
-    dirs.iter().map(|dir| dir.join(&file)).find(|path| path.is_file())
 }
 
 /// Why a reading of `count` transcripts is none: they are too many.
