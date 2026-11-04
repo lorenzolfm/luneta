@@ -33,6 +33,11 @@
 //! so only a pane that would move says it needs one: one that stays moves no
 //! client there to find that out.
 //!
+//! Closing a stand-in can cut short the calls that follow it, as `cli::heard`
+//! says, so those are asked again. A `stack-panes` cut short can still be on
+//! its way as zellij lists the panes, and read as having no room: the pane then
+//! stays, or moves after all, and nothing is lost either way.
+//!
 //! zellij's CLI holds no condition on what it last listed. So a tiled pane
 //! that ends between the listing and the move can still have its tab close on
 //! the floating panes, and a tab that closes in that moment can give its id to
@@ -44,7 +49,7 @@ use std::process::Command;
 
 use luneta_protocol::tab;
 
-use crate::cli::{answered, done, laid, quiet, Laid};
+use crate::cli::{answered, done, done_once_reached, heard, laid, quiet, Laid};
 use crate::clients;
 use crate::closes::terminals;
 use crate::zellij::SessionName;
@@ -296,13 +301,14 @@ fn over_stand_in(session: &SessionName, pane: PaneId, to: u32) -> Result<Landed,
 }
 
 /// Has zellij open a stand-in in the tab `to` of `session`, with no client
-/// moved, and says which.
+/// moved, and says which. One zellij opened as a pane closing cut its answer
+/// short has a second open beside it, and ends on its own.
 fn open_stand_in(session: &SessionName, to: u32) -> Result<PaneId, String> {
     let mut command = action(session);
     quiet(&mut command);
     command.args(["new-pane", "--tab-id", &to.to_string(), "--no-focus", "--close-on-exit"]);
     command.arg("--").args(STAND_IN);
-    let said = answered(&mut command)?;
+    let said = heard(|| answered(&mut command))?;
     let id = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
     let id = id.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))?;
     Ok(PaneId::terminal(id))
@@ -321,7 +327,7 @@ fn close_stand_in(session: &SessionName, pane: PaneId) {
 fn stack(session: &SessionName, root: PaneId, moved: PaneId) -> Result<(), String> {
     let mut command = action(session);
     command.args(["stack-panes", "--"]).arg(root.to_string()).arg(moved.to_string());
-    done(command)
+    done_once_reached(command)
 }
 
 /// Closes the tab `from`, which the panes of `session` left, where zellij

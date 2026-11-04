@@ -273,6 +273,30 @@ fn a_pane_that_ends_on_its_way_does_not_stop_the_rest() {
     assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), on_stand_in("terminal_2")]);
 }
 
+/// Each move closes a stand-in, and zellij cuts other calls short as a pane
+/// closes: one that waits ends well with nothing said, though what it asked for
+/// goes on, and one yet to reach it fails, having asked nothing. Each is asked
+/// again, so that what came of it is said as it was, and a stack that did go
+/// goes once.
+#[test]
+fn calls_a_closing_pane_cuts_short_are_asked_again() {
+    let host = Host::new();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    host.zellij.list("work", &json!([pane(1, from), pane(3, to)]));
+    host.zellij.clients("work", &[(1, "terminal_1")]);
+    host.zellij.stacks_into("work", 1, &json!([pane(1, to), pane(3, to)]));
+    host.zellij.silences("work", "list-panes");
+    host.zellij.silences("work", "list-clients");
+    host.zellij.silences("work", "new-pane");
+    host.zellij.unreaches("work", "stack-panes");
+
+    assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
+
+    // The first opened all the same, and ends on its own.
+    assert_eq!(host.zellij.opened(), [stand_in(1), stand_in(1)]);
+    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1")]);
+}
+
 /// The terminal a tab was picked by may have closed by the key: nothing moves,
 /// and no stand-in opens.
 #[test]
