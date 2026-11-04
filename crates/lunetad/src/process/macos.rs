@@ -1,14 +1,19 @@
 //! Processes on macOS, through sysinfo, which asks the kernel with `sysctl`,
-//! and without code of ours that is unsafe.
+//! and without code of ours that is unsafe; and their ends, through kqueue.
 
 use std::ffi::OsString;
+use std::io;
+use std::ptr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use rustix::event::kqueue::{kevent, kqueue, Event, EventFilter, EventFlags, ProcessEvents};
+use rustix::io::Errno;
+use rustix::process::Pid;
+use sysinfo::{Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
-    let pid = Pid::from_u32(pid);
+    let pid = sysinfo::Pid::from_u32(pid);
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
     system.process(pid).map(read)
 }
@@ -34,6 +39,36 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     let refresh = ProcessRefreshKind::nothing().with_environ(UpdateKind::Always);
     with(pid, refresh, |process| process.environ().to_vec())
+}
+
+/// Waits for `pid` to end, as kqueue says. A process that has ended already, or
+/// is gone, kqueue finds none of, as the event it could not add says, in place
+/// of the event it waits for.
+#[expect(
+    unsafe_code,
+    reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
+)]
+pub fn ends(pid: Pid) -> io::Result<()> {
+    let queue = kqueue()?;
+    let flags = ProcessEvents::EXIT;
+    let end = Event::new(EventFilter::Proc { pid, flags }, EventFlags::ADD, ptr::null_mut());
+    let mut adding: &[Event] = &[end];
+    let mut heard = [end];
+    loop {
+        // SAFETY: it asks that the files the events name stay open as long as
+        // the queue, and this event names a process.
+        let failure = match unsafe { kevent(&queue, adding, &mut heard[..], None) } {
+            Ok(_) if !heard[0].flags().contains(EventFlags::ERROR) => return Ok(()),
+            Ok(_) => i32::try_from(heard[0].data()).map_or(Errno::INVAL, Errno::from_raw_os_error),
+            // A call a signal cuts short has added what it was given.
+            Err(Errno::INTR) => {
+                adding = &[];
+                continue;
+            },
+            Err(failure) => failure,
+        };
+        return if failure == Errno::SRCH { Ok(()) } else { Err(failure.into()) };
+    }
 }
 
 /// The pids of this system. macOS has one pid namespace, and Claude Code calls

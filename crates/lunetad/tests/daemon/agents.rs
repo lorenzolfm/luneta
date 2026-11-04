@@ -350,6 +350,44 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("two is gone", || host.agent("two").is_none().then_some(()));
 }
 
+/// An agent that crashes says no word to the folder, and leaves its file. It
+/// leaves the list as its process ends, whether its parent has waited for it
+/// yet or not, and not at the next sweep, which is two seconds off: each is
+/// killed just after the read that found it, as the daemon started or since.
+#[test]
+fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
+    let host = Host::new();
+    let mut before = process(None);
+    host.write(before.pid(), &file_for("before", &before, "busy"));
+    let _daemon = start(host.vars()).unwrap();
+    eventually("the one before is there", || host.agent("before"));
+
+    let gone_in_time = |id: &str, killed: Instant| {
+        eventually(id, || host.agent(id).is_none().then_some(()));
+        let took = killed.elapsed();
+        assert!(took < Duration::from_secs(1), "{id} stayed listed for {took:?}");
+    };
+    let killed = Instant::now();
+    before.kill();
+    gone_in_time("before", killed);
+
+    let mut kept = vec![before];
+    for round in 0..4 {
+        let id = format!("since-{round}");
+        let mut agent = process(None);
+        host.write(agent.pid(), &file_for(&id, &agent, "busy"));
+        eventually(&id, || host.agent(&id));
+        let killed = Instant::now();
+        if round % 2 == 0 {
+            agent.kill();
+            kept.push(agent);
+        } else {
+            drop(agent);
+        }
+        gone_in_time(&id, killed);
+    }
+}
+
 /// A file that does not read for longer than a write takes is cut short for
 /// good, or in a shape of a newer Claude Code's, or no session file at all: a
 /// folder by a session file's name, one too long to be one, or one that

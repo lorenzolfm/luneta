@@ -58,7 +58,9 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # And a session of its own for what luneta runs that may ask on a terminal.
 # And the host's name, which the sidebar calls this machine by. And the far
 # end of the terminal luneta runs zellij's client in, which luneta holds open.
-rustix = { version = "1.1.4", features = ["fs", "param", "process", "pty", "system", "termios", "time"] }
+# And the end of a process that is no child of the daemon's, which a pidfd says
+# on Linux, and kqueue on macOS.
+rustix = { version = "1.1.4", features = ["event", "fs", "param", "process", "pty", "system", "termios", "time"] }
 # Tells luneta's terminal's reader of a resize, as crossterm's did. Already in
 # the tree by way of crossterm.
 signal-hook = "0.3.18"

@@ -679,6 +679,12 @@ impl Running {
         self.child.id()
     }
 
+    /// Kills it, and leaves it for later to be waited for, as a parent busy
+    /// with something else does: it has ended, and the system still lists it.
+    pub fn kill(&mut self) {
+        self.child.kill().unwrap();
+    }
+
     /// Its stdin and stdout, which it was spawned with piped.
     pub fn piped(&mut self) -> (ChildStdin, ChildStdout) {
         (self.child.stdin.take().unwrap(), self.child.stdout.take().unwrap())

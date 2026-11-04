@@ -2,10 +2,14 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use rustix::event::{poll, PollFd, PollFlags};
+use rustix::io::{retry_on_intr, Errno};
+use rustix::process::{pidfd_open, Pid, PidfdFlags};
 use rustix::time::{clock_gettime, ClockId};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
@@ -14,12 +18,31 @@ fn proc(pid: u32, leaf: &str) -> PathBuf {
 
 /// When `pid` started, in clock ticks after boot: field 22 of its `stat`, as
 /// Claude Code records it. Counted from the last `)`, since the name before it
-/// can hold spaces and parentheses.
+/// can hold spaces and parentheses. None for one that ended, which keeps its
+/// `stat`, in the state `Z`, until its parent waits for it.
 #[must_use]
 pub fn start(pid: u32) -> Option<String> {
     let stat = fs::read_to_string(proc(pid, "stat")).ok()?;
     let close = stat.rfind(')')?;
-    stat[close + 1..].split_whitespace().nth(19).map(str::to_owned)
+    let mut fields = stat[close + 1..].split_whitespace();
+    if fields.next()? == "Z" {
+        return None;
+    }
+    fields.nth(18).map(str::to_owned)
+}
+
+/// Waits for `pid` to end, as its pidfd says: it reads as ready once all of the
+/// process has ended, whether or not its parent has waited for it. No process
+/// by that pid has ended, and been waited for.
+pub fn ends(pid: Pid) -> io::Result<()> {
+    let process = match pidfd_open(pid, PidfdFlags::empty()) {
+        Ok(process) => process,
+        Err(Errno::SRCH) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut ready = [PollFd::new(&process, PollFlags::IN)];
+    retry_on_intr(|| poll(&mut ready, None))?;
+    Ok(())
 }
 
 /// When `pid` started, or less than a clock tick after, but never before it,
