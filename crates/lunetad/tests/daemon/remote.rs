@@ -30,7 +30,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
-use lunetad::links::{self, At, Link, Pasted, Ready};
+use lunetad::links::{self, At, Link, Pasted, Ready, Work};
 use lunetad::transcripts::SessionId;
 use lunetad::SessionName;
 use rustix::process::{test_kill_process, Pid, Signal};
@@ -1327,13 +1327,15 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let link = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
         let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
         let session = Pasted::new(link.clone(), vec![worked("/nowhere/at/all"), worked(&main)]);
         let ready = pasted_on(&mut daemon, "far", &session).await.unwrap();
         let worktree = clone.join("issue-7").display().to_string();
         let branch = Some("issue-7".to_owned());
-        assert_eq!(ready, Ready { at: At::Session(1), worktree: worktree.clone(), branch });
+        let session_at = At::Session(1);
+        let answer = Ready { at: session_at, worktree: worktree.clone(), branch, file: None };
+        assert_eq!(ready, answer);
         assert!(clone.join("issue-7").join(".git").is_file());
         let viewed = "issue view 7 --repo github.com/o/n --json url --jq .url";
         assert_eq!(far.gh.issues(), [viewed]);
@@ -1352,6 +1354,146 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
         assert_eq!(far.gh.issues().len(), 2);
     });
+}
+
+/// A `.md` file pasted on a row of another machine is read there, and git
+/// there says the repository it is in, untracked in a worktree or not, whose
+/// session the key goes to, by what the pane's directory is in, whatever its
+/// remotes are; gh is not asked. The worktree is of a branch named for it,
+/// from origin's default branch as it is now, not as the clone last fetched
+/// it. Pasted again, it finds that worktree, and a pane that works in it. A
+/// file in no repository goes by the row's, and a relative path from it, and
+/// `~/` is the home of the machine there, not of this one. A path that names
+/// no file, or one in a clone git made, makes nothing, and says why.
+#[test]
+fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(&scratch, &up, &clone);
+    let main = clone.join("main").display().to_string();
+    let plans = clone.join("main").join("docs/plans");
+    fs::create_dir_all(&plans).unwrap();
+    let plan = plans.join("Sync Rework.md");
+    fs::write(&plan, "written down").unwrap();
+    let plan = plan.display().to_string();
+    // A commit origin has that the clone has not fetched.
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    let tip = rev_parse(&up, "main");
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let file = |path: &str, from: Option<&str>| {
+            Work::File(links::File::parse(path, from).unwrap())
+        };
+        let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
+        let panes = vec![worked("/nowhere/at/all"), worked(&main)];
+        let asked = Pasted::new(file(&plan, Some("/nowhere/at/all")), panes.clone());
+        let ready = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        let worktree = clone.join("sync-rework").display().to_string();
+        let branch = Some("sync-rework".to_owned());
+        let answer = Ready {
+            at: At::Session(1),
+            worktree: worktree.clone(),
+            branch: branch.clone(),
+            file: Some(plan.clone()),
+        };
+        assert_eq!(ready, answer);
+        assert!(clone.join("sync-rework").join(".git").is_file());
+        assert_eq!(rev_parse(&clone.join("sync-rework"), "HEAD"), tip);
+        assert!(far.gh.issues().is_empty());
+
+        let mut in_it = panes.clone();
+        in_it.push(worked(&worktree));
+        let asked = Pasted::new(file(&plan, None), in_it);
+        let again = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        assert_eq!(again.at, At::There(2));
+        assert_eq!(again.worktree, worktree);
+
+        // No pane in the repository: a session to make in what holds it.
+        let asked = Pasted::new(file(&plan, None), vec![worked("/nowhere/at/all")]);
+        let made = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        let At::Clone { cwd, name } = made.at else { panic!("no session to make") };
+        assert_eq!((cwd, name.as_str()), (clone.display().to_string(), "n"));
+
+        // In no repository, by the far machine's `~/`: the row's repository,
+        // and the file where it is.
+        let home = far.home.path().canonicalize().unwrap();
+        fs::write(home.join("errand.md"), "written down").unwrap();
+        let asked = Pasted::new(file("~/errand.md", Some(&main)), panes.clone());
+        let errand = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        assert_eq!(errand.at, At::Session(1));
+        assert_eq!(errand.worktree, clone.join("errand").display().to_string());
+        assert_eq!(errand.file, Some(home.join("errand.md").display().to_string()));
+
+        // From the row, relative.
+        let asked = Pasted::new(file("docs/plans/Sync Rework.md", Some(&main)), panes.clone());
+        let relative = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        assert_eq!(relative.file, Some(plan.clone()));
+        assert_eq!(relative.worktree, worktree);
+
+        // A file this machine has, and the far one has not.
+        let mine = here.home.path().canonicalize().unwrap().join("mine.md");
+        fs::write(&mine, "written down").unwrap();
+        let asked = Pasted::new(file("~/mine.md", Some(&main)), panes.clone());
+        assert_eq!(refused_there(&mut daemon, &asked).await, "no such file");
+        assert!(!clone.join("mine").exists());
+
+        let outside = scratch.join("outside.md");
+        fs::write(&outside, "written down").unwrap();
+        let asked = Pasted::new(file(&outside.display().to_string(), None), panes.clone());
+        assert_eq!(
+            refused_there(&mut daemon, &asked).await,
+            "it is in no repository, and the row highlighted works in no directory to go by"
+        );
+
+        let by_git = scratch.join("by-git");
+        git(&scratch, &["clone", "-q", &up.display().to_string(), &by_git.display().to_string()]);
+        fs::write(by_git.join("plan.md"), "written down").unwrap();
+        let asked = Pasted::new(file(&by_git.join("plan.md").display().to_string(), None), panes);
+        assert_eq!(
+            refused_there(&mut daemon, &asked).await,
+            format!(
+                "{} is in a clone git made, and wt would make the worktree in its .git; wt clone \
+                 it first",
+                by_git.display()
+            )
+        );
+        assert_eq!(rev_parse_verify(&by_git, "refs/heads/plan"), None);
+    });
+}
+
+/// Why the daemon of the machine `far` found nothing for `pasted`.
+async fn refused_there(daemon: &mut DaemonClient<Channel>, pasted: &Pasted) -> String {
+    let refused = pasted_on(daemon, "far", pasted).await.unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    refused.message().to_owned()
+}
+
+/// What git says `what` is, in the repository `dir` is in.
+fn rev_parse(dir: &Path, what: &str) -> String {
+    rev_parse_verify(dir, what).expect("what git knows")
+}
+
+/// The same, or none where git knows none.
+fn rev_parse_verify(dir: &Path, what: &str) -> Option<String> {
+    let said = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", "--quiet", what])
+        .output()
+        .unwrap();
+    said.status.success().then(|| String::from_utf8(said.stdout).unwrap().trim().to_owned())
 }
 
 /// An agent's review on another machine is that machine's daemon's to keep:

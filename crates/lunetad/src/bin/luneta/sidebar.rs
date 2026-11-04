@@ -83,7 +83,7 @@ use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
-use crate::pull::{Link, Ready, Worked};
+use crate::pull::{Link, Ready, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::zellij::{Closes, Open, SessionName, Tab, Within};
@@ -1004,7 +1004,7 @@ pub enum Asked {
     /// Find where a key of the menu numbered `menu`, for the pull request or
     /// the issue `link`, pasted on a row of `on`, goes among its panes
     /// `worked`, and have its worktree made there.
-    Pull { menu: u64, on: Machine, link: Link, worked: Vec<Worked> },
+    Pull { menu: u64, on: Machine, work: Work, worked: Vec<Worked> },
     /// Find the skills that `cwd`, on `on`, can run, for the menu numbered
     /// `menu`.
     Find { menu: u64, on: Machine, cwd: String },
@@ -2775,31 +2775,34 @@ impl Sidebar {
     }
 
     /// Opens the menu for the pull request or the issue `text` is the link
-    /// of, if it is one, in the place of the menu open, over zellij or at the
-    /// bottom of the sidebar, or else at the bottom, for the row highlighted:
-    /// its keys act on the machine of that row, as every key of the menu
-    /// does. Other text does nothing, as a paste did before. What is pasted
-    /// in the box for a machine's destination goes in it, a link too.
+    /// of, or the `.md` file it is the path of, if it is one, in the place of
+    /// the menu open, over zellij or at the bottom of the sidebar, or else at
+    /// the bottom, for the row highlighted: its keys act on the machine of
+    /// that row, as every key of the menu does, where a file is looked for
+    /// once a key is pressed, as only that machine can say, and a relative
+    /// path goes from where the row works. Other text does nothing, as a
+    /// paste did before. What is pasted in the box for a machine's
+    /// destination goes in it, a link too.
     pub fn paste(&mut self, text: &str) {
         if self.menu.as_mut().is_some_and(|menu| menu.paste(text)) {
             return;
         }
-        let Some(link) = Link::parse(text) else {
-            return;
-        };
-        self.notice = None;
         let target = match &self.menu {
             Some(menu) => Some(menu.target().clone()),
             None => self.target(),
         };
+        let Some(work) = Work::parse(text, target.as_ref().and_then(Target::cwd)) else {
+            return;
+        };
+        self.notice = None;
         let Some(target) = target else {
             if self.cursor.is_none() {
-                self.say(format!("menu: no row is highlighted for {link} to open the menu on"));
+                self.say(format!("menu: no row is highlighted for {work} to open the menu on"));
             }
             return;
         };
         self.menus += 1;
-        self.menu = Some(Menu::pull(self.menus, target, link));
+        self.menu = Some(Menu::pull(self.menus, target, work));
     }
 
     /// The menu, while it floats over zellij.
@@ -2932,8 +2935,8 @@ impl Sidebar {
                     Asked::OpenThere { menu: number, on, place, open }
                 }
             },
-            Wants::Pull(link) => match self.worked(&on) {
-                Ok(worked) => Asked::Pull { menu: number, on, link, worked },
+            Wants::Pull(work) => match self.worked(&on) {
+                Ok(worked) => Asked::Pull { menu: number, on, work, worked },
                 Err(why) => self.pulled(number, Err(why)),
             },
             Wants::Printed { session, pane, ended } => {
@@ -2962,8 +2965,8 @@ impl Sidebar {
     }
 
     /// luneta found where the key of the menu numbered `menu`, for a pull
-    /// request, goes, as `ready` says, or why it found nothing: the menu goes
-    /// on, while it waits on it.
+    /// request, an issue or a file, goes, as `ready` says, or why it found
+    /// nothing: the menu goes on, while it waits on it.
     pub fn pulled(&mut self, menu: u64, ready: Result<Ready, String>) -> Asked {
         let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.pulling()) else {
             return Asked::Nothing;
@@ -7117,11 +7120,12 @@ mod tests {
             worked(listed("older", 10), 2, "/w/c", None, true),
             worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
         ];
-        let pull = Asked::Pull { menu: 1, on: Machine::Local, link, worked };
+        let work = Work::Link(link);
+        let pull = Asked::Pull { menu: 1, on: Machine::Local, work, worked };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
-        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
+        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None, file: None };
         let asked = Asked::Make {
             menu: 1,
             on: Machine::Local,
@@ -7137,6 +7141,48 @@ mod tests {
         }
         let opened = pane_of("newer-2", 30, 3);
         assert_eq!(sidebar.opened(1, Ok(3)), go_here(opened));
+    }
+
+    /// A `.md` file's path pasted opens the menu for the file, whether or not
+    /// it names a file, which a key finds out on the machine of the row. It
+    /// goes by the directory the row highlighted works in. A row that works in
+    /// none, as a session's, opens the menu all the same: an absolute path
+    /// needs no directory, and a relative one says so once a key is pressed.
+    /// Text that names no `.md` file does nothing.
+    #[test]
+    fn a_md_file_s_path_pasted_opens_the_menu_for_it() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        for text in ["notes.txt", "two\nlines.md", "https://example.com/plan.md", ".md"] {
+            sidebar.paste(text);
+            assert!(sidebar.menu.is_none(), "{text:?}");
+        }
+        let Some(Target::Pane(on, row)) = sidebar.target() else { panic!("not a pane's row") };
+        let cwd = row.cwd.clone();
+        sidebar.paste("  docs/plans/sync-rework.md\n");
+        let lines = screen(&mut sidebar, true, 39, 16);
+        assert_eq!(lines[12..], [
+            "─ sync-rework ─ plans/sync-rework.md ─",
+            " w  worktree",
+            " t  tackle",
+            " <ESC> - Close",
+        ]);
+        let Asked::Pull { on: asked_on, work, .. } = sidebar.key(&char('t'), moment(160_000))
+        else {
+            panic!("no job for the key");
+        };
+        assert_eq!(asked_on, on);
+        let file = Work::parse("docs/plans/sync-rework.md", cwd.as_deref());
+        assert_eq!(Some(work), file);
+
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(Place::Session(listed("older", 10))));
+        sidebar.paste("/w/plan.md");
+        let Asked::Pull { work, .. } = sidebar.key(&char('w'), moment(160_000)) else {
+            panic!("no job for the key");
+        };
+        assert_eq!(Some(work), Work::parse("/w/plan.md", None));
     }
 
     /// The menu on an agent's row whose pane zellij has not said the
@@ -8301,10 +8347,11 @@ mod tests {
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let worked = links::Worked { dir: "/w/b".to_owned(), pull: None, here: false };
         let worked = vec![Worked { session: listed("work", 20), pane: 3, works: worked }];
-        let pull = Asked::Pull { menu: number, on: on.clone(), link, worked };
+        let asked = Work::Link(link);
+        let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, worked };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
-        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None };
+        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None, file: None };
         let asked = sidebar.pulled(number, Ok(ready));
         assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
         let made = session("main", 30, vec![pane(1, 0, "/w/n", "fish")]);

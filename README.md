@@ -665,6 +665,25 @@ asks `gh` first what the number is: GitHub counts issues and pull requests in
 one sequence, and a link of an issue of a pull request's number, or of none,
 makes nothing, and the menu says why.
 
+A `.md` file's path, pasted the same way, opens the menu for that file, for work
+written down there and not on GitHub: one line that ends in `.md`, from the
+root, from `~/`, or else from where the highlighted row works. `w` makes a
+worktree of a branch named for the file, and opens a tab there of that name, so
+`docs/plans/sync-rework.md` makes `sync-rework`: in lower case, with a `-` for
+what a branch's name can't hold. `t` does the same and starts Claude Code in the
+tab, told to `Tackle` the file by its real path, and let read it there, as the
+worktree may not have it. The worktree is made in the repository the file is in,
+or, for a file in none, the one the highlighted row works in; a file in none, on
+a row that works in no directory, makes nothing, and the menu says why. The tab
+opens in the session of a pane that works in that repository, or else in a
+session luneta makes in the directory that holds it, and wt makes the worktree
+only in a clone wt made. Where neither the clone nor origin has the branch yet,
+luneta fetches origin's default branch and makes it from that: in a fork's clone,
+from the fork, as a file names no other. The file is looked for once a key is
+pressed, so the menu opens for any such line, and a path that names no file says
+so then. Pasted again, the path finds the worktree the first paste made, as an
+issue's link does, and so does another file of the same name.
+
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no
 topic, and such a row goes by its tab, if you named it, or else by the
@@ -942,7 +961,9 @@ machine's to act on: lunetad there finds where its keys go among that
 machine's panes and the clones its zoxide knows, asks its `gh`, and has its
 `luneta worktree` make the worktree there, with the `zoxide`, `gh` and `git` on
 the `PATH` it started with, as for the ask box; a session it makes for the link
-is made there, holding the `#123` tab alone, as here. `Ctrl d` on its header
+is made there, holding the `#123` tab alone, as here. So is a `.md` file's path:
+lunetad there looks for the file, with that machine's `~/`, so a file only this
+machine has says `no such file`, after the machine's name. `Ctrl d` on its header
 opens the picker on the directories with the highlight on that machine's,
 which lunetad there lists as its zoxide knows them, and its eza; `Enter` on one
 makes the session there, named as that machine names one. `Ctrl j` on its
@@ -1272,7 +1293,7 @@ sound.
 | [`claude`](https://claude.com/claude-code) | optional | the menu, the brief and the ask box |
 | `git` | optional | the branch in the name of an agent the menu starts |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's or issue's repository that no session works in |
-| [`wt`](https://github.com/lorenzolfm/wt) | optional | the clone a worktree of a pull request or an issue you paste in [luneta's sidebar](#luneta-in-your-terminal) is made in, which `wt clone` makes, and the links of the files git ignores there, which wt's hook makes. luneta makes the worktree with wt's code, which it is built with, so `wt` needn't be on the `PATH` |
+| [`wt`](https://github.com/lorenzolfm/wt) | optional | the clone a worktree of a pull request, an issue or a `.md` file you paste in [luneta's sidebar](#luneta-in-your-terminal) is made in, which `wt clone` makes, and the links of the files git ignores there, which wt's hook makes. luneta makes the worktree with wt's code, which it is built with, so `wt` needn't be on the `PATH` |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), and the issue of a link you paste there |
