@@ -2055,6 +2055,14 @@ impl Sidebar {
         self.notice = None;
     }
 
+    /// Takes `notice` out of the notes, for it is no longer so, where they say
+    /// that and nothing else.
+    pub fn unsay(&mut self, notice: &str) {
+        if self.notice.as_deref() == Some(notice) {
+            self.notice = None;
+        }
+    }
+
     /// Says in the notes that an image is on its way to the machine `to`, or
     /// no longer says so, with none. The sidebar collapsed says so by its rule.
     pub fn image_going(&mut self, to: Option<Destination>) {
@@ -7570,6 +7578,19 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         assert_eq!((0..24).flat_map(|y| number_spot(&drawn, y)).count(), 0);
+    }
+
+    /// A note that is no longer so goes by its words, and leaves another that
+    /// is there in its place, as what went wrong as luneta started.
+    #[test]
+    fn a_note_no_longer_so_goes_and_leaves_any_other() {
+        let mut sidebar = fresh();
+        sidebar.notify("what goes wrong is kept in no log".to_owned());
+        sidebar.unsay("no one reads");
+        assert_eq!(sidebar.notice.as_deref(), Some("what goes wrong is kept in no log"));
+        sidebar.notify("no one reads".to_owned());
+        sidebar.unsay("no one reads");
+        assert_eq!(sidebar.notice, None);
     }
 
     /// A click on a number copies its link and does nothing else: the

@@ -1219,6 +1219,8 @@ impl App {
                     let acts = self.alerts.again();
                     self.alert(acts);
                 }
+                // A key may have asked before this luneta knew which one reads.
+                self.sidebar.unsay(peers::NO_READER);
                 self.hold_aloud();
             },
             Event::Opened { menu, opened } => {
@@ -2231,7 +2233,9 @@ impl App {
     /// `Alt u`: what plays pauses or goes on, and else what zellij copied last
     /// is read, by this luneta where it is the one of its machine that reads
     /// aloud, or by the one that is. Where it knows of none, the sidebar says why.
+    /// What it said before goes: this key tries again, and it may no longer be so.
     fn read_aloud(&mut self) {
+        self.sidebar.clear_notice();
         match self.desktop.reader() {
             Reader::This => {
                 let read = self.aloud.key(self.copied.as_deref());
@@ -2243,8 +2247,9 @@ impl App {
     }
 
     /// `Alt Shift u`: what plays stops, and what waits goes, by whichever
-    /// luneta `read_aloud` says.
+    /// luneta `read_aloud` says, and what the sidebar said before goes, as it does there.
     fn stop_aloud(&mut self) {
+        self.sidebar.clear_notice();
         match self.desktop.reader() {
             Reader::This => self.aloud.press(aloud::Button::Stop),
             Reader::Another(holder) => holder.stopped(),
