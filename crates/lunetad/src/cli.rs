@@ -64,6 +64,56 @@ pub fn failure(output: &Output) -> String {
     format!("zellij: {} ({})", line.trim(), output.status)
 }
 
+/// How many times luneta asks zellij for what a pane closing can cut short.
+const ASKS: usize = 3;
+
+/// What zellij's CLI says where something else answered as it first reached a
+/// session's server: it has asked nothing of it then.
+const UNREACHED: &str = "There is no active session!";
+
+/// What `ask`, a call of zellij's CLI that has something to say each time,
+/// said, or why not; asked again where a pane closing cut it short. zellij
+/// tells every connection to a session's server it may go on as a pane closes
+/// (`ClosePane` in zellij-server 0.45.1's `pty.rs`), not only a client's. A
+/// call that waits for its answer takes that for one, and ends well with
+/// nothing said, though what it asked for goes on: a pane it asked to open
+/// opens. Or it ends with `UNREACHED`, having asked nothing. Measured beside
+/// panes opening and closing, one call in six was cut short.
+pub fn heard(mut ask: impl FnMut() -> Result<String, String>) -> Result<String, String> {
+    asked(&mut ask, |answer| {
+        unreached(answer) || matches!(answer, Ok(said) if said.trim().is_empty())
+    })
+}
+
+/// Has `command`, a zellij that says nothing as it does what it was asked, do
+/// it, as `done` does, asked again where a pane closing kept it from asking,
+/// as `heard` says.
+pub fn done_once_reached(mut command: Command) -> Result<(), String> {
+    quiet(&mut command);
+    asked(&mut || answered(&mut command), unreached).map(drop)
+}
+
+/// What `ask` answered, asked up to `ASKS` times while `short` says it was cut
+/// short.
+fn asked(
+    ask: &mut dyn FnMut() -> Result<String, String>,
+    short: impl Fn(&Result<String, String>) -> bool,
+) -> Result<String, String> {
+    let mut answer = ask();
+    for _ in 1..ASKS {
+        if !short(&answer) {
+            break;
+        }
+        answer = ask();
+    }
+    answer
+}
+
+/// Whether `answer` says zellij's CLI asked nothing of the server.
+fn unreached(answer: &Result<String, String>) -> bool {
+    matches!(answer, Err(why) if why.contains(UNREACHED))
+}
+
 /// Why zellij could not be run.
 #[must_use]
 pub fn unrun(error: &io::Error) -> String {
@@ -124,7 +174,7 @@ pub fn laid(session: &str) -> Result<Vec<Laid>, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
     command.args(["--session", session, "action", "list-panes", "--json"]);
-    let said = answered(&mut command)?;
+    let said = heard(|| answered(&mut command))?;
     serde_json::from_str(&said)
         .map_err(|error| format!("zellij listed panes that do not read: {error}"))
 }

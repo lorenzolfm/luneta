@@ -125,7 +125,8 @@ pub fn script(path: &Path, text: &str) {
 /// minutes and three seconds before. It notes each rename it is asked for,
 /// for `renamed`, and renames nothing. It notes each client that is started,
 /// with `attach`, for `attached`, which ends at once as one that detached
-/// does. It knows no other command.
+/// does. A pane closing can cut a call of a session short, once, as a test had
+/// it `silences` or `unreaches` it. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -145,6 +146,18 @@ case "$(uname)" in
     *) cache="$HOME/.cache/zellij" ;;
 esac
 kept="$cache/contract_version_1/session_info/$session"
+if [ "$1" = action ] && [ -f "{panes}/$session.$2.silent" ]; then
+    rm "{panes}/$session.$2.silent"
+    if [ "$2" = new-pane ]; then
+        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
+    fi
+    exit 0
+fi
+if [ "$1" = action ] && [ -f "{panes}/$session.$2.unreached" ]; then
+    rm "{panes}/$session.$2.unreached"
+    echo "There is no active session!" >&2
+    exit 1
+fi
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
     "action list-panes --json") asking=laid ;;
@@ -384,6 +397,19 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// of these, it lists what it did, as it does where it has no room.
     pub fn stacks_into(&self, session: &str, nth: u32, panes: &serde_json::Value) {
         self.write(&format!("{session}.stacks.{nth}"), &panes.to_string());
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` end
+    /// well with nothing said, as a pane closing cuts one short, though what it
+    /// asked for goes on.
+    pub fn silences(&self, session: &str, action: &str) {
+        self.write(&format!("{session}.{action}.silent"), "");
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` fail as
+    /// a pane closing keeps one from asking, having asked nothing.
+    pub fn unreaches(&self, session: &str, action: &str) {
+        self.write(&format!("{session}.{action}.unreached"), "");
     }
 
     /// Has zellij list `clients` for the session `session` from now on, each
