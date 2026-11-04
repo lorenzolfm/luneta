@@ -24,7 +24,7 @@ use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
-use lunetad::links::{self, Pasted, Ready, Unready};
+use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Runs, Skill};
@@ -35,7 +35,7 @@ use lunetad::{log, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Channel;
-use tonic::{Code, Status};
+use tonic::Status;
 
 use crate::daemon::{self, Reach};
 
@@ -398,7 +398,7 @@ impl Away {
             // The daemon answers with the stream as the turn starts.
             let steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
                 Ok(Ok(steps)) => steps.into_inner(),
-                Ok(Err(status)) => return Some(Err(said(on, &status))),
+                Ok(Err(status)) => return Some(Err(on.said(&status))),
                 Err(_) => return Some(Err(format!("{on}: lunetad did not answer in {secs}s"))),
             };
             heard(on, steps, deadline, wanted, hear).await
@@ -406,35 +406,11 @@ impl Away {
     }
 
     /// Where a key of luneta's menu goes for what was `pasted` there, as
-    /// `lunetad::links` finds it there, by the place of its pane among those
-    /// `pasted` says, and the worktree it has made there; or why it found
-    /// nothing, as it said there, or as luneta heard no answer by
-    /// `links::PATIENCE` and its patience after, by which the daemon there
-    /// has done with it. The daemon there starts on it as it answers with the
-    /// stream: no stream means it started on nothing, and from then on an
-    /// answer that does not say otherwise may leave a worktree there, as a
-    /// question that hangs up does not stop it.
+    /// `Pasted::ready_on` asks the daemon there, through the one luneta
+    /// watches, with its patience for each answer.
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
-        let request = pasted.asked(Some(self.on()));
-        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
-        let secs = patience.as_secs_f32();
-        let minutes = links::PATIENCE.as_secs() / 60;
-        let in_doubt = |why: String| Err(Unready::InDoubt(format!("{on}: {why}")));
-        self.runtime.block_on(async move {
-            // The daemon answers with the stream at once, and the answer in
-            // it once it has found it.
-            let mut answer = match tokio::time::timeout(patience, daemon.paste(request)).await {
-                Ok(Ok(answer)) => answer.into_inner(),
-                Ok(Err(status)) => return Err(Unready::Failed(said(on, &status))),
-                Err(_) => return in_doubt(format!("lunetad did not answer in {secs}s")),
-            };
-            match tokio::time::timeout(links::PATIENCE + patience, answer.message()).await {
-                Ok(Ok(Some(ready))) => pasted.answered(ready).or_else(in_doubt),
-                Ok(Ok(None)) => in_doubt("lunetad's answer ended with nothing in it".to_owned()),
-                Ok(Err(status)) => Err(unready(on, &status)),
-                Err(_) => in_doubt(format!("lunetad had found nothing after {minutes} minutes")),
-            }
-        })
+        let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        self.runtime.block_on(pasted.ready_on(daemon, on, patience))
     }
 
     /// Has the daemon there keep `png`, as `lunetad::images` does there, and
@@ -455,7 +431,7 @@ impl Away {
                 let answer = tokio::time::timeout(patience, daemon.keep_image(request)).await;
                 let mut answer = match answer {
                     Ok(Ok(answer)) => answer.into_inner(),
-                    Ok(Err(status)) => return Err(said(on, &status)),
+                    Ok(Err(status)) => return Err(on.said(&status)),
                     Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
                 };
                 let deadline = images::PATIENCE + patience;
@@ -465,7 +441,7 @@ impl Away {
                         Err(format!("{on}: lunetad kept the image at \"{}\"", kept.path))
                     },
                     Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
-                    Ok(Err(status)) => Err(said(on, &status)),
+                    Ok(Err(status)) => Err(on.said(&status)),
                     Err(_) => Err(format!("{on}: the image had not gone after {minutes} minutes")),
                 }
             };
@@ -493,7 +469,7 @@ impl Away {
         let (on, secs) = (&self.on, self.patience.as_secs_f32());
         match self.runtime.block_on(asked) {
             Ok(Ok(answer)) => Ok(answer.into_inner()),
-            Ok(Err(status)) => Err(said(on, &status)),
+            Ok(Err(status)) => Err(on.said(&status)),
             Err(_) => Err(format!("{on}: lunetad did not answer in {secs}s")),
         }
     }
@@ -526,7 +502,7 @@ async fn heard(
                 Ok(step) => step.into_iter().for_each(hear),
                 Err(why) => return Some(Err(format!("{on}: {why}"))),
             },
-            Ok(Some(Err(status))) => return Some(Err(said(on, &status))),
+            Ok(Some(Err(status))) => return Some(Err(on.said(&status))),
             Ok(None) => return Some(Ok(())),
         }
     }
@@ -568,32 +544,6 @@ fn exited_of(answer: ListExitedResponse) -> Vec<Exited> {
         Some(Exited { name, ago: exited.ago?.try_into().ok()? })
     };
     answer.exited.into_iter().filter_map(exited).collect()
-}
-
-/// What `status`, of a question for `on`, says: what lunetad said, or what a
-/// daemon older than the question would mean.
-fn said(on: &Destination, status: &Status) -> String {
-    match status.code() {
-        Code::Unimplemented => {
-            format!("{on}: its lunetad, or this one, is older than what luneta asked of it")
-        },
-        _ if status.message().is_empty() => format!("{on}: lunetad: {}", status.code()),
-        _ => format!("{on}: {}", status.message()),
-    }
-}
-
-/// Why the daemon of `on`, having started on a key of the menu, found nowhere
-/// for it to go, as `status` says: `Code::NotFound` is its machine having none
-/// of the repository, which a daemon older than that does not say apart, and
-/// `Code::FailedPrecondition` its making nothing. Anything else may have left a
-/// worktree there: the daemon may have said so, or the answer been cut short.
-fn unready(on: &Destination, status: &Status) -> Unready {
-    let why = said(on, status);
-    match status.code() {
-        Code::NotFound => Unready::Nowhere(why),
-        Code::FailedPrecondition => Unready::Failed(why),
-        _ => Unready::InDoubt(why),
-    }
 }
 
 #[cfg(test)]
@@ -661,28 +611,6 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
-    }
-
-    /// What a daemon that started on a key says tells whether another machine
-    /// may go on: it has none of the repository, or it made nothing. Anything
-    /// else may have left a worktree there: `Aborted` says so, and an answer
-    /// cut short says nothing.
-    #[test]
-    fn only_a_daemon_that_says_it_made_nothing_lets_another_machine_go_on() {
-        let on = "nixos".parse().unwrap();
-        let why = "nixos: why".to_owned();
-        assert_eq!(unready(&on, &Status::not_found("why")), Unready::Nowhere(why.clone()));
-        assert_eq!(unready(&on, &Status::failed_precondition("why")), Unready::Failed(why.clone()));
-        let unsure = [
-            Status::aborted("why"),
-            Status::unavailable("why"),
-            Status::cancelled("why"),
-            Status::internal("why"),
-            Status::unknown("why"),
-        ];
-        for status in unsure {
-            assert_eq!(unready(&on, &status), Unready::InDoubt(why.clone()), "{status:?}");
-        }
     }
 
     /// The daemon there names a session to make, and says when it read

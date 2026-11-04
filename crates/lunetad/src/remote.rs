@@ -35,6 +35,7 @@ use notify::RecursiveMode;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
 use tonic::transport::Channel;
+use tonic::{Code, Status};
 
 use crate::api::daemon_client::DaemonClient;
 use crate::api::remote::{self, unreached};
@@ -93,6 +94,21 @@ const SOCKET_MAKING: usize = 17;
 /// the order of their spelling.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Destination(String);
+
+impl Destination {
+    /// What `status`, of a question for this machine, says: what lunetad said,
+    /// or what a daemon older than the question would mean.
+    #[must_use]
+    pub fn said(&self, status: &Status) -> String {
+        match status.code() {
+            Code::Unimplemented => {
+                format!("{self}: its lunetad, or this one, is older than what luneta asked of it")
+            },
+            _ if status.message().is_empty() => format!("{self}: lunetad: {}", status.code()),
+            _ => format!("{self}: {}", status.message()),
+        }
+    }
+}
 
 impl FromStr for Destination {
     type Err = String;

@@ -988,7 +988,11 @@ impl Daemon for Host {
         request: Request<PasteRequest>,
     ) -> Result<Response<Self::PasteStream>, Status> {
         let (on, pasted) = Pasted::of(request.into_inner()).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        // A machine this daemon does not reach never heard the question, which
+        // `Code::Unavailable` would not say: a connection lost after it did
+        // says that too.
+        let unasked = |why: Status| Status::failed_precondition(why.message());
+        if let Some(mut daemon) = self.bridged(on).map_err(unasked)? {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }

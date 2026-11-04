@@ -57,14 +57,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use tokio::time::timeout;
+use tonic::transport::Channel;
+use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch};
 use wt::repo::Repo;
 
+use crate::api::daemon_client::DaemonClient;
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::program::{self, Ran};
-use crate::{git, github, names, zoxide, Directory, SessionName};
+use crate::{git, github, names, zoxide, Destination, Directory, SessionName};
 
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
@@ -696,6 +700,26 @@ impl Unready {
             Unready::Nowhere(why) | Unready::Failed(why) | Unready::InDoubt(why) => why,
         }
     }
+
+    /// Why the daemon of `on` found nowhere for a key of the menu to go, as
+    /// `status` says, before the answer's stream or in it: `Code::NotFound` is
+    /// its machine having none of the repository, which a daemon older than
+    /// that does not say apart; `Code::FailedPrecondition` its making nothing,
+    /// or the daemon between not reaching it; and `Code::InvalidArgument` and
+    /// `Code::Unimplemented` a daemon that did not take the question. Anything
+    /// else may have left a worktree there: the daemon may have said so, or the
+    /// connection been lost, or the answer been cut short, which all look the
+    /// same whether or not the question had reached it.
+    fn of(on: &Destination, status: &Status) -> Unready {
+        let why = on.said(status);
+        match status.code() {
+            Code::NotFound => Unready::Nowhere(why),
+            Code::FailedPrecondition | Code::InvalidArgument | Code::Unimplemented => {
+                Unready::Failed(why)
+            },
+            _ => Unready::InDoubt(why),
+        }
+    }
 }
 
 /// A failure on the way to the worktree, which made none, as `?` says it: what
@@ -789,6 +813,39 @@ impl Pasted {
         match &self.work {
             Work::Link(link) => ready(link, &self.worked),
             Work::File(file) => ready_file(file, &self.worked),
+        }
+    }
+
+    /// Where a key goes, as `ready` finds it on the machine `on`, whose daemon
+    /// `daemon` hands the question on to, with `patience` for each answer; or
+    /// why it found nothing, as it said there, or as no answer came by
+    /// `PATIENCE` and that patience after, by which the daemon there has done
+    /// with it. The daemon there starts on it as it hears it, whether or not
+    /// its answer comes back, and a question that hangs up does not stop it:
+    /// so from the moment the question leaves, what does not say otherwise, as
+    /// `Unready::of` reads it, may leave a worktree there.
+    pub async fn ready_on(
+        &self,
+        mut daemon: DaemonClient<Channel>,
+        on: &Destination,
+        patience: Duration,
+    ) -> Result<Ready<usize>, Unready> {
+        let request = self.asked(Some(On { destination: on.to_string() }));
+        let secs = patience.as_secs_f32();
+        let minutes = PATIENCE.as_secs() / 60;
+        let in_doubt = |why: String| Err(Unready::InDoubt(format!("{on}: {why}")));
+        // The daemon answers with the stream at once, and the answer in it
+        // once it has found it.
+        let mut answer = match timeout(patience, daemon.paste(request)).await {
+            Ok(Ok(answer)) => answer.into_inner(),
+            Ok(Err(status)) => return Err(Unready::of(on, &status)),
+            Err(_) => return in_doubt(format!("lunetad did not answer in {secs}s")),
+        };
+        match timeout(PATIENCE + patience, answer.message()).await {
+            Ok(Ok(Some(ready))) => self.answered(ready).or_else(in_doubt),
+            Ok(Ok(None)) => in_doubt("lunetad's answer ended with nothing in it".to_owned()),
+            Ok(Err(status)) => Err(Unready::of(on, &status)),
+            Err(_) => in_doubt(format!("lunetad had found nothing after {minutes} minutes")),
         }
     }
 
@@ -2077,6 +2134,33 @@ mod tests {
         assert_eq!(Remotes::of(Ok(Ran::Stuck)), stuck);
         let unrun = Remotes::of(Err(io::Error::from(io::ErrorKind::NotFound)));
         assert!(matches!(unrun, Remotes::Unsaid(_)), "{unrun:?}");
+    }
+
+    /// What a daemon says tells whether another machine may go on: it has none
+    /// of the repository, or it made nothing, or it did not take the question.
+    /// Anything else may have left a worktree there: `Aborted` says so, and an
+    /// answer cut short or lost says nothing.
+    #[test]
+    fn only_a_daemon_that_says_it_made_nothing_lets_another_machine_go_on() {
+        let on: Destination = "nixos".parse().unwrap();
+        let why = || "nixos: why".to_owned();
+        assert_eq!(Unready::of(&on, &Status::not_found("why")), Unready::Nowhere(why()));
+        for status in [Status::failed_precondition("why"), Status::invalid_argument("why")] {
+            assert_eq!(Unready::of(&on, &status), Unready::Failed(why()), "{status:?}");
+        }
+        let older = Unready::of(&on, &Status::unimplemented("why"));
+        assert!(matches!(older, Unready::Failed(_)), "{older:?}");
+        let unsure = [
+            Status::aborted("why"),
+            Status::unavailable("why"),
+            Status::cancelled("why"),
+            Status::deadline_exceeded("why"),
+            Status::internal("why"),
+            Status::unknown("why"),
+        ];
+        for status in unsure {
+            assert_eq!(Unready::of(&on, &status), Unready::InDoubt(why()), "{status:?}");
+        }
     }
 
     /// Where a key goes is answered as it was found: a pane by its place
