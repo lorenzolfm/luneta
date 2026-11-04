@@ -88,6 +88,17 @@ service Daemon {
   // would take the session along now, stays. It answers once zellij has, or
   // with what zellij said as it failed, or why it closed nothing.
   rpc Close(CloseRequest) returns (CloseResponse);
+  // The tabs of the session of a terminal other than its own, as zellij lists
+  // the session's panes now, in their order: for its tab's panes to turn into
+  // panes of one of them.
+  rpc OtherTabs(OtherTabsRequest) returns (OtherTabsResponse);
+  // Has zellij turn a terminal of a session into a tab of its own, or the
+  // panes of its tab into panes of another tab, which the tab they left goes
+  // with. What runs in them runs on, and each keeps its id. It answers once
+  // they have moved, or that a client has to come first, or with why they did
+  // not: a terminal alone in its tab, or that alone holds it open for floating
+  // panes that would end, stays.
+  rpc Turn(TurnRequest) returns (TurnResponse);
   // Has zellij kill a session and delete it, so that it keeps nothing to
   // bring it back with, as `zellij delete-session --force` does. It answers
   // once the session's server has ended, or with why it did not: a session
@@ -447,6 +458,48 @@ message CloseRequest {
 }
 
 message CloseResponse {}
+
+message OtherTabsRequest {
+  On on = 1;
+  string session = 2;
+  // The terminal whose tab is left out, by its id.
+  uint32 pane = 3;
+}
+
+message OtherTabsResponse {
+  repeated Tab tabs = 1;
+
+  message Tab {
+    uint32 id = 1;
+    // Its name, as zellij lists it, who names it `Tab #N` until you do.
+    string name = 2;
+  }
+}
+
+message TurnRequest {
+  On on = 1;
+  string session = 2;
+  // The terminal, by its id.
+  uint32 pane = 3;
+  // What it turns into: one of these, always. A question with neither is
+  // invalid.
+  oneof becomes {
+    // A tab of its own. Its tab keeps its other panes, and names the new one
+    // where someone named it.
+    NewTab new_tab = 4;
+    // Panes of this other tab, by its id, as `OtherTabs` says it, with the
+    // other panes of its tab.
+    uint32 panes_of = 5;
+  }
+
+  message NewTab {}
+}
+
+message TurnResponse {
+  // Nothing moved: the session has no client to make room for a new tab, and
+  // one that comes there can ask again.
+  bool no_client = 1;
+}
 
 message KillRequest {
   On on = 1;

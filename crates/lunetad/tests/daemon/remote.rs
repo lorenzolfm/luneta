@@ -15,7 +15,9 @@ use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
 use lunetad::api::keep_printed_response::{self, File};
-use lunetad::api::{close_request, closes_response, list_exited_response};
+use lunetad::api::{
+    close_request, closes_response, list_exited_response, other_tabs_response, turn_request,
+};
 use lunetad::api::list_skills_response::Skill;
 use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
@@ -25,8 +27,9 @@ use lunetad::api::{
     DumpScreenRequest, GoRequest, KeepImageRequest, KeepPrintedRequest, KillRequest,
     ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
-    MoveReviewRequest, NameSessionRequest, On, OpenRequest, RefugeRequest, RenameSessionRequest,
-    ReviewMove, StartRequest, TranscriptEndsRequest, WatchRequest,
+    MoveReviewRequest, NameSessionRequest, On, OpenRequest, OtherTabsRequest, RefugeRequest,
+    RenameSessionRequest, ReviewMove, StartRequest, TranscriptEndsRequest, TurnRequest,
+    WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
@@ -588,6 +591,13 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         "is_floating": false, "tab_id": 3,
     });
     far.zellij.list("held", &serde_json::json!([tab, holds, beside]));
+    far.zellij.list("turning", &serde_json::json!([tab, beside]));
+    far.zellij.clients("turning", &[(1, "terminal_4")]);
+    let there = serde_json::json!({
+        "id": 4, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
+        "is_floating": false, "tab_id": 6,
+    });
+    far.zellij.stacks_into("turning", 1, &serde_json::json!([there, beside]));
     far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join(".claude/skills/near");
@@ -779,6 +789,18 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             "--session two action close-tab-by-id 3",
         ];
         assert_eq!(far.zellij.closed(), closed_there);
+
+        // A tab there turns into panes of another there, as zellij there lists
+        // them.
+        let tabs = OtherTabsRequest { on: on("far"), session: "turning".to_owned(), pane: 4 };
+        let tabs = daemon.other_tabs(tabs).await.unwrap().into_inner().tabs;
+        assert_eq!(tabs, [other_tabs_response::Tab { id: 6, name: String::new() }]);
+        let becomes = Some(turn_request::Becomes::PanesOf(6));
+        let turn = TurnRequest { on: on("far"), session: "turning".to_owned(), pane: 4, becomes };
+        daemon.turn(turn).await.unwrap();
+        let stacked = "--session turning action stack-panes -- terminal_5 terminal_4";
+        assert_eq!(far.zellij.turned().first().map(String::as_str), Some(stacked));
+        assert!(here.zellij.turned().is_empty());
 
         // A session there is killed by when it started, as its daemon lists
         // it, and deleted.

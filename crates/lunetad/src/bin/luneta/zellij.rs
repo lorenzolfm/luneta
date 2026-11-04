@@ -25,6 +25,7 @@ use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
+use lunetad::turns::{self, OtherTab, Turned};
 use lunetad::{clients, moves, Destination, SocketId};
 pub use lunetad::SessionName;
 
@@ -34,6 +35,7 @@ use crate::host::{Event, Nudged};
 use crate::icons;
 use crate::machines::Machine;
 use crate::own::{Before, Look, Looked};
+use crate::sidebar::PanePlace;
 
 /// A pane of a session, as the CLI names it: `<session>:<pane>`, as `luneta
 /// agents` writes it.
@@ -660,6 +662,10 @@ pub enum After {
     /// Open this, as `open` does, for the menu owed what it opens: told once
     /// done, or else as it is dropped undone.
     Open(Due<u32>, Open),
+    /// Turn the pane `pane` of `session` into a tab, for the menu owed the
+    /// pane, now that a client is there to make room for it: told once done,
+    /// or else as it is dropped undone.
+    IntoTab(Due<u32>, SessionName, u32),
     /// Kill the session the client left, which it was in, the one that
     /// started at `started`, and delete it.
     Kill { session: SessionName, started: SystemTime },
@@ -675,7 +681,7 @@ impl After {
     /// not done: to the menu owed what it opens, or as a notice.
     pub fn untold(self, events: &Sender<Event>) {
         match self {
-            After::Open(owed, _) => {
+            After::Open(owed, _) | After::IntoTab(owed, ..) => {
                 owed.pay(Err("luneta cannot tell when zellij's client is there".to_owned()));
             },
             After::Kill { session, .. } => {
@@ -692,6 +698,13 @@ impl After {
         match (self, there) {
             (After::Open(owed, open), there) => {
                 owed.pay(there.open(&open).map(|opened| told(opened, events)));
+            },
+            (After::IntoTab(owed, session, pane), there) => {
+                let turned = there.turn(&session, pane, turns::Turn::PaneIntoTab);
+                owed.pay(turned.and_then(|turned| match turned {
+                    Turned::Done => Ok(pane),
+                    Turned::NoClient => Err(lunetad::opens::no_client(&session)),
+                }));
             },
             // A zellij of its own kills it: one run as the client's would
             // wait on the session it ends.
@@ -711,7 +724,7 @@ impl After {
     /// Says why it is not done: the client did not come.
     fn stayed(self, events: &Sender<Event>) {
         match self {
-            After::Open(owed, _) => {
+            After::Open(owed, _) | After::IntoTab(owed, ..) => {
                 owed.pay(Err("zellij did not take its client there".to_owned()));
             },
             After::Kill { session, .. } => {
@@ -725,7 +738,7 @@ impl After {
     /// menu owed what it opens, or as a notice that the session stays.
     fn failed(self, why: String, events: &Sender<Event>) {
         match self {
-            After::Open(owed, _) => owed.pay(Err(why)),
+            After::Open(owed, _) | After::IntoTab(owed, ..) => owed.pay(Err(why)),
             kill @ After::Kill { .. } => kill.stayed(events),
         }
     }
@@ -758,6 +771,45 @@ fn told(opened: Opened, events: &Sender<Event>) -> u32 {
 /// a key asked for: the terminal it opened, or why none, as `Due` says.
 pub fn owed(menu: u64, events: &Sender<Event>) -> Due<u32> {
     Due::new(events, move |opened| Event::Opened { menu, opened })
+}
+
+/// Asks zellij on the machine `on`, on a thread of its own, which tabs of
+/// `session` are not that of its terminal `pane`, for the menu numbered
+/// `menu`, and hands back what it answers.
+pub fn other_tabs(
+    menu: u64,
+    on: &Machine,
+    session: SessionName,
+    pane: u32,
+    events: &Sender<Event>,
+) {
+    let (on, events) = (on.clone(), events.clone());
+    thread::spawn(move || {
+        let tabs = There::on(&on).and_then(|mut there| there.other_tabs(&session, pane));
+        // luneta is on its way out.
+        let _ = events.send(Event::Tabs { menu, tabs });
+    });
+}
+
+/// Has zellij on the machine `on` turn the pane `place` as `turn` says, on a
+/// thread of its own, for the menu numbered `menu`, and hands back its
+/// terminal, for luneta to take its client to, or why it did not, as `owed`
+/// does. What stays moves nothing, luneta's client neither. Where its session
+/// has no client to make room for a new tab, the menu is owed that yet, once
+/// luneta's client has come, as `Event::NoClient` says.
+pub fn turn(menu: u64, on: &Machine, place: PanePlace, turn: turns::Turn, events: &Sender<Event>) {
+    let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
+    thread::spawn(move || {
+        let (session, pane) = (place.session.name(), place.pane);
+        match There::on(&on).and_then(|mut there| there.turn(session, pane, turn)) {
+            Ok(Turned::Done) => owed.pay(Ok(pane)),
+            Ok(Turned::NoClient) => {
+                // luneta is on its way out.
+                let _ = events.send(Event::NoClient { menu, owed, on, place });
+            },
+            Err(why) => owed.pay(Err(why)),
+        }
+    });
 }
 
 /// Asks zellij on the machine `on`, on a thread of its own, what closing the
@@ -1102,6 +1154,30 @@ impl There {
         match self {
             There::Here => opening(open),
             There::Away(away) => away.open(open),
+        }
+    }
+
+    /// The tabs of `session` other than that of its terminal `pane`, as
+    /// `lunetad::turns::other_tabs` says, or why it does not say.
+    fn other_tabs(&mut self, session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
+        match self {
+            There::Here => turns::other_tabs(session, pane),
+            There::Away(away) => away.other_tabs(session, pane),
+        }
+    }
+
+    /// Has zellij turn the terminal `pane` of `session` as `turn` says, as
+    /// `lunetad::turns::turned` does, and says what came of it, or why it did
+    /// not.
+    fn turn(
+        &mut self,
+        session: &SessionName,
+        pane: u32,
+        turn: turns::Turn,
+    ) -> Result<Turned, String> {
+        match self {
+            There::Here => turns::turned(session, pane, turn),
+            There::Away(away) => away.turn(session, pane, turn),
         }
     }
 

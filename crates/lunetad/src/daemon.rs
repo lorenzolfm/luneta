@@ -56,7 +56,9 @@ use crate::api::list_dirs_response::Dir;
 use crate::api::list_exited_response::Exited;
 use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
+use crate::api::other_tabs_response::Tab as OtherTab;
 use crate::api::refuge_response::{self, Kept, Went};
+use crate::api::turn_request;
 use crate::api::{
     self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
     ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
@@ -66,9 +68,10 @@ use crate::api::{
     ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
     ListSkillsResponse, MoveReviewRequest, MoveReviewResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, RenameSessionResponse, ReviewMove, SayRequest,
-    SayResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    NameSessionResponse, OpenRequest, OpenResponse, OtherTabsRequest, OtherTabsResponse,
+    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
+    RenameSessionResponse, ReviewMove, SayRequest, SayResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, TurnRequest, TurnResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -86,9 +89,11 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::agent::Agent;
+use crate::turns::{Turn, Turned};
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
-    opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, watch,
+    opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, turns,
+    watch,
     zellij, zoxide,
 };
 
@@ -772,6 +777,40 @@ impl Daemon for Host {
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
         Ok(Response::new(CloseResponse {}))
+    }
+
+    async fn other_tabs(
+        &self,
+        request: Request<OtherTabsRequest>,
+    ) -> Result<Response<OtherTabsResponse>, Status> {
+        let OtherTabsRequest { on, session, pane } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.other_tabs(OtherTabsRequest { on: None, session, pane }).await;
+        }
+        let tabs = task::spawn_blocking(move || turns::other_tabs(&session, pane)).await;
+        let tabs = tabs.map_err(|error| unfinished(&error))?;
+        let tabs = tabs.map_err(Status::failed_precondition)?;
+        let tab = |turns::OtherTab { id, name }| OtherTab { id, name };
+        Ok(Response::new(OtherTabsResponse { tabs: tabs.into_iter().map(tab).collect() }))
+    }
+
+    async fn turn(&self, request: Request<TurnRequest>) -> Result<Response<TurnResponse>, Status> {
+        let TurnRequest { on, session, pane, becomes } = request.into_inner();
+        let session = named("session", &session)?;
+        let turn = match becomes {
+            Some(turn_request::Becomes::NewTab(_)) => Turn::PaneIntoTab,
+            Some(turn_request::Becomes::PanesOf(to)) => Turn::TabIntoPanes { to },
+            None => return Err(Status::invalid_argument("becomes: neither a tab nor panes")),
+        };
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.turn(turn.asked(None, &session, pane)).await;
+        }
+        let turned = task::spawn_blocking(move || turns::turned(&session, pane, turn)).await;
+        let turned = turned.map_err(|error| unfinished(&error))?;
+        let turned = turned.map_err(Status::failed_precondition)?;
+        Ok(Response::new(TurnResponse { no_client: turned == Turned::NoClient }))
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {

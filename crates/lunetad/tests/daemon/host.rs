@@ -180,6 +180,18 @@ case "$*" in
         echo "$asked" >> "{panes}/went"
         exit 0
         ;;
+    "action stack-panes -- "*)
+        echo "$asked" >> "{panes}/turned"
+        for next in "{panes}/$session".stacks.*; do
+            [ -f "$next" ] && mv "$next" "{panes}/$session.json"
+            break
+        done
+        exit 0
+        ;;
+    "action toggle-pane-embed-or-floating "*)
+        echo "$asked" >> "{panes}/turned"
+        exit 0
+        ;;
     "action new-pane "*)
         echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
         echo terminal_9
@@ -322,6 +334,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("opened")
     }
 
+    /// Each pane zellij was asked to stack, float or embed, as its arguments
+    /// were, in the order it was asked.
+    pub fn turned(&self) -> Vec<String> {
+        self.lines("turned")
+    }
+
     /// Each rename zellij was asked for, as its arguments were, in the order
     /// it was asked.
     pub fn renamed(&self) -> Vec<String> {
@@ -359,6 +377,13 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// the next tab there, as `list` would, with that tab, `3`, among them.
     pub fn opens_into(&self, session: &str, panes: &serde_json::Value) {
         self.write(&format!("{session}.opened.json"), &panes.to_string());
+    }
+
+    /// Has zellij list `panes` for the session `session` once it has stacked
+    /// the `nth` pane there, from the first, as `list` would. Past the last
+    /// of these, it lists what it did, as it does where it has no room.
+    pub fn stacks_into(&self, session: &str, nth: u32, panes: &serde_json::Value) {
+        self.write(&format!("{session}.stacks.{nth}"), &panes.to_string());
     }
 
     /// Has zellij list `clients` for the session `session` from now on, each
