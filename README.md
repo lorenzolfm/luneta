@@ -1175,10 +1175,12 @@ if it's the wrong one:
 | slash tiger style | `/tigerstyle` |
 | use the hand off skill, the next session fixes CI | `/handoff the next session fixes CI` |
 
-Only a mark names a skill: "slash" before its name, or "skill" after it, which
-the model may write as "scale" or "queue". A name with neither stays words, as
-`research` and `teach` are words too, and "hand this off" is no `/handoff`. The
-names are those the [menu's `/`](#menu) finds
+Only a mark names a skill: "slash" before its name, or "skill" after it. A name
+with neither stays words, as `research` and `teach` are words too, and "hand
+this off" is no `/handoff`. The model may write "skill" as "skills", "scale" or
+"queue", which are words too, so those count only after "use", "using", "run",
+"apply" or "with": "use the handoff scale" is `/handoff`, and "clear the code
+review queue" stays words. The names are those the [menu's `/`](#menu) finds
 for the directory of the agent's pane, on its machine. A name is matched
 loosely, as the model mishears them: spaces and hyphens don't count, and "make
 legal statements unrepresentable" is `/make-illegal-states-unrepresentable`. A
@@ -1189,13 +1191,19 @@ Claude Code runs a slash command only at the very start of a prompt, so the
 first skill you name goes first, and the rest of what you said goes after it,
 as what it is given. It must also be the first thing on the prompt, so what you
 typed there before you dictated keeps it from running. A second skill is written
-by name, as ``the `tigerstyle` skill``, for the agent to run itself, which it
+by name, as ``the `tigerstyle` skill``, for the agent to run itself. An agent
 can't where the skill's frontmatter says `disable-model-invocation: true`, as
-that of `/handoff` and `/thermo-nuclear-review` do: name those first. What you
-say with a mark in it waits for the skills to be found, a moment after you
-start talking. In a shell, "slash" is more likely part of a path, and in the
-[ask box](#from-lunetas-sidebar), whose agent runs in safe mode, your skills
-are not there to run: what you say stays as you said it in both.
+that of `/handoff` and `/thermo-nuclear-review` do, so named second, one of those
+stays as you said it, and the box tells you it runs only if named first.
+
+`Enter` sends what the box showed as you pressed it. A command the box didn't
+show then, as when the skills are still being found, or the model's last words
+make one, is written and waits for your own `Enter`. What you say with a mark in
+it waits for the skills to be found, a moment after you start talking. In a
+shell, "slash" is more likely part of a path, and in the
+[ask box](#from-lunetas-sidebar), whose agent runs in safe mode, your skills are
+not there to run: what you say stays as you said it in both, and so it does where
+the agent you opened the box on has left the pane by the time it is written.
 
 What you say is turned into text on your machine, and none of it leaves it, or
 is kept. It is NVIDIA's Parakeet, an English model, that does it, which

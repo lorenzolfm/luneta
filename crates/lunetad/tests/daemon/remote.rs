@@ -655,7 +655,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let skills = dir.path().to_str().unwrap().to_owned();
         let skills = ListSkillsRequest { on: on("far"), dir: skills };
         let found = daemon.list_skills(skills).await.unwrap();
-        let near = Skill { name: "near".to_owned(), description: "Near.".to_owned() };
+        let near =
+            Skill { name: "near".to_owned(), description: "Near.".to_owned(), only_you: false };
         assert_eq!(found.into_inner().skills, [near]);
         let nowhere = ListSkillsRequest { on: on("far"), dir: String::new() };
         invalid(daemon.list_skills(nowhere).await.unwrap_err());

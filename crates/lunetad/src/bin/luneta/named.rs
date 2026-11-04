@@ -5,6 +5,9 @@
 //! Only a mark says a skill: "slash" before its name, as you would type it, or
 //! "skill" after it, as you would say it. A name with neither stays words:
 //! `research` and `teach` are words too, and to hand work off is no `/handoff`.
+//! The model writes "skill" as words of their own, as "scale" and "queue", and
+//! there it takes what you said before the name to tell which: "use the handoff
+//! scale" names a skill, and "clear the code review queue" does not.
 //!
 //! The model mishears names, and writes them in words of its own: "make legal
 //! statements unrepresentable", "hand off", "tiger style". So a name is matched
@@ -17,18 +20,22 @@
 //! it is given. A skill named after it cannot lead too, so it is written by
 //! name for the agent to run itself. An agent cannot run a skill whose
 //! frontmatter says `disable-model-invocation: true`, as `handoff` and
-//! `thermo-nuclear-review` say: those run only when named first.
+//! `thermo-nuclear-review` say: named after the first, one of those stays as you
+//! said it, and `Written` says so.
 
 use std::fmt;
 
-use crate::skills::{Name, Skill};
+use crate::skills::{Name, Runs, Skill};
 
 /// The word spoken before a skill's name.
 const SLASH: &str = "slash";
 
-/// The words spoken after a skill's name: "skill", and what the model has been
-/// heard to write for it, "scale" often.
-const SKILL: [&str; 4] = ["skill", "skills", "scale", "queue"];
+/// The word spoken after a skill's name.
+const SKILL: &str = "skill";
+
+/// What the model has been heard to write for that word, "scale" often. Each is
+/// a word of its own too, as "the review queue" is.
+const HEARD_AS_SKILL: [&str; 3] = ["skills", "scale", "queue"];
 
 /// The most words a name is said in: `thermo-nuclear-code-quality-review` is
 /// five, and a word misheard as two adds to that.
@@ -44,6 +51,14 @@ const LEADING_UP: [&str; 16] = [
 /// The words no name starts with.
 const ARTICLES: [&str; 3] = ["a", "an", "the"];
 
+/// What must come before a name for a word of `HEARD_AS_SKILL` after it to be
+/// "skill": what you do with a skill. "through" is not among them, as you work
+/// through a queue too.
+const LEAD_INS: [&str; 5] = ["apply", "run", "use", "using", "with"];
+
+/// The words that may come between a lead-in and the name.
+const BETWEEN: [&str; 5] = ["a", "an", "my", "our", "the"];
+
 /// What it takes for one skill to win over another, in thousandths of a match:
 /// about one letter in ten.
 const MARGIN: u32 = 100;
@@ -51,6 +66,16 @@ const MARGIN: u32 = 100;
 /// What a plugin's skill loses when only its name in the plugin is said, so
 /// that a skill of yours of that name wins over it.
 const PLUGINS_COST: u32 = MARGIN;
+
+/// What a word after a name says of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    /// "skill": what comes before it names one.
+    Said,
+    /// A word of its own that the model also writes for "skill": what comes
+    /// before it names one only where a lead-in comes before that.
+    Heard,
+}
 
 /// A word of what was said.
 struct Word<'a> {
@@ -64,13 +89,19 @@ impl<'a> Word<'a> {
         Word { text, letters: letters(text) }
     }
 
-    fn says_skill(&self) -> bool {
-        SKILL.contains(&self.letters.as_str())
+    fn mark(&self) -> Option<Mark> {
+        let letters = self.letters.as_str();
+        if letters == SKILL {
+            return Some(Mark::Said);
+        }
+        HEARD_AS_SKILL.contains(&letters).then_some(Mark::Heard)
     }
 
     /// How many words after this one a name starts, if it says a slash: this
     /// very word, for one the model wrote as `/tigerstyle`, or the next, for
-    /// "slash" or a `/` alone. A path has more than the one slash.
+    /// "slash" or a `/` alone. A path of more than one part has another slash,
+    /// and says none. One of one part cannot be told from a skill: `/research`
+    /// is the skill of that name, where there is one.
     fn says_slash(&self) -> Option<usize> {
         if self.letters == SLASH {
             return Some(1);
@@ -92,7 +123,7 @@ impl<'a> Word<'a> {
 struct Named<'a> {
     from: usize,
     to: usize,
-    name: &'a Name,
+    skill: &'a Skill,
 }
 
 /// What is written for what was said: the slash command of the first skill it
@@ -102,12 +133,15 @@ struct Named<'a> {
 pub struct Written {
     pub command: Option<Name>,
     pub text: String,
+    /// The skills named after the first that only you can run: an agent told
+    /// their names cannot, so what was said of them is in `text` as it was.
+    pub only_first: Vec<Name>,
 }
 
 impl Written {
     /// What was `said`, as it was.
     pub fn said(said: &str) -> Self {
-        Written { command: None, text: said.to_owned() }
+        Written { command: None, text: said.to_owned(), only_first: Vec::new() }
     }
 }
 
@@ -124,7 +158,8 @@ impl fmt::Display for Written {
 /// Whether `said` has a mark in it, and so whether what the finder finds can
 /// change how it is written.
 pub fn marked(said: &str) -> bool {
-    said.split_whitespace().map(Word::new).any(|word| word.says_skill() || word.says_slash().is_some())
+    let says = |word: Word<'_>| word.mark().is_some() || word.says_slash().is_some();
+    said.split_whitespace().map(Word::new).any(says)
 }
 
 /// What is written for what was `said`, with each of `skills` it names written
@@ -141,14 +176,19 @@ pub fn written(said: &str, skills: &[Skill]) -> Written {
     let ended = words[first.to - 1].ending();
     let mut parts = before_it(before, ended, first.to < words.len());
     let mut at = first.to;
+    let mut only_first = Vec::new();
     for other in others {
+        if other.skill.runs == Runs::OnlyForYou {
+            only_first.push(other.skill.name.clone());
+            continue;
+        }
         let the = other.from > at && words[other.from - 1].letters == "the";
         parts.extend(words[at..other.from - usize::from(the)].iter().map(|w| w.text.to_owned()));
-        parts.push(format!("the `{}` skill{}", other.name, words[other.to - 1].ending()));
+        parts.push(format!("the `{}` skill{}", other.skill.name, words[other.to - 1].ending()));
         at = other.to;
     }
     parts.extend(words[at..].iter().map(|word| word.text.to_owned()));
-    Written { command: Some(first.name.clone()), text: parts.join(" ") }
+    Written { command: Some(first.skill.name.clone()), text: parts.join(" "), only_first }
 }
 
 /// The words `before` the first skill named, as what it is given: with no
@@ -184,16 +224,19 @@ fn named_in<'s>(words: &[Word<'_>], skills: &'s [Skill]) -> Vec<Named<'s>> {
             let spans = longest.map(|end| &words[name..=end]);
             if let Some((span, skill)) = closest(spans, skills) {
                 let end = name + span;
-                let to = end + usize::from(words.get(end).is_some_and(Word::says_skill));
-                named.push(Named { from: at, to, name: skill });
+                let said = words.get(end).and_then(Word::mark) == Some(Mark::Said);
+                let to = end + usize::from(said);
+                named.push(Named { from: at, to, skill });
                 (taken, at) = (to, to);
                 continue;
             }
-        } else if word.says_skill() {
+        } else if let Some(mark) = word.mark() {
             let room = at - taken;
             let spans = (1..=SAID_IN.min(room)).map(|span| &words[at - span..at]);
-            if let Some((span, skill)) = closest(spans, skills) {
-                named.push(Named { from: at - span, to: at + 1, name: skill });
+            if let Some((span, skill)) = closest(spans, skills)
+                && (mark == Mark::Said || led_in(&words[taken..at - span]))
+            {
+                named.push(Named { from: at - span, to: at + 1, skill });
                 taken = at + 1;
             }
         }
@@ -202,34 +245,42 @@ fn named_in<'s>(words: &[Word<'_>], skills: &'s [Skill]) -> Vec<Named<'s>> {
     named
 }
 
+/// Whether the last of the words `before` a name, but for those that may come
+/// between, is a lead-in.
+fn led_in(before: &[Word<'_>]) -> bool {
+    let mut words = before.iter().rev();
+    let lead = words.find(|word| !BETWEEN.contains(&word.letters.as_str()));
+    lead.is_some_and(|word| LEAD_INS.contains(&word.letters.as_str()))
+}
+
 /// Of `spans` of words, each one word longer than the last, the one that names
-/// a skill closest, and the skill: its length in words, and the skill's name.
+/// a skill closest, and the skill: its length in words, and the skill.
 /// The shortest of two as close. No name is said starting with an article, and
 /// taking one for the name's first letters would find names that are not said.
 fn closest<'w, 's>(
     spans: impl Iterator<Item = &'w [Word<'w>]>,
     skills: &'s [Skill],
-) -> Option<(usize, &'s Name)> {
-    let mut best: Option<(u32, usize, &Name)> = None;
+) -> Option<(usize, &'s Skill)> {
+    let mut best: Option<(u32, usize, &Skill)> = None;
     for span in spans {
         if span.first().is_some_and(|word| ARTICLES.contains(&word.letters.as_str())) {
             continue;
         }
         let said: String = span.iter().map(|word| word.letters.as_str()).collect();
-        let Some((fit, name)) = closest_skill(&said, skills) else {
+        let Some((fit, skill)) = closest_skill(&said, skills) else {
             continue;
         };
         if best.is_none_or(|(most, ..)| fit > most) {
-            best = Some((fit, span.len(), name));
+            best = Some((fit, span.len(), skill));
         }
     }
-    best.map(|(_, words, name)| (words, name))
+    best.map(|(_, words, skill)| (words, skill))
 }
 
 /// The skill that `said`, in letters, names, and how well: the closest of them,
 /// by a margin over the next.
-fn closest_skill<'s>(said: &str, skills: &'s [Skill]) -> Option<(u32, &'s Name)> {
-    let mut fits = skills.iter().filter_map(|skill| Some((fit(said, skill.name.as_str())?, &skill.name)));
+fn closest_skill<'s>(said: &str, skills: &'s [Skill]) -> Option<(u32, &'s Skill)> {
+    let mut fits = skills.iter().filter_map(|skill| Some((fit(said, skill.name.as_str())?, skill)));
     let first = fits.next()?;
     let (best, next) = fits.fold((first, 0), |(best, next), other| {
         if other.0 > best.0 { (other, best.0) } else { (best, next.max(other.0)) }
@@ -291,6 +342,7 @@ mod tests {
         let skill = |name: &&str| Skill {
             name: Name::new((*name).to_owned()).expect("a name"),
             description: String::new(),
+            runs: Runs::ForAnyone,
         };
         names.iter().map(skill).collect()
     }
@@ -384,7 +436,7 @@ mod tests {
             ("Run the thermonuclear review scale", "/thermo-nuclear-review"),
             ("slash thermal nuclear review", "/thermo-nuclear-review"),
             ("the tigers style skill", "/tigerstyle"),
-            ("the Tiger-Style queue", "/tigerstyle"),
+            ("Use the Tiger-Style queue", "/tigerstyle"),
             ("the deep skill", "/review:deep"),
             ("the review deep skill", "/review:deep"),
         ] {
@@ -420,6 +472,35 @@ mod tests {
         assert_eq!(written(spaced, &[]), Written::said(spaced));
     }
 
+    /// A word that is the model's for "skill" and a word of its own names a
+    /// skill only after what you do to a skill. "skill" itself needs nothing
+    /// before it, and "slash" needs no such word after it.
+    #[test]
+    fn a_word_heard_as_skill_takes_a_lead_in() {
+        for (said, command) in [
+            ("Use the handoff scale", "/handoff"),
+            ("Now run my tiger style queue.", "/tigerstyle"),
+            (
+                "Review this with the thermonuclear review skills.",
+                "/thermo-nuclear-review Review this",
+            ),
+            ("Look at the triage skill.", "/triage Look at"),
+            ("slash triage queue", "/triage queue"),
+        ] {
+            assert_eq!(written_for(said), command, "{said:?}");
+        }
+        for said in [
+            "Look at the triage queue.",
+            "Clear the code review queue.",
+            "What is in the research queue?",
+            "Improve my research skills.",
+            "Rate it on the code review scale.",
+            "Work through the triage queue.",
+        ] {
+            assert_eq!(written_for(said), said);
+        }
+    }
+
     /// Each word of a longer name counts, so the name said whole is the one
     /// named, of two that start and end alike.
     #[test]
@@ -450,20 +531,34 @@ mod tests {
     fn a_skill_after_the_first_is_written_by_name() {
         for (said, command) in [
             (
-                "Run the tiger style skill and then the handoff skill.",
-                "/tigerstyle and then the `handoff` skill.",
+                "Run the tiger style skill and then the grilling skill.",
+                "/tigerstyle and then the `grilling` skill.",
             ),
             (
                 "slash thermonuclear review and slash tiger style on this",
                 "/thermo-nuclear-review and the `tigerstyle` skill on this",
             ),
             (
-                "slash tiger style, then slash thermo-nuclear-review, and stop",
-                "/tigerstyle then the `thermo-nuclear-review` skill, and stop",
+                "slash tiger style, then slash grilling, and stop",
+                "/tigerstyle then the `grilling` skill, and stop",
             ),
         ] {
             assert_eq!(written_for(said), command, "{said:?}");
         }
+    }
+
+    /// An agent cannot run a skill only you can run, so named after the first
+    /// it stays as it was said, and says so. Named first, it leads.
+    #[test]
+    fn a_later_skill_only_you_can_run_stays_as_it_was_said() {
+        let mut list = skills(&["handoff", "tigerstyle"]);
+        list[0].runs = Runs::OnlyForYou;
+        let later = written("Run the tiger style skill and then the handoff skill.", &list);
+        assert_eq!(later.to_string(), "/tigerstyle and then the handoff skill.");
+        assert_eq!(later.only_first, [list[0].name.clone()]);
+        let first = written("Use the handoff skill, then the tiger style skill.", &list);
+        assert_eq!(first.to_string(), "/handoff then the `tigerstyle` skill.");
+        assert_eq!(first.only_first, []);
     }
 
     /// What comes before a name keeps its sentences, and loses only what led

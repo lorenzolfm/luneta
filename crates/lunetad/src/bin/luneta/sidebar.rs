@@ -290,6 +290,16 @@ pub struct PanePlace {
     pub pane: u32,
 }
 
+/// The agent in the pane luneta's zellij is on, that you can name a skill to:
+/// where it is, and the directory its skills are found for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HereAgent {
+    pub on: Machine,
+    pub session: SessionName,
+    pub pane: u32,
+    pub dir: String,
+}
+
 /// What a row stands for, by which the highlight keeps to it as rows come and
 /// go: a machine's header, or a session or a pane of this machine's, or of
 /// another's, where luneta's zellij goes.
@@ -1770,17 +1780,22 @@ impl Sidebar {
         }
     }
 
-    /// The machine and the directory of the Claude Code agent started at a
-    /// prompt in the pane luneta's zellij is on, if one is there. A `claude
+    /// The Claude Code agent started at a prompt in the pane luneta's zellij
+    /// is on, if one is there, as luneta last followed its client. A `claude
     /// -p` that a shell started is no agent to talk to: the shell has the keys.
-    pub fn here_agent(&self) -> Option<(Machine, String)> {
+    pub fn here_agent(&self) -> Option<HereAgent> {
         let place = self.here_place().ok()?;
         let seen = self.seen(&self.on)?;
         let seated = seated(seen.agents, seen.sessions);
         let agent = seated.get(&(place.session.name().as_str(), place.pane))?;
         let pane = self.pane_of(&self.on, &place.session, place.pane)?;
-        (agent.entrypoint.as_deref() == Some("cli"))
-            .then(|| (self.on.clone(), agent_dir(agent, pane).to_owned()))
+        let here = agent.runs_in() == Harness::ClaudeCode && agent.at_a_prompt();
+        here.then(|| HereAgent {
+            on: self.on.clone(),
+            session: place.session.name().clone(),
+            pane: place.pane,
+            dir: agent_dir(agent, pane).to_owned(),
+        })
     }
 
     /// The machine whose header the highlight is on, if it is on one.
@@ -6999,7 +7014,11 @@ mod tests {
         let find = Asked::Find { menu: 1, on: Machine::Local, cwd: cwd.clone() };
         assert_eq!(sidebar.key(&char('/'), moment(160_000)), find);
         let name = |name: &str| Name::new(name.to_owned()).expect("a name");
-        let skill = |named: &str| Skill { name: name(named), description: String::new() };
+        let skill = |named: &str| Skill {
+            name: name(named),
+            description: String::new(),
+            runs: crate::skills::Runs::ForAnyone,
+        };
         sidebar.found(1, Ok(vec![skill("code-review"), skill("tigerstyle")]));
         let clicked = clicks(&mut sidebar, 11);
         let skills: Vec<(&str, Option<Hit>)> =
@@ -7287,9 +7306,10 @@ mod tests {
 
     /// What goes wrong with what the menu over zellij does is said over
     /// zellij, where you look, and the sidebar collapsed has no room for:
-    /// What you say can name a skill only to an agent started at a prompt in
-    /// the pane luneta's zellij is on, of that agent's directory as zellij
-    /// says it: not to a shell, nor to one where a shell ran `claude -p`.
+    /// What you say can name a skill only to a Claude Code agent started at a
+    /// prompt in the pane luneta's zellij is on, of that agent's directory as
+    /// zellij says it: not to a shell, nor to one where a shell ran `claude
+    /// -p`, nor to a pi agent, as the skills the finder finds are Claude Code's.
     #[test]
     fn the_agent_here_is_the_one_in_the_pane_luneta_s_zellij_is_on() {
         let on_pane = |id: u32| {
@@ -7298,10 +7318,16 @@ mod tests {
                 pane(1, 0, "/w/a", "claude"),
                 pane(2, 0, "/w/b", "fish"),
                 pane(3, 0, "/w/c", "fish"),
+                pane(4, 0, "/w/d", "pi"),
             ];
             let printing = agent("s", 3, Status::Busy, None);
             let printing = Agent { entrypoint: Some("sdk-cli".to_owned()), ..printing };
-            let agents = vec![agent("s", 1, Status::Idle, None), printing];
+            let pi = Agent {
+                harness: Some(Harness::Pi.into()),
+                entrypoint: Some("tui".to_owned()),
+                ..agent("s", 4, Status::Idle, None)
+            };
+            let agents = vec![agent("s", 1, Status::Idle, None), printing, pi];
             sidebar.heard(host(vec![session("s", 10, panes)], agents));
             assert_eq!(sidebar.here_agent(), None);
             let look = sidebar.titled("s | fish".to_owned()).expect("a look");
@@ -7309,9 +7335,12 @@ mod tests {
             sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
             sidebar.here_agent()
         };
-        assert_eq!(on_pane(1), Some((Machine::Local, "/w/a".to_owned())));
+        let session = SessionName::running("s").expect("a name");
+        let here = HereAgent { on: Machine::Local, session, pane: 1, dir: "/w/a".to_owned() };
+        assert_eq!(on_pane(1), Some(here));
         assert_eq!(on_pane(2), None);
         assert_eq!(on_pane(3), None);
+        assert_eq!(on_pane(4), None);
     }
 
     /// luneta takes it once, and it stays out of the notes, but for what
@@ -8488,7 +8517,9 @@ mod tests {
 
         let there = |pane| pane_of("main", 20, pane);
         assert_eq!(sidebar.here_row, Some(Spot::Remote(nixos(), there(1))));
-        assert_eq!(sidebar.here_agent(), Some((Machine::Remote(nixos()), "/w/b".to_owned())));
+        let here = sidebar.here_agent().expect("an agent here");
+        assert_eq!(here.on, Machine::Remote(nixos()));
+        assert_eq!((here.pane, here.dir.as_str()), (1, "/w/b"));
         let lines = screen(&mut sidebar, false, 32, 12);
         assert_eq!(lines[5], "     \u{e795} w/a");
         assert_eq!(lines[8], "▌╭ ✓ \u{ec82} fix                  1m");

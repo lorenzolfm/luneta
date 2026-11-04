@@ -7,7 +7,7 @@ use std::thread;
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-pub use lunetad::skills::{Name, Skill};
+pub use lunetad::skills::{Name, Runs, Skill};
 
 use crate::away::{self, Away};
 use crate::host::Event;
@@ -186,7 +186,7 @@ mod tests {
 
     fn skill(name: &str, description: &str) -> Skill {
         let name = Name::new(name.to_owned()).expect("a name");
-        Skill { name, description: description.to_owned() }
+        Skill { name, description: description.to_owned(), runs: Runs::ForAnyone }
     }
 
     fn names(search: &Search) -> Vec<&str> {

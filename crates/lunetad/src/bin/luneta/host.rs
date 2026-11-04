@@ -79,7 +79,7 @@ use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::review;
 use crate::pull::{self, Ready};
-use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
@@ -246,7 +246,7 @@ impl Focus {
     /// the dictation box over it has them, for what you say to its pane.
     fn zellij_told(&self) -> bool {
         match (self.side, &self.over) {
-            (Side::Zellij | Side::Collapsed, None | Some(Over::Dictation(_, Where::Zellij))) => {
+            (Side::Zellij | Side::Collapsed, None | Some(Over::Dictation(_, Where::Zellij(_)))) => {
                 true
             },
             (Side::Sidebar, _) | (_, Some(_)) => false,
@@ -307,11 +307,12 @@ struct Fetch {
     got: u64,
 }
 
-/// Where what you dictate is written: in the pane zellij is on, or on the
-/// line of the ask box, which waits under the dictation's.
+/// Where what you dictate is written: in the pane zellij is on, which had this
+/// agent in it as the box opened, if it had one, or on the line of the ask box,
+/// which waits under the dictation's.
 #[derive(Debug)]
 enum Where {
-    Zellij,
+    Zellij(Option<HereAgent>),
     Ask(Ask),
 }
 
@@ -2066,7 +2067,7 @@ impl App {
     fn dictate(&mut self) -> bool {
         let (zellij, had) = (self.focus.zellij(), self.focus.zellij_told());
         let under = match self.focus.over.take() {
-            None if zellij => Where::Zellij,
+            None if zellij => Where::Zellij(self.sidebar.here_agent()),
             Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
             other => {
                 self.focus.over = other;
@@ -2096,14 +2097,11 @@ impl App {
     /// is more likely part of a path, and the ask box's agent runs in safe
     /// mode, where none of your skills are.
     fn nameable(&self, number: u64, under: &Where) -> Skills {
-        let agent = match under {
-            Where::Zellij => self.sidebar.here_agent(),
-            Where::Ask(_) => None,
-        };
-        let Some((on, cwd)) = agent else {
+        let Where::Zellij(Some(agent)) = under else {
             return Skills::Found(Vec::new());
         };
-        skills::find(&on, &cwd, &self.events, move |skills| Event::Nameable { number, skills });
+        let said = move |skills| Event::Nameable { number, skills };
+        skills::find(&agent.on, &agent.dir, &self.events, said);
         Skills::Finding
     }
 
@@ -2115,7 +2113,9 @@ impl App {
     /// is pasted: Claude Code folds a long paste to `[Pasted text #1]`, and
     /// takes a prompt that is only that for words, whatever the paste starts
     /// with. Then it is sent, as `Enter` would send it, where you ended the
-    /// dictation with `Enter`.
+    /// dictation with `Enter`. No command is written where the agent it was
+    /// named to has gone from the pane, as far as luneta has followed its
+    /// client: zellij's pane takes any bytes, so no write can be surer than that.
     fn undictate(&mut self, dictated: Option<Dictated>) {
         let had = self.focus.zellij_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Dictation(..)));
@@ -2124,19 +2124,17 @@ impl App {
         };
         let side = self.focus.side;
         match under {
-            Where::Zellij => {
+            Where::Zellij(agent) => {
                 self.give_from(had, Focus::on(side));
-                let Some(Dictated { written, sends }) = dictated else {
+                let Some(dictated) = dictated else {
                     return;
                 };
+                let here = self.sidebar.here_agent() == agent;
+                let dictated = if here { dictated } else { dictated.moved() };
+                let Dictated { written, sends, .. } = dictated;
                 let mode = self.client.hosted.mode();
                 if let Some(command) = &written.command {
-                    for c in format!("/{command} ").chars() {
-                        let typed = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-                        if let Some(bytes) = keys::key(&typed, mode) {
-                            self.client.hosted.send(bytes);
-                        }
-                    }
+                    self.client.hosted.send(format!("/{command} ").into_bytes());
                 }
                 if !written.text.is_empty() {
                     self.client.hosted.send(keys::paste(&format!("{} ", written.text), mode));

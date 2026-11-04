@@ -2634,6 +2634,7 @@ mod tests {
         let skill = |name: &&str| Skill {
             name: Name::new((*name).to_owned()).expect("a name"),
             description: format!("{name} it"),
+            runs: crate::skills::Runs::ForAnyone,
         };
         names.iter().map(skill).collect()
     }
