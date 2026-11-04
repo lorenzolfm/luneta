@@ -1348,10 +1348,12 @@ What several agents say is read in the order it came, with the session named
 aloud as the speaker changes. Past 16 waiting, the oldest goes. What has waited
 two minutes goes too, so that a Mac waking up doesn't read out an hour of
 updates, and what came before luneta first heard from a machine says nothing.
-A pause holds what waits as well, and what `--now` gives, and what waited through
-it has its two minutes from when it goes on. It ends with the last of what it
-held, or with a stop. The sidebar collapsed has no room for the line, and shows a
-pause by the icon of its button. `Alt r`, in any luneta of the machine, holds
+A pause holds what waits as well, and what `--now` gives. What waited through it,
+and what comes behind that, no longer goes for its age, so a long pause doesn't
+lose the end of a handoff, while what had waited two minutes when you paused still
+goes. A pause ends with the last of what it held, or with a stop. The sidebar
+collapsed has no room for the line, and shows a pause by the icon of its button.
+`Alt r`, in any luneta of the machine, holds
 what plays until the dictation box closes, or the microphone would write the
 agent's words into your prompt. One luneta of a machine reads, as with
 [notifications](#notifications), and `Alt u` and `Alt Shift u` in another have

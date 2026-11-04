@@ -14,10 +14,12 @@
 //! `WAITING`, and what has waited past `STALE`, naming the session as the
 //! speaker changes. What `--now` gave goes before all of it, and only the last
 //! of those, as it would have cut off the one before. A pause is yours, and
-//! holds what `--now` gave too. The sidebar has a line of what is being read,
-//! with a button for each of those keys, and a mark on its agent's row: no box,
-//! as a box would take the keys. The sidebar collapsed has no room for the line,
-//! and shows only a pause, as what plays you can hear.
+//! holds what `--now` gave too: what waited through it no longer goes for its
+//! age, and nor does what comes behind that, with `WAITING` the limit of them.
+//! The sidebar has a line of what is being read, with a button for each of those
+//! keys, and a mark on its agent's row: no box, as a box would take the keys. The
+//! sidebar collapsed has no room for the line, and shows only a pause, as what
+//! plays you can hear.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +31,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lunetad::api::say::Does;
 use lunetad::api::{Saying, Utterance, Zellij};
 use lunetad::sayings::STALE;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
@@ -141,17 +145,24 @@ impl Shown {
     }
 
     /// The sidebar's line of it, `width` wide, its buttons at its right, and
-    /// where they are on it.
+    /// where they are on it. They go by what is drawn, whatever it says, and
+    /// a button whose icon does not fit has no spot, so that a click hits what
+    /// it is on, or nothing.
     pub fn line(&self, width: usize) -> (Line<'static>, Spots<Button>) {
         let room = width.saturating_sub(2 * BUTTON);
         let mut line = self.said(room);
         let toggle = if self.paused() { Button::GoOn } else { Button::Pause };
-        let filler = " ".repeat(room.saturating_sub(line.width()));
+        let said = drawn_width(&line, width);
+        let from = room.max(said);
+        let filler = " ".repeat(from - said);
         let buttons = format!("{filler} {}  {} ", toggle.icon(), Button::Stop.icon());
         line.spans.push(Span::styled(buttons, Style::new().fg(ACCENT)));
         let mut spots = Spots::default();
-        spots.add(0, room..room + BUTTON, toggle);
-        spots.add(0, room + BUTTON..room + 2 * BUTTON, Button::Stop);
+        for (at, button) in [(from, toggle), (from + BUTTON, Button::Stop)] {
+            if at + 1 < width {
+                spots.add(0, at..at + BUTTON, button);
+            }
+        }
         (line, spots)
     }
 
@@ -163,7 +174,7 @@ impl Shown {
         match self {
             Shown::Fetching { got, .. } => {
                 let (got, of) = (got / 1_000_000, voice::BYTES / 1_000_000);
-                let said = cut(&format!("fetching the voice, once: {got} of {of} MB"), room);
+                let said = cut(&format!("voice: {got} of {of} MB"), room);
                 Line::from(vec![mark, Span::raw(" "), Span::styled(said, dim)])
             },
             Shown::Reading { whose, text, .. } => {
@@ -187,13 +198,29 @@ impl Shown {
     }
 }
 
+/// How many columns `line` takes when drawn, up to `width`: `Line::width` counts
+/// the control characters an agent's words can hold, which are not drawn.
+fn drawn_width(line: &Line<'_>, width: usize) -> usize {
+    let width = u16::try_from(width).unwrap_or(u16::MAX);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width, 1));
+    usize::from(buffer.set_line(0, 0, line, width).0)
+}
+
 /// What waits to be read.
 #[derive(Debug)]
 struct Waiting {
     whose: Whose,
     text: String,
-    /// When it came, or when you last had it go on: what its age is told from.
-    came: SystemTime,
+    /// When it came, what its age is told from: none once it has waited on you,
+    /// through a pause or behind what did, as its age is then your doing.
+    came: Option<SystemTime>,
+}
+
+impl Waiting {
+    /// Whether it has waited too long, at `now`.
+    fn stale(&self, now: SystemTime) -> bool {
+        self.came.is_some_and(|came| now.duration_since(came).is_ok_and(|age| age > STALE))
+    }
 }
 
 /// What is being read.
@@ -275,7 +302,7 @@ impl Queue {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
             let whose = Whose::Said { on: on.clone(), speaker: utterance.speaker };
-            Waiting { whose, text: utterance.text, came: at }
+            Waiting { whose, text: utterance.text, came: Some(at) }
         };
         match does {
             Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
@@ -286,7 +313,12 @@ impl Queue {
     }
 
     /// `waiting` waits behind the rest, and the oldest goes where too many do.
-    fn after(&mut self, waiting: Waiting) {
+    /// Behind what waited on you, it waits on you too: it would have been read
+    /// by now but for the pause.
+    fn after(&mut self, mut waiting: Waiting) {
+        if self.in_turn.back().is_some_and(|last| last.came.is_none()) {
+            waiting.came = None;
+        }
         self.in_turn.push_back(waiting);
         if self.in_turn.len() > WAITING {
             self.in_turn.pop_front();
@@ -309,20 +341,27 @@ impl Queue {
         self.paused = false;
     }
 
-    /// Pauses what is being read and what waits, where there is any: a pause of
-    /// nothing would keep what is said next silent, with no line to say why.
-    fn pause(&mut self) {
-        self.paused = self.busy();
+    /// Pauses what is being read and what waits, where there is any, as of `at`:
+    /// a pause of nothing would keep what is said next silent, with no line to
+    /// say why. What had waited too long by then goes, as it would have with no
+    /// pause, or going on would bring it back.
+    fn pause(&mut self, at: SystemTime) {
+        if !self.paused {
+            self.at_once.take_if(|waiting| waiting.stale(at));
+            self.in_turn.retain(|waiting| !waiting.stale(at));
+            self.paused = self.busy();
+        }
     }
 
-    /// Has what you paused go on, as of `at`: you had what waits wait, so it has
-    /// waited no time, or a pause of minutes would lose the rest of an agent's
-    /// handoff. What you did not pause did not wait on you.
-    fn unpause(&mut self, at: SystemTime) {
+    /// Has what you paused go on. You had what waits wait, so its age no longer
+    /// counts, however long it takes to read: one deadline for all of it would
+    /// lose the last of it, an agent's handoff, where it takes over `STALE`. What
+    /// you did not pause did not wait on you.
+    fn unpause(&mut self) {
         if self.paused {
             self.paused = false;
             let waiting = self.at_once.iter_mut().chain(&mut self.in_turn);
-            waiting.for_each(|waiting| waiting.came = at);
+            waiting.for_each(|waiting| waiting.came = None);
         }
     }
 
@@ -339,18 +378,14 @@ impl Queue {
     /// What to read next, at `now`, of what has not waited too long, led by
     /// the name of its session where the speaker changed: the name is all
     /// there is to tell a voice from another by. Nothing waits too long during
-    /// a pause, which `unpause` gives its time back after.
+    /// a pause, after which `unpause` has its age no longer count.
     fn next(&mut self, now: SystemTime) -> Option<Next> {
-        let paused = self.paused;
-        let fresh = |came: SystemTime| {
-            paused || now.duration_since(came).map_or(true, |age| age <= STALE)
-        };
         loop {
-            let next = self.at_once.take().or_else(|| self.in_turn.pop_front());
-            let Waiting { whose, text, came } = next?;
-            if !fresh(came) {
+            let next = self.at_once.take().or_else(|| self.in_turn.pop_front())?;
+            if !self.paused && next.stale(now) {
                 continue;
             }
+            let Waiting { whose, text, .. } = next;
             let speaker = match &whose {
                 Whose::Said { on, speaker: Some(speaker) } => {
                     Some((on.clone(), called(speaker).to_owned()))
@@ -476,7 +511,7 @@ impl Aloud {
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
         let text = selected.ok_or("nothing to read aloud: select some text in a pane first")?;
-        let came = SystemTime::now();
+        let came = Some(SystemTime::now());
         self.queue.after(Waiting { whose: Whose::Selection, text, came });
         self.go_on();
         Ok(())
@@ -486,8 +521,8 @@ impl Aloud {
     /// nothing, as what you selected is not what you clicked it for.
     pub fn press(&mut self, button: Button) {
         match button {
-            Button::Pause => self.queue.pause(),
-            Button::GoOn => self.queue.unpause(SystemTime::now()),
+            Button::Pause => self.queue.pause(SystemTime::now()),
+            Button::GoOn => self.queue.unpause(),
             Button::Stop => self.queue.stop(),
         }
         self.keep_held();
@@ -590,8 +625,10 @@ mod tests {
     use lunetad::api::say::Stop;
     use lunetad::api::Say;
     use lunetad::Destination;
+    use ratatui::layout::Position;
 
     use super::*;
+    use crate::sidebar::COLUMNS;
     use crate::speaker::Quiet;
 
     const PID: u32 = 7;
@@ -930,7 +967,7 @@ mod tests {
     fn what_is_said_after_a_stop_is_not_paused() {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
-        queue.pause();
+        queue.pause(at(1));
         let said = vec![saying(1, Does::Stop(Stop {})), in_turn(2, "after the stop", None)];
         queue.hear(here(said), true, at(2));
         assert!(!queue.paused);
@@ -943,25 +980,95 @@ mod tests {
     fn what_goes_first_does_not_end_a_pause() {
         let mut queue = hearing();
         let quiet = reading(&mut queue, 1);
-        queue.pause();
+        queue.pause(at(1));
         queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(2));
         assert!(quiet.cut.load(Ordering::Relaxed));
         assert!(queue.paused);
         assert_eq!(spoken(&mut queue), ["first"]);
     }
 
-    /// The rest of a handoff you paused for longer than `STALE` is still read,
-    /// and has `STALE` again from when you had it go on.
+    /// All that waited through a pause is read, each thing taking longer than
+    /// `STALE` to read: one deadline for all of it would lose the last of it,
+    /// the handoff an agent ended on.
     #[test]
-    fn what_waited_through_a_pause_has_not_waited_too_long() {
+    fn what_waited_through_a_pause_is_all_read_however_long_it_takes() {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
-        queue.pause();
+        queue.pause(at(1));
         queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(1));
-        queue.hear(here(vec![in_turn(2, "second", None)]), true, at(2));
-        queue.unpause(at(3) + STALE * 5);
-        assert_eq!(queue.next(at(3) + STALE * 6).map(|next| next.spoken).as_deref(), Some("first"));
-        assert_eq!(queue.next(at(4) + STALE * 6), None, "past STALE from going on");
+        let last = WAITING as u64 + 1;
+        let rest = (2..=last).map(|n| in_turn(n, &n.to_string(), None)).collect();
+        queue.hear(here(rest), true, at(2));
+        queue.unpause();
+        let mut clock = at(3) + STALE * 5;
+        let read: Vec<String> = std::iter::from_fn(|| {
+            clock += STALE * 2;
+            queue.next(clock)
+        })
+        .map(|next| next.spoken)
+        .collect();
+        assert_eq!(read.len(), WAITING + 1);
+        assert_eq!(read[0], "first");
+        assert_eq!(read[WAITING], last.to_string());
+    }
+
+    /// What is said behind what waited through a pause would have been read by
+    /// now but for the pause, and is read too; and once that is all read, what
+    /// is said next has an age of its own again.
+    #[test]
+    fn what_comes_behind_what_waited_through_a_pause_is_read_too() {
+        let mut queue = hearing();
+        drop(reading(&mut queue, 1));
+        queue.hear(here(vec![in_turn(1, "waited", None)]), true, at(1));
+        queue.pause(at(1));
+        queue.unpause();
+        queue.hear(here(vec![in_turn(2, "behind", None)]), true, at(2));
+        let late = at(2) + STALE * 5;
+        assert_eq!(queue.next(late).map(|next| next.spoken).as_deref(), Some("waited"));
+        assert_eq!(queue.next(late).map(|next| next.spoken).as_deref(), Some("behind"));
+        queue.hear(here(vec![in_turn(3, "after", None)]), true, at(3));
+        assert_eq!(queue.next(late), None, "it waited on nothing of yours");
+    }
+
+    /// What had waited too long as you paused goes, as it would have with no
+    /// pause: a Mac that woke does not read out an hour of updates for two taps
+    /// of a key. What had not stays.
+    #[test]
+    fn a_pause_does_not_bring_back_what_had_waited_too_long() {
+        let mut queue = hearing();
+        let early = vec![saying(1, Does::Now(utterance("first", None))), in_turn(2, "early", None)];
+        queue.hear(here(early), true, at(1));
+        queue.hear(here(vec![in_turn(3, "late", None)]), true, at(1) + STALE);
+        drop(reading(&mut queue, 1));
+        queue.pause(at(2) + STALE);
+        queue.unpause();
+        let later = at(3) + STALE * 5;
+        assert_eq!(queue.next(later).map(|next| next.spoken).as_deref(), Some("late"));
+        assert_eq!(queue.next(later), None);
+    }
+
+    /// With only what had waited too long, there is nothing to pause, and a
+    /// pause of it would keep what is said next silent.
+    #[test]
+    fn a_pause_of_only_what_had_waited_too_long_is_none() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
+        queue.pause(at(2) + STALE);
+        assert!(!queue.paused);
+        assert!(!queue.busy());
+    }
+
+    /// A button drawn before the pause, clicked long into it, lets go of nothing
+    /// that waited through it.
+    #[test]
+    fn pausing_what_is_paused_lets_go_of_nothing() {
+        let mut queue = hearing();
+        drop(reading(&mut queue, 1));
+        queue.hear(here(vec![in_turn(1, "rest", None)]), true, at(1));
+        queue.pause(at(1));
+        queue.pause(at(2) + STALE * 5);
+        assert!(queue.paused);
+        assert_eq!(queue.in_turn.len(), 1);
     }
 
     /// What you paused is still there to go on, where what the pause held ends
@@ -972,7 +1079,7 @@ mod tests {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
         queue.hear(here(vec![in_turn(1, "rest", None)]), true, at(1));
-        queue.pause();
+        queue.pause(at(1));
         assert!(queue.ended(1));
         assert!(queue.paused, "what waits is what you paused too");
         assert_eq!(queue.next(at(2) + STALE * 5).map(|next| next.spoken).as_deref(), Some("rest"));
@@ -984,8 +1091,71 @@ mod tests {
     fn going_on_with_nothing_paused_gives_what_waits_no_more_time() {
         let mut queue = hearing();
         queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
-        queue.unpause(at(2) + STALE);
+        queue.unpause();
         assert_eq!(queue.next(at(2) + STALE), None);
+    }
+
+    /// A click hits the button whose icon it is on, or nothing, at any width,
+    /// down to where one icon fits or none does, and whatever an agent's words
+    /// hold: an icon never shows on the other's spot, nor a spot with no icon.
+    #[test]
+    fn a_click_hits_the_icon_it_is_on_at_any_width_and_of_any_text() {
+        let texts = [
+            "the tests pass",
+            "\u{1b}[31mFAIL\u{1b}[0m",
+            "a\u{7}b\u{7}c",
+            "\u{1b}\u{1b}\u{1b}x",
+            "\u{85}\u{9b}x",
+            "日本語のテキストです",
+            "لا لا لا لا",
+            "",
+        ];
+        for text in texts {
+            for width in 0..=48 {
+                for (paused, toggle) in [(false, Button::Pause), (true, Button::GoOn)] {
+                    let (whose, text) = (Whose::Selection, one_line(text, SHOWN_CHARS));
+                    let (line, spots) = Shown::Reading { whose, text, paused }.line(width.into());
+                    let area = Rect::new(0, 0, width, 1);
+                    let mut buffer = Buffer::empty(area);
+                    buffer.set_line(0, 0, &line, width);
+                    let spots = spots.placed(area);
+                    for button in [toggle, Button::Stop] {
+                        let icon = (0..width).find(|x| buffer[(*x, 0)].symbol() == button.icon());
+                        let hit = |x| spots.at(Position::new(x, 0)) == Some(&button);
+                        let spot = (0..width).any(hit);
+                        assert_eq!(icon.is_some(), spot, "{button:?} in {width} of {line:?}");
+                        if let Some(icon) = icon {
+                            assert!(hit(icon), "{button:?} at {icon} in {width} of {line:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Control characters are not drawn, and leave no gap after the buttons.
+    #[test]
+    fn what_is_not_drawn_does_not_push_the_buttons_along() {
+        for text in ["\u{1b}[31mFAIL\u{1b}[0m", "a\u{7}b\u{7}c"] {
+            let (whose, text) = (Whose::Selection, text.to_owned());
+            let (line, spots) = Shown::Reading { whose, text, paused: false }.line(31);
+            let area = Rect::new(0, 0, 31, 1);
+            let mut buffer = Buffer::empty(area);
+            buffer.set_line(0, 0, &line, 31);
+            assert_eq!(buffer[(29, 0)].symbol(), STOP);
+            assert_eq!(spots.placed(area).at(Position::new(29, 0)), Some(&Button::Stop));
+        }
+    }
+
+    /// The sidebar as it starts, of its width less its edge, has room for how
+    /// far the fetch of the model got, its buttons and all.
+    #[test]
+    fn the_fetch_says_how_far_it_got_at_the_width_the_sidebar_starts_at() {
+        let shown = Shown::Fetching { got: 12_000_000, paused: false };
+        let (line, _) = shown.line(usize::from(COLUMNS) - 1);
+        let said: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        let far = format!("12 of {} MB", voice::BYTES / 1_000_000);
+        assert!(said.contains(&far), "{said}");
     }
 
     /// A terminal that speaks kitty's keys, and one that types them.

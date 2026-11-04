@@ -31,6 +31,11 @@ pub const POINTED: Color = gruvbox::BG1;
 /// next of a burst, as desktops have a double click by default.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
+/// How soon after spots came, went or moved a click on where they are, or were,
+/// is still on what was drawn before: about what it takes to see that they did,
+/// and to stop a hand on its way.
+const UNSEEN: Duration = Duration::from_millis(400);
+
 /// Spots, each where it is, and what a click on it does: on luneta's
 /// terminal once drawn there, or before, on the lines a box draws, by the
 /// line and the columns along it.
@@ -273,6 +278,41 @@ impl Burst {
     }
 }
 
+/// Where spots are, or were, that came, went or moved with no click to have them
+/// do so, as the buttons of what is read aloud do as it starts and ends. A click
+/// there just then is no click on what it finds: on the row that slid under a
+/// button that went, it would take zellij to a pane, and on a button that came
+/// over a row, it would stop what had just begun.
+#[derive(Debug, Default)]
+pub struct Settling {
+    /// Where the spots were last drawn.
+    areas: Vec<Rect>,
+    /// Where they were and are, as of when they last changed, and when that was.
+    changed: Option<(Vec<Rect>, Instant)>,
+}
+
+impl Settling {
+    /// Takes in `spots` as a frame drew them, `now`. What each does may change
+    /// where it is, as a pause's icon gives way to going on: a click there hits
+    /// what is drawn all the same.
+    pub fn drawn<S>(&mut self, spots: &Spots<S>, now: Instant) {
+        let areas: Vec<Rect> = spots.0.iter().map(|(area, _)| *area).collect();
+        if areas != self.areas {
+            let mut changed = std::mem::replace(&mut self.areas, areas);
+            changed.extend_from_slice(&self.areas);
+            self.changed = Some((changed, now));
+        }
+    }
+
+    /// Whether a press at `at`, `now`, is one on where they changed just then.
+    pub fn takes(&self, at: Position, now: Instant) -> bool {
+        self.changed.as_ref().is_some_and(|(areas, since)| {
+            now.saturating_duration_since(*since) < UNSEEN
+                && areas.iter().any(|area| area.contains(at))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
@@ -394,5 +434,66 @@ mod tests {
         assert!(burst.takes(Position::new(5, 15), after(300)));
         // Next to the last, though two columns from the first.
         assert!(burst.takes(Position::new(6, 14), after(450)));
+    }
+
+    fn at_line(line: usize, spot: char) -> Spots<char> {
+        let mut spots = Spots::default();
+        spots.add(line, 10..13, spot);
+        spots
+    }
+
+    /// A click as buttons go is no click on the row that slid under them, and
+    /// one a moment later is.
+    #[test]
+    fn a_click_on_where_spots_just_went_is_on_nothing() {
+        let start = Instant::now();
+        let after = |ms| start + Duration::from_millis(ms);
+        let on = Position::new(11, 5);
+        let mut settling = Settling::default();
+        settling.drawn(&at_line(5, 'a'), start);
+        settling.drawn(&Spots::<char>::default(), after(1000));
+        assert!(settling.takes(on, after(1100)));
+        assert!(!settling.takes(on, after(1400)), "you have seen them go");
+        assert!(!settling.takes(Position::new(9, 5), after(1100)), "beside them");
+        assert!(!settling.takes(Position::new(11, 4), after(1100)), "above them");
+    }
+
+    /// A click as buttons come is no click on them, and one a moment later is.
+    #[test]
+    fn a_click_on_where_spots_just_came_is_on_nothing() {
+        let start = Instant::now();
+        let after = |ms| start + Duration::from_millis(ms);
+        let on = Position::new(11, 5);
+        let mut settling = Settling::default();
+        settling.drawn(&Spots::<char>::default(), start);
+        assert!(!settling.takes(on, start), "nothing has changed");
+        settling.drawn(&at_line(5, 'a'), after(1000));
+        assert!(settling.takes(on, after(1100)));
+        assert!(!settling.takes(on, after(1400)), "you have seen them come");
+    }
+
+    /// Buttons that move are not where they were, nor yet where they are.
+    #[test]
+    fn a_click_on_where_spots_just_moved_from_or_to_is_on_nothing() {
+        let start = Instant::now();
+        let mut settling = Settling::default();
+        settling.drawn(&at_line(5, 'a'), start);
+        settling.drawn(&at_line(3, 'a'), start + Duration::from_secs(1));
+        let soon = start + Duration::from_millis(1100);
+        assert!(settling.takes(Position::new(11, 5), soon));
+        assert!(settling.takes(Position::new(11, 3), soon));
+    }
+
+    /// Frames that draw them where they were change nothing, nor does what each
+    /// does: a pause's icon that gave way to going on is there to click.
+    #[test]
+    fn spots_that_stay_where_they_are_take_a_click() {
+        let start = Instant::now();
+        let mut settling = Settling::default();
+        settling.drawn(&at_line(5, 'a'), start);
+        let later = start + Duration::from_secs(1);
+        settling.drawn(&at_line(5, 'a'), later);
+        settling.drawn(&at_line(5, 'b'), later);
+        assert!(!settling.takes(Position::new(11, 5), later));
     }
 }

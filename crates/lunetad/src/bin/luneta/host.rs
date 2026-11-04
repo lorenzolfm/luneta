@@ -89,7 +89,7 @@ use crate::pull::{self, Link, Ready};
 use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
-use crate::spots::{Burst, Drawn, Hit};
+use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::starts::{self, First, Sought, Start};
 use crate::width::Width;
 use crate::zellij::{
@@ -361,8 +361,8 @@ enum Held {
     Edge { dragged: bool },
     /// A press luneta took for itself: one that closed a box over zellij, as
     /// the menu or a brief, one on a spot, or one of a burst of clicks that
-    /// is none. What it drags, and its release, go nowhere, as zellij heard
-    /// no press of it.
+    /// is none, or right as buttons came or went. What it drags, and its
+    /// release, go nowhere, as zellij heard no press of it.
     Taken,
 }
 
@@ -641,6 +641,9 @@ struct App {
     /// pressed a spot, or next to it, that come fast after it, onto what
     /// that drew there.
     burst: Option<Burst>,
+    /// Where the buttons of what is read aloud came or went just now, where a
+    /// click is on nothing.
+    settling: Settling,
     /// What has the mouse drew last: the box over zellij, where one is, or
     /// else the sidebar, with the spots on its menu or legend, which a click
     /// goes to while it has the mouse still.
@@ -940,6 +943,7 @@ fn run_in(
         // of its window's focus has you in it all along.
         focused: true,
         burst: None,
+        settling: Settling::default(),
         drawn: Drawn::Nothing,
         pointer: None,
         cursor: None,
@@ -1773,6 +1777,13 @@ impl App {
                 return;
             }
             self.burst = None;
+            // Nor is a click right as the buttons of what is read aloud came
+            // or went, which they do by themselves.
+            if self.settling.takes(at, Instant::now()) {
+                self.held = Held::Taken;
+                self.burst = Some(Burst::new(at, Instant::now()));
+                return;
+            }
         }
         // A click on a spot of what has the mouse, and the keys, does what the
         // spot says, and nothing else.
@@ -3071,6 +3082,7 @@ impl App {
             } else {
                 self.sidebar.draw(buffer, sidebar, now)
             };
+            self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
             let cursor = self.client.hosted.draw(buffer, zellij);
             // What has the mouse is the box over zellij, where one is, or else
             // the sidebar.
