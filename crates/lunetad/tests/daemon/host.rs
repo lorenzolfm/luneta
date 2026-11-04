@@ -126,7 +126,8 @@ pub fn script(path: &Path, text: &str) {
 /// for `renamed`, and renames nothing. It notes each client that is started,
 /// with `attach`, for `attached`, which ends at once as one that detached
 /// does. A pane closing can cut a call of a session short, once, as a test had
-/// it `silences` or `unreaches` it. It knows no other command.
+/// it `silences` or `unreaches` it, or hand it another call's answer, as a test
+/// had it `answers_another`. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -148,15 +149,15 @@ esac
 kept="$cache/contract_version_1/session_info/$session"
 if [ "$1" = action ] && [ -f "{panes}/$session.$2.silent" ]; then
     rm "{panes}/$session.$2.silent"
-    if [ "$2" = new-pane ]; then
-        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
-    fi
+    case "$2" in
+        new-pane | new-tab) echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened" ;;
+    esac
     exit 0
 fi
-if [ "$1" = action ] && [ -f "{panes}/$session.$2.unreached" ]; then
-    rm "{panes}/$session.$2.unreached"
-    echo "There is no active session!" >&2
-    exit 1
+if [ "$1" = action ] && [ -f "{panes}/$session.$2.once" ]; then
+    once=$(cat "{panes}/$session.$2.once")
+    rm "{panes}/$session.$2.once"
+    eval "$once"
 fi
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
@@ -406,10 +407,25 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.write(&format!("{session}.{action}.silent"), "");
     }
 
-    /// Has the next `action`, a command of `zellij action`, in `session` fail as
-    /// a pane closing keeps one from asking, having asked nothing.
-    pub fn unreaches(&self, session: &str, action: &str) {
-        self.write(&format!("{session}.{action}.unreached"), "");
+    /// Has the next `action`, a command of `zellij action`, in `session` end
+    /// having asked nothing, as a pane closing keeps one from reaching its
+    /// session's server. zellij's CLI then says so by how many `others` of its
+    /// sessions answered: with two or more it lists them, and ends well.
+    pub fn unreaches(&self, session: &str, action: &str, others: usize) {
+        let gone = format!("Session '{session}' not found. The following sessions are active:");
+        let ends = match others {
+            0 => "echo 'There is no active session!' >&2; exit 1".to_owned(),
+            1 => format!("echo \"{gone}\" >&2; echo other >&2; exit 1"),
+            _ => format!("echo \"{gone}\" >&2; echo other; echo another; exit 0"),
+        };
+        self.write(&format!("{session}.{action}.once"), &ends);
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` end
+    /// well saying `said`, the answer to another call: zellij answers by the id
+    /// of a connection, and gives the id of one that ended to the next.
+    pub fn answers_another(&self, session: &str, action: &str, said: &str) {
+        self.write(&format!("{session}.{action}.once"), &format!("echo '{said}'; exit 0"));
     }
 
     /// Has zellij list `clients` for the session `session` from now on, each

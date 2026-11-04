@@ -40,7 +40,8 @@
 //! Closing a stand-in can cut short the calls that follow it, as `cli::heard`
 //! says, so those are asked again. A `stack-panes` cut short can still be on
 //! its way as zellij lists the panes, and read as having no room: the pane then
-//! stays, or moves after all, and nothing is lost either way.
+//! stays, or moves after all, and nothing is lost either way, as what goes then
+//! is its stand-in, and never a tab, which would end a pane late to land there.
 //!
 //! zellij's CLI holds no condition on what it last listed. So a tiled pane
 //! that ends between the listing and the move can still have its tab close on
@@ -54,7 +55,7 @@ use std::time::SystemTime;
 
 use luneta_protocol::tab;
 
-use crate::cli::{answered, done, done_once_reached, heard, laid, quiet, Laid};
+use crate::cli::{answered, done_once_reached, heard, laid, quiet, Laid};
 use crate::clients;
 use crate::closes::{same_session, terminals};
 use crate::zellij::SessionName;
@@ -122,8 +123,9 @@ fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
 
 /// Moves the terminal `pane` of `session`, the one that started at `started`,
 /// into a tab made for it, and says what came of it, or why it did not, where
-/// the tab goes and it stays where it was. What runs in it runs on either way.
-/// A pane that stays says so ahead of a session with no room for the tab.
+/// it stays where it was, and the tab goes as what holds it closes. What runs in
+/// it runs on either way. A pane that stays says so ahead of a session with no
+/// room for the tab.
 pub fn into_tab(
     session: &SessionName,
     started: SystemTime,
@@ -140,21 +142,16 @@ pub fn into_tab(
         return Err("zellij opened a tab with no pane".to_owned());
     };
     let moved = PaneId::terminal(pane);
-    stack(session, PaneId::terminal(*root), moved)?;
-    let why = match landed(&laid(session.as_str())?, moved, tab) {
-        Landed::There => {
-            for stand_in in stand_ins {
-                close_stand_in(session, PaneId::terminal(stand_in));
-            }
-            return Ok(IntoTab::Done);
-        },
-        Landed::Stayed => no_room(moved, tab),
-        Landed::Gone => format!("pane {pane} is gone"),
-    };
-    let mut close = action(session);
-    close.args(["close-tab-by-id", &tab.to_string()]);
-    done(close)?;
-    Err(why)
+    let root = PaneId::terminal(*root);
+    let listed = stack(session, root, moved).and_then(|()| laid(session.as_str()));
+    for stand_in in stand_ins {
+        close_stand_in(session, PaneId::terminal(stand_in));
+    }
+    match landed(&listed?, moved, tab) {
+        Landed::There => Ok(IntoTab::Done),
+        Landed::Stayed => Err(no_room(moved, tab)),
+        Landed::Gone => Err(format!("pane {pane} is gone")),
+    }
 }
 
 /// What the tab made for the terminal `pane` among `laid`, the panes of its
@@ -296,15 +293,23 @@ fn action(session: &SessionName) -> Command {
 }
 
 /// Has zellij open a tab for a pane in `session`, named `name` or as zellij
-/// numbers it, with no client moved, and says its id.
+/// numbers it, with no client moved, and says its id. One zellij opened as a
+/// pane closing cut its answer short has a second open beside it, and ends on
+/// its own with its stand-in. The name goes joined to its option: apart, zellij's
+/// CLI takes one that starts with `-` for an option too.
 fn new_tab(session: &SessionName, name: Option<&str>) -> Result<u32, String> {
     let mut command = action(session);
     quiet(&mut command);
     command.args(["new-tab", "--no-focus", "--close-on-exit"]);
-    command.args(name.iter().flat_map(|name| ["--name", name]));
+    command.args(name.map(|name| format!("--name={name}")));
     command.arg("--").args(STAND_IN);
-    let said = answered(&mut command)?;
-    said.trim().parse().map_err(|_| format!("zellij opened no tab it named: {:?}", said.trim()))
+    heard(
+        || answered(&mut command),
+        |said| {
+            let tab = said.trim().parse();
+            tab.map_err(|_| format!("zellij opened no tab it named: {:?}", said.trim()))
+        },
+    )
 }
 
 /// Moves `pane` to the tab `to` of `session`, by stacking it on a stand-in
@@ -325,10 +330,14 @@ fn open_stand_in(session: &SessionName, to: u32) -> Result<PaneId, String> {
     quiet(&mut command);
     command.args(["new-pane", "--tab-id", &to.to_string(), "--no-focus", "--close-on-exit"]);
     command.arg("--").args(STAND_IN);
-    let said = heard(|| answered(&mut command))?;
-    let id = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
-    let id = id.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))?;
-    Ok(PaneId::terminal(id))
+    heard(
+        || answered(&mut command),
+        |said| {
+            let id = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
+            let unnamed = || format!("zellij opened no pane it named: {:?}", said.trim());
+            id.map(PaneId::terminal).ok_or_else(unnamed)
+        },
+    )
 }
 
 /// Has zellij close the stand-in `pane` of `session`. What came of the move
@@ -336,7 +345,7 @@ fn open_stand_in(session: &SessionName, to: u32) -> Result<PaneId, String> {
 fn close_stand_in(session: &SessionName, pane: PaneId) {
     let mut close = action(session);
     close.args(["close-pane", "--pane-id", &pane.to_string()]);
-    let _ = done(close);
+    let _ = done_once_reached(close);
 }
 
 /// Has zellij stack `moved` on `root`, from whatever tab it is in. It stacks
@@ -356,7 +365,7 @@ fn close_emptied(session: &SessionName, from: u32) -> Result<(), String> {
     }
     let mut close = action(session);
     close.args(["close-tab-by-id", &from.to_string()]);
-    done(close)
+    done_once_reached(close)
 }
 
 /// A pane as zellij's CLI takes it: a terminal's or a plugin's, by its id.

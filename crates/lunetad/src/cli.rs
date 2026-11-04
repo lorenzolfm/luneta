@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::program;
+use crate::program::{self, Ran};
 
 /// What names the session of a zellij pane, in the variables of what runs in
 /// it.
@@ -44,8 +44,23 @@ pub fn quiet(command: &mut Command) {
 /// it was asked, or why it did not.
 pub fn answered(command: &mut Command) -> Result<String, String> {
     let ran = program::run(command, ANSWER).map_err(|error| unrun(&error))?;
-    let said = ran.answer().map_err(|why| format!("zellij: {why}"))?;
+    let said = answer_of(ran)?;
     String::from_utf8(said).map_err(|_| "zellij said what is not UTF-8".to_owned())
+}
+
+/// What zellij's CLI said on its stdout as it ended as `ran` says, or why not.
+/// One can end well having asked nothing: where the session it was asked of did
+/// not answer it and others did, it says so, lists them on its stdout, and ends
+/// as that list does (`send_action_to_session` in zellij 0.45.1's `commands.rs`,
+/// and `list_sessions`, which exits 0).
+pub(crate) fn answer_of(ran: Ran) -> Result<Vec<u8>, String> {
+    if let Ran::Ended { stderr, .. } = &ran {
+        let stderr = String::from_utf8_lossy(stderr);
+        if let Some(line) = stderr.lines().find(|line| line.contains(OTHERS_ANSWERED)) {
+            return Err(format!("zellij: {}", line.trim()));
+        }
+    }
+    ran.answer().map_err(|why| format!("zellij: {why}"))
 }
 
 /// Has `command`, a zellij, do what it was asked, and says why not when it
@@ -67,22 +82,40 @@ pub fn failure(output: &Output) -> String {
 /// How many times luneta asks zellij for what a pane closing can cut short.
 const ASKS: usize = 3;
 
-/// What zellij's CLI says where something else answered as it first reached a
-/// session's server: it has asked nothing of it then.
-const UNREACHED: &str = "There is no active session!";
+/// What zellij's CLI says where no session answered as it first reached the
+/// sockets: something else answered the one it was asked of, and it has asked
+/// nothing of it then.
+const NONE_ANSWERED: &str = "There is no active session!";
 
-/// What `ask`, a call of zellij's CLI that has something to say each time,
-/// said, or why not; asked again where a pane closing cut it short. zellij
-/// tells every connection to a session's server it may go on as a pane closes
-/// (`ClosePane` in zellij-server 0.45.1's `pty.rs`), not only a client's. A
-/// call that waits for its answer takes that for one, and ends well with
-/// nothing said, though what it asked for goes on: a pane it asked to open
-/// opens. Or it ends with `UNREACHED`, having asked nothing. Measured beside
-/// panes opening and closing, one call in six was cut short.
-pub fn heard(mut ask: impl FnMut() -> Result<String, String>) -> Result<String, String> {
-    asked(&mut ask, |answer| {
-        unreached(answer) || matches!(answer, Ok(said) if said.trim().is_empty())
-    })
+/// What it says where others did, after the session's name.
+const OTHERS_ANSWERED: &str = "not found. The following sessions are active:";
+
+/// What `read` makes of what `ask`, a call of zellij's CLI that has something
+/// to say each time, said, or why not; asked again where a pane closing cut it
+/// short. zellij tells every connection to a session's server it may go on as a
+/// pane closes (`ClosePane` in zellij-server 0.45.1's `pty.rs`), not only a
+/// client's. A call that waits for its answer takes that for one, and ends well
+/// with nothing said, though what it asked for goes on: a pane it asked to open
+/// opens. What it would have said goes by its connection's id, which zellij
+/// gives the next that connects, so that another call can hear it. Or it asked
+/// nothing, as `unreached` says. So only what `read` takes is an answer. Measured
+/// beside panes opening and closing, one call in six was cut short.
+pub fn heard<T>(
+    mut ask: impl FnMut() -> Result<String, String>,
+    read: impl Fn(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut last = String::new();
+    for _ in 0..ASKS {
+        match ask() {
+            Ok(said) => match read(&said) {
+                Ok(it) => return Ok(it),
+                Err(unread) => last = unread,
+            },
+            Err(why) if unreached(&why) => last = why,
+            Err(why) => return Err(why),
+        }
+    }
+    Err(last)
 }
 
 /// Has `command`, a zellij that says nothing as it does what it was asked, do
@@ -90,28 +123,14 @@ pub fn heard(mut ask: impl FnMut() -> Result<String, String>) -> Result<String, 
 /// as `heard` says.
 pub fn done_once_reached(mut command: Command) -> Result<(), String> {
     quiet(&mut command);
-    asked(&mut || answered(&mut command), unreached).map(drop)
+    heard(|| answered(&mut command), |_| Ok(()))
 }
 
-/// What `ask` answered, asked up to `ASKS` times while `short` says it was cut
-/// short.
-fn asked(
-    ask: &mut dyn FnMut() -> Result<String, String>,
-    short: impl Fn(&Result<String, String>) -> bool,
-) -> Result<String, String> {
-    let mut answer = ask();
-    for _ in 1..ASKS {
-        if !short(&answer) {
-            break;
-        }
-        answer = ask();
-    }
-    answer
-}
-
-/// Whether `answer` says zellij's CLI asked nothing of the server.
-fn unreached(answer: &Result<String, String>) -> bool {
-    matches!(answer, Err(why) if why.contains(UNREACHED))
+/// Whether `why` zellij's CLI failed says it asked nothing of the server, as it
+/// says by how many other sessions answered. A session that is truly gone says
+/// so too, and asked again says the same.
+fn unreached(why: &str) -> bool {
+    why.contains(NONE_ANSWERED) || why.contains(OTHERS_ANSWERED)
 }
 
 /// Why zellij could not be run.
@@ -174,9 +193,13 @@ pub fn laid(session: &str) -> Result<Vec<Laid>, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
     command.args(["--session", session, "action", "list-panes", "--json"]);
-    let said = heard(|| answered(&mut command))?;
-    serde_json::from_str(&said)
-        .map_err(|error| format!("zellij listed panes that do not read: {error}"))
+    heard(
+        || answered(&mut command),
+        |said| {
+            serde_json::from_str(said)
+                .map_err(|error| format!("zellij listed panes that do not read: {error}"))
+        },
+    )
 }
 
 /// The terminal of the tab whose id is `tab` among `laid`, the first it
