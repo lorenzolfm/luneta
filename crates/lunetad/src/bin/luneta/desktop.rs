@@ -119,8 +119,10 @@ impl Desktop {
             Heard::Holding(lock, socket) => {
                 // It reaches for no other now.
                 self.role = Role::Undecided;
-                let socket = match peers::listening(&socket, &self.events) {
-                    Ok(()) => Some(socket),
+                let socket = socket
+                    .and_then(|socket| peers::listening(&socket, &self.events).map(|()| socket));
+                let socket = match socket {
+                    Ok(socket) => Some(socket),
                     Err(why) => {
                         // luneta is on its way out.
                         let _ = self.events.send(Event::Notice(format!(
@@ -738,11 +740,29 @@ mod tests {
         assert!(!desktop.heard(Heard::Peering(socket.clone()), false));
         assert!(matches!(desktop.reader(), Reader::Another(_)));
         let lock = File::create(folder.path().join("lock")).expect("a lock");
-        assert!(desktop.heard(Heard::Holding(lock, socket.clone()), false));
+        assert!(desktop.heard(Heard::Holding(lock, Ok(socket.clone())), false));
         assert!(matches!(desktop.reader(), Reader::This));
 
         let mut over_ssh = Desktop { serving: None, role: Role::Elsewhere, events };
         assert!(!over_ssh.heard(Heard::Peering(socket), false));
         assert!(matches!(over_ssh.reader(), Reader::Nobody(NO_SPEAKERS)));
+    }
+
+    /// A luneta that holds the lock, in a folder it may not hear in, reads
+    /// aloud all the same, and says why a click goes nowhere.
+    #[test]
+    fn a_luneta_that_may_not_hear_in_the_folder_still_reads_aloud_and_says_why() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let (events, heard) = mpsc::channel();
+        let mut desktop = Desktop { serving: None, role: Role::Undecided, events };
+
+        let lock = File::create(folder.path().join("lock")).expect("a lock");
+        assert!(desktop.heard(Heard::Holding(lock, Err("why".to_owned())), false));
+        assert!(matches!(desktop.reader(), Reader::This));
+        assert!(matches!(desktop.role, Role::Holder { socket: None, .. }));
+        let Ok(Event::Notice(said)) = heard.try_recv() else {
+            panic!("it says why");
+        };
+        assert_eq!(said, "a click on a notification goes nowhere: why");
     }
 }

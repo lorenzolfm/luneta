@@ -73,8 +73,9 @@ pub const NO_READER: &str = "this luneta reads nothing aloud, and reaches no oth
 /// What came of the lock, or of another luneta of this machine.
 pub enum Heard {
     /// This luneta holds the lock now: the file it holds it on, which lets
-    /// go of it as it closes, and the socket to hear the others on.
-    Holding(File, PathBuf),
+    /// go of it as it closes, and the socket to hear the others on, or why
+    /// there is none.
+    Holding(File, Result<PathBuf, String>),
     /// Another luneta holds it, which this one waits for: the socket that one
     /// hears on.
     Peering(PathBuf),
@@ -171,10 +172,10 @@ fn key_of(group: &str) -> Option<Key> {
     Some(Key { on, pid: pid.parse().ok()? })
 }
 
-/// luneta's runtime folder, or why there is none.
-fn folder() -> Result<PathBuf, String> {
-    let folder = lunetad::folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set")?;
-    let folder = lunetad::folder::make(&folder).map_err(|refusal| refusal.to_string())?;
+/// The runtime folder at `path`, made where it is not there, or why it is not
+/// one to use.
+fn checked(path: &Path) -> Result<PathBuf, String> {
+    let folder = lunetad::folder::make(path).map_err(|refusal| refusal.to_string())?;
     Ok(folder.path().to_owned())
 }
 
@@ -184,31 +185,39 @@ fn folder() -> Result<PathBuf, String> {
 /// and reads nothing aloud, and the sidebar says why.
 pub fn wait(events: Sender<Event>) {
     thread::spawn(move || {
-        let held = folder().and_then(|folder| {
-            let (path, socket) = (folder.join(LOCK), folder.join(SOCKET));
-            let lock = File::create(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-            match lock.try_lock() {
-                Ok(()) => Ok(Some((lock, socket))),
-                Err(TryLockError::WouldBlock) => {
-                    // luneta is on its way out.
-                    if events.send(Event::Peers(Heard::Peering(socket.clone()))).is_err() {
-                        return Ok(None);
-                    }
-                    lock.lock().map(|()| Some((lock, socket))).map_err(|error| error.to_string())
-                },
-                Err(TryLockError::Error(error)) => Err(error.to_string()),
-            }
-        });
-        // luneta is on its way out.
-        let _ = match held {
-            Ok(Some((lock, socket))) => events.send(Event::Peers(Heard::Holding(lock, socket))),
-            Ok(None) => Ok(()),
-            Err(why) => {
-                let why = format!("no notifications, and nothing read aloud: {why}");
-                events.send(Event::Notice(why))
-            },
-        };
+        let found = lunetad::folder::find();
+        let found = found.ok_or_else(|| "neither XDG_RUNTIME_DIR nor TMPDIR is set".to_owned());
+        if let Err(why) = found.and_then(|folder| take(&folder, &events)) {
+            let why = format!("no notifications, and nothing read aloud: {why}");
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
+        }
     });
+}
+
+/// Takes the lock in the runtime folder at `path`, for `wait`, and hands
+/// `events` what came of it. A luneta can wait for days, while the folder goes
+/// or stops being this user's alone, so it looks at the folder again before it
+/// hears on a socket there.
+fn take(path: &Path, events: &Sender<Event>) -> Result<(), String> {
+    let folder = checked(path)?;
+    let at = folder.join(LOCK);
+    let lock = File::create(&at).map_err(|error| format!("{}: {error}", at.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {},
+        Err(TryLockError::WouldBlock) => {
+            // luneta is on its way out.
+            if events.send(Event::Peers(Heard::Peering(folder.join(SOCKET)))).is_err() {
+                return Ok(());
+            }
+            lock.lock().map_err(|error| error.to_string())?;
+        },
+        Err(TryLockError::Error(error)) => return Err(error.to_string()),
+    }
+    let socket = checked(path).map(|folder| folder.join(SOCKET));
+    // luneta is on its way out.
+    let _ = events.send(Event::Peers(Heard::Holding(lock, socket)));
+    Ok(())
 }
 
 /// Hears the other lunetas of this machine, and `luneta clicked`, on `socket`,
@@ -537,6 +546,8 @@ fn talk(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::time::Instant;
 
     use super::*;
@@ -717,6 +728,44 @@ mod tests {
         drop((said, listener));
         reaching.stopped();
         assert_eq!(note(&heard), NO_READER);
+    }
+
+    /// The socket a luneta comes to hear on once it has waited for the lock in
+    /// the folder at `path`, which `change` does something to meanwhile.
+    fn socket_after_waiting(path: &Path, change: impl FnOnce()) -> Result<PathBuf, String> {
+        let until = Duration::from_secs(5);
+        let another = File::create(checked(path).expect("a folder").join(LOCK)).expect("a lock");
+        another.try_lock().expect("another holds it");
+        let (events, heard) = mpsc::channel();
+        let taking = path.to_owned();
+        thread::spawn(move || take(&taking, &events));
+        let waits = heard.recv_timeout(until).expect("it finds the lock held");
+        assert!(matches!(waits, Event::Peers(Heard::Peering(_))));
+        change();
+        drop(another);
+        match heard.recv_timeout(until).expect("it comes to hold the lock") {
+            Event::Peers(Heard::Holding(_, socket)) => socket,
+            _ => panic!("it holds the lock"),
+        }
+    }
+
+    /// A luneta that waited for the lock looks at the folder again before it
+    /// hears there: it makes one that went, and refuses one that others can
+    /// reach into now.
+    #[test]
+    fn a_luneta_that_waited_for_the_lock_looks_at_the_folder_again() {
+        let root = tempfile::tempdir().expect("a folder");
+        let folder = root.path().join("luneta");
+
+        let gone = || fs::remove_dir_all(&folder).expect("it goes");
+        assert_eq!(socket_after_waiting(&folder, gone), Ok(folder.join(SOCKET)));
+        assert!(folder.is_dir(), "it makes the folder again");
+
+        let open = || {
+            fs::set_permissions(&folder, Permissions::from_mode(0o755)).expect("it opens");
+        };
+        let refused = format!("{} is open to other users", folder.display());
+        assert_eq!(socket_after_waiting(&folder, open), Err(refused));
     }
 
     /// The luneta that holds the lock knows you dictate in another, whichever
