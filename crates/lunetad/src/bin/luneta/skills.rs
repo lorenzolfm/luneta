@@ -1,22 +1,27 @@
-//! The search box over the skills a pane's directory can run, in the menu:
-//! what the finder of `lunetad::skills` finds there, on the machine the pane
-//! is on, narrowed to what you type.
+//! The skills a pane's directory can run, as the finder of `lunetad::skills`
+//! finds them there, on the machine the pane is on, and the search box over
+//! them in the menu, narrowed to what you type.
 
 use std::sync::mpsc::Sender;
 use std::thread;
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-pub use lunetad::skills::{Name, Skill};
+pub use lunetad::skills::{Name, Runs, Skill};
 
 use crate::away::{self, Away};
 use crate::host::Event;
 use crate::machines::Machine;
 
 /// Asks the finder for the skills `cwd`, on `on`, can run, on a thread of
-/// its own, for the menu numbered `menu`, and hands back what it found, or
-/// why it found nothing.
-pub fn find(menu: u64, on: &Machine, cwd: &str, events: &Sender<Event>) {
+/// its own, and hands back what it found, or why it found nothing, as the
+/// event `said` makes of it.
+pub fn find(
+    on: &Machine,
+    cwd: &str,
+    events: &Sender<Event>,
+    said: impl FnOnce(Result<Vec<Skill>, String>) -> Event + Send + 'static,
+) {
     let (on, cwd, events) = (on.clone(), cwd.to_owned(), events.clone());
     thread::spawn(move || {
         let skills = match &on {
@@ -26,7 +31,7 @@ pub fn find(menu: u64, on: &Machine, cwd: &str, events: &Sender<Event>) {
             },
         };
         // luneta is on its way out.
-        let _ = events.send(Event::Skills { menu, skills });
+        let _ = events.send(said(skills));
     });
 }
 
@@ -181,7 +186,7 @@ mod tests {
 
     fn skill(name: &str, description: &str) -> Skill {
         let name = Name::new(name.to_owned()).expect("a name");
-        Skill { name, description: description.to_owned() }
+        Skill { name, description: description.to_owned(), runs: Runs::ForAnyone }
     }
 
     fn names(search: &Search) -> Vec<&str> {

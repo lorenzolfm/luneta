@@ -254,11 +254,14 @@ message ListSkillsResponse {
   // directory.
   repeated Skill skills = 1;
 
-  // A skill, by the name a prompt runs it by, after its `/`, a word, and
-  // what it says it does, on one line.
+  // A skill, by the name a prompt runs it by, after its `/`, a word, what it
+  // says it does, on one line, and whether you alone can run it: an agent told
+  // its name cannot, as its frontmatter says `disable-model-invocation: true`.
+  // A daemon too old to know says false.
   message Skill {
     string name = 1;
     string description = 2;
+    bool only_you = 3;
   }
 }
 

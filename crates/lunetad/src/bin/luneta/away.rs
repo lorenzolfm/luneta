@@ -26,7 +26,7 @@ use lunetad::images::{self, Png};
 use lunetad::links::{self, Pasted, Ready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
-use lunetad::skills::{Name, Skill};
+use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
 use lunetad::zoxide::Dir;
 use lunetad::{log, Destination, Directory, SessionName};
@@ -189,7 +189,8 @@ impl Away {
         let request = ListSkillsRequest { on: Some(self.on()), dir: dir.to_owned() };
         let listed = self.ask(|mut daemon| async move { daemon.list_skills(request).await })?;
         let skill = |skill: lunetad::api::list_skills_response::Skill| {
-            Some(Skill { name: Name::new(skill.name)?, description: skill.description })
+            let runs = if skill.only_you { Runs::OnlyForYou } else { Runs::ForAnyone };
+            Some(Skill { name: Name::new(skill.name)?, description: skill.description, runs })
         };
         Ok(listed.skills.into_iter().filter_map(skill).collect())
     }

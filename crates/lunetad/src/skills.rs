@@ -88,11 +88,22 @@ const MANIFEST: &str = ".claude-plugin/plugin.json";
 const DESCRIPTION_CHARS: usize = 500;
 
 /// A skill the directory can run, as a prompt runs it: its name, after the
-/// `/`, and what its frontmatter says it does, on one line.
+/// `/`, what its frontmatter says it does, on one line, and who can run it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub name: Name,
     pub description: String,
+    pub runs: Runs,
+}
+
+/// Who can run a skill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runs {
+    /// You, by its slash command, and an agent, told its name.
+    ForAnyone,
+    /// You alone: its frontmatter says `disable-model-invocation: true`, and
+    /// an agent told its name cannot run it.
+    OnlyForYou,
 }
 
 /// The name a skill runs by, after its `/`: one word, as the first word of a
@@ -175,7 +186,7 @@ fn found(stdout: &[u8]) -> Vec<Skill> {
             // A tab, say, has no width to draw, and would throw the line off.
             let shown = |c: char| if c.is_control() { ' ' } else { c };
             let description = front.description.chars().map(shown).take(DESCRIPTION_CHARS);
-            skills.push(Skill { name, description: description.collect() });
+            skills.push(Skill { name, description: description.collect(), runs: front.runs });
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -193,7 +204,7 @@ fn own(path: &str, text: &str) -> Option<(String, Front)> {
     if let Some(file) = workflow.filter(|file| one_name(file)) {
         let name = meta(text, "name").unwrap_or_else(|| file.to_owned());
         let description = meta(text, "description").unwrap_or_default();
-        return Some((name, Front { description, invocable: true }));
+        return Some((name, Front { description, invocable: true, runs: Runs::ForAnyone }));
     }
     let skill = path.strip_prefix("skills/").and_then(|path| path.strip_suffix("/SKILL.md"));
     let name = skill.filter(|name| one_name(name)).or_else(|| command(path))?;
@@ -294,6 +305,7 @@ struct Front {
     /// False for a skill that says `user-invocable: false`: Claude Code runs
     /// it, but no slash command does.
     invocable: bool,
+    runs: Runs,
 }
 
 impl Front {
@@ -301,7 +313,8 @@ impl Front {
     /// value on its line, quoted or not, and the lines indented under it, as
     /// a block scalar or a plain one runs on, joined by spaces.
     fn read(front: &str) -> Self {
-        let mut read = Front { description: String::new(), invocable: true };
+        let mut read =
+            Front { description: String::new(), invocable: true, runs: Runs::ForAnyone };
         let mut lines = front.lines().peekable();
         while let Some(line) = lines.next() {
             let Some((key, value)) = line.split_once(':') else {
@@ -320,11 +333,19 @@ impl Front {
             match key {
                 "description" => read.description = unquote(&parts.join(" ")),
                 "user-invocable" => read.invocable = unquote(&parts.join(" ")) != "false",
+                "disable-model-invocation" if truthy(&unquote(&parts.join(" "))) => {
+                    read.runs = Runs::OnlyForYou;
+                },
                 _ => {},
             }
         }
         read
     }
+}
+
+/// Whether Claude Code takes a frontmatter's value for true.
+fn truthy(value: &str) -> bool {
+    ["1", "true", "yes", "on"].contains(&value.to_ascii_lowercase().as_str())
 }
 
 /// The string `key` has in a workflow's `meta`: the first line that starts
@@ -378,7 +399,7 @@ mod tests {
 
     fn skill(name: &str, description: &str) -> Skill {
         let name = Name::new(name.to_owned()).expect("a name");
-        Skill { name, description: description.to_owned() }
+        Skill { name, description: description.to_owned(), runs: Runs::ForAnyone }
     }
 
     /// What `FIND` prints: the plugins, then where, the path and the
@@ -510,6 +531,12 @@ mod tests {
         }
         assert!(Front::read("user-invocable: true").invocable);
         assert!(!Front::read("user-invocable: false").invocable);
+        for front in ["disable-model-invocation: true", "disable-model-invocation: \"Yes\""] {
+            assert_eq!(Front::read(front).runs, Runs::OnlyForYou, "{front:?}");
+        }
+        for front in ["disable-model-invocation: false", "name: x"] {
+            assert_eq!(Front::read(front).runs, Runs::ForAnyone, "{front:?}");
+        }
         let long = format!("description: {}", "é".repeat(DESCRIPTION_CHARS * 2));
         let skills = found(&printed("[]", &[("", "skills/long/SKILL.md", &long)]));
         let description = skills.first().map(|skill| skill.description.chars().count());

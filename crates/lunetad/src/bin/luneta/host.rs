@@ -71,6 +71,7 @@ use crate::input;
 use crate::keys;
 use crate::machines::{self, Added, Machine};
 use crate::menu::{self, Choice};
+use crate::named;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::own::{Before, Look, Looked};
@@ -79,8 +80,8 @@ use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::review;
 use crate::pull::{self, Ready};
-use crate::sidebar::{self, Asked, Keys, Place, Sidebar};
-use crate::skills::{self, Skill};
+use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
+use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Fetched, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
 use crate::starts::{self, First, Sought, Start};
@@ -142,6 +143,9 @@ pub enum Event {
     Picker { number: u64, heard: picker::Heard },
     /// What the speech model said of the dictation numbered `number`.
     Spoken { number: u64, spoken: Spoken },
+    /// The skills that the dictation numbered `number` can name, or why the
+    /// finder found none.
+    Nameable { number: u64, skills: Result<Vec<Skill>, String> },
     /// How the fetch of the speech model goes.
     Fetched(Fetched),
     /// A fold was made or taken away where the folds are kept: by another
@@ -243,7 +247,7 @@ impl Focus {
     /// the dictation box over it has them, for what you say to its pane.
     fn zellij_told(&self) -> bool {
         match (self.side, &self.over) {
-            (Side::Zellij | Side::Collapsed, None | Some(Over::Dictation(_, Where::Zellij))) => {
+            (Side::Zellij | Side::Collapsed, None | Some(Over::Dictation(_, Where::Zellij(_)))) => {
                 true
             },
             (Side::Sidebar, _) | (_, Some(_)) => false,
@@ -304,11 +308,12 @@ struct Fetch {
     got: u64,
 }
 
-/// Where what you dictate is written: in the pane zellij is on, or on the
-/// line of the ask box, which waits under the dictation's.
+/// Where what you dictate is written: in the pane zellij is on, which had this
+/// agent in it as the box opened, if it had one, or on the line of the ask box,
+/// which waits under the dictation's.
 #[derive(Debug)]
 enum Where {
-    Zellij,
+    Zellij(Option<HereAgent>),
     Ask(Ask),
 }
 
@@ -1216,6 +1221,17 @@ impl App {
                     self.undictate(Some(dictated));
                 }
             },
+            Event::Nameable { number, skills } => {
+                if let Err(why) = &skills {
+                    self.sidebar.notify(why.clone());
+                }
+                if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
+                    && dictation.number() == number
+                    && let Some(dictated) = dictation.found(skills)
+                {
+                    self.undictate(Some(dictated));
+                }
+            },
             Event::Fetched(fetched) => self.fetched(&fetched),
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
@@ -1934,7 +1950,9 @@ impl App {
             Asked::Pull { menu, on, link, worked } => {
                 pull::prepare(menu, on, link, worked, &self.events);
             },
-            Asked::Find { menu, on, cwd } => skills::find(menu, &on, &cwd, &self.events),
+            Asked::Find { menu, on, cwd } => {
+                skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });
+            },
             Asked::Printed { menu, on, session, pane, ended } => {
                 printed::read(menu, &on, &session, pane, ended, &self.events);
             },
@@ -2050,7 +2068,7 @@ impl App {
     fn dictate(&mut self) -> bool {
         let (zellij, had) = (self.focus.zellij(), self.focus.zellij_told());
         let under = match self.focus.over.take() {
-            None if zellij => Where::Zellij,
+            None if zellij => Where::Zellij(self.sidebar.here_agent()),
             Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
             other => {
                 self.focus.over = other;
@@ -2060,9 +2078,10 @@ impl App {
         self.dictations += 1;
         let number = self.dictations;
         let dictation = if speech::fetched() {
+            let skills = self.nameable(number, &under);
             let speech = self.speech.get_or_insert_with(Speech::start);
             let listening = speech.listen(number, &self.events);
-            Dictation::hearing(number, listening, self.releases, Instant::now())
+            Dictation::hearing(number, listening, skills, self.releases, Instant::now())
         } else {
             let events = &self.events;
             let fetching = || Fetch { _asking: speech::fetch(events), got: 0 };
@@ -2073,12 +2092,29 @@ impl App {
         true
     }
 
+    /// The skills that the dictation numbered `number`, into `under`, can name,
+    /// which the finder is asked for: those of the directory of the Claude
+    /// Code agent in the pane zellij is on. None elsewhere: in a shell, "slash"
+    /// is more likely part of a path, and the ask box's agent runs in safe
+    /// mode, where none of your skills are.
+    fn nameable(&self, number: u64, under: &Where) -> Skills {
+        let Where::Zellij(Some(agent)) = under else {
+            return Skills::Found(Vec::new());
+        };
+        let said = move |skills| Event::Nameable { number, skills };
+        skills::find(&agent.on, &agent.dir, &self.events, said);
+        Skills::Finding
+    }
+
     /// Closes the dictation box, which gives up the dictation it is at, if it
     /// is still at one, and gives the keys back to what it was over. What you
-    /// `dictated`, if anything, is written there as it closes: pasted in the
-    /// pane zellij is on, with a space after it for what you say next, or on
-    /// the ask box's line. Then it is sent, as `Enter` would send it, where
-    /// you ended the dictation with `Enter`.
+    /// `dictated`, if anything, is written there as it closes: as [`pastes`]
+    /// in the pane zellij is on, or on the ask box's line. Then it is sent, as
+    /// `Enter` would send it, where you ended the dictation with `Enter`, which
+    /// zellij keeps for itself outside its normal mode. No command is written
+    /// where the agent it was named to has gone from the pane, as far as luneta
+    /// has followed its client: zellij's pane takes any bytes, so no write can
+    /// be surer than that.
     fn undictate(&mut self, dictated: Option<Dictated>) {
         let had = self.focus.zellij_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Dictation(..)));
@@ -2087,13 +2123,18 @@ impl App {
         };
         let side = self.focus.side;
         match under {
-            Where::Zellij => {
+            Where::Zellij(agent) => {
                 self.give_from(had, Focus::on(side));
-                let Some(Dictated { text, sends }) = dictated else {
+                let Some(dictated) = dictated else {
                     return;
                 };
+                let here = self.sidebar.here_agent() == agent;
+                let dictated = if here { dictated } else { dictated.moved() };
+                let Dictated { written, sends, .. } = dictated;
                 let mode = self.client.hosted.mode();
-                self.client.hosted.send(keys::paste(&format!("{text} "), mode));
+                for paste in pastes(&written, mode) {
+                    self.client.hosted.send(paste);
+                }
                 let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
                 if sends && let Some(bytes) = keys::key(&enter, mode) {
                     self.client.hosted.send(bytes);
@@ -2102,7 +2143,7 @@ impl App {
             },
             Where::Ask(mut ask) => {
                 if let Some(dictated) = &dictated {
-                    ask.dictated(&dictated.text);
+                    ask.dictated(&dictated.written.to_string());
                 }
                 self.give_from(had, Focus { side, over: Some(Over::Ask(ask)) });
                 if dictated.is_some_and(|dictated| dictated.sends) {
@@ -2948,6 +2989,19 @@ fn whole<W: io::Write>(
     drawn.and(ended)
 }
 
+/// The bytes that write what was dictated in the pane zellij is on, paste by
+/// paste: a slash command, then what it is given, each with a space after it
+/// for what you say next. Neither is typed, as zellij takes what is typed for
+/// keys, and outside its normal mode acts on them: an `x` in its tab mode closes
+/// the tab. Nor are they one paste, as Claude Code folds a long one to
+/// `[Pasted text #1]`, and takes a prompt that is only that for words, whatever
+/// the paste starts with.
+fn pastes(written: &named::Written, mode: TermMode) -> Vec<Vec<u8>> {
+    let command = written.command.iter().map(|command| format!("/{command} "));
+    let text = (!written.text.is_empty()).then(|| format!("{} ", written.text));
+    command.chain(text).map(|paste| keys::paste(&paste, mode)).collect()
+}
+
 /// What a client of zellij's on `on` said as it failed, ending `exited`: the
 /// last line on its screen, as an ssh that reached no machine, or a zellij
 /// that could not attach, or make a session of a name taken, writes it as it
@@ -3033,6 +3087,26 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// Pasted, what you dictate reaches the pane in any mode of zellij's, which
+    /// acts on keys: typed, `/handoff` would open a pane in its pane mode.
+    #[test]
+    fn what_is_dictated_is_pasted_and_a_command_on_its_own() {
+        let pasted = |command: Option<&str>, text: &str| {
+            let command = command.map(|name| skills::Name::new(name.to_owned()).expect("a name"));
+            let written = named::Written { command, text: text.to_owned(), only_first: Vec::new() };
+            pastes(&written, TermMode::BRACKETED_PASTE)
+        };
+        assert_eq!(
+            pasted(Some("handoff"), "the next session fixes CI"),
+            [
+                b"\x1b[200~/handoff \x1b[201~".to_vec(),
+                b"\x1b[200~the next session fixes CI \x1b[201~".to_vec(),
+            ],
+        );
+        assert_eq!(pasted(Some("handoff"), ""), [b"\x1b[200~/handoff \x1b[201~".to_vec()]);
+        assert_eq!(pasted(None, "hand this off"), [b"\x1b[200~hand this off \x1b[201~".to_vec()]);
     }
 
     /// Where `screen` shows its cursor, if it shows one.

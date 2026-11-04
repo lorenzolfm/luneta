@@ -592,8 +592,10 @@ impl Daemon for Host {
         let found = task::spawn_blocking(move || skills::found_in(dir.as_str())).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;
-        let skill = |skills::Skill { name, description }| {
-            Skill { name: name.to_string(), description }
+        let skill = |skills::Skill { name, description, runs }| Skill {
+            name: name.to_string(),
+            description,
+            only_you: runs == skills::Runs::OnlyForYou,
         };
         Ok(Response::new(ListSkillsResponse { skills: skills.into_iter().map(skill).collect() }))
     }
