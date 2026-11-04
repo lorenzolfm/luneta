@@ -2198,9 +2198,8 @@ impl Sidebar {
                     let icon = program.and_then(icons::of);
                     let (machine, session) = (machine.clone(), listed.clone());
                     let review = agent(pane.id).and_then(ReviewRow::of);
-                    let speaks = aloud.is_some_and(|(on, seat)| {
-                        let session = session.name().as_str();
-                        *on == machine && seat.session == session && seat.pane == pane.id
+                    let speaks = aloud.is_some_and(|(on, named, id)| {
+                        *on == machine && named == session.name().as_str() && id == pane.id
                     });
                     let row = move |bracket| Row::Pane {
                         machine,
@@ -9143,8 +9142,8 @@ mod tests {
         };
         assert_eq!(marked(&mut sidebar), [""; 0]);
 
-        let seat = Some(aloud::Seat { session: "work".to_owned(), pane: 2 });
-        let whose = aloud::Whose::Said { on: Machine::Local, seat };
+        let speaker = Zellij { named: "old".to_owned(), session: Some("work".to_owned()), pane: 2 };
+        let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
         let text = "the tests pass".to_owned();
         sidebar.aloud(Some(aloud::Shown::Reading { whose, text }));
         let rows = marked(&mut sidebar);

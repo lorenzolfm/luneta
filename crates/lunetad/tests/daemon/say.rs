@@ -19,8 +19,9 @@ fn luneta(host: &Host, args: &[&str]) -> Output {
     answered(host.vars().command(LUNETA).args(args))
 }
 
-/// How a saying is to be read, what it reads, and whose pane it comes from.
-type Read<'a> = (&'static str, &'a str, Option<(&'a str, u32)>);
+/// How a saying is to be read, what it reads, and whose pane it comes from: the
+/// name the pane knows its session by, the name it has now, and the pane.
+type Read<'a> = (&'static str, &'a str, Option<(&'a str, Option<&'a str>, u32)>);
 
 fn read(saying: &Saying) -> Read<'_> {
     let does = saying.say.as_ref().and_then(|say| say.does.as_ref()).unwrap();
@@ -30,7 +31,8 @@ fn read(saying: &Saying) -> Read<'_> {
         Does::Stop(_) => return ("stop", "", None),
     };
     let speaker = utterance.speaker.as_ref();
-    (how, &utterance.text, speaker.map(|it| (it.session.as_str(), it.pane)))
+    let from = speaker.map(|it| (it.named.as_str(), it.session.as_deref(), it.pane));
+    (how, &utterance.text, from)
 }
 
 fn said(host: &api::Host) -> Vec<Read<'_>> {
@@ -89,6 +91,26 @@ fn what_says_nothing_or_too_much_is_refused() {
     assert_eq!(said(&host.host()), []);
 }
 
+/// A session's name is said too, so it is held to what the text is, and it has
+/// to be one, whatever the variables of the pane say.
+#[test]
+fn a_session_by_what_is_no_name_or_too_long_a_one_is_refused() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let from = |session: &str| {
+        let mut command = host.vars().command(LUNETA);
+        command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", "2");
+        answered(command.args(["say", "hello"]))
+    };
+    let long = from(&"a".repeat(lunetad::sayings::BYTES_MAX));
+    assert!(!long.status.success());
+    assert!(String::from_utf8_lossy(&long.stderr).contains("the most to say at once"));
+    let no_name = from("a/b");
+    assert!(!no_name.status.success());
+    assert!(String::from_utf8_lossy(&no_name.stderr).contains("speaker"));
+    assert_eq!(said(&host.host()), []);
+}
+
 /// An agent goes on in silence: nothing waits for a daemon that may never be.
 #[test]
 fn with_no_lunetad_it_fails_at_once_and_starts_none() {
@@ -102,10 +124,12 @@ fn with_no_lunetad_it_fails_at_once_and_starts_none() {
     assert!(folder_in(host.runtime.path()).is_none(), "it started a daemon");
 }
 
-/// zellij's variables keep the name a session had as the pane opened, and
-/// another session may have taken it since.
+/// zellij's variables keep the name a session had as the pane opened, and a
+/// pane needs no agent in it for the daemon to say what that is now. Where it
+/// cannot tell, as of a name no session has held, or that two have, the session
+/// is left unsaid: a pane's id is not unique across them.
 #[test]
-fn what_comes_from_a_pane_goes_by_the_name_its_session_has_now() {
+fn what_comes_from_a_pane_goes_by_the_name_its_session_has_now_where_that_can_be_told() {
     let host = agents::Host::new();
     let _work = UnixListener::bind(host.contract().join("work")).unwrap();
     let agent = process(Some(("work", 2)));
@@ -116,17 +140,29 @@ fn what_comes_from_a_pane_goes_by_the_name_its_session_has_now() {
     fs::rename(host.contract().join("work"), host.contract().join("fix")).unwrap();
     eventually("the agent is in fix", || in_session("fix"));
 
-    let mut command = host.vars().command(LUNETA);
-    command.env("ZELLIJ_SESSION_NAME", "work").env("ZELLIJ_PANE_ID", "2");
-    succeeds(&answered(command.args(["say", "from a pane"])));
-    let mut command = host.vars().command(LUNETA);
-    command.env("ZELLIJ_SESSION_NAME", "elsewhere").env("ZELLIJ_PANE_ID", "9");
-    succeeds(&answered(command.args(["say", "no agent there"])));
+    let say = |session: &str, pane: &str, text: &str| {
+        let mut command = host.vars().command(LUNETA);
+        command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", pane);
+        succeeds(&answered(command.args(["say", text])));
+    };
+    say("work", "2", "from an agent's pane");
+    say("work", "9", "from a shell's pane");
+    say("elsewhere", "9", "from a session unheard of");
+    assert_eq!(
+        said(&host.host()),
+        [
+            ("in turn", "from an agent's pane", Some(("work", Some("fix"), 2))),
+            ("in turn", "from a shell's pane", Some(("work", Some("fix"), 9))),
+            ("in turn", "from a session unheard of", Some(("elsewhere", None, 9))),
+        ],
+    );
 
+    let _again = UnixListener::bind(host.contract().join("work")).unwrap();
+    let named = |name: &str, host: &agents::Host| {
+        host.host().sessions.iter().any(|session| session.name == name)
+    };
+    eventually("a new session took the name", || named("work", &host).then_some(()));
+    say("work", "2", "from either");
     let told = host.host();
-    let want = [
-        ("in turn", "from a pane", Some(("fix", 2))),
-        ("in turn", "no agent there", Some(("elsewhere", 9))),
-    ];
-    assert_eq!(said(&told), want);
+    assert_eq!(said(&told).last(), Some(&("in turn", "from either", Some(("work", None, 2)))));
 }

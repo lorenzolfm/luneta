@@ -144,6 +144,23 @@ impl Desktop {
         matches!(self.role, Role::Holder { .. })
     }
 
+    /// You dictate in this luneta, or no longer do, as `dictating` says, for
+    /// the one of its machine that reads aloud to know, where that is another.
+    pub fn dictating(&mut self, dictating: bool) {
+        if let Role::Peer(reaching) = &mut self.role {
+            reaching.dictating(dictating);
+        }
+    }
+
+    /// Whether you dictate in another luneta of this machine, which this one
+    /// reads aloud for.
+    pub fn another_dictates(&self) -> bool {
+        match &self.role {
+            Role::Holder { peers, .. } => peers.dictating(),
+            Role::Peer(_) | Role::Unsure => false,
+        }
+    }
+
     /// Hands `Alt u`, with `selected`, to the luneta of this machine that reads
     /// aloud, where another does: whether it did.
     pub fn hand_read(&self, selected: &str) -> bool {

@@ -1195,6 +1195,7 @@ impl App {
                     let acts = self.alerts.again();
                     self.alert(acts);
                 }
+                self.hold_aloud();
             },
             Event::Opened { menu, opened } => {
                 let asked = self.sidebar.opened(menu, opened);
@@ -2162,6 +2163,16 @@ impl App {
         }
     }
 
+    /// What plays waits while you dictate, in this luneta or another of its
+    /// machine, and goes on after: the microphone would hear the speakers, and
+    /// write what they say. As `give_from` sets what the focus is, and each peer
+    /// is told only what changed, every way a box closes comes through here.
+    fn hold_aloud(&mut self) {
+        let here = matches!(self.focus.over, Some(Over::Dictation(..)));
+        self.desktop.dictating(here);
+        self.aloud.hold(here || self.desktop.another_dictates());
+    }
+
     /// Says why `Alt u` read nothing, if it did not.
     fn read_aloud_went(&mut self, read: Result<(), &str>) {
         if let Err(why) = read {
@@ -2589,8 +2600,6 @@ impl App {
     /// over, or gives it back, as the dictation box does, which leaves where
     /// they were no longer there to tell.
     fn give_from(&mut self, had: bool, focus: Focus) {
-        // The microphone would hear the speakers, and write what they say.
-        self.aloud.hold(matches!(focus.over, Some(Over::Dictation(..))));
         if focus.side == Side::Collapsed || focus.over.is_some() {
             // The strip has no edge to drag nor rows to hold, and a box takes
             // the mouse: what the mouse holds of either is let go, as a
@@ -2630,6 +2639,7 @@ impl App {
             ) => Keys::Zellij,
         });
         self.focus = focus;
+        self.hold_aloud();
         if self.focused
             && has != had
             && let Some(bytes) = keys::focus(has, self.client.hosted.mode())

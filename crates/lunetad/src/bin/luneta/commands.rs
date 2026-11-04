@@ -16,7 +16,6 @@ use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::remote::Reached;
 use lunetad::api::say::{Does, Stop};
-use lunetad::api::utterance::Speaker;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
     Agent, Host, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Say, SayRequest,
@@ -221,15 +220,15 @@ fn from_stdin() -> Result<String, String> {
 }
 
 /// The pane this runs in, by the name its session had as it opened, or as you
-/// asked from it in the ask box: none outside zellij.
-fn speaker_here() -> Option<Speaker> {
-    match zellij::here().ok()?? {
-        Seat::Opened { named, pane } => Some(Speaker { session: named, pane }),
-        Seat::Asked { user: User::Pane { session, pane }, .. } => {
-            Some(Speaker { session: session.to_string(), pane })
-        },
-        Seat::Asked { .. } => None,
-    }
+/// asked from it in the ask box, for lunetad to say what it is in now: none
+/// outside zellij.
+fn speaker_here() -> Option<Zellij> {
+    let (named, pane) = match zellij::here().ok()?? {
+        Seat::Opened { named, pane } => (named, pane),
+        Seat::Asked { user: User::Pane { session, pane }, .. } => (session.to_string(), pane),
+        Seat::Asked { .. } => return None,
+    };
+    Some(Zellij { named, session: None, pane })
 }
 
 /// Adds `destination` to luneta's hosts file, and says how lunetad's first

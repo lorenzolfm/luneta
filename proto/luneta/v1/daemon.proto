@@ -148,7 +148,8 @@ service Daemon {
   // gives it, and answers once it has it, without waiting for it to be read,
   // or for anyone to be there to read it: the daemon puts it in
   // `Host.sayings`, for luneta's window to read, here or on another machine.
-  // What says nothing, or is too long, is answered as an invalid argument.
+  // What says nothing, is too long, or names a session by what zellij takes
+  // for no name, is answered as an invalid argument.
   rpc Say(SayRequest) returns (SayResponse);
 }
 
@@ -748,17 +749,11 @@ message Say {
 
 // What to read aloud, and who it comes from.
 message Utterance {
-  // Never empty, nor over the 16 KiB `Say` takes.
+  // Never empty, nor, with `speaker.named`, over the 16 KiB `Say` takes.
   string text = 1;
-  // The pane it comes from: none from outside zellij. Asked with `Say`, the
-  // session is by the name it had as the pane opened, as zellij's variables
-  // keep it. In `Host.sayings`, it is by the name the daemon knows it by now.
-  optional Speaker speaker = 2;
-
-  message Speaker {
-    string session = 1;
-    uint32 pane = 2;
-  }
+  // The pane it comes from: none from outside zellij. `Say` goes by `named`,
+  // a name zellij takes, and sets `session` itself, whatever it was asked with.
+  optional Zellij speaker = 2;
 }
 
 message SayRequest {

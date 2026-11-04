@@ -1298,10 +1298,11 @@ What several agents say is read in the order it came, with the session named
 aloud as the speaker changes. Past 16 waiting, the oldest goes. What has waited
 two minutes goes too, so that a Mac waking up doesn't read out an hour of
 updates, and what came before luneta first heard from a machine says nothing.
-`Alt r` holds what plays until the dictation box closes, or the microphone
-would write the agent's words into your prompt. One luneta of a machine reads,
-as with [notifications](#notifications), and `Alt u` in another has that one
-read. A luneta over ssh reads nothing: its speakers are not the ones you sit at.
+`Alt r`, in any luneta of the machine, holds what plays until the dictation box
+closes, or the microphone would write the agent's words into your prompt. One
+luneta of a machine reads, as with [notifications](#notifications), and `Alt u`
+in another has that one read. A luneta over ssh reads nothing: its speakers are
+not the ones you sit at.
 
 What is read is turned into speech on your machine, and none of it leaves it, or
 is kept. It is Gradium's Phonon 31m, an English model, that does it, on the CPU,

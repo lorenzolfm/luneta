@@ -77,7 +77,7 @@ use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Ready};
-use crate::sayings;
+use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination};
 use crate::reviews::Move;
 use crate::watch::Troubles;
@@ -901,9 +901,9 @@ impl Daemon for Host {
     async fn say(&self, request: Request<SayRequest>) -> Result<Response<SayResponse>, Status> {
         let say = request.into_inner().say.and_then(|say| say.does);
         let say = say.ok_or_else(|| Status::invalid_argument("it says nothing to do"))?;
-        sayings::check(&say).map_err(Status::invalid_argument)?;
+        let said = ToSay::parse(say).map_err(Status::invalid_argument)?;
         let at = SystemTime::now();
-        self.ask(|answer| Command::Say { say, at, answer }).await?;
+        self.ask(|answer| Command::Say { said, at, answer }).await?;
         Ok(Response::new(SayResponse {}))
     }
 

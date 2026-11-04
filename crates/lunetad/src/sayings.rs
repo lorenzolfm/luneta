@@ -15,9 +15,11 @@ use std::time::{Duration, SystemTime};
 
 use crate::api;
 use crate::api::say::Does;
+use crate::zellij::{SessionName, Sessions};
 
-/// The longest text the daemon takes: seventeen minutes of speech or so, and
-/// what each answer of `Watch` carries for as long as it is on the list.
+/// The longest text the daemon takes, with the name of the session it comes
+/// from, as that is said too: seventeen minutes of speech or so, and what each
+/// answer of `Watch` carries for as long as it is on the list.
 pub const BYTES_MAX: usize = 16 * 1024;
 
 /// How long what was said stays worth reading. A window holds what waits to
@@ -26,6 +28,35 @@ pub const STALE: Duration = Duration::from_mins(2);
 
 /// How many the list holds, the last taken.
 const KEPT: usize = 16;
+
+/// What the daemon takes, as `parse` found it: only that makes one, and only
+/// this is put on the list.
+#[derive(Debug)]
+pub struct ToSay(Does);
+
+impl ToSay {
+    /// `does`, or why the daemon does not take it: what it reads has words in
+    /// it, comes from a session by a name zellij takes, and is no more than
+    /// `BYTES_MAX`, with that name.
+    pub fn parse(does: Does) -> Result<ToSay, String> {
+        let (Does::InTurn(utterance) | Does::Now(utterance)) = &does else {
+            return Ok(ToSay(does));
+        };
+        if utterance.text.trim().is_empty() {
+            return Err("it says nothing".to_owned());
+        }
+        let mut bytes = utterance.text.len();
+        if let Some(speaker) = &utterance.speaker {
+            SessionName::running(&speaker.named).map_err(|why| format!("speaker: {why}"))?;
+            bytes += speaker.named.len();
+        }
+        if bytes > BYTES_MAX {
+            let most = format!("{BYTES_MAX} is the most to say at once");
+            return Err(format!("it is {bytes} bytes long, and {most}"));
+        }
+        Ok(ToSay(does))
+    }
+}
 
 /// What the daemon last took, oldest first, each with when.
 #[derive(Debug, Default)]
@@ -36,13 +67,12 @@ pub struct Sayings {
 }
 
 impl Sayings {
-    /// Takes `does` at `at`, as of the pane it names, by the name of its
-    /// session now, where `agents` tell it: a rename leaves zellij's
-    /// variables behind.
-    pub fn take(&mut self, does: Does, agents: &[api::Agent], at: SystemTime) {
-        let does = match does {
-            Does::InTurn(utterance) => Does::InTurn(by_name_now(utterance, agents)),
-            Does::Now(utterance) => Does::Now(by_name_now(utterance, agents)),
+    /// Takes `said` at `at`, as of the pane it names, in the session `sessions`
+    /// say that is now: a rename leaves zellij's variables behind.
+    pub fn take(&mut self, said: ToSay, sessions: &Sessions, at: SystemTime) {
+        let does = match said.0 {
+            Does::InTurn(utterance) => Does::InTurn(placed(utterance, sessions)),
+            Does::Now(utterance) => Does::Now(placed(utterance, sessions)),
             Does::Stop(stop) => Does::Stop(stop),
         };
         self.numbered += 1;
@@ -63,44 +93,30 @@ impl Sayings {
     }
 }
 
-/// `utterance`, with its speaker's session by the name it has now, where an
-/// agent in that pane tells it, or else by the name it had as the pane opened.
-fn by_name_now(mut utterance: api::Utterance, agents: &[api::Agent]) -> api::Utterance {
+/// `utterance`, with its speaker's session as `sessions` tell it now: none
+/// where no session could be it, or more than one, as a pane's id does not tell
+/// the sessions that have held a name apart. What it was asked with has no say.
+fn placed(mut utterance: api::Utterance, sessions: &Sessions) -> api::Utterance {
     if let Some(speaker) = &mut utterance.speaker {
-        let zellij = agents.iter().filter_map(|agent| agent.zellij.as_ref());
-        let found = zellij
-            .filter(|zellij| zellij.named == speaker.session && zellij.pane == speaker.pane)
-            .find_map(|zellij| zellij.session.clone());
-        if let Some(now) = found {
-            speaker.session = now;
-        }
+        speaker.session = sessions.lead(&speaker.named, None).map(str::to_owned);
     }
     utterance
-}
-
-/// Whether the daemon takes `does`, or why not: what it reads has words in
-/// it, and no more than `BYTES_MAX` of them.
-pub fn check(does: &Does) -> Result<(), String> {
-    let (Does::InTurn(utterance) | Does::Now(utterance)) = does else {
-        return Ok(());
-    };
-    let bytes = utterance.text.len();
-    if utterance.text.trim().is_empty() {
-        return Err("it says nothing".to_owned());
-    }
-    if bytes > BYTES_MAX {
-        return Err(format!("it is {bytes} bytes long, and {BYTES_MAX} is the most to say at once"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::utterance::Speaker;
 
-    fn said(text: &str) -> Does {
-        Does::InTurn(api::Utterance { text: text.to_owned(), speaker: None })
+    fn does(text: &str, speaker: Option<api::Zellij>) -> Does {
+        Does::InTurn(api::Utterance { text: text.to_owned(), speaker })
+    }
+
+    fn said(text: &str) -> ToSay {
+        ToSay::parse(does(text, None)).unwrap()
+    }
+
+    fn from(named: &str, session: Option<&str>) -> api::Zellij {
+        api::Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane: 3 }
     }
 
     fn texts(sayings: &[api::Saying]) -> Vec<&str> {
@@ -117,7 +133,7 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH;
         let mut sayings = Sayings::default();
         for count in 0..KEPT + 2 {
-            sayings.take(said(&count.to_string()), &[], at);
+            sayings.take(said(&count.to_string()), &Sessions::default(), at);
         }
         let fresh = sayings.fresh(at);
         assert_eq!(fresh.len(), KEPT);
@@ -131,8 +147,9 @@ mod tests {
     fn what_was_said_too_long_ago_goes() {
         let at = SystemTime::UNIX_EPOCH + Duration::from_hours(1);
         let mut sayings = Sayings::default();
-        sayings.take(said("early"), &[], at);
-        sayings.take(said("late"), &[], at + Duration::from_mins(1));
+        let sessions = Sessions::default();
+        sayings.take(said("early"), &sessions, at);
+        sayings.take(said("late"), &sessions, at + Duration::from_mins(1));
         assert_eq!(texts(&sayings.fresh(at + STALE)), ["early", "late"]);
         assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
         assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
@@ -140,33 +157,34 @@ mod tests {
         assert_eq!(texts(&sayings.fresh(SystemTime::UNIX_EPOCH)), ["early", "late"]);
     }
 
-    /// zellij's variables keep the name a session had as the pane opened.
+    /// The daemon alone says what session a pane is in now.
     #[test]
-    fn a_speaker_goes_by_the_name_its_session_has_now() {
-        let agent = |named: &str, session: Option<&str>, pane| api::Agent {
-            zellij: Some(api::Zellij {
-                named: named.to_owned(),
-                session: session.map(str::to_owned),
-                pane,
-            }),
-            ..api::Agent::default()
-        };
-        let agents = [agent("old", Some("new"), 3), agent("other", Some("other"), 4)];
-        let from = |session: &str, pane| api::Utterance {
-            text: "hello".to_owned(),
-            speaker: Some(Speaker { session: session.to_owned(), pane }),
-        };
-        let told = |utterance| by_name_now(utterance, &agents).speaker.unwrap().session;
-        assert_eq!(told(from("old", 3)), "new");
-        assert_eq!(told(from("old", 9)), "old", "no agent in that pane says otherwise");
-        assert_eq!(told(from("elsewhere", 3)), "elsewhere");
+    fn what_a_speaker_was_asked_with_has_no_say_in_its_session() {
+        let speaker = Some(from("work", Some("made up")));
+        let utterance = api::Utterance { text: "hello".to_owned(), speaker };
+        let placed = placed(utterance, &Sessions::default()).speaker.unwrap();
+        assert_eq!(placed.session, None);
+        assert_eq!(placed.named, "work");
     }
 
     #[test]
     fn what_says_nothing_or_too_much_is_not_taken() {
-        assert!(check(&said(" \n\t")).is_err());
-        assert!(check(&said(&"a".repeat(BYTES_MAX + 1))).is_err());
-        assert_eq!(check(&said(&"a".repeat(BYTES_MAX))), Ok(()));
-        assert_eq!(check(&Does::Stop(api::say::Stop {})), Ok(()));
+        assert!(ToSay::parse(does(" \n\t", None)).is_err());
+        assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX + 1), None)).is_err());
+        assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX), None)).is_ok());
+        assert!(ToSay::parse(Does::Stop(api::say::Stop {})).is_ok());
+    }
+
+    /// A session's name is said too, and goes in each answer of `Watch`.
+    #[test]
+    fn the_name_of_a_session_counts_and_has_to_be_a_name() {
+        let parsed = |text: &str, named: &str| ToSay::parse(does(text, Some(from(named, None))));
+        let text = "a".repeat(BYTES_MAX - 4);
+        assert!(parsed(&text, "name").is_ok());
+        assert!(parsed(&text, "names").is_err());
+        assert!(parsed("hi", &"a".repeat(BYTES_MAX)).is_err());
+        for no_name in ["", " ", "..", "a/b"] {
+            assert!(parsed("hi", no_name).is_err(), "{no_name:?}");
+        }
     }
 }

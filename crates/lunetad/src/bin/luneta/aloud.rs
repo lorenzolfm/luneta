@@ -11,8 +11,10 @@
 //!
 //! What waits is read in the order it came, with the oldest let go of past
 //! `WAITING`, and what has waited past `STALE`, naming the session as the
-//! speaker changes. The sidebar has a line of what is being read, and a mark
-//! on its agent's row: no box, as a box would take the keys.
+//! speaker changes. What `--now` gave goes before all of it, and only the last
+//! of those, as it would have cut off the one before. The sidebar has a line of
+//! what is being read, and a mark on its agent's row: no box, as a box would
+//! take the keys.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +24,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use lunetad::api::say::Does;
-use lunetad::api::{Saying, Utterance};
+use lunetad::api::{Saying, Utterance, Zellij};
 use lunetad::sayings::STALE;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -49,25 +51,23 @@ const WAITING: usize = 16;
 /// has room for.
 const SHOWN_CHARS: usize = 200;
 
-/// A pane something came from: of its session by the name its daemon knows it
-/// by.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Seat {
-    pub session: String,
-    pub pane: u32,
-}
-
 /// Whose something to read is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Whose {
     /// Yours, by `Alt u`.
     Selection,
-    /// `luneta say`'s on a machine, in a pane there, if it ran in one.
-    Said { on: Machine, seat: Option<Seat> },
+    /// `luneta say`'s on a machine, from a pane there, if it ran in one.
+    Said { on: Machine, speaker: Option<Zellij> },
+}
+
+/// What a session is to be called, of the pane `speaker`: what its daemon says
+/// it is now, or else what the pane knows it by.
+fn called(speaker: &Zellij) -> &str {
+    speaker.session.as_deref().unwrap_or(&speaker.named)
 }
 
 /// What the sidebar shows of what goes on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Shown {
     /// What is being read, on one line.
     Reading { whose: Whose, text: String },
@@ -76,12 +76,13 @@ pub enum Shown {
 }
 
 impl Shown {
-    /// The pane this comes from, for the mark on its row.
-    pub fn from(&self) -> Option<(&Machine, &Seat)> {
-        match self {
-            Shown::Reading { whose: Whose::Said { on, seat: Some(seat) }, .. } => Some((on, seat)),
-            Shown::Reading { .. } | Shown::Fetching { .. } => None,
-        }
+    /// The pane this comes from, for the mark on its row: its machine, the
+    /// session it is in, where its daemon could tell, and its id.
+    pub fn from(&self) -> Option<(&Machine, &str, u32)> {
+        let Shown::Reading { whose: Whose::Said { on, speaker: Some(speaker) }, .. } = self else {
+            return None;
+        };
+        Some((on, speaker.session.as_deref()?, speaker.pane))
     }
 
     /// The sidebar's line of it, `width` wide.
@@ -98,9 +99,9 @@ impl Shown {
             Shown::Reading { whose, text } => {
                 let who = match whose {
                     Whose::Selection => "selection".to_owned(),
-                    Whose::Said { seat: Some(seat), .. } => seat.session.clone(),
-                    Whose::Said { on: Machine::Local, seat: None } => machines::local_name(),
-                    Whose::Said { on: Machine::Remote(on), seat: None } => on.to_string(),
+                    Whose::Said { speaker: Some(speaker), .. } => called(speaker).to_owned(),
+                    Whose::Said { on: Machine::Local, speaker: None } => machines::local_name(),
+                    Whose::Said { on: Machine::Remote(on), speaker: None } => on.to_string(),
                 };
                 let who = cut(&who, room);
                 let rest = room.saturating_sub(who.width() + 3);
@@ -132,7 +133,7 @@ struct Now {
 }
 
 /// What is to be read next: as it is to be said, and as it came.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct Next {
     spoken: String,
     whose: Whose,
@@ -143,7 +144,11 @@ struct Next {
 /// no thread, sound or model in it.
 #[derive(Debug, Default)]
 struct Queue {
-    waiting: VecDeque<Waiting>,
+    /// What goes before all that waits, by `--now`.
+    at_once: Option<Waiting>,
+    /// What waits its turn, oldest first, as all that is taken goes in at the
+    /// back: what is let go of from the front is the oldest.
+    in_turn: VecDeque<Waiting>,
     now: Option<Now>,
     /// The number of the last read.
     numbered: u64,
@@ -191,8 +196,7 @@ impl Queue {
     fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
-            let seat = utterance.speaker.map(|it| Seat { session: it.session, pane: it.pane });
-            let whose = Whose::Said { on: on.clone(), seat };
+            let whose = Whose::Said { on: on.clone(), speaker: utterance.speaker };
             Waiting { whose, text: utterance.text, came: at }
         };
         match does {
@@ -205,30 +209,34 @@ impl Queue {
 
     /// `waiting` waits behind the rest, and the oldest goes where too many do.
     fn after(&mut self, waiting: Waiting) {
-        self.waiting.push_back(waiting);
-        if self.waiting.len() > WAITING {
-            self.waiting.pop_front();
+        self.in_turn.push_back(waiting);
+        if self.in_turn.len() > WAITING {
+            self.in_turn.pop_front();
         }
     }
 
-    /// `waiting` is next, and what is being read stops.
+    /// `waiting` is next, in place of one that had not begun, which it would
+    /// have cut off, and what is being read stops.
     fn first(&mut self, waiting: Waiting) {
-        if self.waiting.len() == WAITING {
-            self.waiting.pop_front();
-        }
-        self.waiting.push_front(waiting);
+        self.at_once = Some(waiting);
         self.now = None;
     }
 
     /// What is being read stops, and what waits goes.
     fn stop(&mut self) {
         self.now = None;
-        self.waiting.clear();
+        self.at_once = None;
+        self.in_turn.clear();
+    }
+
+    /// Whether anything waits to be read.
+    fn waits(&self) -> bool {
+        self.at_once.is_some() || !self.in_turn.is_empty()
     }
 
     /// Whether anything is being read, or waits to be.
     fn busy(&self) -> bool {
-        self.now.is_some() || !self.waiting.is_empty()
+        self.now.is_some() || self.waits()
     }
 
     /// What to read next, at `now`, of what has not waited too long, led by
@@ -237,13 +245,16 @@ impl Queue {
     fn next(&mut self, now: SystemTime) -> Option<Next> {
         let fresh = |came: SystemTime| now.duration_since(came).map_or(true, |age| age <= STALE);
         loop {
-            let Waiting { whose, text, came } = self.waiting.pop_front()?;
+            let next = self.at_once.take().or_else(|| self.in_turn.pop_front());
+            let Waiting { whose, text, came } = next?;
             if !fresh(came) {
                 continue;
             }
             let speaker = match &whose {
-                Whose::Said { on, seat: Some(seat) } => Some((on.clone(), seat.session.clone())),
-                Whose::Said { seat: None, .. } | Whose::Selection => None,
+                Whose::Said { on, speaker: Some(speaker) } => {
+                    Some((on.clone(), called(speaker).to_owned()))
+                },
+                Whose::Said { speaker: None, .. } | Whose::Selection => None,
             };
             let spoken = match &speaker {
                 Some((_, session)) if self.named != speaker => format!("{session}. {text}"),
@@ -407,7 +418,7 @@ impl Aloud {
     /// Reads what is next, where nothing is being read, once the model is in,
     /// which what waits has fetched.
     fn go_on(&mut self) {
-        if self.queue.now.is_some() || self.queue.waiting.is_empty() {
+        if self.queue.now.is_some() || !self.queue.waits() {
             return;
         }
         self.fetched = self.fetched || voice::fetched();
@@ -434,7 +445,7 @@ impl Aloud {
         if let Some(Now { whose, text, .. }) = &self.queue.now {
             return Some(Shown::Reading { whose: whose.clone(), text: text.clone() });
         }
-        let fetching = self.fetching.as_ref().filter(|_| !self.queue.waiting.is_empty());
+        let fetching = self.fetching.as_ref().filter(|_| self.queue.waits());
         fetching.map(|fetching| Shown::Fetching { got: fetching.got })
     }
 }
@@ -444,7 +455,6 @@ mod tests {
     use std::time::Duration;
 
     use lunetad::api::say::Stop;
-    use lunetad::api::utterance::Speaker;
     use lunetad::api::Say;
     use lunetad::Destination;
 
@@ -466,8 +476,12 @@ mod tests {
         Saying { pid: PID, number, say: Some(Say { does: Some(does) }) }
     }
 
+    fn pane(named: &str, session: Option<&str>) -> Zellij {
+        Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane: 3 }
+    }
+
     fn utterance(text: &str, session: Option<&str>) -> Utterance {
-        let speaker = session.map(|session| Speaker { session: session.to_owned(), pane: 3 });
+        let speaker = session.map(|session| pane(session, Some(session)));
         Utterance { text: text.to_owned(), speaker }
     }
 
@@ -576,6 +590,52 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["first", "next"]);
     }
 
+    /// What is to go first is no one's oldest, however many come behind it.
+    #[test]
+    fn past_the_most_that_wait_what_goes_first_stays() {
+        let mut queue = hearing();
+        let mut said = vec![saying(1, Does::Now(utterance("first", None)))];
+        said.extend((2..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string(), None)));
+        queue.hear(here(said), true, at(1));
+        let read = spoken(&mut queue);
+        assert_eq!(read.len(), WAITING + 1);
+        assert_eq!(read[0], "first");
+        assert_eq!(read[1], "3");
+    }
+
+    /// Two in one answer end as they do in two: the second would have cut off
+    /// the first.
+    #[test]
+    fn what_goes_first_takes_the_place_of_one_that_has_not_begun() {
+        let mut queue = hearing();
+        let said = vec![
+            in_turn(1, "next", None),
+            saying(2, Does::Now(utterance("cut off", None))),
+            saying(3, Does::Now(utterance("first", None))),
+        ];
+        queue.hear(here(said), true, at(1));
+        assert_eq!(spoken(&mut queue), ["first", "next"]);
+    }
+
+    #[test]
+    fn stop_lets_go_of_what_was_to_go_first_too() {
+        let mut queue = hearing();
+        let said =
+            vec![saying(1, Does::Now(utterance("first", None))), saying(2, Does::Stop(Stop {}))];
+        queue.hear(here(said), true, at(1));
+        assert!(!queue.busy());
+    }
+
+    /// What was to go first has waited too long as all else has, and what is
+    /// behind it is next.
+    #[test]
+    fn what_was_to_go_first_goes_once_it_has_waited_too_long() {
+        let mut queue = hearing();
+        queue.hear(here(vec![saying(1, Does::Now(utterance("early", None)))]), true, at(1));
+        queue.hear(here(vec![in_turn(2, "late", None)]), true, at(1) + STALE);
+        assert_eq!(queue.next(at(2) + STALE).map(|next| next.spoken).as_deref(), Some("late"));
+    }
+
     #[test]
     fn stop_stops_and_clears_in_the_order_said() {
         let mut queue = hearing();
@@ -665,11 +725,42 @@ mod tests {
             let line = Shown::Reading { whose, text }.line(40);
             line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
         };
-        let seat = Some(Seat { session: "luneta".to_owned(), pane: 3 });
+        let from = |speaker| Whose::Said { on: far(), speaker };
         assert_eq!(line(Whose::Selection), format!("{MARK} selection · the tests pass"));
-        let said = Whose::Said { on: far(), seat };
+        let said = from(Some(pane("old", Some("luneta"))));
         assert_eq!(line(said), format!("{MARK} luneta · the tests pass"));
-        let unseated = Whose::Said { on: far(), seat: None };
-        assert_eq!(line(unseated), format!("{MARK} far · the tests pass"));
+        assert_eq!(line(from(None)), format!("{MARK} far · the tests pass"));
+        let untold = from(Some(pane("old", None)));
+        assert_eq!(line(untold), format!("{MARK} old · the tests pass"));
+    }
+
+    /// A row is marked only where the daemon said what session its pane is in:
+    /// the name a pane knows its session by may be another's now.
+    #[test]
+    fn what_comes_from_a_session_not_told_marks_no_row() {
+        let shown = |speaker| {
+            let whose = Whose::Said { on: far(), speaker: Some(speaker) };
+            Shown::Reading { whose, text: String::new() }
+        };
+        let told = shown(pane("old", Some("new")));
+        assert_eq!(told.from(), Some((&far(), "new", 3)));
+        assert_eq!(shown(pane("old", None)).from(), None);
+    }
+
+    /// A pane's session is named by what its daemon says it is now, and is the
+    /// same speaker whichever name that goes by.
+    #[test]
+    fn a_session_not_told_goes_by_the_name_the_pane_knows_it_by() {
+        let mut queue = hearing();
+        let from = |text: &str, speaker| {
+            Utterance { text: text.to_owned(), speaker: Some(speaker) }
+        };
+        let said = vec![
+            saying(1, Does::InTurn(from("told", pane("old", Some("new"))))),
+            saying(2, Does::InTurn(from("same", pane("other", Some("new"))))),
+            saying(3, Does::InTurn(from("untold", pane("old", None)))),
+        ];
+        queue.hear(here(said), true, at(1));
+        assert_eq!(spoken(&mut queue), ["new. told", "same", "old. untold"]);
     }
 }
