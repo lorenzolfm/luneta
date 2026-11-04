@@ -65,7 +65,7 @@ use crate::away;
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::close::Act;
-use crate::desktop::{self, Desktop};
+use crate::desktop::{self, Desktop, Reader};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::due::Due;
 use crate::fails::{Back, Failed, Fails};
@@ -194,9 +194,6 @@ pub enum Event {
 /// How often the sidebar is drawn again with nothing else to draw it: every
 /// second for the ages, and at each turn of the spinner while one turns.
 const TICK: Duration = Duration::from_secs(1);
-
-/// Why the keys of what is read aloud do nothing, in a luneta over ssh.
-const NO_SPEAKERS: &str = "this luneta reads nothing aloud: it has no speakers of yours";
 
 /// The most events that go into one frame. Those that come faster wait for the
 /// next, so that luneta draws at least once each this many events, however
@@ -2233,23 +2230,25 @@ impl App {
 
     /// `Alt u`: what plays pauses or goes on, and else what zellij copied last
     /// is read, by this luneta where it is the one of its machine that reads
-    /// aloud, or by the one that is. A luneta over ssh has no speakers of yours.
+    /// aloud, or by the one that is. Where it knows of none, the sidebar says why.
     fn read_aloud(&mut self) {
-        if self.desktop.reads_aloud() {
-            let read = self.aloud.key(self.copied.as_deref());
-            self.read_aloud_went(read);
-        } else if !self.desktop.hand_read(self.copied.as_deref().unwrap_or_default()) {
-            self.sidebar.notify(NO_SPEAKERS.to_owned());
+        match self.desktop.reader() {
+            Reader::This => {
+                let read = self.aloud.key(self.copied.as_deref());
+                self.read_aloud_went(read);
+            },
+            Reader::Another(holder) => holder.selected(self.copied.as_deref().unwrap_or_default()),
+            Reader::Nobody(why) => self.sidebar.notify(why.to_owned()),
         }
     }
 
     /// `Alt Shift u`: what plays stops, and what waits goes, by whichever
     /// luneta `read_aloud` says.
     fn stop_aloud(&mut self) {
-        if self.desktop.reads_aloud() {
-            self.aloud.press(aloud::Button::Stop);
-        } else if !self.desktop.hand_stop() {
-            self.sidebar.notify(NO_SPEAKERS.to_owned());
+        match self.desktop.reader() {
+            Reader::This => self.aloud.press(aloud::Button::Stop),
+            Reader::Another(holder) => holder.stopped(),
+            Reader::Nobody(why) => self.sidebar.notify(why.to_owned()),
         }
     }
 

@@ -52,13 +52,33 @@ pub struct Desktop {
 
 /// What a luneta is of those of its machine.
 enum Role {
-    /// It does not know yet, or never will, as it runs over ssh.
-    Unsure,
+    /// It does not know yet, and never will where the lock cannot be had.
+    Undecided,
+    /// It runs over ssh, and is none of them: the machine it runs on is not
+    /// the one you sit at.
+    Elsewhere,
     /// Another holds the lock: this one tells it where it looks.
     Peer(Reaching),
     /// It holds the lock, and puts the notifications up: with the socket it
     /// hears the others on, where it hears on one, and what they said.
     Holder { _lock: File, socket: Option<PathBuf>, peers: Peers },
+}
+
+/// Why the keys of what is read aloud do nothing, in a luneta over ssh.
+const NO_SPEAKERS: &str = "this luneta reads nothing aloud: it has no speakers of yours";
+
+/// Why they do nothing in a luneta that does not know what it is of those of
+/// its machine: the speakers may be fine, and another may read, or none.
+const NO_READER: &str = "this luneta reads nothing aloud, and reaches no other that does";
+
+/// Which luneta the keys of what is read aloud are for.
+pub enum Reader<'a> {
+    /// This one.
+    This,
+    /// Another of its machine, which this one tells of them.
+    Another(&'a Reaching),
+    /// None that this one can tell of them, and why, in words.
+    Nobody(&'static str),
 }
 
 impl Desktop {
@@ -67,13 +87,13 @@ impl Desktop {
     pub fn start(events: &Sender<Event>) -> Desktop {
         let events = events.clone();
         if elsewhere() {
-            return Desktop { serving: None, role: Role::Unsure, events };
+            return Desktop { serving: None, role: Role::Elsewhere, events };
         }
         let (orders, taken) = channel::unbounded_channel();
         let serving = events.clone();
         let worker = thread::spawn(move || serve(taken, &serving));
         peers::wait(events.clone());
-        Desktop { serving: Some((orders, worker)), role: Role::Unsure, events }
+        Desktop { serving: Some((orders, worker)), role: Role::Undecided, events }
     }
 
     pub fn post(&self, alert: Alert) {
@@ -99,7 +119,7 @@ impl Desktop {
         match heard {
             Heard::Holding(lock) => {
                 // It reaches for no other now.
-                self.role = Role::Unsure;
+                self.role = Role::Undecided;
                 let socket = match peers::listening(&self.events) {
                     Ok(socket) => Some(socket),
                     Err(why) => {
@@ -115,7 +135,7 @@ impl Desktop {
                 true
             },
             Heard::Peering => {
-                if let (Role::Unsure, Ok(socket)) = (&self.role, peers::socket()) {
+                if let (Role::Undecided, Ok(socket)) = (&self.role, peers::socket()) {
                     self.role = Role::Peer(Reaching::to(socket, focused, self.events.clone()));
                 }
                 false
@@ -134,7 +154,7 @@ impl Desktop {
         match &mut self.role {
             Role::Peer(reaching) => reaching.focus(focused),
             Role::Holder { peers, .. } if focused => peers.here(),
-            Role::Holder { .. } | Role::Unsure => {},
+            Role::Holder { .. } | Role::Undecided | Role::Elsewhere => {},
         }
     }
 
@@ -142,6 +162,16 @@ impl Desktop {
     /// that holds the lock, which none over ssh ever does.
     pub fn reads_aloud(&self) -> bool {
         matches!(self.role, Role::Holder { .. })
+    }
+
+    /// Which luneta the keys of what is read aloud are for.
+    pub fn reader(&self) -> Reader<'_> {
+        match &self.role {
+            Role::Holder { .. } => Reader::This,
+            Role::Peer(reaching) => Reader::Another(reaching),
+            Role::Undecided => Reader::Nobody(NO_READER),
+            Role::Elsewhere => Reader::Nobody(NO_SPEAKERS),
+        }
     }
 
     /// You dictate in this luneta, or no longer do, as `dictating` says, for
@@ -157,31 +187,7 @@ impl Desktop {
     pub fn another_dictates(&self) -> bool {
         match &self.role {
             Role::Holder { peers, .. } => peers.dictating(),
-            Role::Peer(_) | Role::Unsure => false,
-        }
-    }
-
-    /// Hands `Alt u`, with `selected`, to the luneta of this machine that reads
-    /// aloud, where another does: whether it did.
-    pub fn hand_read(&self, selected: &str) -> bool {
-        match &self.role {
-            Role::Peer(reaching) => {
-                reaching.selected(selected);
-                true
-            },
-            Role::Holder { .. } | Role::Unsure => false,
-        }
-    }
-
-    /// Hands `Alt Shift u` to the luneta of this machine that reads aloud,
-    /// where another does: whether it did.
-    pub fn hand_stop(&self) -> bool {
-        match &self.role {
-            Role::Peer(reaching) => {
-                reaching.stopped();
-                true
-            },
-            Role::Holder { .. } | Role::Unsure => false,
+            Role::Peer(_) | Role::Undecided | Role::Elsewhere => false,
         }
     }
 
@@ -198,7 +204,7 @@ impl Desktop {
     pub fn looks(&self) -> Vec<Key> {
         match &self.role {
             Role::Holder { peers, .. } => peers.looks(),
-            Role::Peer(_) | Role::Unsure => Vec::new(),
+            Role::Peer(_) | Role::Undecided | Role::Elsewhere => Vec::new(),
         }
     }
 
@@ -208,7 +214,7 @@ impl Desktop {
     pub fn hand(&mut self, key: &Key) -> bool {
         match &mut self.role {
             Role::Holder { peers, .. } => peers.hand(key),
-            Role::Peer(_) | Role::Unsure => false,
+            Role::Peer(_) | Role::Undecided | Role::Elsewhere => false,
         }
     }
 }
@@ -686,5 +692,36 @@ mod notifier {
             let again = posting(&alert(Kind::Done, "All done.", false), "luneta-41", None);
             assert_eq!((value(&again, "-sound"), value(&again, "-execute")), (None, None));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+
+    /// The keys of what is read aloud are for the luneta that holds the lock,
+    /// and only one over ssh says your speakers are why they do nothing: one
+    /// that does not know what it is may have them right there.
+    #[test]
+    fn the_keys_of_what_is_read_aloud_go_to_the_reader_and_only_ssh_blames_the_speakers() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let (events, _heard) = mpsc::channel();
+        let desktop = |role| Desktop { serving: None, role, events: events.clone() };
+
+        let lock = File::create(folder.path().join("lock")).expect("a lock");
+        let holder = desktop(Role::Holder { _lock: lock, socket: None, peers: Peers::default() });
+        assert!(matches!(holder.reader(), Reader::This));
+        let socket = folder.path().join("nobody-hears.sock");
+        let reaching = Reaching::to(socket, false, events.clone());
+        assert!(matches!(desktop(Role::Peer(reaching)).reader(), Reader::Another(_)));
+
+        let why = |role| match desktop(role).reader() {
+            Reader::Nobody(why) => why,
+            Reader::This | Reader::Another(_) => panic!("it says why nothing reads"),
+        };
+        assert!(why(Role::Elsewhere).contains("speakers"), "{}", why(Role::Elsewhere));
+        assert!(!why(Role::Undecided).contains("speakers"), "{}", why(Role::Undecided));
     }
 }
