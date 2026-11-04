@@ -3919,10 +3919,11 @@ impl Sidebar {
 
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
-    /// to the room it has. Its last column is the edge, as the sidebar's is.
-    /// The rule is in `ERROR` while the daemon does not answer, or `NAME` while
-    /// an image is on its way, as the note that says so is, which the strip has
-    /// no room for.
+    /// to the room it has, and a pause of what is read aloud, which you cannot
+    /// hear, as the icon of its button. Its last column is the edge, as the
+    /// sidebar's is. The rule is in `ERROR` while the daemon does not answer, or
+    /// `NAME` while an image is on its way, as the note that says so is, which
+    /// the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         self.aloud_buttons = Spots::default();
@@ -3941,6 +3942,9 @@ impl Sidebar {
             }
             let count = cut(&count.to_string(), width.saturating_sub(glyph.width()));
             lines.push(Line::from(vec![Span::styled(glyph, style), Span::styled(count, style)]));
+        }
+        if self.aloud.as_ref().is_some_and(aloud::Shown::paused) {
+            lines.push(Line::styled(aloud::PLAY, Style::new().fg(ACCENT)));
         }
         put(buffer, area, &lines, self.framing());
     }
@@ -9876,9 +9880,10 @@ mod tests {
                 let (x, y) = buffer.pos_of(found);
                 Some(Position::new(x, y))
             };
-            for (paused, toggle, other) in
-                [(false, aloud::PAUSE, aloud::PLAY), (true, aloud::PLAY, aloud::PAUSE)]
-            {
+            for (paused, toggle, other, button) in [
+                (false, aloud::PAUSE, aloud::PLAY, aloud::Button::Pause),
+                (true, aloud::PLAY, aloud::PAUSE, aloud::Button::GoOn),
+            ] {
                 let mut buffer = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
                 sidebar.aloud(reading(paused));
                 let _ = sidebar.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
@@ -9887,7 +9892,7 @@ mod tests {
                 let stop = at(&buffer, aloud::STOP).expect("the button shows");
                 assert_eq!(toggle.y, stop.y);
                 let hit = |x, y| sidebar.aloud_buttons().at(Position::new(x, y)).copied();
-                assert_eq!(hit(toggle.x, toggle.y), Some(aloud::Button::Toggle));
+                assert_eq!(hit(toggle.x, toggle.y), Some(button));
                 assert_eq!(hit(stop.x, stop.y), Some(aloud::Button::Stop));
                 assert_eq!(hit(toggle.x, toggle.y - 1), None);
                 assert_eq!(hit(toggle.x - 2, toggle.y), None, "on what it says");
@@ -9896,6 +9901,25 @@ mod tests {
             let mut buffer = Buffer::empty(area);
             sidebar.draw_collapsed(&mut buffer, area, SystemTime::UNIX_EPOCH);
             assert_eq!(sidebar.aloud_buttons(), &Spots::default());
+        }
+    }
+
+    /// The sidebar collapsed has no line of what is read aloud, and what plays
+    /// you can hear: a pause is all it has to say.
+    #[test]
+    fn a_pause_shows_on_the_sidebar_collapsed() {
+        let marked = |shown| {
+            let area = Rect::new(0, 0, COLLAPSED, 6);
+            let mut sidebar = Sidebar::default();
+            sidebar.aloud(Some(shown));
+            let mut buffer = Buffer::empty(area);
+            sidebar.draw_collapsed(&mut buffer, area, SystemTime::UNIX_EPOCH);
+            buffer.content().iter().any(|cell| cell.symbol() == aloud::PLAY)
+        };
+        for paused in [false, true] {
+            let (whose, text) = (aloud::Whose::Selection, String::new());
+            assert_eq!(marked(aloud::Shown::Reading { whose, text, paused }), paused);
+            assert_eq!(marked(aloud::Shown::Fetching { got: 0, paused }), paused);
         }
     }
 }

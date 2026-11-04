@@ -1350,9 +1350,10 @@ two minutes goes too, so that a Mac waking up doesn't read out an hour of
 updates, and what came before luneta first heard from a machine says nothing.
 A pause holds what waits as well, and what `--now` gives, and what waited through
 it has its two minutes from when it goes on. It ends with the last of what it
-held, or with a stop. `Alt r`, in any luneta of the machine, holds what plays
-until the dictation box closes, or the microphone would write the agent's words
-into your prompt. One luneta of a machine reads, as with
+held, or with a stop. The sidebar collapsed has no room for the line, and shows a
+pause by the icon of its button. `Alt r`, in any luneta of the machine, holds
+what plays until the dictation box closes, or the microphone would write the
+agent's words into your prompt. One luneta of a machine reads, as with
 [notifications](#notifications), and `Alt u` and `Alt Shift u` in another have
 that one do so. A luneta over ssh reads nothing: its speakers are not the ones
 you sit at.

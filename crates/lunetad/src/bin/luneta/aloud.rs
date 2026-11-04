@@ -16,7 +16,8 @@
 //! of those, as it would have cut off the one before. A pause is yours, and
 //! holds what `--now` gave too. The sidebar has a line of what is being read,
 //! with a button for each of those keys, and a mark on its agent's row: no box,
-//! as a box would take the keys.
+//! as a box would take the keys. The sidebar collapsed has no room for the line,
+//! and shows only a pause, as what plays you can hear.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,13 +67,27 @@ pub const STOP: &str = "\u{f04db}";
 /// of it, as an icon alone is hard to hit.
 const BUTTON: usize = 3;
 
-/// A button on the sidebar's line of what is being read.
+/// A button on the sidebar's line of what is being read. Each does what it
+/// shows, or nothing: one drawn before things changed never does the opposite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
-    /// Pauses what plays, or has it go on.
-    Toggle,
+    /// Pauses what plays.
+    Pause,
+    /// Has what is paused go on.
+    GoOn,
     /// Stops what plays, and lets go of what waits.
     Stop,
+}
+
+impl Button {
+    /// What it shows.
+    fn icon(self) -> &'static str {
+        match self {
+            Button::Pause => PAUSE,
+            Button::GoOn => PLAY,
+            Button::Stop => STOP,
+        }
+    }
 }
 
 /// The most that wait to be read: an agent's handoff is a few, and each of five
@@ -118,21 +133,24 @@ impl Shown {
         Some((on, speaker.session.as_deref()?, speaker.pane))
     }
 
+    /// Whether you paused it.
+    pub fn paused(&self) -> bool {
+        match self {
+            Shown::Reading { paused, .. } | Shown::Fetching { paused, .. } => *paused,
+        }
+    }
+
     /// The sidebar's line of it, `width` wide, its buttons at its right, and
     /// where they are on it.
     pub fn line(&self, width: usize) -> (Line<'static>, Spots<Button>) {
         let room = width.saturating_sub(2 * BUTTON);
         let mut line = self.said(room);
-        let paused = matches!(
-            self,
-            Shown::Reading { paused: true, .. } | Shown::Fetching { paused: true, .. }
-        );
-        let toggle = if paused { PLAY } else { PAUSE };
+        let toggle = if self.paused() { Button::GoOn } else { Button::Pause };
         let filler = " ".repeat(room.saturating_sub(line.width()));
-        let buttons = format!("{filler} {toggle}  {STOP} ");
+        let buttons = format!("{filler} {}  {} ", toggle.icon(), Button::Stop.icon());
         line.spans.push(Span::styled(buttons, Style::new().fg(ACCENT)));
         let mut spots = Spots::default();
-        spots.add(0, room..room + BUTTON, Button::Toggle);
+        spots.add(0, room..room + BUTTON, toggle);
         spots.add(0, room + BUTTON..room + 2 * BUTTON, Button::Stop);
         (line, spots)
     }
@@ -174,6 +192,7 @@ impl Shown {
 struct Waiting {
     whose: Whose,
     text: String,
+    /// When it came, or when you last had it go on: what its age is told from.
     came: SystemTime,
 }
 
@@ -290,12 +309,18 @@ impl Queue {
         self.paused = false;
     }
 
-    /// Pauses what is being read and what waits, or has them go on, as of `at`:
-    /// you had what waits wait, so it has waited no time, or a pause of minutes
-    /// would lose the rest of an agent's handoff.
-    fn toggle(&mut self, at: SystemTime) {
-        self.paused = !self.paused;
-        if !self.paused {
+    /// Pauses what is being read and what waits, where there is any: a pause of
+    /// nothing would keep what is said next silent, with no line to say why.
+    fn pause(&mut self) {
+        self.paused = self.busy();
+    }
+
+    /// Has what you paused go on, as of `at`: you had what waits wait, so it has
+    /// waited no time, or a pause of minutes would lose the rest of an agent's
+    /// handoff. What you did not pause did not wait on you.
+    fn unpause(&mut self, at: SystemTime) {
+        if self.paused {
+            self.paused = false;
             let waiting = self.at_once.iter_mut().chain(&mut self.in_turn);
             waiting.for_each(|waiting| waiting.came = at);
         }
@@ -313,9 +338,13 @@ impl Queue {
 
     /// What to read next, at `now`, of what has not waited too long, led by
     /// the name of its session where the speaker changed: the name is all
-    /// there is to tell a voice from another by.
+    /// there is to tell a voice from another by. Nothing waits too long during
+    /// a pause, which `unpause` gives its time back after.
     fn next(&mut self, now: SystemTime) -> Option<Next> {
-        let fresh = |came: SystemTime| now.duration_since(came).map_or(true, |age| age <= STALE);
+        let paused = self.paused;
+        let fresh = |came: SystemTime| {
+            paused || now.duration_since(came).map_or(true, |age| age <= STALE)
+        };
         loop {
             let next = self.at_once.take().or_else(|| self.in_turn.pop_front());
             let Waiting { whose, text, came } = next?;
@@ -339,11 +368,13 @@ impl Queue {
 
     /// The reading numbered `number` ended: whether that is what is being read,
     /// and so what waits is next. What was stopped before it ended has said
-    /// all it had to.
+    /// all it had to. A pause ends with the last of what it held: what comes
+    /// after that was not what you paused.
     fn ended(&mut self, number: u64) -> bool {
         let reading = self.now.as_ref().is_some_and(|now| now.number == number);
         if reading {
             self.now = None;
+            self.paused = self.paused && self.waits();
         }
         reading
     }
@@ -440,7 +471,7 @@ impl Aloud {
     /// else reads `selected`. Or why it reads nothing.
     pub fn key(&mut self, selected: Option<&str>) -> Result<(), &'static str> {
         if self.queue.busy() {
-            self.press(Button::Toggle);
+            self.press(if self.queue.paused { Button::GoOn } else { Button::Pause });
             return Ok(());
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
@@ -455,8 +486,8 @@ impl Aloud {
     /// nothing, as what you selected is not what you clicked it for.
     pub fn press(&mut self, button: Button) {
         match button {
-            Button::Toggle if self.queue.busy() => self.queue.toggle(SystemTime::now()),
-            Button::Toggle => {},
+            Button::Pause => self.queue.pause(),
+            Button::GoOn => self.queue.unpause(SystemTime::now()),
             Button::Stop => self.queue.stop(),
         }
         self.keep_held();
@@ -510,11 +541,9 @@ impl Aloud {
     }
 
     /// Reads what is next, where nothing is being read. What comes next of what
-    /// you paused starts paused, and a pause ends with the last of it: what
-    /// comes after that was not what you paused.
+    /// you paused starts paused.
     fn go_on(&mut self) {
         self.read_next();
-        self.queue.paused = self.queue.paused && self.queue.busy();
         self.keep_held();
     }
 
@@ -837,12 +866,12 @@ mod tests {
     fn a_pause_and_dictating_each_hold_what_plays_until_both_are_over() {
         let (mut aloud, quiet) = aloud_reading();
         let held = || quiet.held.load(Ordering::Relaxed);
-        aloud.press(Button::Toggle);
+        aloud.press(Button::Pause);
         aloud.hold(true);
         aloud.hold(false);
         assert!(held(), "it is still paused");
         aloud.hold(true);
-        aloud.press(Button::Toggle);
+        aloud.press(Button::GoOn);
         assert!(held(), "you still dictate");
         aloud.hold(false);
         assert!(!held());
@@ -862,7 +891,7 @@ mod tests {
         ];
         for ends in ended {
             let (mut aloud, quiet) = aloud_reading();
-            aloud.press(Button::Toggle);
+            aloud.press(Button::Pause);
             ends(&mut aloud);
             assert!(!quiet.held.load(Ordering::Relaxed));
             assert_eq!(aloud.shown(), None);
@@ -876,9 +905,23 @@ mod tests {
     #[test]
     fn a_button_with_nothing_left_to_do_does_nothing() {
         let mut aloud = Aloud::new(std::sync::mpsc::channel().0);
-        aloud.press(Button::Toggle);
-        assert!(!aloud.queue.paused);
-        assert!(!aloud.queue.busy());
+        for button in [Button::Pause, Button::GoOn] {
+            aloud.press(button);
+            assert!(!aloud.queue.paused);
+            assert!(!aloud.queue.busy());
+        }
+    }
+
+    /// One drawn before the pause changed does not do the opposite of what it
+    /// shows.
+    #[test]
+    fn a_button_drawn_before_a_change_does_what_it_shows_or_nothing() {
+        let (mut aloud, quiet) = aloud_reading();
+        aloud.press(Button::GoOn);
+        assert!(!quiet.held.load(Ordering::Relaxed), "what plays plays on");
+        aloud.press(Button::Pause);
+        aloud.press(Button::Pause);
+        assert!(quiet.held.load(Ordering::Relaxed), "what is paused stays paused");
     }
 
     /// What `--stop` said before more was said ends the pause in the order said:
@@ -886,7 +929,8 @@ mod tests {
     #[test]
     fn what_is_said_after_a_stop_is_not_paused() {
         let mut queue = hearing();
-        queue.toggle(at(1));
+        drop(reading(&mut queue, 1));
+        queue.pause();
         let said = vec![saying(1, Does::Stop(Stop {})), in_turn(2, "after the stop", None)];
         queue.hear(here(said), true, at(2));
         assert!(!queue.paused);
@@ -899,7 +943,7 @@ mod tests {
     fn what_goes_first_does_not_end_a_pause() {
         let mut queue = hearing();
         let quiet = reading(&mut queue, 1);
-        queue.toggle(at(1));
+        queue.pause();
         queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(2));
         assert!(quiet.cut.load(Ordering::Relaxed));
         assert!(queue.paused);
@@ -911,12 +955,37 @@ mod tests {
     #[test]
     fn what_waited_through_a_pause_has_not_waited_too_long() {
         let mut queue = hearing();
-        queue.toggle(at(1));
+        drop(reading(&mut queue, 1));
+        queue.pause();
         queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(1));
         queue.hear(here(vec![in_turn(2, "second", None)]), true, at(2));
-        queue.toggle(at(3) + STALE * 5);
+        queue.unpause(at(3) + STALE * 5);
         assert_eq!(queue.next(at(3) + STALE * 6).map(|next| next.spoken).as_deref(), Some("first"));
         assert_eq!(queue.next(at(4) + STALE * 6), None, "past STALE from going on");
+    }
+
+    /// What you paused is still there to go on, where what the pause held ends
+    /// past `STALE`: as speakers that went, a `--now` with no words to say, or a
+    /// model that came late, and the pause goes on with it.
+    #[test]
+    fn nothing_goes_stale_during_a_pause() {
+        let mut queue = hearing();
+        drop(reading(&mut queue, 1));
+        queue.hear(here(vec![in_turn(1, "rest", None)]), true, at(1));
+        queue.pause();
+        assert!(queue.ended(1));
+        assert!(queue.paused, "what waits is what you paused too");
+        assert_eq!(queue.next(at(2) + STALE * 5).map(|next| next.spoken).as_deref(), Some("rest"));
+    }
+
+    /// What you did not pause did not wait on you: a button drawn before its
+    /// pause ended gives it no more time.
+    #[test]
+    fn going_on_with_nothing_paused_gives_what_waits_no_more_time() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
+        queue.unpause(at(2) + STALE);
+        assert_eq!(queue.next(at(2) + STALE), None);
     }
 
     /// A terminal that speaks kitty's keys, and one that types them.
