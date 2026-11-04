@@ -24,8 +24,8 @@ use lunetad::api::{
     ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
     OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
     RefugeResponse, RenameSessionRequest, RenameSessionResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, TurnRequest, TurnResponse, Version,
-    WatchRequest,
+    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
+    TurnIntoTabResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -569,7 +569,17 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
-    async fn turn(&self, _: Request<TurnRequest>) -> Result<Response<TurnResponse>, Status> {
+    async fn turn_into_tab(
+        &self,
+        _: Request<TurnIntoTabRequest>,
+    ) -> Result<Response<TurnIntoTabResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn turn_into_panes(
+        &self,
+        _: Request<TurnIntoPanesRequest>,
+    ) -> Result<Response<TurnIntoPanesResponse>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 

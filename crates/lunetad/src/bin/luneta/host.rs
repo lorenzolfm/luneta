@@ -47,7 +47,7 @@ use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::log::{self, Process};
-use lunetad::turns::OtherTab;
+use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::Destination;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -130,6 +130,9 @@ pub enum Event {
     /// The tabs the tab of the pane of the menu numbered `menu` can turn into,
     /// as zellij lists its session, or why it does not say.
     Tabs { menu: u64, tabs: Result<Vec<OtherTab>, String> },
+    /// What came of zellij turning the tab of the pane `pane` of the menu
+    /// numbered `menu` into panes of another, where any moved, or why none did.
+    IntoPanes { menu: u64, pane: u32, came: Result<IntoPanes, String> },
     /// A pane of a session no client is in stays, for the menu numbered `menu`
     /// owed it, until a client there makes room for its tab.
     NoClient { menu: u64, owed: Due<u32>, on: Machine, place: PanePlace },
@@ -1191,6 +1194,10 @@ impl App {
             },
             Event::Tabs { menu, tabs } => {
                 let asked = self.sidebar.tabs(menu, tabs);
+                self.follow(asked);
+            },
+            Event::IntoPanes { menu, pane, came } => {
+                let asked = self.sidebar.turned_into_panes(menu, pane, came);
                 self.follow(asked);
             },
             // A menu closed since is no longer what you are on, and takes

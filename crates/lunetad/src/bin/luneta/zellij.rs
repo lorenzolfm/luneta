@@ -25,7 +25,7 @@ use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
-use lunetad::turns::{self, OtherTab, Turned};
+use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{clients, moves, Destination, SocketId};
 pub use lunetad::SessionName;
 
@@ -700,10 +700,9 @@ impl After {
                 owed.pay(there.open(&open).map(|opened| told(opened, events)));
             },
             (After::IntoTab(owed, session, pane), there) => {
-                let turned = there.turn(&session, pane, turns::Turn::PaneIntoTab);
-                owed.pay(turned.and_then(|turned| match turned {
-                    Turned::Done => Ok(pane),
-                    Turned::NoClient => Err(lunetad::opens::no_client(&session)),
+                owed.pay(there.turn_into_tab(&session, pane).and_then(|came| match came {
+                    IntoTab::Done => Ok(pane),
+                    IntoTab::NoClient => Err(lunetad::opens::no_client(&session)),
                 }));
             },
             // A zellij of its own kills it: one run as the client's would
@@ -792,23 +791,46 @@ pub fn other_tabs(
 }
 
 /// Has zellij on the machine `on` turn the pane `place` as `turn` says, on a
-/// thread of its own, for the menu numbered `menu`, and hands back its
-/// terminal, for luneta to take its client to, or why it did not, as `owed`
-/// does. What stays moves nothing, luneta's client neither. Where its session
-/// has no client to make room for a new tab, the menu is owed that yet, once
-/// luneta's client has come, as `Event::NoClient` says.
+/// thread of its own, for the menu numbered `menu`, and hands back what came of
+/// it. What stays moves nothing, luneta's client neither.
 pub fn turn(menu: u64, on: &Machine, place: PanePlace, turn: turns::Turn, events: &Sender<Event>) {
+    match turn {
+        turns::Turn::PaneIntoTab => pane_into_tab(menu, on, place, events),
+        turns::Turn::TabIntoPanes { beside } => tab_into_panes(menu, on, &place, beside, events),
+    }
+}
+
+/// Turns the pane `place` into a tab, and hands back its terminal, for luneta
+/// to take its client to, or why it did not, as `owed` does. Where its session
+/// has no client to make room for the tab, the menu is owed that yet, once
+/// luneta's client has come, as `Event::NoClient` says.
+fn pane_into_tab(menu: u64, on: &Machine, place: PanePlace, events: &Sender<Event>) {
     let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
     thread::spawn(move || {
         let (session, pane) = (place.session.name(), place.pane);
-        match There::on(&on).and_then(|mut there| there.turn(session, pane, turn)) {
-            Ok(Turned::Done) => owed.pay(Ok(pane)),
-            Ok(Turned::NoClient) => {
+        match There::on(&on).and_then(|mut there| there.turn_into_tab(session, pane)) {
+            Ok(IntoTab::Done) => owed.pay(Ok(pane)),
+            Ok(IntoTab::NoClient) => {
                 // luneta is on its way out.
                 let _ = events.send(Event::NoClient { menu, owed, on, place });
             },
             Err(why) => owed.pay(Err(why)),
         }
+    });
+}
+
+/// Turns the tab of the pane `place` into panes of the tab of the terminal
+/// `beside`, and hands back what came of it where any moved, or why none did,
+/// with `Event::IntoPanes`.
+fn tab_into_panes(menu: u64, on: &Machine, place: &PanePlace, beside: u32, events: &Sender<Event>) {
+    let (session, pane) = (place.session.name().clone(), place.pane);
+    let owed = Due::new(events, move |came| Event::IntoPanes { menu, pane, came });
+    let on = on.clone();
+    thread::spawn(move || {
+        let came = There::on(&on).and_then(|mut there| {
+            there.turn_into_panes(&session, pane, beside)
+        });
+        owed.pay(came);
     });
 }
 
@@ -1166,18 +1188,29 @@ impl There {
         }
     }
 
-    /// Has zellij turn the terminal `pane` of `session` as `turn` says, as
-    /// `lunetad::turns::turned` does, and says what came of it, or why it did
+    /// Has zellij turn the terminal `pane` of `session` into a tab, as
+    /// `lunetad::turns::into_tab` does, and says what came of it, or why it did
     /// not.
-    fn turn(
+    fn turn_into_tab(&mut self, session: &SessionName, pane: u32) -> Result<IntoTab, String> {
+        match self {
+            There::Here => turns::into_tab(session, pane),
+            There::Away(away) => away.turn_into_tab(session, pane),
+        }
+    }
+
+    /// Has zellij turn the panes of the tab of the terminal `pane` of `session`
+    /// into panes of the tab of the terminal `beside`, as
+    /// `lunetad::turns::into_panes` does, and says what came of it where any
+    /// moved, or why none did.
+    fn turn_into_panes(
         &mut self,
         session: &SessionName,
         pane: u32,
-        turn: turns::Turn,
-    ) -> Result<Turned, String> {
+        beside: u32,
+    ) -> Result<IntoPanes, String> {
         match self {
-            There::Here => turns::turned(session, pane, turn),
-            There::Away(away) => away.turn(session, pane, turn),
+            There::Here => turns::into_panes(session, pane, beside),
+            There::Away(away) => away.turn_into_panes(session, pane, beside),
         }
     }
 

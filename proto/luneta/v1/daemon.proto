@@ -89,16 +89,19 @@ service Daemon {
   // with what zellij said as it failed, or why it closed nothing.
   rpc Close(CloseRequest) returns (CloseResponse);
   // The tabs of the session of a terminal other than its own, as zellij lists
-  // the session's panes now, in their order: for its tab's panes to turn into
-  // panes of one of them.
+  // the session's panes now, in their order, each by a terminal in it: for its
+  // tab's panes to turn into panes beside that terminal.
   rpc OtherTabs(OtherTabsRequest) returns (OtherTabsResponse);
-  // Has zellij turn a terminal of a session into a tab of its own, or the
-  // panes of its tab into panes of another tab, which the tab they left goes
-  // with. What runs in them runs on, and each keeps its id. It answers once
-  // they have moved, or that a client has to come first, or with why they did
-  // not: a terminal alone in its tab, or that alone holds it open for floating
-  // panes that would end, stays.
-  rpc Turn(TurnRequest) returns (TurnResponse);
+  // Has zellij turn a terminal of a session into a tab of its own. What runs in
+  // it runs on, and it keeps its id. It answers once it has moved, or that a
+  // client has to come first, or with why it did not: a terminal alone in its
+  // tab, or that alone holds it open for floating panes that would end, stays.
+  rpc TurnIntoTab(TurnIntoTabRequest) returns (TurnIntoTabResponse);
+  // Has zellij turn the panes of the tab of a terminal of a session into panes
+  // of the tab of another terminal, which the tab they left goes with. What
+  // runs in them runs on, and each keeps its id. It answers once they have
+  // moved, or how many did before zellij stopped, or with why none did.
+  rpc TurnIntoPanes(TurnIntoPanesRequest) returns (TurnIntoPanesResponse);
   // Has zellij kill a session and delete it, so that it keeps nothing to
   // bring it back with, as `zellij delete-session --force` does. It answers
   // once the session's server has ended, or with why it did not: a session
@@ -463,35 +466,66 @@ message OtherTabsResponse {
   repeated Tab tabs = 1;
 
   message Tab {
-    uint32 id = 1;
+    // A terminal in it, by its id, which names the tab: zellij gives the id of
+    // a tab that closed to the next it opens, and never a terminal's.
+    uint32 pane = 1;
     // Its name, as zellij lists it, who names it `Tab #N` until you do.
     string name = 2;
   }
 }
 
-message TurnRequest {
+message TurnIntoTabRequest {
   On on = 1;
   string session = 2;
   // The terminal, by its id.
   uint32 pane = 3;
-  // What it turns into: one of these, always. A question with neither is
-  // invalid.
-  oneof becomes {
-    // A tab of its own. Its tab keeps its other panes, and names the new one
-    // where someone named it.
-    NewTab new_tab = 4;
-    // Panes of this other tab, by its id, as `OtherTabs` says it, with the
-    // other panes of its tab.
-    uint32 panes_of = 5;
-  }
-
-  message NewTab {}
 }
 
-message TurnResponse {
-  // Nothing moved: the session has no client to make room for a new tab, and
-  // one that comes there can ask again.
-  bool no_client = 1;
+message TurnIntoTabResponse {
+  // What came of it: one of these, always. A client that finds none has a
+  // newer daemon's.
+  oneof came {
+    // It moved. Its tab keeps its other panes, and names the new one where
+    // someone named it.
+    Done done = 1;
+    // Nothing moved: the session has no client to make room for a new tab, and
+    // one that comes there can ask again.
+    NoClient no_client = 2;
+  }
+
+  message Done {}
+
+  message NoClient {}
+}
+
+message TurnIntoPanesRequest {
+  On on = 1;
+  string session = 2;
+  // The terminal whose tab's panes turn, by its id.
+  uint32 pane = 3;
+  // A terminal of the tab they go into, by its id, as `OtherTabs` says it.
+  uint32 beside = 4;
+}
+
+message TurnIntoPanesResponse {
+  // What came of it, where any moved: one of these, always. A client that finds
+  // none has a newer daemon's.
+  oneof came {
+    // All that were there moved, and the tab they left goes.
+    Done done = 1;
+    // Some did, and the rest stay in their tab.
+    Partly partly = 2;
+  }
+
+  message Done {}
+
+  message Partly {
+    uint32 moved = 1;
+    // How many there were, less any that ended on the way.
+    uint32 of = 2;
+    // Why the rest stay.
+    string why = 3;
+  }
 }
 
 message KillRequest {
