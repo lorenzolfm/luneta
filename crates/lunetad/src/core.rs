@@ -21,6 +21,7 @@ use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
 use crate::reviews::{Act, Answer, Move, Refused, Reviews};
+use crate::sayings::Sayings;
 use crate::shells::Shell;
 use crate::zellij::{Id, Sessions, Socket};
 
@@ -52,6 +53,8 @@ pub enum Command {
     Reviewed { pid: u32, ticket: u64, answer: Answer },
     /// Moves the review of the agent `pid`, and says why not where it did not.
     MoveReview { pid: u32, does: Move, answer: oneshot::Sender<Result<(), Refused>> },
+    /// Takes what `Say` was asked, at `at`.
+    Say { say: api::say::Does, at: SystemTime, answer: oneshot::Sender<()> },
     /// Asks for the sessions zellij can be asked about, for their panes.
     Sessions(oneshot::Sender<Vec<Addressed>>),
     /// Asks for the directories the panes work in, for git to be asked about.
@@ -161,6 +164,8 @@ struct Known {
     waiting: Vec<oneshot::Sender<Option<api::Host>>>,
     /// The reviews the agents run.
     reviews: Reviews,
+    /// What `Say` last took.
+    sayings: Sayings,
 }
 
 fn run(commands: &Receiver<Command>, wakes: &Wakes, acts: &SyncSender<Act>) {
@@ -182,6 +187,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes, acts: &SyncSender<Act>) {
         seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
         reviews: Reviews::new(SystemTime::now()),
+        sayings: Sayings::default(),
     };
     known.host = api::Host { version: Some(known.version()), ..known.built() };
     for command in commands {
@@ -258,6 +264,11 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes, acts: &SyncSender<Act>) {
                 known.review(acts);
                 // One who stopped waiting has no use for the answer.
                 let _ = answer.send(moved);
+            },
+            Command::Say { say, at, answer } => {
+                let agents = known.agents();
+                known.sayings.take(say, &agents, at);
+                let _ = answer.send(());
             },
             Command::Sessions(answer) => {
                 let sessions = known.addressed().into_iter().map(|(id, name)| Addressed {
@@ -545,6 +556,7 @@ impl Known {
             unread_files,
             remotes,
             unread_hosts: Some(self.unread_hosts),
+            sayings: self.sayings.fresh(SystemTime::now()),
         }
     }
 
@@ -572,6 +584,9 @@ impl Known {
     }
 
     fn watch(&mut self, after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>>) {
+        // What was said too long ago goes before anyone hears it, as a daemon
+        // that slept has not swept since.
+        self.update();
         assert_eq!(self.host.version, Some(self.version()));
         if after != Some(self.version()) {
             let _ = answer.send(Some(self.host.clone()));

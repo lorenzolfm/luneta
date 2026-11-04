@@ -40,7 +40,7 @@ use tonic::{Code, Status};
 
 use crate::agents::file_for;
 use crate::demand::{stop, Detached};
-use crate::host::{eventually, folder_in, script, start, Host, Running, Vars, LUNETA};
+use crate::host::{answered, eventually, folder_in, script, start, Host, Running, Vars, LUNETA};
 use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
@@ -269,6 +269,25 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
 /// A hosts file that does not read leaves the machines it named as they
 /// were, and the daemon says that it could not read it, until it reads
 /// again.
+/// An agent on another machine is heard where you sit, as the agents are.
+#[test]
+fn what_another_machine_is_told_to_say_comes_with_its_host() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    let said = answered(far.vars().command(LUNETA).args(["say", "over here"]));
+    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+
+    let far_host = reached(&here, "far", |far| !far.sayings.is_empty());
+    assert_eq!(far_host.sayings.len(), 1);
+    assert_eq!(here.host().sayings, [], "it is the other machine's to say");
+}
+
 #[test]
 fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
     let here = Host::new();

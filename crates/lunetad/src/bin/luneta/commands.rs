@@ -3,7 +3,7 @@
 
 use std::error::Error;
 use std::future::Future;
-use std::io::Write as _;
+use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -15,14 +15,18 @@ use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::remote::Reached;
+use lunetad::api::say::{Does, Stop};
+use lunetad::api::utterance::Speaker;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, Host, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Session, Status,
-    UnreadFile, Version, WatchRequest, WorkTree, Zellij,
+    Agent, Host, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Say, SayRequest,
+    Session, Status, UnreadFile, Utterance, Version, WatchRequest, WorkTree, Zellij,
 };
+use lunetad::asks::User;
 use lunetad::folder::SOCKET;
 use lunetad::links::Link;
 pub use lunetad::log::causes;
+use lunetad::sayings::BYTES_MAX;
 use lunetad::{release, Destination};
 use prost::Message as _;
 use tonic::transport::Channel;
@@ -31,6 +35,7 @@ use crate::bridge;
 use crate::daemon::{self, Reach};
 use crate::drive::{self, Address, Agreed, Opening};
 use crate::machines::{self, Added};
+use crate::zellij::{self, Seat};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
 /// `bridge` start a lunetad where none runs, as a program reads the host by
@@ -112,6 +117,21 @@ pub enum Command {
         #[arg(value_parser = drive::pull_request)]
         link: Link,
     },
+    /// Read text aloud on the machine you sit at, whichever machine this runs
+    /// on: queue it, after what waits to be read, and return once lunetad has
+    /// it, without waiting for it to be read. It fails at once where no
+    /// lunetad runs.
+    Say {
+        /// What to read. Without it, what comes on stdin.
+        #[arg(allow_hyphen_values = true)]
+        text: Option<String>,
+        /// Read it first, and cut off what is being read.
+        #[arg(long)]
+        now: bool,
+        /// Stop what is being read, and let go of what waits.
+        #[arg(long, conflicts_with_all = ["text", "now"])]
+        stop: bool,
+    },
 }
 
 /// A version as `--after` spells it: `<pid>:<seq>`.
@@ -136,6 +156,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Go { to } => drive::go(to, folder),
         Command::Close { what, yes } => drive::close(what, *yes, folder),
         Command::Review { link } => drive::review(link, folder),
+        Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
     }
 }
 
@@ -164,6 +185,51 @@ where
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Gives lunetad in `folder` what to read aloud, `text` or else what comes on
+/// stdin, from the pane this runs in, first where `now` says; or has it `stop`.
+fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
+    let does = if stop {
+        Does::Stop(Stop {})
+    } else {
+        let text = match text.map_or_else(from_stdin, |text| Ok(text.to_owned())) {
+            Ok(text) => text,
+            Err(why) => {
+                eprintln!("luneta: {why}");
+                return ExitCode::FAILURE;
+            },
+        };
+        let utterance = Utterance { text, speaker: speaker_here() };
+        if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
+    };
+    let say = Some(Say { does: Some(does) });
+    ask(folder, Reach::Running, |mut daemon| async move {
+        daemon.say(SayRequest { say }).await?;
+        Ok(())
+    })
+}
+
+/// What comes on stdin, up to one byte over what lunetad takes, for it to say
+/// that it does not. Or why it does not read.
+fn from_stdin() -> Result<String, String> {
+    let limit = BYTES_MAX as u64 + 1;
+    let mut read = Vec::new();
+    let got = io::stdin().take(limit).read_to_end(&mut read);
+    got.map_err(|error| format!("stdin does not read: {error}"))?;
+    Ok(String::from_utf8_lossy(&read).into_owned())
+}
+
+/// The pane this runs in, by the name its session had as it opened, or as you
+/// asked from it in the ask box: none outside zellij.
+fn speaker_here() -> Option<Speaker> {
+    match zellij::here().ok()?? {
+        Seat::Opened { named, pane } => Some(Speaker { session: named, pane }),
+        Seat::Asked { user: User::Pane { session, pane }, .. } => {
+            Some(Speaker { session: session.to_string(), pane })
+        },
+        Seat::Asked { .. } => None,
+    }
 }
 
 /// Adds `destination` to luneta's hosts file, and says how lunetad's first

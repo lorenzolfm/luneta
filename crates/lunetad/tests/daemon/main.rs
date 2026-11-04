@@ -23,6 +23,8 @@ mod remote;
 #[cfg(test)]
 mod reviews;
 #[cfg(test)]
+mod say;
+#[cfg(test)]
 mod sessions;
 #[cfg(test)]
 mod shells;

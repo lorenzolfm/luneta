@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{
+    self,
     Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor,
     Zellij,
 };
@@ -93,6 +94,18 @@ impl Host {
         runtime.block_on(async {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
             daemon.list_agents(ListAgentsRequest {}).await.unwrap().into_inner()
+        })
+    }
+
+    /// The host, as the daemon answers a first look.
+    pub fn host(&self) -> api::Host {
+        let folder =
+            crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            let asked = api::WatchRequest { after: None, kept: None };
+            daemon.watch(asked).await.unwrap().into_inner()
         })
     }
 

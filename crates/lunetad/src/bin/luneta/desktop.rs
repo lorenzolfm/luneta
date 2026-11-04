@@ -138,6 +138,24 @@ impl Desktop {
         }
     }
 
+    /// Whether this luneta is the one of its machine that reads aloud: the one
+    /// that holds the lock, which none over ssh ever does.
+    pub fn reads_aloud(&self) -> bool {
+        matches!(self.role, Role::Holder { .. })
+    }
+
+    /// Hands `Alt u`, with `selected`, to the luneta of this machine that reads
+    /// aloud, where another does: whether it did.
+    pub fn hand_read(&self, selected: &str) -> bool {
+        match &self.role {
+            Role::Peer(reaching) => {
+                reaching.selected(selected);
+                true
+            },
+            Role::Holder { .. } | Role::Unsure => false,
+        }
+    }
+
     /// You look at the panes of the agents of `keys` in luneta's window,
     /// which has the focus, or at none.
     pub fn looking(&mut self, keys: &[Key]) {

@@ -46,8 +46,9 @@ use crate::brief;
 use crate::menu::{self, Hint};
 use crate::named::{self, Written};
 use crate::sidebar::{self, ACCENT};
+use crate::models::Fetched;
 use crate::skills::{Name, Skill, Skills};
-use crate::speech::{self, Fetched, Listening, Spoken};
+use crate::speech::{self, Listening, Spoken};
 
 /// The key that dictates, held or tapped.
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('r'), KeyModifiers::ALT);
@@ -109,21 +110,28 @@ impl Dictated {
     }
 }
 
-/// When the key that dictates last went down or repeated, by which luneta
-/// tells it held down from pressed again, where the terminal does not say:
+/// When a key that does something held down last went down or repeated, by
+/// which luneta tells it held down from pressed again, where the terminal does
+/// not say:
 /// one that does not speak the kitty keyboard protocol presses the key held
 /// again and again, as it would type it, and says no key let go.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Repeats {
+    /// The key it tells of.
+    key: (KeyCode, KeyModifiers),
     last: Option<Instant>,
 }
 
 impl Repeats {
-    /// `key` at `now`, as it is, or, where it is the key that dictates
+    pub fn of(key: (KeyCode, KeyModifiers)) -> Repeats {
+        Repeats { key, last: None }
+    }
+
+    /// `key` at `now`, as it is, or, where it is the key this tells of
     /// pressed as soon after it last went down as a key held repeats, as the
     /// repeat it is, as kitty's keys say it.
     pub fn read(&mut self, key: KeyEvent, now: Instant) -> KeyEvent {
-        if (key.code, key.modifiers) != KEY || key.kind == KeyEventKind::Release {
+        if (key.code, key.modifiers) != self.key || key.kind == KeyEventKind::Release {
             return key;
         }
         let soon = self.last.is_some_and(|last| now.saturating_duration_since(last) < REPEATS);
@@ -656,7 +664,7 @@ mod tests {
     #[test]
     fn the_key_pressed_as_soon_after_as_a_key_repeats_is_held() {
         let at = Instant::now();
-        let mut repeats = Repeats::default();
+        let mut repeats = Repeats::of(KEY);
         let mut read = |key: KeyEvent, after: u64| {
             repeats.read(key, at + Duration::from_millis(after)).kind
         };

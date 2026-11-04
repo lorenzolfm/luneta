@@ -67,8 +67,8 @@ use crate::api::{
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
     ListSkillsResponse, MoveReviewRequest, MoveReviewResponse, NameSessionRequest,
     NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, RenameSessionResponse, ReviewMove, StartRequest,
-    StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    RefugeResponse, RenameSessionRequest, RenameSessionResponse, ReviewMove, SayRequest,
+    SayResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -77,6 +77,7 @@ use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Ready};
+use crate::sayings;
 use crate::remote::{Bridges, Destination};
 use crate::reviews::Move;
 use crate::watch::Troubles;
@@ -895,6 +896,15 @@ impl Daemon for Host {
         let moved = self.ask(|answer| Command::MoveReview { pid, does, answer }).await?;
         moved.map_err(|refused| Status::failed_precondition(refused.to_string()))?;
         Ok(Response::new(MoveReviewResponse {}))
+    }
+
+    async fn say(&self, request: Request<SayRequest>) -> Result<Response<SayResponse>, Status> {
+        let say = request.into_inner().say.and_then(|say| say.does);
+        let say = say.ok_or_else(|| Status::invalid_argument("it says nothing to do"))?;
+        sayings::check(&say).map_err(Status::invalid_argument)?;
+        let at = SystemTime::now();
+        self.ask(|answer| Command::Say { say, at, answer }).await?;
+        Ok(Response::new(SayResponse {}))
     }
 
     async fn paste(

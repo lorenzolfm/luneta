@@ -13,9 +13,12 @@
 //! agent, which `luneta clicked` tells the luneta that holds the lock, and
 //! which that one tells the one whose window had the focus last, to go to
 //! that agent's pane. A group names an agent, as `group` says, and names
-//! its notification on macOS too.
+//! its notification on macOS too. And `selected` and what you selected, in
+//! base64, or nothing, as you press `Alt u` in a luneta that does not hold the
+//! lock: the one that does reads aloud for them all.
 
 use std::collections::HashMap;
+use base64::Engine as _;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::net::Shutdown;
@@ -54,6 +57,10 @@ const WRITES: Duration = Duration::from_millis(200);
 /// agents of a pane.
 const LINE_BYTES: u64 = 64 * 1024;
 
+/// The most of a selection a luneta hands on, so that its line, in base64, is
+/// under `LINE_BYTES`: half an hour of speech or so.
+const SELECTED_BYTES: usize = 40 * 1024;
+
 /// What came of the lock, or of another luneta of this machine.
 pub enum Heard {
     /// This luneta holds the lock now: the file it holds it on, which lets
@@ -85,7 +92,12 @@ enum Line {
     Focused,
     Looks(Vec<Key>),
     Clicked(Key),
+    /// `Alt u`, with what is selected there, which may be nothing.
+    Selected(String),
 }
+
+/// Encodes what is selected for a line, and back.
+const SELECTION: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 impl Line {
     /// The line `text` says, or none: one of a word not known here, or of a
@@ -96,6 +108,10 @@ impl Line {
             "focused" => Line::Focused,
             "looks" => Line::Looks(words.by_ref().map(key_of).collect::<Option<_>>()?),
             "clicked" => Line::Clicked(key_of(words.next()?)?),
+            "selected" => {
+                let selected = SELECTION.decode(words.next().unwrap_or_default()).ok()?;
+                Line::Selected(String::from_utf8(selected).ok()?)
+            },
             _ => return None,
         };
         words.next().is_none().then_some(line)
@@ -109,6 +125,7 @@ impl Line {
                 keys.iter().fold("looks".to_owned(), |line, key| line + " " + &group(key)) + "\n"
             },
             Line::Clicked(key) => format!("clicked {}\n", group(key)),
+            Line::Selected(selected) => format!("selected {}\n", SELECTION.encode(selected)),
         }
     }
 }
@@ -212,6 +229,7 @@ fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
     for line in lines(stream) {
         let event = match line {
             Line::Clicked(key) => Event::Clicked(key),
+            Line::Selected(selected) => Event::ReadAloud(selected),
             Line::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
             Line::Looks(keys) => Event::Peers(Heard::Peer(number, Peered::Looks(keys))),
         };
@@ -332,6 +350,7 @@ pub struct Reaching {
 enum Tell {
     Focus(bool),
     Looks(Vec<Key>),
+    Selected(String),
 }
 
 impl Reaching {
@@ -348,6 +367,14 @@ impl Reaching {
     pub fn focus(&mut self, focused: bool) {
         // A thread that ended takes no more.
         let _ = self.told.send(Tell::Focus(focused));
+    }
+
+    /// You pressed `Alt u` with `selected` selected: as much of it as a line
+    /// carries, with the character it ends in whole.
+    pub fn selected(&self, selected: &str) {
+        let end = selected.floor_char_boundary(SELECTED_BYTES);
+        // A thread that ended takes no more.
+        let _ = self.told.send(Tell::Selected(selected[..end].to_owned()));
     }
 
     /// You look at the panes of the agents of `looks`, in luneta's window,
@@ -375,7 +402,8 @@ fn reach(socket: &Path, telling: &Receiver<Tell>, mut focused: bool, events: &Se
         match telling.recv_timeout(AGAIN) {
             Ok(Tell::Focus(now)) => focused = now,
             Ok(Tell::Looks(now)) => looks = now,
-            Err(RecvTimeoutError::Timeout) => {},
+            // The luneta it was for is gone, and its voice with it.
+            Ok(Tell::Selected(_)) | Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -420,6 +448,7 @@ fn talk(
                 *looks = now;
                 talking = tell(Line::Looks(looks.clone()));
             },
+            Ok(Tell::Selected(selected)) => talking = tell(Line::Selected(selected)),
             Err(RecvTimeoutError::Timeout) => talking = !gone.load(Ordering::Relaxed),
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = stream.shutdown(Shutdown::Both);
@@ -469,6 +498,8 @@ mod tests {
             Line::Focused,
             Line::Looks(Vec::new()),
             Line::Looks(vec![key(41), far(7)]),
+            Line::Selected(String::new()),
+            Line::Selected("two words\nand a line é".to_owned()),
             Line::Clicked(far(7)),
         ];
         for line in lines {

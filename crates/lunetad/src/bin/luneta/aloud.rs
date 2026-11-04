@@ -1,0 +1,675 @@
+//! What luneta reads aloud, on the machine you sit at: what `luneta say` gave
+//! the daemon of any machine it watches, as the host says it, and what you
+//! selected, by `Alt u`. While anything plays, `Alt u` stops it instead, and
+//! lets go of what waits. And what plays waits while you dictate, or the
+//! microphone would write the agent's words into your prompt.
+//!
+//! One luneta of a machine reads, the one that puts its notifications up, as
+//! two would talk over each other; and `Alt u` in another has it read. A luneta
+//! over ssh reads nothing: its speakers are not where you sit. What came before
+//! a machine's first answer says nothing, as it does with notifications.
+//!
+//! What waits is read in the order it came, with the oldest let go of past
+//! `WAITING`, and what has waited past `STALE`, naming the session as the
+//! speaker changes. The sidebar has a line of what is being read, and a mark
+//! on its agent's row: no box, as a box would take the keys.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use lunetad::api::say::Does;
+use lunetad::api::{Saying, Utterance};
+use lunetad::sayings::STALE;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr as _;
+
+use crate::brief::{one_line, Asking};
+use crate::host::Event;
+use crate::machines::{self, Machine};
+use crate::models::Fetched;
+use crate::sidebar::{cut, ACCENT, NAME};
+use crate::voice::{self, Reading, Voice};
+
+/// The key that reads what you selected, and stops what plays.
+pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('u'), KeyModifiers::ALT);
+
+/// The mark of what is being read, `md-volume_high` of the Nerd Fonts.
+pub const MARK: &str = "\u{f057e}";
+
+/// The most that wait to be read: an agent's handoff is a few, and each of five
+/// agents at work has one or two.
+const WAITING: usize = 16;
+
+/// How much of what is being read the sidebar holds on to, more than its line
+/// has room for.
+const SHOWN_CHARS: usize = 200;
+
+/// A pane something came from: of its session by the name its daemon knows it
+/// by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Seat {
+    pub session: String,
+    pub pane: u32,
+}
+
+/// Whose something to read is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Whose {
+    /// Yours, by `Alt u`.
+    Selection,
+    /// `luneta say`'s on a machine, in a pane there, if it ran in one.
+    Said { on: Machine, seat: Option<Seat> },
+}
+
+/// What the sidebar shows of what goes on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// What is being read, on one line.
+    Reading { whose: Whose, text: String },
+    /// What waits waits for the model, of which this many bytes are in.
+    Fetching { got: u64 },
+}
+
+impl Shown {
+    /// The pane this comes from, for the mark on its row.
+    pub fn from(&self) -> Option<(&Machine, &Seat)> {
+        match self {
+            Shown::Reading { whose: Whose::Said { on, seat: Some(seat) }, .. } => Some((on, seat)),
+            Shown::Reading { .. } | Shown::Fetching { .. } => None,
+        }
+    }
+
+    /// The sidebar's line of it, `width` wide.
+    pub fn line(&self, width: usize) -> Line<'static> {
+        let mark = Span::styled(MARK, Style::new().fg(ACCENT));
+        let room = width.saturating_sub(2);
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        match self {
+            Shown::Fetching { got } => {
+                let (got, of) = (got / 1_000_000, voice::BYTES / 1_000_000);
+                let said = cut(&format!("fetching the voice, once: {got} of {of} MB"), room);
+                Line::from(vec![mark, Span::raw(" "), Span::styled(said, dim)])
+            },
+            Shown::Reading { whose, text } => {
+                let who = match whose {
+                    Whose::Selection => "selection".to_owned(),
+                    Whose::Said { seat: Some(seat), .. } => seat.session.clone(),
+                    Whose::Said { on: Machine::Local, seat: None } => machines::local_name(),
+                    Whose::Said { on: Machine::Remote(on), seat: None } => on.to_string(),
+                };
+                let who = cut(&who, room);
+                let rest = room.saturating_sub(who.width() + 3);
+                let name = Span::styled(who, Style::new().fg(NAME));
+                let text = Span::styled(format!(" · {}", cut(text, rest)), dim);
+                Line::from(vec![mark, Span::raw(" "), name, text])
+            },
+        }
+    }
+}
+
+/// What waits to be read.
+#[derive(Debug)]
+struct Waiting {
+    whose: Whose,
+    text: String,
+    came: SystemTime,
+}
+
+/// What is being read.
+#[derive(Debug)]
+struct Now {
+    number: u64,
+    whose: Whose,
+    /// On one line, for the sidebar.
+    text: String,
+    /// Dropped, it stops.
+    _reading: Reading,
+}
+
+/// What is to be read next: as it is to be said, and as it came.
+#[derive(Debug, PartialEq, Eq)]
+struct Next {
+    spoken: String,
+    whose: Whose,
+    text: String,
+}
+
+/// What is being read, what waits, and what was heard of each machine, with
+/// no thread, sound or model in it.
+#[derive(Debug, Default)]
+struct Queue {
+    waiting: VecDeque<Waiting>,
+    now: Option<Now>,
+    /// The number of the last read.
+    numbered: u64,
+    /// The session whose name was said last, of the last that named one: none
+    /// after what came from no session.
+    named: Option<(Machine, String)>,
+    /// The last heard of each machine, by the daemon that numbered it: a
+    /// machine here has answered, with nothing said yet if none.
+    heard: HashMap<Machine, Option<(u32, u64)>>,
+}
+
+impl Queue {
+    /// Takes in what each machine lunetad watches last said, as `machines` has
+    /// it, as of `at`: none of one it does not reach now, which keeps where it
+    /// was. A machine left out, which it no longer watches, begins again. What
+    /// a machine says in its first answer came before luneta heard it, and
+    /// goes unread, and so does all of it where this luneta does not `read`,
+    /// which it leaves behind, and reads on from once it does.
+    fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool, at: SystemTime) {
+        let watched: HashSet<&Machine> = machines.iter().map(|(on, _)| on).collect();
+        self.heard.retain(|on, _| watched.contains(on));
+        for (on, sayings) in machines {
+            let Some(sayings) = sayings else {
+                continue;
+            };
+            let last = sayings.last().map(|last| (last.pid, last.number));
+            let Some(&seen) = self.heard.get(&on) else {
+                self.heard.insert(on, last);
+                continue;
+            };
+            if let Some(last) = last {
+                self.heard.insert(on.clone(), Some(last));
+            }
+            if !read {
+                continue;
+            }
+            for saying in sayings.into_iter().filter(|saying| later(saying, seen)) {
+                self.take(&on, saying, at);
+            }
+        }
+    }
+
+    /// Takes in what `on` said at `at`. One that does nothing luneta knows
+    /// comes of a newer daemon.
+    fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
+        let does = saying.say.and_then(|say| say.does);
+        let waiting = |utterance: Utterance| {
+            let seat = utterance.speaker.map(|it| Seat { session: it.session, pane: it.pane });
+            let whose = Whose::Said { on: on.clone(), seat };
+            Waiting { whose, text: utterance.text, came: at }
+        };
+        match does {
+            Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
+            Some(Does::Now(utterance)) => self.first(waiting(utterance)),
+            Some(Does::Stop(_)) => self.stop(),
+            None => {},
+        }
+    }
+
+    /// `waiting` waits behind the rest, and the oldest goes where too many do.
+    fn after(&mut self, waiting: Waiting) {
+        self.waiting.push_back(waiting);
+        if self.waiting.len() > WAITING {
+            self.waiting.pop_front();
+        }
+    }
+
+    /// `waiting` is next, and what is being read stops.
+    fn first(&mut self, waiting: Waiting) {
+        if self.waiting.len() == WAITING {
+            self.waiting.pop_front();
+        }
+        self.waiting.push_front(waiting);
+        self.now = None;
+    }
+
+    /// What is being read stops, and what waits goes.
+    fn stop(&mut self) {
+        self.now = None;
+        self.waiting.clear();
+    }
+
+    /// Whether anything is being read, or waits to be.
+    fn busy(&self) -> bool {
+        self.now.is_some() || !self.waiting.is_empty()
+    }
+
+    /// What to read next, at `now`, of what has not waited too long, led by
+    /// the name of its session where the speaker changed: the name is all
+    /// there is to tell a voice from another by.
+    fn next(&mut self, now: SystemTime) -> Option<Next> {
+        let fresh = |came: SystemTime| now.duration_since(came).map_or(true, |age| age <= STALE);
+        loop {
+            let Waiting { whose, text, came } = self.waiting.pop_front()?;
+            if !fresh(came) {
+                continue;
+            }
+            let speaker = match &whose {
+                Whose::Said { on, seat: Some(seat) } => Some((on.clone(), seat.session.clone())),
+                Whose::Said { seat: None, .. } | Whose::Selection => None,
+            };
+            let spoken = match &speaker {
+                Some((_, session)) if self.named != speaker => format!("{session}. {text}"),
+                Some(_) | None => text.clone(),
+            };
+            self.named = speaker;
+            return Some(Next { spoken, whose, text });
+        }
+    }
+
+    /// The reading numbered `number` ended: whether that is what is being read,
+    /// and so what waits is next. What was stopped before it ended has said
+    /// all it had to.
+    fn ended(&mut self, number: u64) -> bool {
+        let reading = self.now.as_ref().is_some_and(|now| now.number == number);
+        if reading {
+            self.now = None;
+        }
+        reading
+    }
+}
+
+/// Whether `saying` came after `seen`: another daemon's, which counts afresh,
+/// came after what the one before it said.
+fn later(saying: &Saying, seen: Option<(u32, u64)>) -> bool {
+    seen.is_none_or(|(pid, number)| saying.pid != pid || saying.number > number)
+}
+
+/// Whether `c` is drawn, and not said: what a terminal program draws its frames
+/// and marks with, as Claude Code does, which `ptts` would take for words, and
+/// a font's icons. Letters, digits and punctuation are not.
+fn drawn(c: char) -> bool {
+    matches!(u32::from(c),
+        // Arrows, and symbols of math and of technical drawing, as `⏺` and `⎿`.
+        0x2190..=0x21FF | 0x2300..=0x23FF
+        // Box drawing, blocks and shapes.
+        | 0x2500..=0x25FF
+        // Symbols, dingbats, as `✳`, and braille, as a spinner's.
+        | 0x2600..=0x28FF
+        // The Nerd Fonts' icons.
+        | 0xE000..=0xF8FF | 0xF0000..=0xF_FFFD)
+}
+
+/// What a pane drew, as a selection has it, as it is to be read: without what
+/// frames and marks it, each row of a box a sentence, and the end of a
+/// paragraph the end of a sentence. `ptts` joins the lines a pane breaks at its
+/// width, and takes it from there, numbers and symbols and all.
+fn plain(selected: &str) -> String {
+    let mut plain = String::new();
+    for line in selected.lines() {
+        let said: String = line.chars().filter(|c| !drawn(*c)).collect();
+        for word in said.split_whitespace() {
+            if !plain.is_empty() {
+                plain.push(' ');
+            }
+            plain.push_str(word);
+        }
+        let boxed = line.contains(|c| matches!(u32::from(c), 0x2500..=0x259F));
+        let ends = said.trim().is_empty() || boxed;
+        if ends && !plain.is_empty() && !plain.ends_with(['.', '!', '?', ':', ';', ',']) {
+            plain.push('.');
+        }
+    }
+    plain
+}
+
+/// What luneta reads aloud, from the first thing it has to read until it ends.
+pub struct Aloud {
+    queue: Queue,
+    /// The thread that runs the voice, from the first thing it reads on.
+    voice: Option<Voice>,
+    /// The fetch of the model, while it is on its way.
+    fetching: Option<Fetching>,
+    /// Whether the model is in, once luneta has found that it is.
+    fetched: bool,
+    /// Has what plays wait, while you dictate.
+    held: Arc<AtomicBool>,
+    events: Sender<Event>,
+}
+
+/// The fetch of the model, and how many bytes of it are in.
+struct Fetching {
+    _asking: Asking,
+    got: u64,
+}
+
+impl Aloud {
+    pub fn new(events: Sender<Event>) -> Aloud {
+        Aloud {
+            queue: Queue::default(),
+            voice: None,
+            fetching: None,
+            fetched: false,
+            held: Arc::default(),
+            events,
+        }
+    }
+
+    /// Takes in what each machine said, as `Queue::hear` does, and reads what
+    /// is next.
+    pub fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool) {
+        self.queue.hear(machines, read, SystemTime::now());
+        self.go_on();
+    }
+
+    /// `Alt u`: stops what plays and lets go of what waits, where anything
+    /// does, and else reads `selected`. Or why it reads nothing.
+    pub fn key(&mut self, selected: Option<&str>) -> Result<(), &'static str> {
+        if self.queue.busy() {
+            self.queue.stop();
+            return Ok(());
+        }
+        let selected = selected.map(plain).filter(|text| !text.is_empty());
+        let text = selected.ok_or("nothing to read aloud: select some text in a pane first")?;
+        let came = SystemTime::now();
+        self.queue.after(Waiting { whose: Whose::Selection, text, came });
+        self.go_on();
+        Ok(())
+    }
+
+    /// Has what plays wait while you dictate, as `held` says, and go on after.
+    pub fn hold(&self, held: bool) {
+        self.held.store(held, Ordering::Relaxed);
+    }
+
+    /// The reading numbered `number` ended as `ended` says, and what waits is
+    /// next: or why it went wrong, while it was what was being read.
+    pub fn ended(&mut self, number: u64, ended: Result<(), String>) -> Option<String> {
+        let reading = self.queue.ended(number);
+        self.go_on();
+        ended.err().filter(|_| reading)
+    }
+
+    /// Takes in how the fetch of the model goes: once it is in, what waits is
+    /// next, and where it did not come, what waits goes, and why not.
+    pub fn fetch_went(&mut self, fetched: Fetched) -> Option<String> {
+        match fetched {
+            Fetched::Got(got) => {
+                if let Some(fetching) = &mut self.fetching {
+                    fetching.got = got;
+                }
+                None
+            },
+            Fetched::Ended(ended) => {
+                self.fetching = None;
+                match ended {
+                    Ok(()) => {
+                        self.fetched = true;
+                        self.go_on();
+                        None
+                    },
+                    Err(why) => {
+                        self.queue.stop();
+                        Some(format!("the voice did not come: {why}"))
+                    },
+                }
+            },
+        }
+    }
+
+    /// Reads what is next, where nothing is being read, once the model is in,
+    /// which what waits has fetched.
+    fn go_on(&mut self) {
+        if self.queue.now.is_some() || self.queue.waiting.is_empty() {
+            return;
+        }
+        self.fetched = self.fetched || voice::fetched();
+        if !self.fetched {
+            if self.fetching.is_none() {
+                self.fetching = Some(Fetching { _asking: voice::fetch(&self.events), got: 0 });
+            }
+            return;
+        }
+        let Some(Next { spoken, whose, text }) = self.queue.next(SystemTime::now()) else {
+            return;
+        };
+        let held = &self.held;
+        let voice = self.voice.get_or_insert_with(|| Voice::start(Arc::clone(held)));
+        self.queue.numbered += 1;
+        let number = self.queue.numbered;
+        let reading = voice.read(number, spoken, &self.events);
+        let text = one_line(&text, SHOWN_CHARS);
+        self.queue.now = Some(Now { number, whose, text, _reading: reading });
+    }
+
+    /// What the sidebar shows of it.
+    pub fn shown(&self) -> Option<Shown> {
+        if let Some(Now { whose, text, .. }) = &self.queue.now {
+            return Some(Shown::Reading { whose: whose.clone(), text: text.clone() });
+        }
+        let fetching = self.fetching.as_ref().filter(|_| !self.queue.waiting.is_empty());
+        fetching.map(|fetching| Shown::Fetching { got: fetching.got })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use lunetad::api::say::Stop;
+    use lunetad::api::utterance::Speaker;
+    use lunetad::api::Say;
+    use lunetad::Destination;
+
+    use super::*;
+    use crate::speaker::Quiet;
+
+    const PID: u32 = 7;
+
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_hours(1) + Duration::from_secs(seconds)
+    }
+
+    fn far() -> Machine {
+        let far: Destination = "far".parse().unwrap();
+        Machine::Remote(far)
+    }
+
+    fn saying(number: u64, does: Does) -> Saying {
+        Saying { pid: PID, number, say: Some(Say { does: Some(does) }) }
+    }
+
+    fn utterance(text: &str, session: Option<&str>) -> Utterance {
+        let speaker = session.map(|session| Speaker { session: session.to_owned(), pane: 3 });
+        Utterance { text: text.to_owned(), speaker }
+    }
+
+    fn in_turn(number: u64, text: &str, session: Option<&str>) -> Saying {
+        saying(number, Does::InTurn(utterance(text, session)))
+    }
+
+    fn here(sayings: Vec<Saying>) -> Vec<(Machine, Option<Vec<Saying>>)> {
+        vec![(Machine::Local, Some(sayings))]
+    }
+
+    /// A queue that has heard from this machine, and from `far` where named.
+    fn hearing() -> Queue {
+        let mut queue = Queue::default();
+        let quiet = vec![(Machine::Local, Some(Vec::new())), (far(), Some(Vec::new()))];
+        queue.hear(quiet, true, at(0));
+        queue
+    }
+
+    fn spoken(queue: &mut Queue) -> Vec<String> {
+        std::iter::from_fn(|| queue.next(at(0))).map(|next| next.spoken).collect()
+    }
+
+    /// Something being read, which says when it was cut off.
+    fn reading(queue: &mut Queue, number: u64) -> Quiet {
+        let (reading, quiet) = Reading::new(Arc::default());
+        let whose = Whose::Selection;
+        queue.now = Some(Now { number, whose, text: String::new(), _reading: reading });
+        quiet
+    }
+
+    /// A window that opens does not read out what was said before it.
+    #[test]
+    fn what_a_machine_said_before_its_first_answer_says_nothing() {
+        let mut queue = Queue::default();
+        queue.hear(here(vec![in_turn(1, "before", None)]), true, at(0));
+        assert!(!queue.busy());
+        queue.hear(here(vec![in_turn(1, "before", None), in_turn(2, "after", None)]), true, at(1));
+        assert_eq!(spoken(&mut queue), ["after"]);
+    }
+
+    /// Each answer lists what was said lately, and what is read is read once.
+    #[test]
+    fn what_was_heard_is_read_once() {
+        let mut queue = hearing();
+        let one = in_turn(1, "one", None);
+        queue.hear(here(vec![one.clone()]), true, at(1));
+        queue.hear(here(vec![one.clone(), in_turn(2, "two", None)]), true, at(2));
+        queue.hear(here(vec![one, in_turn(2, "two", None)]), true, at(3));
+        assert_eq!(spoken(&mut queue), ["one", "two"]);
+    }
+
+    #[test]
+    fn a_daemon_started_again_counts_afresh_and_is_heard() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(5, "old", None)]), true, at(1));
+        let again = Saying { pid: PID + 1, ..in_turn(1, "new", None) };
+        queue.hear(here(vec![again]), true, at(2));
+        assert_eq!(spoken(&mut queue), ["old", "new"]);
+    }
+
+    /// A machine out of reach keeps its place, and one forgotten does not:
+    /// what it said while it was forgotten came before its next first answer.
+    #[test]
+    fn a_machine_away_keeps_its_place_and_one_forgotten_begins_again() {
+        let mut queue = hearing();
+        let far_said = |sayings| vec![(Machine::Local, Some(Vec::new())), (far(), sayings)];
+        queue.hear(far_said(None), true, at(1));
+        queue.hear(far_said(Some(vec![in_turn(1, "while away", None)])), true, at(2));
+        assert_eq!(spoken(&mut queue), ["while away"]);
+        queue.hear(here(Vec::new()), true, at(3));
+        queue.hear(far_said(Some(vec![in_turn(2, "gone a while", None)])), true, at(4));
+        assert!(!queue.busy());
+    }
+
+    /// The window that does not hold the lock keeps up, and on taking the lock
+    /// reads on from there.
+    #[test]
+    fn a_luneta_that_does_not_read_leaves_behind_what_it_heard() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(1, "for the other", None)]), false, at(1));
+        assert!(!queue.busy());
+        let both = vec![in_turn(1, "for the other", None), in_turn(2, "for this", None)];
+        queue.hear(here(both), true, at(2));
+        assert_eq!(spoken(&mut queue), ["for this"]);
+    }
+
+    #[test]
+    fn past_the_most_that_wait_the_oldest_goes() {
+        let mut queue = hearing();
+        let many = (1..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string(), None)).collect();
+        queue.hear(here(many), true, at(1));
+        let read = spoken(&mut queue);
+        assert_eq!(read.len(), WAITING);
+        assert_eq!(read[0], "3");
+    }
+
+    #[test]
+    fn now_goes_first_and_cuts_off_what_plays() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(1, "next", None)]), true, at(1));
+        let quiet = reading(&mut queue, 1);
+        let now = saying(2, Does::Now(utterance("first", None)));
+        queue.hear(here(vec![now]), true, at(2));
+        assert!(quiet.cut.load(Ordering::Relaxed));
+        assert_eq!(spoken(&mut queue), ["first", "next"]);
+    }
+
+    #[test]
+    fn stop_stops_and_clears_in_the_order_said() {
+        let mut queue = hearing();
+        let quiet = reading(&mut queue, 1);
+        let said = vec![
+            in_turn(1, "gone", None),
+            saying(2, Does::Stop(Stop {})),
+            in_turn(3, "after the stop", None),
+        ];
+        queue.hear(here(said), true, at(1));
+        assert!(quiet.cut.load(Ordering::Relaxed));
+        assert_eq!(spoken(&mut queue), ["after the stop"]);
+    }
+
+    #[test]
+    fn the_session_is_named_as_the_speaker_changes() {
+        let mut queue = hearing();
+        let said = vec![
+            in_turn(1, "one", Some("luneta")),
+            in_turn(2, "two", Some("luneta")),
+            in_turn(3, "three", Some("wt")),
+            in_turn(4, "four", Some("luneta")),
+            in_turn(5, "no pane", None),
+            in_turn(6, "six", Some("luneta")),
+        ];
+        queue.hear(here(said), true, at(1));
+        assert_eq!(
+            spoken(&mut queue),
+            ["luneta. one", "two", "wt. three", "luneta. four", "no pane", "luneta. six"],
+        );
+    }
+
+    /// One name on two machines is two speakers.
+    #[test]
+    fn a_session_of_that_name_on_another_machine_is_another_speaker() {
+        let mut queue = hearing();
+        let said = |text, number| Some(vec![in_turn(number, text, Some("main"))]);
+        let here_said = said("here", 1);
+        let far_quiet = (far(), Some(Vec::new()));
+        queue.hear(vec![(Machine::Local, here_said.clone()), far_quiet], true, at(1));
+        queue.hear(vec![(Machine::Local, here_said), (far(), said("there", 1))], true, at(1));
+        assert_eq!(spoken(&mut queue), ["main. here", "main. there"]);
+    }
+
+    /// A Mac that slept does not read out what it had waiting when it did.
+    #[test]
+    fn what_has_waited_too_long_is_not_read() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(2, "late", None)]), true, at(1) + STALE);
+        let next = queue.next(at(2) + STALE).unwrap();
+        assert_eq!(next.spoken, "late");
+        assert_eq!(queue.next(at(2) + STALE), None);
+    }
+
+    #[test]
+    fn only_what_is_being_read_ending_moves_on() {
+        let mut queue = hearing();
+        drop(reading(&mut queue, 2));
+        assert!(!queue.ended(1), "stopped before it ended");
+        assert!(queue.busy());
+        assert!(queue.ended(2));
+        assert!(!queue.busy());
+    }
+
+    #[test]
+    fn a_pane_s_frames_and_marks_are_not_read() {
+        let selected = "⏺ The fix is in. The daemon keeps what\n  was said.\n\n  ⎿  ok\n";
+        assert_eq!(plain(selected), "The fix is in. The daemon keeps what was said. ok");
+        assert_eq!(plain("✳ Thinking… (esc to interrupt)"), "Thinking… (esc to interrupt)");
+        assert_eq!(plain("\u{f057e} ● a"), "a");
+        assert_eq!(plain("──────\n│ │\n"), "");
+    }
+
+    #[test]
+    fn a_paragraph_or_a_row_of_a_box_ends_a_sentence() {
+        assert_eq!(plain("Summary\n\nIt works"), "Summary. It works");
+        assert_eq!(plain("Asked:\n\nIt works"), "Asked: It works");
+        let table = "┌──────┬─────┐\n│ name │ age │\n├──────┼─────┤\n│ a    │ 2   │\n└─────┘";
+        assert_eq!(plain(table), "name age. a 2.");
+    }
+
+    #[test]
+    fn what_is_being_read_has_a_line_of_whose_it_is_and_what_it_says() {
+        let line = |whose| {
+            let text = "the tests pass".to_owned();
+            let line = Shown::Reading { whose, text }.line(40);
+            line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
+        };
+        let seat = Some(Seat { session: "luneta".to_owned(), pane: 3 });
+        assert_eq!(line(Whose::Selection), format!("{MARK} selection · the tests pass"));
+        let said = Whose::Said { on: far(), seat };
+        assert_eq!(line(said), format!("{MARK} luneta · the tests pass"));
+        let unseated = Whose::Said { on: far(), seat: None };
+        assert_eq!(line(unseated), format!("{MARK} far · the tests pass"));
+    }
+}
