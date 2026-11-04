@@ -85,6 +85,7 @@ use crate::zellij::SessionName;
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
+use crate::agent::Agent;
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
     opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, watch,
@@ -357,7 +358,9 @@ fn follow(
         move |found| core.send(Command::PiAgents(found)).is_ok()
     };
     let any = |_: &Path| true;
-    watch::watch("pi", dir, RecursiveMode::NonRecursive, any, SWEEP, read, tell)?;
+    let mode = RecursiveMode::NonRecursive;
+    let pids = |agents: &Vec<Agent>| agents.iter().map(|agent| agent.pid).collect();
+    watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
     let mut shells = shells::Shells::new(folder);
     let dir = shells.dir().to_owned();
     let read = move || shells.read();
