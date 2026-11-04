@@ -29,11 +29,26 @@
 //! pane that has the pull request's branch checked out, as the daemon says by
 //! its page, or that works in the worktree wt's code says, is where a key
 //! goes instead of a new tab.
+//!
+//! A `.md` file's path opens it too, for work written down there and not on
+//! GitHub. It names no repository: the one the file is in is its own, by what
+//! git says of the directory it is in, and a file in none goes by the
+//! repository of the row it was pasted on. A pane works in that repository
+//! where git says the same of its directory, and a session luneta makes
+//! starts in the directory that holds it. A repository git refuses to read is
+//! not one a file is in none of: nothing is made, and the note says why. A
+//! file's branch is `md-sync-rework` and its tab `sync-rework`, so a second
+//! paste finds the first's worktree, and so do two files of one name; but
+//! `main.md` finds no branch of the repository's. Where neither the repository
+//! nor origin has the branch yet, it is made from origin's default branch as it
+//! is then. The agent reads the file where it is, by its real path: the
+//! worktree may not have it.
 
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,11 +57,11 @@ use std::time::Duration;
 use wt::cmd::add::{self, Fetch};
 use wt::repo::Repo;
 
-use crate::api::paste_request::Worked as AskedWorked;
+use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::program::{self, Ran};
-use crate::{git, github, names, zoxide, SessionName};
+use crate::{git, github, names, zoxide, Directory, SessionName};
 
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
@@ -206,6 +221,166 @@ impl Link {
 impl fmt::Display for Link {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}#{}", self.repository(), self.number)
+    }
+}
+
+/// The end of the name of a file a paste opens the menu for.
+const MARKDOWN: &str = ".md";
+
+/// A `.md` file, by its path as it was pasted on a row of a machine, which is
+/// where it is read: from the root, from `~/`, or else from the directory
+/// that row works in, where it works in one. The tab of its worktree is named
+/// `stem`, and its branch for that.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct File {
+    path: String,
+    from: Option<Directory>,
+    stem: String,
+}
+
+impl File {
+    /// The file `text` is a path of, but for the space around it, pasted on a
+    /// row that works in `from`: one line that ends in `.md`, whether or not
+    /// any file has that path, which only its machine can say. None for any
+    /// other text, an address too, with or without its scheme, or for a file
+    /// whose name holds nothing to name a branch for.
+    #[must_use]
+    pub fn parse(text: &str, from: Option<Directory>) -> Option<File> {
+        let path = text.trim();
+        let address = path.contains("://") || on_github(path).is_some();
+        if address || path.chars().any(char::is_control) {
+            return None;
+        }
+        let name = path.rsplit('/').next()?;
+        let stem = slug(name.strip_suffix(MARKDOWN)?);
+        (!stem.is_empty()).then(|| File { path: path.to_owned(), from, stem })
+    }
+
+    /// The branch luneta has wt make for it, `md-sync-rework`, as an issue's
+    /// is `issue-123`: a second paste finds the first's by that, and no branch
+    /// of the repository's that goes by the file's name, as `main`.
+    fn branch(&self) -> String {
+        format!("md-{}", self.stem)
+    }
+
+    /// Its path, as it was pasted.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Its real path, on the machine this runs on; or why it names no file
+    /// there.
+    fn real(&self) -> Result<String, String> {
+        let real = fs::canonicalize(self.absolute()?).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => "no such file".to_owned(),
+            _ => error.to_string(),
+        })?;
+        if !real.is_file() {
+            return Err("it is no file".to_owned());
+        }
+        real.into_os_string().into_string().map_err(|_| "its real path is no text".to_owned())
+    }
+
+    /// Its path from the root, on the machine this runs on, as the machine's
+    /// `HOME` starts one from `~/`, and the row it was pasted on a relative
+    /// one; or why it has none.
+    fn absolute(&self) -> Result<PathBuf, String> {
+        if let Some(rest) = self.path.strip_prefix("~/") {
+            let home = env::var_os("HOME").map(PathBuf::from);
+            let home = home.filter(|home| home.is_absolute());
+            let home = home.ok_or("HOME is not set to an absolute path, for its ~/")?;
+            return Ok(home.join(rest));
+        }
+        if self.path.starts_with('/') {
+            return Ok(PathBuf::from(&self.path));
+        }
+        let from = self.from.as_ref().ok_or(
+            "its path is relative, and the row highlighted works in no directory to go from",
+        )?;
+        Ok(Path::new(from.as_str()).join(&self.path))
+    }
+
+    /// The repository its worktree is made in, once `real` is where it is: a
+    /// directory of it, and its common directory, by which a pane works in
+    /// it. The file's own, or else, for a file git says is in none, the one
+    /// the row it was pasted on works in. Or why it has neither, or git did not
+    /// say.
+    fn repository(&self, real: &str) -> Result<(String, String), String> {
+        let beside = Path::new(real).parent().and_then(Path::to_str).unwrap_or(real);
+        match common_dir(beside) {
+            Common::Of(common) => return Ok((beside.to_owned(), common)),
+            Common::Unsaid(why) => {
+                return Err(format!("git did not say what repository it is in: {why}"));
+            },
+            Common::NoRepository => {},
+        }
+        let from = self.from.as_ref().ok_or(
+            "it is in no repository, and the row highlighted works in no directory to go by",
+        )?;
+        match common_dir(from.as_str()) {
+            Common::Of(common) => Ok((from.to_string(), common)),
+            Common::NoRepository => {
+                Err(format!("it is in no repository, nor is {from}, the row highlighted"))
+            },
+            Common::Unsaid(why) => Err(format!(
+                "it is in no repository, and git did not say what {from}, the row highlighted, \
+                 is in: {why}"
+            )),
+        }
+    }
+}
+
+/// `stem` as a branch and a tab are named for it: in lower case, with `-` for
+/// each run of what is neither a letter, a digit nor `_`, and none at either
+/// end. Nothing git refuses in a branch's name is left, as `..`, a space or a
+/// `.lock` at the end. Empty where nothing is left.
+fn slug(stem: &str) -> String {
+    let mut slug = String::with_capacity(stem.len());
+    for c in stem.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            slug.extend(c.to_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.truncate(slug.trim_end_matches('-').len());
+    slug
+}
+
+/// What a paste opens the menu for, whose keys make a worktree for it: a pull
+/// request or an issue, by its link, or a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Work {
+    Link(Link),
+    File(File),
+}
+
+impl Work {
+    /// What `text` pasted names, on a row that works in `from`: a link, as
+    /// `Link::parse` takes one, or else a file, as `File::parse` takes one.
+    #[must_use]
+    pub fn parse(text: &str, from: Option<Directory>) -> Option<Work> {
+        let link = Link::parse(text).map(Work::Link);
+        link.or_else(|| File::parse(text, from).map(Work::File))
+    }
+
+    /// What its tab is named, and the menu calls it.
+    #[must_use]
+    pub fn tab(&self) -> String {
+        match self {
+            Work::Link(link) => link.tab(),
+            Work::File(file) => file.stem.clone(),
+        }
+    }
+}
+
+impl fmt::Display for Work {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Work::Link(link) => link.fmt(f),
+            Work::File(file) => f.write_str(&file.path),
+        }
     }
 }
 
@@ -413,34 +588,43 @@ pub enum At<P> {
     Clone { cwd: String, name: SessionName },
 }
 
-/// What a key of the menu goes on with: where it goes, the worktree of the
-/// pull request, and the branch checked out there, which an agent is named
-/// for.
+/// What a key of the menu goes on with: where it goes, the worktree made for
+/// what was pasted, the branch checked out there, which an agent is named for,
+/// and what the agent is on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready<P> {
     pub at: At<P>,
     pub worktree: String,
     pub branch: Option<String>,
+    pub work: Readied,
+}
+
+/// What an agent on what was pasted is on: the link, or the file, by its real
+/// path, which it reads where it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readied {
+    Link(Link),
+    File { real: String },
 }
 
 impl Ready<usize> {
     /// Where it goes, with each pane named as `among` names the pane of its
     /// place there; or the place of one that `among` has none of.
     pub fn placed<P: Clone>(self, among: &[P]) -> Result<Ready<P>, usize> {
-        let Ready { at, worktree, branch } = self;
+        let Ready { at, worktree, branch, work } = self;
         let pane = |at: usize| among.get(at).cloned().ok_or(at);
         let at = match at {
             At::There(at) => At::There(pane(at)?),
             At::Session(at) => At::Session(pane(at)?),
             At::Clone { cwd, name } => At::Clone { cwd, name },
         };
-        Ok(Ready { at, worktree, branch })
+        Ok(Ready { at, worktree, branch, work })
     }
 
     /// The answer that says it.
     #[must_use]
     pub fn answer(self) -> PasteResponse {
-        let Ready { at, worktree, branch } = self;
+        let Ready { at, worktree, branch, work } = self;
         // A place is of a question's panes, which are no more than
         // `WORKED_MAX`.
         let place = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
@@ -451,18 +635,118 @@ impl Ready<usize> {
                 paste_response::At::Clone(MadeClone { cwd, name: name.to_string() })
             },
         };
-        PasteResponse { at: Some(at), worktree, branch }
+        let file = match work {
+            Readied::Link(_) => None,
+            Readied::File { real } => Some(real),
+        };
+        PasteResponse { at: Some(at), worktree, branch, file }
+    }
+}
+
+/// A link or a file pasted on a row of a machine, and the panes of that
+/// machine, as luneta knows them, for where a key of the menu goes: on that
+/// machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pasted {
+    work: Work,
+    worked: Vec<Worked>,
+}
+
+impl Pasted {
+    #[must_use]
+    pub fn new(work: Work, worked: Vec<Worked>) -> Self {
+        Pasted { work, worked }
     }
 
-    /// Where `answer` says the key goes, or why it says nothing luneta can
-    /// go by: it names a session zellij would not take, or a worktree or a
-    /// directory for the session by no absolute path, or it says where in
-    /// words of a newer daemon's.
-    pub fn of(answer: PasteResponse) -> Result<Self, String> {
-        let PasteResponse { at, worktree, branch } = answer;
+    /// What `request` asks, and of which machine, or why it is invalid: it
+    /// says neither a link nor a path of a `.md` file, or a row's directory
+    /// by no absolute path, or more panes than `WORKED_MAX`, or a pane by no
+    /// absolute path, or a pull request's page that is no link.
+    pub fn of(request: PasteRequest) -> Result<(Option<On>, Pasted), String> {
+        let PasteRequest { on, work, worked } = request;
+        let work = match work {
+            Some(paste_request::Work::Link(link)) => {
+                Work::Link(Link::parse(&link).ok_or_else(|| {
+                    format!(
+                        "link: {link:?} is no link of a pull request or of an issue on {GITHUB}"
+                    )
+                })?)
+            },
+            Some(paste_request::Work::File(AskedFile { path, from })) => {
+                let from = from.map(Directory::parse).transpose();
+                let from = from.map_err(|why| format!("from: {why}"))?;
+                let file = File::parse(&path, from);
+                Work::File(file.ok_or_else(|| format!("file: {path:?} is no path of a .md file"))?)
+            },
+            None => return Err("it says neither a link nor a file".to_owned()),
+        };
+        if worked.len() > WORKED_MAX {
+            return Err(format!("worked: more than {WORKED_MAX} panes"));
+        }
+        let pane = |AskedWorked { dir, pull, here }| {
+            if !dir.starts_with('/') {
+                return Err(format!("worked: {dir:?} is no absolute path"));
+            }
+            let pull = pull
+                .map(|page| Link::parse(&page).ok_or(page))
+                .transpose()
+                .map_err(|page| format!("worked: {page:?} is no pull request's page"))?;
+            Ok(Worked { dir, pull, here })
+        };
+        let worked = worked.into_iter().map(pane).collect::<Result<_, String>>()?;
+        Ok((on, Pasted { work, worked }))
+    }
+
+    /// The question that asks it of the machine `on` names, or of the
+    /// daemon's own, where it names none.
+    #[must_use]
+    pub fn asked(&self, on: Option<On>) -> PasteRequest {
+        let pane = |Worked { dir, pull, here }: &Worked| AskedWorked {
+            dir: dir.clone(),
+            pull: pull.as_ref().map(Link::url),
+            here: *here,
+        };
+        let worked = self.worked.iter().map(pane).collect();
+        let work = match &self.work {
+            Work::Link(link) => paste_request::Work::Link(link.url()),
+            Work::File(File { path, from, .. }) => {
+                let from = from.clone().map(String::from);
+                paste_request::Work::File(AskedFile { path: path.clone(), from })
+            },
+        };
+        PasteRequest { on, work: Some(work), worked }
+    }
+
+    /// Where a key goes, on the machine this runs on, by the place of its
+    /// pane among those luneta said, and the worktree, which it has `luneta
+    /// worktree` make there, or where one of the branch is already; or why
+    /// it found nothing.
+    pub fn ready(&self) -> Result<Ready<usize>, String> {
+        match &self.work {
+            Work::Link(link) => ready(link, &self.worked),
+            Work::File(file) => ready_file(file, &self.worked),
+        }
+    }
+
+    /// Where `answer`, from the daemon of another machine, says the key goes
+    /// for what this asks, or why it says nothing luneta can go by: it names a
+    /// session zellij would not take, or a worktree, a file or a directory for
+    /// the session by no absolute path, or it says a file of a link or no file
+    /// of a file, or it says where in words of a newer daemon's.
+    pub fn answered(&self, answer: PasteResponse) -> Result<Ready<usize>, String> {
+        let PasteResponse { at, worktree, branch, file } = answer;
         if !worktree.starts_with('/') {
             return Err(format!("worktree: {worktree:?} is no absolute path"));
         }
+        let work = match (&self.work, file) {
+            (Work::Link(link), None) => Readied::Link(link.clone()),
+            (Work::Link(_), Some(file)) => return Err(format!("file: {file:?} is of no link")),
+            (Work::File(_), Some(real)) if real.starts_with('/') => Readied::File { real },
+            (Work::File(_), Some(real)) => {
+                return Err(format!("file: {real:?} is no absolute path"));
+            },
+            (Work::File(_), None) => return Err("it does not say where the file is".to_owned()),
+        };
         let place = |at: u32| usize::try_from(at).unwrap_or(usize::MAX);
         let at = match at {
             Some(paste_response::At::There(at)) => At::There(place(at)),
@@ -481,73 +765,7 @@ impl Ready<usize> {
                     .to_owned());
             },
         };
-        Ok(Ready { at, worktree, branch })
-    }
-}
-
-/// A link pasted on a row of a machine, and the panes of that machine, as
-/// luneta knows them, for where a key of the menu goes: on that machine.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pasted {
-    link: Link,
-    worked: Vec<Worked>,
-}
-
-impl Pasted {
-    #[must_use]
-    pub fn new(link: Link, worked: Vec<Worked>) -> Self {
-        Pasted { link, worked }
-    }
-
-    /// What `request` asks, and of which machine, or why it is invalid: it
-    /// says no link, or more panes than `WORKED_MAX`, or a pane by no
-    /// absolute path, or a pull request's page that is no link.
-    pub fn of(request: PasteRequest) -> Result<(Option<On>, Pasted), String> {
-        let PasteRequest { on, link, worked } = request;
-        let link = Link::parse(&link).ok_or_else(|| {
-            format!("link: {link:?} is no link of a pull request or of an issue on {GITHUB}")
-        })?;
-        if worked.len() > WORKED_MAX {
-            return Err(format!("worked: more than {WORKED_MAX} panes"));
-        }
-        let pane = |AskedWorked { dir, pull, here }| {
-            if !dir.starts_with('/') {
-                return Err(format!("worked: {dir:?} is no absolute path"));
-            }
-            let pull = pull
-                .map(|page| Link::parse(&page).ok_or(page))
-                .transpose()
-                .map_err(|page| format!("worked: {page:?} is no pull request's page"))?;
-            Ok(Worked { dir, pull, here })
-        };
-        let worked = worked.into_iter().map(pane).collect::<Result<_, String>>()?;
-        Ok((on, Pasted { link, worked }))
-    }
-
-    /// The question that asks it of the machine `on` names, or of the
-    /// daemon's own, where it names none.
-    #[must_use]
-    pub fn asked(&self, on: Option<On>) -> PasteRequest {
-        let pane = |Worked { dir, pull, here }: &Worked| AskedWorked {
-            dir: dir.clone(),
-            pull: pull.as_ref().map(Link::url),
-            here: *here,
-        };
-        let worked = self.worked.iter().map(pane).collect();
-        PasteRequest { on, link: self.link.url(), worked }
-    }
-
-    #[must_use]
-    pub fn link(&self) -> &Link {
-        &self.link
-    }
-
-    /// Where a key goes, on the machine this runs on, by the place of its
-    /// pane among those luneta said, and the worktree, which it has `luneta
-    /// worktree` make there, or where one of the branch is already; or why
-    /// it found nothing.
-    pub fn ready(&self) -> Result<Ready<usize>, String> {
-        ready(&self.link, &self.worked)
+        Ok(Ready { at, worktree, branch, work })
     }
 }
 
@@ -572,7 +790,9 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
     let (repository, going) = match found(link, worked, &mut repository_of) {
         Some(Found::There(at)) => {
             let dir = &worked[at].dir;
-            return Ok(Ready { at: At::There(at), worktree: dir.clone(), branch: branch(dir) });
+            let (worktree, branch) = (dir.clone(), branch(dir));
+            let work = Readied::Link(link.clone());
+            return Ok(Ready { at: At::There(at), worktree, branch, work });
         },
         Some(Found::Session(at)) => (worked[at].dir.clone(), Going::Session(at)),
         None => match clone(link, &mut repository_of)? {
@@ -581,18 +801,57 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
         },
     };
     if let Some(branch) = link.branch() {
-        base(&repository, link, &branch)?;
+        let remote = remotes_in(&repository).and_then(|listed| remote(&listed, link, ssh_host));
+        let remote = remote.ok_or_else(|| {
+            format!("git no longer says a remote of {repository} is {}", link.repository())
+        })?;
+        base(&repository, &remote, &branch)?;
     }
-    let worktree = worktree(&repository, link)?;
-    // The worktree of the pull request's branch, where it was one already,
-    // may have a pane that works in it, as the kernel says where.
+    made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))
+}
+
+/// Where a key goes for `file` among the panes `worked`, as `Pasted::ready`
+/// says: the file, read where it is, says the repository, and any pane that
+/// works in that is of it, as in no other, whichever remotes it has.
+fn ready_file(file: &File, worked: &[Worked]) -> Result<Ready<usize>, String> {
+    let real = file.real()?;
+    let (repository, common) = file.repository(&real)?;
+    wt_made(&repository)?;
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    let session = session_among(worked, |dir| {
+        let same = |of: Common| matches!(of, Common::Of(of) if of == common);
+        let in_it = *seen.entry(dir.to_owned()).or_insert_with(|| same(common_dir(dir)));
+        in_it.then_some(())
+    });
+    let going = if let Some(at) = session {
+        Going::Session(at)
+    } else {
+        let (cwd, name) = session_for(&repository)?;
+        Going::Clone { cwd, name }
+    };
+    let branch = file.branch();
+    base(&repository, ORIGIN, &branch)?;
+    made_worktree(&repository, &Of::Branch(branch), going, worked, Readied::File { real })
+}
+
+/// Where a key goes once the worktree `of` is made in the repository `dir` is
+/// in: `going`, or a pane among `worked` that works in the worktree, where it
+/// was one already, as the kernel says where. An agent there is on `work`.
+fn made_worktree(
+    dir: &str,
+    of: &Of,
+    going: Going,
+    worked: &[Worked],
+    work: Readied,
+) -> Result<Ready<usize>, String> {
+    let worktree = worktree(dir, of)?;
     let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == worktree);
     let at = match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
         (Some((at, _)), _) => At::There(at),
         (None, Going::Session(at)) => At::Session(at),
         (None, Going::Clone { cwd, name }) => At::Clone { cwd, name: free(&name)? },
     };
-    Ok(Ready { at, branch: branch(&worktree), worktree })
+    Ok(Ready { at, branch: branch(&worktree), worktree, work })
 }
 
 /// Where a key goes, by where it stands among the panes.
@@ -630,15 +889,21 @@ fn found(
     if let Some((at, _)) = there {
         return Some(Found::There(at));
     }
-    let mut session: Option<(bool, Remote, usize)> = None;
-    for (at, it) in worked.iter().enumerate() {
-        let Some(Repository { by, layout: Layout::Wt }) = repository_of(&it.dir) else {
-            continue;
-        };
-        let rank = (!it.here, by, at);
-        session = Some(session.map_or(rank, |was| was.min(rank)));
-    }
-    session.map(|(_, _, at)| Found::Session(at))
+    let by_wt = |dir: &str| repository_of(dir).filter(|it| it.layout == Layout::Wt).map(|it| it.by);
+    session_among(worked, by_wt).map(Found::Session)
+}
+
+/// The place among `worked` of the pane whose session a tab opens in: one that
+/// works in the repository, as `rank` says of a directory, and how well. One in
+/// the session luneta's zellij is in goes first, then the best by `rank`, then
+/// the first row.
+fn session_among<R: Ord>(
+    worked: &[Worked],
+    mut rank: impl FnMut(&str) -> Option<R>,
+) -> Option<usize> {
+    let ranked = worked.iter().enumerate();
+    let ranked = ranked.filter_map(|(at, it)| Some((!it.here, rank(&it.dir)?, at)));
+    ranked.min().map(|(_, _, at)| at)
 }
 
 /// The clone of `link`'s repository that wt made among the directories
@@ -663,10 +928,18 @@ fn clone(
         return Ok(None);
     };
     let dir = dirs[dir].clone();
-    let cwd = holder(&dir).ok_or_else(|| format!("git does not say what repository {dir} is"))?;
+    let (cwd, name) = session_for(&dir)?;
+    Ok(Some((dir, cwd, name)))
+}
+
+/// The directory a session made for the repository `dir` is in starts in,
+/// which holds it, and the name the picker gives that directory; or why it
+/// has none.
+fn session_for(dir: &str) -> Result<(String, SessionName), String> {
+    let cwd = holder(dir).ok_or_else(|| format!("git does not say what repository {dir} is"))?;
     let name = names::session_for(Path::new(&cwd))
         .ok_or_else(|| format!("no session can be named for {cwd}"))?;
-    Ok(Some((dir, cwd, name)))
+    Ok((cwd, name))
 }
 
 /// `name`, or the first of it with a `-2` and on that no session has, one
@@ -724,14 +997,56 @@ fn cloned(
 /// The directory that holds the bare repository `dir` is in, as wt keeps its
 /// worktrees: beside its hidden `.bare`, or in it, where it is not hidden.
 fn holder(dir: &str) -> Option<String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "rev-parse", "--path-format=absolute"]))
-        .arg("--git-common-dir");
-    let common = said(&mut git)?;
+    let Common::Of(common) = common_dir(dir) else {
+        return None;
+    };
     let common = Path::new(&common);
     let hidden = common.file_name()?.to_str()?.starts_with('.');
     let holder = if hidden { common.parent()? } else { common };
     holder.to_str().map(str::to_owned)
+}
+
+/// What git starts with, in its own language, where a directory is in no
+/// repository: `(or any of the parent directories)`, or `(or any parent up to
+/// mount point /x)`. Nothing else tells that from a repository it refuses: it
+/// ends with one status for all of them.
+const IN_NO_REPOSITORY: &str = "fatal: not a git repository (or any ";
+
+/// What git says of the repository a directory is in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Common {
+    /// It is in one: the directory all its worktrees have in common, by its
+    /// real path, which tells that repository from another.
+    Of(String),
+    /// It is in none.
+    NoRepository,
+    /// git did not say, for this reason, as it refused the repository it found,
+    /// one of a newer format, or of another user, or it did not answer in time.
+    /// That says nothing of whether the directory is in one.
+    Unsaid(String),
+}
+
+impl Common {
+    /// What git's `answer` says of it: what it said, where it ended well, or
+    /// else why not.
+    fn of(answer: Result<Vec<u8>, String>) -> Common {
+        match answer.map(one_line) {
+            Ok(Some(common)) => Common::Of(common),
+            Ok(None) => Common::Unsaid("it named no directory".to_owned()),
+            Err(why) if why.starts_with(IN_NO_REPOSITORY) => Common::NoRepository,
+            Err(why) => Common::Unsaid(why),
+        }
+    }
+}
+
+/// What git says of the repository `dir` is in.
+fn common_dir(dir: &str) -> Common {
+    let mut git = Command::new("git");
+    git::local(git.args(["-C", dir, "rev-parse", "--path-format=absolute"]))
+        .arg("--git-common-dir")
+        .env("LC_ALL", "C");
+    let ran = program::run(&mut git, ANSWER);
+    Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 
 /// The remotes of the repository `dir` is in, as `git config --get-regexp`
@@ -765,7 +1080,11 @@ fn branch(dir: &str) -> Option<String> {
 
 /// The one line git said, where it ended well.
 fn said(git: &mut Command) -> Option<String> {
-    let said = program::run(git, ANSWER).ok()?.answer().ok()?;
+    one_line(program::run(git, ANSWER).ok()?.answer().ok()?)
+}
+
+/// `said`, where it is a line of text.
+fn one_line(said: Vec<u8>) -> Option<String> {
     let said = String::from_utf8(said).ok()?;
     Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
 }
@@ -787,29 +1106,27 @@ fn page(link: &Link) -> Result<Link, String> {
     Link::parse(said).ok_or_else(|| format!("gh issue view said {said}, which is no link"))
 }
 
-/// Makes `branch`, the issue `link`'s, in the repository `dir` is in, where
-/// neither it nor origin has one yet: from the default branch of the issue's
-/// repository as the remote that is of it has it now, with no upstream, as
-/// wt makes a new branch. wt would make it from origin's, as the repository
-/// last fetched it, which can be weeks behind, and of the fork in a fork's
-/// clone. Where either has the branch, wt goes on with it: one origin has
-/// may be one pushed from another machine. Or why it made none.
-fn base(dir: &str, link: &Link, branch: &str) -> Result<(), String> {
+/// Makes `branch`, an issue's or a file's, in the repository `dir` is in,
+/// where neither it nor origin has one yet: from the default branch of
+/// `remote` as it has it now, the one of the issue's repository, or origin
+/// for a file, with no upstream, as wt makes a new branch. wt would make it
+/// from origin's, as the repository last fetched it, which can be weeks
+/// behind, and of the fork in a fork's clone. Where either has the branch, wt
+/// goes on with it: one origin has may be one pushed from another machine. Or
+/// why it made none.
+fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
     let head = format!("refs/heads/{branch}");
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "rev-parse", "--verify", "--quiet", &head]));
     if said(&mut git).is_some() {
         return Ok(());
     }
-    let remote = remotes_in(dir).and_then(|listed| remote(&listed, link, ssh_host));
-    let remote = remote
-        .ok_or_else(|| format!("git no longer says a remote of {dir} is {}", link.repository()))?;
     let pushed = across(dir, "ls-remote", &[ORIGIN, &head])?;
     let pushed = String::from_utf8_lossy(&pushed);
     if pushed.lines().any(|line| line.split('\t').nth(1) == Some(head.as_str())) {
         return Ok(());
     }
-    across(dir, "fetch", &[&remote, &format!("HEAD:{head}")]).map(drop)
+    across(dir, "fetch", &[remote, &format!("HEAD:{head}")]).map(drop)
 }
 
 /// What git says, as it runs `command` with `args` in the repository `dir`
@@ -823,17 +1140,16 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-/// Has a worktree made of the pull request or the issue `link` in the
-/// repository `dir` is in, as `luneta worktree` makes it, and says where it
-/// is, or where one of its branch is already: the line it prints, as the real
-/// path of the directory it names. Or why it made none, as it says. A
-/// program of its own, and not a thread: wt says on stderr how it goes, and
-/// has git say it there too, which in luneta's sidebar is the terminal luneta
-/// draws; and alone, as git may ask for a passphrase on the terminal of its
-/// session.
-fn worktree(dir: &str, link: &Link) -> Result<String, String> {
+/// Has a worktree made `of` a pull request or a branch in the repository
+/// `dir` is in, as `luneta worktree` makes it, and says where it is, or where
+/// one of its branch is already: the line it prints, as the real path of the
+/// directory it names. Or why it made none, as it says. A program of its own,
+/// and not a thread: wt says on stderr how it goes, and has git say it there
+/// too, which in luneta's sidebar is the terminal luneta draws; and alone, as
+/// git may ask for a passphrase on the terminal of its session.
+fn worktree(dir: &str, of: &Of) -> Result<String, String> {
     let mut luneta = Command::new(luneta()?);
-    git::local(luneta.args(["worktree", "--repo", dir, &link.wt().to_string()]));
+    git::local(luneta.args(["worktree", "--repo", dir, &of.to_string()]));
     // It fetches across the network, by ssh as like as not.
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
@@ -893,20 +1209,23 @@ pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
     }
     let wt_add = |error| format!("wt add: {error:#}");
     let found = Repo::discover(Some(Path::new(repo))).map_err(wt_add)?;
-    match layout(repo) {
-        Layout::Wt => {},
-        Layout::Git => {
-            return Err(format!(
-                "{repo} is in a clone git made, and wt would make the worktree in its .git; wt \
-                 clone it first"
-            ));
-        },
-        Layout::Unsaid => {
-            return Err(format!("git did not say whether {repo} is in a clone wt made"));
-        },
-    }
+    wt_made(repo)?;
     let made = add::run(&found, &of.to_string(), None, Fetch::Lazy).map_err(wt_add)?;
     Ok(made.path().to_owned())
+}
+
+/// Why wt makes no worktree in the repository `dir` is in, where it does not:
+/// one git cloned, in whose `.git` wt would make it, or one git does not say
+/// how it is laid out.
+fn wt_made(dir: &str) -> Result<(), String> {
+    match layout(dir) {
+        Layout::Wt => Ok(()),
+        Layout::Git => Err(format!(
+            "{dir} is in a clone git made, and wt would make the worktree in its .git; wt clone \
+             it first"
+        )),
+        Layout::Unsaid => Err(format!("git did not say whether {dir} is in a clone wt made")),
+    }
 }
 
 /// The real path of the directory `path` names, where it names one, as the
@@ -954,6 +1273,10 @@ mod tests {
 
     fn issue() -> Link {
         Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link")
+    }
+
+    fn directory(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).expect("an absolute path")
     }
 
     #[test]
@@ -1241,15 +1564,14 @@ mod tests {
         empty(&cdk, "two");
         let now = git(&cdk, &["rev-parse", "HEAD"]);
         let made = || git(&clone, &["rev-parse", "refs/heads/issue-2736"]);
-        assert_eq!(base(&clone, &issue(), "issue-2736"), Ok(()));
+        assert_eq!(base(&clone, "cashubtc", "issue-2736"), Ok(()));
         assert_eq!(made(), now);
         assert_eq!(git(&clone, &["config", "branch.issue-2736.remote"]), None);
         empty(&cdk, "three");
-        assert_eq!(base(&clone, &issue(), "issue-2736"), Ok(()));
+        assert_eq!(base(&clone, "cashubtc", "issue-2736"), Ok(()));
         assert_eq!(made(), now);
         assert!(git(&fork, &["branch", "issue-7", "main"]).is_some());
-        let pushed = Link::parse("https://github.com/cashubtc/cdk/issues/7").expect("a link");
-        assert_eq!(base(&clone, &pushed, "issue-7"), Ok(()));
+        assert_eq!(base(&clone, "cashubtc", "issue-7"), Ok(()));
         assert_eq!(git(&clone, &["rev-parse", "--verify", "-q", "refs/heads/issue-7"]), None);
     }
 
@@ -1275,12 +1597,13 @@ mod tests {
     fn a_paste_is_asked_of_a_link_and_of_panes_by_their_absolute_paths() {
         let cdk = "https://github.com/cashubtc/cdk/pull/2736";
         let worked = vec![worked("/w/cdk/main", Some(cdk), true), worked("/dots", None, false)];
-        let pasted = Pasted::new(issue(), worked);
+        let pasted = Pasted::new(Work::Link(issue()), worked);
         let on = Some(On { destination: "nixos".to_owned() });
         assert_eq!(Pasted::of(pasted.asked(on.clone())), Ok((on, pasted.clone())));
         let refused = |request: PasteRequest| Pasted::of(request).map(drop).unwrap_err();
         let asked = |worked: Vec<AskedWorked>| PasteRequest { worked, ..pasted.asked(None) };
-        let unlinked = PasteRequest { link: "github.com/cashubtc".to_owned(), ..asked(Vec::new()) };
+        let link = paste_request::Work::Link("github.com/cashubtc".to_owned());
+        let unlinked = PasteRequest { work: Some(link), ..asked(Vec::new()) };
         assert_eq!(
             refused(unlinked),
             "link: \"github.com/cashubtc\" is no link of a pull request or of an issue on \
@@ -1297,27 +1620,217 @@ mod tests {
         assert_eq!(refused(unpaged), "worked: \"main\" is no pull request's page");
         let many = asked(vec![pane("/w", None); 1025]);
         assert_eq!(refused(many), "worked: more than 1024 panes");
+        assert_eq!(
+            refused(PasteRequest { work: None, ..asked(Vec::new()) }),
+            "it says neither a link nor a file"
+        );
+    }
+
+    /// A file is asked of by its path as it was pasted, and the directory of
+    /// the row, which only the machine reads. What is no path of a `.md` file
+    /// is refused, or a row's directory by no absolute path.
+    #[test]
+    fn a_paste_is_asked_of_a_file_by_its_path_and_its_row_s_directory() {
+        for from in [Some(directory("/w/cdk/main")), None] {
+            let file = File::parse("~/notes/plan.md", from).unwrap();
+            let pasted = Pasted::new(Work::File(file), Vec::new());
+            assert_eq!(Pasted::of(pasted.asked(None)), Ok((None, pasted)));
+        }
+        let refused = |path: &str, from: Option<&str>| {
+            let file = AskedFile { path: path.to_owned(), from: from.map(str::to_owned) };
+            let work = Some(paste_request::Work::File(file));
+            let request = PasteRequest { on: None, work, worked: Vec::new() };
+            Pasted::of(request).map(drop).unwrap_err()
+        };
+        assert_eq!(refused("plan.txt", None), "file: \"plan.txt\" is no path of a .md file");
+        assert_eq!(refused("plan.md", Some("w/cdk")), "from: \"w/cdk\" is no absolute path");
+    }
+
+    /// A file's path is one line that ends in `.md`, but for the space around
+    /// it, wherever it says the file is. Its name gives its tab, of what git
+    /// takes in a branch's name, in lower case, and its branch, after `md-`,
+    /// which is no branch of the repository's, whatever the file's name is. An
+    /// address is no path, with or without its scheme, nor is a name with
+    /// nothing to name a branch for.
+    #[test]
+    fn a_file_s_path_is_one_line_that_ends_in_md_and_names_its_branch() {
+        for (text, path, stem) in [
+            ("docs/plans/sync-rework.md", "docs/plans/sync-rework.md", "sync-rework"),
+            ("  /w/plan.md\n", "/w/plan.md", "plan"),
+            ("~/notes/My Plan (v2).md", "~/notes/My Plan (v2).md", "my-plan-v2"),
+            ("README.md", "README.md", "readme"),
+            ("2026-11-03_plan.md", "2026-11-03_plan.md", "2026-11-03_plan"),
+            ("a..b.md", "a..b.md", "a-b"),
+            ("x.lock.md", "x.lock.md", "x-lock"),
+            ("--force.md", "--force.md", "force"),
+            ("revisão.md", "revisão.md", "revisão"),
+            ("main.md", "main.md", "main"),
+        ] {
+            let file = File::parse(text, None).unwrap_or_else(|| panic!("{text:?}"));
+            let branch = format!("md-{stem}");
+            assert_eq!((file.path(), file.branch()), (path, branch.clone()), "{text:?}");
+            let check = git(".", &["check-ref-format", "--branch", &branch]);
+            assert_eq!(check, Some(branch), "{text:?}");
+            assert_eq!(Work::File(file.clone()).tab(), stem, "{text:?}");
+        }
+        for text in [
+            "plan.txt",
+            "plan.md and more",
+            "plan.md/",
+            "two\nlines.md",
+            "https://example.com/plan.md",
+            "github.com/cashubtc/cdk/blob/main/README.md",
+            "www.github.com/cashubtc/cdk/blob/main/README.md",
+            ".md",
+            "docs/.md",
+            "---.md",
+            "",
+        ] {
+            assert_eq!(File::parse(text, None), None, "{text:?}");
+        }
+        // A link is a link, whatever it ends in.
+        let issue = "https://github.com/cashubtc/cdk/issues/2736";
+        assert_eq!(Work::parse(issue, None), Some(Work::Link(self::issue())));
+        let file = Work::parse("/w/plan.md", Some(directory("/w")));
+        assert_eq!(file, File::parse("/w/plan.md", Some(directory("/w"))).map(Work::File));
+    }
+
+    /// A file's real path comes of its path from the root, or from the row it
+    /// was pasted on, through any link. What names no file says so, and so
+    /// does a relative path with no row to go from. The repository is the
+    /// file's own, untracked or not, or else the one the row works in; with
+    /// neither, it says so. In a repository git refuses to read, git does not
+    /// say it is in none, and the row's does not stand in for it.
+    #[test]
+    fn a_file_is_read_where_it_is_and_its_repository_is_its_own_or_else_the_row_s() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = fs::canonicalize(scratch.path()).unwrap();
+        let path = |name: &str| scratch.join(name).to_str().unwrap().to_owned();
+        let (repo, row, notes) = (path("repo"), path("row"), path("notes"));
+        for dir in [&repo, &row] {
+            assert!(git(&scratch, &["init", "-q", "-b", "main", dir]).is_some());
+        }
+        fs::create_dir_all(scratch.join("repo/docs")).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(scratch.join("repo/docs/plan.md"), "plan").unwrap();
+        fs::write(scratch.join("notes/plan.md"), "plan").unwrap();
+        fs::create_dir(scratch.join("notes/dir.md")).unwrap();
+        std::os::unix::fs::symlink(scratch.join("repo/docs/plan.md"), scratch.join("notes/l.md"))
+            .unwrap();
+        let file = |text: &str, from: Option<&str>| {
+            File::parse(text, from.map(directory)).unwrap()
+        };
+
+        let inside = path("repo/docs/plan.md");
+        assert_eq!(file(&inside, None).real().as_ref(), Ok(&inside));
+        assert_eq!(file("docs/plan.md", Some(&repo)).real().as_ref(), Ok(&inside));
+        let root = scratch.to_str();
+        assert_eq!(file("notes/l.md", root).real().as_ref(), Ok(&inside));
+        let gone = file(&path("repo/gone.md"), None).real();
+        assert_eq!(gone, Err("no such file".to_owned()));
+        assert_eq!(file(&path("notes/dir.md"), None).real(), Err("it is no file".to_owned()));
+        assert_eq!(
+            file("docs/plan.md", None).real(),
+            Err("its path is relative, and the row highlighted works in no directory to go from"
+                .to_owned())
+        );
+
+        let common = |dir: &str| format!("{dir}/.git");
+        let docs = path("repo/docs");
+        let own = file(&inside, Some(&row)).repository(&inside);
+        assert_eq!(own, Ok((docs, common(&repo))));
+        let outside = path("notes/plan.md");
+        let by_row = file(&outside, Some(&row)).repository(&outside);
+        assert_eq!(by_row, Ok((row.clone(), common(&row))));
+        assert_eq!(
+            file(&outside, None).repository(&outside),
+            Err("it is in no repository, and the row highlighted works in no directory to go by"
+                .to_owned())
+        );
+        assert_eq!(
+            file(&outside, Some(&notes)).repository(&outside),
+            Err(format!("it is in no repository, nor is {notes}, the row highlighted"))
+        );
+
+        let refused = path("refused");
+        assert!(git(&scratch, &["init", "-q", "-b", "main", &refused]).is_some());
+        assert!(git(&refused, &["config", "core.repositoryformatversion", "99"]).is_some());
+        fs::write(scratch.join("refused/plan.md"), "plan").unwrap();
+        let in_it = path("refused/plan.md");
+        let unsaid = file(&in_it, Some(&row)).repository(&in_it).unwrap_err();
+        let git_said = "git did not say what repository it is in: fatal: ";
+        assert!(unsaid.starts_with(git_said), "{unsaid}");
+        let by_it = file(&outside, Some(&refused)).repository(&outside).unwrap_err();
+        let by_it_starts =
+            format!("it is in no repository, and git did not say what {refused}, the row");
+        assert!(by_it.starts_with(&by_it_starts), "{by_it}");
+    }
+
+    /// git tells no repository from one it refuses by its words alone, as it
+    /// ends with one status for all of them: as it says them near a mount
+    /// point too. Anything else it says, or a time it did not answer in, says
+    /// nothing of a repository.
+    #[test]
+    fn only_git_s_own_words_say_a_directory_is_in_no_repository() {
+        let said = |why: &str| Common::of(Err(why.to_owned()));
+        for why in [
+            "fatal: not a git repository (or any of the parent directories): .git",
+            "fatal: not a git repository (or any parent up to mount point /run/user)",
+        ] {
+            assert_eq!(said(why), Common::NoRepository, "{why}");
+        }
+        for why in [
+            "fatal: Expected git repo version <= 1, found 99",
+            "fatal: unknown repository extension found:",
+            "fatal: detected dubious ownership in repository at '/w'",
+            "fatal: gitfile does not point to a valid repository: /w/.git",
+            "fatal: not a git repository: /w/.bare/worktrees/gone",
+            "fatal: cannot change to '/w': No such file or directory",
+            "it did not answer in time",
+        ] {
+            assert_eq!(said(why), Common::Unsaid(why.to_owned()), "{why}");
+        }
+        assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of("/w/.bare".to_owned()));
+        assert!(matches!(Common::of(Ok(Vec::new())), Common::Unsaid(_)));
     }
 
     /// Where a key goes is answered as it was found: a pane by its place
-    /// among those asked of, or a session to make, by its name. An answer
-    /// luneta cannot go by is refused: of a worktree by no absolute path, a
-    /// session zellij would not take, or of where in words of a newer
-    /// daemon's.
+    /// among those asked of, or a session to make, by its name, with the file
+    /// by its real path where one was asked of. An answer luneta cannot go by
+    /// is refused: of a worktree by no absolute path, a session zellij would
+    /// not take, a file of a link or none of a file, or of where in words of a
+    /// newer daemon's.
     #[test]
     fn where_a_key_goes_is_answered_as_it_was_found() {
+        let asked_of_link = Pasted::new(Work::Link(issue()), Vec::new());
+        let plan = File::parse("plan.md", None).unwrap();
+        let asked_of_file = Pasted::new(Work::File(plan), Vec::new());
+        let of_link = || Readied::Link(issue());
+        let of_file = || Readied::File { real: "/w/cdk/main/plan.md".to_owned() };
         let name = SessionName::parse("cdk").unwrap();
         let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
         for at in [At::There(1), At::Session(0), clone] {
-            let (worktree, branch) = ("/w/cdk/issue-2736", Some("issue-2736".to_owned()));
-            let ready = Ready { at, worktree: worktree.to_owned(), branch };
-            assert_eq!(Ready::of(ready.clone().answer()), Ok(ready));
+            let worktree = "/w/cdk/issue-2736".to_owned();
+            let branch = Some("issue-2736".to_owned());
+            let ready = Ready { at, worktree, branch, work: of_link() };
+            assert_eq!(asked_of_link.answered(ready.clone().answer()), Ok(ready.clone()));
+            let ready = Ready { work: of_file(), ..ready };
+            assert_eq!(asked_of_file.answered(ready.clone().answer()), Ok(ready));
         }
-        let there = || Ready { at: At::There(1), worktree: "/w/x".to_owned(), branch: None };
-        let answer = || there().answer();
-        let refused = |answer: PasteResponse| Ready::of(answer).unwrap_err();
+        let there =
+            |work| Ready { at: At::There(1), worktree: "/w/x".to_owned(), branch: None, work };
+        let answer = || there(of_link()).answer();
+        let refused = |answer: PasteResponse| asked_of_link.answered(answer).unwrap_err();
         let relative = PasteResponse { worktree: "x".to_owned(), ..answer() };
         assert_eq!(refused(relative), "worktree: \"x\" is no absolute path");
+        let refused_of_file = |answer: PasteResponse| asked_of_file.answered(answer).unwrap_err();
+        let relative = PasteResponse { file: Some("plan.md".to_owned()), ..answer() };
+        assert_eq!(refused_of_file(relative), "file: \"plan.md\" is no absolute path");
+        assert_eq!(refused_of_file(answer()), "it does not say where the file is");
+        assert_eq!(
+            refused(there(of_file()).answer()),
+            "file: \"/w/cdk/main/plan.md\" is of no link"
+        );
         assert!(refused(PasteResponse { at: None, ..answer() }).contains("a newer lunetad does"));
         let made = |cwd: &str, name: &str| PasteResponse {
             at: Some(paste_response::At::Clone(MadeClone {
@@ -1336,11 +1849,12 @@ mod tests {
     /// knows of that place; a place it said none of is refused.
     #[test]
     fn a_place_names_the_pane_luneta_said_of_it() {
+        fn ready<P>(at: At<P>) -> Ready<P> {
+            let work = Readied::File { real: "/w/plan.md".to_owned() };
+            Ready { at, worktree: "/w".to_owned(), branch: None, work }
+        }
         let panes = ["dots:1", "cdk:4"];
-        let (worktree, branch) = ("/w".to_owned(), None);
-        let session = Ready { at: At::Session(1), worktree: worktree.clone(), branch: None };
-        let placed = Ready { at: At::Session("cdk:4"), worktree: worktree.clone(), branch: None };
-        assert_eq!(session.placed(&panes), Ok(placed));
-        assert_eq!(Ready { at: At::There(2), worktree, branch }.placed(&panes), Err(2));
+        assert_eq!(ready(At::Session(1)).placed(&panes), Ok(ready(At::Session("cdk:4"))));
+        assert_eq!(ready(At::There(2)).placed(&panes), Err(2));
     }
 }

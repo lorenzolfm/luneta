@@ -588,12 +588,31 @@ message KeepImageResponse {
 
 message PasteRequest {
   On on = 1;
-  // The link, of a pull request or of an issue on GitHub, as luneta pastes
-  // one: anything else is invalid.
-  string link = 2;
+  // What was pasted: one of these, always. A question with neither is
+  // invalid, as a daemon older than `file` takes one of a file.
+  oneof work {
+    // The link, of a pull request or of an issue on GitHub, as luneta pastes
+    // one: anything else is invalid.
+    string link = 2;
+    // A `.md` file, for a worktree of a branch named for it.
+    File file = 4;
+  }
   // The panes of the machine, in the order of luneta's rows. More than 1024
   // are invalid.
   repeated Worked worked = 3;
+
+  message File {
+    // Its path, as it was pasted: from the root, from `~/`, or else from
+    // `from`. What is no path of a `.md` file is invalid. The daemon of the
+    // machine reads it there, and says why it found no file where it finds
+    // none.
+    string path = 1;
+    // The directory the row it was pasted on works in, by its absolute path,
+    // absent for a row of none: a relative path goes from it, and a file in
+    // no repository has its worktree in the repository it is in. One by
+    // another path is invalid.
+    optional string from = 2;
+  }
 
   message Worked {
     // The directory it works in, by its absolute path: one by another is
@@ -625,6 +644,9 @@ message PasteResponse {
   string worktree = 4;
   // The branch checked out there, absent for none.
   optional string branch = 5;
+  // The real path of the file, where one was pasted: an agent reads it where
+  // it is, as the worktree may not have it.
+  optional string file = 6;
 
   message Clone {
     // The directory the session starts in, which holds the clone.

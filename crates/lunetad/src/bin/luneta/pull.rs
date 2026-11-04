@@ -1,7 +1,8 @@
-//! A pull request's link, or an issue's, pasted in luneta, and where the key
-//! of the menu it opens goes for it, as `lunetad::links` finds it: on the
-//! machine of the row it was pasted on, among that machine's panes, as the
-//! sidebar knows them. luneta finds it for a row of its own machine, and
+//! A pull request's link, or an issue's, or a `.md` file's path, pasted in
+//! luneta, and where the key of the menu it opens goes for it, as
+//! `lunetad::links` finds it: on the machine of the row it was pasted on,
+//! among that machine's panes, as the sidebar knows them. luneta finds it for
+//! a row of its own machine, and
 //! the daemon of another for one of that machine's, through the daemon
 //! luneta watches. `luneta worktree` is the program that makes the
 //! worktree, of wt's code, wherever luneta has it made.
@@ -11,7 +12,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use lunetad::links::{self, Pasted};
-pub use lunetad::links::{At, Kind, Link, Of};
+pub use lunetad::links::{At, Kind, Link, Of, Readied, Work};
 
 use crate::away::{self, Away};
 use crate::due::Due;
@@ -33,18 +34,17 @@ pub struct Worked {
 /// each pane by its session and its id, as the sidebar knows it.
 pub type Ready = links::Ready<(Listed, u32)>;
 
-/// Finds where a key of the menu numbered `menu` goes for the pull request
-/// or the issue `link`, pasted on a row of the machine `on`, among the panes
-/// the sidebar knows of it, `worked`, and has the worktree made there, on a
-/// thread of its own; and hands back what it found, or why it found
-/// nothing, as `Due` does. luneta finds it on its own machine, and the
-/// daemon of another machine there.
-pub fn prepare(menu: u64, on: Machine, link: Link, worked: Vec<Worked>, events: &Sender<Event>) {
+/// Finds where a key of the menu numbered `menu` goes for `work`, pasted on a
+/// row of the machine `on`, among the panes the sidebar knows of it, `worked`,
+/// and has the worktree made there, on a thread of its own; and hands back
+/// what it found, or why it found nothing, as `Due` does. luneta finds it on
+/// its own machine, and the daemon of another machine there.
+pub fn prepare(menu: u64, on: Machine, work: Work, worked: Vec<Worked>, events: &Sender<Event>) {
     let due = Due::new(events, move |ready| Event::Pulled { menu, ready });
     let apart = |Worked { session, pane, works }| ((session, pane), works);
     let (panes, worked): (Vec<(Listed, u32)>, Vec<links::Worked>) =
         worked.into_iter().map(apart).unzip();
-    let pasted = Pasted::new(link, worked);
+    let pasted = Pasted::new(work, worked);
     thread::spawn(move || {
         let ready = match &on {
             Machine::Local => pasted.ready(),

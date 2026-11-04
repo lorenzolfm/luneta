@@ -1432,12 +1432,12 @@ impl App {
         match input {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
-            // A pull request's or an issue's link pasted with the sidebar's
-            // keys, or in the menu over zellij, opens the menu for it, and
-            // what is pasted in the menu's box for a machine's destination
-            // goes in it. zellij keeps every paste it has the keys for, links
-            // too, for the agents in it. The dictation box does nothing with
-            // a paste, as with any key but its own.
+            // A pull request's or an issue's link, or a `.md` file's path,
+            // pasted with the sidebar's keys, or in the menu over zellij,
+            // opens the menu for it, and what is pasted in the menu's box for
+            // a machine's destination goes in it. zellij keeps every paste it
+            // has the keys for, links too, for the agents in it. The dictation
+            // box does nothing with a paste, as with any key but its own.
             Input::Paste(text) => match &mut self.focus.over {
                 Some(Over::Ask(ask)) => ask.paste(&text),
                 Some(Over::Picker(picker)) => picker.paste(&text),
@@ -1947,8 +1947,8 @@ impl App {
                     self.sidebar.close_menu();
                 }
             },
-            Asked::Pull { menu, on, link, worked } => {
-                pull::prepare(menu, on, link, worked, &self.events);
+            Asked::Pull { menu, on, work, worked } => {
+                pull::prepare(menu, on, work, worked, &self.events);
             },
             Asked::Find { menu, on, cwd } => {
                 skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });
