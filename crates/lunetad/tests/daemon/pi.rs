@@ -15,7 +15,7 @@ use lunetad::api::{Agent, Harness, Status};
 use serde_json::{json, Value};
 
 use crate::agents::{process, Host};
-use crate::host::{eventually, start, Daemon, Running};
+use crate::host::{eventually, start, Daemon, Running, Vars};
 
 /// Stands in for pi: loads the extension, and tells it of each event on a line
 /// of stdin, with the context pi gives it. `load` has it load the extension
@@ -69,7 +69,12 @@ struct Pi {
 
 impl Pi {
     fn start(host: &Host, mode: &str) -> Self {
-        let mut command = host.vars().command("node");
+        Self::start_with(host, host.vars(), mode)
+    }
+
+    /// One started with the variables `vars`, as a shell of its own has them.
+    fn start_with(host: &Host, vars: Vars<'_>, mode: &str) -> Self {
+        let mut command = vars.command("node");
         command
             .args(["--input-type=module", "--eval", PI])
             .arg(extension(host))
@@ -143,13 +148,67 @@ fn the_extension_goes_where_pi_finds_it_once_pi_has_run() {
     assert!(!host.pi_folder().exists());
 
     fs::create_dir_all(extension(&host).parent().unwrap()).unwrap();
-    fs::write(extension(&host), "// an older luneta's").unwrap();
-    let source = include_str!("../../src/pi/luneta.ts");
+    let older = "// an older luneta's";
+    fs::write(extension(&host), older).unwrap();
     eventually("the extension is written over", || {
-        (fs::read_to_string(extension(&host)).unwrap() == source).then_some(())
+        (fs::read_to_string(extension(&host)).unwrap() != older).then_some(())
     });
     let there: Vec<_> = fs::read_dir(extension(&host).parent().unwrap()).unwrap().collect();
     assert_eq!(there.len(), 1, "it leaves only itself: {there:?}");
+}
+
+/// Where pi starts, the variables that name luneta's folder can say another:
+/// `nix develop` moves `TMPDIR`, which names it where there is no
+/// `XDG_RUNTIME_DIR`, as on macOS. The agent is listed all the same, and nothing
+/// is left where no daemon reads.
+#[test]
+fn a_pi_in_a_shell_that_moved_tmpdir_is_listed() {
+    let host = Host::new();
+    fs::create_dir_all(host.pi_folder()).unwrap();
+    let _daemon = start(Vars { runtime: None, temp: Some(host.runtime()), ..host.vars() }).unwrap();
+    eventually("the extension is there", || extension(&host).is_file().then_some(()));
+
+    let moved = tempfile::tempdir().unwrap();
+    let shell = Vars { runtime: None, temp: Some(moved.path()), ..host.vars() };
+    let mut pi = Pi::start_with(&host, shell, "tui");
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    as_status(&host, pi.process.pid(), Status::Idle);
+    assert!(!moved.path().join("luneta").exists());
+}
+
+/// The folder goes into the extension's code as text, so what it is spelled
+/// with is no code: a `"` does not end that text, nor a `\` make it mean another
+/// folder.
+#[test]
+fn a_folder_s_spelling_is_no_code_in_the_extension() {
+    let host = Host::new();
+    fs::create_dir_all(host.pi_folder()).unwrap();
+    let root = host.runtime().join(r#"a"b\c"#);
+    fs::create_dir(&root).unwrap();
+    let _daemon = start(Vars { runtime: Some(&root), ..host.vars() }).unwrap();
+    eventually("the extension is there", || extension(&host).is_file().then_some(()));
+
+    let mut pi = Pi::start(&host, "tui");
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    assert!(root.join(format!("luneta/pi/{}.json", pi.process.pid())).is_file());
+}
+
+/// A daemon that starts in another folder puts the extension there anew, for
+/// the agents that start after it to tell that folder: the one that reads them
+/// now. Nothing else would say that the extension on disk names the wrong one.
+#[test]
+fn a_daemon_in_another_folder_takes_the_extension_over() {
+    let host = Host::new();
+    fs::create_dir_all(host.pi_folder()).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let daemon = start(Vars { runtime: Some(elsewhere.path()), ..host.vars() }).unwrap();
+    eventually("the extension is there", || extension(&host).is_file().then_some(()));
+    drop(daemon);
+
+    let _daemon = start(host.vars()).unwrap();
+    let mut pi = Pi::start(&host, "tui");
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    as_status(&host, pi.process.pid(), Status::Idle);
 }
 
 /// What the extension hears of an agent is what the daemon lists: where it is

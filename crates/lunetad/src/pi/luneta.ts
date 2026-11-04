@@ -1,10 +1,10 @@
 // luneta's extension for pi: keeps a file that says what this agent is doing,
 // for lunetad to list it by. lunetad puts this file where pi finds it, over any
-// other of its name, each time it starts.
+// other of its name, each time it starts, with its folder written in.
 //
-// One file to a process, `pi/<pid>.json` in luneta's folder, moved into place
-// whole as it changes, and gone as pi quits. lunetad tells one that a killed pi
-// left behind by the process its name names.
+// One file to a process, `pi/<pid>.json` in that folder, moved into place whole
+// as it changes, and gone as pi quits. lunetad tells one that a killed pi left
+// behind by the process its name names.
 
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,25 +22,28 @@ type Pi = {
 };
 
 /**
- * This process's file, in luneta's folder as lunetad and the shell hook find
- * it, which is made for this user alone where it is not there. None where there
- * is no place for that folder, or where it is another user's, or open to them,
- * or a link: what is in it says what you work on.
+ * The folder lunetad reads, which it writes in here as it puts this file. This
+ * process's variables would not do to find it: `nix develop` moves `TMPDIR`,
+ * which names it where there is no `XDG_RUNTIME_DIR`, as on macOS.
+ */
+const FOLDER = "LUNETA_FOLDER";
+
+/**
+ * This process's file, in lunetad's folder, which is made for this user alone
+ * where it is not there. None where that folder is another user's, or open to
+ * them, or a link: what is in it says what you work on.
  */
 function fileOfThisProcess(): string | undefined {
-  const root = process.env.XDG_RUNTIME_DIR || process.env.TMPDIR;
-  if (!root) return undefined;
-  const folder = join(root, "luneta");
   try {
-    mkdirSync(folder, { mode: 0o700 });
+    mkdirSync(FOLDER, { mode: 0o700 });
   } catch (error) {
     if ((error as { code?: string }).code !== "EEXIST") throw error;
   }
-  const found = lstatSync(folder);
+  const found = lstatSync(FOLDER);
   const yours = found.isDirectory() && found.uid === process.getuid?.();
   if (!yours || (found.mode & 0o077) !== 0) return undefined;
-  mkdirSync(join(folder, "pi"), { recursive: true });
-  return join(folder, "pi", `${process.pid}.json`);
+  mkdirSync(join(FOLDER, "pi"), { recursive: true });
+  return join(FOLDER, "pi", `${process.pid}.json`);
 }
 
 /**

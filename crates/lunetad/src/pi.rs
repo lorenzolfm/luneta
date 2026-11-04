@@ -3,8 +3,8 @@
 //! pi keeps no file for each agent that runs, and its transcripts name no pid.
 //! An extension of luneta's does: `pi/<pid>.json` in luneta's folder, which is
 //! the daemon's own, moved into place whole as the agent's status changes, and
-//! gone as pi quits. The adapter puts the extension where pi finds it, once pi
-//! has run on the machine, and reads the files.
+//! gone as pi quits. The adapter puts the extension where pi finds it, with that
+//! folder written in, once pi has run on the machine, and reads the files.
 //!
 //! A file outlives its process when the process is killed, and a pid can come
 //! back as another process's. So a file stands for an agent only while the
@@ -35,8 +35,11 @@ use crate::agent::{
 use crate::watch::{self, Troubles};
 use crate::{log, process};
 
-/// The extension, as lunetad puts it where pi finds it.
+/// The extension, but for the folder it is told of.
 const EXTENSION: &str = include_str!("pi/luneta.ts");
+
+/// What stands in the extension's code for the daemon's folder, as a string.
+const FOLDER_STRING: &str = "\"LUNETA_FOLDER\"";
 
 /// What the extension is called in the folder pi finds extensions in.
 const EXTENSION_FILE: &str = "luneta.ts";
@@ -86,6 +89,8 @@ struct Process {
 
 /// The files of the extension, read again on every scan.
 pub struct AgentFiles {
+    /// The daemon's folder, which the extension is told of.
+    luneta: PathBuf,
     dir: PathBuf,
     /// pi's folder, until the extension is in it.
     uninstalled: Option<PathBuf>,
@@ -108,7 +113,13 @@ impl AgentFiles {
         {
             log::say(&format!("{}: {error}", dir.display()));
         }
-        AgentFiles { dir, uninstalled: pi, processes: HashMap::new(), troubles: Troubles::default() }
+        AgentFiles {
+            luneta: luneta.to_owned(),
+            dir,
+            uninstalled: pi,
+            processes: HashMap::new(),
+            troubles: Troubles::default(),
+        }
     }
 
     #[must_use]
@@ -121,7 +132,7 @@ impl AgentFiles {
     /// last scan: the daemon can run for a long time before it does.
     pub fn scan(&mut self) -> Vec<Agent> {
         if let Some(pi) = self.uninstalled.as_ref().filter(|pi| pi.is_dir()) {
-            match install(pi) {
+            match install(pi, &self.luneta) {
                 Ok(()) => self.uninstalled = None,
                 Err(error) => {
                     self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
@@ -168,19 +179,31 @@ impl AgentFiles {
     }
 }
 
-/// Puts the extension in the folder pi finds extensions in, where it is not as
-/// it should be. pi makes `pi`, its folder, as it first runs, and nothing makes
-/// that folder in it until someone has an extension to put there.
-fn install(pi: &Path) -> io::Result<()> {
+/// The extension, told of `luneta`, the daemon's folder: where pi starts, the
+/// variables that name that folder can say another. A JSON string is a string
+/// of the extension's code too, whatever the folder is spelled with.
+fn extension(luneta: &Path) -> io::Result<String> {
+    let Some(folder) = luneta.to_str() else {
+        return Err(io::Error::new(ErrorKind::InvalidData, "the daemon's folder is not UTF-8"));
+    };
+    Ok(EXTENSION.replacen(FOLDER_STRING, &serde_json::to_string(folder)?, 1))
+}
+
+/// Puts the extension in the folder pi finds extensions in, told of `luneta`,
+/// where it is not as it should be. pi makes `pi`, its folder, as it first runs,
+/// and nothing makes that folder in it until someone has an extension to put
+/// there.
+fn install(pi: &Path, luneta: &Path) -> io::Result<()> {
+    let text = extension(luneta)?;
     let extensions = pi.join("extensions");
     let file = extensions.join(EXTENSION_FILE);
-    if fs::read(&file).is_ok_and(|text| text == EXTENSION.as_bytes()) {
+    if fs::read(&file).is_ok_and(|there| there == text.as_bytes()) {
         return Ok(());
     }
     fs::create_dir_all(&extensions)?;
     // Whole, as a pi that starts reads it, under a name it does not load.
     let new = extensions.join(format!(".{EXTENSION_FILE}.{}.new", std::process::id()));
-    fs::write(&new, EXTENSION)?;
+    fs::write(&new, text)?;
     fs::rename(&new, &file).inspect_err(|_| {
         // What failed leaves nothing worth keeping, and what follows says why.
         let _ = fs::remove_file(&new);
