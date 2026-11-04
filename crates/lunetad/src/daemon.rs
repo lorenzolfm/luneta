@@ -56,7 +56,9 @@ use crate::api::list_dirs_response::Dir;
 use crate::api::list_exited_response::Exited;
 use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
+use crate::api::other_tabs_response::Tab as OtherTab;
 use crate::api::refuge_response::{self, Kept, Went};
+use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
     self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
     ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
@@ -66,9 +68,11 @@ use crate::api::{
     ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
     ListSkillsResponse, MoveReviewRequest, MoveReviewResponse, NameSessionRequest,
-    NameSessionResponse, OpenRequest, OpenResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, RenameSessionResponse, ReviewMove, SayRequest,
-    SayResponse, StartRequest, StartResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    NameSessionResponse, OpenRequest, OpenResponse, OtherTabsRequest, OtherTabsResponse,
+    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
+    RenameSessionResponse, ReviewMove, SayRequest, SayResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
+    TurnIntoTabRequest, TurnIntoTabResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -86,10 +90,11 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::agent::Agent;
+use crate::turns::{IntoPanes, IntoTab};
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
-    opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, watch,
-    zellij, zoxide,
+    opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, turns,
+    watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -755,8 +760,9 @@ impl Daemon for Host {
         &self,
         request: Request<CloseRequest>,
     ) -> Result<Response<CloseResponse>, Status> {
-        let CloseRequest { on, session, closes } = request.into_inner();
+        let CloseRequest { on, session, closes, started_at } = request.into_inner();
         let session = named("session", &session)?;
+        let started = started_of(started_at)?;
         let close = match closes {
             Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
             Some(close_request::Closes::Tab(ClosedTab { panes, .. })) if panes.is_empty() => {
@@ -766,20 +772,85 @@ impl Daemon for Host {
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.close(close.asked(None, &session)).await;
+            return daemon.close(close.asked(None, &session, started)).await;
         }
-        let closed = task::spawn_blocking(move || closes::closed(&session, &close)).await;
+        let closed = task::spawn_blocking(move || closes::closed(&session, started, &close)).await;
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
         Ok(Response::new(CloseResponse {}))
     }
 
+    async fn other_tabs(
+        &self,
+        request: Request<OtherTabsRequest>,
+    ) -> Result<Response<OtherTabsResponse>, Status> {
+        let OtherTabsRequest { on, session, pane } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            return daemon.other_tabs(OtherTabsRequest { on: None, session, pane }).await;
+        }
+        let tabs = task::spawn_blocking(move || turns::other_tabs(&session, pane)).await;
+        let tabs = tabs.map_err(|error| unfinished(&error))?;
+        let tabs = tabs.map_err(Status::failed_precondition)?;
+        let tab = |turns::OtherTab { pane, name }| OtherTab { pane, name };
+        Ok(Response::new(OtherTabsResponse { tabs: tabs.into_iter().map(tab).collect() }))
+    }
+
+    async fn turn_into_tab(
+        &self,
+        request: Request<TurnIntoTabRequest>,
+    ) -> Result<Response<TurnIntoTabResponse>, Status> {
+        let TurnIntoTabRequest { on, session, pane, started_at } = request.into_inner();
+        let session = named("session", &session)?;
+        let started = started_of(started_at)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (session, started_at) = (session.to_string(), Some(started.into()));
+            let asked = TurnIntoTabRequest { on: None, session, pane, started_at };
+            return daemon.turn_into_tab(asked).await;
+        }
+        let came = task::spawn_blocking(move || turns::into_tab(&session, started, pane)).await;
+        let came = came.map_err(|error| unfinished(&error))?;
+        let came = match came.map_err(Status::failed_precondition)? {
+            IntoTab::Done => turn_into_tab_response::Came::Done(turn_into_tab_response::Done {}),
+            IntoTab::NoClient => {
+                turn_into_tab_response::Came::NoClient(turn_into_tab_response::NoClient {})
+            },
+        };
+        Ok(Response::new(TurnIntoTabResponse { came: Some(came) }))
+    }
+
+    async fn turn_into_panes(
+        &self,
+        request: Request<TurnIntoPanesRequest>,
+    ) -> Result<Response<TurnIntoPanesResponse>, Status> {
+        let TurnIntoPanesRequest { on, session, pane, beside, started_at } = request.into_inner();
+        let session = named("session", &session)?;
+        let started = started_of(started_at)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (session, started_at) = (session.to_string(), Some(started.into()));
+            let asked = TurnIntoPanesRequest { on: None, session, pane, beside, started_at };
+            return daemon.turn_into_panes(asked).await;
+        }
+        let came =
+            task::spawn_blocking(move || turns::into_panes(&session, started, pane, beside)).await;
+        let came = came.map_err(|error| unfinished(&error))?;
+        let came = match came.map_err(Status::failed_precondition)? {
+            IntoPanes::Done => {
+                turn_into_panes_response::Came::Done(turn_into_panes_response::Done {})
+            },
+            IntoPanes::Partly { moved, of, why } => {
+                let partly = turn_into_panes_response::Partly { moved, of, why };
+                turn_into_panes_response::Came::Partly(partly)
+            },
+        };
+        Ok(Response::new(TurnIntoPanesResponse { came: Some(came) }))
+    }
+
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
         let KillRequest { on, session, started_at } = request.into_inner();
         let session = named("session", &session)?;
-        let started = started_at.and_then(|at| SystemTime::try_from(at).ok()).ok_or_else(|| {
-            Status::invalid_argument("started_at: it says no time the session started at")
-        })?;
+        let started = started_of(started_at)?;
         if let Some(mut daemon) = self.bridged(on)? {
             let (session, started_at) = (session.to_string(), Some(started.into()));
             return daemon.kill(KillRequest { on: None, session, started_at }).await;
@@ -1037,6 +1108,14 @@ where
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
     let listed = clients::list(std::process::Command::new("zellij"), session.as_str())?;
     Ok(listed.into_iter().map(clients::Client::to_api).collect())
+}
+
+/// When a session started, as a question says it, or why it is invalid: it
+/// says no time.
+fn started_of<At: TryInto<SystemTime>>(started_at: Option<At>) -> Result<SystemTime, Status> {
+    started_at.and_then(|at| at.try_into().ok()).ok_or_else(|| {
+        Status::invalid_argument("started_at: it says no time the session started at")
+    })
 }
 
 /// `name`, of the question's `field`, as a session's name zellij takes, or

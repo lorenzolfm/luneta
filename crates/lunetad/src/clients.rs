@@ -12,6 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::api;
+use crate::cli::{answer_of, heard};
 use crate::program;
 
 /// How long zellij has to list a session's clients: a server that runs
@@ -74,11 +75,16 @@ pub fn parse(said: &str) -> Result<Vec<Client>, String> {
 /// asks for them.
 pub fn list(mut zellij: Command, session: &str) -> Result<Vec<Client>, String> {
     zellij.args(["--session", session, "action", "list-clients"]);
-    let ran = program::run(&mut zellij, LIMIT)
-        .map_err(|error| format!("zellij could not be run: {error}"))?;
-    let said = ran.answer().map_err(|why| format!("zellij: {why}"))?;
-    let said = String::from_utf8(said).map_err(|_| "zellij listed what is not UTF-8".to_owned())?;
-    parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
+    let ask = || {
+        let ran = program::run(&mut zellij, LIMIT)
+            .map_err(|error| format!("zellij could not be run: {error}"))?;
+        let said = answer_of(ran)?;
+        String::from_utf8(said).map_err(|_| "zellij listed what is not UTF-8".to_owned())
+    };
+    let read = |said: &str| {
+        parse(said).map_err(|why| format!("zellij listed what does not read: {why}"))
+    };
+    heard(ask, read)
 }
 
 #[cfg(test)]

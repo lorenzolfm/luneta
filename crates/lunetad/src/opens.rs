@@ -115,8 +115,8 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             quiet(&mut zellij);
             if clients::list(zellij, session.as_str())?.is_empty() {
                 return Err(format!(
-                    "no client is in {session}, and zellij makes a tab with no room for its panes \
-                     in a session with none: open a pane beside one of its panes, or go there first"
+                    "{}: open a pane beside one of its panes, or go there first",
+                    no_client(session)
                 ));
             }
             if let Some(since) = alone_since {
@@ -126,6 +126,15 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned())
         },
     }
+}
+
+/// Why no tab opens in `session`, which no client is in.
+#[must_use]
+pub fn no_client(session: &SessionName) -> String {
+    format!(
+        "no client is in {session}, and zellij makes a tab with no room for its panes in a session \
+         with none"
+    )
 }
 
 /// What luneta says of a tab zellij opened with no pane in it.
@@ -158,7 +167,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
     let terminal = terminal_of(&laid, opened).ok_or(NO_PANE)?;
     let mut notes: Vec<String> = kept.into_iter().collect();
     for made in made {
-        if let Err(why) = closes::closed(session, &Close::tab(&laid, made)) {
+        if let Err(why) = closes::closed_as_listed(session, &Close::tab(&laid, made)) {
             notes.push(why);
         }
     }

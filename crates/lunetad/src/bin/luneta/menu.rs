@@ -11,7 +11,9 @@
 //! command a shell ran last printed, to fix what went wrong or explain it.
 //! `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in, or
-//! a machine for lunetad to watch through ssh, by what you type ssh to it. `d`
+//! a machine for lunetad to watch through ssh, by what you type ssh to it. `t`
+//! opens the Turn group: the pane into a tab of its own, or its tab into panes
+//! of another you pick, what runs in them running on. `d`
 //! opens the Delete group, which closes the pane or deletes its session, and
 //! asks first when that would end an agent at work, and on a machine's header
 //! forgets the machine. `b` opens the Brief group, which briefs you on every
@@ -39,6 +41,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
 use lunetad::reviews::{self, Move, SKILLS as REVIEW_SKILLS};
 use lunetad::Destination;
+use lunetad::turns::{OtherTab, Turn};
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -100,6 +103,17 @@ const REVIEW_SKIP: char = 's';
 const NEW: char = 'n';
 const NEW_NAME: &str = "New";
 
+/// The key of luneta's own Turn group, and its name.
+const TURN: char = 't';
+const TURN_NAME: &str = "Turn";
+
+/// What the menu names the list of tabs a tab's panes can turn into.
+const TABS_TITLE: &str = "Into tab";
+
+/// The keys of that list, a tab each, in their order. A session with more
+/// tabs than this leaves the rest out.
+const TAB_KEYS: &str = "123456789abcdefghijklmnopqrstuvwxyz";
+
 /// The key of luneta's own Delete group, its name, and its keys: one deletes
 /// what the menu is for, the other its session.
 const DELETE: char = 'd';
@@ -148,6 +162,17 @@ const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor
 const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open beside, nor a \
                                directory to open in; highlight a pane, unfolding the machine first \
                                if it is folded";
+
+/// What the menu says of a key of the Turn group on a session's row, which
+/// lists no pane while the highlight is on it.
+const NO_ROW_TURN: &str =
+    "menu: a session's row has no pane to turn; highlight a pane, unfolding its session first if \
+     it is folded";
+
+/// What the menu says of such a key on a machine's header.
+const NO_MACHINE_TURN: &str =
+    "menu: a machine's header has no pane to turn; highlight a pane, unfolding the machine first \
+     if it is folded";
 
 /// What the menu says of the key that forgets a machine, on this one's
 /// header.
@@ -248,7 +273,7 @@ impl Top {
     }
 }
 
-/// No command takes the key of the ask box, or of luneta's Claude, New,
+/// No command takes the key of the ask box, or of luneta's Claude, New, Turn,
 /// Delete or Brief group, which would be out of reach at the top of the
 /// sidebar, and gone from the legend; nor a key the sidebar moves, folds or
 /// opens the menu with, which `Top::of` finds first. Nor does the sidebar
@@ -257,7 +282,12 @@ const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
         let key = Command::ALL[at].key();
-        let group = key == ASK || key == SKILLS || key == REVIEW || key == NEW || key == DELETE
+        let group = key == ASK
+            || key == SKILLS
+            || key == REVIEW
+            || key == NEW
+            || key == TURN
+            || key == DELETE
             || key == BRIEF;
         assert!(!group, "a command on a key of luneta's groups");
         assert!(Top::moves(key).is_none(), "a command on a key the sidebar moves with");
@@ -301,6 +331,36 @@ impl New {
             New::Tab => "new tab",
             New::Session => "new session",
             New::Machine => "new machine",
+        }
+    }
+}
+
+/// A key of the Turn group, for the pane the menu is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnKey {
+    /// That pane, into a tab of its own.
+    PaneIntoTab,
+    /// That pane's tab, into panes of another tab, which you pick where it
+    /// has more than one.
+    TabIntoPanes,
+}
+
+impl TurnKey {
+    /// Each, in the order the Turn group shows them.
+    const ALL: [TurnKey; 2] = [TurnKey::PaneIntoTab, TurnKey::TabIntoPanes];
+
+    const fn key(self) -> char {
+        match self {
+            TurnKey::PaneIntoTab => 't',
+            TurnKey::TabIntoPanes => 'p',
+        }
+    }
+
+    /// What the menu says the key does.
+    const fn does(self) -> &'static str {
+        match self {
+            TurnKey::PaneIntoTab => "pane into tab",
+            TurnKey::TabIntoPanes => "tab into pane",
         }
     }
 }
@@ -434,6 +494,11 @@ enum Entry {
     Review { key: char, does: Move, says: String },
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
+    /// A key of the Turn group: turns the pane the menu is for, or its tab.
+    Turn(TurnKey),
+    /// A key of the list of tabs a tab's panes can turn into: the tab of this
+    /// name, which that list shows.
+    Tab { key: char, name: String },
     /// A key of the Delete group: closes the pane the menu is for, or deletes
     /// its session, `session`.
     Close { key: char, session: Listed, scope: Scope },
@@ -460,9 +525,11 @@ impl Entry {
             Entry::Group { key, .. }
             | Entry::Start { key, .. }
             | Entry::Review { key, .. }
-            | Entry::Close { key, .. } => *key,
+            | Entry::Close { key, .. }
+            | Entry::Tab { key, .. } => *key,
             Entry::Forget(_) => DELETE_ROW,
             Entry::New(new) => new.key(),
+            Entry::Turn(turning) => turning.key(),
             Entry::Last(last) => last.key(),
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
@@ -489,6 +556,8 @@ enum Pressed {
     Review(Move),
     /// Opens a pane, a tab or a session.
     New(New),
+    /// Turns the pane the menu is for, or its tab.
+    Turn(TurnKey),
     /// Closes the pane the menu is for, or deletes its session, `session`,
     /// by `key`.
     Delete { key: char, session: Listed, scope: Scope },
@@ -515,10 +584,12 @@ struct Keys {
 
 impl Keys {
     /// The menu's keys: `/`, which opens the search over the skills, `a`,
-    /// which opens the ask box, and the Claude, New, Delete and Brief groups: `c t`, `c m` and `c s` start an
+    /// which opens the ask box, and the Claude, New, Turn, Delete and Brief
+    /// groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
     /// last, `n p`, `n t` and `n s` open a pane, a tab and a
-    /// session, and `n m` the box for a machine's destination, `d d` deletes
+    /// session, and `n m` the box for a machine's destination, `t t` turns the
+    /// pane into a tab and `t p` its tab into panes of another, `d d` deletes
     /// what the menu is for, as `removes` says, and `d s` deletes its
     /// session, or on a machine's header `d d` alone forgets the machine, and
     /// `b z`, `b s` and `b h` brief you on every session, its session and
@@ -550,6 +621,11 @@ impl Keys {
                 key: NEW,
                 name: NEW_NAME,
                 entries: New::ALL.into_iter().map(Entry::New).collect(),
+            },
+            Entry::Group {
+                key: TURN,
+                name: TURN_NAME,
+                entries: TurnKey::ALL.into_iter().map(Entry::Turn).collect(),
             },
             Entry::Group {
                 key: DELETE,
@@ -640,6 +716,7 @@ impl Keys {
             Entry::Last(last) => return Pressed::Last(*last),
             Entry::Review { does, .. } => return Pressed::Review(does.clone()),
             Entry::New(new) => return Pressed::New(*new),
+            Entry::Turn(turning) => return Pressed::Turn(*turning),
             Entry::Close { key, session, scope } => {
                 return Pressed::Delete { key: *key, session: session.clone(), scope: *scope };
             },
@@ -647,9 +724,9 @@ impl Keys {
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
-            // The legend only shows, and runs nothing, as does the menu for a
-            // pull request, which takes its keys itself.
-            Entry::Command(_) | Entry::Pull(..) => return Pressed::Nothing,
+            // The legend only shows, and runs nothing, as do the menu for a
+            // pull request and the list of tabs, which take their keys themselves.
+            Entry::Command(_) | Entry::Pull(..) | Entry::Tab { .. } => return Pressed::Nothing,
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -771,6 +848,23 @@ fn answer(key: &KeyEvent, asked: char) -> Answer {
         KeyCode::Char('n') | KeyCode::Backspace => Answer::Back,
         _ => Answer::Nothing,
     }
+}
+
+/// The entries of the list of `tabs`, on a key each, as far as there are keys
+/// for them.
+fn tab_entries(tabs: &[OtherTab]) -> Vec<Entry> {
+    let entry = |(key, tab): (char, &OtherTab)| Entry::Tab { key, name: tab.name.clone() };
+    TAB_KEYS.chars().zip(tabs).map(entry).collect()
+}
+
+/// The terminal that names the tab among `tabs` that `key` picks, if any: its
+/// key, with no modifier but `Shift`.
+fn picked(key: &KeyEvent, tabs: &[OtherTab]) -> Option<u32> {
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    let at = TAB_KEYS.chars().position(|key| key == c).filter(|_| bare(key))?;
+    tabs.get(at).map(|tab| tab.pane)
 }
 
 /// A key of the Delete group: the key, which goes ahead pressed again once
@@ -921,6 +1015,16 @@ impl Target {
         match self {
             Target::Pane(_, row) => row.reviewing.as_ref(),
             Target::Session(..) | Target::Machine(_) => None,
+        }
+    }
+
+    /// The pane's row a key of the Turn group turns, or why there is none: a
+    /// session's row has no pane, nor a machine's header.
+    fn turned(&self) -> Result<&PaneRow, String> {
+        match self {
+            Target::Session(..) => Err(NO_ROW_TURN.to_owned()),
+            Target::Pane(_, row) => Ok(row),
+            Target::Machine(_) => Err(NO_MACHINE_TURN.to_owned()),
         }
     }
 
@@ -1122,6 +1226,12 @@ pub enum Wants {
     /// which it takes the client to first, for a tab of a session it is
     /// not in.
     Open { session: Listed, pane: u32, cwd: String, opens: Opens },
+    /// zellij to list the tabs of `session` other than that of its pane
+    /// `pane`, for `tabs`.
+    Tabs { session: Listed, pane: u32 },
+    /// zellij to turn the pane `pane` of `session` as `turn` says, for luneta
+    /// to take its client there.
+    Turn { session: Listed, pane: u32, turn: Turn },
     /// luneta to find where a key of the menu for the pull request, the issue
     /// or the file goes, and to have its worktree made, for `pulled`.
     Pull(Work),
@@ -1208,6 +1318,15 @@ enum Stage {
     /// zellij opens what a key asked for, in `session`, for luneta to take
     /// its client there. Keys do nothing but close the menu.
     Opening { keys: Keys, session: Listed },
+    /// A key of the Turn group waits for zellij to list the tabs of `session`
+    /// other than that of its pane `pane`. Keys do nothing but close the menu.
+    Listing { keys: Keys, session: Listed, pane: u32 },
+    /// The tabs of `session` the tab of its pane `pane` can turn into, on a
+    /// key each, which you pick one of.
+    Picking { keys: Keys, session: Listed, pane: u32, tabs: Vec<OtherTab> },
+    /// zellij turns what a key of the Turn group asked for, in `session`, for
+    /// luneta to take its client there. Keys do nothing but close the menu.
+    Turning { keys: Keys, session: Listed },
     /// The key `last` waits for luneta to keep what the pane's shell
     /// printed after `ended`, for an agent on it beside the pane. Keys do
     /// nothing but close the menu.
@@ -1222,11 +1341,13 @@ enum Stage {
 }
 
 /// Where a menu waits for zellij to open what a key asked for: in a session
-/// lunetad lists, or in one zellij makes for it, by its name.
+/// lunetad lists, or in one zellij makes for it, by its name; or to turn what
+/// a key of the Turn group asked for, in a session lunetad lists.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Opening<'a> {
     In(&'a Listed),
     Made(&'a SessionName),
+    Turned(&'a Listed),
 }
 
 /// How far the menu for a pull request, an issue or a file is, with its keys,
@@ -1311,14 +1432,17 @@ impl Menu {
             | Stage::Choosing(_)
             | Stage::Asking { .. }
             | Stage::Opening { .. }
+            | Stage::Listing { .. }
+            | Stage::Picking { .. }
+            | Stage::Turning { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }
             | Stage::Ssh { .. } => None,
         }
     }
 
-    /// Where the menu waits for zellij to open what a key asked for, while
-    /// it does.
+    /// Where the menu waits for zellij to open what a key asked for, or to
+    /// turn it, while it does.
     pub fn opening(&self) -> Option<Opening<'_>> {
         match &self.stage {
             Stage::Opening { session, .. }
@@ -1328,13 +1452,22 @@ impl Menu {
             Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => {
                 Some(Opening::Made(session))
             },
+            Stage::Turning { session, .. } => Some(Opening::Turned(session)),
             Stage::Choosing(_)
             | Stage::Planning { .. }
             | Stage::Asking { .. }
+            | Stage::Listing { .. }
+            | Stage::Picking { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }
             | Stage::Ssh { .. } => None,
         }
+    }
+
+    /// Whether a key of the Turn group waits for zellij to list the other
+    /// tabs.
+    pub fn listing(&self) -> bool {
+        matches!(self.stage, Stage::Listing { .. })
     }
 
     /// Whether a key waits for luneta to keep what the pane's shell printed.
@@ -1417,6 +1550,22 @@ impl Menu {
                         Did::Closed(Done::Start(target.machine().clone(), cwd))
                     },
                 },
+                Pressed::Turn(turning) => match target.turned() {
+                    Ok(row) => {
+                        let (session, pane) = (row.session.clone(), row.pane);
+                        match turning {
+                            TurnKey::PaneIntoTab => {
+                                let stage = Stage::Turning { keys, session: session.clone() };
+                                stays(stage, Wants::Turn { session, pane, turn: Turn::PaneIntoTab })
+                            },
+                            TurnKey::TabIntoPanes => {
+                                let stage = Stage::Listing { keys, session: session.clone(), pane };
+                                stays(stage, Wants::Tabs { session, pane })
+                            },
+                        }
+                    },
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
                 Pressed::Delete { key, session, scope } => {
                     let wants = Wants::Plan { session: session.clone(), scope };
                     let delete = Delete { key, session, scope };
@@ -1449,11 +1598,25 @@ impl Menu {
             },
             Stage::Planning { .. }
             | Stage::Opening { .. }
+            | Stage::Listing { .. }
+            | Stage::Picking { .. }
+            | Stage::Turning { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }
                 if closes(key) =>
             {
                 Did::Closed(Done::Nothing)
+            },
+            Stage::Picking { keys, .. } if key.code == KeyCode::Backspace && bare(key) => {
+                stays(Stage::Choosing(keys), Wants::Nothing)
+            },
+            Stage::Picking { keys, session, pane, tabs } => match picked(key, &tabs) {
+                Some(beside) => {
+                    let turn = Turn::TabIntoPanes { beside };
+                    let stage = Stage::Turning { keys, session: session.clone() };
+                    stays(stage, Wants::Turn { session, pane, turn })
+                },
+                None => stays(Stage::Picking { keys, session, pane, tabs }, Wants::Nothing),
             },
             // `Backspace` goes out of the menu from its first group, and the
             // menu for a pull request, an issue or a file has no other.
@@ -1474,6 +1637,8 @@ impl Menu {
             },
             stage @ (Stage::Planning { .. }
             | Stage::Opening { .. }
+            | Stage::Listing { .. }
+            | Stage::Turning { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
@@ -1487,6 +1652,38 @@ impl Menu {
                 Answer::Nothing => {
                     stays(Stage::Asking { keys, delete, plan, asks }, Wants::Nothing)
                 },
+            },
+        }
+    }
+
+    /// What the key of the Turn group that waits for the other tabs of its
+    /// session does, as `tabs` says, or why zellij did not say: its tab's
+    /// panes turn into those of the tab there is, and the menu waits for
+    /// zellij to turn them, or it lists the tabs there are, for you to pick
+    /// one. With none, nothing turns.
+    pub fn tabs(self, tabs: Result<Vec<OtherTab>, String>) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Listing { keys, session, pane } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
+        let tabs = match tabs {
+            Ok(tabs) => tabs,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: not turned: {why}"))),
+        };
+        match tabs.as_slice() {
+            [] => Did::Closed(Done::Wrong(format!(
+                "menu: not turned: {} has no other tab for pane {pane}'s to turn into",
+                session.name()
+            ))),
+            [only] => {
+                let turn = Turn::TabIntoPanes { beside: only.pane };
+                let stage = Stage::Turning { keys, session: session.clone() };
+                let wants = Wants::Turn { session, pane, turn };
+                Did::Stays(Menu { number, target, stage }, wants)
+            },
+            _ => {
+                let stage = Stage::Picking { keys, session, pane, tabs };
+                Did::Stays(Menu { number, target, stage }, Wants::Nothing)
             },
         }
     }
@@ -1690,7 +1887,11 @@ impl Menu {
             | Stage::Reading { keys, .. } => keys.search.is_some(),
             // It keeps its width as you type too.
             Stage::Ssh { .. } => true,
-            Stage::Asking { .. } | Stage::Pull { .. } => false,
+            Stage::Asking { .. }
+            | Stage::Pull { .. }
+            | Stage::Listing { .. }
+            | Stage::Picking { .. }
+            | Stage::Turning { .. } => false,
         }
     }
 
@@ -1725,9 +1926,18 @@ impl Menu {
                 };
                 (work.tab(), from, body, keyed(width, &[(Hint::Esc, "Close")]))
             },
+            Stage::Picking { tabs, .. } => {
+                let entries = tab_entries(tabs);
+                spots = entry_spots(&entries, width).map(Choice::Key);
+                let body = entries.iter().map(|entry| entry_line(entry, inner)).collect();
+                let back = [(Hint::Backspace, "Back"), (Hint::Esc, "Close")];
+                (TABS_TITLE.to_owned(), right, body, keyed(width, &back))
+            },
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }
             | Stage::Opening { keys, .. }
+            | Stage::Listing { keys, .. }
+            | Stage::Turning { keys, .. }
             | Stage::Reading { keys, .. } => {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
                 if let Some(search) = &keys.search {
@@ -2012,6 +2222,8 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Last(last) => spans.push(does(last.does())),
         Entry::Review { says, .. } => spans.push(does(says)),
         Entry::New(new) => spans.push(does(new.does())),
+        Entry::Turn(turning) => spans.push(does(turning.does())),
+        Entry::Tab { name, .. } => spans.push(does(name)),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
         Entry::Forget(_) => spans.push(does(FORGET_DOES)),
         Entry::Brief(scope) => spans.push(does(scope.does())),
@@ -2307,6 +2519,123 @@ mod tests {
         assert_eq!(closed(menu.key(&char('s'))), Done::Start(Machine::Local, cwd));
     }
 
+    fn esc() -> KeyEvent {
+        KeyEvent::from(KeyCode::Esc)
+    }
+
+    fn other_tab(pane: u32, name: &str) -> OtherTab {
+        OtherTab { pane, name: name.to_owned() }
+    }
+
+    /// The menu `t p` leaves waiting for the other tabs of the session of
+    /// `row()`.
+    fn listing() -> Menu {
+        let (menu, _) = stays(opened(pane_row(), Some(TURN)));
+        let (menu, wants) = stays(menu.key(&char('p')));
+        assert_eq!(wants, Wants::Tabs { session: listed(), pane: 4 });
+        assert!(menu.listing());
+        menu
+    }
+
+    /// `t t` turns the pane of the row into a tab, and the menu waits for
+    /// zellij to, where its keys do nothing but close it. luneta knows
+    /// nothing yet of where a pane works that it turns all the same.
+    #[test]
+    fn a_key_turns_the_pane_of_the_row_into_a_tab() {
+        let unsaid = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        let (menu, wants) = stays(opened(unsaid, Some(TURN)));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0),
+            [
+                "─ Turn ────────────────────────",
+                " t  pane into tab",
+                " p  tab into pane",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        let (menu, wants) = stays(menu.key(&char('t')));
+        assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn: Turn::PaneIntoTab });
+        assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
+        let (menu, wants) = stays(menu.key(&char('t')));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(closed(menu.key(&esc())), Done::Nothing);
+    }
+
+    /// `t p` needs no list where the session has only one other tab, and has
+    /// nothing to turn into where it has none. Keys do nothing but close the
+    /// menu until zellij has said.
+    #[test]
+    fn a_key_turns_the_tab_of_the_row_into_panes_of_its_only_other_tab() {
+        let (menu, wants) = stays(listing().key(&char('1')));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, wants) = stays(menu.tabs(Ok(vec![other_tab(7, "Tab #2")])));
+        let turn = Turn::TabIntoPanes { beside: 7 };
+        assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
+        assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
+
+        let Done::Wrong(none) = closed(listing().tabs(Ok(Vec::new()))) else {
+            panic!("no reason");
+        };
+        assert!(none.contains("luneta has no other tab"), "{none}");
+        let wrong = Done::Wrong("menu: not turned: pane 4 is gone".to_owned());
+        assert_eq!(closed(listing().tabs(Err("pane 4 is gone".to_owned()))), wrong);
+        assert_eq!(closed(listing().key(&esc())), Done::Nothing);
+    }
+
+    /// With more than one other tab, the menu lists them on a key each, by
+    /// their names, in the order it was given them, and a key or a click on
+    /// one turns the tab of the row into panes of that. `Backspace` goes back
+    /// to the group, and any other key does nothing.
+    #[test]
+    fn a_key_picks_the_tab_a_tab_of_the_row_turns_into() {
+        let tabs = vec![other_tab(7, "auth"), other_tab(2, "Tab #3")];
+        let (menu, wants) = stays(listing().tabs(Ok(tabs)));
+        assert_eq!(wants, Wants::Nothing);
+        let (lines, spots) = menu.lines(31, 9, 0);
+        assert_eq!(
+            text(&lines),
+            [
+                "─ Into tab ────── luneta/main ─",
+                " 1  auth",
+                " 2  Tab #3",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(spots.at(Position::new(3, 2)), Some(&Choice::Key(char('2'))));
+
+        let (menu, wants) = stays(menu.key(&char('3')));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, wants) = stays(menu.key(&KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT)));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, wants) = stays(menu.key(&char('2')));
+        let turn = Turn::TabIntoPanes { beside: 2 };
+        assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
+        assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
+
+        let (menu, _) = stays(listing().tabs(Ok(vec![other_tab(7, "a"), other_tab(2, "b")])));
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(menu.lines(31, 9, 0).0[1].to_string(), " t  pane into tab");
+        let (menu, _) = stays(listing().tabs(Ok(vec![other_tab(7, "a"), other_tab(2, "b")])));
+        assert_eq!(closed(menu.key(&esc())), Done::Nothing);
+    }
+
+    /// A session's row and a machine's header have no pane to turn, and say
+    /// so as the key is pressed.
+    #[test]
+    fn a_key_of_the_turn_group_needs_a_pane_s_row() {
+        for (target, why) in [
+            (session_row(), NO_ROW_TURN),
+            (Target::Machine(Machine::Local), NO_MACHINE_TURN),
+        ] {
+            for key in ['t', 'p'] {
+                let (menu, _) = stays(opened(target.clone(), Some(TURN)));
+                assert_eq!(closed(menu.key(&char(key))), Done::Wrong(why.to_owned()));
+            }
+        }
+    }
+
     #[test]
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(pane_row(), None));
@@ -2318,6 +2647,7 @@ mod tests {
                 " a  Ask",
                 " c  Claude ▸",
                 " n  New ▸",
+                " t  Turn ▸",
                 " d  Delete ▸",
                 " b  Brief ▸",
                 " <ESC> - Close",
@@ -2334,7 +2664,7 @@ mod tests {
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
-            text(&legend(31, 9).0),
+            text(&legend(31, 10).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
@@ -2343,6 +2673,7 @@ mod tests {
                 " a  Ask",
                 " c  Claude ▸",
                 " n  New ▸",
+                " t  Turn ▸",
                 " d  Delete ▸",
                 " b  Brief ▸",
             ]
@@ -2355,6 +2686,7 @@ mod tests {
         assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);
         assert_eq!(Top::of('n'), None);
+        assert_eq!(Top::of('t'), None);
         assert_eq!(Top::of('d'), None);
         assert_eq!(Top::of('b'), None);
     }
@@ -2613,8 +2945,9 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         let done = closed(menu.planned(plan(Closes::Pane, Vec::new())));
-        assert_eq!(done, Done::Act(vps(), Act::Pane { session: listed().name().clone(), pane: 4 }));
         let name = || listed().name().clone();
+        let act = Act::Pane { session: name(), started: listed().started(), pane: 4 };
+        assert_eq!(done, Done::Act(vps(), act));
         for (row, highlighted) in [
             (pane, Briefed::Agent(vps(), name(), 4)),
             (session, Briefed::Session(vps(), name())),
@@ -2810,7 +3143,8 @@ mod tests {
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         assert_eq!(menu.planning(), Some((&listed(), 4)));
         let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
-        let act = Act::Pane { session: listed().name().clone(), pane: 4 };
+        let (session, started) = (listed().name().clone(), listed().started());
+        let act = Act::Pane { session, started, pane: 4 };
         assert_eq!(done, Done::Act(Machine::Local, act));
         // On a session's row, `d d` deletes the session, which zellij need not
         // say anything of first.
@@ -2859,7 +3193,8 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let act = Act::Tab { session: listed().name().clone(), tab: 2, panes: vec![4, 5] };
+        let (session, started) = (listed().name().clone(), listed().started());
+        let act = Act::Tab { session, started, tab: 2, panes: vec![4, 5] };
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
     }
 
@@ -2920,13 +3255,14 @@ mod tests {
     fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
         let menu = Menu::new(1, pane_row());
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
-        assert_eq!(floated(drawing(&menu), 50, 10), [
+        assert_eq!(floated(drawing(&menu), 50, 11), [
             "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
             boxed(" a  Ask"),
             boxed(" c  Claude ▸"),
             boxed(" n  New ▸"),
+            boxed(" t  Turn ▸"),
             boxed(" d  Delete ▸"),
             boxed(" b  Brief ▸"),
             boxed(" <ESC> - Close"),

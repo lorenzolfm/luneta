@@ -15,7 +15,10 @@ use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
 use lunetad::api::keep_printed_response::{self, File};
-use lunetad::api::{close_request, closes_response, list_exited_response};
+use lunetad::api::{
+    close_request, closes_response, list_exited_response, other_tabs_response,
+    turn_into_panes_response, turn_into_tab_response,
+};
 use lunetad::api::list_skills_response::Skill;
 use lunetad::api::open_request::{self, Opens};
 use lunetad::api::refuge_response::{Ended, Kept, Went};
@@ -25,8 +28,9 @@ use lunetad::api::{
     DumpScreenRequest, GoRequest, KeepImageRequest, KeepPrintedRequest, KillRequest,
     ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
-    MoveReviewRequest, NameSessionRequest, On, OpenRequest, RefugeRequest, RenameSessionRequest,
-    ReviewMove, StartRequest, TranscriptEndsRequest, WatchRequest,
+    MoveReviewRequest, NameSessionRequest, On, OpenRequest, OtherTabsRequest, RefugeRequest,
+    RenameSessionRequest, ReviewMove, StartRequest, TranscriptEndsRequest, TurnIntoPanesRequest,
+    TurnIntoTabRequest, WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
@@ -588,6 +592,13 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         "is_floating": false, "tab_id": 3,
     });
     far.zellij.list("held", &serde_json::json!([tab, holds, beside]));
+    far.zellij.list("turning", &serde_json::json!([tab, beside]));
+    far.zellij.clients("turning", &[(1, "terminal_4")]);
+    let there = serde_json::json!({
+        "id": 4, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
+        "is_floating": false, "tab_id": 6,
+    });
+    far.zellij.stacks_into("turning", 1, &serde_json::json!([there, beside]));
     far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join(".claude/skills/near");
@@ -755,7 +766,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         // What it closes goes while zellij lists it as the close says: a pane
         // another holds its tab open beside, and a tab with its terminals.
         let close = |session: &str, closes| {
-            CloseRequest { on: on("far"), session: session.to_owned(), closes: Some(closes) }
+            let (session, started_at) = (session.to_owned(), Some(SystemTime::UNIX_EPOCH.into()));
+            CloseRequest { on: on("far"), session, closes: Some(closes), started_at }
         };
         let pane = close_request::Closes::Pane;
         let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
@@ -780,14 +792,55 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         ];
         assert_eq!(far.zellij.closed(), closed_there);
 
+        // A tab there turns into panes of another there, as zellij there lists
+        // them.
+        let tabs = OtherTabsRequest { on: on("far"), session: "turning".to_owned(), pane: 4 };
+        let tabs = daemon.other_tabs(tabs).await.unwrap().into_inner().tabs;
+        assert_eq!(tabs, [other_tabs_response::Tab { pane: 5, name: String::new() }]);
+        let session = || "turning".to_owned();
+        let started_at = Some(SystemTime::UNIX_EPOCH.into());
+        let turn = TurnIntoPanesRequest {
+            on: on("far"),
+            session: session(),
+            pane: 4,
+            beside: 5,
+            started_at,
+        };
+        let came = daemon.turn_into_panes(turn).await.unwrap().into_inner().came;
+        let done = turn_into_panes_response::Came::Done(turn_into_panes_response::Done {});
+        assert_eq!(came, Some(done));
+        let stacked = "--session turning action stack-panes -- terminal_9 terminal_4";
+        assert_eq!(far.zellij.turned(), [stacked]);
+        assert!(here.zellij.turned().is_empty());
+        let stand_in = "--session turning action close-pane --pane-id terminal_9";
+        assert_eq!(far.zellij.closed()[2], stand_in);
+
+        // A pane there that a client has to come for says so.
+        let session = "held".to_owned();
+        let turn = TurnIntoTabRequest { on: on("far"), session, pane: 4, started_at };
+        let came = daemon.turn_into_tab(turn).await.unwrap().into_inner().came;
+        let none = turn_into_tab_response::NoClient {};
+        assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(none)));
+
         // A session there is killed by when it started, as its daemon lists
         // it, and deleted.
         let kill = |started_at| {
             KillRequest { on: on("far"), session: "work".to_owned(), started_at }
         };
         invalid(daemon.kill(kill(None)).await.unwrap_err());
+        // What closes in a session there goes by when it started too.
+        let held = |started_at| CloseRequest {
+            on: on("far"),
+            session: "work".to_owned(),
+            closes: Some(pane(4)),
+            started_at,
+        };
+        invalid(daemon.close(held(None)).await.unwrap_err());
+        let since = Some(SystemTime::UNIX_EPOCH.into());
+        let stays = daemon.close(held(since)).await.unwrap_err();
+        assert!(stays.message().contains("a session made since"), "{stays:?}");
         daemon.kill(kill(work_started)).await.unwrap();
-        assert_eq!(far.zellij.closed()[2..], ["delete-session --force work"]);
+        assert_eq!(far.zellij.closed()[3..], ["delete-session --force work"]);
         assert!(here.zellij.closed().is_empty());
 
         // The sessions that ended there are listed there, each by how long
@@ -807,7 +860,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             DeleteExitedRequest { on: on("far"), session: session.to_owned() }
         };
         daemon.delete_exited(delete("old")).await.unwrap();
-        assert_eq!(far.zellij.closed()[3..], ["delete-session old"]);
+        assert_eq!(far.zellij.closed()[4..], ["delete-session old"]);
         let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
         assert!(listed.exited.is_empty());
         invalid(daemon.delete_exited(delete("")).await.unwrap_err());

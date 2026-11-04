@@ -89,7 +89,7 @@ fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
 
 /// The terminals in the tab `tab` among `laid`, the panes of its session,
 /// the floating ones too, as zellij lists them.
-fn terminals(laid: &[Laid], tab: u32) -> Vec<u32> {
+pub(crate) fn terminals(laid: &[Laid], tab: u32) -> Vec<u32> {
     let terminals = laid.iter().filter(|laid| laid.tab_id == tab && !laid.is_plugin);
     terminals.map(|laid| laid.id).collect()
 }
@@ -114,15 +114,42 @@ impl Close {
     /// The question that has zellij close it of `session` on the machine
     /// `on` names, or on the daemon's own, where it names none.
     #[must_use]
-    pub fn asked(&self, on: Option<On>, session: &SessionName) -> CloseRequest {
+    pub fn asked(
+        &self,
+        on: Option<On>,
+        session: &SessionName,
+        started: SystemTime,
+    ) -> CloseRequest {
         let closes = match self {
             Close::Pane(pane) => close_request::Closes::Pane(*pane),
             Close::Tab { id, panes } => {
                 close_request::Closes::Tab(closes_response::Tab { id: *id, panes: panes.clone() })
             },
         };
-        CloseRequest { on, session: session.to_string(), closes: Some(closes) }
+        let started_at = Some(started.into());
+        CloseRequest { on, session: session.to_string(), closes: Some(closes), started_at }
     }
+}
+
+/// Closes `close` of `session`, the one that started at `started`, as
+/// `closed_as_listed` does, or says why it closed nothing: one that took the
+/// name since has panes of the same ids, as zellij numbers them from 0 for each
+/// server, and they stay.
+pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Result<(), String> {
+    same_session(session, started)?;
+    closed_as_listed(session, close)
+}
+
+/// Whether `session` is the one that started at `started`, as far as the
+/// sockets of those that run say; or why not, or why luneta cannot tell. One
+/// that no longer runs took no name, and what asks of it hears that from
+/// zellij.
+pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result<(), String> {
+    let running = running_in(&crate::zellij::folder())?;
+    if running.iter().any(|(name, at)| name == session.as_str() && *at != started) {
+        return Err(format!("\"{session}\" is a session made since, which stays"));
+    }
+    Ok(())
 }
 
 /// Closes `close` of `session`, while zellij lists the session's panes as
@@ -131,7 +158,7 @@ impl Close {
 /// holds other terminals than it did, or that would take the session along
 /// now, stays. zellij closes nothing on a condition of its own: what changes
 /// between the list and the close goes with it.
-pub fn closed(session: &SessionName, close: &Close) -> Result<(), String> {
+pub(crate) fn closed_as_listed(session: &SessionName, close: &Close) -> Result<(), String> {
     still(&laid(session.as_str())?, close)?;
     let mut command = Command::new("zellij");
     command.args(["--session", session.as_str(), "action"]);
@@ -201,10 +228,8 @@ const SETTLING: Duration = Duration::from_millis(100);
 /// is, as `settled` waits for: a luneta, or a `luneta close` in a pane of
 /// the session, that ends with the session may not be there by then.
 pub fn killed(session: &SessionName, started: SystemTime) -> Result<(), String> {
+    same_session(session, started)?;
     let folder = crate::zellij::folder();
-    if running_in(&folder)?.iter().any(|(name, at)| name == session.as_str() && *at != started) {
-        return Err(format!("\"{session}\" is a session made since, which stays"));
-    }
     let mut command = Command::new("zellij");
     quiet(&mut command);
     command.args(["delete-session", "--force", session.as_str()]);
@@ -272,6 +297,7 @@ mod tests {
             is_focused: false,
             tab_id,
             tab_position: tab_id,
+            tab_name: String::new(),
             pane_command: None,
         }
     }

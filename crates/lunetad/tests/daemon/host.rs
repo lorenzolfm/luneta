@@ -125,7 +125,9 @@ pub fn script(path: &Path, text: &str) {
 /// minutes and three seconds before. It notes each rename it is asked for,
 /// for `renamed`, and renames nothing. It notes each client that is started,
 /// with `attach`, for `attached`, which ends at once as one that detached
-/// does. It knows no other command.
+/// does. A pane closing can cut a call of a session short, once, as a test had
+/// it `silences` or `unreaches` it, or hand it another call's answer, as a test
+/// had it `answers_another`. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -145,6 +147,18 @@ case "$(uname)" in
     *) cache="$HOME/.cache/zellij" ;;
 esac
 kept="$cache/contract_version_1/session_info/$session"
+if [ "$1" = action ] && [ -f "{panes}/$session.$2.silent" ]; then
+    rm "{panes}/$session.$2.silent"
+    case "$2" in
+        new-pane | new-tab) echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened" ;;
+    esac
+    exit 0
+fi
+if [ "$1" = action ] && [ -f "{panes}/$session.$2.once" ]; then
+    once=$(cat "{panes}/$session.$2.once")
+    rm "{panes}/$session.$2.once"
+    eval "$once"
+fi
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
     "action list-panes --json") asking=laid ;;
@@ -178,6 +192,18 @@ case "$*" in
         ;;
     "action switch-session "* | "action focus-pane-id "*)
         echo "$asked" >> "{panes}/went"
+        exit 0
+        ;;
+    "action stack-panes -- "*)
+        echo "$asked" >> "{panes}/turned"
+        for next in "{panes}/$session".stacks.*; do
+            [ -f "$next" ] && mv "$next" "{panes}/$session.json"
+            break
+        done
+        exit 0
+        ;;
+    "action toggle-pane-embed-or-floating "*)
+        echo "$asked" >> "{panes}/turned"
         exit 0
         ;;
     "action new-pane "*)
@@ -322,6 +348,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("opened")
     }
 
+    /// Each pane zellij was asked to stack, float or embed, as its arguments
+    /// were, in the order it was asked.
+    pub fn turned(&self) -> Vec<String> {
+        self.lines("turned")
+    }
+
     /// Each rename zellij was asked for, as its arguments were, in the order
     /// it was asked.
     pub fn renamed(&self) -> Vec<String> {
@@ -359,6 +391,41 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// the next tab there, as `list` would, with that tab, `3`, among them.
     pub fn opens_into(&self, session: &str, panes: &serde_json::Value) {
         self.write(&format!("{session}.opened.json"), &panes.to_string());
+    }
+
+    /// Has zellij list `panes` for the session `session` once it has stacked
+    /// the `nth` pane there, from the first, as `list` would. Past the last
+    /// of these, it lists what it did, as it does where it has no room.
+    pub fn stacks_into(&self, session: &str, nth: u32, panes: &serde_json::Value) {
+        self.write(&format!("{session}.stacks.{nth}"), &panes.to_string());
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` end
+    /// well with nothing said, as a pane closing cuts one short, though what it
+    /// asked for goes on.
+    pub fn silences(&self, session: &str, action: &str) {
+        self.write(&format!("{session}.{action}.silent"), "");
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` end
+    /// having asked nothing, as a pane closing keeps one from reaching its
+    /// session's server. zellij's CLI then says so by how many `others` of its
+    /// sessions answered: with two or more it lists them, and ends well.
+    pub fn unreaches(&self, session: &str, action: &str, others: usize) {
+        let gone = format!("Session '{session}' not found. The following sessions are active:");
+        let ends = match others {
+            0 => "echo 'There is no active session!' >&2; exit 1".to_owned(),
+            1 => format!("echo \"{gone}\" >&2; echo other >&2; exit 1"),
+            _ => format!("echo \"{gone}\" >&2; echo other; echo another; exit 0"),
+        };
+        self.write(&format!("{session}.{action}.once"), &ends);
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` end
+    /// well saying `said`, the answer to another call: zellij answers by the id
+    /// of a connection, and gives the id of one that ended to the next.
+    pub fn answers_another(&self, session: &str, action: &str, said: &str) {
+        self.write(&format!("{session}.{action}.once"), &format!("echo '{said}'; exit 0"));
     }
 
     /// Has zellij list `clients` for the session `session` from now on, each

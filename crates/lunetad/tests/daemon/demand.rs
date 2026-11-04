@@ -22,9 +22,10 @@ use lunetad::api::{
     ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
     ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
-    PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
-    RenameSessionResponse, StartRequest, StartResponse, TranscriptEndsRequest,
-    TranscriptEndsResponse, Version, WatchRequest,
+    OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
+    RefugeResponse, RenameSessionRequest, RenameSessionResponse, StartRequest, StartResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
+    TurnIntoTabResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -558,6 +559,27 @@ impl Daemon for StandIn {
         &self,
         _: Request<ListClientsRequest>,
     ) -> Result<Response<ListClientsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn other_tabs(
+        &self,
+        _: Request<OtherTabsRequest>,
+    ) -> Result<Response<OtherTabsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn turn_into_tab(
+        &self,
+        _: Request<TurnIntoTabRequest>,
+    ) -> Result<Response<TurnIntoTabResponse>, Status> {
+        Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    async fn turn_into_panes(
+        &self,
+        _: Request<TurnIntoPanesRequest>,
+    ) -> Result<Response<TurnIntoPanesResponse>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
