@@ -25,6 +25,7 @@ impl Mic {
     /// The default input on, sending what it hears to `heard`, as it hears
     /// it, or why there is none.
     pub fn open(heard: Sender<Heard>) -> Result<Mic, String> {
+        crate::hush::alsa_errors();
         let host = cpal::default_host();
         let device = host.default_input_device().ok_or("this machine has no microphone")?;
         let config = chosen(&device)?;

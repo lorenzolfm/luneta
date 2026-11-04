@@ -39,6 +39,8 @@ picker over it with sessions, agents and directories tabs.
   agent you're talking to, or [luneta's sidebar](#from-lunetas-sidebar)
 * [Dictate](#dictate) to an agent, or to the ask box, by a speech model that
   runs on your machine: hold `Alt r` and talk
+* Have what you selected [read aloud](#read-aloud), and an agent on any of your
+  machines tell you how its work goes, out of the speakers where you sit
 * Get a [notification](#notifications) when an agent on any of your machines
   wants you, gone as soon as it no longer does
 * Have your review skills [run in turn](#a-review-in-turn) on a new pull request,
@@ -414,7 +416,7 @@ where none is. Run through ssh, or in a pane of zellij, luneta passes over a
 session of another machine's that may hold its own terminal, through ssh: one
 with a pane that runs ssh or luneta. When zellij fails, luneta ends and says
 what zellij said.
-zellij's keys are yours as they were, but eight, which luneta takes before
+zellij's keys are yours as they were, but nine, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
 - `Ctrl a` goes back and forth between zellij and the sidebar. A click goes to
@@ -431,11 +433,12 @@ zellij sees them, whichever of the two has the keys:
   agents, and `Ctrl d` on the directories.
 - `Alt r` [dictates](#dictate) into the pane zellij is on, or the ask box:
   hold it and talk.
+- `Alt u` [reads aloud](#read-aloud) what you selected, and stops what plays.
 
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
 line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
 and a shell ends on `Ctrl d`. zellij's default config binds `Ctrl b` to tmux
-mode and `Ctrl q` to quit. luneta takes all eight first: if you use those,
+mode and `Ctrl q` to quit. luneta takes all nine first: if you use those,
 bind them to other keys, in zellij's config or in Claude Code's
 `~/.claude/keybindings.json`.
 
@@ -1028,6 +1031,7 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta close S[:P]… [--yes PLAN]` | closes panes and deletes sessions |
 | `luneta here` | says which pane it runs in, as `S:P` |
 | `luneta review LINK` | starts a [review](#a-review-in-turn) of a pull request, on a new agent in its worktree |
+| `luneta say [TEXT]` | [reads it aloud](#read-aloud) on the machine you sit at, once what is before it has been |
 
 They are for a pane of zellij, where an agent runs, and take what it runs in
 for the pane, the session and the directory you leave out. A pane or a tab
@@ -1248,6 +1252,69 @@ luneta records on the machine it runs on, the one you sit at, whichever machine
 the agent you talk to runs on: Claude Code's own `/voice` records on the
 machine Claude Code runs on, which over ssh has no microphone of yours.
 
+### Read aloud
+
+`Alt u` reads aloud what you selected in a pane: zellij copies a selection as
+the mouse lets go, and luneta hears it there, with no need of the clipboard.
+While anything plays, `Alt u` stops it, and lets go of what waits, instead.
+
+An agent tells you how its work goes with `luneta say`, while you look at
+something else. It works from an agent on any machine: the words go to the
+daemon of the machine it runs on, and from there to your window, as the agents
+on your sidebar do.
+
+| command | does |
+|---|---|
+| `luneta say [TEXT]` | queues `TEXT`, or what comes on stdin, and returns once lunetad has it |
+| `luneta say --now TEXT` | reads it first, and cuts off what plays |
+| `luneta say --stop` | stops what plays, and lets go of what waits |
+
+Nothing needs backgrounding, as nothing waits for the speakers. With no lunetad
+it fails at once, and so does more than 16 KiB at a time. The skill in
+[`skills/say`](skills/say/SKILL.md) has Claude Code, or any agent that reads
+skills, narrate by itself once you ask it to keep you updated out loud, until
+you tell it to stop: a breath at a time as things change, written for the ear,
+and a complete spoken handoff at the end, as the skill of
+[Say It](https://github.com/callebtc/sayit), which it is adapted from, has it.
+A skill's permission lasts only for the turn that loaded it, so for no prompt on
+every utterance, give Claude Code the rule in `~/.claude/settings.json`:
+
+```sh
+npx skills add lorenzolfm/luneta          # or: cp -r skills/say ~/.claude/skills/
+```
+
+```json
+{ "permissions": { "allow": ["Bash(luneta say:*)"] } }
+```
+
+The sidebar has a line of whose it is and what it says, and a mark on the row of
+its agent's pane. No box comes up, so you keep working:
+
+```text
+󰕾 luneta · The tests pass on this machine, and…
+```
+
+What several agents say is read in the order it came, with the session named
+aloud as the speaker changes. Past 16 waiting, the oldest goes. What has waited
+two minutes goes too, so that a Mac waking up doesn't read out an hour of
+updates, and what came before luneta first heard from a machine says nothing.
+`Alt r`, in any luneta of the machine, holds what plays until the dictation box
+closes, or the microphone would write the agent's words into your prompt. One
+luneta of a machine reads, as with [notifications](#notifications), and `Alt u`
+in another has that one read. A luneta over ssh reads nothing: its speakers are
+not the ones you sit at.
+
+What is read is turned into speech on your machine, and none of it leaves it, or
+is kept. It is Gradium's Phonon 31m, an English model, that does it, on the CPU,
+through [ptts](https://crates.io/crates/ptts), making sound as it goes, so that
+long text doesn't wait for its end: on a Ryzen 9950X, 11 times faster than it
+plays, on two threads, with the first sound in about 160 ms. The model is 65 MB,
+and the first thing to read fetches it from Hugging Face, once, as
+[dictation's](#dictate) is, into `luneta/models`. The speakers are the system's
+default output: ALSA's on Linux, which PipeWire and PulseAudio serve, and
+CoreAudio's on macOS, open only while something plays. A machine with none says
+so on the sidebar, and fetches nothing.
+
 ### Notifications
 
 luneta tells your desktop when an agent wants you, on this machine or on
@@ -1304,6 +1371,7 @@ sound.
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
 | a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
+| speakers, and the same `curl` and `sha256sum` | optional | [reading aloud](#read-aloud), and the fetch of its model the first time |
 | a freedesktop notification server on Linux, [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) on macOS | optional | [notifications](#notifications) |
 | `wl-paste` or `xclip` on Linux, `osascript` on macOS, which comes with it | optional | pasting an image in an agent on [another machine](#other-machines) with `Ctrl v` |
 

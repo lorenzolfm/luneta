@@ -4,19 +4,8 @@
 //! macOS. It writes what you say as you say it, and the whole of it once you
 //! are done, punctuated and capitalized.
 //!
-//! The model is 731 MB, too much to ship with luneta, which fetches it the
-//! first time you dictate, from Hugging Face, of a revision pinned here, and
-//! keeps it in a folder named by its SHA-256 in `luneta/models` of
-//! `$XDG_DATA_HOME`, or of `~/.local/share` where that is not set, on macOS
-//! too: a luneta that pins another model reads none of this one's. curl
-//! fetches it, and `sha256sum`, or `shasum` on macOS, checks it against the
-//! size and the SHA-256 it is pinned by: both are on every machine luneta
-//! runs on. It takes its name in the folder only once it passes, so that no
-//! luneta reads one halfway fetched. One luneta fetches it at a time, under a
-//! lock beside it, which curl holds with it, into the one part of it there
-//! is: a curl that runs on past a luneta killed outright holds the lock
-//! until it is done, and the next luneta checks what it fetched, and keeps
-//! it. A luneta that gave up mid-fetch takes its part away.
+//! The model is 731 MB, which luneta fetches the first time you dictate, as
+//! `models` says.
 //!
 //! One thread of luneta's runs the model, from the first dictation until
 //! luneta ends, as reading it in again each time would take a second where
@@ -25,51 +14,30 @@
 //! model makes of it as it goes, until luneta has it finish, and then what
 //! you said, or gives it up. One job at a time: the next waits.
 
-use std::cell::Cell;
-use std::env;
-use std::ffi::OsString;
-use std::fs::{self, File, TryLockError};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lunetad::program;
 use transcribe_cpp::{Model, RunOptions, Session, SessionOptions, Stream, StreamOptions};
 
 use crate::brief::Asking;
 use crate::due::Due;
 use crate::host::Event;
 use crate::mic::{self, Mic};
+use crate::models::{self, Pin};
 
-/// The model, as it is fetched: the name it is kept by, where it is fetched
-/// from, of a revision of its own, and how many bytes it is, and the SHA-256
-/// of them. The revision, the size and the sum are those hex pins. Another
-/// pin is another folder: the change that makes one takes away the folders
-/// of the others under `luneta/models`, which no luneta reads any more.
-const FILE: &str = "parakeet-unified-en-0.6b-Q8_0.gguf";
-const URL: &str = "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/\
-    7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf";
-pub const BYTES: u64 = 731_357_568;
-const SHA256: &str = "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795";
+/// The model, as it is fetched. The revision, the size and the sum are those
+/// hex pins.
+const PINS: [Pin; 1] = [Pin {
+    file: "parakeet-unified-en-0.6b-Q8_0.gguf",
+    url: "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/\
+          7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf",
+    bytes: 731_357_568,
+    sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+}];
 
-/// What sums a file's SHA-256, and says it first on its line.
-#[cfg(target_os = "macos")]
-const SUM: &[&str] = &["shasum", "-a", "256"];
-#[cfg(not(target_os = "macos"))]
-const SUM: &[&str] = &["sha256sum"];
-
-/// How long the model has to come, over a line of a megabyte a second. One
-/// that takes longer is stuck, and is killed.
-const FETCH: Duration = Duration::from_hours(1);
-
-/// How long the model's sum has to be worked out, which takes `shasum`, of
-/// perl, a few seconds.
-const CHECK: Duration = Duration::from_mins(2);
-
-/// How often luneta is told how much of the model is in.
-const PROGRESS: Duration = Duration::from_millis(250);
+/// How many bytes the model is.
+pub const BYTES: u64 = models::bytes(&PINS);
 
 /// How long the microphone stays on once you are done: the end of a last
 /// word comes as the key is let go.
@@ -124,138 +92,15 @@ pub enum Spoken {
     Ended(Result<String, String>),
 }
 
-/// How the fetch of the model goes.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Fetched {
-    /// How many of its bytes are in.
-    Got(u64),
-    /// It is in, or why not.
-    Ended(Result<(), String>),
-}
-
-/// Where the model is kept, or why it cannot be.
-fn path() -> Result<PathBuf, String> {
-    kept_in(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
-}
-
-/// Where the model is kept, by `$XDG_DATA_HOME` and `$HOME` as they are set,
-/// if they are: one set to a relative path is not, as the spec has it.
-fn kept_in(data: Option<OsString>, home: Option<OsString>) -> Result<PathBuf, String> {
-    let set = |value: Option<OsString>| value.map(PathBuf::from).filter(|path| path.is_absolute());
-    let data = set(data)
-        .or_else(|| set(home).map(|home| home.join(".local").join("share")))
-        .ok_or("neither XDG_DATA_HOME nor HOME is set to an absolute path")?;
-    Ok(data.join("luneta").join("models").join(SHA256).join(FILE))
-}
-
 /// Whether the model is in.
 pub fn fetched() -> bool {
-    path().is_ok_and(|path| whole(&path))
+    models::fetched(&PINS)
 }
 
-/// Whether the model at `path` is whole: it takes its name only once it
-/// passed its check, and one of another size, as of a copy cut short, or a
-/// disk that filled, is not it, and is fetched again, over it.
-fn whole(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|kept| kept.is_file() && kept.len() == BYTES)
-}
-
-/// Fetches the model, and tells `events` how it goes, on a thread of its
-/// own, for as long as what it returns is kept: dropped, as luneta ends,
-/// curl is killed, and what it fetched thrown away, by the time the drop
-/// returns, so that no luneta leaves a fetch going, or half a model, behind.
+/// Fetches the model, and tells `events` how it goes, for as long as what it
+/// returns is kept.
 pub fn fetch(events: &Sender<Event>) -> Asking {
-    let due = Due::new(events, |ended| Event::Fetched(Fetched::Ended(ended)));
-    let events = events.clone();
-    Asking::on_thread(move |wanted| due.pay(fetching(wanted, &events)))
-}
-
-/// Fetches the model, for as long as it is `wanted`, as its part beside where
-/// it is kept, and gives it its name once it passed its check. It waits for
-/// the lock beside it first, which the system lets go of however the luneta
-/// and the curl that hold it end, and tells `events` how far the one that
-/// holds it got, and takes what that one kept.
-fn fetching(wanted: &dyn Fn() -> bool, events: &Sender<Event>) -> Result<(), String> {
-    let path = path()?;
-    let folder = path.parent().ok_or("the model is kept in no folder")?;
-    fs::create_dir_all(folder)
-        .map_err(|error| format!("no folder for the model, {}: {error}", folder.display()))?;
-    let part = path.with_added_extension("part");
-    let told = Cell::new(Instant::now());
-    let still = || {
-        if told.get().elapsed() >= PROGRESS {
-            told.set(Instant::now());
-            if let Ok(got) = fs::metadata(&part) {
-                // luneta is on its way out.
-                let _ = events.send(Event::Fetched(Fetched::Got(got.len())));
-            }
-        }
-        wanted()
-    };
-    // Let go of as `lock` closes.
-    let lock = File::create(path.with_added_extension("lock"))
-        .map_err(|error| format!("the speech model takes no lock: {error}"))?;
-    loop {
-        match lock.try_lock() {
-            Ok(()) => break,
-            Err(TryLockError::WouldBlock) if still() => thread::sleep(PROGRESS),
-            Err(TryLockError::WouldBlock) => return Err("given up".to_owned()),
-            Err(TryLockError::Error(error)) => {
-                return Err(format!("the speech model takes no lock: {error}"));
-            },
-        }
-    }
-    // Another luneta kept it, as this one waited.
-    if whole(&path) {
-        return Ok(());
-    }
-    // A curl that ran on past a luneta killed outright fetched it all, as
-    // this one waited: what it fetched is checked as this one's would be.
-    let fetched = if whole(&part) {
-        Ok(())
-    } else {
-        let mut curl = Command::new("curl");
-        curl.args(["--fail", "--location", "--silent", "--show-error", "--retry", "3"]);
-        curl.arg("--output").arg(&part).arg(URL);
-        // curl holds the lock with luneta, on its stdin, which it never reads.
-        let held = lock
-            .try_clone()
-            .map_err(|error| format!("the speech model takes no lock: {error}"))?;
-        match program::run_while_reading(&mut curl, FETCH, still, Stdio::from(held)) {
-            Ok(Some(ran)) => ran.answer().map(drop).map_err(|why| format!("curl: {why}")),
-            Ok(None) => Err("given up".to_owned()),
-            Err(error) => Err(format!("luneta fetches the speech model with curl: {error}")),
-        }
-    };
-    let checked = fetched.and_then(|()| check(&part, wanted));
-    let kept = checked.and_then(|()| {
-        fs::rename(&part, &path).map_err(|error| format!("the model is not kept: {error}"))
-    });
-    if kept.is_err() {
-        // Nothing of it was fetched, as curl could not start.
-        let _ = fs::remove_file(&part);
-    }
-    kept
-}
-
-/// Whether `file` is the model as it is pinned: of its size, and its sum,
-/// worked out for as long as it is `wanted`.
-fn check(file: &Path, wanted: &dyn Fn() -> bool) -> Result<(), String> {
-    let bytes = fs::metadata(file).map_err(|error| format!("the model is gone: {error}"))?.len();
-    if bytes != BYTES {
-        return Err(format!("the model came {bytes} bytes long, and not {BYTES}"));
-    }
-    let mut sum = Command::new(SUM[0]);
-    sum.args(&SUM[1..]).arg(file);
-    let said = program::run_while(&mut sum, CHECK, wanted)
-        .map_err(|error| format!("{}: {error}", SUM[0]))?
-        .ok_or("given up")?
-        .answer()
-        .map_err(|why| format!("{}: {why}", SUM[0]))?;
-    match String::from_utf8_lossy(&said).split_whitespace().next() {
-        Some(sum) if sum == SHA256 => Ok(()),
-        _ => Err("the model that came is not the one luneta pins: its SHA-256 differs".to_owned()),
-    }
+    models::fetch(&PINS, events, Event::Fetched, || Ok(()))
 }
 
 /// The thread that runs the model, for as long as it is kept.
@@ -414,7 +259,7 @@ fn heard(
 /// The model read in, with a session of its own to run on, one thread a
 /// core, as many as `THREADS` at the most.
 fn load() -> Result<Session, String> {
-    let path = path()?;
+    let path = PINS[0].path()?;
     // A person can take away one of the model's size that is not it.
     let model = Model::load(&path).map_err(|error| {
         format!("the speech model cannot be read in, {}: {error}", path.display())
@@ -520,29 +365,5 @@ mod tests {
         assert!((level(&[1.0; 160]) - 1.0).abs() < f32::EPSILON);
         let (quiet, loud) = (level(&tone(0.01, 0.01)), level(&tone(0.3, 0.01)));
         assert!(0.0 < quiet && quiet < loud && loud < 1.0, "{quiet} {loud}");
-    }
-
-    #[test]
-    fn the_model_is_kept_where_xdg_data_home_says_or_under_home() {
-        let set = |value: &str| Some(OsString::from(value));
-        let kept = kept_in(set("/data"), set("/home/you"));
-        assert_eq!(kept, Ok(PathBuf::from(format!("/data/luneta/models/{SHA256}/{FILE}"))));
-        let kept = kept_in(set("relative"), set("/home/you"));
-        let under_home = format!("/home/you/.local/share/luneta/models/{SHA256}/{FILE}");
-        assert_eq!(kept, Ok(PathBuf::from(under_home)));
-        assert!(kept_in(None, set("relative")).is_err());
-    }
-
-    /// A model cut short, as of a copy, is not in: it is fetched over.
-    #[test]
-    fn only_a_model_of_its_size_is_in() {
-        let scratch = tempfile::tempdir().unwrap();
-        let path = scratch.path().join(FILE);
-        assert!(!whole(&path));
-        let file = File::create(&path).unwrap();
-        file.set_len(BYTES / 2).unwrap();
-        assert!(!whole(&path));
-        file.set_len(BYTES).unwrap();
-        assert!(whole(&path));
     }
 }

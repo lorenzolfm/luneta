@@ -689,6 +689,13 @@ impl Daemon for StandIn {
     ) -> Result<Response<Self::KeepImageStream>, Status> {
         Err(Status::unimplemented("a stand-in keeps no image"))
     }
+
+    async fn say(
+        &self,
+        _: Request<api::SayRequest>,
+    ) -> Result<Response<api::SayResponse>, Status> {
+        Err(Status::unimplemented("a stand-in reads nothing aloud"))
+    }
 }
 
 /// The daemon ends once zellij has had no session, and no client has watched

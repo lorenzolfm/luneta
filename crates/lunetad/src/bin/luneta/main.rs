@@ -4,6 +4,7 @@
 //! agent of its ask box among others.
 
 mod alerts;
+mod aloud;
 mod answers;
 mod ask;
 mod away;
@@ -22,6 +23,7 @@ mod folds;
 mod gruvbox;
 mod host;
 mod hosted;
+mod hush;
 mod icons;
 mod images;
 mod input;
@@ -31,6 +33,7 @@ mod live;
 mod machines;
 mod menu;
 mod mic;
+mod models;
 mod named;
 mod news;
 mod order;
@@ -42,10 +45,12 @@ mod pull;
 mod review;
 mod sidebar;
 mod skills;
+mod speaker;
 mod speech;
 mod spots;
 mod starts;
 mod state;
+mod voice;
 mod watch;
 mod width;
 mod zellij;

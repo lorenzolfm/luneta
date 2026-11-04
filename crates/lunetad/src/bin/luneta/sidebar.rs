@@ -51,8 +51,8 @@ use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{
-    Agent, Client, Front, Harness, Host, NameSource, Pane, ReviewWaits, Session, Shell, Status,
-    UnreadFile, Zellij,
+    Agent, Client, Front, Harness, Host, NameSource, Pane, ReviewWaits, Saying, Session, Shell,
+    Status, UnreadFile, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::links;
@@ -66,6 +66,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::alerts::{self, Reach};
+use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
@@ -655,6 +656,8 @@ enum Row {
         /// Where it sits among the panes listed of its tab, if it shares it,
         /// and the colour of its session, which the bracket is drawn in.
         bracket: Option<(Bracket, Color)>,
+        /// Whether what is being read aloud comes from it.
+        speaks: bool,
     },
 }
 
@@ -843,6 +846,8 @@ struct Seen<'a> {
     /// where the process of each runs, as far as it can tell.
     unread: u32,
     unread_files: &'a [UnreadFile],
+    /// What it last said to read aloud.
+    sayings: &'a [Saying],
 }
 
 impl Seen<'_> {
@@ -920,6 +925,7 @@ fn machines(host: &Host) -> Machines<'_> {
         unread_sockets: host.unread_sockets,
         unread: host.unread,
         unread_files: &host.unread_files,
+        sayings: &host.sayings,
     };
     let mut others = Vec::new();
     let mut named = HashSet::new();
@@ -941,6 +947,7 @@ fn machines(host: &Host) -> Machines<'_> {
                 unread_sockets: host.unread_sockets,
                 unread: host.unread,
                 unread_files: &host.unread_files,
+                sayings: &host.sayings,
             }),
             Some(Reached::Reaching(_)) => Err(Away::Reaching),
             Some(Reached::Unreached(unreached)) => Err(Away::of(unreached)),
@@ -1134,6 +1141,8 @@ pub struct Sidebar {
     notice: Option<String>,
     /// The machine an image is on its way to, once that takes a while.
     image_going: Option<Destination>,
+    /// What is being read aloud, or what that waits for.
+    aloud: Option<aloud::Shown>,
     /// What went wrong as the menu floated over zellij, for luneta to say
     /// there, where you look, and the sidebar collapsed has no room for.
     said: Option<String>,
@@ -1938,6 +1947,23 @@ impl Sidebar {
         runs
     }
 
+    /// What each machine lunetad watches last said to read aloud, for `aloud`,
+    /// or nothing before lunetad has said: none of one it does not reach now.
+    /// One it no longer watches is not among them.
+    pub fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
+        let each = machines(self.host.as_ref()?).each();
+        Some(each.map(|(on, seen)| (on, seen.ok().map(|seen| seen.sayings.to_vec()))).collect())
+    }
+
+    /// Shows what is being read aloud, on a line and on the row of the pane it
+    /// comes from.
+    pub fn aloud(&mut self, shown: Option<aloud::Shown>) {
+        if self.aloud != shown {
+            self.aloud = shown;
+            self.rebuild();
+        }
+    }
+
     /// Says what went wrong, in the notes until the next key, and in the log.
     pub fn notify(&mut self, notice: String) {
         log::say(&notice);
@@ -1990,6 +2016,7 @@ impl Sidebar {
     /// matches best, or else on its first.
     fn rebuild(&mut self) {
         let here_pane = self.here_place().ok();
+        let aloud = self.aloud.as_ref().and_then(aloud::Shown::from);
         let Some(host) = &self.host else {
             return;
         };
@@ -2171,6 +2198,9 @@ impl Sidebar {
                     let icon = program.and_then(icons::of);
                     let (machine, session) = (machine.clone(), listed.clone());
                     let review = agent(pane.id).and_then(ReviewRow::of);
+                    let speaks = aloud.is_some_and(|(on, named, id)| {
+                        *on == machine && named == session.name().as_str() && id == pane.id
+                    });
                     let row = move |bracket| Row::Pane {
                         machine,
                         session,
@@ -2184,6 +2214,7 @@ impl Sidebar {
                         checkout,
                         review,
                         bracket,
+                        speaks,
                     };
                     shown.entry(pane.tab).or_default().push((row, found));
                 }
@@ -3848,6 +3879,9 @@ impl Sidebar {
             let going = format!("Going to {session}; this session ends once you are there");
             notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
         }
+        if let Some(aloud) = &self.aloud {
+            notes.push(aloud.line(width));
+        }
         let room = height.saturating_sub(HEADER + 1 + notes.len());
         let above = notes.len();
         let (lines, spotted) = match self.bottom() {
@@ -4455,11 +4489,14 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             vec![Line::from(spans)]
         },
-        Row::Pane { here, unread, marked, icon, label, hits, checkout, review, bracket, .. } => {
+        Row::Pane {
+            here, unread, marked, icon, label, hits, checkout, review, bracket, speaks, ..
+        } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map(|since| age(since, now)).unwrap_or_default();
-            let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
+            let speaker = if *speaks { aloud::MARK.width() + 1 } else { 0 };
+            let reserve = speaker + if age.is_empty() { 0 } else { age.width() + 1 };
             // A pane with no mark, of an agent or of a command, is dimmed,
             // and its icon is drawn as its label is.
             let label_style = match mark {
@@ -4486,9 +4523,13 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             spans.push(Span::raw(" "));
             let room = width.saturating_sub(LABEL + reserve + 1);
             let (shown, wide) = lit(label, room, Keep::Start, hits, label_style);
-            let gap = width.saturating_sub(LABEL + wide + age.width() + 1);
+            let gap = width.saturating_sub(LABEL + wide + speaker + age.width() + 1);
             spans.extend(shown);
             spans.push(Span::raw(" ".repeat(gap)));
+            if *speaks {
+                spans.push(Span::styled(aloud::MARK, Style::new().fg(ACCENT)));
+                spans.push(Span::raw(" "));
+            }
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
             if let Some(checkout) = checkout {
@@ -4972,6 +5013,7 @@ mod tests {
             unread_files: Vec::new(),
             remotes: Vec::new(),
             unread_hosts: Some(0),
+            sayings: Vec::new(),
         }
     }
 
@@ -8196,6 +8238,7 @@ mod tests {
             pull_requests: Vec::new(),
             unread_sockets: Some(0),
             unread_files: Vec::new(),
+            sayings: Vec::new(),
         })
     }
 
@@ -9084,5 +9127,31 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).1, [3, 4]);
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 7), area);
         assert_eq!(names_listed(&sidebar), ["y", "z", "x", "x"]);
+    }
+
+    /// What is being read aloud has a line at the bottom, and a mark on the
+    /// row of the pane it comes from, and on no other.
+    #[test]
+    fn what_is_read_aloud_has_a_line_and_a_mark_on_its_row() {
+        let panes = vec![pane(1, 0, "/one", "one"), pane(2, 0, "/two", "two")];
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(vec![session("work", 100, panes)], Vec::new()));
+        let marked = |sidebar: &mut Sidebar| {
+            let shown = screen(sidebar, false, 40, 12);
+            shown.into_iter().filter(|row| row.contains(aloud::MARK)).collect::<Vec<_>>()
+        };
+        assert_eq!(marked(&mut sidebar), [""; 0]);
+
+        let speaker = Zellij { named: "old".to_owned(), session: Some("work".to_owned()), pane: 2 };
+        let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
+        let text = "the tests pass".to_owned();
+        sidebar.aloud(Some(aloud::Shown::Reading { whose, text }));
+        let rows = marked(&mut sidebar);
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert!(rows[0].contains("two"), "{rows:#?}");
+        assert!(rows[1].contains("work · the tests pass"), "{rows:#?}");
+
+        sidebar.aloud(None);
+        assert_eq!(marked(&mut sidebar), [""; 0]);
     }
 }

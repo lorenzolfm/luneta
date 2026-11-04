@@ -13,9 +13,14 @@
 //! agent, which `luneta clicked` tells the luneta that holds the lock, and
 //! which that one tells the one whose window had the focus last, to go to
 //! that agent's pane. A group names an agent, as `group` says, and names
-//! its notification on macOS too.
+//! its notification on macOS too. And `selected` and what you selected, in
+//! base64, or nothing, as you press `Alt u` in a luneta that does not hold the
+//! lock: the one that does reads aloud for them all. And `dictating` and
+//! `dictated`, as you begin and end dictating in one, as what plays waits on
+//! the microphone, wherever it is you dictate.
 
 use std::collections::HashMap;
+use base64::Engine as _;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::net::Shutdown;
@@ -54,6 +59,10 @@ const WRITES: Duration = Duration::from_millis(200);
 /// agents of a pane.
 const LINE_BYTES: u64 = 64 * 1024;
 
+/// The most of a selection a luneta hands on, so that its line, in base64, is
+/// under `LINE_BYTES`: half an hour of speech or so.
+const SELECTED_BYTES: usize = 40 * 1024;
+
 /// What came of the lock, or of another luneta of this machine.
 pub enum Heard {
     /// This luneta holds the lock now: the file it holds it on, which lets
@@ -75,6 +84,8 @@ pub enum Peered {
     /// It looks at the panes of these agents, in its window, which has the
     /// focus.
     Looks(Vec<Key>),
+    /// You dictate in it, or no longer do.
+    Dictating(bool),
     /// It went, as it ended, or as it holds the lock now.
     Gone,
 }
@@ -85,7 +96,14 @@ enum Line {
     Focused,
     Looks(Vec<Key>),
     Clicked(Key),
+    /// `Alt u`, with what is selected there, which may be nothing.
+    Selected(String),
+    /// You dictate there, or no longer do.
+    Dictating(bool),
 }
+
+/// Encodes what is selected for a line, and back.
+const SELECTION: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 impl Line {
     /// The line `text` says, or none: one of a word not known here, or of a
@@ -96,6 +114,12 @@ impl Line {
             "focused" => Line::Focused,
             "looks" => Line::Looks(words.by_ref().map(key_of).collect::<Option<_>>()?),
             "clicked" => Line::Clicked(key_of(words.next()?)?),
+            "selected" => {
+                let selected = SELECTION.decode(words.next().unwrap_or_default()).ok()?;
+                Line::Selected(String::from_utf8(selected).ok()?)
+            },
+            "dictating" => Line::Dictating(true),
+            "dictated" => Line::Dictating(false),
             _ => return None,
         };
         words.next().is_none().then_some(line)
@@ -109,6 +133,9 @@ impl Line {
                 keys.iter().fold("looks".to_owned(), |line, key| line + " " + &group(key)) + "\n"
             },
             Line::Clicked(key) => format!("clicked {}\n", group(key)),
+            Line::Selected(selected) => format!("selected {}\n", SELECTION.encode(selected)),
+            Line::Dictating(true) => "dictating\n".to_owned(),
+            Line::Dictating(false) => "dictated\n".to_owned(),
         }
     }
 }
@@ -212,8 +239,10 @@ fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
     for line in lines(stream) {
         let event = match line {
             Line::Clicked(key) => Event::Clicked(key),
+            Line::Selected(selected) => Event::ReadAloud(selected),
             Line::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
             Line::Looks(keys) => Event::Peers(Heard::Peer(number, Peered::Looks(keys))),
+            Line::Dictating(now) => Event::Peers(Heard::Peer(number, Peered::Dictating(now))),
         };
         // luneta is on its way out.
         if events.send(event).is_err() {
@@ -262,6 +291,8 @@ struct Peer {
     stream: UnixStream,
     /// The agents of the pane it looks at, while its window has the focus.
     looks: Vec<Key>,
+    /// Whether you dictate in it: this goes as it goes, however it ended.
+    dictating: bool,
 }
 
 impl Peers {
@@ -269,7 +300,7 @@ impl Peers {
     pub fn heard(&mut self, number: u64, peered: Peered) {
         match peered {
             Peered::Came(stream) => {
-                self.peers.insert(number, Peer { stream, looks: Vec::new() });
+                self.peers.insert(number, Peer { stream, looks: Vec::new(), dictating: false });
             },
             Peered::Focused => {
                 if self.peers.contains_key(&number) {
@@ -279,6 +310,11 @@ impl Peers {
             Peered::Looks(looks) => {
                 if let Some(peer) = self.peers.get_mut(&number) {
                     peer.looks = looks;
+                }
+            },
+            Peered::Dictating(now) => {
+                if let Some(peer) = self.peers.get_mut(&number) {
+                    peer.dictating = now;
                 }
             },
             Peered::Gone => self.gone(number),
@@ -300,6 +336,11 @@ impl Peers {
     /// The agents of the panes the others look at.
     pub fn looks(&self) -> Vec<Key> {
         self.peers.values().flat_map(|peer| peer.looks.iter().cloned()).collect()
+    }
+
+    /// Whether you dictate in another.
+    pub fn dictating(&self) -> bool {
+        self.peers.values().any(|peer| peer.dictating)
     }
 
     /// Tells the luneta whose window had the focus last, where that is
@@ -326,12 +367,16 @@ pub struct Reaching {
     told: Sender<Tell>,
     /// What it told last of where you look, to tell only what changed.
     looks: Vec<Key>,
+    /// And of whether you dictate.
+    dictating: bool,
 }
 
 /// What the thread that reaches the luneta that holds the lock is told.
 enum Tell {
     Focus(bool),
     Looks(Vec<Key>),
+    Selected(String),
+    Dictating(bool),
 }
 
 impl Reaching {
@@ -341,13 +386,21 @@ impl Reaching {
     pub fn to(socket: PathBuf, focused: bool, events: Sender<Event>) -> Reaching {
         let (told, telling) = mpsc::channel();
         thread::spawn(move || reach(&socket, &telling, focused, &events));
-        Reaching { told, looks: Vec::new() }
+        Reaching { told, looks: Vec::new(), dictating: false }
     }
 
     /// luneta's window took the focus, or let it go, as `focused` says.
     pub fn focus(&mut self, focused: bool) {
         // A thread that ended takes no more.
         let _ = self.told.send(Tell::Focus(focused));
+    }
+
+    /// You pressed `Alt u` with `selected` selected: as much of it as a line
+    /// carries, with the character it ends in whole.
+    pub fn selected(&self, selected: &str) {
+        let end = selected.floor_char_boundary(SELECTED_BYTES);
+        // A thread that ended takes no more.
+        let _ = self.told.send(Tell::Selected(selected[..end].to_owned()));
     }
 
     /// You look at the panes of the agents of `looks`, in luneta's window,
@@ -359,37 +412,49 @@ impl Reaching {
             let _ = self.told.send(Tell::Looks(looks.to_vec()));
         }
     }
+
+    /// You dictate in this luneta, or no longer do, as `dictating` says.
+    pub fn dictating(&mut self, dictating: bool) {
+        if self.dictating != dictating {
+            self.dictating = dictating;
+            // A thread that ended takes no more.
+            let _ = self.told.send(Tell::Dictating(dictating));
+        }
+    }
 }
 
 /// Tells the luneta that hears on `socket` what `telling` says, and all of
 /// it again whenever it reaches one anew, until `telling` ends; and hands
 /// `events` the clicks it is told of.
 fn reach(socket: &Path, telling: &Receiver<Tell>, mut focused: bool, events: &Sender<Event>) {
-    let mut looks = Vec::new();
+    let (mut looks, mut dictating) = (Vec::new(), false);
     loop {
         if let Ok(stream) = UnixStream::connect(socket)
-            && !talk(&stream, telling, &mut focused, &mut looks, events)
+            && !talk(&stream, telling, &mut focused, &mut looks, &mut dictating, events)
         {
             return;
         }
         match telling.recv_timeout(AGAIN) {
             Ok(Tell::Focus(now)) => focused = now,
             Ok(Tell::Looks(now)) => looks = now,
-            Err(RecvTimeoutError::Timeout) => {},
+            Ok(Tell::Dictating(now)) => dictating = now,
+            // The luneta it was for is gone, and its voice with it.
+            Ok(Tell::Selected(_)) | Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
 
 /// Talks to the luneta at the other end of `stream`, which holds the lock,
-/// until it goes: tells it at once what `focused` and `looks` say, and then
-/// what `telling` says, as it comes. Whether to reach for one again, as
-/// `telling` has not ended.
+/// until it goes: tells it at once what `focused`, `looks` and `dictating` say,
+/// and then what `telling` says, as it comes. Whether to reach for one again,
+/// as `telling` has not ended.
 fn talk(
     stream: &UnixStream,
     telling: &Receiver<Tell>,
     focused: &mut bool,
     looks: &mut Vec<Key>,
+    dictating: &mut bool,
     events: &Sender<Event>,
 ) -> bool {
     let _ = stream.set_write_timeout(Some(WRITES));
@@ -409,7 +474,9 @@ fn talk(
         });
     }
     let tell = |line: Line| (&*stream).write_all(line.said().as_bytes()).is_ok();
-    let mut talking = tell(Line::Looks(looks.clone())) && (!*focused || tell(Line::Focused));
+    let mut talking = tell(Line::Looks(looks.clone()))
+        && (!*focused || tell(Line::Focused))
+        && (!*dictating || tell(Line::Dictating(true)));
     while talking {
         match telling.recv_timeout(AGAIN) {
             Ok(Tell::Focus(now)) => {
@@ -419,6 +486,11 @@ fn talk(
             Ok(Tell::Looks(now)) => {
                 *looks = now;
                 talking = tell(Line::Looks(looks.clone()));
+            },
+            Ok(Tell::Selected(selected)) => talking = tell(Line::Selected(selected)),
+            Ok(Tell::Dictating(now)) => {
+                *dictating = now;
+                talking = tell(Line::Dictating(now));
             },
             Err(RecvTimeoutError::Timeout) => talking = !gone.load(Ordering::Relaxed),
             Err(RecvTimeoutError::Disconnected) => {
@@ -469,6 +541,10 @@ mod tests {
             Line::Focused,
             Line::Looks(Vec::new()),
             Line::Looks(vec![key(41), far(7)]),
+            Line::Selected(String::new()),
+            Line::Selected("two words\nand a line é".to_owned()),
+            Line::Dictating(true),
+            Line::Dictating(false),
             Line::Clicked(far(7)),
         ];
         for line in lines {
@@ -548,6 +624,59 @@ mod tests {
         assert!(matches!(peered, Peered::Gone));
         peers.heard(number, peered);
         assert!(!peers.hand(&key(41)), "the luneta that went is told nothing");
+    }
+
+    /// Takes in what the others say until `done`, within a few seconds.
+    fn hear_until(heard: &Receiver<Event>, peers: &mut Peers, done: impl Fn(&Peers) -> bool) {
+        while !done(peers) {
+            let (number, peered) = next(heard);
+            peers.heard(number, peered);
+        }
+    }
+
+    /// The luneta that holds the lock knows you dictate in another, whichever
+    /// came first; hears that you stopped, and lets go once it goes, however it
+    /// ended, so that no window that died keeps what plays waiting for good.
+    #[test]
+    fn the_luneta_that_holds_the_lock_knows_you_dictate_in_another_until_it_goes() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (clicks, _clicked) = mpsc::channel();
+        let mut reaching = Reaching::to(socket.clone(), false, clicks);
+        reaching.dictating(true);
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("it listens");
+
+        let mut peers = Peers::default();
+        assert!(!peers.dictating());
+        hear_until(&heard, &mut peers, Peers::dictating);
+        reaching.dictating(false);
+        hear_until(&heard, &mut peers, |peers| !peers.dictating());
+        reaching.dictating(true);
+        hear_until(&heard, &mut peers, Peers::dictating);
+        drop(reaching);
+        hear_until(&heard, &mut peers, |peers| !peers.dictating());
+        assert!(peers.peers.is_empty());
+    }
+
+    /// A luneta that comes to hold the lock after another ended hears of it
+    /// anew from those it reaches: it has told no one but the one that went.
+    #[test]
+    fn a_luneta_that_comes_to_hold_the_lock_is_told_you_dictate_in_another() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (clicks, _clicked) = mpsc::channel();
+        let mut reaching = Reaching::to(socket.clone(), false, clicks);
+        let first = UnixListener::bind(&socket).expect("it listens");
+        let (stream, _) = first.accept().expect("the other comes");
+        reaching.dictating(true);
+        assert!(lines(stream).any(|line| line == Line::Dictating(true)));
+        drop(first);
+
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("another listens");
+        let mut second = Peers::default();
+        hear_until(&heard, &mut second, Peers::dictating);
     }
 
     /// What `luneta clicked` tells the luneta that holds the lock reaches

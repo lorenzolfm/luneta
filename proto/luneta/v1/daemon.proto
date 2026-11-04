@@ -144,6 +144,13 @@ service Daemon {
   // there is none. An image that does not all come, or does not start as a PNG
   // does, is kept by no name an image goes by, however the daemon ends.
   rpc KeepImage(stream KeepImageRequest) returns (stream KeepImageResponse);
+  // Takes what is to be read aloud on the machine you sit at, as `luneta say`
+  // gives it, and answers once it has it, without waiting for it to be read,
+  // or for anyone to be there to read it: the daemon puts it in
+  // `Host.sayings`, for luneta's window to read, here or on another machine.
+  // What says nothing, is too long, or names a session by what zellij takes
+  // for no name, is answered as an invalid argument.
+  rpc Say(SayRequest) returns (SayResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -719,6 +726,51 @@ message Host {
   // may leave out a machine the file names. The daemon's log says why.
   // Absent from a daemon older than this field, which watches no machine.
   optional uint32 unread_hosts = 10;
+  // What `Say` last took, oldest first: the last 16 at the most, and none
+  // it took over two minutes ago. A window reads those later than it saw in
+  // the answer before. Those in its first answer of a machine it leaves.
+  repeated Saying sayings = 11;
+}
+
+// What is to be said aloud, or that nothing more is.
+message Say {
+  // One of these, always: a client that finds none has a newer daemon's.
+  oneof does {
+    // Read after what waits to be read.
+    Utterance in_turn = 1;
+    // Read at once, before what waits, and cutting off what is being read.
+    Utterance now = 2;
+    // Stop what is being read, and let go of what waits.
+    Stop stop = 3;
+  }
+
+  message Stop {}
+}
+
+// What to read aloud, and who it comes from.
+message Utterance {
+  // Never empty, nor, with `speaker.named`, over the 16 KiB `Say` takes.
+  string text = 1;
+  // The pane it comes from: none from outside zellij. `Say` goes by `named`,
+  // a name zellij takes, and sets `session` itself, whatever it was asked with.
+  optional Zellij speaker = 2;
+}
+
+message SayRequest {
+  // Always there.
+  Say say = 1;
+}
+
+message SayResponse {}
+
+// What `Say` took, as `Host.sayings` lists it.
+message Saying {
+  // The daemon that took it, whose numbers begin again after it restarts.
+  uint32 pid = 1;
+  // Each later than the last that daemon took.
+  uint64 number = 2;
+  // Always there.
+  Say say = 3;
 }
 
 // A machine the daemon watches besides its own, through
@@ -753,6 +805,7 @@ message Remote {
     repeated PullRequest pull_requests = 6;
     optional uint32 unread_sockets = 7;
     repeated UnreadFile unread_files = 8;
+    repeated Saying sayings = 11;
   }
 
   // What the daemon has of a machine that its daemon does not answer for:

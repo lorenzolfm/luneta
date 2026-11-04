@@ -138,6 +138,41 @@ impl Desktop {
         }
     }
 
+    /// Whether this luneta is the one of its machine that reads aloud: the one
+    /// that holds the lock, which none over ssh ever does.
+    pub fn reads_aloud(&self) -> bool {
+        matches!(self.role, Role::Holder { .. })
+    }
+
+    /// You dictate in this luneta, or no longer do, as `dictating` says, for
+    /// the one of its machine that reads aloud to know, where that is another.
+    pub fn dictating(&mut self, dictating: bool) {
+        if let Role::Peer(reaching) = &mut self.role {
+            reaching.dictating(dictating);
+        }
+    }
+
+    /// Whether you dictate in another luneta of this machine, which this one
+    /// reads aloud for.
+    pub fn another_dictates(&self) -> bool {
+        match &self.role {
+            Role::Holder { peers, .. } => peers.dictating(),
+            Role::Peer(_) | Role::Unsure => false,
+        }
+    }
+
+    /// Hands `Alt u`, with `selected`, to the luneta of this machine that reads
+    /// aloud, where another does: whether it did.
+    pub fn hand_read(&self, selected: &str) -> bool {
+        match &self.role {
+            Role::Peer(reaching) => {
+                reaching.selected(selected);
+                true
+            },
+            Role::Holder { .. } | Role::Unsure => false,
+        }
+    }
+
     /// You look at the panes of the agents of `keys` in luneta's window,
     /// which has the focus, or at none.
     pub fn looking(&mut self, keys: &[Key]) {

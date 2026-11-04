@@ -564,6 +564,7 @@ async fn watched(
             unread_files,
             remotes: _,
             unread_hosts: _,
+            sayings,
         } = host;
         let host = remote::Host {
             sessions,
@@ -573,6 +574,7 @@ async fn watched(
             pull_requests,
             unread_sockets,
             unread_files,
+            sayings,
         };
         if !told(&core, &destination, Reached::Host(host)) {
             return;

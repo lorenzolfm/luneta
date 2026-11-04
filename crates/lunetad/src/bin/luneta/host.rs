@@ -16,7 +16,8 @@
 //! dictates, held or tapped, into the pane zellij is on or the ask box, in a
 //! box along the bottom of zellij that has the keys and the mouse until what
 //! you said is written. What the mouse drags on zellij stays with zellij
-//! under a box too.
+//! under a box too. `Alt u` reads aloud what zellij copied last, and stops
+//! what is being read.
 //! A click on an entry of the menu, a key a line of keys names, a skill the
 //! menu's search finds, or a row of the picker, does what its key does, or
 //! `Enter` on it, as each said where it drew them; and the one under the
@@ -55,6 +56,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
 use crate::alerts::{self, Alerts};
+use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
 use crate::away;
@@ -71,6 +73,7 @@ use crate::input;
 use crate::keys;
 use crate::machines::{self, Added, Machine};
 use crate::menu::{self, Choice};
+use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
 use crate::order::{self, Order};
@@ -82,7 +85,7 @@ use crate::review;
 use crate::pull::{self, Ready};
 use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
-use crate::speech::{self, Fetched, Speech, Spoken};
+use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit};
 use crate::starts::{self, First, Sought, Start};
 use crate::width::Width;
@@ -148,6 +151,12 @@ pub enum Event {
     Nameable { number: u64, skills: Result<Vec<Skill>, String> },
     /// How the fetch of the speech model goes.
     Fetched(Fetched),
+    /// What came of what the voice read, numbered `number`.
+    Voiced { number: u64, ended: Result<(), String> },
+    /// How the fetch of the voice goes.
+    VoiceFetched(Fetched),
+    /// `Alt u` in another luneta of this machine, with what is selected there.
+    ReadAloud(String),
     /// A fold was made or taken away where the folds are kept: by another
     /// luneta, or by this one.
     Folds,
@@ -643,6 +652,13 @@ struct App {
     /// When the key that dictates last went down, by which a press of it
     /// that is the key held is its repeat.
     repeats: dictation::Repeats,
+    /// And when the key that reads aloud did.
+    aloud_repeats: dictation::Repeats,
+    /// What luneta reads aloud.
+    aloud: Aloud,
+    /// What zellij last copied, as it does a selection as the mouse lets go,
+    /// for `Alt u` to read: it is not kept past that.
+    copied: Option<String>,
     /// The thread that runs the speech model, from the first dictation on.
     speech: Option<Speech>,
     /// The fetch of the speech model, while it is on its way.
@@ -913,7 +929,10 @@ fn run_in(
         pickers: 0,
         dictations: 0,
         image: images::Going::default(),
-        repeats: dictation::Repeats::default(),
+        repeats: dictation::Repeats::of(dictation::KEY),
+        aloud_repeats: dictation::Repeats::of(aloud::KEY),
+        aloud: Aloud::new(events.clone()),
+        copied: None,
         speech: None,
         fetching: None,
         releases,
@@ -1141,6 +1160,9 @@ impl App {
                     let acts = self.alerts.heard(machines, Instant::now());
                     self.alert(acts);
                 }
+                if let Some(sayings) = self.sidebar.sayings() {
+                    self.aloud.hear(sayings, self.desktop.reads_aloud());
+                }
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => {
@@ -1173,6 +1195,7 @@ impl App {
                     let acts = self.alerts.again();
                     self.alert(acts);
                 }
+                self.hold_aloud();
             },
             Event::Opened { menu, opened } => {
                 let asked = self.sidebar.opened(menu, opened);
@@ -1233,6 +1256,20 @@ impl App {
                 }
             },
             Event::Fetched(fetched) => self.fetched(&fetched),
+            Event::Voiced { number, ended } => {
+                if let Some(why) = self.aloud.ended(number, ended) {
+                    self.sidebar.notify(why);
+                }
+            },
+            Event::VoiceFetched(fetched) => {
+                if let Some(why) = self.aloud.fetch_went(fetched) {
+                    self.sidebar.notify(why);
+                }
+            },
+            Event::ReadAloud(selected) => {
+                let read = self.aloud.key(Some(&selected));
+                self.read_aloud_went(read);
+            },
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
         }
@@ -1458,7 +1495,8 @@ impl App {
 
     fn key(&mut self, key: &KeyEvent) {
         let now = Instant::now();
-        let key = &self.repeats.read(*key, now);
+        let key = self.repeats.read(*key, now);
+        let key = &self.aloud_repeats.read(key, now);
         // The dictation box takes every key, going up too, until it closes.
         if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
             match dictation.key(key, now) {
@@ -1474,13 +1512,19 @@ impl App {
         let chord = (key.code, key.modifiers);
         // No key going up reaches what is under the box, nor the key that
         // dictates, held down past the box it opened, as it repeats: it
-        // would type itself there, or open the box again.
+        // would type itself there, or open the box again. Nor does the key
+        // that reads aloud repeat, which would read and stop by turns.
         if key.kind == KeyEventKind::Release
-            || (chord == dictation::KEY && key.kind == KeyEventKind::Repeat)
+            || (key.kind == KeyEventKind::Repeat
+                && (chord == dictation::KEY || chord == aloud::KEY))
         {
             return;
         }
         if chord == dictation::KEY && self.dictate() {
+            return;
+        }
+        if chord == aloud::KEY {
+            self.read_aloud();
             return;
         }
         match &mut self.focus.over {
@@ -2106,6 +2150,36 @@ impl App {
         Skills::Finding
     }
 
+    /// `Alt u`: what plays stops, and else what zellij copied last is read, by
+    /// this luneta where it is the one of its machine that reads aloud, or by
+    /// the one that is. A luneta over ssh has no speakers of yours.
+    fn read_aloud(&mut self) {
+        if self.desktop.reads_aloud() {
+            let read = self.aloud.key(self.copied.as_deref());
+            self.read_aloud_went(read);
+        } else if !self.desktop.hand_read(self.copied.as_deref().unwrap_or_default()) {
+            let why = "this luneta reads nothing aloud: it has no speakers of yours";
+            self.sidebar.notify(why.to_owned());
+        }
+    }
+
+    /// What plays waits while you dictate, in this luneta or another of its
+    /// machine, and goes on after: the microphone would hear the speakers, and
+    /// write what they say. As `give_from` sets what the focus is, and each peer
+    /// is told only what changed, every way a box closes comes through here.
+    fn hold_aloud(&mut self) {
+        let here = matches!(self.focus.over, Some(Over::Dictation(..)));
+        self.desktop.dictating(here);
+        self.aloud.hold(here || self.desktop.another_dictates());
+    }
+
+    /// Says why `Alt u` read nothing, if it did not.
+    fn read_aloud_went(&mut self, read: Result<(), &str>) {
+        if let Err(why) = read {
+            self.sidebar.notify(why.to_owned());
+        }
+    }
+
     /// Closes the dictation box, which gives up the dictation it is at, if it
     /// is still at one, and gives the keys back to what it was over. What you
     /// `dictated`, if anything, is written there as it closes: as [`pastes`]
@@ -2565,6 +2639,7 @@ impl App {
             ) => Keys::Zellij,
         });
         self.focus = focus;
+        self.hold_aloud();
         if self.focused
             && has != had
             && let Some(bytes) = keys::focus(has, self.client.hosted.mode())
@@ -2638,6 +2713,7 @@ impl App {
                     ClipboardType::Clipboard => 'c',
                     ClipboardType::Selection => 'p',
                 };
+                self.copied = Some(text.clone());
                 let text = base64::engine::general_purpose::STANDARD.encode(text);
                 let backend = terminal.backend_mut();
                 write!(backend, "\x1b]52;{which};{text}\x07")?;
@@ -2898,6 +2974,7 @@ impl App {
     }
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        self.sidebar.aloud(self.aloud.shown());
         whole(terminal, |terminal| self.frame(terminal))
     }
 

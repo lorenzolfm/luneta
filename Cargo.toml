@@ -16,6 +16,19 @@ opt-level = "z"
 lto = true
 strip = true
 
+# Built without optimizing, the voice that reads aloud makes a fifth of a second
+# of speech a second, too slow to hear. With these, eight seconds.
+[profile.dev.package.ptts]
+opt-level = 3
+[profile.dev.package.xn]
+opt-level = 3
+[profile.dev.package.xn-gemm]
+opt-level = 3
+[profile.dev.package.xn-gemm-common]
+opt-level = 3
+[profile.dev.package.xn-gemm-f32]
+opt-level = 3
+
 # `all` and `pedantic` at the bottom, then the `restriction` lints that are worth
 # warning on top of them, then the pedantic lints that cost more than they catch.
 # Priority orders the overlap: a later priority wins, so the explicit entries

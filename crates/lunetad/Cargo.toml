@@ -26,8 +26,9 @@ alacritty_terminal = "0.26.0"
 # the tree by way of alacritty_terminal.
 base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
-# The microphone, while you dictate: ALSA's default input on Linux, which
-# PipeWire and PulseAudio serve, and CoreAudio's on macOS.
+# The microphone, while you dictate, and the speakers, while luneta reads
+# aloud: ALSA's defaults on Linux, which PipeWire and PulseAudio serve, and
+# CoreAudio's on macOS.
 cpal = "0.18.2"
 # Sets luneta's terminal's modes. What `input` reads of it are crossterm's keys
 # and mouse, which `keys` and the sidebar take.
@@ -43,6 +44,11 @@ luneta-protocol = { path = "../protocol" }
 # FSEvents on macOS.
 notify = "8.2.0"
 prost = "0.14.4"
+# Runs the voice that reads aloud, on this machine: Phonon, in Rust, on the CPU.
+# `hf` reads its tokenizer. Exact, as it went from 0.4 to 0.6 in ten days, and
+# as `xn`, which it runs on, is named here too for the size of its pool of
+# threads: which only the version `ptts` builds on can be told.
+ptts = { version = "=0.6.0", features = ["hf"] }
 # Draws luneta's frame, and puts on the terminal only what changed in it.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 # For the uid the runtime folder must belong to: std has no safe getuid. And
@@ -78,6 +84,7 @@ unicode-width = { version = "0.2.2", default-features = false }
 # The shell the user database names yours, which a tab luneta opens runs:
 # std has no safe getpwuid, nor rustix any. Its libc is in the tree already.
 uzers = { version = "0.12.2", default-features = false }
+xn = "=0.2.13"
 # Makes the worktree of a pull request or an issue pasted in the sidebar, as
 # `wt add` does: wt's own code, of a commit of its, so that no `wt` need be on
 # the `PATH`, and what wt says of it is luneta's to read, in its own types.
@@ -88,11 +95,14 @@ wt = { git = "https://github.com/lorenzolfm/wt", rev = "eb50a4794b7989398751d47e
 [target.'cfg(target_os = "macos")'.dependencies]
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Keeps what alsa-lib says of what goes wrong off luneta's terminal, where cpal
+# does not. Already in the tree by way of cpal.
+alsa = "0.11.0"
 # Puts luneta's notifications up on freedesktop's notification server, and
 # hears the clicks on them, over D-Bus: on tokio, which luneta runs already,
 # in place of async-io. macOS has terminal-notifier.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-zbus = { version = "6.2.1", default-features = false, features = ["proxy", "tokio"] }
+zbus ={ version = "6.2.1", default-features = false, features = ["proxy", "tokio"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"
