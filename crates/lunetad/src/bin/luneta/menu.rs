@@ -152,6 +152,14 @@ const FLOATING: (usize, usize) = (24, 62);
 /// What a key that starts an agent starts.
 const CLAUDE: &str = "claude";
 
+/// The key that waits for what to yank at the top of the sidebar, what the
+/// legend names it, the key that then yanks a pull request's link, and what
+/// is said of that key.
+const YANK: char = 'y';
+const YANK_NAME: &str = "Yank";
+pub const YANK_PULL: char = 'p';
+const YANK_PULL_DOES: &str = "PR link";
+
 /// What the menu says of a key that starts an agent, or opens a pane, a tab
 /// or a session, on a session's row, which the highlight is only on while it
 /// lists none of the session's panes: folded, or with none to list.
@@ -192,17 +200,20 @@ pub enum Command {
     /// Selects the session of the highlighted row, or the machine of the
     /// highlighted header, for `Top::Shift` to move, and ends the selection.
     Reorder,
+    /// Opens the pull request of the highlighted row in your browser.
+    Open,
 }
 
 impl Command {
     /// Every command, in the order the legend lists them.
-    const ALL: [Command; 3] = [Command::Search, Command::Unread, Command::Reorder];
+    const ALL: [Command; 4] = [Command::Search, Command::Unread, Command::Reorder, Command::Open];
 
     const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Unread => 'u',
             Command::Reorder => 'v',
+            Command::Open => 'o',
         }
     }
 
@@ -213,6 +224,7 @@ impl Command {
             Command::Search => "Search",
             Command::Unread => "Unread",
             Command::Reorder => "Reorder",
+            Command::Open => "Open PR",
         }
     }
 
@@ -243,13 +255,18 @@ pub enum Top {
     Fold(Option<bool>),
     /// Opens the menu on its first group, where every key is the menu's.
     Menu,
+    /// Waits for what to yank, as vim's `y` waits for a motion: `YANK_PULL`
+    /// copies the link of the highlighted row's pull request. Any other key
+    /// drops it, `Esc` doing only that, as after a lone `First`.
+    Yank,
     /// Runs a command of the sidebar's own.
     Command(Command),
 }
 
 impl Top {
     /// What `key` does at the top of the sidebar besides a command: moves the
-    /// highlight or the sessions selected, folds, or opens the menu.
+    /// highlight or the sessions selected, folds, opens the menu, or waits for
+    /// what to yank.
     const fn moves(key: char) -> Option<Top> {
         match key {
             'j' => Some(Top::Move(1)),
@@ -262,6 +279,7 @@ impl Top {
             'l' => Some(Top::Fold(Some(false))),
             ' ' => Some(Top::Fold(None)),
             'm' => Some(Top::Menu),
+            YANK => Some(Top::Yank),
             _ => None,
         }
     }
@@ -510,6 +528,9 @@ enum Entry {
     /// A command of the sidebar's own, which the legend lists beside the
     /// menu's keys.
     Command(Command),
+    /// The key that yanks a pull request's link, which the bottom of the
+    /// sidebar lists while `y` waits.
+    YankPull,
     /// A key of the menu for what was pasted, a pull request's link, an
     /// issue's or a file's path, which that menu shows.
     Pull(Pull, Asks),
@@ -533,6 +554,7 @@ impl Entry {
             Entry::Last(last) => last.key(),
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
+            Entry::YankPull => YANK_PULL,
             Entry::Pull(pull, asks) => pull.key(*asks),
             Entry::Search => SEARCH,
             Entry::Ask => ASK,
@@ -647,12 +669,14 @@ impl Keys {
         Keys { root, open: Vec::new(), search: None }
     }
 
-    /// The legend: the sidebar's commands, then the keys at the top of the
-    /// menu, but for those a command has, or the sidebar moves with, which
-    /// `m` reaches. It shows the Delete group's key and not what it deletes,
-    /// which is the row's, so any row's will do.
+    /// The legend: the sidebar's commands, and what `y` waits on, which it
+    /// lists as a group, then the keys at the top of the menu, but for those
+    /// a command has, or the sidebar moves with, which `m` reaches. It shows
+    /// the Delete group's key and not what it deletes, which is the row's, so
+    /// any row's will do.
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
+        root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: Vec::new() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
         let keys = Keys::new(Removes::Machine(Machine::Local), None);
         root.extend(keys.root.into_iter().filter(shown));
@@ -726,7 +750,9 @@ impl Keys {
             Entry::Ask => return Pressed::Ask,
             // The legend only shows, and runs nothing, as do the menu for a
             // pull request and the list of tabs, which take their keys themselves.
-            Entry::Command(_) | Entry::Pull(..) | Entry::Tab { .. } => return Pressed::Nothing,
+            Entry::Command(_) | Entry::YankPull | Entry::Pull(..) | Entry::Tab { .. } => {
+                return Pressed::Nothing;
+            },
             Entry::Group { .. } => {},
         }
         self.open.push(at);
@@ -2152,15 +2178,31 @@ fn title(keys: &Keys) -> String {
 /// leaves them to the menu, and the sidebar's command, each with what it
 /// does. Each is a spot that presses its key, by its line among them.
 pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
-    let keys = Keys::legend();
+    listed(TITLE, &Keys::legend().root, width, room)
+}
+
+/// What the bottom of the sidebar lists in the legend's place while `y` waits
+/// for what to yank, as `legend` lists it.
+pub fn yanks(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
+    listed(YANK_NAME, &[Entry::YankPull], width, room)
+}
+
+/// `entries` under a rule that names them `title`, `width` wide, in `room`
+/// lines at most, each a spot that presses its key, by its line among them.
+fn listed(
+    title: &str,
+    entries: &[Entry],
+    width: usize,
+    room: usize,
+) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     let mut lines = Vec::with_capacity(room);
     if room == 0 {
         return (lines, Spots::default());
     }
-    lines.push(rule(TITLE, "", width));
+    lines.push(rule(title, "", width));
     let inner = width.saturating_sub(1);
-    lines.extend(keys.root.iter().map(|entry| entry_line(entry, inner)).take(room - 1));
-    let spots = entry_spots(&keys.root, width).first(lines.len() - 1).down(1);
+    lines.extend(entries.iter().map(|entry| entry_line(entry, inner)).take(room - 1));
+    let spots = entry_spots(entries, width).first(lines.len() - 1).down(1);
     (lines, spots)
 }
 
@@ -2228,6 +2270,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Forget(_) => spans.push(does(FORGET_DOES)),
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
+        Entry::YankPull => spans.push(does(YANK_PULL_DOES)),
         Entry::Pull(pull, asks) => spans.push(does(pull.does(*asks))),
         Entry::Search => spans.push(does(SEARCH_DOES)),
         Entry::Ask => spans.push(does(ASK_DOES)),
@@ -2664,12 +2707,14 @@ mod tests {
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
-            text(&legend(31, 10).0),
+            text(&legend(31, 12).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
                 " u  Unread",
                 " v  Reorder",
+                " o  Open PR",
+                " y  Yank ▸",
                 " a  Ask",
                 " c  Claude ▸",
                 " n  New ▸",
@@ -2683,6 +2728,8 @@ mod tests {
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
+        assert_eq!(Top::of('o'), Some(Top::Command(Command::Open)));
+        assert_eq!(Top::of('y'), Some(Top::Yank));
         assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);
         assert_eq!(Top::of('n'), None);

@@ -1,11 +1,11 @@
 //! What a click does where luneta drew something it takes one on: an entry
 //! of the menu or the legend, a key a line of keys names, a skill of the
-//! search over them, a row of the picker. Each says, as it draws, what it
-//! drew where, and a click goes by what it said, so that what you see and
-//! what a click hits never disagree: to what drew it, while that has the
-//! mouse still, and to the row or the skill it drew there, wherever that is
-//! now. The spot under the pointer is lit, for you to see what a click there
-//! hits before you click.
+//! search over them, a row of the picker, the number of a pull request on a
+//! row of the sidebar. Each says, as it draws, what it drew where, and a click
+//! goes by what it said, so that what you see and what a click hits never
+//! disagree: to what drew it, while that has the mouse still, and to the row
+//! or the skill it drew there, wherever that is now. The spot under the
+//! pointer is lit, for you to see what a click there hits before you click.
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ use ratatui::style::Color;
 use crate::gruvbox;
 use crate::menu::Choice;
 use crate::picker::Pick;
+use crate::sidebar::PullLink;
 
 /// The background of the spot under the pointer, where the spot has none of
 /// its own: the softer of the highlight's two, which a row the highlight is
@@ -108,6 +109,25 @@ impl<S> Spots<S> {
             }
         }
     }
+
+    /// Lights the spot under `pointer` on `buffer` a step past whatever
+    /// background it has: a spot on a row the highlight may be on, which
+    /// `light` would leave as it is, and on your own pane's row at that.
+    fn raise(&self, buffer: &mut Buffer, pointer: Position) {
+        let Some((area, _)) = self.0.iter().find(|(area, _)| area.contains(pointer)) else {
+            return;
+        };
+        for at in area.positions() {
+            if let Some(cell) = buffer.cell_mut(at) {
+                let raised = match cell.bg {
+                    Color::Reset => POINTED,
+                    POINTED => gruvbox::BG2,
+                    _ => gruvbox::BG3,
+                };
+                cell.set_bg(raised);
+            }
+        }
+    }
 }
 
 /// What has the mouse drew last, and its spots, where they are on luneta's
@@ -117,8 +137,8 @@ impl<S> Spots<S> {
 #[derive(Debug, Default)]
 pub enum Drawn {
     /// Nothing that takes a click: a brief, the ask box or a note, or the
-    /// sidebar collapsed, or with nothing under the rows, or a box that had
-    /// no room.
+    /// sidebar collapsed, or a box that had no room; or nothing under the
+    /// rows, as the bottom of `Sidebar`.
     #[default]
     Nothing,
     /// The keys at the bottom of the sidebar, the legend's or the search's.
@@ -128,6 +148,9 @@ pub enum Drawn {
     Menu { number: u64, area: Option<Rect>, spots: Spots<Choice> },
     /// The picker numbered `number`, in the box `area`.
     Picker { number: u64, area: Rect, spots: Spots<Pick> },
+    /// The sidebar, with nothing over it: the numbers of the pull requests
+    /// on its rows, each with its link, over what is at its `bottom`.
+    Sidebar { numbers: Spots<PullLink>, bottom: Box<Drawn> },
 }
 
 /// Which keys at the bottom of the sidebar drew: the legend's, or the
@@ -147,6 +170,8 @@ pub enum Hit {
     Menu(u64, Choice),
     /// On the picker numbered so.
     Picker(u64, Pick),
+    /// On the number of a pull request, on a row of the sidebar.
+    Number(PullLink),
 }
 
 impl Drawn {
@@ -155,7 +180,7 @@ impl Drawn {
         match self {
             Drawn::Menu { area, .. } => *area,
             Drawn::Picker { area, .. } => Some(*area),
-            Drawn::Nothing | Drawn::Keys(..) => None,
+            Drawn::Nothing | Drawn::Keys(..) | Drawn::Sidebar { .. } => None,
         }
     }
 
@@ -170,6 +195,9 @@ impl Drawn {
             Drawn::Picker { number, spots, .. } => {
                 spots.at(at).cloned().map(|pick| Hit::Picker(*number, pick))
             },
+            Drawn::Sidebar { numbers, bottom } => {
+                numbers.at(at).cloned().map(Hit::Number).or_else(|| bottom.at(at))
+            },
         }
     }
 
@@ -180,6 +208,10 @@ impl Drawn {
             Drawn::Keys(_, spots) => spots.light(buffer, pointer),
             Drawn::Menu { spots, .. } => spots.light(buffer, pointer),
             Drawn::Picker { spots, .. } => spots.light(buffer, pointer),
+            Drawn::Sidebar { numbers, bottom } => {
+                numbers.raise(buffer, pointer);
+                bottom.light(buffer, pointer);
+            },
         }
     }
 
@@ -194,6 +226,10 @@ impl Drawn {
             },
             Drawn::Picker { number, area: boxed, spots } => {
                 Drawn::Picker { number, area: boxed, spots: spots.down(lines).placed(area) }
+            },
+            Drawn::Sidebar { numbers, bottom } => Drawn::Sidebar {
+                numbers: numbers.down(lines).placed(area),
+                bottom: Box::new(bottom.placed(lines, area)),
             },
         }
     }
@@ -276,6 +312,28 @@ mod tests {
         spots.light(&mut buffer, Position::new(2, 0));
         let lit: Vec<Color> = (0..6).map(|x| buffer[(x, 0)].bg).collect();
         assert_eq!(lit, [POINTED, gruvbox::BG2, POINTED, POINTED, Color::Reset, Color::Reset]);
+    }
+
+    /// The pointer lights a number on a row a step past what the row has, on
+    /// the highlight's two as well: it is on your own pane's row as often as
+    /// not.
+    #[test]
+    fn the_pointer_raises_a_number_whatever_its_row_is_on() {
+        let mut spots = Spots::default();
+        spots.add(0, 1..3, PullLink { number: 1, url: "https://x/1".to_owned() });
+        for (on, raised) in [
+            (Color::Reset, POINTED),
+            (POINTED, gruvbox::BG2),
+            (gruvbox::BG2, gruvbox::BG3),
+        ] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+            buffer.set_style(buffer.area, ratatui::style::Style::new().bg(on));
+            spots.raise(&mut buffer, Position::new(3, 0));
+            assert!(buffer.content().iter().all(|cell| cell.bg == on));
+            spots.raise(&mut buffer, Position::new(2, 0));
+            let lit: Vec<Color> = (0..4).map(|x| buffer[(x, 0)].bg).collect();
+            assert_eq!(lit, [on, raised, raised, on]);
+        }
     }
 
     /// A click hits a spot with what drew it, and the box over zellij is the

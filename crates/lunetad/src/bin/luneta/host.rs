@@ -21,7 +21,8 @@
 //! A click on an entry of the menu, a key a line of keys names, a skill the
 //! menu's search finds, or a row of the picker, does what its key does, or
 //! `Enter` on it, as each said where it drew them; and the one under the
-//! pointer is lit.
+//! pointer is lit. A click on the number of a pull request on a row of the
+//! sidebar copies its link, wherever the keys are.
 
 use std::collections::VecDeque;
 use std::env;
@@ -62,6 +63,7 @@ use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChang
 use crate::ask::{Ask, Heard, Keyed};
 use crate::away;
 use crate::brief::{self, Asking, Briefing, Written};
+use crate::browser;
 use crate::close::Act;
 use crate::desktop::{self, Desktop};
 use crate::dictation::{self, Dictated, Dictation};
@@ -119,6 +121,8 @@ pub enum Event {
     Stayed(u64),
     /// Something went wrong that the sidebar says.
     Notice(String),
+    /// A link for luneta's terminal to put on its clipboard.
+    Copy(String),
     /// What came of the image `Ctrl v` was to paste in an agent's pane on
     /// another machine.
     Image(Went),
@@ -1191,6 +1195,7 @@ impl App {
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Copy(text) => clip(terminal, ClipboardType::Clipboard, &text)?,
             Event::Image(went) => self.image_went(went),
             Event::ImageSlow(on) => self.sidebar.image_going(Some(on)),
             Event::Folds => self.sidebar.refold(),
@@ -1912,6 +1917,11 @@ impl App {
                     self.picked(did);
                 }
             },
+            // What the click was on is what it copies, whatever came since.
+            Hit::Number(link) => {
+                let asked = self.sidebar.number_clicked(link, SystemTime::now());
+                self.follow(asked);
+            },
             // A box opened over what drew it since.
             Hit::Menu(..) => {},
         }
@@ -1965,6 +1975,16 @@ impl App {
             Asked::Nothing => {},
             Asked::Take => self.give(Focus::on(Side::Sidebar)),
             Asked::Leave => self.leave(),
+            // Only the loop has luneta's terminal to write to, which an event
+            // reaches. luneta is on its way out where it does not.
+            Asked::Copy(text) => {
+                let _ = self.events.send(Event::Copy(text));
+            },
+            Asked::Browse(url) => {
+                if let Err(why) = browser::open(&url, &self.events) {
+                    self.sidebar.notify(why);
+                }
+            },
             Asked::Go { on, place } => {
                 self.go(&on, &place, None);
                 self.leave();
@@ -2744,15 +2764,8 @@ impl App {
                 }
             },
             Said::Copied(clipboard, text) => {
-                let which = match clipboard {
-                    ClipboardType::Clipboard => 'c',
-                    ClipboardType::Selection => 'p',
-                };
-                self.copied = Some(text.clone());
-                let text = base64::engine::general_purpose::STANDARD.encode(text);
-                let backend = terminal.backend_mut();
-                write!(backend, "\x1b]52;{which};{text}\x07")?;
-                backend.flush()?;
+                clip(terminal, clipboard, &text)?;
+                self.copied = Some(text);
             },
             Said::Answer(answer) => self.client.hosted.answer(answer.into_bytes()),
             Said::AskedSize(answer) => {
@@ -3084,6 +3097,23 @@ impl App {
     }
 }
 
+/// Has `terminal` put `text` on `clipboard`, as OSC 52 asks.
+fn clip(terminal: &mut DefaultTerminal, clipboard: ClipboardType, text: &str) -> io::Result<()> {
+    let backend = terminal.backend_mut();
+    write!(backend, "{}", osc52(clipboard, text))?;
+    backend.flush()
+}
+
+/// What asks a terminal to put `text` on `clipboard`.
+fn osc52(clipboard: ClipboardType, text: &str) -> String {
+    let which = match clipboard {
+        ClipboardType::Clipboard => 'c',
+        ClipboardType::Selection => 'p',
+    };
+    let text = base64::engine::general_purpose::STANDARD.encode(text);
+    format!("\x1b]52;{which};{text}\x07")
+}
+
 /// Writes a frame to `terminal`, as `draw` does, for the terminal to show
 /// whole: one that can holds what it shows from the frame's first write to
 /// its last. A frame goes out in more than one write, and its cursor moves to
@@ -3165,6 +3195,16 @@ mod tests {
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
+
+    /// A terminal takes what it is to copy as base64, on the clipboard or the
+    /// primary selection as the letter says.
+    #[test]
+    fn what_to_copy_goes_out_as_osc_52() {
+        let url = "https://github.com/o/r/pull/1";
+        let spelled = "aHR0cHM6Ly9naXRodWIuY29tL28vci9wdWxsLzE=";
+        assert_eq!(osc52(ClipboardType::Clipboard, url), format!("\x1b]52;c;{spelled}\x07"));
+        assert_eq!(osc52(ClipboardType::Selection, url), format!("\x1b]52;p;{spelled}\x07"));
+    }
 
     /// What luneta writes to its terminal, write by write, into `written`:
     /// each flush is one, as it is to stdout.
