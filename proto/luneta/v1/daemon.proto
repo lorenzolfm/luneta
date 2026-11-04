@@ -47,7 +47,7 @@ service Daemon {
   // typed on, in a file for the daemon's user alone, for an agent there to
   // read, as luneta's menu does for `c f` and `c e`: zellij dumps the pane's
   // text, and the daemon keeps what follows that line, up to the prompt the
-  // shell waits at. Files kept a day go as another is kept.
+  // shell waits at. A file goes a day on.
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
   // The name a session luneta makes for a directory takes, as its picker's
   // directories name one: the directory's own, or its repository's and its
@@ -133,6 +133,17 @@ service Daemon {
   // that has no skill left for this, or that has gone on from the skill the
   // move names, is answered as a failed precondition.
   rpc MoveReview(MoveReviewRequest) returns (MoveReviewResponse);
+  // Keeps an image in a file for the daemon's user alone, for an agent there
+  // to read as its path is pasted on its prompt, as luneta does for `Ctrl v`
+  // on an agent's pane on another machine, and answers with its path. A file
+  // goes a day on, or sooner, oldest first, to keep what images hold there to
+  // 128 MiB. The image comes as a stream, as tonic refuses a message over 4
+  // MiB, and a screenshot can be larger. It answers once, as late as all of it
+  // takes to come: a stream too, as the start of every answer is cut five
+  // seconds after the question. The stream ends after the answer, or with why
+  // there is none. An image that does not all come, or does not start as a PNG
+  // does, is kept by no name an image goes by, however the daemon ends.
+  rpc KeepImage(stream KeepImageRequest) returns (stream KeepImageResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -547,6 +558,29 @@ message AskResponse {
     string id = 1;
     string command = 2;
   }
+}
+
+message KeepImageRequest {
+  // One of these, always.
+  oneof part {
+    // What the image is: the first part of the stream, and only that one.
+    Image image = 1;
+    // The next of its bytes, as much as a message has room for: every part
+    // after the first.
+    bytes bytes = 2;
+  }
+
+  message Image {
+    On on = 1;
+    // How many bytes it is, at least the 8 every PNG starts with: fewer than
+    // these is an image that did not all come, and more is refused.
+    uint64 size = 2;
+  }
+}
+
+message KeepImageResponse {
+  // The file it is in, a PNG, with every link in its path followed.
+  string path = 1;
 }
 
 message PasteRequest {

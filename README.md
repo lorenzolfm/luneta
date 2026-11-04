@@ -189,8 +189,8 @@ failed` holds `make`. Where nothing follows that line, the file holds all the
 pane shows, and the agent is told it may be such a line; where more does, the
 file starts after it, too late. Of a prompt of more than one line, the lines
 before the one the shell waits on end the file, as luneta cannot tell them from
-what the command printed. A file goes once it is a day old, as luneta keeps
-another.
+what the command printed. A file goes once it is a day old, within the hour
+while lunetad runs, or else as it next starts.
 
 The Claude group's other keys are for a few skills, built in. For any other,
 `/` at the top of the menu searches every skill the pane's directory can run:
@@ -934,6 +934,28 @@ its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
 `$XDG_STATE_HOME/luneta/folded-machines`.
 
+`Ctrl v` on the pane of an agent on another machine pastes the image on your
+clipboard, as it does for an agent on this one. Claude Code reads the clipboard
+of the machine it runs on, and your screenshot is on the one you sit at: luneta
+reads it here, with `osascript` on macOS and `wl-paste` or `xclip` on Linux, has
+lunetad there keep it in a file for its user alone, in `images` in luneta's
+runtime folder there, and pastes the file's path on the agent's prompt, which
+Claude Code takes for an image at once. A file goes a day on, within the hour
+while lunetad runs, or else as it next starts; or sooner, oldest first, to keep
+what images hold there to 128 MiB, as that folder is memory on most Linuxes. The
+image goes through the bridge, up to 64 MiB of it, as a PNG. The keys stay with
+the pane as it goes, and the path lands where the cursor is once it has, so long
+as that is on the same machine. On a slow line the notes say it is on its way,
+and they say why where it did not go. With the sidebar collapsed, which has no
+room for notes, its rule takes the note's colour while an image goes, and a box
+over zellij says why where it did not go, until the next key, which it takes. A
+line under about 200 kbit/s drops the connection an image goes on.
+
+With no image on the clipboard, `Ctrl v` goes on to the pane, and so it does on
+a pane with no agent, a shell's among them, and on an agent on this machine,
+which reads its own clipboard. So it does where luneta itself runs over ssh, on
+a machine whose clipboard is not the one you sit at.
+
 ### Tell an agent
 
 `luneta`'s commands open, move and close what the menu does, so the agent you
@@ -1195,6 +1217,7 @@ sound.
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
 | a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
 | a freedesktop notification server on Linux, [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) on macOS | optional | [notifications](#notifications) |
+| `wl-paste` or `xclip` on Linux, `osascript` on macOS, which comes with it | optional | pasting an image in an agent on [another machine](#other-machines) with `Ctrl v` |
 
 The sessions need nothing but zellij. The optional tools are looked up by
 name on the `PATH` luneta starts with, which the daemon it starts has too, but

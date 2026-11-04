@@ -37,18 +37,20 @@ use std::time::{Duration, Instant, SystemTime};
 use luneta_protocol::said::Said;
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio::task;
 use tokio::time::timeout;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::{Channel, Server};
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::close_request;
 use crate::api::closes_response::{self, Pane, Session as WholeSession, Tab as ClosedTab};
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
+use crate::api::keep_image_request::{Image, Part};
 use crate::api::keep_printed_response::{self, File as PrintedFile, Nothing, Top};
 use crate::api::list_dirs_response::Dir;
 use crate::api::list_exited_response::Exited;
@@ -58,8 +60,9 @@ use crate::api::refuge_response::{self, Kept, Went};
 use crate::api::{
     self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
     ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest,
-    KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse,
+    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepImageRequest,
+    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
+    ListAgentsRequest, ListAgentsResponse,
     ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
     ListSkillsResponse, MoveReviewRequest, MoveReviewResponse, NameSessionRequest,
@@ -72,6 +75,7 @@ use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
+use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Ready};
 use crate::remote::{Bridges, Destination};
 use crate::reviews::Move;
@@ -81,9 +85,9 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
-    claude, client, clients, closes, ended, eza, git, github, log, metadata, moves, names, opens,
-    panes, printed, release, remote, renames, reviews, screens, shells, skills, watch, zellij,
-    zoxide,
+    claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
+    opens, panes, printed, release, remote, renames, reviews, screens, shells, skills, watch,
+    zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -109,6 +113,11 @@ const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 /// GitHub puts on the user, and that each gh of theirs shares.
 const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(1);
 
+/// How often the daemon looks for the files luneta keeps that are past their
+/// day, as nothing else takes away the last of a kind, which holds what a
+/// screenshot shows, and memory on most Linuxes.
+const KEEPS_SWEEP: Duration = Duration::from_hours(1);
+
 /// How long `Watch` waits for the host to change before it answers with the
 /// host as it was: within the time a client waits for an answer.
 const WATCH: Duration = Duration::from_secs(4);
@@ -131,6 +140,16 @@ const STEPS_WAITING: usize = 64;
 /// What the daemon says of a turn of the ask box's agent that it ran, and
 /// that ended without saying how.
 const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of it failed";
+
+/// How many of a question's bytes the daemon lets a client have on their way
+/// at once, which HTTP/2 tells it. An image is the one question large enough
+/// to fill a line. What is on its way holds up what comes after it on the
+/// line, and so a ping of the bridge's, which closes the connection, and all
+/// on it, unanswered for five seconds. This much takes a second to cross a
+/// line of 1 Mbit/s, and those five at about 200 kbit/s, below which an image
+/// closes the connection it goes on. It holds an image to about 10 Mbit/s
+/// across a line of 100 ms, which a screenshot does not notice.
+const IN_FLIGHT: u32 = 128 * 1024;
 
 /// How long the daemon runs on once zellij has no session, and no client
 /// watches it: long enough that ending the last one and opening another does
@@ -219,6 +238,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     remote::follow(core.clone(), watchers.kept.subscribe(), SWEEP, folder, Arc::clone(&bridges))?;
+    tokio::spawn(sweep_keeps(claim.folder.clone()));
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
@@ -244,6 +264,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let served = tokio::spawn(
         Server::builder()
             .max_concurrent_streams(QUESTIONS_MAX)
+            .initial_stream_window_size(IN_FLIGHT)
             .timeout(client::ANSWER)
             .add_service(DaemonServer::new(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
@@ -260,6 +281,25 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
             log::say(&format!("clients still connected after {secs}s are left"));
             Ok(())
         },
+    }
+}
+
+/// Takes away the files luneta keeps in its `folder` that are past their day,
+/// as the daemon starts, which takes in what stayed while none ran, and every
+/// `KEEPS_SWEEP` from then on.
+async fn sweep_keeps(folder: PathBuf) {
+    let mut sweeps = tokio::time::interval(KEEPS_SWEEP);
+    loop {
+        sweeps.tick().await;
+        let folder = folder.clone();
+        let swept = task::spawn_blocking(move || {
+            let now = SystemTime::now();
+            keeps::sweep_kind(&folder, images::FOLDER, now);
+            keeps::sweep_kind(&folder, printed::FOLDER, now);
+        });
+        // One that panicked has said so in the log, and what it left stays for
+        // the next.
+        let _ = swept.await;
     }
 }
 
@@ -857,6 +897,60 @@ impl Daemon for Host {
         }
         let answer = late(move || pasted.ready().map(Ready::answer));
         Ok(Response::new(Box::pin(answer)))
+    }
+
+    type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
+
+    async fn keep_image(
+        &self,
+        request: Request<Streaming<KeepImageRequest>>,
+    ) -> Result<Response<Self::KeepImageStream>, Status> {
+        let mut parts = request.into_inner();
+        let Some(KeepImageRequest { part: Some(Part::Image(Image { on, size })) }) =
+            parts.message().await?
+        else {
+            return Err(Status::invalid_argument("the first part does not say what the image is"));
+        };
+        let size = Size::new(size).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let image = Image { on: None, size: size.get() };
+            let image = KeepImageRequest { part: Some(Part::Image(image)) };
+            // A question that hangs up here ends what goes there short of
+            // its size, which that daemon keeps no file of.
+            let rest = parts.map_while(Result::ok);
+            let answer = daemon.keep_image(tokio_stream::once(image).chain(rest)).await?;
+            return Ok(Response::new(Box::pin(answer.into_inner())));
+        }
+        let handle = Handle::current();
+        let answer = late(move || kept_image(&handle, parts, size).map(|path| KeepImageResponse { path }));
+        Ok(Response::new(Box::pin(answer)))
+    }
+}
+
+/// Keeps the image `parts` go on with, of `size` bytes, in luneta's folder,
+/// and says where; or why it kept none, as what is no image's bytes came, or
+/// they did not all come by `images::PATIENCE`. It runs on a thread of its
+/// own, and `handle`'s runtime hears the parts.
+fn kept_image(
+    handle: &Handle,
+    mut parts: Streaming<KeepImageRequest>,
+    size: Size,
+) -> Result<String, String> {
+    let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
+    let mut keeping = Keeping::new(&runtime, size, SystemTime::now())?;
+    let deadline = tokio::time::Instant::now() + images::PATIENCE;
+    let minutes = images::PATIENCE.as_secs() / 60;
+    loop {
+        let next = handle.block_on(async {
+            tokio::time::timeout_at(deadline, parts.message()).await
+        });
+        let next = next.map_err(|_| format!("the image had not all come after {minutes} minutes"))?;
+        let next = next.map_err(|status| format!("the image did not all come: {}", status.message()))?;
+        match next {
+            None => return keeping.kept(),
+            Some(KeepImageRequest { part: Some(Part::Bytes(bytes)) }) => keeping = keeping.write(&bytes)?,
+            Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
+        }
     }
 }
 

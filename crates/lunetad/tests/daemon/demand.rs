@@ -16,8 +16,9 @@ use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
     ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepPrintedRequest,
-    KeepPrintedResponse, KillRequest, KillResponse, ListAgentsRequest, ListAgentsResponse,
+    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepImageRequest,
+    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
+    ListAgentsRequest, ListAgentsResponse,
     ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
     ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
@@ -29,7 +30,7 @@ use lunetad::{folder, release, Claim};
 use prost::Message as _;
 use rustix::process::{Pid, Signal};
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 
 use crate::host::{
     answered, eventually, folder_in, info, install, script, start, Host, Running, Vars, LUNETA,
@@ -98,7 +99,7 @@ fn held(host: &Host) -> bool {
     folder_in(host.runtime.path()).is_some_and(|folder| folder::held(&folder).unwrap())
 }
 
-fn stop(pid: u32) {
+pub fn stop(pid: u32) {
     let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     rustix::process::kill_process(pid, Signal::TERM).unwrap();
 }
@@ -678,6 +679,15 @@ impl Daemon for StandIn {
         _: Request<api::MoveReviewRequest>,
     ) -> Result<Response<api::MoveReviewResponse>, Status> {
         Err(Status::unimplemented("a stand-in keeps no review"))
+    }
+
+    type KeepImageStream = tokio_stream::Empty<Result<KeepImageResponse, Status>>;
+
+    async fn keep_image(
+        &self,
+        _: Request<Streaming<KeepImageRequest>>,
+    ) -> Result<Response<Self::KeepImageStream>, Status> {
+        Err(Status::unimplemented("a stand-in keeps no image"))
     }
 }
 

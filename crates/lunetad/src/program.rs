@@ -58,7 +58,15 @@ impl Ran {
 /// longer than that. An error when it could not be started, or what it said
 /// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let Ok(ran) = running::<Infallible>(command, limit, None, Kills::Program, Stdio::null())?;
+    run_up_to(command, limit, SAID_MAX)
+}
+
+/// Runs `command` as `run` does, where it may say up to `most` bytes on its
+/// stdout, in place of `SAID_MAX`: an error of `ErrorKind::FileTooLarge` where
+/// it said more, as one that hands over a file does, whatever its size.
+pub fn run_up_to(command: &mut Command, limit: Duration, most: u64) -> io::Result<Ran> {
+    let kills = Kills::Program;
+    let Ok(ran) = running::<Infallible>(command, limit, None, kills, Stdio::null(), most)?;
     Ok(ran)
 }
 
@@ -70,7 +78,8 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
 /// typed there. With none, it fails, and says why. What it started, as git
 /// does that wt runs, would run on once it is killed.
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
-    let Ok(ran) = running::<Infallible>(alone(command), limit, None, Kills::Group, Stdio::null())?;
+    let kills = Kills::Group;
+    let Ok(ran) = running::<Infallible>(alone(command), limit, None, kills, Stdio::null(), SAID_MAX)?;
     Ok(ran)
 }
 
@@ -97,7 +106,7 @@ pub fn run_while_reading(
     stdin: Stdio,
 ) -> io::Result<Option<Ran>> {
     let wanted = || if wanted() { Ok(()) } else { Err(()) };
-    running::<()>(command, limit, Some(&wanted), Kills::Program, stdin).map(Result::ok)
+    running::<()>(command, limit, Some(&wanted), Kills::Program, stdin, SAID_MAX).map(Result::ok)
 }
 
 /// What of a program is killed, as it is stuck or no longer wanted.
@@ -112,18 +121,20 @@ enum Kills {
 
 /// Runs `command`, as `run_while` does, where it is `wanted` only for a
 /// while, which says what that comes to once it is not, or else as `run`
-/// does, with `stdin` on its stdin, and kills of it what `kills` says.
+/// does, with `stdin` on its stdin, and kills of it what `kills` says. It may
+/// say up to `most` bytes on its stdout.
 fn running<N>(
     command: &mut Command,
     limit: Duration,
     wanted: Option<&dyn Fn() -> Result<(), N>>,
     kills: Kills,
     stdin: Stdio,
+    most: u64,
 ) -> io::Result<Result<Ran, N>> {
     let deadline = Instant::now() + limit;
     let mut child =
         command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let heard = hear(&mut child, deadline, wanted);
+    let heard = hear(&mut child, deadline, wanted, most);
     // Whatever was heard of it, or why nothing could be, what is left of it
     // is killed, and it is waited for last, so that no kill names a pid let
     // go. One that could not be killed is let go unwaited for, rather than
@@ -150,14 +161,19 @@ enum Heard<N> {
     Unwanted(N),
 }
 
-/// What is heard of `child` until `deadline`, for as long as it is `wanted`.
+/// What is heard of `child` until `deadline`, for as long as it is `wanted`,
+/// up to `most` bytes of its stdout.
 fn hear<N>(
     child: &mut Child,
     deadline: Instant,
     wanted: Option<&dyn Fn() -> Result<(), N>>,
+    most: u64,
 ) -> io::Result<Heard<N>> {
-    let stdout = read(child.stdout.take().expect("its stdout is piped"))?;
-    let stderr = read(child.stderr.take().expect("its stderr is piped"))?;
+    let stdout = child.stdout.take().expect("its stdout is piped");
+    let stdout = read(stdout, most, io::ErrorKind::FileTooLarge)?;
+    // What a program says of its failures is no answer that is too large.
+    let stderr = child.stderr.take().expect("its stderr is piped");
+    let stderr = read(stderr, SAID_MAX, io::ErrorKind::Other)?;
     let ended = ends(child)?;
     let left = || deadline.saturating_duration_since(Instant::now());
     loop {
@@ -257,17 +273,25 @@ fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
 }
 
 /// What comes out of `pipe` until it closes, read in a thread of its own and
-/// handed over in one piece, or why it could not all be read.
-fn read(mut pipe: impl Read + Send + 'static) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
+/// handed over in one piece, or why it could not all be read: an error of
+/// `over` where it is more than `most` bytes.
+fn read(
+    mut pipe: impl Read + Send + 'static,
+    most: u64,
+    over: io::ErrorKind,
+) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
     in_thread(move || {
         let mut all = Vec::new();
-        let read = (&mut pipe).take(SAID_MAX).read_to_end(&mut all);
+        let read = (&mut pipe).take(most).read_to_end(&mut all);
         // What it says past the most is read and let go, so that it is not
         // kept waiting.
         let past = read.and_then(|_| io::copy(&mut pipe, &mut io::sink()));
         match past {
             Ok(0) => Ok(all),
-            Ok(_) => Err(io::Error::other(format!("it said more than {SAID_MAX} bytes"))),
+            Ok(_) => {
+                let more = format!("it said more than {most} bytes");
+                Err(io::Error::new(over, more))
+            },
             Err(error) => Err(error),
         }
     })
@@ -296,7 +320,7 @@ mod tests {
 
     use rustix::process::{self, Pid, Signal};
 
-    use super::{Ran, SAID_MAX, alone, run, run_alone, run_while, run_while_reading};
+    use super::{Ran, SAID_MAX, alone, run, run_alone, run_up_to, run_while, run_while_reading};
 
     /// A file handed a program on its stdin, and the lock on it with it, is
     /// held for as long as what the program left running holds it, past the
@@ -332,6 +356,25 @@ mod tests {
             panic!("it said more than the most, and was read");
         };
         assert!(error.to_string().contains("said more than"), "{error}");
+    }
+
+    /// A program asked for what can be more than `SAID_MAX` has as much of
+    /// its stdout read as the question says, and more than that is an error
+    /// a question can tell from any other.
+    #[test]
+    fn a_program_may_say_as_much_as_it_is_asked_for() {
+        let most = SAID_MAX + 1;
+        let mut says = Command::new("head");
+        says.args(["-c", &most.to_string(), "/dev/zero"]);
+        let Ok(Ran::Ended { stdout, .. }) = run_up_to(&mut says, Duration::from_secs(10), most)
+        else {
+            panic!("it said no more than the most, and was not read");
+        };
+        assert_eq!(stdout.len() as u64, most);
+        let Err(error) = run_up_to(&mut says, Duration::from_secs(10), most - 1) else {
+            panic!("it said more than the most, and was read");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge, "{error}");
     }
 
     /// A program is heard from as it ends, about as soon as std's own `output`

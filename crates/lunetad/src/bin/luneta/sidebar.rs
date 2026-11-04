@@ -1122,6 +1122,8 @@ pub struct Sidebar {
     room: usize,
     /// The last thing that went wrong, until the next key.
     notice: Option<String>,
+    /// The machine an image is on its way to, once that takes a while.
+    image_going: Option<Destination>,
     /// What went wrong as the menu floated over zellij, for luneta to say
     /// there, where you look, and the sidebar collapsed has no room for.
     said: Option<String>,
@@ -1836,6 +1838,22 @@ impl Sidebar {
         })
     }
 
+    /// The machine of the agent in the pane luneta's zellij is on, as far as
+    /// the sidebar knows, where that is another machine: none on this one,
+    /// nor on a pane with no agent, nor where the sidebar does not know the
+    /// pane.
+    pub fn far_agent(&self) -> Option<&Destination> {
+        let Machine::Remote(on) = &self.on else {
+            return None;
+        };
+        let Some(Here::Pane { place, .. }) = self.whereabouts() else {
+            return None;
+        };
+        let seen = self.seen(&self.on)?;
+        let seat = (place.session.name().as_str(), place.pane);
+        seated(seen.agents, seen.sessions).contains_key(&seat).then_some(on)
+    }
+
     /// What runs on `machine`, as its daemon says in `seen`, for the picker:
     /// every session newest first, each with its panes in the order of their
     /// tabs, and the agents in them, those of the session luneta's zellij is
@@ -1896,6 +1914,18 @@ impl Sidebar {
     pub fn notify(&mut self, notice: String) {
         log::say(&notice);
         self.notice = Some(notice);
+    }
+
+    /// Takes what `notify` said out of the notes, for what it was said of has
+    /// been tried again.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
+    /// Says in the notes that an image is on its way to the machine `to`, or
+    /// no longer says so, with none. The sidebar collapsed says so by its rule.
+    pub fn image_going(&mut self, to: Option<Destination>) {
+        self.image_going = to;
     }
 
     /// Says what went wrong with what the menu did: in the notes, or over
@@ -3613,13 +3643,16 @@ impl Sidebar {
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
     /// to the room it has. Its last column is the edge, as the sidebar's is.
-    /// The rule is in `ERROR` while the daemon does not answer, as the note
-    /// that says so is, which the strip has no room for.
+    /// The rule is in `ERROR` while the daemon does not answer, or `NAME` while
+    /// an image is on its way, as the note that says so is, which the strip has
+    /// no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
             Style::new().fg(ERROR)
+        } else if self.image_going.is_some() {
+            Style::new().fg(NAME)
         } else {
             Style::new().add_modifier(Modifier::DIM)
         };
@@ -3769,6 +3802,10 @@ impl Sidebar {
         }
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
+        }
+        if let Some(to) = &self.image_going {
+            let going = format!("image on its way to {to}");
+            notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
         }
         if let Some(Sent { session, from: Some(Leaving { ends: true, .. }), landed: false, .. }) =
             &self.sent
@@ -5277,6 +5314,34 @@ mod tests {
         assert_ne!(note, open);
         assert_eq!(rule(&mut sidebar), note);
         sidebar.heard(idle_agent());
+        assert_eq!(rule(&mut sidebar), open);
+    }
+
+    /// Collapsed, the sidebar has no room for the note that says an image is
+    /// on its way either, so its rule turns that note's colour while it goes;
+    /// but for lunetad not answering, which says more.
+    #[test]
+    fn collapsed_the_sidebar_tints_its_rule_while_an_image_goes() {
+        let mut sidebar = fresh();
+        sidebar.heard(idle_agent());
+        let look = |buffer: &Buffer, x: u16, y: u16| {
+            let cell = &buffer[(x, y)];
+            (cell.fg, cell.modifier.contains(Modifier::DIM))
+        };
+        let rule = |sidebar: &mut Sidebar| look(&collapsed(sidebar, 3, moment(160_000)), 0, 0);
+        let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 1);
+        assert_eq!(rule(&mut sidebar), open);
+        sidebar.image_going(Some("far".parse().unwrap()));
+        // The note, ` image on its way to far`, takes the last line.
+        let buffer = drawn(&mut sidebar, false, COLUMNS, 6);
+        assert_eq!(buffer[(1, 5)].symbol(), "i");
+        let note = look(&buffer, 1, 5);
+        assert_ne!(note, open);
+        assert_eq!(rule(&mut sidebar), note);
+        sidebar.lost("gone".to_owned());
+        assert_eq!(rule(&mut sidebar).0, ERROR);
+        sidebar.heard(idle_agent());
+        sidebar.image_going(None);
         assert_eq!(rule(&mut sidebar), open);
     }
 
@@ -7776,6 +7841,44 @@ mod tests {
         assert!(!sidebar.scrolling());
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
         assert_eq!(tick(&mut sidebar, 660), "       less logs");
+    }
+
+    /// `Ctrl v` is for an agent on another machine: one in the pane luneta's
+    /// zellij is on there, as its client is followed. A shell beside it there
+    /// keeps its own, and so does an agent on this machine, in a pane by the
+    /// same number of a session by the same name.
+    #[test]
+    fn a_far_agent_is_one_in_the_pane_zellij_is_on_there() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let panes = |command| vec![pane(1, 0, "/w/b", command), pane(2, 0, "/w/b", "fish")];
+        let agents = || vec![agent("main", 1, Status::Idle, Some("fix"))];
+        host.sessions = vec![session("main", 10, panes("claude"))];
+        host.agents = agents();
+        host.remotes[0] = remote("nixos", up(vec![session("main", 20, panes("claude"))], agents()));
+        sidebar.heard(host.clone());
+        assert_eq!(sidebar.far_agent(), None);
+
+        let look = sidebar.swapping(&Machine::Remote(nixos()), &session_name("main"));
+        assert_eq!(sidebar.far_agent(), None, "the sidebar does not know the pane yet");
+        let clients = |pane| vec![Client { id: 1, pane: Some(pane) }];
+        let before = || Some(Before::Listed(Vec::new()));
+        let looked = Looked { number: look.number, went: None, clients: clients(1), before: before() };
+        sidebar.looked(looked);
+        sidebar.titled("main | fix".to_owned());
+        assert_eq!(sidebar.far_agent(), Some(&nixos()));
+
+        let look = sidebar.swapping(&Machine::Remote(nixos()), &session_name("main"));
+        let looked = Looked { number: look.number, went: None, clients: clients(2), before: before() };
+        sidebar.looked(looked);
+        assert_eq!(sidebar.far_agent(), None, "a shell there keeps its own");
+
+        host.remotes[0] = remote("nixos", up(vec![session("main", 20, panes("fish"))], Vec::new()));
+        sidebar.heard(host);
+        let look = sidebar.swapping(&Machine::Remote(nixos()), &session_name("main"));
+        let looked = Looked { number: look.number, went: None, clients: clients(1), before: before() };
+        sidebar.looked(looked);
+        assert_eq!(sidebar.far_agent(), None, "its agent ended");
     }
 
     /// The machine lunetad watches as `destination`, as it says it has it.
