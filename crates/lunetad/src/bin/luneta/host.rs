@@ -1227,7 +1227,7 @@ impl App {
             // luneta's client nowhere.
             Event::NoClient { menu, owed, on, place } => {
                 if self.sidebar.waits_on(menu) {
-                    let after = After::IntoTab(owed, place.session.name().clone(), place.pane);
+                    let after = After::IntoTab(owed, place.clone());
                     if !self.go(&on, &Place::Pane(place), Some(after)) {
                         self.sidebar.close_menu();
                     }
@@ -1973,11 +1973,12 @@ impl App {
                 zellij::closes(menu, &on, session, pane, &self.events);
             },
             Asked::Delete { on, act } => match act {
-                Act::Pane { session, pane } => {
-                    zellij::close(&on, session, Close::Pane(pane), &self.events);
+                Act::Pane { session, started, pane } => {
+                    zellij::close(&on, session, started, Close::Pane(pane), &self.events);
                 },
-                Act::Tab { session, tab, panes } => {
-                    zellij::close(&on, session, Close::Tab { id: tab, panes }, &self.events);
+                Act::Tab { session, started, tab, panes } => {
+                    let close = Close::Tab { id: tab, panes };
+                    zellij::close(&on, session, started, close, &self.events);
                 },
                 Act::Kill { session, started } => {
                     self.deleting.retain(|deleting| !deleting.is_finished());

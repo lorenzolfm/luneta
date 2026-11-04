@@ -662,10 +662,10 @@ pub enum After {
     /// Open this, as `open` does, for the menu owed what it opens: told once
     /// done, or else as it is dropped undone.
     Open(Due<u32>, Open),
-    /// Turn the pane `pane` of `session` into a tab, for the menu owed the
-    /// pane, now that a client is there to make room for it: told once done,
-    /// or else as it is dropped undone.
-    IntoTab(Due<u32>, SessionName, u32),
+    /// Turn the pane `place` into a tab, for the menu owed the pane, now that a
+    /// client is there to make room for it: told once done, or else as it is
+    /// dropped undone.
+    IntoTab(Due<u32>, PanePlace),
     /// Kill the session the client left, which it was in, the one that
     /// started at `started`, and delete it.
     Kill { session: SessionName, started: SystemTime },
@@ -699,10 +699,12 @@ impl After {
             (After::Open(owed, open), there) => {
                 owed.pay(there.open(&open).map(|opened| told(opened, events)));
             },
-            (After::IntoTab(owed, session, pane), there) => {
-                owed.pay(there.turn_into_tab(&session, pane).and_then(|came| match came {
-                    IntoTab::Done => Ok(pane),
-                    IntoTab::NoClient => Err(lunetad::opens::no_client(&session)),
+            (After::IntoTab(owed, place), there) => {
+                let (session, started) = (place.session.name(), place.session.started());
+                let came = there.turn_into_tab(session, started, place.pane);
+                owed.pay(came.and_then(|came| match came {
+                    IntoTab::Done => Ok(place.pane),
+                    IntoTab::NoClient => Err(lunetad::opens::no_client(session)),
                 }));
             },
             // A zellij of its own kills it: one run as the client's would
@@ -807,8 +809,9 @@ pub fn turn(menu: u64, on: &Machine, place: PanePlace, turn: turns::Turn, events
 fn pane_into_tab(menu: u64, on: &Machine, place: PanePlace, events: &Sender<Event>) {
     let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
     thread::spawn(move || {
-        let (session, pane) = (place.session.name(), place.pane);
-        match There::on(&on).and_then(|mut there| there.turn_into_tab(session, pane)) {
+        let (session, started, pane) =
+            (place.session.name(), place.session.started(), place.pane);
+        match There::on(&on).and_then(|mut there| there.turn_into_tab(session, started, pane)) {
             Ok(IntoTab::Done) => owed.pay(Ok(pane)),
             Ok(IntoTab::NoClient) => {
                 // luneta is on its way out.
@@ -823,12 +826,13 @@ fn pane_into_tab(menu: u64, on: &Machine, place: PanePlace, events: &Sender<Even
 /// `beside`, and hands back what came of it where any moved, or why none did,
 /// with `Event::IntoPanes`.
 fn tab_into_panes(menu: u64, on: &Machine, place: &PanePlace, beside: u32, events: &Sender<Event>) {
-    let (session, pane) = (place.session.name().clone(), place.pane);
+    let (session, started, pane) =
+        (place.session.name().clone(), place.session.started(), place.pane);
     let owed = Due::new(events, move |came| Event::IntoPanes { menu, pane, came });
     let on = on.clone();
     thread::spawn(move || {
         let came = There::on(&on).and_then(|mut there| {
-            there.turn_into_panes(&session, pane, beside)
+            there.turn_into_panes(&session, started, pane, beside)
         });
         owed.pay(came);
     });
@@ -849,10 +853,17 @@ pub fn closes(menu: u64, on: &Machine, session: SessionName, pane: u32, events: 
 /// Has zellij on the machine `on` close `close` of `session`, on a thread of
 /// its own, at once: it moves no client. What zellij says of a failure comes
 /// back as a notice.
-pub fn close(on: &Machine, session: SessionName, close: Close, events: &Sender<Event>) {
+pub fn close(
+    on: &Machine,
+    session: SessionName,
+    started: SystemTime,
+    close: Close,
+    events: &Sender<Event>,
+) {
     let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
-        if let Err(why) = There::on(&on).and_then(|mut there| there.close(&session, &close)) {
+        let closed = There::on(&on).and_then(|mut there| there.close(&session, started, &close));
+        if let Err(why) = closed {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
@@ -1191,10 +1202,15 @@ impl There {
     /// Has zellij turn the terminal `pane` of `session` into a tab, as
     /// `lunetad::turns::into_tab` does, and says what came of it, or why it did
     /// not.
-    fn turn_into_tab(&mut self, session: &SessionName, pane: u32) -> Result<IntoTab, String> {
+    fn turn_into_tab(
+        &mut self,
+        session: &SessionName,
+        started: SystemTime,
+        pane: u32,
+    ) -> Result<IntoTab, String> {
         match self {
-            There::Here => turns::into_tab(session, pane),
-            There::Away(away) => away.turn_into_tab(session, pane),
+            There::Here => turns::into_tab(session, started, pane),
+            There::Away(away) => away.turn_into_tab(session, started, pane),
         }
     }
 
@@ -1205,12 +1221,13 @@ impl There {
     fn turn_into_panes(
         &mut self,
         session: &SessionName,
+        started: SystemTime,
         pane: u32,
         beside: u32,
     ) -> Result<IntoPanes, String> {
         match self {
-            There::Here => turns::into_panes(session, pane, beside),
-            There::Away(away) => away.turn_into_panes(session, pane, beside),
+            There::Here => turns::into_panes(session, started, pane, beside),
+            There::Away(away) => away.turn_into_panes(session, started, pane, beside),
         }
     }
 
@@ -1224,10 +1241,15 @@ impl There {
     }
 
     /// Has zellij close `close` of `session`, or says why it did not.
-    fn close(&mut self, session: &SessionName, close: &Close) -> Result<(), String> {
+    fn close(
+        &mut self,
+        session: &SessionName,
+        started: SystemTime,
+        close: &Close,
+    ) -> Result<(), String> {
         match self {
-            There::Here => closed(session, close),
-            There::Away(away) => away.close(session, close),
+            There::Here => closed(session, started, close),
+            There::Away(away) => away.close(session, started, close),
         }
     }
 

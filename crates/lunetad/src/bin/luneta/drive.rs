@@ -717,8 +717,11 @@ fn plans_in(
         Wanted::Panes(panes) => match zellij::closes_together(&named, panes)? {
             Closing::Session => vec![Act::Kill { session: owned(), started }],
             Closing::Parts { tabs, panes } => {
-                let tabs = tabs.into_iter().map(|(tab, panes)| Act::Tab { session: owned(), tab, panes });
-                let panes = panes.into_iter().map(|pane| Act::Pane { session: owned(), pane });
+                let tabs = tabs
+                    .into_iter()
+                    .map(|(tab, panes)| Act::Tab { session: owned(), started, tab, panes });
+                let panes =
+                    panes.into_iter().map(|pane| Act::Pane { session: owned(), started, pane });
                 tabs.chain(panes).collect()
             },
         },
@@ -751,7 +754,7 @@ fn session_of(act: &Act) -> &str {
 /// What `act` does, in words.
 fn says(act: &Act) -> String {
     match act {
-        Act::Pane { session, pane } => format!("close pane {session}:{pane}"),
+        Act::Pane { session, pane, .. } => format!("close pane {session}:{pane}"),
         Act::Tab { session, panes, .. } => {
             let panes: Vec<String> = panes.iter().map(|pane| format!("{session}:{pane}")).collect();
             format!("close the tab of {}", panes.join(", "))
@@ -805,9 +808,11 @@ fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane
 /// Has zellij do `act`.
 fn act(act: &Act) -> Result<(), String> {
     match act {
-        Act::Pane { session, pane } => zellij::closed(session, &Close::Pane(*pane)),
-        Act::Tab { session, tab, panes } => {
-            zellij::closed(session, &Close::Tab { id: *tab, panes: panes.clone() })
+        Act::Pane { session, started, pane } => {
+            zellij::closed(session, *started, &Close::Pane(*pane))
+        },
+        Act::Tab { session, started, tab, panes } => {
+            zellij::closed(session, *started, &Close::Tab { id: *tab, panes: panes.clone() })
         },
         Act::Kill { session, started } | Act::Leave { session, started, .. } => {
             zellij::killed(session, *started)

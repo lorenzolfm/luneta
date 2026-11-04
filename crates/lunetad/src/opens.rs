@@ -167,7 +167,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
     let terminal = terminal_of(&laid, opened).ok_or(NO_PANE)?;
     let mut notes: Vec<String> = kept.into_iter().collect();
     for made in made {
-        if let Err(why) = closes::closed(session, &Close::tab(&laid, made)) {
+        if let Err(why) = closes::closed_as_listed(session, &Close::tab(&laid, made)) {
             notes.push(why);
         }
     }

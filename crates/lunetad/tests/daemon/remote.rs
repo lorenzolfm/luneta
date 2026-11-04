@@ -766,7 +766,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         // What it closes goes while zellij lists it as the close says: a pane
         // another holds its tab open beside, and a tab with its terminals.
         let close = |session: &str, closes| {
-            CloseRequest { on: on("far"), session: session.to_owned(), closes: Some(closes) }
+            let (session, started_at) = (session.to_owned(), Some(SystemTime::UNIX_EPOCH.into()));
+            CloseRequest { on: on("far"), session, closes: Some(closes), started_at }
         };
         let pane = close_request::Closes::Pane;
         let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
@@ -797,7 +798,14 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let tabs = daemon.other_tabs(tabs).await.unwrap().into_inner().tabs;
         assert_eq!(tabs, [other_tabs_response::Tab { pane: 5, name: String::new() }]);
         let session = || "turning".to_owned();
-        let turn = TurnIntoPanesRequest { on: on("far"), session: session(), pane: 4, beside: 5 };
+        let started_at = Some(SystemTime::UNIX_EPOCH.into());
+        let turn = TurnIntoPanesRequest {
+            on: on("far"),
+            session: session(),
+            pane: 4,
+            beside: 5,
+            started_at,
+        };
         let came = daemon.turn_into_panes(turn).await.unwrap().into_inner().came;
         let done = turn_into_panes_response::Came::Done(turn_into_panes_response::Done {});
         assert_eq!(came, Some(done));
@@ -808,7 +816,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(far.zellij.closed()[2], stand_in);
 
         // A pane there that a client has to come for says so.
-        let turn = TurnIntoTabRequest { on: on("far"), session: "held".to_owned(), pane: 4 };
+        let session = "held".to_owned();
+        let turn = TurnIntoTabRequest { on: on("far"), session, pane: 4, started_at };
         let came = daemon.turn_into_tab(turn).await.unwrap().into_inner().came;
         let none = turn_into_tab_response::NoClient {};
         assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(none)));
@@ -819,6 +828,17 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             KillRequest { on: on("far"), session: "work".to_owned(), started_at }
         };
         invalid(daemon.kill(kill(None)).await.unwrap_err());
+        // What closes in a session there goes by when it started too.
+        let held = |started_at| CloseRequest {
+            on: on("far"),
+            session: "work".to_owned(),
+            closes: Some(pane(4)),
+            started_at,
+        };
+        invalid(daemon.close(held(None)).await.unwrap_err());
+        let since = Some(SystemTime::UNIX_EPOCH.into());
+        let stays = daemon.close(held(since)).await.unwrap_err();
+        assert!(stays.message().contains("a session made since"), "{stays:?}");
         daemon.kill(kill(work_started)).await.unwrap();
         assert_eq!(far.zellij.closed()[3..], ["delete-session --force work"]);
         assert!(here.zellij.closed().is_empty());

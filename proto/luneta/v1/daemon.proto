@@ -85,7 +85,8 @@ service Daemon {
   // all, as `zellij action close-pane` and `close-tab-by-id` do, while the
   // session's panes are as `Closes` said: a terminal that would take its tab
   // along now, or a tab that holds other terminals than it did, or that
-  // would take the session along now, stays. It answers once zellij has, or
+  // would take the session along now, or a session that took the name since,
+  // stays. It answers once zellij has, or
   // with what zellij said as it failed, or why it closed nothing.
   rpc Close(CloseRequest) returns (CloseResponse);
   // The tabs of the session of a terminal other than its own, as zellij lists
@@ -458,6 +459,10 @@ message CloseRequest {
     // no terminal is invalid.
     ClosesResponse.Tab tab = 4;
   }
+  // When the session started, as its `Session.started_at` says: a session by
+  // its name that started at another time took the name since, and what is in
+  // it stays. A question without it is invalid.
+  google.protobuf.Timestamp started_at = 5;
 }
 
 message CloseResponse {}
@@ -486,6 +491,10 @@ message TurnIntoTabRequest {
   string session = 2;
   // The terminal, by its id.
   uint32 pane = 3;
+  // When the session started, as its `Session.started_at` says: a session by
+  // its name that started at another time took the name since, and what is in
+  // it stays. A question without it is invalid.
+  google.protobuf.Timestamp started_at = 4;
 }
 
 message TurnIntoTabResponse {
@@ -512,6 +521,10 @@ message TurnIntoPanesRequest {
   uint32 pane = 3;
   // A terminal of the tab they go into, by its id, as `OtherTabs` says it.
   uint32 beside = 4;
+  // When the session started, as its `Session.started_at` says: a session by
+  // its name that started at another time took the name since, and what is in
+  // it stays. A question without it is invalid.
+  google.protobuf.Timestamp started_at = 5;
 }
 
 message TurnIntoPanesResponse {
