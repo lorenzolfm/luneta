@@ -34,10 +34,10 @@ use lunetad::api::{
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
-use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Work};
+use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Work};
 use lunetad::transcripts::SessionId;
 use lunetad::{Directory, SessionName};
-use rustix::process::{test_kill_process, Pid, Signal};
+use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
@@ -164,6 +164,41 @@ exec "{to}/$destination"
         let path = self.to.join(format!("{destination}.bridges"));
         let bridges = fs::read_to_string(path).unwrap_or_default();
         bridges.lines().map(|pid| pid.parse().unwrap()).collect()
+    }
+
+    /// Has what `destination`, as `reaches` has it, says come back through a
+    /// `cat` of its own, for `stalls_answers` to stop.
+    fn answers_through_a_cat(&self, destination: &str) {
+        let bridge = self.to.join(format!("{destination}.bridge"));
+        fs::rename(self.to.join(destination), &bridge).unwrap();
+        let cat = self.to.join(format!("{destination}.cat"));
+        let text = format!(
+            "{} | sh -c 'echo $$ > \"$1\"; exec cat' sh {}\n",
+            quoted(bridge.to_str().unwrap()),
+            quoted(cat.to_str().unwrap()),
+        );
+        script(&self.to.join(destination), &text);
+    }
+
+    /// Stops what `destination` says on its way back, as a link that goes
+    /// quiet does, while what is asked of it goes on reaching it, until what
+    /// this returns goes.
+    fn stalls_answers(&self, destination: &str) -> StalledAnswers {
+        let cat = fs::read_to_string(self.to.join(format!("{destination}.cat"))).unwrap();
+        let cat = Pid::from_raw(cat.trim().parse().unwrap()).unwrap();
+        kill_process(cat, Signal::STOP).unwrap();
+        StalledAnswers(cat)
+    }
+}
+
+/// The `cat` a machine's answers come back through, stopped. It goes on as
+/// this goes, so that the bridge can end.
+struct StalledAnswers(Pid);
+
+impl Drop for StalledAnswers {
+    fn drop(&mut self) {
+        // It ended, with the bridge the daemon gave up on.
+        let _ = kill_process(self.0, Signal::CONT);
     }
 }
 
@@ -1360,6 +1395,22 @@ async fn pasted_on(
     Ok(pasted.answered(ready).expect("an answer luneta reads"))
 }
 
+/// A clone wt made in `scratch`, of `up` there, for a key of the menu on `host`:
+/// zoxide there knows it, and gh there knows the issue 7 of `o/n`. That is the
+/// repository on GitHub of a remote of the clone, which git takes for `up`.
+fn clone_with_issue_7(host: &Host, scratch: &Path) -> PathBuf {
+    host.gh.issue(7, "https://github.com/o/n/issues/7");
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(scratch, &up, &clone);
+    let bare = clone.join(".bare");
+    let github = "git@github.com:o/n.git";
+    git(&bare, &["remote", "add", "upstream", github]);
+    git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
+    let main = clone.join("main").display().to_string();
+    script(&host.zellij.bin().join("zoxide"), &format!("echo '{main}'\n"));
+    clone
+}
+
 /// A link pasted on a row of another machine is found there: gh there asks
 /// GitHub of the issue, git there reads the repository its panes work in,
 /// and `luneta worktree` there makes the issue's branch's worktree, beside
@@ -1374,21 +1425,12 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    far.gh.issue(7, "https://github.com/o/n/issues/7");
     let scratch = tempfile::tempdir().unwrap();
     // As git says the worktree, by its real path, as on macOS, where the
     // temporary folder is through a link.
     let scratch = scratch.path().canonicalize().unwrap();
-    let (up, clone) = (scratch.join("up"), scratch.join("n"));
-    cloned_as_wt(&scratch, &up, &clone);
-    // The issue's repository on GitHub, by a remote of the clone, which git
-    // takes for `up`.
-    let bare = clone.join(".bare");
-    let github = "git@github.com:o/n.git";
-    git(&bare, &["remote", "add", "upstream", github]);
-    git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
+    let clone = clone_with_issue_7(&far, &scratch);
     let main = clone.join("main").display().to_string();
-    script(&far.zellij.bin().join("zoxide"), &format!("echo '{main}'\n"));
     let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -1425,9 +1467,149 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         let relative = pasted_on(&mut daemon, "far", &relative).await.unwrap_err();
         assert_eq!(relative.code(), Code::InvalidArgument, "{relative:?}");
         let nowhere = pasted_on(&mut daemon, "nowhere", &session).await.unwrap_err();
-        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
+        assert_eq!(nowhere.code(), Code::FailedPrecondition, "{nowhere:?}");
         assert_eq!(far.gh.issues().len(), 2);
     });
+}
+
+/// A machine with no session in a link's repository, and whose zoxide knows no
+/// clone of it, says so apart from whatever else goes wrong, through the daemon
+/// that bridges to it, for luneta to ask its other machines. It asks nothing of
+/// GitHub for that, as its gh may be logged out. One with a clone git made says
+/// what stands in the way instead, as does one with a directory git would not
+/// say the remotes of, which may be a clone of it. One that has the repository
+/// goes no further on an issue's number that is a pull request's on GitHub,
+/// whether it has a session there or a pane on its branch.
+#[test]
+fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    script(&far.zellij.bin().join("zoxide"), "exit 0\n");
+    far.gh.issue(8, "https://github.com/o/n/pull/8");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let github = "git@github.com:o/n.git";
+    let (by_git, unread, by_wt) =
+        (scratch.join("by-git"), scratch.join("unread"), scratch.join("by-wt"));
+    git(&scratch, &["init", "-q", &by_git.display().to_string()]);
+    git(&by_git, &["remote", "add", "origin", github]);
+    git(&scratch, &["init", "-q", "--bare", &unread.display().to_string()]);
+    git(&unread, &["remote", "add", "origin", github]);
+    let config = unread.join("config");
+    fs::write(&config, fs::read_to_string(&config).unwrap() + "[broken\n").unwrap();
+    cloned_as_wt(&scratch, &scratch.join("up"), &by_wt);
+    git(&by_wt.join(".bare"), &["remote", "add", "upstream", github]);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let link = Work::Link(Link::parse("https://github.com/o/n/pull/7").unwrap());
+        let none = Pasted::new(link.clone(), Vec::new());
+        let none = pasted_on(&mut daemon, "far", &none).await.unwrap_err();
+        assert_eq!(none.code(), Code::NotFound, "{none:?}");
+        assert!(none.message().starts_with("no session works in o/n"), "{none:?}");
+
+        let issue = |number: u32| {
+            Work::Link(Link::parse(&format!("https://github.com/o/n/issues/{number}")).unwrap())
+        };
+        let none = Pasted::new(issue(7), Vec::new());
+        let none = pasted_on(&mut daemon, "far", &none).await.unwrap_err();
+        assert_eq!(none.code(), Code::NotFound, "{none:?}");
+        assert!(far.gh.issues().is_empty(), "{:?}", far.gh.issues());
+
+        let in_dir = |dir: &Path| links::Worked {
+            dir: dir.display().to_string(),
+            pull: None,
+            here: false,
+        };
+        let by_git = Pasted::new(link.clone(), vec![in_dir(&by_git)]);
+        let by_git = pasted_on(&mut daemon, "far", &by_git).await.unwrap_err();
+        assert_eq!(by_git.code(), Code::FailedPrecondition, "{by_git:?}");
+        assert!(by_git.message().contains("that git made"), "{by_git:?}");
+
+        let unsaid = Pasted::new(link, vec![in_dir(&unread)]);
+        let unsaid = pasted_on(&mut daemon, "far", &unsaid).await.unwrap_err();
+        assert_eq!(unsaid.code(), Code::FailedPrecondition, "{unsaid:?}");
+        let whether = format!("git did not say whether {} is of o/n: ", unread.display());
+        assert!(unsaid.message().starts_with(&whether), "{unsaid:?}");
+
+        let pull = Link::parse("https://github.com/o/n/pull/8").unwrap();
+        let on_it = links::Worked { pull: Some(pull), ..in_dir(Path::new("/nowhere/at/all")) };
+        for panes in [vec![in_dir(&by_wt.join("main"))], vec![on_it]] {
+            let kind = pasted_on(&mut daemon, "far", &Pasted::new(issue(8), panes)).await;
+            let kind = kind.unwrap_err();
+            assert_eq!(kind.code(), Code::FailedPrecondition, "{kind:?}");
+            let paste = "it is a pull request on GitHub: paste https://github.com/o/n/pull/8";
+            assert_eq!(kind.message(), paste, "{kind:?}");
+        }
+        assert_eq!(far.gh.issues().len(), 2, "{:?}", far.gh.issues());
+    });
+}
+
+/// A machine that made the worktree, and could not then say where the key goes,
+/// says so apart from a machine that made nothing: it is the one failure that
+/// leaves something behind, and no other machine should make another.
+#[test]
+fn a_machine_that_made_the_worktree_and_went_no_further_says_so_apart() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_issue_7(&host, &scratch);
+    let _daemon = start(host.vars()).unwrap();
+    host.hide_kept_sessions();
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let asked = Pasted::new(Work::Link(issue), Vec::new()).asked(None);
+        let mut answer = daemon.paste(asked).await.unwrap().into_inner();
+        let why = answer.message().await.unwrap_err();
+        assert_eq!(why.code(), Code::Aborted, "{why:?}");
+    });
+    assert!(clone.join("issue-7").join(".git").is_file());
+}
+
+/// A machine whose answer stalls on its way back started on the key as it heard
+/// it, and makes the worktree with no one left to hear of it. So what luneta
+/// hears by then says it may have, for no other machine to make a second, though
+/// it comes before the answer's stream does.
+#[test]
+fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.reaches("far", far.vars());
+    ssh.answers_through_a_cat("far");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_issue_7(&far, &scratch);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _stalled = ssh.stalls_answers("far");
+    let said = runtime.block_on(async {
+        let daemon = lunetad::connect(&folder).await.unwrap();
+        let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let pasted = Pasted::new(Work::Link(issue), Vec::new());
+        pasted.ready_on(daemon, &"far".parse().unwrap(), Duration::from_secs(6)).await
+    });
+    assert!(matches!(said, Err(Unready::InDoubt(_))), "{said:?}");
+    let made = clone.join("issue-7").join(".git");
+    eventually("the worktree on far", || made.is_file().then_some(()));
 }
 
 /// A `.md` file pasted on a row of another machine is read there, and git

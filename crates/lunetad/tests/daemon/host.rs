@@ -684,6 +684,13 @@ impl Host {
         self.home.path().join(cache).join("contract_version_1/session_info")
     }
 
+    /// Puts a file where zellij keeps what it keeps of each session, so that
+    /// no one can read which sessions it keeps.
+    pub fn hide_kept_sessions(&self) {
+        fs::remove_dir_all(self.metadata()).unwrap();
+        fs::write(self.metadata(), "").unwrap();
+    }
+
     /// Has zellij write `text` as what it keeps of `session`, in place, as
     /// zellij does.
     pub fn write_metadata(&self, session: &str, text: &str) {

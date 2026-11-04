@@ -6,7 +6,10 @@
 //! an agent on the issue. luneta finds that for a row of its own machine,
 //! and a daemon for a luneta on another, whose link was pasted on a row of
 //! this one: git, gh, ssh's config, zoxide and the worktree are the
-//! machine's.
+//! machine's. A machine with no session in the repository and no clone of it
+//! says so apart from any other failure, as `Unready::Nowhere`, for luneta to
+//! ask its other machines; and one that may have made the worktree says that
+//! apart too, as `Unready::InDoubt`, for it to ask no other.
 //!
 //! The key goes, of the panes luneta says of the machine, to the one in the
 //! session its zellij is in, where a pane of it works in the repository, or
@@ -48,20 +51,24 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use tokio::time::timeout;
+use tonic::transport::Channel;
+use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch};
 use wt::repo::Repo;
 
+use crate::api::daemon_client::DaemonClient;
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::program::{self, Ran};
-use crate::{git, github, names, zoxide, Directory, SessionName};
+use crate::{git, github, names, zoxide, Destination, Directory, SessionName};
 
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
@@ -536,15 +543,38 @@ struct Repository {
     layout: Layout,
 }
 
+/// What git says of whether a directory is in the pull request's repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Looked {
+    /// It is, so.
+    Of(Repository),
+    /// It is not.
+    NotOf,
+    /// git did not say its remotes, for this reason, so it may be.
+    Unsaid(String),
+}
+
+impl Looked {
+    /// The repository, where it is the pull request's.
+    fn repository(&self) -> Option<Repository> {
+        match self {
+            Looked::Of(repository) => Some(*repository),
+            Looked::NotOf | Looked::Unsaid(_) => None,
+        }
+    }
+}
+
 /// How the repository `dir` is in is the pull request `link`'s, if it is,
 /// as `ssh_host` says what host ssh takes a name of its remotes for.
-fn repository(
-    dir: &str,
-    link: &Link,
-    ssh_host: impl FnMut(&str) -> Option<String>,
-) -> Option<Repository> {
-    let remote = remote(&remotes_in(dir)?, link, ssh_host)?;
-    Some(Repository { by: Remote::of(&remote), layout: layout(dir) })
+fn repository(dir: &str, link: &Link, ssh_host: impl FnMut(&str) -> Option<String>) -> Looked {
+    match remotes_in(dir) {
+        Remotes::Listed(listed) => match remote(&listed, link, ssh_host) {
+            Some(remote) => Looked::Of(Repository { by: Remote::of(&remote), layout: layout(dir) }),
+            None => Looked::NotOf,
+        },
+        Remotes::Unlisted => Looked::NotOf,
+        Remotes::Unsaid(why) => Looked::Unsaid(why),
+    }
 }
 
 /// The name of the remote of `listed` that is of the pull request `link`'s
@@ -648,6 +678,58 @@ impl Ready<usize> {
     }
 }
 
+/// Why a machine has nowhere for a key of the menu to go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unready {
+    /// No session there works in the link's repository, and zoxide there
+    /// knows no clone of it, as this says: another machine may have one.
+    Nowhere(String),
+    /// It made nothing, as this says: what is there is in the way, as a clone
+    /// git made, or the machine could not tell, or it was never asked.
+    Failed(String),
+    /// It may have made the worktree, as this says: it made one and went no
+    /// further, or no answer came. No other machine should make another.
+    InDoubt(String),
+}
+
+impl Unready {
+    /// What it says, of any.
+    #[must_use]
+    pub fn said(self) -> String {
+        match self {
+            Unready::Nowhere(why) | Unready::Failed(why) | Unready::InDoubt(why) => why,
+        }
+    }
+
+    /// Why the daemon of `on` found nowhere for a key of the menu to go, as
+    /// `status` says, before the answer's stream or in it: `Code::NotFound` is
+    /// its machine having none of the repository, which a daemon older than
+    /// that does not say apart; `Code::FailedPrecondition` its making nothing,
+    /// or the daemon between not reaching it; and `Code::InvalidArgument` and
+    /// `Code::Unimplemented` a daemon that did not take the question. Anything
+    /// else may have left a worktree there: the daemon may have said so, or the
+    /// connection been lost, or the answer been cut short, which all look the
+    /// same whether or not the question had reached it.
+    fn of(on: &Destination, status: &Status) -> Unready {
+        let why = on.said(status);
+        match status.code() {
+            Code::NotFound => Unready::Nowhere(why),
+            Code::FailedPrecondition | Code::InvalidArgument | Code::Unimplemented => {
+                Unready::Failed(why)
+            },
+            _ => Unready::InDoubt(why),
+        }
+    }
+}
+
+/// A failure on the way to the worktree, which made none, as `?` says it: what
+/// may have made one says `Unready::InDoubt` by name.
+impl From<String> for Unready {
+    fn from(why: String) -> Self {
+        Unready::Failed(why)
+    }
+}
+
 /// A link or a file pasted on a row of a machine, and the panes of that
 /// machine, as luneta knows them, for where a key of the menu goes: on that
 /// machine.
@@ -725,11 +807,45 @@ impl Pasted {
     /// Where a key goes, on the machine this runs on, by the place of its
     /// pane among those luneta said, and the worktree, which it has `luneta
     /// worktree` make there, or where one of the branch is already; or why
-    /// it found nothing.
-    pub fn ready(&self) -> Result<Ready<usize>, String> {
+    /// it found nothing. A file is the row's machine's, wherever else one of
+    /// its name is, so of a file this is never `Unready::Nowhere`.
+    pub fn ready(&self) -> Result<Ready<usize>, Unready> {
         match &self.work {
             Work::Link(link) => ready(link, &self.worked),
             Work::File(file) => ready_file(file, &self.worked),
+        }
+    }
+
+    /// Where a key goes, as `ready` finds it on the machine `on`, whose daemon
+    /// `daemon` hands the question on to, with `patience` for each answer; or
+    /// why it found nothing, as it said there, or as no answer came by
+    /// `PATIENCE` and that patience after, by which the daemon there has done
+    /// with it. The daemon there starts on it as it hears it, whether or not
+    /// its answer comes back, and a question that hangs up does not stop it:
+    /// so from the moment the question leaves, what does not say otherwise, as
+    /// `Unready::of` reads it, may leave a worktree there.
+    pub async fn ready_on(
+        &self,
+        mut daemon: DaemonClient<Channel>,
+        on: &Destination,
+        patience: Duration,
+    ) -> Result<Ready<usize>, Unready> {
+        let request = self.asked(Some(On { destination: on.to_string() }));
+        let secs = patience.as_secs_f32();
+        let minutes = PATIENCE.as_secs() / 60;
+        let in_doubt = |why: String| Err(Unready::InDoubt(format!("{on}: {why}")));
+        // The daemon answers with the stream at once, and the answer in it
+        // once it has found it.
+        let mut answer = match timeout(patience, daemon.paste(request)).await {
+            Ok(Ok(answer)) => answer.into_inner(),
+            Ok(Err(status)) => return Err(Unready::of(on, &status)),
+            Err(_) => return in_doubt(format!("lunetad did not answer in {secs}s")),
+        };
+        match timeout(PATIENCE + patience, answer.message()).await {
+            Ok(Ok(Some(ready))) => self.answered(ready).or_else(in_doubt),
+            Ok(Ok(None)) => in_doubt("lunetad's answer ended with nothing in it".to_owned()),
+            Ok(Err(status)) => Err(Unready::of(on, &status)),
+            Err(_) => in_doubt(format!("lunetad had found nothing after {minutes} minutes")),
         }
     }
 
@@ -776,24 +892,17 @@ impl Pasted {
 
 /// Where a key goes for `link` among the panes `worked`, as `Pasted::ready`
 /// says.
-fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
-    // wt asks GitHub for a pull request's branch, and finds none for an
-    // issue's number; but it makes an issue's branch whatever the number is.
-    if link.kind() == Kind::Issue {
-        let page = page(link)?;
-        if page.kind() == Kind::Pull {
-            return Err(format!("it is a pull request on GitHub: paste {}", page.url()));
-        }
-    }
-    let mut seen: HashMap<String, Option<Repository>> = HashMap::new();
+fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
+    let mut seen: HashMap<String, Looked> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
     let mut repository_of = |dir: &str| {
         let host_of =
             |host: &str| hosts.entry(host.to_owned()).or_insert_with(|| ssh_host(host)).clone();
-        *seen.entry(dir.to_owned()).or_insert_with(|| repository(dir, link, host_of))
+        seen.entry(dir.to_owned()).or_insert_with(|| repository(dir, link, host_of)).repository()
     };
     let (repository, going) = match found(link, worked, &mut repository_of) {
         Some(Found::There(at)) => {
+            kind_holds(link)?;
             let dir = &worked[at].dir;
             let (worktree, branch) = (dir.clone(), branch(dir));
             let work = Readied::Link(link.clone());
@@ -805,8 +914,12 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
             None => return Err(no_clone(link, &seen)),
         },
     };
+    kind_holds(link)?;
     if let Some(branch) = link.branch() {
-        let remote = remotes_in(&repository).and_then(|listed| remote(&listed, link, ssh_host));
+        let remote = match remotes_in(&repository) {
+            Remotes::Listed(listed) => remote(&listed, link, ssh_host),
+            Remotes::Unlisted | Remotes::Unsaid(_) => None,
+        };
         let remote = remote.ok_or_else(|| {
             format!("git no longer says a remote of {repository} is {}", link.repository())
         })?;
@@ -815,10 +928,26 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
     made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))
 }
 
+/// Why a key goes no further for `link`, of a machine that has its repository:
+/// an issue's number that gh says is a pull request's, or that gh does not say
+/// the page of. wt asks GitHub for a pull request's branch, and finds none for
+/// an issue's number; but it makes an issue's branch whatever the number is. A
+/// machine with none of the repository asks nothing, as its gh may be logged
+/// out, which says nothing of whether another machine has it.
+fn kind_holds(link: &Link) -> Result<(), String> {
+    if link.kind() == Kind::Issue {
+        let page = page(link)?;
+        if page.kind() == Kind::Pull {
+            return Err(format!("it is a pull request on GitHub: paste {}", page.url()));
+        }
+    }
+    Ok(())
+}
+
 /// Where a key goes for `file` among the panes `worked`, as `Pasted::ready`
 /// says: the file, read where it is, says the repository, and any pane that
 /// works in that is of it, as in no other, whichever remotes it has.
-fn ready_file(file: &File, worked: &[Worked]) -> Result<Ready<usize>, String> {
+fn ready_file(file: &File, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
     let real = file.real()?;
     let (repository, common) = file.repository(&real)?;
     wt_made(&repository)?;
@@ -848,13 +977,15 @@ fn made_worktree(
     going: Going,
     worked: &[Worked],
     work: Readied,
-) -> Result<Ready<usize>, String> {
+) -> Result<Ready<usize>, Unready> {
     let worktree = worktree(dir, of)?;
     let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == worktree);
     let at = match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
         (Some((at, _)), _) => At::There(at),
         (None, Going::Session(at)) => At::Session(at),
-        (None, Going::Clone { cwd, name }) => At::Clone { cwd, name: free(&name)? },
+        (None, Going::Clone { cwd, name }) => {
+            At::Clone { cwd, name: free(&name).map_err(Unready::InDoubt)? }
+        },
     };
     Ok(Ready { at, branch: branch(&worktree), worktree, work })
 }
@@ -958,25 +1089,38 @@ fn free(name: &SessionName) -> Result<SessionName, String> {
 /// Why no clone of `link`'s repository is for `wt add`, as what luneta has
 /// `seen` of each directory it looked in says: there is none, or one git
 /// cloned, in whose `.git` wt would make the worktree, or one git did not say
-/// how it is laid out.
-fn no_clone(link: &Link, seen: &HashMap<String, Option<Repository>>) -> String {
+/// how it is laid out, or a directory git did not say the remotes of, which
+/// may be one. Only of none may another machine have one to go to: the others
+/// say what stands in the way here, or that this machine cannot tell.
+fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
     let repository = link.repository();
     let laid_out = move |layout: Layout| {
-        let dirs = seen.iter().filter(move |(_, it)| it.is_some_and(|it| it.layout == layout));
-        dirs.map(|(dir, _)| dir).min()
+        let of_it = move |(_, it): &(&String, &Looked)| {
+            it.repository().is_some_and(|it| it.layout == layout)
+        };
+        seen.iter().filter(of_it).map(|(dir, _)| dir).min()
+    };
+    let unsaid = |(dir, it): (&'_ String, &'_ Looked)| match it {
+        Looked::Unsaid(why) => Some((dir.clone(), why.clone())),
+        Looked::Of(_) | Looked::NotOf => None,
     };
     match (laid_out(Layout::Git), laid_out(Layout::Unsaid)) {
-        (Some(dir), _) => format!(
+        (Some(dir), _) => Unready::Failed(format!(
             "{dir} is in a clone of {repository} that git made, and wt would make the worktree \
              in its .git; wt clone it first"
-        ),
-        (None, Some(dir)) => {
-            format!("git did not say whether {dir}, of {repository}, is in a clone wt made")
+        )),
+        (None, Some(dir)) => Unready::Failed(format!(
+            "git did not say whether {dir}, of {repository}, is in a clone wt made"
+        )),
+        (None, None) => match seen.iter().filter_map(unsaid).min() {
+            Some((dir, why)) => Unready::Failed(format!(
+                "git did not say whether {dir} is of {repository}: {why}"
+            )),
+            None => Unready::Nowhere(format!(
+                "no session works in {repository}, nor does zoxide know a clone of it; wt clone \
+                 it first"
+            )),
         },
-        (None, None) => format!(
-            "no session works in {repository}, nor does zoxide know a clone of it; wt clone it \
-             first"
-        ),
     }
 }
 
@@ -1054,13 +1198,55 @@ fn common_dir(dir: &str) -> Common {
     Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 
-/// The remotes of the repository `dir` is in, as `git config --get-regexp`
-/// prints them; none where it has none, or `dir` is in no repository.
-fn remotes_in(dir: &str) -> Option<String> {
+/// Whether `stderr` is git saying, in its own language, that a directory it was
+/// told to work in is gone, as a pane's can be. One it cannot go into for
+/// another reason, as a mount gone stale, may be there all the same.
+fn directory_gone(stderr: &[u8]) -> bool {
+    stderr.starts_with(b"fatal: cannot change to ")
+        && stderr.trim_ascii_end().ends_with(b": No such file or directory")
+}
+
+/// What git says of the remotes of the repository a directory is in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Remotes {
+    /// As `git config --get-regexp` prints them.
+    Listed(String),
+    /// It has none, or the directory is in no repository, or is gone.
+    Unlisted,
+    /// git did not say, for this reason: it did not answer in time, could not
+    /// be run, or would not read the repository it found. That says nothing of
+    /// whether the directory is in one that has remotes.
+    Unsaid(String),
+}
+
+impl Remotes {
+    /// What `ran` says: `git config` ends with 1, saying nothing, where it
+    /// matched nothing, in no repository too. Where it ignores a repository of
+    /// a newer format, it ends with 1 too, but warns of it.
+    fn of(ran: io::Result<Ran>) -> Remotes {
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => return Remotes::Unsaid(format!("it could not be run: {error}")),
+        };
+        if let Ran::Ended { status, stderr, .. } = &ran
+            && ((status.code() == Some(1) && stderr.is_empty()) || directory_gone(stderr))
+        {
+            return Remotes::Unlisted;
+        }
+        match ran.answer().map(String::from_utf8) {
+            Ok(Ok(listed)) => Remotes::Listed(listed),
+            Ok(Err(_)) => Remotes::Unsaid("it listed what is no text".to_owned()),
+            Err(why) => Remotes::Unsaid(why),
+        }
+    }
+}
+
+/// What git says of the remotes of the repository `dir` is in.
+fn remotes_in(dir: &str) -> Remotes {
     let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "config", "--get-regexp", r"^remote\..*\.url$"]));
-    let ran = program::run(&mut git, ANSWER).ok()?;
-    String::from_utf8(ran.answer().ok()?).ok()
+    git::local(git.args(["-C", dir, "config", "--get-regexp", r"^remote\..*\.url$"]))
+        .env("LC_ALL", "C");
+    Remotes::of(program::run(&mut git, ANSWER))
 }
 
 /// How the repository `dir` is in is laid out, as git says.
@@ -1152,26 +1338,39 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
 /// and not a thread: wt says on stderr how it goes, and has git say it there
 /// too, which in luneta's sidebar is the terminal luneta draws; and alone, as
 /// git may ask for a passphrase on the terminal of its session.
-fn worktree(dir: &str, of: &Of) -> Result<String, String> {
+fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     let mut luneta = Command::new(luneta()?);
     git::local(luneta.args(["worktree", "--repo", dir, &of.to_string()]));
     // It fetches across the network, by ssh as like as not.
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
+    worktree_said(ran)
+}
+
+/// Where `ran`, of `luneta worktree`, says the worktree is. One that failed,
+/// and said why, made none. One that said no directory, or ended and did not
+/// say why, as a signal ends one, or that was killed as it went on too long,
+/// may have made it all the same.
+fn worktree_said(ran: Ran) -> Result<String, Unready> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
             let said = printed.strip_suffix('\n').filter(|said| !said.is_empty());
-            let said = said.ok_or_else(|| "luneta worktree said no worktree".to_owned())?;
-            directory(said)
-                .ok_or_else(|| format!("luneta worktree said {said}, which is no directory"))
+            let Some(said) = said else {
+                return Err(Unready::InDoubt("luneta worktree said no worktree".to_owned()));
+            };
+            directory(said).ok_or_else(|| {
+                Unready::InDoubt(format!("luneta worktree said {said}, which is no directory"))
+            })
         },
-        Ran::Ended { status, stderr, .. } => Err(failure(&String::from_utf8_lossy(&stderr))
-            .unwrap_or(format!("luneta worktree: {status}"))),
-        Ran::Stuck => Err(format!(
+        Ran::Ended { status, stderr, .. } => match failure(&String::from_utf8_lossy(&stderr)) {
+            Some(why) => Err(Unready::Failed(why)),
+            None => Err(Unready::InDoubt(format!("luneta worktree: {status}"))),
+        },
+        Ran::Stuck => Err(Unready::InDoubt(format!(
             "the worktree took longer than {} minutes to make",
             MAKING.as_secs() / 60
-        )),
+        ))),
     }
 }
 
@@ -1251,6 +1450,9 @@ fn failure(stderr: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::ExitStatus;
+
     use super::*;
 
     fn link() -> Link {
@@ -1524,30 +1726,64 @@ mod tests {
     /// With no clone for `wt add`, luneta says to have wt clone one, and
     /// names one git made where it saw one, as wt would make the worktree in
     /// its `.git`; or else one git did not say how it is laid out, which it
-    /// takes for neither.
+    /// takes for neither; or else a directory git did not say the remotes of,
+    /// which may be one. Only with none of them may another machine have one
+    /// to go to.
     #[test]
     fn with_no_clone_for_wt_luneta_says_of_one_git_made() {
-        let seen = |seen: &[(&str, Option<Repository>)]| -> HashMap<String, Option<Repository>> {
-            seen.iter().map(|(dir, it)| ((*dir).to_owned(), *it)).collect()
+        let seen = |seen: &[(&str, Looked)]| -> HashMap<String, Looked> {
+            seen.iter().map(|(dir, it)| ((*dir).to_owned(), it.clone())).collect()
+        };
+        let stuck = || Looked::Unsaid("it did not answer in time".to_owned());
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/dots", Looked::NotOf)])),
+            Unready::Nowhere(
+                "no session works in cashubtc/cdk, nor does zoxide know a clone of it; wt clone \
+                 it first"
+                    .to_owned()
+            )
+        );
+        let by_git = || {
+            Unready::Failed(
+                "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make the \
+                 worktree in its .git; wt clone it first"
+                    .to_owned(),
+            )
         };
         assert_eq!(
-            no_clone(&link(), &seen(&[("/dots", None)])),
-            "no session works in cashubtc/cdk, nor does zoxide know a clone of it; wt clone it \
-             first"
-        );
-        let by_git = "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make \
-                      the worktree in its .git; wt clone it first";
-        assert_eq!(
-            no_clone(&link(), &seen(&[("/dots", None), ("/w/cdk/src", Some(BY_GIT))])),
-            by_git
+            no_clone(&link(), &seen(&[
+                ("/dots", Looked::NotOf),
+                ("/w/cdk/src", Looked::Of(BY_GIT)),
+            ])),
+            by_git()
         );
         assert_eq!(
-            no_clone(&link(), &seen(&[("/a/cdk", Some(UNSAID)), ("/w/cdk/src", Some(BY_GIT))])),
-            by_git
+            no_clone(&link(), &seen(&[
+                ("/a/cdk", Looked::Of(UNSAID)),
+                ("/w/cdk/src", Looked::Of(BY_GIT)),
+                ("/mnt/stuck", stuck()),
+            ])),
+            by_git()
+        );
+        let unsaid = || {
+            Unready::Failed(
+                "git did not say whether /a/cdk, of cashubtc/cdk, is in a clone wt made".to_owned(),
+            )
+        };
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/dots", Looked::NotOf), ("/a/cdk", Looked::Of(UNSAID))])),
+            unsaid()
         );
         assert_eq!(
-            no_clone(&link(), &seen(&[("/dots", None), ("/a/cdk", Some(UNSAID))])),
-            "git did not say whether /a/cdk, of cashubtc/cdk, is in a clone wt made"
+            no_clone(&link(), &seen(&[("/a/cdk", Looked::Of(UNSAID)), ("/mnt/stuck", stuck())])),
+            unsaid()
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[("/dots", Looked::NotOf), ("/mnt/stuck", stuck())])),
+            Unready::Failed(
+                "git did not say whether /mnt/stuck is of cashubtc/cdk: it did not answer in time"
+                    .to_owned()
+            )
         );
     }
 
@@ -1820,6 +2056,111 @@ mod tests {
         }
         assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of("/w/.bare".to_owned()));
         assert!(matches!(Common::of(Ok(Vec::new())), Common::Unsaid(_)));
+    }
+
+    /// A program that ended with `code`, having said `stdout` and `stderr`.
+    fn ended(code: i32, stdout: &[u8], stderr: &[u8]) -> Ran {
+        Ran::Ended {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    /// A `luneta worktree` that failed, and said why, made nothing, so another
+    /// machine may go on. One killed as it went on too long, or by a signal, or
+    /// that ended with no word of why, or said no worktree as it ended well,
+    /// may have made it, and no other should.
+    #[test]
+    fn a_worktree_may_be_made_unless_luneta_worktree_said_why_it_failed() {
+        let failed = format!("{WHY}it is not there\n");
+        let failed = worktree_said(ended(1, b"", failed.as_bytes()));
+        assert_eq!(failed, Err(Unready::Failed("it is not there".to_owned())));
+        let killed = Ran::Ended {
+            status: ExitStatus::from_raw(9),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let unsure = [
+            Ran::Stuck,
+            killed,
+            ended(101, b"", b""),
+            ended(0, b"", b""),
+            ended(0, b"/no/dir\n", b""),
+        ];
+        for unsure in unsure {
+            let said = worktree_said(unsure);
+            assert!(matches!(said, Err(Unready::InDoubt(_))), "{said:?}");
+        }
+    }
+
+    /// git says a directory has no remotes by ending with 1 and saying nothing,
+    /// in a repository with none and in no repository alike, and that it is
+    /// gone in its own words. A repository it ignores or cannot read says
+    /// nothing of whether it has remotes, nor does a directory it cannot go
+    /// into, nor a git that did not answer or could not be run.
+    #[test]
+    fn git_says_a_directory_has_no_remotes_apart_from_saying_nothing() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = |name: &str| scratch.path().join(name);
+        let remotes = |name: &str| remotes_in(dir(name).to_str().unwrap());
+        let repository = |name: &str| {
+            assert!(git(scratch.path(), &["init", "-q", name]).is_some());
+            dir(name)
+        };
+        let url = "git@github.com:o/n.git";
+        assert!(git(repository("with"), &["remote", "add", "origin", url]).is_some());
+        let listed = format!("remote.origin.url {url}\n");
+        assert_eq!(remotes("with"), Remotes::Listed(listed));
+
+        repository("without");
+        fs::create_dir(dir("plain")).unwrap();
+        for name in ["without", "plain", "gone"] {
+            assert_eq!(remotes(name), Remotes::Unlisted, "{name}");
+        }
+
+        let newer = repository("newer");
+        assert!(git(newer, &["config", "core.repositoryformatversion", "9"]).is_some());
+        let config = repository("broken").join(".git/config");
+        fs::write(&config, fs::read_to_string(&config).unwrap() + "[broken\n").unwrap();
+        for name in ["newer", "broken"] {
+            assert!(matches!(remotes(name), Remotes::Unsaid(_)), "{name}: {:?}", remotes(name));
+        }
+
+        let stale = b"fatal: cannot change to '/mnt/w': Stale file handle\n";
+        let stale = Remotes::of(Ok(ended(128, b"", stale)));
+        assert!(matches!(stale, Remotes::Unsaid(_)), "{stale:?}");
+        let stuck = Remotes::Unsaid("it did not answer in time".to_owned());
+        assert_eq!(Remotes::of(Ok(Ran::Stuck)), stuck);
+        let unrun = Remotes::of(Err(io::Error::from(io::ErrorKind::NotFound)));
+        assert!(matches!(unrun, Remotes::Unsaid(_)), "{unrun:?}");
+    }
+
+    /// What a daemon says tells whether another machine may go on: it has none
+    /// of the repository, or it made nothing, or it did not take the question.
+    /// Anything else may have left a worktree there: `Aborted` says so, and an
+    /// answer cut short or lost says nothing.
+    #[test]
+    fn only_a_daemon_that_says_it_made_nothing_lets_another_machine_go_on() {
+        let on: Destination = "nixos".parse().unwrap();
+        let why = || "nixos: why".to_owned();
+        assert_eq!(Unready::of(&on, &Status::not_found("why")), Unready::Nowhere(why()));
+        for status in [Status::failed_precondition("why"), Status::invalid_argument("why")] {
+            assert_eq!(Unready::of(&on, &status), Unready::Failed(why()), "{status:?}");
+        }
+        let older = Unready::of(&on, &Status::unimplemented("why"));
+        assert!(matches!(older, Unready::Failed(_)), "{older:?}");
+        let unsure = [
+            Status::aborted("why"),
+            Status::unavailable("why"),
+            Status::cancelled("why"),
+            Status::deadline_exceeded("why"),
+            Status::internal("why"),
+            Status::unknown("why"),
+        ];
+        for status in unsure {
+            assert_eq!(Unready::of(&on, &status), Unready::InDoubt(why()), "{status:?}");
+        }
     }
 
     /// Where a key goes is answered as it was found: a pane by its place

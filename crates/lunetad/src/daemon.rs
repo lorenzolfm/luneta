@@ -80,7 +80,7 @@ use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
-use crate::links::{Pasted, Ready};
+use crate::links::{Pasted, Ready, Unready};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination};
 use crate::reviews::Move;
@@ -988,11 +988,15 @@ impl Daemon for Host {
         request: Request<PasteRequest>,
     ) -> Result<Response<Self::PasteStream>, Status> {
         let (on, pasted) = Pasted::of(request.into_inner()).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        // A machine this daemon does not reach never heard the question, which
+        // `Code::Unavailable` would not say: a connection lost after it did
+        // says that too.
+        let unasked = |why: Status| Status::failed_precondition(why.message());
+        if let Some(mut daemon) = self.bridged(on).map_err(unasked)? {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let answer = late(move || pasted.ready().map(Ready::answer));
+        let answer = late(move || pasted.ready().map(Ready::answer).map_err(unready));
         Ok(Response::new(Box::pin(answer)))
     }
 
@@ -1019,7 +1023,10 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer.into_inner())));
         }
         let handle = Handle::current();
-        let answer = late(move || kept_image(&handle, parts, size).map(|path| KeepImageResponse { path }));
+        let answer = late(move || {
+            let kept = kept_image(&handle, parts, size);
+            kept.map(|path| KeepImageResponse { path }).map_err(Status::failed_precondition)
+        });
         Ok(Response::new(Box::pin(answer)))
     }
 }
@@ -1059,18 +1066,30 @@ fn kept_image(
 fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>
 where
     T: Send + 'static,
-    J: FnOnce() -> Result<T, String> + Send + 'static,
+    J: FnOnce() -> Result<T, Status> + Send + 'static,
 {
     let (answer, answered) = tokio::sync::mpsc::channel(1);
     task::spawn(async move {
         let done = match task::spawn_blocking(job).await {
-            Ok(done) => done.map_err(Status::failed_precondition),
+            Ok(done) => done,
             Err(error) => Err(unfinished(&error)),
         };
         // The question hung up.
         let _ = answer.send(done).await;
     });
     ReceiverStream::new(answered)
+}
+
+/// What the daemon says of a machine with nowhere for a key of the menu to
+/// go: `Code::NotFound`, for a luneta to ask its other machines, where this
+/// one has none of the repository; `Code::Aborted`, for it to ask no other,
+/// where the worktree may be made; and `Code::FailedPrecondition` otherwise.
+fn unready(why: Unready) -> Status {
+    match why {
+        Unready::Nowhere(why) => Status::not_found(why),
+        Unready::Failed(why) => Status::failed_precondition(why),
+        Unready::InDoubt(why) => Status::aborted(why),
+    }
 }
 
 /// What `talk` hears of a turn of the ask box's agent, a step at a time, as

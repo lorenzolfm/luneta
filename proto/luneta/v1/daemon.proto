@@ -141,7 +141,15 @@ service Daemon {
   // that zoxide knows there. It answers once, as late as that takes, which
   // fetches across the network: a stream, as the start of every answer is
   // cut five seconds after the question. The stream ends after the answer,
-  // or with why there is none.
+  // or with why there is none, which its code tells apart for luneta to know
+  // whether to ask its other machines. Not found is a machine with no session
+  // in a link's repository, and whose zoxide knows no clone of it, as git said
+  // of every directory: never of a file. A failed precondition is one that
+  // made nothing, and says what stands in the way, as one the daemon does not
+  // reach. Aborted is one that may have made the worktree, of which no other
+  // machine should make another. So may one of any other code, but for an
+  // invalid argument and unimplemented, before the stream as in it: a machine
+  // starts on the question as it hears it, and goes on if the answer is lost.
   rpc Paste(PasteRequest) returns (stream PasteResponse);
   // Moves the review an agent runs, as a key of luneta's menu does: the
   // daemon of the agent's machine keeps it. One that the agent does not run,
