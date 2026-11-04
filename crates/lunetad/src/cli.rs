@@ -159,6 +159,11 @@ pub struct Laid {
     /// list without them still says what closing a pane closes.
     #[serde(default)]
     pub is_focused: bool,
+    /// Whether it is shown over the other panes of its tab. Only a turn goes by
+    /// it, to show it so again, as a pane leaving the tab or coming into it ends
+    /// that.
+    #[serde(default)]
+    pub is_fullscreen: bool,
     pub tab_id: u32,
     /// Where its tab stands among the session's, from the first.
     #[serde(default)]
@@ -263,6 +268,7 @@ mod tests {
             is_suppressed: false,
             is_floating: false,
             is_focused: false,
+            is_fullscreen: false,
             tab_id,
             tab_position: tab_id,
             tab_name: String::new(),

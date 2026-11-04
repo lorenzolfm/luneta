@@ -23,10 +23,17 @@
 //! it is picked: zellij gives the id of a tab that closed to the next it
 //! opens, and never a terminal's while its server runs.
 //!
-//! zellij moves the client that last typed in the session to each pane it
-//! stacks. The menu takes luneta's own there in the end, and the CLI takes that
-//! client back. A tab whose last tiled pane leaves closes as zellij next draws
-//! for a client, with the floating panes left in it, which end: so those go
+//! zellij moves the client that last typed in the session to the last pane it is
+//! told to stack, and hides the floating panes of the tab it goes to. It passes
+//! over a pane that is none of the session's, so with `NOWHERE` last it moves no
+//! client, as `stacked` has it: what you type goes on reaching your pane. A client
+//! on the pane that moves is to go with it, so that one goes with no `NOWHERE`,
+//! as does one with no room for it, which counts as a pane of the stack. zellij
+//! then does move the client that last typed: the menu takes luneta's own there in
+//! the end, and the CLI takes that client back. A pane that moves with no client
+//! taken to it needs a second stand-in for it to end a pane like any other, as
+//! `under_stack` says. A tab whose last tiled pane leaves closes as zellij next
+//! draws for a client, with the floating panes left in it, which end: so those go
 //! first, and a pane that alone holds its tab open stays where they would end.
 //!
 //! zellij makes a tab with no room for its panes in a session no client is in,
@@ -68,6 +75,11 @@ use crate::zellij::SessionName;
 /// ends on its own, which closes the pane, and a tab with nothing else in it,
 /// where luneta is gone before it does.
 const STAND_IN: [&str; 2] = ["sleep", "10"];
+
+/// What zellij is told to stack last for it to move no client, as it focuses the
+/// last pane it is told to stack: a pane none of a session's has, as zellij
+/// numbers terminals from 0 and gives no id of one again while its server runs.
+const NOWHERE: PaneId = PaneId::Terminal(u32::MAX);
 
 /// What a pane of a session turns into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +143,7 @@ fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
 pub struct Leaving {
     pane: u32,
     name: Option<String>,
+    fullscreen: Option<PaneId>,
 }
 
 impl Leaving {
@@ -140,22 +153,22 @@ impl Leaving {
         PaneId::Terminal(self.pane)
     }
 
+    /// The pane shown fullscreen in the tab it leaves, which its leaving ends.
+    #[must_use]
+    pub fn fullscreen(&self) -> Option<PaneId> {
+        self.fullscreen
+    }
+
     /// Moves it into a tab made for it in `session`, or says why it did not,
     /// where it stays where it was, and the tab goes as what holds it closes.
     /// What runs in it runs on either way.
     pub fn turn(&self, session: &SessionName) -> Result<(), String> {
         let tab = new_tab(session, self.name.as_deref())?;
-        let stand_ins = terminals(&laid(session.as_str())?, tab);
-        let Some(root) = stand_ins.first() else {
-            return Err("zellij opened a tab with no pane".to_owned());
-        };
+        let stand_ins: Vec<PaneId> =
+            terminals(&laid(session.as_str())?, tab).into_iter().map(PaneId::Terminal).collect();
         let moved = self.pane();
-        let root = PaneId::Terminal(*root);
-        let listed = stack(session, root, moved).and_then(|()| laid(session.as_str()));
-        for stand_in in stand_ins {
-            close_stand_in(session, PaneId::Terminal(stand_in));
-        }
-        match landed(&listed?, moved, tab) {
+        let listed = over_stand_ins(session, &stand_ins, moved, tab)?;
+        match landed(&listed, moved, tab) {
             Landed::There => Ok(()),
             Landed::Stayed => Err(no_room(moved, tab)),
             Landed::Gone => Err(format!("pane {} is gone", self.pane)),
@@ -173,8 +186,11 @@ pub fn pane_leaving(
     pane: u32,
 ) -> Result<Option<Leaving>, String> {
     same_session(session, started)?;
-    let name = leaving(&laid(session.as_str())?, pane)?;
-    Ok(has_client(session)?.then_some(Leaving { pane, name }))
+    let laid = laid(session.as_str())?;
+    let name = leaving(&laid, pane)?;
+    let fullscreen = fullscreen_of(&laid, terminal(&laid, pane)?.tab_id)
+        .filter(|it| *it != PaneId::Terminal(pane));
+    Ok(has_client(session)?.then_some(Leaving { pane, name, fullscreen }))
 }
 
 /// Moves the terminal `pane` of `session`, the one that started at `started`,
@@ -257,6 +273,7 @@ pub struct Moving {
     from: u32,
     to: u32,
     panes: Vec<PaneId>,
+    fullscreen: Option<PaneId>,
 }
 
 impl Moving {
@@ -264,6 +281,13 @@ impl Moving {
     #[must_use]
     pub fn panes(&self) -> &[PaneId] {
         &self.panes
+    }
+
+    /// The pane shown fullscreen in the tab they go into, which their coming
+    /// ends.
+    #[must_use]
+    pub fn fullscreen(&self) -> Option<PaneId> {
+        self.fullscreen
     }
 
     /// Moves them in `session`, tiled, and the tab they left goes; and says what
@@ -304,7 +328,38 @@ fn moving(laid: &[Laid], pane: u32, beside: u32) -> Result<Moving, String> {
     let (tiled, others): (Vec<&Laid>, Vec<&Laid>) =
         laid.iter().filter(moves).partition(|it| it.is_tiled());
     let panes = others.into_iter().chain(tiled).map(Laid::pane_id).collect();
-    Ok(Moving { from, to, panes })
+    Ok(Moving { from, to, panes, fullscreen: fullscreen_of(laid, to) })
+}
+
+/// The pane shown fullscreen in the tab `tab` among `laid`, if one is.
+fn fullscreen_of(laid: &[Laid], tab: u32) -> Option<PaneId> {
+    laid.iter().find(|it| it.tab_id == tab && it.is_fullscreen).map(Laid::pane_id)
+}
+
+/// Shows `pane` of `session` fullscreen again, as it was before a turn, once the
+/// turn is over: a pane that leaves its tab, or a stand-in that opens there, ends
+/// that. Not one that is gone, or that still is, nor while a client is on another
+/// pane of its tab, whom zellij would move to it.
+pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), String> {
+    if !ended_fullscreen(&laid(session.as_str())?, &clients_of(session)?, pane) {
+        return Ok(());
+    }
+    let mut toggle = action(session);
+    toggle.args(["toggle-fullscreen", "--pane-id", &pane.to_string()]);
+    done_once_reached(toggle)
+}
+
+/// Whether `pane`, among `laid`, the panes of a session that `clients` are in, is
+/// no longer shown fullscreen and can be again with no client moved.
+fn ended_fullscreen(laid: &[Laid], clients: &[clients::Client], pane: PaneId) -> bool {
+    let Some(shown) = laid.iter().find(|it| it.pane_id() == pane) else {
+        return false;
+    };
+    let beside = |client: &clients::Client| {
+        client.pane != pane
+            && laid.iter().any(|it| it.tab_id == shown.tab_id && it.pane_id() == client.pane)
+    };
+    !shown.is_fullscreen && !clients.iter().any(beside)
 }
 
 /// The terminal `pane` among `laid`, or why not: it is gone.
@@ -343,9 +398,14 @@ fn no_room(pane: PaneId, tab: u32) -> String {
 
 /// Whether a client is in `session`, as zellij lists them now.
 fn has_client(session: &SessionName) -> Result<bool, String> {
+    Ok(!clients_of(session)?.is_empty())
+}
+
+/// The clients in `session`, as zellij lists them now.
+fn clients_of(session: &SessionName) -> Result<Vec<clients::Client>, String> {
     let mut zellij = Command::new("zellij");
     quiet(&mut zellij);
-    Ok(!clients::list(zellij, session.as_str())?.is_empty())
+    clients::list(zellij, session.as_str())
 }
 
 /// zellij's `action` command on `session`.
@@ -380,9 +440,8 @@ fn new_tab(session: &SessionName, name: Option<&str>) -> Result<u32, String> {
 /// it ended up, or why zellij was not asked to the end.
 fn over_stand_in(session: &SessionName, pane: PaneId, to: u32) -> Result<Landed, String> {
     let stand_in = open_stand_in(session, to)?;
-    let listed = stack(session, stand_in, pane).and_then(|()| laid(session.as_str()));
-    close_stand_in(session, stand_in);
-    Ok(landed(&listed?, pane, to))
+    let listed = over_stand_ins(session, &[stand_in], pane, to)?;
+    Ok(landed(&listed, pane, to))
 }
 
 /// Has zellij open a stand-in in the tab `to` of `session`, with no client
@@ -411,11 +470,84 @@ fn close_stand_in(session: &SessionName, pane: PaneId) {
     let _ = done_once_reached(close);
 }
 
-/// Has zellij stack `moved` on `root`, from whatever tab it is in. It stacks
-/// nothing where it has no room, and says nothing of it.
-fn stack(session: &SessionName, root: PaneId, moved: PaneId) -> Result<(), String> {
+/// Has zellij stack `moved` on the first of `stand_ins`, in the tab `tab` of
+/// `session`, closes them, and says what it listed with `moved` stacked. `moved`
+/// is left a pane like any other, as `under_stack` says.
+fn over_stand_ins(
+    session: &SessionName,
+    stand_ins: &[PaneId],
+    moved: PaneId,
+    tab: u32,
+) -> Result<Vec<Laid>, String> {
+    let Some(&root) = stand_ins.first() else {
+        return Err("zellij opened a tab with no pane".to_owned());
+    };
+    let came = stacked(session, root, moved, tab);
+    let last = match came {
+        Ok(Stacked { unfocused: true, .. }) => under_stack(session, root, tab),
+        _ => None,
+    };
+    for &stand_in in stand_ins {
+        close_stand_in(session, stand_in);
+    }
+    if let Some(last) = last {
+        close_stand_in(session, last);
+    }
+    came.map(|came| came.listed)
+}
+
+/// What came of having zellij stack a pane: what it lists then, and whether it
+/// stacked it with `NOWHERE` last, so that it moved no client.
+struct Stacked {
+    listed: Vec<Laid>,
+    unfocused: bool,
+}
+
+/// Has zellij stack `moved` on `root`, in the tab `tab` of `session`, and says what
+/// came of it. With `NOWHERE` it moves no client, unless one is on `moved`, as that
+/// one goes with it. A stack with no room does nothing, and `NOWHERE` takes up room:
+/// asked again without it, it moves the pane where it ever did, and the client that
+/// last typed along with it.
+fn stacked(
+    session: &SessionName,
+    root: PaneId,
+    moved: PaneId,
+    tab: u32,
+) -> Result<Stacked, String> {
+    let on_it = |clients: Vec<clients::Client>| clients.iter().any(|it| it.pane == moved);
+    if !clients_of(session).is_ok_and(on_it) {
+        stack(session, &[root, moved, NOWHERE])?;
+        let listed = laid(session.as_str())?;
+        match landed(&listed, moved, tab) {
+            Landed::There => return Ok(Stacked { listed, unfocused: true }),
+            Landed::Gone => return Ok(Stacked { listed, unfocused: false }),
+            Landed::Stayed => {},
+        }
+    }
+    stack(session, &[root, moved])?;
+    Ok(Stacked { listed: laid(session.as_str())?, unfocused: false })
+}
+
+/// Has zellij stack a second stand-in in the tab `tab` of `session` under the pane
+/// stacked on `root` with no client moved, and says which, to close after `root`.
+/// In a tab no client is on, that pane has all the room of the stack and `root` a
+/// row of it. Closing a pane of one row leaves the other a stack of one, which
+/// zellij splits for no stand-in after it, and a new pane opened on it joins. It
+/// makes a pane like any other only of closing the one with the room, and the
+/// second stand-in takes that from it. Where it finds no room for this one, the
+/// pane stays a stack of one, as it ends with no client in the session: it has
+/// moved all the same.
+fn under_stack(session: &SessionName, root: PaneId, tab: u32) -> Option<PaneId> {
+    let last = open_stand_in(session, tab).ok()?;
+    let _ = stack(session, &[root, last, NOWHERE]);
+    Some(last)
+}
+
+/// Has zellij stack `panes` on the first of them, each from whatever tab it is
+/// in. It stacks nothing where it has no room, and says nothing of it.
+fn stack(session: &SessionName, panes: &[PaneId]) -> Result<(), String> {
     let mut command = action(session);
-    command.args(["stack-panes", "--"]).arg(root.to_string()).arg(moved.to_string());
+    command.args(["stack-panes", "--"]).args(panes.iter().map(ToString::to_string));
     done_once_reached(command)
 }
 
@@ -443,6 +575,7 @@ mod tests {
             is_suppressed: false,
             is_floating: false,
             is_focused: false,
+            is_fullscreen: false,
             tab_id,
             tab_position: tab_id,
             tab_name: format!("Tab #{}", tab_id + 1),

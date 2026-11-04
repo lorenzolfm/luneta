@@ -17,12 +17,14 @@
 //! clients. Claude Code runs what that agent runs without asking you, so a
 //! pane it opens runs your shell or Claude Code, and no other command.
 //!
-//! A turn moves nobody, as an open does, though zellij takes the client that
-//! last typed in a session to each pane it moves there: the turn then takes that
-//! client back, as `moved_from` says. One refused before it asked zellij to move
-//! anything has nobody to take back. zellij holds no condition on where a client
-//! is, so a key you press as a turn runs, onto a pane that moves, reads as zellij
-//! taking you there, and you go back.
+//! A turn moves nobody, as an open does, and what you type goes on reaching your
+//! pane, as `turns` says. Where another client is on a pane that moves, or the
+//! tab it goes to has little room, zellij does take the client that last typed in
+//! the session there, and what it types goes there for that moment: the turn then
+//! takes that client back, as `moved_from` says. One refused before it asked zellij
+//! to move anything has nobody to take back. zellij holds no condition on where a
+//! client is, so a key you press as a turn runs, onto a pane that moves, reads as
+//! zellij taking you there, and you go back.
 //!
 //! A close says what it would close, and which agents it would end, and
 //! closes nothing until it is told yes to that plan, by the word it prints
@@ -449,6 +451,7 @@ fn pane_into_tab(given: &Pane) -> Result<String, String> {
     let before = zellij::clients_on_panes(&given.session)?;
     let turned = leaving.turn(&session);
     take_back(&given.session, &before, &[leaving.pane()]);
+    fullscreen_again(&session, leaving.fullscreen());
     turned?;
     Ok(given.to_string())
 }
@@ -469,6 +472,7 @@ fn tab_into_panes(given: &Pane, into: &Pane) -> Result<String, String> {
     let before = zellij::clients_on_panes(&given.session)?;
     let came = moving.turn(&session);
     take_back(&given.session, &before, moving.panes());
+    fullscreen_again(&session, moving.fullscreen());
     match came? {
         IntoPanes::Done => Ok(given.to_string()),
         IntoPanes::Partly { moved, of, why } => Err(format!(
@@ -484,6 +488,16 @@ fn tab_into_panes(given: &Pane, into: &Pane) -> Result<String, String> {
 fn take_back(session: &str, before: &[Client], moved: &[PaneId]) {
     if let Err(why) = taken_back(session, before, moved) {
         eprintln!("luneta: the user may not be on the pane they were on before: {why}");
+    }
+}
+
+/// Shows `pane`, the pane of `session` a turn ended the fullscreen of, so again,
+/// and says where it could not: what turned stays turned either way. It comes
+/// after `take_back`, as zellij would move a client still on another pane of its
+/// tab.
+fn fullscreen_again(session: &SessionName, pane: Option<PaneId>) {
+    if let Some(Err(why)) = pane.map(|pane| turns::fullscreen_again(session, pane)) {
+        eprintln!("luneta: a pane the turn took out of fullscreen stays so: {why}");
     }
 }
 
@@ -509,9 +523,10 @@ fn taken_back(session: &str, before: &[Client], moved: &[PaneId]) -> Result<(), 
 
 /// Who zellij took to a pane a turn moved, as it was `before`, by what it lists
 /// `after`, or none: `moved` are the panes it asked zellij to move. zellij takes
-/// the client that last typed in a session to each pane it stacks, and says not
-/// which that is, so it is one on a pane of those now that was elsewhere. One on
-/// a pane that moved stays on it, as it goes with it, and so is on it still.
+/// the client that last typed in a session to a pane it stacks with nothing after
+/// it, and says not which that is, so it is one on a pane of those now that was
+/// elsewhere. One on a pane that moved stays on it, as it goes with it, and so is
+/// on it still.
 ///
 /// Another can land on one of those without typing, as the tab it was on goes:
 /// it is the one that came from outside them that zellij took. Between two

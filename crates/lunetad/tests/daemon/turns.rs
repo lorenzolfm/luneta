@@ -98,6 +98,12 @@ fn on_stand_in(pane: &str) -> String {
     action(&format!("stack-panes -- terminal_9 {pane}"))
 }
 
+/// What has zellij stack `pane` on the stand-in it opened with no client moved:
+/// it focuses the last it is told to stack, and that is none of the session's.
+fn unfocused(pane: &str) -> String {
+    action(&format!("stack-panes -- terminal_9 {pane} terminal_4294967295"))
+}
+
 fn stand_in_closed() -> String {
     action("close-pane --pane-id terminal_9")
 }
@@ -127,6 +133,30 @@ fn a_pane_turns_into_a_tab_named_as_the_one_it_left() {
         assert_eq!(host.zellij.turned(), [action("stack-panes -- terminal_4 terminal_1")]);
         assert_eq!(host.zellij.closed(), [action("close-pane --pane-id terminal_4")]);
     }
+}
+
+/// A pane stacked with no client taken to it has all the room of the stack, and
+/// closing a stand-in of one row would leave it a stack of one, which zellij
+/// splits for nothing after it. A second stand-in takes the room from it, and goes
+/// after the first, which leaves it a pane like any other.
+#[test]
+fn a_pane_no_client_is_taken_to_ends_a_pane_like_any_other() {
+    let host = Host::new();
+    let (old_tab, new) = ((0, "Tab #1"), (3, "Tab #2"));
+    host.zellij.list("work", &json!([pane(1, old_tab), pane(2, old_tab)]));
+    host.zellij.clients("work", &[(1, "terminal_2")]);
+    host.zellij.opens_into("work", &json!([pane(1, old_tab), pane(2, old_tab), pane(4, new)]));
+    host.zellij.stacks_into("work", 1, &json!([pane(2, old_tab), pane(1, new), pane(4, new)]));
+
+    assert_eq!(into_tab(&host, 1).unwrap(), TAB_DONE);
+
+    let nowhere = "terminal_4294967295";
+    let stacked = action(&format!("stack-panes -- terminal_4 terminal_1 {nowhere}"));
+    assert_eq!(host.zellij.turned(), [stacked]);
+    let tucked = action(&format!("stack-panes -- terminal_4 terminal_9 {nowhere}"));
+    assert_eq!(host.zellij.tucked(), [tucked]);
+    let first = action("close-pane --pane-id terminal_4");
+    assert_eq!(host.zellij.closed(), [first, stand_in_closed()]);
 }
 
 /// A tab zellij opened as a pane closing cut its answer short is asked for
@@ -239,10 +269,11 @@ fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
 
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    assert_eq!(host.zellij.opened(), [stand_in(1), stand_in(1), stand_in(1)]);
-    let stacked = [on_stand_in("terminal_5"), on_stand_in("terminal_1"), on_stand_in("plugin_7")];
+    // One for each, and another for each that no client went to.
+    assert_eq!(host.zellij.opened(), vec![stand_in(1); 5]);
+    let stacked = [unfocused("terminal_5"), on_stand_in("terminal_1"), unfocused("plugin_7")];
     assert_eq!(host.zellij.turned(), stacked);
-    assert_eq!(host.zellij.closed(), [stand_in_closed(), stand_in_closed(), stand_in_closed()]);
+    assert_eq!(host.zellij.closed(), vec![stand_in_closed(); 5]);
 }
 
 /// A session no client is in lists the tab its panes left on, with nothing in
@@ -256,7 +287,8 @@ fn a_session_no_client_is_in_loses_the_tab_they_left_too() {
 
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    assert_eq!(host.zellij.closed(), [stand_in_closed(), action("close-tab-by-id 0")]);
+    let closed = [stand_in_closed(), stand_in_closed(), action("close-tab-by-id 0")];
+    assert_eq!(host.zellij.closed(), closed);
 }
 
 /// A pane zellij finds no room for stops the rest, with what came before it
@@ -275,8 +307,10 @@ fn a_pane_zellij_finds_no_room_for_stays_in_its_tab_and_the_answer_says_some_mov
 
     let why = "zellij found no room for terminal_2 in tab 1, so it stays".to_owned();
     assert_eq!(came, Some(PanesCame::Partly(Partly { moved: 1, of: 3, why })));
-    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), on_stand_in("terminal_2")]);
-    assert_eq!(host.zellij.closed(), [stand_in_closed(), stand_in_closed()]);
+    let stacked = [unfocused("terminal_1"), unfocused("terminal_2"), on_stand_in("terminal_2")];
+    assert_eq!(host.zellij.turned(), stacked);
+    // The first moved, with a second stand-in, and the last did not.
+    assert_eq!(host.zellij.closed(), vec![stand_in_closed(); 3]);
 }
 
 /// With no room for the first, nothing moved, which is a refusal and no answer
@@ -289,7 +323,7 @@ fn a_tab_zellij_finds_no_room_for_moves_nothing() {
 
     refused(&into_panes(&host, 1, 3).unwrap_err(), "no room for terminal_1 in tab 1");
 
-    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1")]);
+    assert_eq!(host.zellij.turned(), [unfocused("terminal_1"), on_stand_in("terminal_1")]);
     assert_eq!(host.zellij.closed(), [stand_in_closed()]);
 }
 
@@ -306,7 +340,7 @@ fn a_pane_that_ends_on_its_way_does_not_stop_the_rest() {
 
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), on_stand_in("terminal_2")]);
+    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), unfocused("terminal_2")]);
 }
 
 /// A session of `work` whose one pane in the tab of terminal 1 moves to the tab
@@ -371,7 +405,8 @@ fn closes_that_reached_no_server_are_asked_again() {
 
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    assert_eq!(host.zellij.closed(), [stand_in_closed(), action("close-tab-by-id 0")]);
+    let closed = [stand_in_closed(), stand_in_closed(), action("close-tab-by-id 0")];
+    assert_eq!(host.zellij.closed(), closed);
 }
 
 /// The terminal a tab was picked by may have closed by the key: nothing moves,

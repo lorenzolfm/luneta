@@ -105,8 +105,10 @@ pub fn script(path: &Path, text: &str) {
 /// lists the panes of a session as a test has it: what it wrote with `list`.
 /// It lists the session's clients too, as the test wrote them with `clients`,
 /// and none until it has, and as `lists_clients_into`, `stacks_clients_into`
-/// and `focuses_clients_into` have them move. Of a session it was given no panes
-/// for, it says there is no such session, as zellij does. It notes each session
+/// and `focuses_clients_into` have them move. It moves none as it stacks a pane
+/// with one that is none of the session's last, and stacks nothing so in a session
+/// a test had `leave_little_room`. A stand-in it opened it stacks for `tucked`,
+/// with no pane moved. Of a session it was given no panes for, it says there is no such session, as zellij does. It notes each session
 /// the daemon asks it for the panes of, for `asked`, and each pane, tab and
 /// session it is asked to close, for `closed`, and closes nothing; in a session
 /// a test had it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
@@ -203,15 +205,29 @@ case "$*" in
         fi
         exit 0
         ;;
+    "action stack-panes -- "*" terminal_9 terminal_4294967295")
+        echo "$asked" >> "{panes}/tucked"
+        exit 0
+        ;;
     "action stack-panes -- "*)
         echo "$asked" >> "{panes}/turned"
-        for next in "{panes}/$session".stacks.*; do
-            [ -f "$next" ] && mv "$next" "{panes}/$session.json"
-            break
-        done
-        if [ -f "{panes}/$session.stacked.clients" ]; then
+        case "$*" in
+            *" terminal_4294967295") focuses=no ;;
+            *) focuses=yes ;;
+        esac
+        if [ "$focuses" = yes ] || [ ! -f "{panes}/$session.tight" ]; then
+            for next in "{panes}/$session".stacks.*; do
+                [ -f "$next" ] && mv "$next" "{panes}/$session.json"
+                break
+            done
+        fi
+        if [ "$focuses" = yes ] && [ -f "{panes}/$session.stacked.clients" ]; then
             mv "{panes}/$session.stacked.clients" "{panes}/$session.clients"
         fi
+        exit 0
+        ;;
+    "action toggle-fullscreen "*)
+        echo "$asked" >> "{panes}/turned"
         exit 0
         ;;
     "action toggle-pane-embed-or-floating "*)
@@ -358,6 +374,13 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("turned")
     }
 
+    /// Each stack of a stand-in zellij was asked for under a pane that moved,
+    /// which is what leaves that pane one like any other, in the order it was
+    /// asked.
+    pub fn tucked(&self) -> Vec<String> {
+        self.lines("tucked")
+    }
+
     /// Each rename zellij was asked for, as its arguments were, in the order
     /// it was asked.
     pub fn renamed(&self) -> Vec<String> {
@@ -441,9 +464,17 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 
     /// Has zellij list `clients` for the session `session` once it has stacked
     /// a pane there, as `clients` would, as it moves the client that last typed
-    /// to it.
+    /// to it. That is the last pane it is told to stack, so one that is none of
+    /// the session's moves nobody.
     pub fn stacks_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
         self.write(&format!("{session}.stacked.clients"), &clients_said(clients));
+    }
+
+    /// Has zellij find room in `session` for a pane to stack, but not for one
+    /// that is none of the session's beside it, which counts as a pane of the
+    /// stack: it stacks neither, and says nothing of it.
+    pub fn leave_little_room(&self, session: &str) {
+        self.write(&format!("{session}.tight"), "");
     }
 
     /// Has zellij list `clients` for the session `session` once it has moved

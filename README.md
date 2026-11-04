@@ -1077,14 +1077,17 @@ environment, not the agent's.
 What runs in the panes goes on, an agent turning the pane it runs in too, and
 each pane keeps its id, so `turn` says the pane it was given. `--into` takes a
 pane of the tab, of the same session, as two tabs can share a name. It moves
-nobody: zellij takes the client that last typed in that session to each pane it
-moves, so you may see the other tab for a moment, and `turn` takes you back to
-the pane you were on. On a pane that moves, you stay on it, and go with it. Where
-it can't take you back, as where you have typed nothing in that session since you
-came and your pane moves, it says so. As with `open tab`, `turn pane` needs someone in the session to make room for the tab, and says so
-otherwise, where `t t` would go there: `turn tab` needs no one. Where `turn tab`
-runs out of room partway, the panes that moved stay moved, and it fails saying
-how many did.
+nobody: what you type goes on reaching your pane, floating panes that show go on
+showing, and a pane shown fullscreen beside those that move stays so. On a pane
+that moves, you stay on it, and go with it. Two things still have zellij take the
+client that last typed in that session to a pane that moves, for a moment, and
+what it types then goes there: another client on that pane, and a tab with too
+little room to do without. `turn` then takes it back. Where it can't take you
+back, as where you have typed nothing in that session since you came and your
+pane moves, it says so. As with `open tab`, `turn pane` needs someone in the
+session to make room for the tab, and says so otherwise, where `t t` would go
+there: `turn tab` needs no one. Where `turn tab` runs out of room partway, the
+panes that moved stay moved, and it fails saying how many did.
 
 `close` takes a pane's tab along once nothing else holds the tab open, and the
 session where that is its only tab, as `d d` does. What it is given in a
