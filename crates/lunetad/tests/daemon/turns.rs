@@ -5,6 +5,8 @@
 //! Any floating asked for shows in `turned` here: zellij drops a pane it has no
 //! room to float, so no move may ask for it.
 
+use std::time::SystemTime;
+
 use lunetad::api::other_tabs_response::Tab;
 use lunetad::api::turn_into_panes_response::Came as PanesCame;
 use lunetad::api::turn_into_panes_response::{Done as PanesDone, Partly};
@@ -45,10 +47,17 @@ fn asking<T>(host: &Host, asked: impl AsyncFnOnce(DaemonClient<Channel>) -> T) -
     })
 }
 
+/// When the session started, as a question says it. No socket lists `work` in
+/// most of these, so no session took its name.
+fn long_ago() -> prost_types::Timestamp {
+    SystemTime::UNIX_EPOCH.into()
+}
+
 /// What the daemon of `host` answers as it is asked to turn the terminal
 /// `pane` of `work` into a tab.
 fn into_tab(host: &Host, pane: u32) -> Result<Option<TabCame>, Status> {
-    let asked = TurnIntoTabRequest { on: None, session: "work".to_owned(), pane };
+    let session = "work".to_owned();
+    let asked = TurnIntoTabRequest { on: None, session, pane, started_at: Some(long_ago()) };
     asking(host, async move |mut daemon| {
         daemon.turn_into_tab(asked).await.map(|answer| answer.into_inner().came)
     })
@@ -57,7 +66,9 @@ fn into_tab(host: &Host, pane: u32) -> Result<Option<TabCame>, Status> {
 /// What the daemon of `host` answers as it is asked to turn the tab of the
 /// terminal `pane` of `work` into panes of the tab of the terminal `beside`.
 fn into_panes(host: &Host, pane: u32, beside: u32) -> Result<Option<PanesCame>, Status> {
-    let asked = TurnIntoPanesRequest { on: None, session: "work".to_owned(), pane, beside };
+    let session = "work".to_owned();
+    let asked =
+        TurnIntoPanesRequest { on: None, session, pane, beside, started_at: Some(long_ago()) };
     asking(host, async move |mut daemon| {
         daemon.turn_into_panes(asked).await.map(|answer| answer.into_inner().came)
     })
@@ -307,6 +318,38 @@ fn a_tab_picked_by_a_terminal_that_closed_since_moves_nothing() {
 
     refused(&into_panes(&host, 1, 3).unwrap_err(), "pane 3, which the tab goes by, is gone");
 
+    assert!(host.zellij.opened().is_empty());
+    assert!(host.zellij.turned().is_empty());
+}
+
+/// zellij numbers panes from 0 for each server, so a session that took the name
+/// since has panes of the same ids: nothing of it moves, and zellij is asked
+/// for nothing. A question that says no start says nothing of which it means.
+#[test]
+fn a_session_that_took_the_name_since_stays() {
+    let host = Host::new();
+    let _work = host.serve("work");
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    host.zellij.list("work", &json!([pane(1, from), pane(2, from), pane(3, to)]));
+    host.zellij.clients("work", &[(1, "terminal_1")]);
+    let session = || "work".to_owned();
+    let tab = |started_at| TurnIntoTabRequest { on: None, session: session(), pane: 1, started_at };
+    let panes = |started_at| TurnIntoPanesRequest {
+        on: None,
+        session: session(),
+        pane: 1,
+        beside: 3,
+        started_at,
+    };
+    asking(&host, async move |mut daemon| {
+        let since = "a session made since";
+        refused(&daemon.turn_into_tab(tab(Some(long_ago()))).await.unwrap_err(), since);
+        refused(&daemon.turn_into_panes(panes(Some(long_ago()))).await.unwrap_err(), since);
+        let unsaid = daemon.turn_into_tab(tab(None)).await.unwrap_err();
+        assert_eq!(unsaid.code(), Code::InvalidArgument, "{unsaid:?}");
+        let unsaid = daemon.turn_into_panes(panes(None)).await.unwrap_err();
+        assert_eq!(unsaid.code(), Code::InvalidArgument, "{unsaid:?}");
+    });
     assert!(host.zellij.opened().is_empty());
     assert!(host.zellij.turned().is_empty());
 }

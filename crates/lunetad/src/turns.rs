@@ -33,6 +33,10 @@
 //! so only a pane that would move says it needs one: one that stays moves no
 //! client there to find that out.
 //!
+//! A session goes by when it started as well as its name: zellij numbers panes
+//! from 0 for each server, so one that took the name since has panes of the
+//! same ids.
+//!
 //! Closing a stand-in can cut short the calls that follow it, as `cli::heard`
 //! says, so those are asked again. A `stack-panes` cut short can still be on
 //! its way as zellij lists the panes, and read as having no room: the pane then
@@ -46,12 +50,13 @@
 
 use std::fmt;
 use std::process::Command;
+use std::time::SystemTime;
 
 use luneta_protocol::tab;
 
 use crate::cli::{answered, done, done_once_reached, heard, laid, quiet, Laid};
 use crate::clients;
-use crate::closes::terminals;
+use crate::closes::{same_session, terminals};
 use crate::zellij::SessionName;
 
 /// What runs in a pane opened for another until that one is in its place: what
@@ -115,11 +120,16 @@ fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
     Ok(tabs.into_iter().map(|it| OtherTab { pane: it.id, name: it.tab_name.clone() }).collect())
 }
 
-/// Moves the terminal `pane` of `session` into a tab made for it, and says what
-/// came of it, or why it did not, where the tab goes and it stays where it was.
-/// What runs in it runs on either way. A pane that stays says so ahead of a
-/// session with no room for the tab.
-pub fn into_tab(session: &SessionName, pane: u32) -> Result<IntoTab, String> {
+/// Moves the terminal `pane` of `session`, the one that started at `started`,
+/// into a tab made for it, and says what came of it, or why it did not, where
+/// the tab goes and it stays where it was. What runs in it runs on either way.
+/// A pane that stays says so ahead of a session with no room for the tab.
+pub fn into_tab(
+    session: &SessionName,
+    started: SystemTime,
+    pane: u32,
+) -> Result<IntoTab, String> {
+    same_session(session, started)?;
     let name = leaving(&laid(session.as_str())?, pane)?;
     if !has_client(session)? {
         return Ok(IntoTab::NoClient);
@@ -170,11 +180,18 @@ fn leaving(laid: &[Laid], pane: u32) -> Result<Option<String>, String> {
     Ok(tab::named(&leaves.tab_name).map(str::to_owned))
 }
 
-/// Moves the panes of the tab of the terminal `pane` of `session` into the tab
-/// of the terminal `beside`, tiled, and the tab they left goes; and says what
-/// came of it where any moved, or why none did. One that ends on its way does
-/// not stop the rest: what runs in it had ended anyway.
-pub fn into_panes(session: &SessionName, pane: u32, beside: u32) -> Result<IntoPanes, String> {
+/// Moves the panes of the tab of the terminal `pane` of `session`, the one that
+/// started at `started`, into the tab of the terminal `beside`, tiled, and the
+/// tab they left goes; and says what came of it where any moved, or why none
+/// did. One that ends on its way does not stop the rest: what runs in it had
+/// ended anyway.
+pub fn into_panes(
+    session: &SessionName,
+    started: SystemTime,
+    pane: u32,
+    beside: u32,
+) -> Result<IntoPanes, String> {
+    same_session(session, started)?;
     let Moving { from, to, panes } = moving(&laid(session.as_str())?, pane, beside)?;
     let mut of = u32::try_from(panes.len()).unwrap_or(u32::MAX);
     let mut moved = 0;

@@ -2945,8 +2945,9 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         let done = closed(menu.planned(plan(Closes::Pane, Vec::new())));
-        assert_eq!(done, Done::Act(vps(), Act::Pane { session: listed().name().clone(), pane: 4 }));
         let name = || listed().name().clone();
+        let act = Act::Pane { session: name(), started: listed().started(), pane: 4 };
+        assert_eq!(done, Done::Act(vps(), act));
         for (row, highlighted) in [
             (pane, Briefed::Agent(vps(), name(), 4)),
             (session, Briefed::Session(vps(), name())),
@@ -3142,7 +3143,8 @@ mod tests {
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         assert_eq!(menu.planning(), Some((&listed(), 4)));
         let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
-        let act = Act::Pane { session: listed().name().clone(), pane: 4 };
+        let (session, started) = (listed().name().clone(), listed().started());
+        let act = Act::Pane { session, started, pane: 4 };
         assert_eq!(done, Done::Act(Machine::Local, act));
         // On a session's row, `d d` deletes the session, which zellij need not
         // say anything of first.
@@ -3191,7 +3193,8 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let act = Act::Tab { session: listed().name().clone(), tab: 2, panes: vec![4, 5] };
+        let (session, started) = (listed().name().clone(), listed().started());
+        let act = Act::Tab { session, started, tab: 2, panes: vec![4, 5] };
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
     }
 

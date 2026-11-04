@@ -148,11 +148,11 @@ pub struct Subject<'a> {
 /// What a delete key asks zellij for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// Close a pane of a session.
-    Pane { session: SessionName, pane: u32 },
-    /// Close a tab of a session, by its id, and the terminals in it, the
-    /// floating ones too.
-    Tab { session: SessionName, tab: u32, panes: Vec<u32> },
+    /// Close a pane of the session that started at `started`.
+    Pane { session: SessionName, started: SystemTime, pane: u32 },
+    /// Close a tab of the session that started at `started`, by its id, and the
+    /// terminals in it, the floating ones too.
+    Tab { session: SessionName, started: SystemTime, tab: u32, panes: Vec<u32> },
     /// Kill the session that started at `started`, and delete it, so that
     /// zellij keeps nothing to bring it back with. A key plans it for a
     /// session luneta's zellij is not in, or for its machine's only one,
@@ -206,9 +206,11 @@ pub struct Plan {
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
     let (session, started) = (subject.session.name().clone(), subject.session.started());
     let act = match &subject.deletes {
-        Deletes::Pane { pane, closes: Closes::Pane } => Act::Pane { session, pane: *pane },
+        Deletes::Pane { pane, closes: Closes::Pane } => {
+            Act::Pane { session, started, pane: *pane }
+        },
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {
-            Act::Tab { session, tab: *id, panes: panes.clone() }
+            Act::Tab { session, started, tab: *id, panes: panes.clone() }
         },
         Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
             Seat::Elsewhere => Act::Kill { session, started },
@@ -346,11 +348,11 @@ mod tests {
         let (session, started) = (luneta.name().clone(), luneta.started());
         assert_eq!(
             planned(Seat::In, pane(Closes::Pane)),
-            Ok(Act::Pane { session: session.clone(), pane: 4 })
+            Ok(Act::Pane { session: session.clone(), started, pane: 4 })
         );
         assert_eq!(
             planned(Seat::In, pane(tab)),
-            Ok(Act::Tab { session: session.clone(), tab: 3, panes: vec![4, 5] })
+            Ok(Act::Tab { session: session.clone(), started, tab: 3, panes: vec![4, 5] })
         );
         let kill = Act::Kill { session: session.clone(), started };
         assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), Ok(kill.clone()));
@@ -391,8 +393,8 @@ mod tests {
             assert_eq!(planned.map(|plan| plan.act), Err(MOVING.to_owned()));
         }
         let planned = plan(&subject(&luneta, Seat::Moving, pane(Closes::Pane), Vec::new()));
-        let session = luneta.name().clone();
-        assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, pane: 4 }));
+        let (session, started) = (luneta.name().clone(), luneta.started());
+        assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, started, pane: 4 }));
     }
 
     /// An idle agent or a shell goes without asking. A busy agent, one that

@@ -248,8 +248,13 @@ impl Away {
 
     /// Has zellij there close `close` of `session`, as
     /// `lunetad::closes::closed` does there, or says why it did not.
-    pub fn close(&mut self, session: &SessionName, close: &Close) -> Result<(), String> {
-        let request = close.asked(Some(self.on()), session);
+    pub fn close(
+        &mut self,
+        session: &SessionName,
+        started: SystemTime,
+        close: &Close,
+    ) -> Result<(), String> {
+        let request = close.asked(Some(self.on()), session, started);
         self.ask(|mut daemon| async move { daemon.close(request).await }).map(|_| ())
     }
 
@@ -269,9 +274,14 @@ impl Away {
     /// Has zellij there turn the terminal `pane` of `session` into a tab, as
     /// `lunetad::turns::into_tab` does there, and says what came of it, or why
     /// it did not.
-    pub fn turn_into_tab(&mut self, session: &SessionName, pane: u32) -> Result<IntoTab, String> {
-        let request =
-            TurnIntoTabRequest { on: Some(self.on()), session: session.to_string(), pane };
+    pub fn turn_into_tab(
+        &mut self,
+        session: &SessionName,
+        started: SystemTime,
+        pane: u32,
+    ) -> Result<IntoTab, String> {
+        let (session, started_at) = (session.to_string(), Some(started.into()));
+        let request = TurnIntoTabRequest { on: Some(self.on()), session, pane, started_at };
         let answer = self.ask(|mut daemon| async move { daemon.turn_into_tab(request).await })?;
         match answer.came {
             Some(turn_into_tab_response::Came::Done(_)) => Ok(IntoTab::Done),
@@ -287,11 +297,13 @@ impl Away {
     pub fn turn_into_panes(
         &mut self,
         session: &SessionName,
+        started: SystemTime,
         pane: u32,
         beside: u32,
     ) -> Result<IntoPanes, String> {
-        let session = session.to_string();
-        let request = TurnIntoPanesRequest { on: Some(self.on()), session, pane, beside };
+        let (session, started_at) = (session.to_string(), Some(started.into()));
+        let request =
+            TurnIntoPanesRequest { on: Some(self.on()), session, pane, beside, started_at };
         let answer = self.ask(|mut daemon| async move { daemon.turn_into_panes(request).await })?;
         match answer.came {
             Some(turn_into_panes_response::Came::Done(_)) => Ok(IntoPanes::Done),

@@ -3168,7 +3168,7 @@ impl Sidebar {
     /// past the rows it takes away, once they are gone.
     fn delete(&mut self, on: Machine, act: Act) -> Asked {
         let takes_place = |place: &Place| match (&act, place.pane()) {
-            (Act::Pane { session, pane }, Some(at)) => {
+            (Act::Pane { session, pane, .. }, Some(at)) => {
                 place.session() == session.as_str() && at == *pane
             },
             (Act::Tab { session, panes, .. }, Some(at)) => {
@@ -7852,7 +7852,11 @@ mod tests {
             assert!(lines.contains(&note), "{lines:#?}");
             assert!(lines.contains(&asks.as_str()), "{lines:#?}");
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
-            let act = Act::Pane { session: session_name("newer"), pane: 1 };
+            let act = Act::Pane {
+                session: session_name("newer"),
+                started: listed("newer", 20).started(),
+                pane: 1,
+            };
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
         }
     }
@@ -7875,7 +7879,11 @@ mod tests {
             type_in(&mut sidebar, "d");
             let closes = closes_here(1, "newer", 1);
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
-            let act = Act::Pane { session: session_name("newer"), pane: 1 };
+            let act = Act::Pane {
+                session: session_name("newer"),
+                started: listed("newer", 20).started(),
+                pane: 1,
+            };
             let went = sidebar.closes(1, Ok(Closes::Pane));
             let lines = screen(&mut sidebar, true, 120, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
@@ -7896,7 +7904,11 @@ mod tests {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let closes = closes_here(1, "older", 2);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
-        let act = Act::Pane { session: session_name("older"), pane: 2 };
+        let act = Act::Pane {
+            session: session_name("older"),
+            started: listed("older", 10).started(),
+            pane: 2,
+        };
         assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
         assert!(sidebar.menu.is_none());
         sidebar.heard(host(
@@ -7925,7 +7937,12 @@ mod tests {
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close its tab? 1 agent, 1");
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
-        let act = Act::Tab { session: session_name("older"), tab: 0, panes: vec![1] };
+        let act = Act::Tab {
+            session: session_name("older"),
+            started: listed("older", 10).started(),
+            tab: 0,
+            panes: vec![1],
+        };
         assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
 
         type_in(&mut sidebar, "d");
@@ -8564,7 +8581,11 @@ mod tests {
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
         assert!(lines.contains(&"Close the pane? 1 agent, 1 waiting"), "{lines:#?}");
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes);
-        let act = Act::Pane { session: session_name("main"), pane: 1 };
+        let act = Act::Pane {
+            session: session_name("main"),
+            started: listed("main", 20).started(),
+            pane: 1,
+        };
         assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Delete { on, act });
         let left = vec![session("main", 20, vec![pane(2, 0, "/w/b", "fish")])];
         host.remotes[0] = remote("nixos", up(left, Vec::new()));
