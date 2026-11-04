@@ -8,7 +8,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, ChildStdout, Stdio};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Harness, Status};
@@ -304,6 +304,25 @@ fn a_pi_agent_goes_on_through_a_new_session_and_goes_as_it_quits() {
     eventually("the agent has gone", || host.agents().is_empty().then_some(()));
     pi.event("agent_settled");
     assert!(!file.exists(), "a late event brings no file back");
+}
+
+/// A pi that is killed says no word to the folder, and leaves its file. It
+/// leaves the list as its process ends, and not at the next sweep, two seconds
+/// off: it is killed just after the read that found it.
+#[test]
+fn a_pi_agent_that_is_killed_leaves_the_list_as_it_ends() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    as_status(&host, pid, Status::Idle);
+
+    let killed = Instant::now();
+    pi.process.kill();
+    eventually("the agent has gone", || host.agents().is_empty().then_some(()));
+    let took = killed.elapsed();
+    assert!(took < Duration::from_secs(1), "it stayed listed for {took:?}");
+    assert!(file_of(&host, pid).exists(), "it left its file");
 }
 
 /// A pi that is not the agent you talk to at a prompt says the mode it runs in,

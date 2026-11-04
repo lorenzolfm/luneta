@@ -1,17 +1,18 @@
 //! A folder watched for whoever reads it, to read it again as it changes.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::log;
+use crate::{log, process};
 
 /// How long a folder is let settle after a change before it is read: a file
 /// written in a few pieces makes a word for each, and one read covers them all.
@@ -27,8 +28,8 @@ const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 /// returns, so that what the daemon knows is whole before it answers anyone,
 /// and then from a thread of its own whenever something in `dir` changes at
 /// a path that `wanted` takes, and at least every `sweep` besides, for what
-/// changes without a word to the folder, as a process that dies. The thread
-/// ends once `tell` says that no one listens.
+/// changes without a word to the folder. The thread ends once `tell` says that
+/// no one listens.
 ///
 /// A folder that is not there yet is read on the sweep alone, and watched once
 /// it turns up.
@@ -38,16 +39,38 @@ pub fn watch<T: 'static>(
     mode: RecursiveMode,
     wanted: fn(&Path) -> bool,
     sweep: Duration,
+    read: impl FnMut() -> T + Send + 'static,
+    tell: impl FnMut(T) -> bool + Send + 'static,
+) -> io::Result<()> {
+    watch_ending(name, dir, mode, wanted, sweep, read, |_| Vec::new(), tell)
+}
+
+/// `watch`, where `pids` says, by their pids, which processes what a read found
+/// holds for: each one's end has it read again, as one that crashes says no
+/// word to the folder.
+pub fn watch_ending<T: 'static>(
+    name: &str,
+    dir: PathBuf,
+    mode: RecursiveMode,
+    wanted: fn(&Path) -> bool,
+    sweep: Duration,
     mut read: impl FnMut() -> T + Send + 'static,
+    pids: fn(&T) -> Vec<u32>,
     mut tell: impl FnMut(T) -> bool + Send + 'static,
 ) -> io::Result<()> {
+    // One wake-up is all a read needs, however many changes made it, so the
+    // channel holds one at most.
+    let (changed, heard) = mpsc::sync_channel(1);
+    let mut ends = Ends::new(changed.clone());
+    let mut read = move || {
+        let found = read();
+        ends.hear(&pids(&found));
+        found
+    };
     if !tell(read()) {
         return Ok(());
     }
     thread::Builder::new().name(name.to_owned()).spawn(move || {
-        // One wake-up is all a read needs, however many changes made it, so
-        // the channel holds one at most.
-        let (changed, heard) = mpsc::sync_channel(1);
         let mut watcher = None;
         let mut troubles = Troubles::default();
         loop {
@@ -99,14 +122,67 @@ fn watcher(
         if event.is_ok_and(|event| !worth_a_read(&event, wanted)) {
             return;
         }
-        match changed.try_send(()) {
-            // A full channel holds a wake-up already, and one that no one
-            // hears is the thread's that has ended.
-            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
-        }
+        wake(&changed);
     })?;
     watcher.watch(dir, mode)?;
     Ok(watcher)
+}
+
+/// Says on `changed` that a read is due.
+fn wake(changed: &SyncSender<()>) {
+    match changed.try_send(()) {
+        // A full channel holds a wake-up already, and one that no one hears is
+        // the thread's that has ended.
+        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
+    }
+}
+
+/// The processes that reads named, each with a thread of its own that waits
+/// for it to end and then says on `changed` that a read is due.
+struct Ends {
+    changed: SyncSender<()>,
+    /// Each thread, by the pid of its process. One that is done stays for as
+    /// long as reads name its pid: reads that go on naming one that just ended,
+    /// or one it could not wait for, start no other.
+    hearing: HashMap<u32, JoinHandle<()>>,
+    /// What went wrong in starting a thread.
+    troubles: Troubles,
+}
+
+impl Ends {
+    fn new(changed: SyncSender<()>) -> Self {
+        Ends { changed, hearing: HashMap::new(), troubles: Troubles::default() }
+    }
+
+    /// Hears out each of `pids`, the processes a read named, that it is not
+    /// hearing out yet. A thread waits on for its process whether or not reads
+    /// name it any more: one whose file goes for a while has the same end when
+    /// the file comes back.
+    fn hear(&mut self, pids: &[u32]) {
+        self.hearing.retain(|pid, thread| !thread.is_finished() || pids.contains(pid));
+        for &pid in pids {
+            let Entry::Vacant(place) = self.hearing.entry(pid) else {
+                continue;
+            };
+            let changed = self.changed.clone();
+            let hearing = move || match process::ends(pid) {
+                Ok(()) => wake(&changed),
+                Err(error) => log::say(&unheard(pid, &error)),
+            };
+            match thread::Builder::new().name("ends".to_owned()).spawn(hearing) {
+                Ok(thread) => {
+                    place.insert(thread);
+                },
+                Err(error) => self.troubles.say(unheard(pid, &error)),
+            }
+        }
+        self.troubles.done();
+    }
+}
+
+/// What the daemon says of a process whose end it cannot wait for.
+fn unheard(pid: u32, error: &io::Error) -> String {
+    format!("the end of process {pid} is left to the sweep: {error}")
 }
 
 /// Whether `event` can change what a read finds. A read's own access to the
@@ -175,5 +251,46 @@ impl Troubles {
     /// in between.
     pub fn done(&mut self) {
         self.said = mem::take(&mut self.now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+
+    /// How long a test waits for a wake-up that is not to come.
+    const QUIET: Duration = Duration::from_millis(100);
+
+    /// How long a test waits for one that is.
+    const HEARD: Duration = Duration::from_secs(5);
+
+    /// A process is heard out once, however many reads name it: its end wakes
+    /// the reader, and a read that still names it, begun as it ended, wakes no
+    /// one. Once reads have stopped naming it, one that names the pid again
+    /// names another process, as a pid comes back.
+    #[test]
+    fn a_process_wakes_the_reader_as_it_ends_and_no_more() {
+        let (changed, heard) = mpsc::sync_channel(1);
+        let mut ends = Ends::new(changed);
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        ends.hear(&[pid]);
+        ends.hear(&[pid]);
+        assert!(heard.recv_timeout(QUIET).is_err(), "it still runs");
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        heard.recv_timeout(HEARD).expect("it ended");
+        while !ends.hearing[&pid].is_finished() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        ends.hear(&[pid]);
+        assert!(heard.recv_timeout(QUIET).is_err(), "it ended once");
+
+        ends.hear(&[]);
+        ends.hear(&[pid]);
+        heard.recv_timeout(HEARD).expect("no process by that pid has ended");
     }
 }

@@ -85,16 +85,18 @@ use crate::zellij::SessionName;
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
+use crate::agent::Agent;
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
     opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, watch,
     zellij, zoxide,
 };
 
-/// How often a folder is read again with no word that it changed: for an agent
-/// that crashed, which leaves its file as it was. zellij is asked about each
-/// session's panes as often, for what changes in them with no word from zellij
-/// or a shell's hook.
+/// How often a folder is read again with no word that it changed: for a folder
+/// that has yet to turn up, a file that stays cut short, and an agent's process
+/// whose end could not be waited for. zellij is asked about each session's
+/// panes as often, for what changes in them with no word from zellij or a
+/// shell's hook.
 const SWEEP: Duration = Duration::from_secs(2);
 
 /// How often the shells' files are read again with no word that they changed,
@@ -343,7 +345,8 @@ fn follow(
             let read = move || files.scan();
             let tell = move |found| core.send(Command::Agents(found)).is_ok();
             let any = |_: &Path| true;
-            watch::watch("claude", dir, RecursiveMode::NonRecursive, any, SWEEP, read, tell)?;
+            let mode = RecursiveMode::NonRecursive;
+            watch::watch_ending("claude", dir, mode, any, SWEEP, read, claude::Scan::pids, tell)?;
         },
         None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
@@ -355,7 +358,9 @@ fn follow(
         move |found| core.send(Command::PiAgents(found)).is_ok()
     };
     let any = |_: &Path| true;
-    watch::watch("pi", dir, RecursiveMode::NonRecursive, any, SWEEP, read, tell)?;
+    let mode = RecursiveMode::NonRecursive;
+    let pids = |agents: &Vec<Agent>| agents.iter().map(|agent| agent.pid).collect();
+    watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
     let mut shells = shells::Shells::new(folder);
     let dir = shells.dir().to_owned();
     let read = move || shells.read();
