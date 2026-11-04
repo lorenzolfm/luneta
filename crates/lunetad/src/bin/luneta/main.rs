@@ -10,6 +10,7 @@ mod ask;
 mod away;
 mod bridge;
 mod brief;
+mod browser;
 mod clipboard;
 mod close;
 mod commands;

