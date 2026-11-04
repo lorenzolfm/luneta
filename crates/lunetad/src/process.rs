@@ -5,6 +5,7 @@
 
 use std::io;
 
+use rustix::io::Errno;
 use rustix::process::Pid;
 
 #[cfg(target_os = "linux")]
@@ -24,11 +25,11 @@ pub use os::{environ, start, started, Domain};
 
 /// Waits for the process `pid` to end, or says why it cannot tell. One that has
 /// ended already has at once, whether or not its parent has waited for it. A
-/// pid the system gives no process has no process to wait for.
+/// pid the system gives no process says so, as nothing by it has ended.
 pub fn ends(pid: u32) -> io::Result<()> {
     match i32::try_from(pid).ok().and_then(Pid::from_raw) {
         Some(pid) => os::ends(pid),
-        None => Ok(()),
+        None => Err(Errno::INVAL.into()),
     }
 }
 
@@ -87,5 +88,12 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(super::start(pid), None);
         assert!(heard_within(pid, Duration::from_secs(5)), "ended, and waited for");
+    }
+
+    /// A pid the system gives no process is not said to have ended.
+    #[test]
+    fn no_end_is_heard_of_a_pid_no_process_can_have() {
+        assert!(super::ends(0).is_err());
+        assert!(super::ends(u32::MAX).is_err());
     }
 }

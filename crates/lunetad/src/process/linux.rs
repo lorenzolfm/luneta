@@ -16,19 +16,28 @@ fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
 }
 
-/// When `pid` started, in clock ticks after boot: field 22 of its `stat`, as
-/// Claude Code records it. Counted from the last `)`, since the name before it
-/// can hold spaces and parentheses. None for one that ended, which keeps its
-/// `stat`, in the state `Z`, until its parent waits for it.
+/// When `pid` started, in clock ticks after boot, as Claude Code records it.
+/// None for one that ended.
 #[must_use]
 pub fn start(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(proc(pid, "stat")).ok()?;
+    start_in(&fs::read_to_string(proc(pid, "stat")).ok()?)
+}
+
+/// Field 22 of a process's `stat`, counted from the last `)`, since the name
+/// before it can hold spaces and parentheses. None for one that ended, which
+/// keeps its `stat` until its parent waits for it, in the state `Z` and with one
+/// thread, the last to end. A main thread that ended before the others reads
+/// `Z` too, with more than one, and all of the process has not ended, as `ends`
+/// says.
+fn start_in(stat: &str) -> Option<String> {
     let close = stat.rfind(')')?;
     let mut fields = stat[close + 1..].split_whitespace();
-    if fields.next()? == "Z" {
+    let state = fields.next()?;
+    let threads = fields.nth(16)?;
+    if state == "Z" && threads == "1" {
         return None;
     }
-    fields.nth(18).map(str::to_owned)
+    fields.nth(1).map(str::to_owned)
 }
 
 /// Waits for `pid` to end, as its pidfd says: it reads as ready once all of the
@@ -112,5 +121,27 @@ impl Domain {
             ours.as_ref().is_none_or(|ours| ours == theirs)
         };
         agrees(&self.machine, machine) && agrees(&self.namespace, namespace)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_in;
+
+    /// A `stat` as the kernel writes it, of a process in `state` with `threads`
+    /// threads, whose name holds a `)`.
+    fn stat(state: &str, threads: u32) -> String {
+        let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
+        format!("7 (a) b) {state} {before} {threads} 0 6630522 16 2 18446744073709551615")
+    }
+
+    /// A process runs for as long as a thread of it does, whichever ended
+    /// first; one whose last thread has ended has no start.
+    #[test]
+    fn a_process_has_a_start_until_all_of_it_has_ended() {
+        let start = Some("6630522".to_owned());
+        assert_eq!(start_in(&stat("S", 1)), start);
+        assert_eq!(start_in(&stat("Z", 2)), start);
+        assert_eq!(start_in(&stat("Z", 1)), None);
     }
 }

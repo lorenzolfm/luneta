@@ -39,22 +39,23 @@ pub fn watch<T: 'static>(
     mode: RecursiveMode,
     wanted: fn(&Path) -> bool,
     sweep: Duration,
-    mut read: impl FnMut() -> T + Send + 'static,
+    read: impl FnMut() -> T + Send + 'static,
     tell: impl FnMut(T) -> bool + Send + 'static,
 ) -> io::Result<()> {
-    watch_ending(name, dir, mode, wanted, sweep, move || (read(), Vec::new()), tell)
+    watch_ending(name, dir, mode, wanted, sweep, read, |_| Vec::new(), tell)
 }
 
-/// `watch`, where `read` says besides, by their pids, which processes what it
-/// read holds for: each one's end has it read again, as one that crashes says
-/// no word to the folder.
+/// `watch`, where `pids` says, by their pids, which processes what a read found
+/// holds for: each one's end has it read again, as one that crashes says no
+/// word to the folder.
 pub fn watch_ending<T: 'static>(
     name: &str,
     dir: PathBuf,
     mode: RecursiveMode,
     wanted: fn(&Path) -> bool,
     sweep: Duration,
-    mut read: impl FnMut() -> (T, Vec<u32>) + Send + 'static,
+    mut read: impl FnMut() -> T + Send + 'static,
+    pids: fn(&T) -> Vec<u32>,
     mut tell: impl FnMut(T) -> bool + Send + 'static,
 ) -> io::Result<()> {
     // One wake-up is all a read needs, however many changes made it, so the
@@ -62,8 +63,8 @@ pub fn watch_ending<T: 'static>(
     let (changed, heard) = mpsc::sync_channel(1);
     let mut ends = Ends::new(changed.clone());
     let mut read = move || {
-        let (found, pids) = read();
-        ends.hear(&pids);
+        let found = read();
+        ends.hear(&pids(&found));
         found
     };
     if !tell(read()) {
@@ -266,9 +267,9 @@ mod tests {
     const HEARD: Duration = Duration::from_secs(5);
 
     /// A process is heard out once, however many reads name it: its end wakes
-    /// the reader, and reads that go on naming it wake no one, as the file of
-    /// one that crashed goes on naming it. Once they have stopped, a read that
-    /// names the pid again names another process, as a pid comes back.
+    /// the reader, and a read that still names it, begun as it ended, wakes no
+    /// one. Once reads have stopped naming it, one that names the pid again
+    /// names another process, as a pid comes back.
     #[test]
     fn a_process_wakes_the_reader_as_it_ends_and_no_more() {
         let (changed, heard) = mpsc::sync_channel(1);

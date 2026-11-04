@@ -341,15 +341,11 @@ fn follow(
             let mut files = claude::SessionFiles::new(&folder);
             let dir = files.dir().to_owned();
             let core = core.clone();
-            let read = move || {
-                let scan = files.scan();
-                let pids = scan.pids();
-                (scan, pids)
-            };
+            let read = move || files.scan();
             let tell = move |found| core.send(Command::Agents(found)).is_ok();
             let any = |_: &Path| true;
             let mode = RecursiveMode::NonRecursive;
-            watch::watch_ending("claude", dir, mode, any, SWEEP, read, tell)?;
+            watch::watch_ending("claude", dir, mode, any, SWEEP, read, claude::Scan::pids, tell)?;
         },
         None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
