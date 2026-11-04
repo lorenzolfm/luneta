@@ -1072,7 +1072,7 @@ mod tests {
     use luneta_protocol::said::Said;
 
     use super::*;
-    use crate::agent::{Named, WaitingFor};
+    use crate::agent::{Harness, Named, WaitingFor};
 
     const LINK: &str = "https://github.com/o/app/pull/7";
 
@@ -1392,6 +1392,7 @@ mod tests {
         Agent {
             pid,
             start: "1000".to_owned(),
+            harness: Harness::ClaudeCode,
             session_id: Said::new("aa-1".to_owned()).unwrap(),
             cwd: Said::new("/w".to_owned()).unwrap(),
             status,

@@ -86,7 +86,7 @@ use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
-    opens, panes, printed, release, remote, renames, reviews, screens, shells, skills, watch,
+    opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, watch,
     zellij, zoxide,
 };
 
@@ -322,9 +322,9 @@ impl Alone {
     }
 }
 
-/// Has the core told what Claude Code's files in `claude_folder`, the shells'
-/// files in luneta's `folder` and zellij's sockets in `sockets` say, as they
-/// change, and says on `end` once zellij has had no session, and none of the
+/// Has the core told what Claude Code's files in `claude_folder`, the files of
+/// the shells and of pi's agents in luneta's `folder` and zellij's sockets in
+/// `sockets` say, as they change, and says on `end` once zellij has had no session, and none of the
 /// `watchers` has watched the host, for `ALONE`. Each look has them say
 /// whether the daemon is kept.
 fn follow(
@@ -346,6 +346,15 @@ fn follow(
         },
         None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
+    let mut files = pi::AgentFiles::new(folder, pi::folder());
+    let dir = files.dir().to_owned();
+    let read = move || files.scan();
+    let tell = {
+        let core = core.clone();
+        move |found| core.send(Command::PiAgents(found)).is_ok()
+    };
+    let any = |_: &Path| true;
+    watch::watch("pi", dir, RecursiveMode::NonRecursive, any, SWEEP, read, tell)?;
     let mut shells = shells::Shells::new(folder);
     let dir = shells.dir().to_owned();
     let read = move || shells.read();

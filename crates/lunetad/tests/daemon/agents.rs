@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -57,6 +57,16 @@ impl Host {
 
     fn sessions(&self) -> PathBuf {
         self.home.path().join(".claude/sessions")
+    }
+
+    /// Where the daemon's folder is made.
+    pub fn runtime(&self) -> &Path {
+        self.runtime.path()
+    }
+
+    /// pi's folder, which pi makes as it first runs.
+    pub fn pi_folder(&self) -> PathBuf {
+        self.home.path().join(".pi/agent")
     }
 
     /// The folder zellij 0.45 keeps its sessions' sockets in.

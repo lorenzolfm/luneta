@@ -17,6 +17,8 @@ mod folder;
 #[cfg(test)]
 mod host;
 #[cfg(test)]
+mod pi;
+#[cfg(test)]
 mod remote;
 #[cfg(test)]
 mod reviews;

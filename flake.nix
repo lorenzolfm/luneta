@@ -124,9 +124,11 @@
             # trees of their own for it to ask about. It asks `ps` which processes are
             # in front of the terminal a command runs on, and the tests ask it too.
             # And the tests ask ssh how it reads the options the daemon has each ssh
-            # to a machine share one connection with.
+            # to a machine share one connection with. node runs luneta's extension for
+            # pi, as pi would, for the daemon to read what it writes.
             nativeCheckInputs = [
               pkgs.git
+              pkgs.nodejs
               pkgs.openssh
               pkgs.procps
             ];
@@ -325,10 +327,12 @@
 
           shell = pkgs.mkShell {
             # protoc for the daemon's build script, as `cargo build -p lunetad` runs it,
-            # and what the speech model's library is built with.
+            # what the speech model's library is built with, and node for the test that
+            # runs luneta's extension for pi.
             packages = [
               toolchain
               dev
+              pkgs.nodejs
               pkgs.protobuf
             ]
             ++ speechBuild;

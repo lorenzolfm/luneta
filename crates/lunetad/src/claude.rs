@@ -17,28 +17,24 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs;
-use std::io::{self, ErrorKind, Read as _};
-use std::os::unix::ffi::OsStrExt;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use luneta_protocol::said::Said;
 use serde::Deserialize;
 
-use crate::agent::{Agent, Name, Named, Source, Status, Unread};
-use crate::links::Link;
-use crate::{log, process, reviews};
+use crate::agent::{
+    file_text, moment, named_pid, nonempty, Agent, Environment, Harness, Name, Source, Status,
+    Unread,
+};
+use crate::{log, process};
 use crate::watch::{self, Troubles};
 
 /// How long a file that does not read still says what it said before. Claude
 /// Code writes a file in place, and in a moment: one that does not read for
 /// longer is cut short for good, or in a shape of a newer Claude Code's.
 const TORN: Duration = Duration::from_secs(1);
-
-/// The most a session file holds that the adapter reads. Claude Code's hold a
-/// few hundred bytes: a file past this is no session file of its.
-const FILE_BYTES_MAX: u64 = 64 * 1024;
 
 /// Claude Code's folder: `$CLAUDE_CONFIG_DIR`, or `~/.claude`, as Claude Code
 /// takes it.
@@ -56,9 +52,9 @@ pub fn folder() -> Option<PathBuf> {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct File {
-    #[serde(deserialize_with = "said")]
+    #[serde(deserialize_with = "nonempty")]
     session_id: Said,
-    #[serde(deserialize_with = "said")]
+    #[serde(deserialize_with = "nonempty")]
     cwd: Said,
     proc_start: Start,
     /// The system and pid namespace the pid is from, as Claude Code spells
@@ -71,12 +67,6 @@ struct File {
     name: Option<String>,
     name_source: Option<String>,
     entrypoint: Option<String>,
-}
-
-/// Text a session file holds where it must hold some, as `Said`: an empty
-/// string is none.
-fn said<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
-    Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
 }
 
 /// When the process started, in the words of the system it ran on: a number
@@ -167,11 +157,11 @@ impl SessionFiles {
         self.scanned = true;
         let mut seen = HashMap::new();
         for path in paths {
-            let Some(pid) = named(&path) else {
+            let Some(pid) = named_pid(&path) else {
                 continue;
             };
             let was = self.seen.remove(&pid);
-            let now = match text_of(&path) {
+            let now = match file_text(&path) {
                 Ok(text) => match serde_json::from_slice::<File>(&text) {
                     Ok(file) => Seen::Whole(file),
                     Err(error) => torn(was, first, &path, &error),
@@ -235,35 +225,6 @@ fn local(domain: &process::Domain, file: &File) -> bool {
     file.pid_domain.as_deref().is_none_or(|recorded| domain.admits(recorded))
 }
 
-/// The pid a session file is named for: `<pid>.json`, spelled as Claude Code
-/// spells a pid, which is how it reads one back. Any other file in the folder,
-/// a copy of one too, names no agent.
-fn named(path: &Path) -> Option<u32> {
-    if path.extension()? != "json" {
-        return None;
-    }
-    let stem = path.file_stem()?.to_str()?;
-    let pid = stem.parse::<u32>().ok()?;
-    if pid.to_string() != stem {
-        return None;
-    }
-    // No agent runs as the kernel's pid 0 or as init's 1.
-    (pid > 1).then_some(pid)
-}
-
-/// What a file holds, if it holds no more than a session file does.
-fn text_of(path: &Path) -> io::Result<Vec<u8>> {
-    let mut text = Vec::new();
-    fs::File::open(path)?.take(FILE_BYTES_MAX + 1).read_to_end(&mut text)?;
-    let bytes = u64::try_from(text.len()).expect("a length under a u64 limit fits a u64");
-    if bytes <= FILE_BYTES_MAX {
-        Ok(text)
-    } else {
-        let why = format!("it holds more than {FILE_BYTES_MAX} bytes");
-        Err(io::Error::new(ErrorKind::FileTooLarge, why))
-    }
-}
-
 /// What a file that does not read is now, by what it `was`. One may be
 /// halfway written for a while, and says what it said before. One that does
 /// not read for longer is unread, which the daemon says once. So is one that
@@ -296,6 +257,7 @@ fn agent(pid: u32, file: &File, environment: Environment) -> Agent {
     Agent {
         pid,
         start: file.proc_start.spelled(),
+        harness: Harness::ClaudeCode,
         session_id: file.session_id.clone(),
         cwd: file.cwd.clone(),
         status: Status::of(file.status.as_deref(), file.waiting_for.as_deref()),
@@ -305,43 +267,5 @@ fn agent(pid: u32, file: &File, environment: Environment) -> Agent {
         entrypoint: word(&file.entrypoint),
         pane: environment.pane,
         review: environment.review,
-    }
-}
-
-/// A time as Claude Code writes it, in milliseconds since the epoch.
-fn moment(millis: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_millis(millis)
-}
-
-/// What the environment of a process says of it.
-#[derive(Clone, Debug, Default)]
-struct Environment {
-    /// The pane it names, if it names one.
-    pane: Option<Named>,
-    /// The pull request of the review it says the agent runs, if any.
-    review: Option<Link>,
-}
-
-impl Environment {
-    /// What the environment of `pid` says.
-    fn of(pid: u32) -> Self {
-        let Some(entries) = process::environ(pid) else {
-            return Environment::default();
-        };
-        let (mut session, mut pane, mut review) = (None, None, None);
-        let review_var = format!("{}=", reviews::VAR);
-        for entry in entries {
-            let entry = entry.as_bytes();
-            if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
-                session = Some(String::from_utf8_lossy(name).into_owned());
-            } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
-                pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
-            } else if let Some(link) = entry.strip_prefix(review_var.as_bytes()) {
-                review = std::str::from_utf8(link).ok().and_then(reviews::pull_request);
-            }
-        }
-        let session = session.filter(|session| !session.is_empty());
-        let pane = session.zip(pane).map(|(session, pane)| Named { session, pane });
-        Environment { pane, review }
     }
 }

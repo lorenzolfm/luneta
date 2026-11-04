@@ -30,6 +30,7 @@ pub mod moves;
 pub mod names;
 pub mod opens;
 mod panes;
+mod pi;
 pub mod printed;
 mod process;
 pub mod program;

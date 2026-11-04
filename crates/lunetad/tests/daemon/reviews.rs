@@ -6,7 +6,7 @@ use std::os::unix::net::UnixListener;
 use std::process::Command;
 
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::{self, MoveReviewRequest, ReviewMove, ReviewWaits};
+use lunetad::api::{self, Harness, MoveReviewRequest, ReviewMove, ReviewWaits};
 use serde_json::json;
 use tonic::Code;
 
@@ -156,6 +156,32 @@ impl Reviewed {
         let written = || self.host.zellij.written();
         eventually("zellij is asked to write", || (written().len() == count).then(written))
     }
+}
+
+/// A review is of a Claude Code agent, as it runs Claude's skills. A pi agent that
+/// goes by the pid of one takes none of it, as the system can give a pi the pid of
+/// an agent under review that has just ended, before the daemon has read that.
+#[test]
+fn a_pi_agent_by_the_pid_of_one_under_review_takes_none_of_it() {
+    let reviewed = Reviewed::new();
+    reviewed.comes_to(ReviewWaits::Skill);
+    let says = json!({
+        "sessionId": "pi-1",
+        "cwd": "/w",
+        "status": "idle",
+        "statusSince": 1_000,
+        "procStart": reviewed.file["procStart"],
+    });
+    let file = format!("luneta/pi/{}.json", reviewed.agent.pid());
+    fs::write(reviewed.host.runtime.path().join(file), says.to_string()).unwrap();
+
+    let agents = eventually("the pi agent is listed", || {
+        let agents = reviewed.host.host().agents;
+        agents.iter().any(|agent| agent.runs_in() == Harness::Pi).then_some(agents)
+    });
+    let of = |harness| agents.iter().find(|agent| agent.runs_in() == harness).unwrap();
+    assert!(of(Harness::ClaudeCode).review.is_some());
+    assert_eq!(of(Harness::Pi).review, None);
 }
 
 /// An agent carries its review, on the first of the skills. A skill's stop is

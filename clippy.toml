@@ -6,3 +6,8 @@ allow-expect-in-tests = true
 # A test helper that reaches an impossible arm has nothing better to do than
 # panic, and the panic *is* the failure report.
 allow-panic-in-tests = true
+
+# prost's accessor reads an agent whose daemon says no harness as unspecified.
+disallowed-methods = [
+  { path = "luneta_protocol::v1::Agent::harness", reason = "absent means Claude Code: read it with `runs_in`" },
+]
