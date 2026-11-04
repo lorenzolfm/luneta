@@ -1432,18 +1432,32 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
 
 /// A machine with no session in a link's repository, and whose zoxide knows no
 /// clone of it, says so apart from whatever else goes wrong, through the daemon
-/// that bridges to it, for luneta to ask its other machines. One with a clone
-/// git made says what stands in the way instead.
+/// that bridges to it, for luneta to ask its other machines. It asks nothing of
+/// GitHub for that, as its gh may be logged out. One with a clone git made says
+/// what stands in the way instead, as does one with a directory git would not
+/// say the remotes of, which may be a clone of it. One that has the repository
+/// goes no further on an issue's number that is a pull request's on GitHub,
+/// whether it has a session there or a pane on its branch.
 #[test]
 fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
     script(&far.zellij.bin().join("zoxide"), "exit 0\n");
+    far.gh.issue(8, "https://github.com/o/n/pull/8");
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
-    git(&scratch, &["init", "-q"]);
-    git(&scratch, &["remote", "add", "origin", "git@github.com:o/n.git"]);
+    let github = "git@github.com:o/n.git";
+    let (by_git, unread, by_wt) =
+        (scratch.join("by-git"), scratch.join("unread"), scratch.join("by-wt"));
+    git(&scratch, &["init", "-q", &by_git.display().to_string()]);
+    git(&by_git, &["remote", "add", "origin", github]);
+    git(&scratch, &["init", "-q", "--bare", &unread.display().to_string()]);
+    git(&unread, &["remote", "add", "origin", github]);
+    let config = unread.join("config");
+    fs::write(&config, fs::read_to_string(&config).unwrap() + "[broken\n").unwrap();
+    cloned_as_wt(&scratch, &scratch.join("up"), &by_wt);
+    git(&by_wt.join(".bare"), &["remote", "add", "upstream", github]);
     let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -1460,13 +1474,74 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
         assert_eq!(none.code(), Code::NotFound, "{none:?}");
         assert!(none.message().starts_with("no session works in o/n"), "{none:?}");
 
-        let dir = scratch.display().to_string();
-        let by_git = links::Worked { dir, pull: None, here: false };
-        let by_git = Pasted::new(link, vec![by_git]);
+        let issue = |number: u32| {
+            Work::Link(Link::parse(&format!("https://github.com/o/n/issues/{number}")).unwrap())
+        };
+        let none = Pasted::new(issue(7), Vec::new());
+        let none = pasted_on(&mut daemon, "far", &none).await.unwrap_err();
+        assert_eq!(none.code(), Code::NotFound, "{none:?}");
+        assert!(far.gh.issues().is_empty(), "{:?}", far.gh.issues());
+
+        let in_dir = |dir: &Path| links::Worked {
+            dir: dir.display().to_string(),
+            pull: None,
+            here: false,
+        };
+        let by_git = Pasted::new(link.clone(), vec![in_dir(&by_git)]);
         let by_git = pasted_on(&mut daemon, "far", &by_git).await.unwrap_err();
         assert_eq!(by_git.code(), Code::FailedPrecondition, "{by_git:?}");
         assert!(by_git.message().contains("that git made"), "{by_git:?}");
+
+        let unsaid = Pasted::new(link, vec![in_dir(&unread)]);
+        let unsaid = pasted_on(&mut daemon, "far", &unsaid).await.unwrap_err();
+        assert_eq!(unsaid.code(), Code::FailedPrecondition, "{unsaid:?}");
+        let whether = format!("git did not say whether {} is of o/n: ", unread.display());
+        assert!(unsaid.message().starts_with(&whether), "{unsaid:?}");
+
+        let pull = Link::parse("https://github.com/o/n/pull/8").unwrap();
+        let on_it = links::Worked { pull: Some(pull), ..in_dir(Path::new("/nowhere/at/all")) };
+        for panes in [vec![in_dir(&by_wt.join("main"))], vec![on_it]] {
+            let kind = pasted_on(&mut daemon, "far", &Pasted::new(issue(8), panes)).await;
+            let kind = kind.unwrap_err();
+            assert_eq!(kind.code(), Code::FailedPrecondition, "{kind:?}");
+            let paste = "it is a pull request on GitHub: paste https://github.com/o/n/pull/8";
+            assert_eq!(kind.message(), paste, "{kind:?}");
+        }
+        assert_eq!(far.gh.issues().len(), 2, "{:?}", far.gh.issues());
     });
+}
+
+/// A machine that made the worktree, and could not then say where the key goes,
+/// says so apart from a machine that made nothing: it is the one failure that
+/// leaves something behind, and no other machine should make another.
+#[test]
+fn a_machine_that_made_the_worktree_and_went_no_further_says_so_apart() {
+    let host = Host::new();
+    host.gh.issue(7, "https://github.com/o/n/issues/7");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(&scratch, &up, &clone);
+    let bare = clone.join(".bare");
+    let github = "git@github.com:o/n.git";
+    git(&bare, &["remote", "add", "upstream", github]);
+    git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
+    let main = clone.join("main").display().to_string();
+    script(&host.zellij.bin().join("zoxide"), &format!("echo '{main}'\n"));
+    let _daemon = start(host.vars()).unwrap();
+    host.hide_kept_sessions();
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let asked = Pasted::new(Work::Link(issue), Vec::new()).asked(None);
+        let mut answer = daemon.paste(asked).await.unwrap().into_inner();
+        let why = answer.message().await.unwrap_err();
+        assert_eq!(why.code(), Code::Aborted, "{why:?}");
+    });
+    assert!(clone.join("issue-7").join(".git").is_file());
 }
 
 /// A `.md` file pasted on a row of another machine is read there, and git

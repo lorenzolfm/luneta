@@ -687,9 +687,12 @@ makes nothing; with no clone wt made, it says to `wt clone` one first. Its keys
 act on the machine of the row you pasted on, or else, where no session there
 works in the repository and zoxide there knows no clone of it, on the first of
 [the other machines](#other-machines) that has either, in the order of
-their rows, which takes zellij there. With none, it names the machines it asked,
-and why it could not ask any it did not. A paste while zellij has the keys stays
-zellij's.
+their rows, which takes zellij there. A row's machine where git does not say the
+remotes of a directory it looks in, which may be a clone of it, stops there, and
+names the directory. So does any machine that may have made the worktree, as one
+whose answer is cut short, so that no other makes a second. With none, it names
+the machines it asked, and why it could not ask any it did not. A paste while
+zellij has the keys stays zellij's.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named

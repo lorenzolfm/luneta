@@ -410,31 +410,29 @@ impl Away {
     /// `pasted` says, and the worktree it has made there; or why it found
     /// nothing, as it said there, or as luneta heard no answer by
     /// `links::PATIENCE` and its patience after, by which the daemon there
-    /// has done with it.
+    /// has done with it. The daemon there starts on it as it answers with the
+    /// stream: no stream means it started on nothing, and from then on an
+    /// answer that does not say otherwise may leave a worktree there, as a
+    /// question that hangs up does not stop it.
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let request = pasted.asked(Some(self.on()));
         let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         let secs = patience.as_secs_f32();
         let minutes = links::PATIENCE.as_secs() / 60;
+        let in_doubt = |why: String| Err(Unready::InDoubt(format!("{on}: {why}")));
         self.runtime.block_on(async move {
             // The daemon answers with the stream at once, and the answer in
             // it once it has found it.
             let mut answer = match tokio::time::timeout(patience, daemon.paste(request)).await {
                 Ok(Ok(answer)) => answer.into_inner(),
-                Ok(Err(status)) => return Err(unready(on, &status)),
-                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s").into()),
+                Ok(Err(status)) => return Err(Unready::Failed(said(on, &status))),
+                Err(_) => return in_doubt(format!("lunetad did not answer in {secs}s")),
             };
             match tokio::time::timeout(links::PATIENCE + patience, answer.message()).await {
-                Ok(Ok(Some(ready))) => {
-                    pasted.answered(ready).map_err(|why| format!("{on}: {why}").into())
-                },
-                Ok(Ok(None)) => {
-                    Err(format!("{on}: lunetad's answer ended with nothing in it").into())
-                },
+                Ok(Ok(Some(ready))) => pasted.answered(ready).or_else(in_doubt),
+                Ok(Ok(None)) => in_doubt("lunetad's answer ended with nothing in it".to_owned()),
                 Ok(Err(status)) => Err(unready(on, &status)),
-                Err(_) => {
-                    Err(format!("{on}: lunetad had found nothing after {minutes} minutes").into())
-                },
+                Err(_) => in_doubt(format!("lunetad had found nothing after {minutes} minutes")),
             }
         })
     }
@@ -584,12 +582,18 @@ fn said(on: &Destination, status: &Status) -> String {
     }
 }
 
-/// Why the daemon of `on` found nowhere for a key of the menu to go, as
-/// `status` says: `Code::NotFound` is its machine having none of the
-/// repository, and a daemon older than that says no such thing.
+/// Why the daemon of `on`, having started on a key of the menu, found nowhere
+/// for it to go, as `status` says: `Code::NotFound` is its machine having none
+/// of the repository, which a daemon older than that does not say apart, and
+/// `Code::FailedPrecondition` its making nothing. Anything else may have left a
+/// worktree there: the daemon may have said so, or the answer been cut short.
 fn unready(on: &Destination, status: &Status) -> Unready {
     let why = said(on, status);
-    if status.code() == Code::NotFound { Unready::Nowhere(why) } else { Unready::Failed(why) }
+    match status.code() {
+        Code::NotFound => Unready::Nowhere(why),
+        Code::FailedPrecondition => Unready::Failed(why),
+        _ => Unready::InDoubt(why),
+    }
 }
 
 #[cfg(test)]
@@ -657,6 +661,28 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
+    }
+
+    /// What a daemon that started on a key says tells whether another machine
+    /// may go on: it has none of the repository, or it made nothing. Anything
+    /// else may have left a worktree there: `Aborted` says so, and an answer
+    /// cut short says nothing.
+    #[test]
+    fn only_a_daemon_that_says_it_made_nothing_lets_another_machine_go_on() {
+        let on = "nixos".parse().unwrap();
+        let why = "nixos: why".to_owned();
+        assert_eq!(unready(&on, &Status::not_found("why")), Unready::Nowhere(why.clone()));
+        assert_eq!(unready(&on, &Status::failed_precondition("why")), Unready::Failed(why.clone()));
+        let unsure = [
+            Status::aborted("why"),
+            Status::unavailable("why"),
+            Status::cancelled("why"),
+            Status::internal("why"),
+            Status::unknown("why"),
+        ];
+        for status in unsure {
+            assert_eq!(unready(&on, &status), Unready::InDoubt(why.clone()), "{status:?}");
+        }
     }
 
     /// The daemon there names a session to make, and says when it read

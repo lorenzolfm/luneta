@@ -1078,11 +1078,13 @@ where
 
 /// What the daemon says of a machine with nowhere for a key of the menu to
 /// go: `Code::NotFound`, for a luneta to ask its other machines, where this
-/// one has none of the repository, and a failure of any other kind otherwise.
+/// one has none of the repository; `Code::Aborted`, for it to ask no other,
+/// where the worktree may be made; and `Code::FailedPrecondition` otherwise.
 fn unready(why: Unready) -> Status {
     match why {
         Unready::Nowhere(why) => Status::not_found(why),
         Unready::Failed(why) => Status::failed_precondition(why),
+        Unready::InDoubt(why) => Status::aborted(why),
     }
 }
 

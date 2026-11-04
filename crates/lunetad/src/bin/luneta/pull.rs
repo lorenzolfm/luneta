@@ -88,10 +88,11 @@ fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> 
 /// say: the machine `on`, among `worked`; and, of a link, where that has
 /// neither a session in its repository nor a clone of it, each of `others`
 /// in turn, until one has either. Anything else that goes wrong on `on` ends
-/// it: that machine has the repository, or may. One of `others` that fails
-/// is passed over, and said only if none has it; it is in the log otherwise.
-/// Each is asked after the last answers, as the first that has it makes a
-/// worktree there, and no other should.
+/// it: that machine has the repository, or may. One of `others` that made
+/// nothing is passed over, and said only if none has it; it is in the log
+/// otherwise. One that may have made the worktree ends it too. Each is asked
+/// after the last answers, as the first that has it makes a worktree there,
+/// and no other should.
 fn first_found(
     on: Machine,
     work: &Work,
@@ -106,7 +107,8 @@ fn first_found(
         let ready = ask(&on, &Pasted::new(work.clone(), worked))?;
         match ready.placed(&panes) {
             Ok(ready) => Ok(Found { on, ready }),
-            Err(_) => Err(Unready::Failed(match &on {
+            // It made the worktree by now.
+            Err(_) => Err(Unready::InDoubt(match &on {
                 Machine::Local => UNASKED.to_owned(),
                 Machine::Remote(destination) => format!("{destination}: {UNASKED}"),
             })),
@@ -114,7 +116,7 @@ fn first_found(
     };
     let why = match found_on(on.clone(), worked) {
         Ok(found) => return Ok(found),
-        Err(Unready::Failed(why)) => return Err(why),
+        Err(Unready::Failed(why) | Unready::InDoubt(why)) => return Err(why),
         Err(Unready::Nowhere(why)) => why,
     };
     let (Work::Link(link), false) = (work, others.is_empty()) else {
@@ -131,11 +133,14 @@ fn first_found(
                 return Ok(found);
             },
             Err(Unready::Nowhere(_)) => nowhere.push(other),
-            // Of another machine, it says which already.
-            Err(Unready::Failed(why)) => failed.push(match other {
-                Machine::Local => format!("{THIS}: {why}"),
-                Machine::Remote(_) => why,
-            }),
+            Err(Unready::Failed(why)) => failed.push(naming(&other, why)),
+            Err(Unready::InDoubt(why)) => {
+                let why = naming(&other, why);
+                let note = format!(
+                    "{why}; it may have made the worktree there, so luneta asked no other machine"
+                );
+                return Err(std::iter::once(note).chain(failed).collect::<Vec<_>>().join("; "));
+            },
         }
     }
     let on = nowhere.iter().map(|machine| match machine {
@@ -148,6 +153,15 @@ fn first_found(
         link.repository(),
     );
     Err(std::iter::once(note).chain(failed).collect::<Vec<_>>().join("; "))
+}
+
+/// `why`, as a note says it among those of other machines: of another machine
+/// than this, it says which already.
+fn naming(machine: &Machine, why: String) -> String {
+    match machine {
+        Machine::Local => format!("{THIS}: {why}"),
+        Machine::Remote(_) => why,
+    }
 }
 
 /// Why luneta does not go where lunetad found a key goes: to a pane it was
@@ -331,6 +345,44 @@ mod tests {
         let note = "no session on far works in cashubtc/cdk, nor does zoxide there know a clone of \
                     it; wt clone it first; this machine: zoxide is no program";
         assert_eq!(said, Err(note.to_owned()));
+    }
+
+    /// One of the others that may have made the worktree ends the search, so
+    /// that the next makes no second one: as it says so, or as it says a pane
+    /// luneta did not ask of, having made it. What others said is in the note.
+    #[test]
+    fn a_machine_that_may_have_made_the_worktree_ends_the_search() {
+        let others = || {
+            vec![
+                (Machine::Remote(vps()), Err("lunetad does not reach me@vps now".to_owned())),
+                remote(far(), vec![pane(7, "/f")]),
+                remote("pi".parse().unwrap(), vec![pane(8, "/p")]),
+            ]
+        };
+        let (said, asked) = asking(&link(), others(), |on| match on {
+            Machine::Local => nowhere(),
+            Machine::Remote(_) => Err(Unready::InDoubt("far: no answer".to_owned())),
+        });
+        let note = "far: no answer; it may have made the worktree there, so luneta asked no other \
+                    machine; lunetad does not reach me@vps now";
+        assert_eq!(said, Err(note.to_owned()));
+        assert_eq!(asked, [Machine::Local, Machine::Remote(far())]);
+
+        let (said, asked) = asking(&link(), others(), |on| match on {
+            Machine::Local => nowhere(),
+            Machine::Remote(_) => Ok(there(3)),
+        });
+        assert!(said.unwrap_err().starts_with(&format!("far: {UNASKED}; it may have")));
+        assert_eq!(asked, [Machine::Local, Machine::Remote(far())]);
+
+        // This machine, among the others of a row of another, is named.
+        let others = vec![(Machine::Local, Ok(vec![pane(1, "/m")])), remote(vps(), Vec::new())];
+        let on = Machine::Remote(far());
+        let said = first_found(on, &link(), Vec::new(), others, |on, _| match on {
+            Machine::Local => Err(Unready::InDoubt("no answer".to_owned())),
+            Machine::Remote(_) => nowhere(),
+        });
+        assert!(said.unwrap_err().starts_with("this machine: no answer; it may have"));
     }
 
     /// A file's path is of the row's machine alone: one of its name elsewhere
