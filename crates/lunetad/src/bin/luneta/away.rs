@@ -24,7 +24,7 @@ use lunetad::asks::{self, Asked, Step};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
-use lunetad::links::{self, Pasted, Ready};
+use lunetad::links::{self, Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
 use lunetad::skills::{Name, Runs, Skill};
@@ -411,7 +411,7 @@ impl Away {
     /// nothing, as it said there, or as luneta heard no answer by
     /// `links::PATIENCE` and its patience after, by which the daemon there
     /// has done with it.
-    pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, String> {
+    pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let request = pasted.asked(Some(self.on()));
         let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         let secs = patience.as_secs_f32();
@@ -421,14 +421,20 @@ impl Away {
             // it once it has found it.
             let mut answer = match tokio::time::timeout(patience, daemon.paste(request)).await {
                 Ok(Ok(answer)) => answer.into_inner(),
-                Ok(Err(status)) => return Err(said(on, &status)),
-                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+                Ok(Err(status)) => return Err(unready(on, &status)),
+                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s").into()),
             };
             match tokio::time::timeout(links::PATIENCE + patience, answer.message()).await {
-                Ok(Ok(Some(ready))) => pasted.answered(ready).map_err(|why| format!("{on}: {why}")),
-                Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
-                Ok(Err(status)) => Err(said(on, &status)),
-                Err(_) => Err(format!("{on}: lunetad had found nothing after {minutes} minutes")),
+                Ok(Ok(Some(ready))) => {
+                    pasted.answered(ready).map_err(|why| format!("{on}: {why}").into())
+                },
+                Ok(Ok(None)) => {
+                    Err(format!("{on}: lunetad's answer ended with nothing in it").into())
+                },
+                Ok(Err(status)) => Err(unready(on, &status)),
+                Err(_) => {
+                    Err(format!("{on}: lunetad had found nothing after {minutes} minutes").into())
+                },
             }
         })
     }
@@ -576,6 +582,14 @@ fn said(on: &Destination, status: &Status) -> String {
         _ if status.message().is_empty() => format!("{on}: lunetad: {}", status.code()),
         _ => format!("{on}: {}", status.message()),
     }
+}
+
+/// Why the daemon of `on` found nowhere for a key of the menu to go, as
+/// `status` says: `Code::NotFound` is its machine having none of the
+/// repository, and a daemon older than that says no such thing.
+fn unready(on: &Destination, status: &Status) -> Unready {
+    let why = said(on, status);
+    if status.code() == Code::NotFound { Unready::Nowhere(why) } else { Unready::Failed(why) }
 }
 
 #[cfg(test)]

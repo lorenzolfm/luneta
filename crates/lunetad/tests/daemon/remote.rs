@@ -1430,6 +1430,45 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     });
 }
 
+/// A machine with no session in a link's repository, and whose zoxide knows no
+/// clone of it, says so apart from whatever else goes wrong, through the daemon
+/// that bridges to it, for luneta to ask its other machines. One with a clone
+/// git made says what stands in the way instead.
+#[test]
+fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    script(&far.zellij.bin().join("zoxide"), "exit 0\n");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    git(&scratch, &["init", "-q"]);
+    git(&scratch, &["remote", "add", "origin", "git@github.com:o/n.git"]);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let link = Work::Link(Link::parse("https://github.com/o/n/pull/7").unwrap());
+        let none = Pasted::new(link.clone(), Vec::new());
+        let none = pasted_on(&mut daemon, "far", &none).await.unwrap_err();
+        assert_eq!(none.code(), Code::NotFound, "{none:?}");
+        assert!(none.message().starts_with("no session works in o/n"), "{none:?}");
+
+        let dir = scratch.display().to_string();
+        let by_git = links::Worked { dir, pull: None, here: false };
+        let by_git = Pasted::new(link, vec![by_git]);
+        let by_git = pasted_on(&mut daemon, "far", &by_git).await.unwrap_err();
+        assert_eq!(by_git.code(), Code::FailedPrecondition, "{by_git:?}");
+        assert!(by_git.message().contains("that git made"), "{by_git:?}");
+    });
+}
+
 /// A `.md` file pasted on a row of another machine is read there, and git
 /// there says the repository it is in, untracked in a worktree or not, whose
 /// session the key goes to, by what the pane's directory is in, whatever its

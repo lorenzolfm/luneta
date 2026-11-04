@@ -6,7 +6,9 @@
 //! an agent on the issue. luneta finds that for a row of its own machine,
 //! and a daemon for a luneta on another, whose link was pasted on a row of
 //! this one: git, gh, ssh's config, zoxide and the worktree are the
-//! machine's.
+//! machine's. A machine with no session in the repository and no clone of it
+//! says so apart from any other failure, as `Unready::Nowhere`, for luneta to
+//! ask its other machines.
 //!
 //! The key goes, of the panes luneta says of the machine, to the one in the
 //! session its zellij is in, where a pane of it works in the repository, or
@@ -648,6 +650,33 @@ impl Ready<usize> {
     }
 }
 
+/// Why a machine has nowhere for a key of the menu to go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unready {
+    /// No session there works in the link's repository, and zoxide there
+    /// knows no clone of it, as this says: another machine may have one.
+    Nowhere(String),
+    /// Anything else, as this says: what is there is in the way, as a clone
+    /// git made, or the machine could not tell.
+    Failed(String),
+}
+
+impl Unready {
+    /// What it says, of either.
+    #[must_use]
+    pub fn said(self) -> String {
+        match self {
+            Unready::Nowhere(why) | Unready::Failed(why) => why,
+        }
+    }
+}
+
+impl From<String> for Unready {
+    fn from(why: String) -> Self {
+        Unready::Failed(why)
+    }
+}
+
 /// A link or a file pasted on a row of a machine, and the panes of that
 /// machine, as luneta knows them, for where a key of the menu goes: on that
 /// machine.
@@ -725,11 +754,12 @@ impl Pasted {
     /// Where a key goes, on the machine this runs on, by the place of its
     /// pane among those luneta said, and the worktree, which it has `luneta
     /// worktree` make there, or where one of the branch is already; or why
-    /// it found nothing.
-    pub fn ready(&self) -> Result<Ready<usize>, String> {
+    /// it found nothing. A file is the row's machine's, wherever else one of
+    /// its name is, so of a file this is never `Unready::Nowhere`.
+    pub fn ready(&self) -> Result<Ready<usize>, Unready> {
         match &self.work {
             Work::Link(link) => ready(link, &self.worked),
-            Work::File(file) => ready_file(file, &self.worked),
+            Work::File(file) => ready_file(file, &self.worked).map_err(Unready::Failed),
         }
     }
 
@@ -776,13 +806,13 @@ impl Pasted {
 
 /// Where a key goes for `link` among the panes `worked`, as `Pasted::ready`
 /// says.
-fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
+fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
     // wt asks GitHub for a pull request's branch, and finds none for an
     // issue's number; but it makes an issue's branch whatever the number is.
     if link.kind() == Kind::Issue {
         let page = page(link)?;
         if page.kind() == Kind::Pull {
-            return Err(format!("it is a pull request on GitHub: paste {}", page.url()));
+            return Err(format!("it is a pull request on GitHub: paste {}", page.url()).into());
         }
     }
     let mut seen: HashMap<String, Option<Repository>> = HashMap::new();
@@ -812,7 +842,8 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, String> {
         })?;
         base(&repository, &remote, &branch)?;
     }
-    made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))
+    let work = Readied::Link(link.clone());
+    made_worktree(&repository, &link.wt(), going, worked, work).map_err(Unready::Failed)
 }
 
 /// Where a key goes for `file` among the panes `worked`, as `Pasted::ready`
@@ -958,25 +989,26 @@ fn free(name: &SessionName) -> Result<SessionName, String> {
 /// Why no clone of `link`'s repository is for `wt add`, as what luneta has
 /// `seen` of each directory it looked in says: there is none, or one git
 /// cloned, in whose `.git` wt would make the worktree, or one git did not say
-/// how it is laid out.
-fn no_clone(link: &Link, seen: &HashMap<String, Option<Repository>>) -> String {
+/// how it is laid out. Only of none may another machine have one to go to:
+/// the others say what stands in the way here.
+fn no_clone(link: &Link, seen: &HashMap<String, Option<Repository>>) -> Unready {
     let repository = link.repository();
     let laid_out = move |layout: Layout| {
         let dirs = seen.iter().filter(move |(_, it)| it.is_some_and(|it| it.layout == layout));
         dirs.map(|(dir, _)| dir).min()
     };
     match (laid_out(Layout::Git), laid_out(Layout::Unsaid)) {
-        (Some(dir), _) => format!(
+        (Some(dir), _) => Unready::Failed(format!(
             "{dir} is in a clone of {repository} that git made, and wt would make the worktree \
              in its .git; wt clone it first"
-        ),
-        (None, Some(dir)) => {
-            format!("git did not say whether {dir}, of {repository}, is in a clone wt made")
-        },
-        (None, None) => format!(
+        )),
+        (None, Some(dir)) => Unready::Failed(format!(
+            "git did not say whether {dir}, of {repository}, is in a clone wt made"
+        )),
+        (None, None) => Unready::Nowhere(format!(
             "no session works in {repository}, nor does zoxide know a clone of it; wt clone it \
              first"
-        ),
+        )),
     }
 }
 
@@ -1524,7 +1556,8 @@ mod tests {
     /// With no clone for `wt add`, luneta says to have wt clone one, and
     /// names one git made where it saw one, as wt would make the worktree in
     /// its `.git`; or else one git did not say how it is laid out, which it
-    /// takes for neither.
+    /// takes for neither. Only with none of them may another machine have
+    /// one to go to.
     #[test]
     fn with_no_clone_for_wt_luneta_says_of_one_git_made() {
         let seen = |seen: &[(&str, Option<Repository>)]| -> HashMap<String, Option<Repository>> {
@@ -1532,22 +1565,32 @@ mod tests {
         };
         assert_eq!(
             no_clone(&link(), &seen(&[("/dots", None)])),
-            "no session works in cashubtc/cdk, nor does zoxide know a clone of it; wt clone it \
-             first"
+            Unready::Nowhere(
+                "no session works in cashubtc/cdk, nor does zoxide know a clone of it; wt clone \
+                 it first"
+                    .to_owned()
+            )
         );
-        let by_git = "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make \
-                      the worktree in its .git; wt clone it first";
+        let by_git = || {
+            Unready::Failed(
+                "/w/cdk/src is in a clone of cashubtc/cdk that git made, and wt would make the \
+                 worktree in its .git; wt clone it first"
+                    .to_owned(),
+            )
+        };
         assert_eq!(
             no_clone(&link(), &seen(&[("/dots", None), ("/w/cdk/src", Some(BY_GIT))])),
-            by_git
+            by_git()
         );
         assert_eq!(
             no_clone(&link(), &seen(&[("/a/cdk", Some(UNSAID)), ("/w/cdk/src", Some(BY_GIT))])),
-            by_git
+            by_git()
         );
         assert_eq!(
             no_clone(&link(), &seen(&[("/dots", None), ("/a/cdk", Some(UNSAID))])),
-            "git did not say whether /a/cdk, of cashubtc/cdk, is in a clone wt made"
+            Unready::Failed(
+                "git did not say whether /a/cdk, of cashubtc/cdk, is in a clone wt made".to_owned()
+            )
         );
     }
 

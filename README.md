@@ -683,8 +683,13 @@ remotes is one. wt makes the worktree only in a clone wt made:
 in one git made, it would make it in the clone's `.git`. The menu waits while
 wt fetches, and then while zellij opens the tab, saying what it waits on after
 a spinner that turns, as `⠋ Making a worktree of #123…`, and says why when it
-makes nothing; with no clone wt made, it says to `wt clone` one first. A paste
-while zellij has the keys stays zellij's.
+makes nothing; with no clone wt made, it says to `wt clone` one first. Its keys
+act on the machine of the row you pasted on, or else, where no session there
+works in the repository and zoxide there knows no clone of it, on the first of
+[the other machines](#other-machines) that has either, in the order of
+their rows, which takes zellij there. With none, it names the machines it asked,
+and why it could not ask any it did not. A paste while zellij has the keys stays
+zellij's.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named
@@ -1012,7 +1017,8 @@ does when a session there ends. While luneta's zellij is on another machine,
 the menu over zellij is for its pane there. The Brief group briefs you on its
 agents as on this machine's, and [the ask box](#on-another-machines-row) runs
 its agent there. A pull request's or an issue's link pasted on its row is that
-machine's to act on: lunetad there finds where its keys go among that
+machine's to act on first, and another's only where it has none of the
+repository: lunetad there finds where its keys go among that
 machine's panes and the clones its zoxide knows, asks its `gh`, and has its
 `luneta worktree` make the worktree there, with the `zoxide`, `gh` and `git` on
 the `PATH` it started with, as for the ask box; a session it makes for the link

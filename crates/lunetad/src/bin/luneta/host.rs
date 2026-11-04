@@ -85,7 +85,7 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::review;
-use crate::pull::{self, Link, Ready};
+use crate::pull::{self, Found, Link};
 use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -146,9 +146,10 @@ pub enum Event {
     /// The skills the directory of the menu numbered `menu` can run, or why
     /// the finder found none.
     Skills { menu: u64, skills: Result<Vec<Skill>, String> },
-    /// Where the key of the menu numbered `menu`, for a pull request or an
-    /// issue, goes, with the worktree made, or why luneta found nothing.
-    Pulled { menu: u64, ready: Result<Ready, String> },
+    /// Where the key of the menu numbered `menu`, for a pull request, an
+    /// issue or a file, goes, and on which machine, with the worktree made;
+    /// or why luneta found nothing.
+    Pulled { menu: u64, found: Result<Found, String> },
     /// What the pane of the menu numbered `menu` printed after its last
     /// command's line, as luneta kept it, or why it kept nothing.
     Printed { menu: u64, printed: Result<Printed, String> },
@@ -1250,8 +1251,8 @@ impl App {
                 }
             },
             Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
-            Event::Pulled { menu, ready } => {
-                let asked = self.sidebar.pulled(menu, ready);
+            Event::Pulled { menu, found } => {
+                let asked = self.sidebar.pulled(menu, found);
                 self.follow(asked);
             },
             Event::Printed { menu, printed } => {
@@ -2071,8 +2072,8 @@ impl App {
                     self.sidebar.close_menu();
                 }
             },
-            Asked::Pull { menu, on, work, worked } => {
-                pull::prepare(menu, on, work, worked, &self.events);
+            Asked::Pull { menu, on, work, worked, others } => {
+                pull::prepare(menu, on, work, worked, others, &self.events);
             },
             Asked::Find { menu, on, cwd } => {
                 skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });

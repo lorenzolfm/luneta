@@ -39,7 +39,7 @@ use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{Turn, User};
 use lunetad::cli::quiet;
-use lunetad::links::{self, At, Link, Pasted, Ready, Work};
+use lunetad::links::{self, At, Link, Pasted, Ready, Unready, Work};
 use lunetad::{clients, reviews};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
@@ -429,7 +429,7 @@ fn reviewing(link: &Link, folder: &Path) -> Result<String, String> {
     }
     let apart = |Worked { session, pane, works }| ((session, pane), works);
     let (panes, worked): (Vec<(Listed, u32)>, Vec<_>) = worked.into_iter().map(apart).unzip();
-    let ready = Pasted::new(Work::Link(link.clone()), worked).ready()?;
+    let ready = Pasted::new(Work::Link(link.clone()), worked).ready().map_err(Unready::said)?;
     let ready = ready.placed(&panes).map_err(|at| format!("no pane {at} was asked of"))?;
     let Ready { at, worktree: cwd, branch, .. } = ready;
     let command = reviews::command(link, branch.as_deref());

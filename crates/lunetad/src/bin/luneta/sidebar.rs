@@ -87,7 +87,7 @@ use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
-use crate::pull::{Kind, Link, Ready, Work, Worked};
+use crate::pull::{Found, Kind, Link, Others, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::zellij::{Closes, Open, SessionName, Tab, Within};
@@ -1064,9 +1064,9 @@ pub enum Asked {
         command: Vec<String>,
     },
     /// Find where a key of the menu numbered `menu`, for `work`, pasted on a
-    /// row of `on`, goes among its panes `worked`, and have its worktree made
-    /// there.
-    Pull { menu: u64, on: Machine, work: Work, worked: Vec<Worked> },
+    /// row of `on`, goes among its panes `worked`, or else on the first of
+    /// `others` that has what it is of, and have its worktree made there.
+    Pull { menu: u64, on: Machine, work: Work, worked: Vec<Worked>, others: Others },
     /// Find the skills that `cwd`, on `on`, can run, for the menu numbered
     /// `menu`.
     Find { menu: u64, on: Machine, cwd: String },
@@ -2955,8 +2955,9 @@ impl Sidebar {
     /// of, or the `.md` file it is the path of, if it is one, in the place of
     /// the menu open, over zellij or at the bottom of the sidebar, or else at
     /// the bottom, for the row highlighted: its keys act on the machine of
-    /// that row, as every key of the menu does, where a file is looked for
-    /// once a key is pressed, as only that machine can say, and a relative
+    /// that row, as every key of the menu does, or on another that has a
+    /// link's repository, where that one has none of it. A file is looked for
+    /// once a key is pressed, as only the row's machine can say, and a relative
     /// path goes from where the row works. Other text does nothing, as a
     /// paste did before. What is pasted in the box for a machine's
     /// destination goes in it, a link too.
@@ -3123,7 +3124,10 @@ impl Sidebar {
                 Asked::Turn { menu: number, on, place: PanePlace { session, pane }, turn }
             },
             Wants::Pull(work) => match self.worked(&on) {
-                Ok(worked) => Asked::Pull { menu: number, on, work, worked },
+                Ok(worked) => {
+                    let others = self.others(&on);
+                    Asked::Pull { menu: number, on, work, worked, others }
+                },
                 Err(why) => self.pulled(number, Err(why)),
             },
             Wants::Printed { session, pane, ended } => {
@@ -3152,13 +3156,13 @@ impl Sidebar {
     }
 
     /// luneta found where the key of the menu numbered `menu`, for a pull
-    /// request, an issue or a file, goes, as `ready` says, or why it found
+    /// request, an issue or a file, goes, as `found` says, or why it found
     /// nothing: the menu goes on, while it waits on it.
-    pub fn pulled(&mut self, menu: u64, ready: Result<Ready, String>) -> Asked {
+    pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
         let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.pulling()) else {
             return Asked::Nothing;
         };
-        self.menu_did(waiting.pulled(ready))
+        self.menu_did(waiting.pulled(found))
     }
 
     /// luneta kept what the pane of the menu numbered `menu` printed, as
@@ -3194,6 +3198,25 @@ impl Sidebar {
         // In the order you moved them to, as their rows go.
         self.order.sessions(on, &mut sessions, |(listed, _)| listed.name.as_str());
         Ok(worked_in(sessions, seen.agents, seen.sessions, seen.pull_requests, here))
+    }
+
+    /// Each machine other than `on`, in the order of the rows, with what
+    /// `worked` says of it, for a key of the menu for a link where `on` has
+    /// none of its repository: where it works, or why luneta knows none of
+    /// its panes.
+    fn others(&self, on: &Machine) -> Others {
+        let Some(host) = &self.host else {
+            return Vec::new();
+        };
+        let (arranged, _) = machines(host).arranged(&self.order);
+        let others = arranged.into_iter().map(|Arranged { machine, .. }| machine);
+        others
+            .filter(|machine| machine != on)
+            .map(|machine| {
+                let worked = self.worked(&machine);
+                (machine, worked)
+            })
+            .collect()
     }
 
     /// What deleting what `deletes` deletes of `listed`, of the machine
@@ -5087,7 +5110,7 @@ mod tests {
 
     use super::*;
     use crate::own::Before;
-    use crate::pull::{At, Readied};
+    use crate::pull::{At, Readied, Ready};
     use crate::spots::Hit;
 
     fn pane(id: u32, tab: u32, cwd: &str, command: &str) -> Pane {
@@ -7875,7 +7898,7 @@ mod tests {
             worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
         ];
         let work = Work::Link(link.clone());
-        let pull = Asked::Pull { menu: 1, on: Machine::Local, work, worked };
+        let pull = Asked::Pull { menu: 1, on: Machine::Local, work, worked, others: Vec::new() };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
@@ -7890,7 +7913,7 @@ mod tests {
             name: "#5".to_owned(),
             command: Vec::new(),
         };
-        assert_eq!(sidebar.pulled(1, Ok(ready)), asked);
+        assert_eq!(sidebar.pulled(1, Ok(Found { on: Machine::Local, ready })), asked);
         if let Some(host) = &mut sidebar.host {
             host.sessions.push(session("newer-2", 30, vec![pane(1, 0, "/w/n", "fish")]));
         }
@@ -9146,19 +9169,73 @@ mod tests {
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let worked = links::Worked { dir: "/w/b".to_owned(), pull: None, here: false };
         let worked = vec![Worked { session: listed("work", 20), pane: 3, works: worked }];
+        let local = links::Worked { dir: "/w/a".to_owned(), pull: None, here: false };
+        let local = vec![Worked { session: listed("main", 10), pane: 1, works: local }];
+        let unreached = |name: &str| {
+            let machine = Machine::Remote(name.parse().unwrap());
+            (machine, Err(format!("lunetad does not reach {name} now")))
+        };
+        let others = vec![(Machine::Local, Ok(local)), unreached("me@vps"), unreached("pi")];
         let asked = Work::Link(link.clone());
-        let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, worked };
+        let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
         let worktree = "/w/n/feat".to_owned();
         let ready = Ready { at, worktree, branch: None, work: Readied::Link(link) };
-        let asked = sidebar.pulled(number, Ok(ready));
+        let asked = sidebar.pulled(number, Ok(Found { on: on.clone(), ready }));
         assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
         let made = session("main", 30, vec![pane(1, 0, "/w/n", "fish")]);
         host.remotes[0] = remote("nixos", up(vec![work(), made], Vec::new()));
         sidebar.heard(host);
         let opened = pane_of("main", 30, 3);
         assert_eq!(sidebar.opened(number, Ok(3)), Asked::Go { on, place: opened });
+    }
+
+    /// A link pasted on a row of a machine that has none of its repository,
+    /// a folded session's as any other, hands luneta the panes of the other
+    /// machines too, in the order of the rows. What luneta finds on one of
+    /// them opens there, and takes luneta's zellij there.
+    #[test]
+    fn a_link_found_on_another_machine_than_the_row_s_opens_there() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        let work = session("work", 20, vec![pane(3, 0, "/w/b", "fish")]);
+        host.remotes[0] = remote("nixos", up(vec![work], Vec::new()));
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(pane_of("main", 10, 1)));
+        sidebar.key(&char('h'), moment(160_000));
+        assert_eq!(sidebar.cursor, Some(Spot::Local(Place::Session(listed("main", 10)))));
+
+        let nixos = Machine::Remote(nixos());
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        sidebar.order.keep_machines(&[vps.clone(), nixos.clone(), Machine::Local]);
+        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+        let asked = sidebar.key(&char('r'), moment(160_000));
+        let Asked::Pull { on, others, .. } = asked else {
+            panic!("no job for the key: {asked:?}");
+        };
+        assert_eq!(on, Machine::Local);
+        let works = links::Worked { dir: "/w/b".to_owned(), pull: None, here: false };
+        let work = Worked { session: listed("work", 20), pane: 3, works };
+        let unreached = |name: &str| Err(format!("lunetad does not reach {name} now"));
+        let pi = Machine::Remote("pi".parse().unwrap());
+        assert_eq!(others, [
+            (vps, unreached("me@vps")),
+            (nixos.clone(), Ok(vec![work])),
+            (pi, unreached("pi")),
+        ]);
+
+        let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
+        let at = At::Session((listed("work", 20), 3));
+        let worktree = "/w/b/feat".to_owned();
+        let ready = Ready { at, worktree, branch: None, work: Readied::Link(link) };
+        let asked = sidebar.pulled(number, Ok(Found { on: nixos.clone(), ready }));
+        let there = |asked: &Asked| matches!(asked, Asked::OpenThere { on, .. } if *on == nixos);
+        assert!(there(&asked), "{asked:?}");
+        let opened = pane_of("work", 20, 9);
+        assert_eq!(sidebar.opened(number, Ok(9)), Asked::Go { on: nixos, place: opened });
     }
 
     /// A key of the menu for a link pasted on the row of a machine lunetad
