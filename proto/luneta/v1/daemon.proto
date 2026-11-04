@@ -47,7 +47,7 @@ service Daemon {
   // typed on, in a file for the daemon's user alone, for an agent there to
   // read, as luneta's menu does for `c f` and `c e`: zellij dumps the pane's
   // text, and the daemon keeps what follows that line, up to the prompt the
-  // shell waits at. Files kept a day go as another is kept.
+  // shell waits at. A file goes a day on.
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
   // The name a session luneta makes for a directory takes, as its picker's
   // directories name one: the directory's own, or its repository's and its
@@ -135,14 +135,14 @@ service Daemon {
   rpc MoveReview(MoveReviewRequest) returns (MoveReviewResponse);
   // Keeps an image in a file for the daemon's user alone, for an agent there
   // to read as its path is pasted on its prompt, as luneta does for `Ctrl v`
-  // on an agent's pane on another machine, and answers with its path. Files
-  // kept a day go as another is kept. The image comes as a stream, as tonic
-  // refuses a message over 4 MiB, and a screenshot can be larger. It answers
-  // once, as late as all of it takes to come: a stream too, as the start of
-  // every answer is cut five seconds after the question. The stream ends
-  // after the answer, or with why there is none. An image that does not all
-  // come, or does not start as a PNG does, is kept by no name an image goes
-  // by, however the daemon ends.
+  // on an agent's pane on another machine, and answers with its path. A file
+  // goes a day on, or sooner, oldest first, to keep what images hold there to
+  // 128 MiB. The image comes as a stream, as tonic refuses a message over 4
+  // MiB, and a screenshot can be larger. It answers once, as late as all of it
+  // takes to come: a stream too, as the start of every answer is cut five
+  // seconds after the question. The stream ends after the answer, or with why
+  // there is none. An image that does not all come, or does not start as a PNG
+  // does, is kept by no name an image goes by, however the daemon ends.
   rpc KeepImage(stream KeepImageRequest) returns (stream KeepImageResponse);
 }
 

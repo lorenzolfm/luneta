@@ -1916,8 +1916,14 @@ impl Sidebar {
         self.notice = Some(notice);
     }
 
+    /// Takes what `notify` said out of the notes, for what it was said of has
+    /// been tried again.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
     /// Says in the notes that an image is on its way to the machine `to`, or
-    /// no longer says so, with none.
+    /// no longer says so, with none. The sidebar collapsed says so by its rule.
     pub fn image_going(&mut self, to: Option<Destination>) {
         self.image_going = to;
     }
@@ -3637,13 +3643,16 @@ impl Sidebar {
     /// Draws the sidebar collapsed into `area`: a rule along the top, and
     /// under it the counts of `tallies` that are not 0, one to a line, each cut
     /// to the room it has. Its last column is the edge, as the sidebar's is.
-    /// The rule is in `ERROR` while the daemon does not answer, as the note
-    /// that says so is, which the strip has no room for.
+    /// The rule is in `ERROR` while the daemon does not answer, or `NAME` while
+    /// an image is on its way, as the note that says so is, which the strip has
+    /// no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
             Style::new().fg(ERROR)
+        } else if self.image_going.is_some() {
+            Style::new().fg(NAME)
         } else {
             Style::new().add_modifier(Modifier::DIM)
         };
@@ -5305,6 +5314,34 @@ mod tests {
         assert_ne!(note, open);
         assert_eq!(rule(&mut sidebar), note);
         sidebar.heard(idle_agent());
+        assert_eq!(rule(&mut sidebar), open);
+    }
+
+    /// Collapsed, the sidebar has no room for the note that says an image is
+    /// on its way either, so its rule turns that note's colour while it goes;
+    /// but for lunetad not answering, which says more.
+    #[test]
+    fn collapsed_the_sidebar_tints_its_rule_while_an_image_goes() {
+        let mut sidebar = fresh();
+        sidebar.heard(idle_agent());
+        let look = |buffer: &Buffer, x: u16, y: u16| {
+            let cell = &buffer[(x, y)];
+            (cell.fg, cell.modifier.contains(Modifier::DIM))
+        };
+        let rule = |sidebar: &mut Sidebar| look(&collapsed(sidebar, 3, moment(160_000)), 0, 0);
+        let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 1);
+        assert_eq!(rule(&mut sidebar), open);
+        sidebar.image_going(Some("far".parse().unwrap()));
+        // The note, ` image on its way to far`, takes the last line.
+        let buffer = drawn(&mut sidebar, false, COLUMNS, 6);
+        assert_eq!(buffer[(1, 5)].symbol(), "i");
+        let note = look(&buffer, 1, 5);
+        assert_ne!(note, open);
+        assert_eq!(rule(&mut sidebar), note);
+        sidebar.lost("gone".to_owned());
+        assert_eq!(rule(&mut sidebar).0, ERROR);
+        sidebar.heard(idle_agent());
+        sidebar.image_going(None);
         assert_eq!(rule(&mut sidebar), open);
     }
 

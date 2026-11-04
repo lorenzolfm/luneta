@@ -19,6 +19,13 @@ use crate::keeps::Draft;
 /// most Linuxes.
 pub const BYTES_MAX: u64 = 64 * 1024 * 1024;
 
+/// How many bytes of images the folder holds at the most, the one on its way
+/// among them, the oldest going to make room: a day of images could otherwise
+/// fill `XDG_RUNTIME_DIR`, where the shell hook writes too. An agent reads an
+/// image as its path is pasted, so this is room for the last to stay as the
+/// next comes, however large both are.
+const FOLDER_BYTES_MAX: u64 = 2 * BYTES_MAX;
+
 /// How long an image has to come, at both ends. The largest one takes this
 /// long at about 900 kbit/s.
 pub const PATIENCE: Duration = Duration::from_mins(10);
@@ -28,7 +35,7 @@ pub const PATIENCE: Duration = Duration::from_mins(10);
 const PART_BYTES: usize = 64 * 1024;
 
 /// The folder the images are kept in, in luneta's.
-const FOLDER: &str = "images";
+pub(crate) const FOLDER: &str = "images";
 
 /// How a PNG starts, whatever it holds.
 const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -105,9 +112,11 @@ pub(crate) struct Keeping {
 }
 
 impl Keeping {
-    /// The file for an image of `size` bytes, in luneta's folder `runtime`.
+    /// The file for an image of `size` bytes, in luneta's folder `runtime`,
+    /// with room made for it.
     pub(crate) fn new(runtime: &Path, size: Size, now: SystemTime) -> Result<Keeping, String> {
         let draft = Draft::new(runtime, FOLDER, "png", now)?;
+        draft.make_room(size.get(), FOLDER_BYTES_MAX);
         Ok(Keeping { draft, left: size.get(), unseen: SIGNATURE })
     }
 
@@ -277,5 +286,42 @@ mod tests {
         assert!(!Path::new(&old).exists());
         assert!(Path::new(&young).exists());
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+    }
+
+    /// What the images kept hold is bounded, the one on its way among them,
+    /// however many came in a day: the oldest go first, what a killed daemon
+    /// left among them, and only as many as it takes. The one kept last stays
+    /// as the next comes, however large both are.
+    #[test]
+    fn the_oldest_images_go_to_make_room_for_another() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("luneta");
+        let now = SystemTime::now();
+        let keeping = |size| drop(Keeping::new(&runtime, Size::new(size).unwrap(), now).unwrap());
+        keeping(8);
+        let folder = runtime.join(FOLDER);
+        // Of no blocks, whatever they say they hold.
+        let file = |name: &str, megabytes: u64, hours: u64| {
+            let made = File::create(folder.join(name)).unwrap();
+            made.set_len(megabytes * 1024 * 1024).unwrap();
+            made.set_modified(now - Duration::from_hours(hours)).unwrap();
+        };
+        file("killed.png.part", 10, 4);
+        file("oldest.png", 30, 3);
+        file("older.png", 30, 2);
+        file("last.png", 64, 1);
+        let left = || {
+            let found = fs::read_dir(&folder).unwrap().flatten();
+            let mut left: Vec<_> = found.map(|file| file.file_name().into_string().unwrap()).collect();
+            left.sort();
+            left
+        };
+
+        keeping(8);
+        assert_eq!(left(), ["last.png", "older.png", "oldest.png"], "134 MiB, less the oldest");
+        keeping(BYTES_MAX);
+        assert_eq!(left(), ["last.png"], "188 MiB, less the two oldest, is all there is room for");
+        keeping(BYTES_MAX);
+        assert_eq!(left(), ["last.png"], "room for two of the largest");
     }
 }

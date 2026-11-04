@@ -23,7 +23,7 @@ use crate::{folder, keeps};
 const TAIL: usize = 2000;
 
 /// The folder the files are kept in, in luneta's.
-const FOLDER: &str = "printed";
+pub(crate) const FOLDER: &str = "printed";
 
 /// What a pane printed, as luneta found it in what zellij dumped: `T` is
 /// the lines of it, which a file holds once luneta kept them.

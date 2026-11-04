@@ -1502,8 +1502,12 @@ impl App {
                 return;
             },
             // And so does a note, but for `MENU`, which then tries the menu
-            // again.
+            // again. A key held down as it came is not the next key, and would
+            // take it away unread.
             Some(Over::Note(_)) => {
+                if key.kind == KeyEventKind::Repeat {
+                    return;
+                }
                 self.give(Focus::on(self.focus.side));
                 if chord != MENU {
                     return;
@@ -1581,7 +1585,8 @@ impl App {
     /// agent on another machine, where luneta runs on the machine you sit
     /// at. It reads the clipboard there, and comes back in `image_went`,
     /// where that holds none. The key held down, or pressed again, while an
-    /// image goes is none of the pane's.
+    /// image goes is none of the pane's. A new try leaves behind what the last
+    /// said in the notes.
     fn key_for_image(&mut self, key: &KeyEvent) -> bool {
         let Some(on) = self.sidebar.far_agent() else {
             return false;
@@ -1589,7 +1594,9 @@ impl App {
         if desktop::elsewhere() {
             return false;
         }
-        self.image.send(on.clone(), *key, &self.events);
+        if self.image.send(on.clone(), *key, &self.events) {
+            self.sidebar.clear_notice();
+        }
         true
     }
 
@@ -1598,8 +1605,7 @@ impl App {
     /// has the keys and is still on an agent of the machine it was pressed
     /// for: one held up by a clipboard's tool is no key for where you went
     /// since. The path of one kept is pasted where the cursor is now, as long
-    /// as that is on the machine that holds the file. Why it was not, the
-    /// notes say.
+    /// as that is on the machine that holds the file.
     fn image_went(&mut self, went: Went) {
         self.image.heard();
         self.sidebar.image_going(None);
@@ -1614,11 +1620,24 @@ impl App {
                     self.client.hosted.send(keys::paste(&path, self.client.hosted.mode()));
                     self.typed();
                 } else {
-                    let left = format!("image not pasted: zellij left {on}, where it is at {path}");
-                    self.sidebar.notify(left);
+                    self.image_not_pasted(&format!("zellij left {on}, where it is at {path}"));
                 }
             },
-            Went::Failed(why) => self.sidebar.notify(format!("image not pasted: {why}")),
+            Went::Failed(why) => self.image_not_pasted(&why),
+        }
+    }
+
+    /// Says why an image was not pasted, and in the log: in the notes, or in
+    /// a box over zellij, where you look, with the sidebar collapsed, which
+    /// has no room for them. Under a box that has the keys already, the notes
+    /// keep it for the sidebar to open on.
+    fn image_not_pasted(&mut self, why: &str) {
+        let note = format!("image not pasted: {why}");
+        if self.focus.side == Side::Collapsed && self.focus.over.is_none() {
+            log::say(&note);
+            self.give(Focus { side: Side::Collapsed, over: Some(Over::Note(note)) });
+        } else {
+            self.sidebar.notify(note);
         }
     }
 

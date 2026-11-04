@@ -1,19 +1,21 @@
 //! The files luneta keeps a while for an agent of this machine to read, each
 //! kind in a folder of its own in luneta's: what a pane printed, as `printed`
 //! keeps it, and an image, as `images` does. Each is for this user alone, and
-//! goes a day on, as another of its kind is kept.
+//! goes a day on: as another of its kind is kept, or as the daemon looks, in
+//! `sweep_kind`, for the last of a kind, which no other follows.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::folder;
 
-/// How long a file is kept: luneta takes away older ones as it keeps another.
-/// The agent reads it as it starts, or as its path is pasted on its prompt.
+/// How long a file is kept: older ones are taken away as luneta keeps another,
+/// and as the daemon looks. The agent reads it as it starts, or as its path is
+/// pasted on its prompt.
 const KEPT: Duration = Duration::from_hours(24);
 
 /// What a rule of Claude Code's reads as more than a path, as gitignore
@@ -70,6 +72,33 @@ impl Draft {
         Ok(Draft { file, partial, kept })
     }
 
+    /// Takes away the oldest of the other files in its folder, whatever they
+    /// are, until they and the `size` bytes this one is to hold come to `most`
+    /// at the most. One that does not go stays for the next to take away.
+    pub(crate) fn make_room(&self, size: u64, most: u64) {
+        let partial = Path::new(&self.partial);
+        let Some(Ok(entries)) = partial.parent().map(fs::read_dir) else {
+            return;
+        };
+        let others = entries.flatten().filter(|entry| entry.path() != partial);
+        let mut others: Vec<(SystemTime, u64, PathBuf)> = others
+            .filter_map(|entry| {
+                let found = entry.metadata().ok().filter(fs::Metadata::is_file)?;
+                Some((found.modified().ok()?, found.len(), entry.path()))
+            })
+            .collect();
+        others.sort();
+        let mut held = size + others.iter().map(|(_, bytes, _)| bytes).sum::<u64>();
+        for (_, bytes, path) in others {
+            if held <= most {
+                return;
+            }
+            if fs::remove_file(path).is_ok() {
+                held -= bytes;
+            }
+        }
+    }
+
     /// Writes the next of its bytes, or says why not.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.file.write_all(bytes).map_err(|error| format!("{}: {error}", self.kept))
@@ -86,6 +115,15 @@ impl Drop for Draft {
     /// One kept no longer goes by this name, and this finds nothing.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.partial);
+    }
+}
+
+/// Takes away the files last written `KEPT` before `now` in the folder `kind`
+/// of luneta's folder `runtime`, where it is there, and this user's alone: for
+/// the daemon, as nothing else takes away the last of a kind.
+pub(crate) fn sweep_kind(runtime: &Path, kind: &str, now: SystemTime) {
+    if let Ok(Some(folder)) = folder::open(&runtime.join(kind)) {
+        sweep(folder.path(), now);
     }
 }
 

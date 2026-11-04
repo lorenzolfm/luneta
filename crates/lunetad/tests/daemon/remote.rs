@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+use std::fs::{self, DirBuilder};
+use std::os::unix::fs::{symlink, DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1225,6 +1225,51 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
         let png = |file: &PathBuf| file.extension() == Some("png".as_ref());
         assert!(!found().iter().any(png), "{:?}", found());
     });
+}
+
+/// The last file of a kind has no other kept after it to take it away, and it
+/// holds what a screenshot shows, in memory on most Linuxes: a daemon that
+/// starts takes away those past their day, as what a killed one left of an
+/// image, and no younger one. What a link in the place of a folder leads to
+/// is no file of luneta's, however old.
+#[test]
+fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
+    let (day, hour) = (Duration::from_hours(25), Duration::from_hours(1));
+    let now = SystemTime::now();
+    let folder = |path: PathBuf| {
+        DirBuilder::new().mode(0o700).create(&path).unwrap();
+        path
+    };
+    let file = |path: PathBuf, age: Duration| {
+        fs::File::create(&path).unwrap().set_modified(now - age).unwrap();
+        path
+    };
+
+    let host = Host::new();
+    let runtime = folder(host.runtime.path().join("luneta"));
+    let (images, printed) = (folder(runtime.join("images")), folder(runtime.join("printed")));
+    let past = [
+        file(images.join("past.png"), day),
+        file(images.join("killed.png.part"), day),
+        file(printed.join("past.txt"), day),
+    ];
+    let young = [file(images.join("young.png"), hour), file(printed.join("young.txt"), hour)];
+    let _daemon = start(host.vars()).unwrap();
+    eventually("the files past their day to go", || {
+        past.iter().all(|file| !file.exists()).then_some(())
+    });
+    assert!(young.iter().all(|file| file.exists()), "{young:?}");
+
+    let linked = Host::new();
+    let runtime = folder(linked.runtime.path().join("luneta"));
+    let elsewhere = tempfile::tempdir().unwrap();
+    symlink(elsewhere.path(), runtime.join("images")).unwrap();
+    let outside = file(elsewhere.path().join("past.png"), day);
+    let past = file(folder(runtime.join("printed")).join("past.txt"), day);
+    let _daemon = start(linked.vars()).unwrap();
+    // The images are looked at first.
+    eventually("the file past its day to go", || (!past.exists()).then_some(()));
+    assert!(outside.exists(), "a file through a link stays");
 }
 
 /// Where a key goes for `pasted` on the machine `on`, as `daemon` hands on

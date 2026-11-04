@@ -39,10 +39,10 @@ impl Going {
     /// Sends the image on the clipboard to the daemon of the machine `on`,
     /// for `key` pressed, while none goes: on a thread of its own, as neither
     /// the clipboard's tools nor a slow line are for luneta's screen to wait
-    /// on. `events` hears what comes of it.
-    pub fn send(&mut self, on: Destination, key: KeyEvent, events: &Sender<Event>) {
+    /// on. `events` hears what comes of it. Says whether one went.
+    pub fn send(&mut self, on: Destination, key: KeyEvent, events: &Sender<Event>) -> bool {
         if self.0 || key.kind != KeyEventKind::Press {
-            return;
+            return false;
         }
         self.0 = true;
         let events = events.clone();
@@ -51,6 +51,7 @@ impl Going {
             // luneta is on its way out.
             let _ = events.send(Event::Image(went));
         });
+        true
     }
 
     /// What came of the one that went has been heard: another may go.

@@ -85,9 +85,9 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::{
-    claude, client, clients, closes, ended, eza, git, github, log, metadata, moves, names, opens,
-    panes, printed, release, remote, renames, reviews, screens, shells, skills, watch, zellij,
-    zoxide,
+    claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
+    opens, panes, printed, release, remote, renames, reviews, screens, shells, skills, watch,
+    zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for an agent
@@ -112,6 +112,11 @@ const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 /// again. gh asks GitHub, and each ask counts against the hourly limit that
 /// GitHub puts on the user, and that each gh of theirs shares.
 const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(1);
+
+/// How often the daemon looks for the files luneta keeps that are past their
+/// day, as nothing else takes away the last of a kind, which holds what a
+/// screenshot shows, and memory on most Linuxes.
+const KEEPS_SWEEP: Duration = Duration::from_hours(1);
 
 /// How long `Watch` waits for the host to change before it answers with the
 /// host as it was: within the time a client waits for an answer.
@@ -233,6 +238,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     remote::follow(core.clone(), watchers.kept.subscribe(), SWEEP, folder, Arc::clone(&bridges))?;
+    tokio::spawn(sweep_keeps(claim.folder.clone()));
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
@@ -275,6 +281,25 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
             log::say(&format!("clients still connected after {secs}s are left"));
             Ok(())
         },
+    }
+}
+
+/// Takes away the files luneta keeps in its `folder` that are past their day,
+/// as the daemon starts, which takes in what stayed while none ran, and every
+/// `KEEPS_SWEEP` from then on.
+async fn sweep_keeps(folder: PathBuf) {
+    let mut sweeps = tokio::time::interval(KEEPS_SWEEP);
+    loop {
+        sweeps.tick().await;
+        let folder = folder.clone();
+        let swept = task::spawn_blocking(move || {
+            let now = SystemTime::now();
+            keeps::sweep_kind(&folder, images::FOLDER, now);
+            keeps::sweep_kind(&folder, printed::FOLDER, now);
+        });
+        // One that panicked has said so in the log, and what it left stays for
+        // the next.
+        let _ = swept.await;
     }
 }
 
