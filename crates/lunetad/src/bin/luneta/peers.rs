@@ -64,13 +64,21 @@ const LINE_BYTES: u64 = 64 * 1024;
 /// under `LINE_BYTES`: half an hour of speech or so.
 const SELECTED_BYTES: usize = 40 * 1024;
 
+/// Why the keys of what is read aloud do nothing in a luneta that reaches no
+/// other: it does not know what it is of those of its machine, or the one that
+/// holds the lock does not hear it. The speakers may be fine, and another may
+/// read, or none.
+pub const NO_READER: &str = "this luneta reads nothing aloud, and reaches no other that does";
+
 /// What came of the lock, or of another luneta of this machine.
 pub enum Heard {
     /// This luneta holds the lock now: the file it holds it on, which lets
-    /// go of it as it closes.
-    Holding(File),
-    /// Another luneta holds it, which this one waits for.
-    Peering,
+    /// go of it as it closes, and the socket to hear the others on, or why
+    /// there is none.
+    Holding(File, Result<PathBuf, String>),
+    /// Another luneta holds it, which this one waits for: the socket that one
+    /// hears on.
+    Peering(PathBuf),
     /// What another luneta did, by the number this one, which holds the
     /// lock, gave it.
     Peer(u64, Peered),
@@ -164,56 +172,58 @@ fn key_of(group: &str) -> Option<Key> {
     Some(Key { on, pid: pid.parse().ok()? })
 }
 
-/// luneta's runtime folder, or why there is none.
-fn folder() -> Result<PathBuf, String> {
-    let folder = lunetad::folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set")?;
-    let folder = lunetad::folder::make(&folder).map_err(|refusal| refusal.to_string())?;
+/// The runtime folder at `path`, made where it is not there, or why it is not
+/// one to use.
+fn checked(path: &Path) -> Result<PathBuf, String> {
+    let folder = lunetad::folder::make(path).map_err(|refusal| refusal.to_string())?;
     Ok(folder.path().to_owned())
-}
-
-/// The socket the luneta that holds the lock hears the others on, or why
-/// there is none.
-pub fn socket() -> Result<PathBuf, String> {
-    Ok(folder()?.join(SOCKET))
 }
 
 /// Waits for the lock on a thread of its own, and hands `events` what came
 /// of it: at once whether this luneta holds it, and once it does, where it
-/// did not at first. Where it cannot be had, luneta puts no notification up,
-/// and the sidebar says why.
+/// did not at first. Where it cannot be had, luneta puts no notification up
+/// and reads nothing aloud, and the sidebar says why.
 pub fn wait(events: Sender<Event>) {
     thread::spawn(move || {
-        let lock = folder().and_then(|folder| {
-            let path = folder.join(LOCK);
-            File::create(&path).map_err(|error| format!("{}: {error}", path.display()))
-        });
-        let held = lock.and_then(|lock| match lock.try_lock() {
-            Ok(()) => Ok(Some(lock)),
-            Err(TryLockError::WouldBlock) => {
-                // luneta is on its way out.
-                if events.send(Event::Peers(Heard::Peering)).is_err() {
-                    return Ok(None);
-                }
-                lock.lock().map(|()| Some(lock)).map_err(|error| error.to_string())
-            },
-            Err(TryLockError::Error(error)) => Err(error.to_string()),
-        });
-        // luneta is on its way out.
-        let _ = match held {
-            Ok(Some(lock)) => events.send(Event::Peers(Heard::Holding(lock))),
-            Ok(None) => Ok(()),
-            Err(why) => events.send(Event::Notice(format!("no notifications: {why}"))),
-        };
+        let found = lunetad::folder::find();
+        let found = found.ok_or_else(|| "neither XDG_RUNTIME_DIR nor TMPDIR is set".to_owned());
+        if let Err(why) = found.and_then(|folder| take(&folder, &events)) {
+            let why = format!("no notifications, and nothing read aloud: {why}");
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why));
+        }
     });
 }
 
-/// Hears the other lunetas of this machine, and `luneta clicked`, on the
-/// socket the luneta that holds the lock hears on, for as long as this one
-/// runs, which holds it: the socket, or why it hears on none.
-pub fn listening(events: &Sender<Event>) -> Result<PathBuf, String> {
-    let socket = socket()?;
-    listen(&socket, events.clone()).map_err(|error| format!("{}: {error}", socket.display()))?;
-    Ok(socket)
+/// Takes the lock in the runtime folder at `path`, for `wait`, and hands
+/// `events` what came of it. A luneta can wait for days, while the folder goes
+/// or stops being this user's alone, so it looks at the folder again before it
+/// hears on a socket there.
+fn take(path: &Path, events: &Sender<Event>) -> Result<(), String> {
+    let folder = checked(path)?;
+    let at = folder.join(LOCK);
+    let lock = File::create(&at).map_err(|error| format!("{}: {error}", at.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {},
+        Err(TryLockError::WouldBlock) => {
+            // luneta is on its way out.
+            if events.send(Event::Peers(Heard::Peering(folder.join(SOCKET)))).is_err() {
+                return Ok(());
+            }
+            lock.lock().map_err(|error| error.to_string())?;
+        },
+        Err(TryLockError::Error(error)) => return Err(error.to_string()),
+    }
+    let socket = checked(path).map(|folder| folder.join(SOCKET));
+    // luneta is on its way out.
+    let _ = events.send(Event::Peers(Heard::Holding(lock, socket)));
+    Ok(())
+}
+
+/// Hears the other lunetas of this machine, and `luneta clicked`, on `socket`,
+/// for as long as this one runs, which holds the lock: or why it hears on none.
+pub fn listening(socket: &Path, events: &Sender<Event>) -> Result<(), String> {
+    listen(socket, events.clone()).map_err(|error| format!("{}: {error}", socket.display()))
 }
 
 /// Hears on `socket` each luneta that comes, as one numbered in turn, what
@@ -389,7 +399,8 @@ enum Tell {
 impl Reaching {
     /// Reaches the luneta that hears on `socket`, as one whose window has
     /// the focus where `focused` says, and hands `events` the clicks it is
-    /// told of.
+    /// told of, and a note for each key of what is read aloud that reached
+    /// no one.
     pub fn to(socket: PathBuf, focused: bool, events: Sender<Event>) -> Reaching {
         let (told, telling) = mpsc::channel();
         thread::spawn(move || reach(&socket, &telling, focused, &events));
@@ -436,9 +447,17 @@ impl Reaching {
     }
 }
 
+/// Says that a key of what is read aloud reached no luneta: the one it was for
+/// has gone, or does not hear on its socket.
+fn unreached(events: &Sender<Event>) {
+    // luneta is on its way out.
+    let _ = events.send(Event::Notice(NO_READER.to_owned()));
+}
+
 /// Tells the luneta that hears on `socket` what `telling` says, and all of
 /// it again whenever it reaches one anew, until `telling` ends; and hands
-/// `events` the clicks it is told of.
+/// `events` the clicks it is told of, and a note for each key of what is read
+/// aloud that reached no one.
 fn reach(socket: &Path, telling: &Receiver<Tell>, mut focused: bool, events: &Sender<Event>) {
     let (mut looks, mut dictating) = (Vec::new(), false);
     loop {
@@ -452,7 +471,8 @@ fn reach(socket: &Path, telling: &Receiver<Tell>, mut focused: bool, events: &Se
             Ok(Tell::Looks(now)) => looks = now,
             Ok(Tell::Dictating(now)) => dictating = now,
             // The luneta it was for is gone, and its voice with it.
-            Ok(Tell::Selected(_) | Tell::Stopped) | Err(RecvTimeoutError::Timeout) => {},
+            Ok(Tell::Selected(_) | Tell::Stopped) => unreached(events),
+            Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -487,6 +507,13 @@ fn talk(
         });
     }
     let tell = |line: Line| (&*stream).write_all(line.said().as_bytes()).is_ok();
+    let key = |line: Line| {
+        let told = tell(line);
+        if !told {
+            unreached(events);
+        }
+        told
+    };
     let mut talking = tell(Line::Looks(looks.clone()))
         && (!*focused || tell(Line::Focused))
         && (!*dictating || tell(Line::Dictating(true)));
@@ -500,8 +527,8 @@ fn talk(
                 *looks = now;
                 talking = tell(Line::Looks(looks.clone()));
             },
-            Ok(Tell::Selected(selected)) => talking = tell(Line::Selected(selected)),
-            Ok(Tell::Stopped) => talking = tell(Line::Stopped),
+            Ok(Tell::Selected(selected)) => talking = key(Line::Selected(selected)),
+            Ok(Tell::Stopped) => talking = key(Line::Stopped),
             Ok(Tell::Dictating(now)) => {
                 *dictating = now;
                 talking = tell(Line::Dictating(now));
@@ -519,6 +546,8 @@ fn talk(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::time::Instant;
 
     use super::*;
@@ -666,6 +695,77 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// The next note luneta is to show, within a few seconds.
+    fn note(heard: &Receiver<Event>) -> String {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if let Event::Notice(note) = heard.recv_timeout(left).expect("it says why") {
+                return note;
+            }
+        }
+    }
+
+    /// A key of what is read aloud says so where it reaches no luneta: none
+    /// hears on the socket, or the one it reached has gone.
+    #[test]
+    fn a_key_of_what_is_read_aloud_that_reaches_no_luneta_says_so() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (events, heard) = mpsc::channel();
+        let reaching = Reaching::to(socket.clone(), false, events);
+        reaching.stopped();
+        assert_eq!(note(&heard), NO_READER);
+        reaching.selected("words");
+        assert_eq!(note(&heard), NO_READER);
+
+        let listener = UnixListener::bind(&socket).expect("it listens");
+        let (stream, _) = listener.accept().expect("the other comes");
+        let mut said = lines(stream);
+        assert_eq!(said.next(), Some(Line::Looks(Vec::new())));
+        drop((said, listener));
+        reaching.stopped();
+        assert_eq!(note(&heard), NO_READER);
+    }
+
+    /// The socket a luneta comes to hear on once it has waited for the lock in
+    /// the folder at `path`, which `change` does something to meanwhile.
+    fn socket_after_waiting(path: &Path, change: impl FnOnce()) -> Result<PathBuf, String> {
+        let until = Duration::from_secs(5);
+        let another = File::create(checked(path).expect("a folder").join(LOCK)).expect("a lock");
+        another.try_lock().expect("another holds it");
+        let (events, heard) = mpsc::channel();
+        let taking = path.to_owned();
+        thread::spawn(move || take(&taking, &events));
+        let waits = heard.recv_timeout(until).expect("it finds the lock held");
+        assert!(matches!(waits, Event::Peers(Heard::Peering(_))));
+        change();
+        drop(another);
+        match heard.recv_timeout(until).expect("it comes to hold the lock") {
+            Event::Peers(Heard::Holding(_, socket)) => socket,
+            _ => panic!("it holds the lock"),
+        }
+    }
+
+    /// A luneta that waited for the lock looks at the folder again before it
+    /// hears there: it makes one that went, and refuses one that others can
+    /// reach into now.
+    #[test]
+    fn a_luneta_that_waited_for_the_lock_looks_at_the_folder_again() {
+        let root = tempfile::tempdir().expect("a folder");
+        let folder = root.path().join("luneta");
+
+        let gone = || fs::remove_dir_all(&folder).expect("it goes");
+        assert_eq!(socket_after_waiting(&folder, gone), Ok(folder.join(SOCKET)));
+        assert!(folder.is_dir(), "it makes the folder again");
+
+        let open = || {
+            fs::set_permissions(&folder, Permissions::from_mode(0o755)).expect("it opens");
+        };
+        let refused = format!("{} is open to other users", folder.display());
+        assert_eq!(socket_after_waiting(&folder, open), Err(refused));
     }
 
     /// The luneta that holds the lock knows you dictate in another, whichever
