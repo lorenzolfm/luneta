@@ -63,7 +63,7 @@ use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChang
 use crate::ask::{Ask, Heard, Keyed};
 use crate::away;
 use crate::brief::{self, Asking, Briefing, Written};
-use crate::browser;
+use crate::browser::Browser;
 use crate::close::Act;
 use crate::desktop::{self, Desktop};
 use crate::dictation::{self, Dictated, Dictation};
@@ -673,6 +673,8 @@ struct App {
     /// What zellij last copied, as it does a selection as the mouse lets go,
     /// for `Alt u` to read: it is not kept past that.
     copied: Option<String>,
+    /// What opens the pull requests `o` asks for.
+    browser: Browser,
     /// The thread that runs the speech model, from the first dictation on.
     speech: Option<Speech>,
     /// The fetch of the speech model, while it is on its way.
@@ -947,6 +949,7 @@ fn run_in(
         aloud_repeats: dictation::Repeats::of(aloud::KEY),
         aloud: Aloud::new(events.clone()),
         copied: None,
+        browser: Browser::default(),
         speech: None,
         fetching: None,
         releases,
@@ -1981,7 +1984,7 @@ impl App {
                 let _ = self.events.send(Event::Copy(link));
             },
             Asked::Browse(link) => {
-                if let Err(why) = browser::open(&link, &self.events) {
+                if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
                     self.sidebar.notify(why);
                 }
             },

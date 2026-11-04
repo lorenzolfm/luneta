@@ -1,12 +1,14 @@
 //! The browser of the machine luneta runs on, which the desktop picks: as
 //! `xdg-open` asks it on Linux, and `open` on macOS. Each hands the page over,
-//! and may stay until the browser it started ends, which outlives luneta.
+//! and may stay until the browser it started ends, which outlives luneta. A
+//! key held down opens its page once.
 
 use std::io::ErrorKind;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::desktop;
 use crate::host::Event;
@@ -15,21 +17,63 @@ use crate::pull::Link;
 /// What asks the desktop to open a page.
 const OPENER: &str = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
 
-/// Opens the page of `link` in your browser. Why it could not start goes back
-/// at once, and why it could not go on to `events`. luneta over ssh opens
-/// nothing: the desktop of the machine it runs on is not the one you sit at.
-pub fn open(link: &Link, events: &Sender<Event>) -> Result<(), String> {
-    if desktop::elsewhere() {
-        return Err("luneta runs over ssh, far from your browser: `y p` copies the link".to_owned());
-    }
-    open_by(Command::new(OPENER), link, events)
+/// How soon after it was last asked for a page asked for again is the key held
+/// down: a terminal can send a key held as if typed again and again, and the
+/// first repeat comes only after the keyboard's wait, which a desktop lets you
+/// set to nearly two seconds.
+const HELD: Duration = Duration::from_secs(2);
+
+/// What opens the pages you ask for.
+#[derive(Debug, Default)]
+pub struct Browser {
+    /// The page that started last, and when it was last asked for.
+    asked: Option<(Link, Instant)>,
 }
 
-/// Has `opener` open the page of `link`, as `open` says. It is no terminal's,
-/// and no group's but its own, for what it starts to draw nothing on luneta's
-/// terminal and to outlive its window. It takes a `Link`, which spells the page
-/// again, for what a daemon of another machine says never to reach the desktop,
-/// which runs a file it is handed.
+impl Browser {
+    /// Opens the page of `link` in your browser, asked for at `now`, but for a
+    /// key held down. Why it could not start goes back at once, and why it
+    /// could not go on to `events`. luneta over ssh opens nothing: the desktop
+    /// of the machine it runs on is not the one you sit at.
+    pub fn open(
+        &mut self,
+        link: &Link,
+        events: &Sender<Event>,
+        now: Instant,
+    ) -> Result<(), String> {
+        if desktop::elsewhere() {
+            let why = "luneta runs over ssh, far from your browser: `y p` copies the link";
+            return Err(why.to_owned());
+        }
+        self.open_with(Command::new(OPENER), link, events, now)
+    }
+
+    /// Has `opener` open the page of `link`, unless that is the key held down,
+    /// which then lasts from `now`. What could not start is no page asked for,
+    /// for a repeat to say so again in place of the note it takes away.
+    fn open_with(
+        &mut self,
+        opener: Command,
+        link: &Link,
+        events: &Sender<Event>,
+        now: Instant,
+    ) -> Result<(), String> {
+        let held = self.asked.as_ref().is_some_and(|(page, then)| {
+            page == link && now.saturating_duration_since(*then) < HELD
+        });
+        if !held {
+            open_by(opener, link, events)?;
+        }
+        self.asked = Some((link.clone(), now));
+        Ok(())
+    }
+}
+
+/// Has `opener` open the page of `link`, as `Browser::open` says. It is no
+/// terminal's, and no group's but its own, for what it starts to draw nothing
+/// on luneta's terminal and to outlive its window. It takes a `Link`, which
+/// spells the page again, for what a daemon of another machine says never to
+/// reach the desktop, which runs a file it is handed.
 fn open_by(mut opener: Command, link: &Link, events: &Sender<Event>) -> Result<(), String> {
     let program = opener.get_program().to_string_lossy().into_owned();
     opener.arg(link.url()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -101,5 +145,34 @@ mod tests {
         let (started, said) = said_by(Command::new("luneta-no-such-opener"));
         assert_eq!(started, Err("luneta-no-such-opener is not on the PATH".to_owned()));
         assert_eq!(said, Vec::<String>::new());
+    }
+
+    /// A key held opens its page once: neither its first repeat, after the
+    /// keyboard's wait, nor one after it, counted from the one before, asks
+    /// anything of the desktop. Another page opens at once, and the same one
+    /// once the key has been let go a while. What could not start is tried
+    /// again.
+    #[test]
+    fn a_key_held_opens_its_page_once() {
+        let (events, _heard) = channel();
+        let page = Link::parse(URL).expect("a link");
+        let other = Link::parse("https://github.com/owner/repo/pull/250").expect("a link");
+        let mut browser = Browser::default();
+        let start = Instant::now();
+        assert_eq!(browser.open_with(shell("exit 0"), &page, &events, start), Ok(()));
+
+        // What is not there says so, where the desktop is asked at all.
+        let mut asks = |link: &Link, at: Instant| {
+            browser.open_with(Command::new("luneta-no-such-opener"), link, &events, at).is_err()
+        };
+        let just_short = HELD.saturating_sub(Duration::from_millis(1));
+        let first_repeat = start + just_short;
+        let next_repeat = first_repeat + just_short;
+        assert!(!asks(&page, first_repeat), "the first repeat");
+        assert!(!asks(&page, next_repeat), "a repeat after it");
+        assert!(asks(&other, next_repeat), "another page");
+        let pressed_again = next_repeat + HELD;
+        assert!(asks(&page, pressed_again), "the same page, later");
+        assert!(asks(&page, pressed_again), "what could not start");
     }
 }

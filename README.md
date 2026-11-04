@@ -788,12 +788,13 @@ so you see it takes a click. A click anywhere else on the row still goes to the
 pane. `y p` copies the link of the highlighted row: `y` waits for what to yank,
 as vim's does, the bottom of the sidebar lists it in the meantime, and `Esc`
 drops it. `o` opens the link in your browser, by `xdg-open` on Linux and `open`
-on macOS. All of them work on another machine's rows too, whose lunetad says the
-link. A copy goes to the terminal you run luneta in, as OSC 52, and `o` opens the
-browser of the machine luneta runs on: where luneta itself runs over ssh, `o`
-opens nothing and says so, and `y p` still copies. A row with no number, or one
-whose lunetad says no link of it on `github.com`, as one too old to say it does,
-takes no click there, and the keys only leave a note.
+on macOS, once however long you hold it: the same link again within two seconds
+opens nothing. All of them work on another machine's rows too, whose lunetad
+says the link. A copy goes to the terminal you run luneta in, as OSC 52, and `o`
+opens the browser of the machine luneta runs on: where luneta itself runs over
+ssh, `o` opens nothing and says so, and `y p` still copies. A row with no number,
+or one whose lunetad says no link of it on `github.com`, as one too old to say
+it does, takes no click there, and the keys only leave a note.
 
 A `•` before a pane's mark says that something finished there since you were
 last in it: an agent, its `✓` in green, or a
