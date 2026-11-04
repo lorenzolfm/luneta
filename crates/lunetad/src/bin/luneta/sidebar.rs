@@ -58,7 +58,7 @@ use lunetad::asks::User;
 use lunetad::links;
 use lunetad::reviews::Move;
 use lunetad::transcripts::SessionId;
-use lunetad::{log, Destination};
+use lunetad::{log, Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1001,9 +1001,9 @@ pub enum Asked {
         name: String,
         command: Vec<String>,
     },
-    /// Find where a key of the menu numbered `menu`, for the pull request or
-    /// the issue `link`, pasted on a row of `on`, goes among its panes
-    /// `worked`, and have its worktree made there.
+    /// Find where a key of the menu numbered `menu`, for `work`, pasted on a
+    /// row of `on`, goes among its panes `worked`, and have its worktree made
+    /// there.
     Pull { menu: u64, on: Machine, work: Work, worked: Vec<Worked> },
     /// Find the skills that `cwd`, on `on`, can run, for the menu numbered
     /// `menu`.
@@ -2791,7 +2791,11 @@ impl Sidebar {
             Some(menu) => Some(menu.target().clone()),
             None => self.target(),
         };
-        let Some(work) = Work::parse(text, target.as_ref().and_then(Target::cwd)) else {
+        // A directory by no absolute path, as an agent's session file may say,
+        // is none to go from: a relative path says so, once a key is pressed.
+        let from = target.as_ref().and_then(Target::cwd);
+        let from = from.and_then(|from| Directory::parse(from.to_owned()).ok());
+        let Some(work) = Work::parse(text, from) else {
             return;
         };
         self.notice = None;
@@ -4768,7 +4772,7 @@ mod tests {
 
     use super::*;
     use crate::own::Before;
-    use crate::pull::At;
+    use crate::pull::{At, Readied};
     use crate::spots::Hit;
 
     fn pane(id: u32, tab: u32, cwd: &str, command: &str) -> Pane {
@@ -7120,12 +7124,13 @@ mod tests {
             worked(listed("older", 10), 2, "/w/c", None, true),
             worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
         ];
-        let work = Work::Link(link);
+        let work = Work::Link(link.clone());
         let pull = Asked::Pull { menu: 1, on: Machine::Local, work, worked };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
-        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None, file: None };
+        let work = Readied::Link(link);
+        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None, work };
         let asked = Asked::Make {
             menu: 1,
             on: Machine::Local,
@@ -7153,7 +7158,13 @@ mod tests {
     fn a_md_file_s_path_pasted_opens_the_menu_for_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        for text in ["notes.txt", "two\nlines.md", "https://example.com/plan.md", ".md"] {
+        for text in [
+            "notes.txt",
+            "two\nlines.md",
+            "https://example.com/plan.md",
+            "github.com/o/r/blob/main/README.md",
+            ".md",
+        ] {
             sidebar.paste(text);
             assert!(sidebar.menu.is_none(), "{text:?}");
         }
@@ -7172,8 +7183,8 @@ mod tests {
             panic!("no job for the key");
         };
         assert_eq!(asked_on, on);
-        let file = Work::parse("docs/plans/sync-rework.md", cwd.as_deref());
-        assert_eq!(Some(work), file);
+        let from = cwd.map(|cwd| Directory::parse(cwd).unwrap());
+        assert_eq!(Some(work), Work::parse("docs/plans/sync-rework.md", from));
 
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
@@ -7183,6 +7194,26 @@ mod tests {
             panic!("no job for the key");
         };
         assert_eq!(Some(work), Work::parse("/w/plan.md", None));
+    }
+
+    /// A row that says where it works by no absolute path, as an agent's
+    /// session file may, whose pane zellij has not said the directory of,
+    /// works in none a file's path can go from: read from luneta's own, it
+    /// would name some other file.
+    #[test]
+    fn a_row_by_no_absolute_path_is_no_directory_for_a_file_s_path() {
+        let mut sidebar = fresh();
+        let unsaid = Pane { cwd: None, ..pane(1, 0, "", "claude") };
+        let elsewhere = Agent { cwd: "w/luneta".to_owned(), ..agent("s", 1, Status::Idle, None) };
+        sidebar.heard(host(vec![session("s", 10, vec![unsaid])], vec![elsewhere]));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "j");
+        assert_eq!(sidebar.target().as_ref().and_then(Target::cwd), Some("w/luneta"));
+        sidebar.paste("docs/plan.md");
+        let Asked::Pull { work, .. } = sidebar.key(&char('w'), moment(160_000)) else {
+            panic!("no job for the key");
+        };
+        assert_eq!(Some(work), Work::parse("docs/plan.md", None));
     }
 
     /// The menu on an agent's row whose pane zellij has not said the
@@ -8347,11 +8378,12 @@ mod tests {
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let worked = links::Worked { dir: "/w/b".to_owned(), pull: None, here: false };
         let worked = vec![Worked { session: listed("work", 20), pane: 3, works: worked }];
-        let asked = Work::Link(link);
+        let asked = Work::Link(link.clone());
         let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, worked };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
-        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None, file: None };
+        let worktree = "/w/n/feat".to_owned();
+        let ready = Ready { at, worktree, branch: None, work: Readied::Link(link) };
         let asked = sidebar.pulled(number, Ok(ready));
         assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
         let made = session("main", 30, vec![pane(1, 0, "/w/n", "fish")]);

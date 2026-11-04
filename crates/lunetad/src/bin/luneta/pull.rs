@@ -12,7 +12,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use lunetad::links::{self, Pasted};
-pub use lunetad::links::{At, Kind, Link, Of, Work};
+pub use lunetad::links::{At, Kind, Link, Of, Readied, Work};
 
 use crate::away::{self, Away};
 use crate::due::Due;

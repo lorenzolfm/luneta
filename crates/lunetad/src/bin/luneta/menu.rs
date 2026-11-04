@@ -51,7 +51,7 @@ use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
-use crate::pull::{At, Kind, Ready, Work};
+use crate::pull::{At, Kind, Readied, Ready, Work};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
@@ -445,8 +445,8 @@ enum Entry {
     /// A command of the sidebar's own, which the legend lists beside the
     /// menu's keys.
     Command(Command),
-    /// A key of the menu for a link of that kind, a pull request's or an
-    /// issue's, which that menu shows.
+    /// A key of the menu for what was pasted, a pull request's link, an
+    /// issue's or a file's path, which that menu shows.
     Pull(Pull, Asks),
     /// The key that opens the search over the skills.
     Search,
@@ -1040,18 +1040,46 @@ fn claude(prompt: &str, branch: Option<&str>) -> Vec<String> {
 
 /// Claude Code on `prompt`, let read `file`, where there is one, with no
 /// question asked: luneta keeps what a shell printed outside the directory
-/// the agent works in, where Claude Code asks first. A rule names a path
-/// from the root with another `/` before it.
+/// the agent works in, where Claude Code asks first. It asks for a file no
+/// rule can name.
 fn claude_reading(prompt: String, file: Option<&str>) -> Vec<String> {
     let mut command = vec![CLAUDE.to_owned()];
-    if let Some(file) = file {
+    if let Some(rule) = file.and_then(read_rule) {
         command.push("--allowedTools".to_owned());
-        command.push(format!("Read(/{file})"));
+        command.push(rule);
         // The flag takes every word after it as another tool, up to this.
         command.push("--".to_owned());
     }
     command.push(prompt);
     command
+}
+
+/// The rule that lets Claude Code read the file by the path `file` from the
+/// root, and no other, but for one whose name differs by its case alone, which
+/// a rule takes no account of; or none where no rule can name it alone. A rule
+/// names a path from the root with another `/` before it, as a glob: `\` makes
+/// `*`, `[` or `]` itself, and it takes four to make a `\`, as Claude Code reads
+/// the rule, and then the glob. Nothing makes a `?` itself. `--allowedTools`
+/// cuts its word at a space or a comma outside parentheses, which any `)`
+/// leaves it outside of, and a line is another glob.
+fn read_rule(file: &str) -> Option<String> {
+    let mut rule = String::from("Read(/");
+    let mut inside = true;
+    for c in file.chars() {
+        match c {
+            '?' => return None,
+            ' ' | ',' if !inside => return None,
+            c if c.is_control() => return None,
+            '(' => inside = true,
+            ')' => inside = false,
+            '*' | '[' | ']' => rule.push('\\'),
+            '\\' => rule.push_str(r"\\\"),
+            _ => {},
+        }
+        rule.push(c);
+    }
+    rule.push(')');
+    Some(rule)
 }
 
 /// The skill a prompt runs, as `/tigerstyle` or `/plugin:skill`: the command
@@ -1501,25 +1529,20 @@ impl Menu {
         let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
-        let Ready { at, worktree, branch, file } = match ready {
+        let Ready { at, worktree, branch, work: readied } = match ready {
             Ok(ready) => ready,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
-        let command = match (pull, &work, file.as_deref()) {
-            (Pull::Worktree, ..) => Vec::new(),
-            (Pull::Agent, Work::Link(link), _) if link.kind() == Kind::Pull => {
+        let command = match (pull, &readied) {
+            (Pull::Worktree, _) => Vec::new(),
+            (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
                 reviews::command(link, branch.as_deref())
             },
-            (Pull::Agent, Work::Link(link), _) => {
+            (Pull::Agent, Readied::Link(link)) => {
                 claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
             },
-            (Pull::Agent, Work::File(_), Some(file)) => {
-                claude_reading(format!("{TACKLE} {file}"), Some(file))
-            },
-            (Pull::Agent, Work::File(_), None) => {
-                return Did::Closed(Done::Wrong(format!(
-                    "menu: {work}: lunetad does not say where the file is"
-                )));
+            (Pull::Agent, Readied::File { real }) => {
+                claude_reading(format!("{TACKLE} {real}"), Some(real))
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
@@ -2179,12 +2202,13 @@ fn skill_line(
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use lunetad::Directory;
     use ratatui::layout::Position;
 
     use super::*;
     use crate::close::{self, Deletes, Doing, Seat, Subject};
     use crate::printed::Kept;
-    use crate::pull::{At, Link, Ready, Work};
+    use crate::pull::{At, Link, Readied, Ready, Work};
     use crate::sidebar::Listed;
     use crate::skills::Skill;
     use crate::spots::Hit;
@@ -3111,8 +3135,10 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/feat-x".to_owned();
         let branch = Some("feat/x".to_owned());
-        let ready =
-            |at| Ok(Ready { at, worktree: worktree.clone(), branch: branch.clone(), file: None });
+        let ready = |at| {
+            let (worktree, branch) = (worktree.clone(), branch.clone());
+            Ok(Ready { at, worktree, branch, work: Readied::Link(pull_request()) })
+        };
         let review = reviews::command(&pull_request(), Some("feat/x"));
         let session = || At::Session((other.clone(), 7));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
@@ -3143,8 +3169,8 @@ mod tests {
     /// words to tackle it, which no skill names.
     #[test]
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
-        let issue = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
-        let issue = Work::Link(issue);
+        let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
+        let issue = Work::Link(link.clone());
         let menu = Menu::pull(1, pane_row(), issue.clone());
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
@@ -3160,7 +3186,7 @@ mod tests {
             at: At::Session((other.clone(), 7)),
             worktree: worktree.clone(),
             branch: Some("issue-2736".to_owned()),
-            file: None,
+            work: Readied::Link(link),
         };
         let (menu, wants) = stays(menu.pulled(Ok(ready)));
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
@@ -3174,12 +3200,14 @@ mod tests {
     /// with where the file is where another says its repository. `t` opens a
     /// tab in the worktree of the file's branch, named for it, with an agent
     /// told in words to tackle the file by its real path, and let read it
-    /// there, outside the worktree. `w` opens the tab alone. With no path
-    /// said for the file, the agent has nothing to read, and none opens. Why
-    /// luneta found nothing says what was pasted, as it was.
+    /// there, outside the worktree. `w` opens the tab alone. Why luneta found
+    /// nothing says what was pasted, as it was.
     #[test]
     fn the_menu_for_a_file_has_a_key_for_a_worktree_and_one_to_tackle_it() {
-        let file = || Work::parse("docs/plans/sync-rework.md\n", Some("/w/cdk/main")).unwrap();
+        let file = || {
+            let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
+            Work::parse("docs/plans/sync-rework.md\n", Some(from)).unwrap()
+        };
         let menu = Menu::pull(1, pane_row(), file());
         assert_eq!(
             text(&menu.lines(38, 9, 0).0),
@@ -3196,14 +3224,14 @@ mod tests {
         assert_eq!(wants, Wants::Pull(file()));
         assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
-        let (worktree, real) = ("/w/cdk/sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
-        let ready = |file: Option<&str>| Ready {
+        let (worktree, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
+        let ready = || Ready {
             at: At::Session((other.clone(), 7)),
             worktree: worktree.to_owned(),
-            branch: Some("sync-rework".to_owned()),
-            file: file.map(str::to_owned),
+            branch: Some("md-sync-rework".to_owned()),
+            work: Readied::File { real: real.to_owned() },
         };
-        let (_, wants) = stays(menu.pulled(Ok(ready(Some(real)))));
+        let (_, wants) = stays(menu.pulled(Ok(ready())));
         let command = [
             "claude",
             "--allowedTools",
@@ -3219,23 +3247,52 @@ mod tests {
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
         let pressed = |key: char| stays(Menu::pull(1, pane_row(), file()).key(&char(key))).0;
-        let (_, wants) = stays(pressed('w').pulled(Ok(ready(Some(real)))));
+        let (_, wants) = stays(pressed('w').pulled(Ok(ready())));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
         let session = other.clone();
         let cwd = worktree.to_owned();
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
         assert_eq!(
-            closed(pressed('t').pulled(Ok(ready(None)))),
-            Done::Wrong(
-                "menu: docs/plans/sync-rework.md: lunetad does not say where the file is"
-                    .to_owned()
-            )
-        );
-        assert_eq!(
             closed(pressed('w').pulled(Err("no such file".to_owned()))),
             Done::Wrong("menu: docs/plans/sync-rework.md: no such file".to_owned())
         );
+    }
+
+    /// The agent is let read the file by a rule that names it alone, as a glob
+    /// would name others, whatever the path holds, and told of it as it is. A
+    /// path no rule can name gets none, and Claude Code asks first.
+    #[test]
+    fn an_agent_is_let_read_the_file_by_a_rule_that_names_it_alone() {
+        for (file, rule) in [
+            ("/w/plan.md", "Read(//w/plan.md)"),
+            ("/w/My Plan (v2).md", "Read(//w/My Plan (v2).md)"),
+            ("/w/a, b.md", "Read(//w/a, b.md)"),
+            ("/w/b{a,c}.md", "Read(//w/b{a,c}.md)"),
+            ("/w/[draft] a*.md", r"Read(//w/\[draft\] a\*.md)"),
+            (r"/w/back\slash.md", r"Read(//w/back\\\\slash.md)"),
+        ] {
+            let prompt = format!("Tackle {file}");
+            let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
+            assert_eq!(
+                claude_reading(prompt.clone(), Some(file)),
+                command.map(str::to_owned).to_vec(),
+                "{file}"
+            );
+        }
+        for file in [
+            "/w/what?.md",
+            "/w/Plan (v2) final.md",
+            "/w/Plan (v2), final.md",
+            "/w/two\nlines.md",
+        ] {
+            let prompt = format!("Tackle {file}");
+            assert_eq!(
+                claude_reading(prompt.clone(), Some(file)),
+                ["claude".to_owned(), prompt],
+                "{file:?}"
+            );
+        }
     }
 
     /// Where no session works in the repository, luneta makes one in its
@@ -3245,7 +3302,8 @@ mod tests {
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
         let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
-        let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, file: None };
+        let work = Readied::Link(pull_request());
+        let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, work };
         let (menu, wants) = stays(pulling('w').pulled(Ok(ready)));
         assert_eq!(
             wants,
@@ -3276,8 +3334,10 @@ mod tests {
     fn the_keys_for_a_link_pasted_on_another_machine_s_row_open_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
-        let ready =
-            |at| Ok(Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, file: None });
+        let ready = |at| {
+            let work = Readied::Link(pull_request());
+            Ok(Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, work })
+        };
         let row = || Target::Pane(vps(), row());
         let place = Place::Pane(PanePlace { session: other.clone(), pane: 9 });
         let there = ready(At::There((other.clone(), 9)));

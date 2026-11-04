@@ -30,9 +30,9 @@ use lunetad::api::{
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
-use lunetad::links::{self, At, Link, Pasted, Ready, Work};
+use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::SessionName;
+use lunetad::{Directory, SessionName};
 use rustix::process::{test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -1285,7 +1285,7 @@ async fn pasted_on(
     let mut answer = daemon.paste(request).await?.into_inner();
     let ready = answer.message().await?.expect("an answer");
     assert_eq!(answer.message().await?, None, "the stream ends after the answer");
-    Ok(Ready::of(ready).expect("an answer luneta reads"))
+    Ok(pasted.answered(ready).expect("an answer luneta reads"))
 }
 
 /// A link pasted on a row of another machine is found there: gh there asks
@@ -1327,14 +1327,16 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
+        let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let link = Work::Link(issue.clone());
         let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
         let session = Pasted::new(link.clone(), vec![worked("/nowhere/at/all"), worked(&main)]);
         let ready = pasted_on(&mut daemon, "far", &session).await.unwrap();
         let worktree = clone.join("issue-7").display().to_string();
         let branch = Some("issue-7".to_owned());
         let session_at = At::Session(1);
-        let answer = Ready { at: session_at, worktree: worktree.clone(), branch, file: None };
+        let work = Readied::Link(issue);
+        let answer = Ready { at: session_at, worktree: worktree.clone(), branch, work };
         assert_eq!(ready, answer);
         assert!(clone.join("issue-7").join(".git").is_file());
         let viewed = "issue view 7 --repo github.com/o/n --json url --jq .url";
@@ -1360,11 +1362,13 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
 /// there says the repository it is in, untracked in a worktree or not, whose
 /// session the key goes to, by what the pane's directory is in, whatever its
 /// remotes are; gh is not asked. The worktree is of a branch named for it,
-/// from origin's default branch as it is now, not as the clone last fetched
-/// it. Pasted again, it finds that worktree, and a pane that works in it. A
-/// file in no repository goes by the row's, and a relative path from it, and
-/// `~/` is the home of the machine there, not of this one. A path that names
-/// no file, or one in a clone git made, makes nothing, and says why.
+/// after `md-`, from origin's default branch as it is now, not as the clone
+/// last fetched it. Pasted again, it finds that worktree, and a pane that works
+/// in it; and a file named as a branch is finds no worktree of that. A file in
+/// no repository goes by the row's, and a relative path from it, and `~/` is
+/// the home of the machine there, not of this one. A path that names no file,
+/// or one in a clone git made, or in a repository git refuses to read, makes
+/// nothing, and says why.
 #[test]
 fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     let here = Host::new();
@@ -1394,23 +1398,25 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let file = |path: &str, from: Option<&str>| {
+            let from = from.map(|from| Directory::parse(from.to_owned()).unwrap());
             Work::File(links::File::parse(path, from).unwrap())
         };
         let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
         let panes = vec![worked("/nowhere/at/all"), worked(&main)];
         let asked = Pasted::new(file(&plan, Some("/nowhere/at/all")), panes.clone());
         let ready = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        let worktree = clone.join("sync-rework").display().to_string();
-        let branch = Some("sync-rework".to_owned());
+        let worktree = clone.join("md-sync-rework").display().to_string();
+        let branch = Some("md-sync-rework".to_owned());
+        let of_plan = || Readied::File { real: plan.clone() };
         let answer = Ready {
             at: At::Session(1),
             worktree: worktree.clone(),
             branch: branch.clone(),
-            file: Some(plan.clone()),
+            work: of_plan(),
         };
         assert_eq!(ready, answer);
-        assert!(clone.join("sync-rework").join(".git").is_file());
-        assert_eq!(rev_parse(&clone.join("sync-rework"), "HEAD"), tip);
+        assert!(clone.join("md-sync-rework").join(".git").is_file());
+        assert_eq!(rev_parse(&clone.join("md-sync-rework"), "HEAD"), tip);
         assert!(far.gh.issues().is_empty());
 
         let mut in_it = panes.clone();
@@ -1433,21 +1439,30 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let asked = Pasted::new(file("~/errand.md", Some(&main)), panes.clone());
         let errand = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(errand.at, At::Session(1));
-        assert_eq!(errand.worktree, clone.join("errand").display().to_string());
-        assert_eq!(errand.file, Some(home.join("errand.md").display().to_string()));
+        assert_eq!(errand.worktree, clone.join("md-errand").display().to_string());
+        let real = home.join("errand.md").display().to_string();
+        assert_eq!(errand.work, Readied::File { real });
 
         // From the row, relative.
         let asked = Pasted::new(file("docs/plans/Sync Rework.md", Some(&main)), panes.clone());
         let relative = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        assert_eq!(relative.file, Some(plan.clone()));
+        assert_eq!(relative.work, of_plan());
         assert_eq!(relative.worktree, worktree);
+
+        // Named as a branch is: a branch of its own, and none of that one's.
+        let named = plans.join("main.md");
+        fs::write(&named, "written down").unwrap();
+        let asked = Pasted::new(file(&named.display().to_string(), None), panes.clone());
+        let of_main = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        assert_eq!(of_main.worktree, clone.join("md-main").display().to_string());
+        assert_eq!(of_main.branch.as_deref(), Some("md-main"));
 
         // A file this machine has, and the far one has not.
         let mine = here.home.path().canonicalize().unwrap().join("mine.md");
         fs::write(&mine, "written down").unwrap();
         let asked = Pasted::new(file("~/mine.md", Some(&main)), panes.clone());
         assert_eq!(refused_there(&mut daemon, &asked).await, "no such file");
-        assert!(!clone.join("mine").exists());
+        assert!(!clone.join("md-mine").exists());
 
         let outside = scratch.join("outside.md");
         fs::write(&outside, "written down").unwrap();
@@ -1460,7 +1475,8 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let by_git = scratch.join("by-git");
         git(&scratch, &["clone", "-q", &up.display().to_string(), &by_git.display().to_string()]);
         fs::write(by_git.join("plan.md"), "written down").unwrap();
-        let asked = Pasted::new(file(&by_git.join("plan.md").display().to_string(), None), panes);
+        let in_by_git = by_git.join("plan.md").display().to_string();
+        let asked = Pasted::new(file(&in_by_git, None), panes.clone());
         assert_eq!(
             refused_there(&mut daemon, &asked).await,
             format!(
@@ -1469,7 +1485,20 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
                 by_git.display()
             )
         );
-        assert_eq!(rev_parse_verify(&by_git, "refs/heads/plan"), None);
+        assert_eq!(rev_parse_verify(&by_git, "refs/heads/md-plan"), None);
+
+        // In a repository git refuses to read, on a row of one it reads: no
+        // word that the file is in no repository, so nothing of the row's.
+        let unread = scratch.join("unread");
+        git(&scratch, &["init", "-q", &unread.display().to_string()]);
+        git(&unread, &["config", "core.repositoryformatversion", "99"]);
+        fs::write(unread.join("in-it.md"), "written down").unwrap();
+        let in_it = unread.join("in-it.md").display().to_string();
+        let asked = Pasted::new(file(&in_it, Some(&main)), panes);
+        let why = refused_there(&mut daemon, &asked).await;
+        assert!(why.starts_with("git did not say what repository it is in: fatal: "), "{why}");
+        assert!(!clone.join("md-in-it").exists());
+        assert_eq!(rev_parse_verify(&clone.join("main"), "refs/heads/md-in-it"), None);
     });
 }
 

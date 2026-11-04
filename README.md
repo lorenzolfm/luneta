@@ -668,13 +668,17 @@ makes nothing, and the menu says why.
 A `.md` file's path, pasted the same way, opens the menu for that file, for work
 written down there and not on GitHub: one line that ends in `.md`, from the
 root, from `~/`, or else from where the highlighted row works. `w` makes a
-worktree of a branch named for the file, and opens a tab there of that name, so
-`docs/plans/sync-rework.md` makes `sync-rework`: in lower case, with a `-` for
-what a branch's name can't hold. `t` does the same and starts Claude Code in the
+worktree of a branch named for the file, and opens a tab there, so
+`docs/plans/sync-rework.md` makes the branch `md-sync-rework` and the tab
+`sync-rework`: in lower case, with a `-` for what a branch's name can't hold. The
+`md-` keeps `main.md` off `main`. `t` does the same and starts Claude Code in the
 tab, told to `Tackle` the file by its real path, and let read it there, as the
-worktree may not have it. The worktree is made in the repository the file is in,
-or, for a file in none, the one the highlighted row works in; a file in none, on
-a row that works in no directory, makes nothing, and the menu says why. The tab
+worktree may not have it; for a path no rule of Claude Code's can name alone, as
+one with a `?`, it asks first. The worktree is made in the repository the file is
+in, or, for a file in none, the one the highlighted row works in; a file in none,
+on a row that works in no directory, makes nothing, and the menu says why. So does
+a file in a repository git refuses to read, as one of a newer format or another
+user's: that is not a file in none. The tab
 opens in the session of a pane that works in that repository, or else in a
 session luneta makes in the directory that holds it, and wt makes the worktree
 only in a clone wt made. Where neither the clone nor origin has the branch yet,

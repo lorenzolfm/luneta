@@ -331,7 +331,7 @@ impl Away {
         })
     }
 
-    /// Where a key of luneta's menu goes for the link `pasted` there, as
+    /// Where a key of luneta's menu goes for what was `pasted` there, as
     /// `lunetad::links` finds it there, by the place of its pane among those
     /// `pasted` says, and the worktree it has made there; or why it found
     /// nothing, as it said there, or as luneta heard no answer by
@@ -351,7 +351,7 @@ impl Away {
                 Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
             };
             match tokio::time::timeout(links::PATIENCE + patience, answer.message()).await {
-                Ok(Ok(Some(ready))) => Ready::of(ready).map_err(|why| format!("{on}: {why}")),
+                Ok(Ok(Some(ready))) => pasted.answered(ready).map_err(|why| format!("{on}: {why}")),
                 Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
                 Ok(Err(status)) => Err(said(on, &status)),
                 Err(_) => Err(format!("{on}: lunetad had found nothing after {minutes} minutes")),
