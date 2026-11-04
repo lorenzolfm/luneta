@@ -466,6 +466,26 @@ fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     assert_eq!(moved, zellij("work", Some("play"), 3));
 }
 
+/// A file that does not read is counted while a process runs by its pid, and
+/// stops being counted as that process ends, and not at the next sweep, two
+/// seconds off: it is killed just after the read that found it.
+#[test]
+fn a_file_that_does_not_read_stops_being_counted_as_its_process_ends() {
+    let host = Host::new();
+    let mut running = process(None);
+    let mut shape = file_for("newer", &running, "busy");
+    shape["procStart"] = json!({ "ticks": started(running.pid()) });
+    host.write(running.pid(), &shape);
+    let _daemon = start(host.vars()).unwrap();
+    assert_eq!(host.list().unread, 1);
+
+    let killed = Instant::now();
+    running.kill();
+    eventually("the file is not counted", || (host.list().unread == 0).then_some(()));
+    let took = killed.elapsed();
+    assert!(took < Duration::from_secs(1), "it stayed counted for {took:?}");
+}
+
 /// A folder that never stops changing is read anyway: the daemon waits for a
 /// burst of changes to settle before it reads, but only so long. The test
 /// writes a file beside the session files every few milliseconds, more often

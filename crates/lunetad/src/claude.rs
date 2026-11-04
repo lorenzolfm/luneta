@@ -112,8 +112,9 @@ impl Scan {
     /// The processes it found running, whose ends change what it finds.
     #[must_use]
     pub fn pids(&self) -> Vec<u32> {
-        let agents = self.agents.iter().map(|agent| agent.pid);
-        agents.chain(self.unread.iter().map(|unread| unread.pid)).collect()
+        let Scan { agents, unread } = self;
+        let agents = agents.iter().map(|agent| agent.pid);
+        agents.chain(unread.iter().map(|unread| unread.pid)).collect()
     }
 }
 
