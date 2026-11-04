@@ -1,12 +1,17 @@
 //! What zellij is asked to move a pane into a tab of its own, or the panes of
-//! a tab into another, as the daemon answers `Turn` and `OtherTabs`: zellij's
-//! CLI has no command for it, and what it does lies in the order of what it
-//! is asked, as those are measured against a real zellij.
+//! a tab into another, as the daemon answers `TurnIntoTab`, `TurnIntoPanes` and
+//! `OtherTabs`: zellij's CLI has no command for it, and what it does lies in
+//! the order of what it is asked, as those are measured against a real zellij.
+//! Any floating asked for shows in `turned` here: zellij drops a pane it has no
+//! room to float, so no move may ask for it.
 
 use lunetad::api::other_tabs_response::Tab;
-use lunetad::api::turn_request::{Becomes, NewTab};
+use lunetad::api::turn_into_panes_response::Came as PanesCame;
+use lunetad::api::turn_into_panes_response::{Done as PanesDone, Partly};
+use lunetad::api::turn_into_tab_response::Came as TabCame;
+use lunetad::api::turn_into_tab_response::{Done as TabDone, NoClient};
 use lunetad::api::daemon_client::DaemonClient;
-use lunetad::api::{OtherTabsRequest, TurnRequest, TurnResponse};
+use lunetad::api::{OtherTabsRequest, TurnIntoPanesRequest, TurnIntoTabRequest};
 use serde_json::{json, Value};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
@@ -16,9 +21,7 @@ use crate::sessions::listed;
 
 /// A terminal of the session, in the tab `tab`, as zellij lists it.
 fn pane(id: u32, tab: (u32, &str)) -> Value {
-    let mut pane = listed(id, "fish", tab, Some("/w"));
-    pane["pane_rows"] = json!(30);
-    pane
+    listed(id, "fish", tab, Some("/w"))
 }
 
 fn floating(mut pane: Value) -> Value {
@@ -30,8 +33,6 @@ fn plugin(mut pane: Value) -> Value {
     pane["is_plugin"] = json!(true);
     pane
 }
-
-const NEW_TAB: Becomes = Becomes::NewTab(NewTab {});
 
 /// Has the daemon of `host` answer what `asked` asks of it.
 fn asking<T>(host: &Host, asked: impl AsyncFnOnce(DaemonClient<Channel>) -> T) -> T {
@@ -45,16 +46,49 @@ fn asking<T>(host: &Host, asked: impl AsyncFnOnce(DaemonClient<Channel>) -> T) -
 }
 
 /// What the daemon of `host` answers as it is asked to turn the terminal
-/// `pane` of `work`.
-fn turned(host: &Host, pane: u32, becomes: Option<Becomes>) -> Result<TurnResponse, Status> {
-    let session = "work".to_owned();
-    let asked = TurnRequest { on: None, session, pane, becomes };
-    asking(host, async move |mut daemon| daemon.turn(asked).await.map(tonic::Response::into_inner))
+/// `pane` of `work` into a tab.
+fn into_tab(host: &Host, pane: u32) -> Result<Option<TabCame>, Status> {
+    let asked = TurnIntoTabRequest { on: None, session: "work".to_owned(), pane };
+    asking(host, async move |mut daemon| {
+        daemon.turn_into_tab(asked).await.map(|answer| answer.into_inner().came)
+    })
+}
+
+/// What the daemon of `host` answers as it is asked to turn the tab of the
+/// terminal `pane` of `work` into panes of the tab of the terminal `beside`.
+fn into_panes(host: &Host, pane: u32, beside: u32) -> Result<Option<PanesCame>, Status> {
+    let asked = TurnIntoPanesRequest { on: None, session: "work".to_owned(), pane, beside };
+    asking(host, async move |mut daemon| {
+        daemon.turn_into_panes(asked).await.map(|answer| answer.into_inner().came)
+    })
 }
 
 fn refused(status: &Status, why: &str) {
     assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
     assert!(status.message().contains(why), "{status:?}");
+}
+
+const TAB_DONE: Option<TabCame> = Some(TabCame::Done(TabDone {}));
+const PANES_DONE: Option<PanesCame> = Some(PanesCame::Done(PanesDone {}));
+
+fn action(said: &str) -> String {
+    format!("--session work action {said}")
+}
+
+/// A stand-in as zellij is asked to open one in the tab `tab`.
+fn stand_in(tab: u32) -> String {
+    let said = format!("new-pane --tab-id {tab} --no-focus --close-on-exit -- sleep 10");
+    format!("- {}", action(&said))
+}
+
+/// What has zellij stack `pane` on the stand-in it opened: its fake says each
+/// is `terminal_9`.
+fn on_stand_in(pane: &str) -> String {
+    action(&format!("stack-panes -- terminal_9 {pane}"))
+}
+
+fn stand_in_closed() -> String {
+    action("close-pane --pane-id terminal_9")
 }
 
 /// A pane moves onto what a tab made for it holds, which then closes. The tab
@@ -70,7 +104,7 @@ fn a_pane_turns_into_a_tab_named_as_the_one_it_left() {
     let new = (3, "auth");
     host.zellij.stacks_into("work", 1, &json!([pane(2, auth), pane(1, new), pane(4, new)]));
 
-    assert!(!turned(&host, 1, Some(NEW_TAB)).unwrap().no_client);
+    assert_eq!(into_tab(&host, 1).unwrap(), TAB_DONE);
 
     let opened =
         "- --session work action new-tab --no-focus --close-on-exit --name auth -- sleep 10";
@@ -90,11 +124,27 @@ fn a_pane_zellij_finds_no_room_for_stays_and_the_tab_made_for_it_goes() {
     host.zellij.clients("work", &[(1, "terminal_1")]);
     host.zellij.opens_into("work", &json!([pane(1, tab), pane(2, tab), pane(4, (3, "Tab #2"))]));
 
-    refused(&turned(&host, 1, Some(NEW_TAB)).unwrap_err(), "no room for terminal_1 in tab 3");
+    refused(&into_tab(&host, 1).unwrap_err(), "no room for terminal_1 in tab 3");
 
     // A tab zellij numbered gives no name to the one made for its pane.
     let opened = "- --session work action new-tab --no-focus --close-on-exit -- sleep 10";
     assert_eq!(host.zellij.opened(), [opened]);
+    assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 3"]);
+}
+
+/// zellij says nothing of a pane that ended either: it is not said to have had
+/// no room, and the tab made for it goes all the same.
+#[test]
+fn a_pane_that_ends_as_it_turns_into_a_tab_is_said_to_have_gone() {
+    let host = Host::new();
+    let tab = (0, "Tab #1");
+    host.zellij.list("work", &json!([pane(1, tab), pane(2, tab)]));
+    host.zellij.clients("work", &[(1, "terminal_1")]);
+    host.zellij.opens_into("work", &json!([pane(1, tab), pane(2, tab), pane(4, (3, "Tab #2"))]));
+    host.zellij.stacks_into("work", 1, &json!([pane(2, tab), pane(4, (3, "Tab #2"))]));
+
+    refused(&into_tab(&host, 1).unwrap_err(), "pane 1 is gone");
+
     assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 3"]);
 }
 
@@ -109,7 +159,7 @@ fn what_stays_opens_no_tab() {
     ] {
         let host = Host::new();
         host.zellij.list("work", &panes);
-        refused(&turned(&host, 1, Some(NEW_TAB)).unwrap_err(), why);
+        refused(&into_tab(&host, 1).unwrap_err(), why);
         assert!(host.zellij.opened().is_empty());
         assert!(host.zellij.turned().is_empty());
     }
@@ -123,27 +173,24 @@ fn a_session_no_client_is_in_has_one_come_first() {
     let tab = (0, "Tab #1");
     host.zellij.list("work", &json!([pane(1, tab), pane(2, tab)]));
 
-    assert!(turned(&host, 1, Some(NEW_TAB)).unwrap().no_client);
+    assert_eq!(into_tab(&host, 1).unwrap(), Some(TabCame::NoClient(NoClient {})));
 
     assert!(host.zellij.opened().is_empty());
     assert!(host.zellij.turned().is_empty());
 }
 
-/// The panes of a tab go one at a time onto the tallest tiled pane of the
-/// other, floating there, which takes each out of the stack, the floating ones
-/// ahead of the last tiled one, whose leaving would end them. Embedded once
-/// all float, they are tiled, as no stack is left to go back to. A client's
-/// zellij closes the tab they left of itself.
+/// The panes of a tab go one at a time onto a stand-in opened for each in the
+/// tab of the terminal picked, which then closes and leaves it tiled, the
+/// floating ones ahead of the last tiled one, whose leaving would end them. None
+/// floats on the way. A client's zellij closes the tab they left of itself.
 #[test]
 fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
     let host = Host::new();
     let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
     let (tool, moved_tool) = (plugin(pane(7, from)), plugin(pane(7, to)));
-    let mut short = pane(4, to);
-    short["pane_rows"] = json!(10);
-    let tall = pane(3, to);
+    let picked = pane(3, to);
     let there = |panes: &[&Value]| {
-        let all = [&tall, &short].into_iter().chain(panes.iter().copied());
+        let all = [&picked].into_iter().chain(panes.iter().copied());
         Value::Array(all.cloned().collect())
     };
     let (one, five) = (pane(1, from), floating(pane(5, from)));
@@ -154,26 +201,12 @@ fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
     host.zellij.stacks_into("work", 2, &there(&[&one_there, &five_there, &tool]));
     host.zellij.stacks_into("work", 3, &there(&[&one_there, &five_there, &moved_tool]));
 
-    turned(&host, 1, Some(Becomes::PanesOf(1))).unwrap();
+    assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    let action = |said: &str| format!("--session work action {said}");
-    let toggle = |pane: &str| action(&format!("toggle-pane-embed-or-floating --pane-id {pane}"));
-    let stack = |pane: &str| action(&format!("stack-panes -- terminal_3 {pane}"));
-    assert_eq!(
-        host.zellij.turned(),
-        [
-            stack("terminal_5"),
-            toggle("terminal_5"),
-            stack("terminal_1"),
-            toggle("terminal_1"),
-            stack("plugin_7"),
-            toggle("plugin_7"),
-            toggle("terminal_5"),
-            toggle("terminal_1"),
-            toggle("plugin_7"),
-        ]
-    );
-    assert!(host.zellij.closed().is_empty());
+    assert_eq!(host.zellij.opened(), [stand_in(1), stand_in(1), stand_in(1)]);
+    let stacked = [on_stand_in("terminal_5"), on_stand_in("terminal_1"), on_stand_in("plugin_7")];
+    assert_eq!(host.zellij.turned(), stacked);
+    assert_eq!(host.zellij.closed(), [stand_in_closed(), stand_in_closed(), stand_in_closed()]);
 }
 
 /// A session no client is in lists the tab its panes left on, with nothing in
@@ -185,58 +218,86 @@ fn a_session_no_client_is_in_loses_the_tab_they_left_too() {
     host.zellij.list("work", &json!([pane(1, from), pane(3, to)]));
     host.zellij.stacks_into("work", 1, &json!([pane(1, to), pane(3, to)]));
 
-    turned(&host, 1, Some(Becomes::PanesOf(1))).unwrap();
+    assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 0"]);
+    assert_eq!(host.zellij.closed(), [stand_in_closed(), action("close-tab-by-id 0")]);
 }
 
-/// A pane zellij finds no room for is not floated, which would float it in
-/// the tab it stays in. Those that came before it are tiled where they went,
-/// and the tab that still holds it stays.
+/// A pane zellij finds no room for stops the rest, with what came before it
+/// tiled where it went, its stand-in gone, and the tab that still holds it
+/// staying. The answer says how many moved, as some did.
 #[test]
-fn a_pane_zellij_finds_no_room_for_stays_in_its_tab_and_is_not_floated() {
+fn a_pane_zellij_finds_no_room_for_stays_in_its_tab_and_the_answer_says_some_moved() {
+    let host = Host::new();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    let laid = json!([pane(1, from), pane(2, from), pane(4, from), pane(3, to)]);
+    host.zellij.list("work", &laid);
+    let first_there = json!([pane(1, to), pane(2, from), pane(4, from), pane(3, to)]);
+    host.zellij.stacks_into("work", 1, &first_there);
+
+    let came = into_panes(&host, 1, 3).unwrap();
+
+    let why = "zellij found no room for terminal_2 in tab 1, so it stays".to_owned();
+    assert_eq!(came, Some(PanesCame::Partly(Partly { moved: 1, of: 3, why })));
+    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), on_stand_in("terminal_2")]);
+    assert_eq!(host.zellij.closed(), [stand_in_closed(), stand_in_closed()]);
+}
+
+/// With no room for the first, nothing moved, which is a refusal and no answer
+/// of how many did.
+#[test]
+fn a_tab_zellij_finds_no_room_for_moves_nothing() {
     let host = Host::new();
     let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
     host.zellij.list("work", &json!([pane(1, from), pane(2, from), pane(3, to)]));
-    host.zellij.stacks_into("work", 1, &json!([pane(1, to), pane(2, from), pane(3, to)]));
 
-    refused(
-        &turned(&host, 1, Some(Becomes::PanesOf(1))).unwrap_err(),
-        "no room for terminal_2 in tab 1",
-    );
+    refused(&into_panes(&host, 1, 3).unwrap_err(), "no room for terminal_1 in tab 1");
 
-    let action = |said: &str| format!("--session work action {said}");
-    let toggle = action("toggle-pane-embed-or-floating --pane-id terminal_1");
-    assert_eq!(
-        host.zellij.turned(),
-        [
-            action("stack-panes -- terminal_3 terminal_1"),
-            toggle.clone(),
-            action("stack-panes -- terminal_3 terminal_2"),
-            toggle,
-        ]
-    );
-    assert!(host.zellij.closed().is_empty());
+    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1")]);
+    assert_eq!(host.zellij.closed(), [stand_in_closed()]);
 }
 
+/// A pane that ended on its way is no reason to stop, nor to say that zellij
+/// had no room: the rest go, and all that were there have moved.
 #[test]
-fn a_question_that_says_what_it_turns_into_is_the_only_one_answered() {
+fn a_pane_that_ends_on_its_way_does_not_stop_the_rest() {
     let host = Host::new();
-    let invalid = turned(&host, 1, None).unwrap_err();
-    assert_eq!(invalid.code(), Code::InvalidArgument, "{invalid:?}");
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    host.zellij.list("work", &json!([pane(1, from), pane(2, from), pane(3, to)]));
+    host.zellij.clients("work", &[(1, "terminal_1")]);
+    host.zellij.stacks_into("work", 1, &json!([pane(2, from), pane(3, to)]));
+    host.zellij.stacks_into("work", 2, &json!([pane(2, to), pane(3, to)]));
+
+    assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
+
+    assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), on_stand_in("terminal_2")]);
 }
 
-/// The tabs a tab can turn into are told by their ids and their names, and a
-/// pane that is gone has no tab to leave out.
+/// The terminal a tab was picked by may have closed by the key: nothing moves,
+/// and no stand-in opens.
 #[test]
-fn the_other_tabs_are_told_by_their_ids_and_names() {
+fn a_tab_picked_by_a_terminal_that_closed_since_moves_nothing() {
+    let host = Host::new();
+    let (from, reused) = ((0, "Tab #1"), (1, "someone else's"));
+    host.zellij.list("work", &json!([pane(1, from), pane(2, from), pane(8, reused)]));
+
+    refused(&into_panes(&host, 1, 3).unwrap_err(), "pane 3, which the tab goes by, is gone");
+
+    assert!(host.zellij.opened().is_empty());
+    assert!(host.zellij.turned().is_empty());
+}
+
+/// The tabs a tab can turn into are told by a terminal in each and their names,
+/// and a pane that is gone has no tab to leave out.
+#[test]
+fn the_other_tabs_are_told_by_a_terminal_and_their_names() {
     let host = Host::new();
     let (auth, two) = ((0, "auth"), (5, "Tab #2"));
     host.zellij.list("work", &json!([pane(1, auth), pane(2, auth), pane(3, two)]));
     let tabs = |pane| OtherTabsRequest { on: None, session: "work".to_owned(), pane };
     asking(&host, async move |mut daemon| {
         let listed = daemon.other_tabs(tabs(1)).await.unwrap().into_inner();
-        assert_eq!(listed.tabs, [Tab { id: 5, name: "Tab #2".to_owned() }]);
+        assert_eq!(listed.tabs, [Tab { pane: 3, name: "Tab #2".to_owned() }]);
         let gone = daemon.other_tabs(tabs(9)).await.unwrap_err();
         refused(&gone, "pane 9 is gone");
     });

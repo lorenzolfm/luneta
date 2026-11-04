@@ -623,8 +623,10 @@ client, zellij goes there first, as a new tab needs one to make room for it.
 `t p` turns the tab of the highlighted pane into panes of another tab, and the
 tab they left goes, with its name, its floating panes tiled beside the rest.
 The menu lists the session's other tabs on a key each, or goes straight to the
-only one. Either way what runs in them goes on, each pane keeps its dot, and
-zellij goes to the highlighted pane, with the keys.
+only one. A pane zellij has no room for stays in its tab, with those behind it,
+and the sidebar says how many moved. Either way what runs in them goes on, each
+pane keeps its dot, and zellij goes to the highlighted pane once all have moved,
+with the keys.
 
 `d d` closes the highlighted pane, or its tab once nothing else holds the tab
 open, floating panes and all. `d s` deletes its session: luneta kills it, and

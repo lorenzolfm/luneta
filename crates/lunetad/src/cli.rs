@@ -96,9 +96,6 @@ pub struct Laid {
     /// What its tab is called, as you pick a tab for another's panes by it.
     #[serde(default)]
     pub tab_name: String,
-    /// How many rows it takes, its frame's among them.
-    #[serde(default)]
-    pub pane_rows: u32,
     /// What runs in its foreground: none where zellij took too long to say,
     /// which does not mean nothing runs.
     pub pane_command: Option<String>,
@@ -161,7 +158,6 @@ mod tests {
             tab_id,
             tab_position: tab_id,
             tab_name: String::new(),
-            pane_rows: 0,
             pane_command: None,
         }
     }

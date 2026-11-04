@@ -58,7 +58,7 @@ use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::other_tabs_response::Tab as OtherTab;
 use crate::api::refuge_response::{self, Kept, Went};
-use crate::api::turn_request;
+use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
     self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
     ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
@@ -71,7 +71,8 @@ use crate::api::{
     NameSessionResponse, OpenRequest, OpenResponse, OtherTabsRequest, OtherTabsResponse,
     PasteRequest, PasteResponse, RefugeRequest, RefugeResponse, RenameSessionRequest,
     RenameSessionResponse, ReviewMove, SayRequest, SayResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, TurnRequest, TurnResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
+    TurnIntoTabRequest, TurnIntoTabResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -89,12 +90,11 @@ use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::agent::Agent;
-use crate::turns::{Turn, Turned};
+use crate::turns::{IntoPanes, IntoTab};
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
     opens, panes, pi, printed, release, remote, renames, reviews, screens, shells, skills, turns,
-    watch,
-    zellij, zoxide,
+    watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -792,25 +792,54 @@ impl Daemon for Host {
         let tabs = task::spawn_blocking(move || turns::other_tabs(&session, pane)).await;
         let tabs = tabs.map_err(|error| unfinished(&error))?;
         let tabs = tabs.map_err(Status::failed_precondition)?;
-        let tab = |turns::OtherTab { id, name }| OtherTab { id, name };
+        let tab = |turns::OtherTab { pane, name }| OtherTab { pane, name };
         Ok(Response::new(OtherTabsResponse { tabs: tabs.into_iter().map(tab).collect() }))
     }
 
-    async fn turn(&self, request: Request<TurnRequest>) -> Result<Response<TurnResponse>, Status> {
-        let TurnRequest { on, session, pane, becomes } = request.into_inner();
+    async fn turn_into_tab(
+        &self,
+        request: Request<TurnIntoTabRequest>,
+    ) -> Result<Response<TurnIntoTabResponse>, Status> {
+        let TurnIntoTabRequest { on, session, pane } = request.into_inner();
         let session = named("session", &session)?;
-        let turn = match becomes {
-            Some(turn_request::Becomes::NewTab(_)) => Turn::PaneIntoTab,
-            Some(turn_request::Becomes::PanesOf(to)) => Turn::TabIntoPanes { to },
-            None => return Err(Status::invalid_argument("becomes: neither a tab nor panes")),
-        };
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.turn(turn.asked(None, &session, pane)).await;
+            let session = session.to_string();
+            return daemon.turn_into_tab(TurnIntoTabRequest { on: None, session, pane }).await;
         }
-        let turned = task::spawn_blocking(move || turns::turned(&session, pane, turn)).await;
-        let turned = turned.map_err(|error| unfinished(&error))?;
-        let turned = turned.map_err(Status::failed_precondition)?;
-        Ok(Response::new(TurnResponse { no_client: turned == Turned::NoClient }))
+        let came = task::spawn_blocking(move || turns::into_tab(&session, pane)).await;
+        let came = came.map_err(|error| unfinished(&error))?;
+        let came = match came.map_err(Status::failed_precondition)? {
+            IntoTab::Done => turn_into_tab_response::Came::Done(turn_into_tab_response::Done {}),
+            IntoTab::NoClient => {
+                turn_into_tab_response::Came::NoClient(turn_into_tab_response::NoClient {})
+            },
+        };
+        Ok(Response::new(TurnIntoTabResponse { came: Some(came) }))
+    }
+
+    async fn turn_into_panes(
+        &self,
+        request: Request<TurnIntoPanesRequest>,
+    ) -> Result<Response<TurnIntoPanesResponse>, Status> {
+        let TurnIntoPanesRequest { on, session, pane, beside } = request.into_inner();
+        let session = named("session", &session)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let session = session.to_string();
+            let asked = TurnIntoPanesRequest { on: None, session, pane, beside };
+            return daemon.turn_into_panes(asked).await;
+        }
+        let came = task::spawn_blocking(move || turns::into_panes(&session, pane, beside)).await;
+        let came = came.map_err(|error| unfinished(&error))?;
+        let came = match came.map_err(Status::failed_precondition)? {
+            IntoPanes::Done => {
+                turn_into_panes_response::Came::Done(turn_into_panes_response::Done {})
+            },
+            IntoPanes::Partly { moved, of, why } => {
+                let partly = turn_into_panes_response::Partly { moved, of, why };
+                turn_into_panes_response::Came::Partly(partly)
+            },
+        };
+        Ok(Response::new(TurnIntoPanesResponse { came: Some(came) }))
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {

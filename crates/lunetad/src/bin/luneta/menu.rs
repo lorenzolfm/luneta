@@ -857,14 +857,14 @@ fn tab_entries(tabs: &[OtherTab]) -> Vec<Entry> {
     TAB_KEYS.chars().zip(tabs).map(entry).collect()
 }
 
-/// The id of the tab among `tabs` that `key` picks, if any: its key, with no
-/// modifier but `Shift`.
+/// The terminal that names the tab among `tabs` that `key` picks, if any: its
+/// key, with no modifier but `Shift`.
 fn picked(key: &KeyEvent, tabs: &[OtherTab]) -> Option<u32> {
     let KeyCode::Char(c) = key.code else {
         return None;
     };
     let at = TAB_KEYS.chars().position(|key| key == c).filter(|_| bare(key))?;
-    tabs.get(at).map(|tab| tab.id)
+    tabs.get(at).map(|tab| tab.pane)
 }
 
 /// A key of the Delete group: the key, which goes ahead pressed again once
@@ -1611,8 +1611,8 @@ impl Menu {
                 stays(Stage::Choosing(keys), Wants::Nothing)
             },
             Stage::Picking { keys, session, pane, tabs } => match picked(key, &tabs) {
-                Some(to) => {
-                    let turn = Turn::TabIntoPanes { to };
+                Some(beside) => {
+                    let turn = Turn::TabIntoPanes { beside };
                     let stage = Stage::Turning { keys, session: session.clone() };
                     stays(stage, Wants::Turn { session, pane, turn })
                 },
@@ -1676,7 +1676,7 @@ impl Menu {
                 session.name()
             ))),
             [only] => {
-                let turn = Turn::TabIntoPanes { to: only.id };
+                let turn = Turn::TabIntoPanes { beside: only.pane };
                 let stage = Stage::Turning { keys, session: session.clone() };
                 let wants = Wants::Turn { session, pane, turn };
                 Did::Stays(Menu { number, target, stage }, wants)
@@ -2523,8 +2523,8 @@ mod tests {
         KeyEvent::from(KeyCode::Esc)
     }
 
-    fn other_tab(id: u32, name: &str) -> OtherTab {
-        OtherTab { id, name: name.to_owned() }
+    fn other_tab(pane: u32, name: &str) -> OtherTab {
+        OtherTab { pane, name: name.to_owned() }
     }
 
     /// The menu `t p` leaves waiting for the other tabs of the session of
@@ -2570,7 +2570,7 @@ mod tests {
         let (menu, wants) = stays(listing().key(&char('1')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.tabs(Ok(vec![other_tab(7, "Tab #2")])));
-        let turn = Turn::TabIntoPanes { to: 7 };
+        let turn = Turn::TabIntoPanes { beside: 7 };
         assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
         assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
 
@@ -2609,7 +2609,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT)));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('2')));
-        let turn = Turn::TabIntoPanes { to: 2 };
+        let turn = Turn::TabIntoPanes { beside: 2 };
         assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
         assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
 

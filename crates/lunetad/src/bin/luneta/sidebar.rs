@@ -58,7 +58,7 @@ use lunetad::asks::User;
 use lunetad::links;
 use lunetad::reviews::Move;
 use lunetad::transcripts::SessionId;
-use lunetad::turns::{OtherTab, Turn};
+use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -3263,6 +3263,29 @@ impl Sidebar {
         }
         self.say(format!("menu: zellij opened pane {pane} in {made}, which luneta cannot tell"));
         Asked::Nothing
+    }
+
+    /// What came of zellij turning the tab of the pane `pane` of the menu
+    /// numbered `menu` into panes of another: luneta goes to the pane, once all
+    /// moved. Once some did, the menu says how many went, not that none did,
+    /// and luneta stays where it is, as the pane may have stayed too.
+    pub fn turned_into_panes(
+        &mut self,
+        menu: u64,
+        pane: u32,
+        came: Result<IntoPanes, String>,
+    ) -> Asked {
+        match came {
+            Ok(IntoPanes::Done) => self.opened(menu, Ok(pane)),
+            Ok(IntoPanes::Partly { moved, of, why }) => {
+                if self.waits_on(menu) {
+                    self.close_menu();
+                    self.say(format!("menu: turned {moved} of {of} panes: {why}"));
+                }
+                Asked::Nothing
+            },
+            Err(why) => self.opened(menu, Err(why)),
+        }
     }
 
     /// Whether the menu numbered `menu` still waits for zellij to open what a
@@ -7191,14 +7214,48 @@ mod tests {
         let newer = || PanePlace { session: listed("newer", 20), pane: 1 };
         let tabs = Asked::Tabs { menu: 2, on: on.clone(), session: session_name("newer"), pane: 1 };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), tabs);
-        let other = || OtherTab { id: 5, name: "Tab #2".to_owned() };
+        let other = || OtherTab { pane: 5, name: "Tab #2".to_owned() };
         assert_eq!(sidebar.tabs(1, Ok(vec![other()])), Asked::Nothing);
-        let turn = Turn::TabIntoPanes { to: 5 };
+        let turn = Turn::TabIntoPanes { beside: 5 };
         let turned = Asked::Turn { menu: 2, on, place: newer(), turn };
         assert_eq!(sidebar.tabs(2, Ok(vec![other()])), turned);
-        assert_eq!(sidebar.opened(2, Err("zellij found no room".to_owned())), Asked::Nothing);
+        let none = Err("zellij found no room".to_owned());
+        assert_eq!(sidebar.turned_into_panes(2, 1, none), Asked::Nothing);
         assert!(sidebar.menu.is_none());
         assert_eq!(sidebar.notice.as_deref(), Some("menu: not turned: zellij found no room"));
+    }
+
+    /// Every pane moved takes luneta to the row's. Some moved says how many,
+    /// and not that nothing turned, and takes it nowhere, as that pane may be
+    /// among the rest. A menu closed since hears nothing of it.
+    #[test]
+    fn what_came_of_turning_a_tab_is_said_as_it_was() {
+        let waiting = || {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            type_in(&mut sidebar, "t");
+            sidebar.key(&char('p'), moment(160_000));
+            let other = OtherTab { pane: 5, name: "Tab #2".to_owned() };
+            sidebar.tabs(1, Ok(vec![other]));
+            assert!(sidebar.waits_on(1));
+            sidebar
+        };
+        let mut sidebar = waiting();
+        let went = sidebar.turned_into_panes(1, 1, Ok(IntoPanes::Done));
+        assert_eq!(went, go_here(pane_of("older", 10, 1)));
+
+        let mut sidebar = waiting();
+        let why = "zellij found no room".to_owned();
+        let partly = IntoPanes::Partly { moved: 2, of: 3, why };
+        assert_eq!(sidebar.turned_into_panes(1, 1, Ok(partly.clone())), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        let said = "menu: turned 2 of 3 panes: zellij found no room";
+        assert_eq!(sidebar.notice.as_deref(), Some(said));
+
+        let mut sidebar = waiting();
+        sidebar.close_menu();
+        assert_eq!(sidebar.turned_into_panes(1, 1, Ok(partly)), Asked::Nothing);
+        assert_eq!(sidebar.notice, None);
     }
 
     /// A pull request's link pasted with the sidebar's keys opens the menu
