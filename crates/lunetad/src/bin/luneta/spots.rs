@@ -18,7 +18,7 @@ use ratatui::style::Color;
 use crate::gruvbox;
 use crate::menu::Choice;
 use crate::picker::Pick;
-use crate::sidebar::PullLink;
+use crate::pull::Link;
 
 /// The background of the spot under the pointer, where the spot has none of
 /// its own: the softer of the highlight's two, which a row the highlight is
@@ -150,7 +150,7 @@ pub enum Drawn {
     Picker { number: u64, area: Rect, spots: Spots<Pick> },
     /// The sidebar, with nothing over it: the numbers of the pull requests
     /// on its rows, each with its link, over what is at its `bottom`.
-    Sidebar { numbers: Spots<PullLink>, bottom: Box<Drawn> },
+    Sidebar { numbers: Spots<Link>, bottom: Box<Drawn> },
 }
 
 /// Which keys at the bottom of the sidebar drew: the legend's, or the
@@ -171,7 +171,7 @@ pub enum Hit {
     /// On the picker numbered so.
     Picker(u64, Pick),
     /// On the number of a pull request, on a row of the sidebar.
-    Number(PullLink),
+    Number(Link),
 }
 
 impl Drawn {
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn the_pointer_raises_a_number_whatever_its_row_is_on() {
         let mut spots = Spots::default();
-        spots.add(0, 1..3, PullLink { number: 1, url: "https://x/1".to_owned() });
+        spots.add(0, 1..3, Link::parse("https://github.com/o/r/pull/1").expect("a link"));
         for (on, raised) in [
             (Color::Reset, POINTED),
             (POINTED, gruvbox::BG2),

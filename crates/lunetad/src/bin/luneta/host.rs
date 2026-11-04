@@ -85,7 +85,7 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::review;
-use crate::pull::{self, Ready};
+use crate::pull::{self, Link, Ready};
 use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -122,7 +122,7 @@ pub enum Event {
     /// Something went wrong that the sidebar says.
     Notice(String),
     /// A link for luneta's terminal to put on its clipboard.
-    Copy(String),
+    Copy(Link),
     /// What came of the image `Ctrl v` was to paste in an agent's pane on
     /// another machine.
     Image(Went),
@@ -1195,7 +1195,7 @@ impl App {
                 self.look(look);
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
-            Event::Copy(text) => clip(terminal, ClipboardType::Clipboard, &text)?,
+            Event::Copy(link) => clip(terminal, ClipboardType::Clipboard, &link.url())?,
             Event::Image(went) => self.image_went(went),
             Event::ImageSlow(on) => self.sidebar.image_going(Some(on)),
             Event::Folds => self.sidebar.refold(),
@@ -1977,11 +1977,11 @@ impl App {
             Asked::Leave => self.leave(),
             // Only the loop has luneta's terminal to write to, which an event
             // reaches. luneta is on its way out where it does not.
-            Asked::Copy(text) => {
-                let _ = self.events.send(Event::Copy(text));
+            Asked::Copy(link) => {
+                let _ = self.events.send(Event::Copy(link));
             },
-            Asked::Browse(url) => {
-                if let Err(why) = browser::open(&url, &self.events) {
+            Asked::Browse(link) => {
+                if let Err(why) = browser::open(&link, &self.events) {
                     self.sidebar.notify(why);
                 }
             },

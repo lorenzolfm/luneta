@@ -160,6 +160,10 @@ const YANK_NAME: &str = "Yank";
 pub const YANK_PULL: char = 'p';
 const YANK_PULL_DOES: &str = "PR link";
 
+/// What `y` waits for: its group in the legend holds them, and the bottom of
+/// the sidebar lists them while it waits.
+const YANKS: [Entry; 1] = [Entry::YankPull];
+
 /// What the menu says of a key that starts an agent, or opens a pane, a tab
 /// or a session, on a session's row, which the highlight is only on while it
 /// lists none of the session's panes: folded, or with none to list.
@@ -676,7 +680,7 @@ impl Keys {
     /// any row's will do.
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
-        root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: Vec::new() });
+        root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
         let keys = Keys::new(Removes::Machine(Machine::Local), None);
         root.extend(keys.root.into_iter().filter(shown));
@@ -2184,7 +2188,7 @@ pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>
 /// What the bottom of the sidebar lists in the legend's place while `y` waits
 /// for what to yank, as `legend` lists it.
 pub fn yanks(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
-    listed(YANK_NAME, &[Entry::YankPull], width, room)
+    listed(YANK_NAME, &YANKS, width, room)
 }
 
 /// `entries` under a rule that names them `title`, `width` wide, in `room`
