@@ -1,20 +1,22 @@
 //! What luneta reads aloud, on the machine you sit at: what `luneta say` gave
 //! the daemon of any machine it watches, as the host says it, and what you
-//! selected, by `Alt u`. While anything plays, `Alt u` stops it instead, and
-//! lets go of what waits. And what plays waits while you dictate, or the
-//! microphone would write the agent's words into your prompt.
+//! selected, by `Alt u`. While anything plays, `Alt u` pauses it and has it go
+//! on, and `Alt Shift u` stops it, and lets go of what waits. What plays waits
+//! while you dictate too, or the microphone would write the agent's words into
+//! your prompt.
 //!
 //! One luneta of a machine reads, the one that puts its notifications up, as
-//! two would talk over each other; and `Alt u` in another has it read. A luneta
-//! over ssh reads nothing: its speakers are not where you sit. What came before
-//! a machine's first answer says nothing, as it does with notifications.
+//! two would talk over each other; and those keys in another have it do so. A
+//! luneta over ssh reads nothing: its speakers are not where you sit. What came
+//! before a machine's first answer says nothing, as it does with notifications.
 //!
 //! What waits is read in the order it came, with the oldest let go of past
 //! `WAITING`, and what has waited past `STALE`, naming the session as the
 //! speaker changes. What `--now` gave goes before all of it, and only the last
-//! of those, as it would have cut off the one before. The sidebar has a line of
-//! what is being read, and a mark on its agent's row: no box, as a box would
-//! take the keys.
+//! of those, as it would have cut off the one before. A pause is yours, and
+//! holds what `--now` gave too. The sidebar has a line of what is being read,
+//! with a button for each of those keys, and a mark on its agent's row: no box,
+//! as a box would take the keys.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,13 +37,43 @@ use crate::host::Event;
 use crate::machines::{self, Machine};
 use crate::models::Fetched;
 use crate::sidebar::{cut, ACCENT, NAME};
+use crate::spots::Spots;
 use crate::voice::{self, Reading, Voice};
 
-/// The key that reads what you selected, and stops what plays.
+/// The key that reads what you selected, and pauses what plays or has it go on.
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('u'), KeyModifiers::ALT);
+
+/// Whether `chord` is `Alt Shift u`, which stops what plays and lets go of what
+/// waits: `u` as kitty's keys say it, and `U` as a terminal without them types
+/// it.
+pub fn stops((code, modifiers): (KeyCode, KeyModifiers)) -> bool {
+    matches!(code, KeyCode::Char('u' | 'U')) && modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT
+}
 
 /// The mark of what is being read, `md-volume_high` of the Nerd Fonts.
 pub const MARK: &str = "\u{f057e}";
+
+/// The button that pauses what plays, `md-pause` of the Nerd Fonts.
+pub const PAUSE: &str = "\u{f03e4}";
+
+/// The button that has what is paused go on, `md-play`.
+pub const PLAY: &str = "\u{f040a}";
+
+/// The button that stops what plays, `md-stop`.
+pub const STOP: &str = "\u{f04db}";
+
+/// How wide a button is, of what a click hits: its icon, and a column each side
+/// of it, as an icon alone is hard to hit.
+const BUTTON: usize = 3;
+
+/// A button on the sidebar's line of what is being read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    /// Pauses what plays, or has it go on.
+    Toggle,
+    /// Stops what plays, and lets go of what waits.
+    Stop,
+}
 
 /// The most that wait to be read: an agent's handoff is a few, and each of five
 /// agents at work has one or two.
@@ -69,10 +101,11 @@ fn called(speaker: &Zellij) -> &str {
 /// What the sidebar shows of what goes on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shown {
-    /// What is being read, on one line.
-    Reading { whose: Whose, text: String },
-    /// What waits waits for the model, of which this many bytes are in.
-    Fetching { got: u64 },
+    /// What is being read, on one line, and whether you paused it.
+    Reading { whose: Whose, text: String, paused: bool },
+    /// What waits waits for the model, of which this many bytes are in, and
+    /// whether you paused it.
+    Fetching { got: u64, paused: bool },
 }
 
 impl Shown {
@@ -85,18 +118,37 @@ impl Shown {
         Some((on, speaker.session.as_deref()?, speaker.pane))
     }
 
-    /// The sidebar's line of it, `width` wide.
-    pub fn line(&self, width: usize) -> Line<'static> {
+    /// The sidebar's line of it, `width` wide, its buttons at its right, and
+    /// where they are on it.
+    pub fn line(&self, width: usize) -> (Line<'static>, Spots<Button>) {
+        let room = width.saturating_sub(2 * BUTTON);
+        let mut line = self.said(room);
+        let paused = matches!(
+            self,
+            Shown::Reading { paused: true, .. } | Shown::Fetching { paused: true, .. }
+        );
+        let toggle = if paused { PLAY } else { PAUSE };
+        let filler = " ".repeat(room.saturating_sub(line.width()));
+        let buttons = format!("{filler} {toggle}  {STOP} ");
+        line.spans.push(Span::styled(buttons, Style::new().fg(ACCENT)));
+        let mut spots = Spots::default();
+        spots.add(0, room..room + BUTTON, Button::Toggle);
+        spots.add(0, room + BUTTON..room + 2 * BUTTON, Button::Stop);
+        (line, spots)
+    }
+
+    /// What it says on that line, in `width`.
+    fn said(&self, width: usize) -> Line<'static> {
         let mark = Span::styled(MARK, Style::new().fg(ACCENT));
         let room = width.saturating_sub(2);
         let dim = Style::new().add_modifier(Modifier::DIM);
         match self {
-            Shown::Fetching { got } => {
+            Shown::Fetching { got, .. } => {
                 let (got, of) = (got / 1_000_000, voice::BYTES / 1_000_000);
                 let said = cut(&format!("fetching the voice, once: {got} of {of} MB"), room);
                 Line::from(vec![mark, Span::raw(" "), Span::styled(said, dim)])
             },
-            Shown::Reading { whose, text } => {
+            Shown::Reading { whose, text, .. } => {
                 let who = match whose {
                     Whose::Selection => "selection".to_owned(),
                     Whose::Said { speaker: Some(speaker), .. } => called(speaker).to_owned(),
@@ -106,8 +158,12 @@ impl Shown {
                 let who = cut(&who, room);
                 let rest = room.saturating_sub(who.width() + 3);
                 let name = Span::styled(who, Style::new().fg(NAME));
-                let text = Span::styled(format!(" · {}", cut(text, rest)), dim);
-                Line::from(vec![mark, Span::raw(" "), name, text])
+                let mut said = vec![mark, Span::raw(" "), name];
+                // Short of room for any of it, it would push the buttons along.
+                if rest > 0 {
+                    said.push(Span::styled(format!(" · {}", cut(text, rest)), dim));
+                }
+                Line::from(said)
             },
         }
     }
@@ -158,6 +214,9 @@ struct Queue {
     /// The last heard of each machine, by the daemon that numbered it: a
     /// machine here has answered, with nothing said yet if none.
     heard: HashMap<Machine, Option<(u32, u64)>>,
+    /// Whether you paused what is being read, and what waits: until you have
+    /// them go on, or nothing is left of them.
+    paused: bool,
 }
 
 impl Queue {
@@ -222,11 +281,24 @@ impl Queue {
         self.now = None;
     }
 
-    /// What is being read stops, and what waits goes.
+    /// What is being read stops, and what waits goes, and with them any pause
+    /// of them: what is said after this plays.
     fn stop(&mut self) {
         self.now = None;
         self.at_once = None;
         self.in_turn.clear();
+        self.paused = false;
+    }
+
+    /// Pauses what is being read and what waits, or has them go on, as of `at`:
+    /// you had what waits wait, so it has waited no time, or a pause of minutes
+    /// would lose the rest of an agent's handoff.
+    fn toggle(&mut self, at: SystemTime) {
+        self.paused = !self.paused;
+        if !self.paused {
+            let waiting = self.at_once.iter_mut().chain(&mut self.in_turn);
+            waiting.for_each(|waiting| waiting.came = at);
+        }
     }
 
     /// Whether anything waits to be read.
@@ -330,7 +402,10 @@ pub struct Aloud {
     fetching: Option<Fetching>,
     /// Whether the model is in, once luneta has found that it is.
     fetched: bool,
-    /// Has what plays wait, while you dictate.
+    /// Whether you dictate.
+    dictating: bool,
+    /// Has what plays wait, while you dictate, or have it paused: the end of
+    /// either leaves the other as it is.
     held: Arc<AtomicBool>,
     events: Sender<Event>,
 }
@@ -348,6 +423,7 @@ impl Aloud {
             voice: None,
             fetching: None,
             fetched: false,
+            dictating: false,
             held: Arc::default(),
             events,
         }
@@ -360,11 +436,11 @@ impl Aloud {
         self.go_on();
     }
 
-    /// `Alt u`: stops what plays and lets go of what waits, where anything
-    /// does, and else reads `selected`. Or why it reads nothing.
+    /// `Alt u`: pauses what plays or has it go on, where anything does, and
+    /// else reads `selected`. Or why it reads nothing.
     pub fn key(&mut self, selected: Option<&str>) -> Result<(), &'static str> {
         if self.queue.busy() {
-            self.queue.stop();
+            self.press(Button::Toggle);
             return Ok(());
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
@@ -375,9 +451,27 @@ impl Aloud {
         Ok(())
     }
 
-    /// Has what plays wait while you dictate, as `held` says, and go on after.
-    pub fn hold(&self, held: bool) {
-        self.held.store(held, Ordering::Relaxed);
+    /// Does what `button` does. One drawn before what it was for ended does
+    /// nothing, as what you selected is not what you clicked it for.
+    pub fn press(&mut self, button: Button) {
+        match button {
+            Button::Toggle if self.queue.busy() => self.queue.toggle(SystemTime::now()),
+            Button::Toggle => {},
+            Button::Stop => self.queue.stop(),
+        }
+        self.keep_held();
+    }
+
+    /// Has what plays wait while you dictate, as `dictating` says, and go on
+    /// after, unless you paused it.
+    pub fn hold(&mut self, dictating: bool) {
+        self.dictating = dictating;
+        self.keep_held();
+    }
+
+    /// Has what plays wait for as long as anything has it wait.
+    fn keep_held(&self) {
+        self.held.store(self.dictating || self.queue.paused, Ordering::Relaxed);
     }
 
     /// The reading numbered `number` ended as `ended` says, and what waits is
@@ -407,7 +501,7 @@ impl Aloud {
                         None
                     },
                     Err(why) => {
-                        self.queue.stop();
+                        self.press(Button::Stop);
                         Some(format!("the voice did not come: {why}"))
                     },
                 }
@@ -415,9 +509,18 @@ impl Aloud {
         }
     }
 
+    /// Reads what is next, where nothing is being read. What comes next of what
+    /// you paused starts paused, and a pause ends with the last of it: what
+    /// comes after that was not what you paused.
+    fn go_on(&mut self) {
+        self.read_next();
+        self.queue.paused = self.queue.paused && self.queue.busy();
+        self.keep_held();
+    }
+
     /// Reads what is next, where nothing is being read, once the model is in,
     /// which what waits has fetched.
-    fn go_on(&mut self) {
+    fn read_next(&mut self) {
         if self.queue.now.is_some() || !self.queue.waits() {
             return;
         }
@@ -442,11 +545,12 @@ impl Aloud {
 
     /// What the sidebar shows of it.
     pub fn shown(&self) -> Option<Shown> {
+        let paused = self.queue.paused;
         if let Some(Now { whose, text, .. }) = &self.queue.now {
-            return Some(Shown::Reading { whose: whose.clone(), text: text.clone() });
+            return Some(Shown::Reading { whose: whose.clone(), text: text.clone(), paused });
         }
         let fetching = self.fetching.as_ref().filter(|_| self.queue.waits());
-        fetching.map(|fetching| Shown::Fetching { got: fetching.got })
+        fetching.map(|fetching| Shown::Fetching { got: fetching.got, paused })
     }
 }
 
@@ -701,6 +805,131 @@ mod tests {
         assert!(!queue.busy());
     }
 
+    /// `Aloud` with something being read, and with no voice to read what comes
+    /// next: and what has it keep quiet.
+    fn aloud_reading() -> (Aloud, Quiet) {
+        let mut aloud = Aloud::new(std::sync::mpsc::channel().0);
+        let (reading, quiet) = Reading::new(Arc::clone(&aloud.held));
+        let whose = Whose::Selection;
+        aloud.queue.now = Some(Now { number: 1, whose, text: String::new(), _reading: reading });
+        (aloud, quiet)
+    }
+
+    /// `Alt u` pauses what plays and has it go on, and does not read what is
+    /// selected meanwhile.
+    #[test]
+    fn the_key_pauses_what_plays_and_has_it_go_on() {
+        let (mut aloud, quiet) = aloud_reading();
+        aloud.key(Some("selected")).expect("it pauses");
+        assert!(quiet.held.load(Ordering::Relaxed));
+        assert!(matches!(aloud.shown(), Some(Shown::Reading { paused: true, .. })));
+        aloud.key(Some("selected")).expect("it goes on");
+        assert!(!quiet.held.load(Ordering::Relaxed));
+        assert!(matches!(aloud.shown(), Some(Shown::Reading { paused: false, .. })));
+        assert!(!quiet.cut.load(Ordering::Relaxed));
+        assert!(!aloud.queue.waits());
+    }
+
+    /// Each has what plays wait until it is over, whichever ends first: closing
+    /// the dictation box does not start what you paused, and going on while you
+    /// dictate does not play into the microphone.
+    #[test]
+    fn a_pause_and_dictating_each_hold_what_plays_until_both_are_over() {
+        let (mut aloud, quiet) = aloud_reading();
+        let held = || quiet.held.load(Ordering::Relaxed);
+        aloud.press(Button::Toggle);
+        aloud.hold(true);
+        aloud.hold(false);
+        assert!(held(), "it is still paused");
+        aloud.hold(true);
+        aloud.press(Button::Toggle);
+        assert!(held(), "you still dictate");
+        aloud.hold(false);
+        assert!(!held());
+    }
+
+    /// Whichever way it stops, what is said next plays: a pause that outlived
+    /// what it paused would keep it silent, with no line to say why.
+    #[test]
+    fn a_pause_ends_with_what_it_paused() {
+        let ended: [fn(&mut Aloud); 3] = [
+            |aloud| aloud.press(Button::Stop),
+            |aloud| drop(aloud.ended(1, Ok(()))),
+            |aloud| {
+                aloud.hear(here(Vec::new()), true);
+                aloud.hear(here(vec![saying(1, Does::Stop(Stop {}))]), true);
+            },
+        ];
+        for ends in ended {
+            let (mut aloud, quiet) = aloud_reading();
+            aloud.press(Button::Toggle);
+            ends(&mut aloud);
+            assert!(!quiet.held.load(Ordering::Relaxed));
+            assert_eq!(aloud.shown(), None);
+            assert!(!aloud.queue.busy());
+            assert!(!aloud.queue.paused);
+        }
+    }
+
+    /// A button drawn just before what plays ended does not read what is
+    /// selected, nor pause what comes next.
+    #[test]
+    fn a_button_with_nothing_left_to_do_does_nothing() {
+        let mut aloud = Aloud::new(std::sync::mpsc::channel().0);
+        aloud.press(Button::Toggle);
+        assert!(!aloud.queue.paused);
+        assert!(!aloud.queue.busy());
+    }
+
+    /// What `--stop` said before more was said ends the pause in the order said:
+    /// what came after it plays.
+    #[test]
+    fn what_is_said_after_a_stop_is_not_paused() {
+        let mut queue = hearing();
+        queue.toggle(at(1));
+        let said = vec![saying(1, Does::Stop(Stop {})), in_turn(2, "after the stop", None)];
+        queue.hear(here(said), true, at(2));
+        assert!(!queue.paused);
+        assert_eq!(spoken(&mut queue), ["after the stop"]);
+    }
+
+    /// `--now` takes the place of what is paused, and waits with it: an agent
+    /// does not talk over the pause you asked for.
+    #[test]
+    fn what_goes_first_does_not_end_a_pause() {
+        let mut queue = hearing();
+        let quiet = reading(&mut queue, 1);
+        queue.toggle(at(1));
+        queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(2));
+        assert!(quiet.cut.load(Ordering::Relaxed));
+        assert!(queue.paused);
+        assert_eq!(spoken(&mut queue), ["first"]);
+    }
+
+    /// The rest of a handoff you paused for longer than `STALE` is still read,
+    /// and has `STALE` again from when you had it go on.
+    #[test]
+    fn what_waited_through_a_pause_has_not_waited_too_long() {
+        let mut queue = hearing();
+        queue.toggle(at(1));
+        queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(1));
+        queue.hear(here(vec![in_turn(2, "second", None)]), true, at(2));
+        queue.toggle(at(3) + STALE * 5);
+        assert_eq!(queue.next(at(3) + STALE * 6).map(|next| next.spoken).as_deref(), Some("first"));
+        assert_eq!(queue.next(at(4) + STALE * 6), None, "past STALE from going on");
+    }
+
+    /// A terminal that speaks kitty's keys, and one that types them.
+    #[test]
+    fn alt_shift_u_stops_as_either_kind_of_terminal_says_it() {
+        let both = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert!(stops((KeyCode::Char('u'), both)));
+        assert!(stops((KeyCode::Char('U'), both)));
+        assert!(!stops(KEY));
+        assert!(!stops((KeyCode::Char('U'), KeyModifiers::SHIFT)));
+        assert!(!stops((KeyCode::Char('i'), both)));
+    }
+
     #[test]
     fn a_pane_s_frames_and_marks_are_not_read() {
         let selected = "⏺ The fix is in. The daemon keeps what\n  was said.\n\n  ⎿  ok\n";
@@ -722,7 +951,7 @@ mod tests {
     fn what_is_being_read_has_a_line_of_whose_it_is_and_what_it_says() {
         let line = |whose| {
             let text = "the tests pass".to_owned();
-            let line = Shown::Reading { whose, text }.line(40);
+            let line = Shown::Reading { whose, text, paused: false }.said(40);
             line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
         };
         let from = |speaker| Whose::Said { on: far(), speaker };
@@ -740,7 +969,7 @@ mod tests {
     fn what_comes_from_a_session_not_told_marks_no_row() {
         let shown = |speaker| {
             let whose = Whose::Said { on: far(), speaker: Some(speaker) };
-            Shown::Reading { whose, text: String::new() }
+            Shown::Reading { whose, text: String::new(), paused: false }
         };
         let told = shown(pane("old", Some("new")));
         assert_eq!(told.from(), Some((&far(), "new", 3)));

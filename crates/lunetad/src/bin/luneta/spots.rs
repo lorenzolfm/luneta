@@ -1,11 +1,12 @@
 //! What a click does where luneta drew something it takes one on: an entry
 //! of the menu or the legend, a key a line of keys names, a skill of the
 //! search over them, a row of the picker, the number of a pull request on a
-//! row of the sidebar. Each says, as it draws, what it drew where, and a click
-//! goes by what it said, so that what you see and what a click hits never
-//! disagree: to what drew it, while that has the mouse still, and to the row
-//! or the skill it drew there, wherever that is now. The spot under the
-//! pointer is lit, for you to see what a click there hits before you click.
+//! row of the sidebar, a button of what is being read aloud. Each says, as it
+//! draws, what it drew where, and a click goes by what it said, so that what
+//! you see and what a click hits never disagree: to what drew it, while that
+//! has the mouse still, and to the row or the skill it drew there, wherever
+//! that is now. The spot under the pointer is lit, for you to see what a click
+//! there hits before you click.
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 
+use crate::aloud::Button;
 use crate::gruvbox;
 use crate::menu::Choice;
 use crate::picker::Pick;
@@ -172,6 +174,9 @@ pub enum Hit {
     Picker(u64, Pick),
     /// On the number of a pull request, on a row of the sidebar.
     Number(Link),
+    /// On the sidebar's line of what is being read aloud, which has the mouse
+    /// whatever else does: no box covers it, and a press moves no keys.
+    Aloud(Button),
 }
 
 impl Drawn {

@@ -446,7 +446,8 @@ zellij sees them, whichever of the two has the keys:
   agents, and `Ctrl d` on the directories.
 - `Alt r` [dictates](#dictate) into the pane zellij is on, or the ask box:
   hold it and talk.
-- `Alt u` [reads aloud](#read-aloud) what you selected, and stops what plays.
+- `Alt u` [reads aloud](#read-aloud) what you selected, and pauses what plays
+  and has it go on. `Alt Shift u` stops it.
 
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
 line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
@@ -1303,7 +1304,8 @@ machine Claude Code runs on, which over ssh has no microphone of yours.
 
 `Alt u` reads aloud what you selected in a pane: zellij copies a selection as
 the mouse lets go, and luneta hears it there, with no need of the clipboard.
-While anything plays, `Alt u` stops it, and lets go of what waits, instead.
+While anything plays, `Alt u` pauses it, and again has it go on from there.
+`Alt Shift u` stops it, and lets go of what waits.
 
 An agent tells you how its work goes with `luneta say`, while you look at
 something else. It works from an agent on any machine: the words go to the
@@ -1335,21 +1337,25 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/say ~/.claude/skill
 ```
 
 The sidebar has a line of whose it is and what it says, and a mark on the row of
-its agent's pane. No box comes up, so you keep working:
+its agent's pane. No box comes up, so you keep working. The line ends in a button
+for each of those keys, and a click on one leaves the keys where they are:
 
 ```text
-󰕾 luneta · The tests pass on this machine, and…
+󰕾 luneta · The tests pass on this ma…  󰏤  󰓛
 ```
 
 What several agents say is read in the order it came, with the session named
 aloud as the speaker changes. Past 16 waiting, the oldest goes. What has waited
 two minutes goes too, so that a Mac waking up doesn't read out an hour of
 updates, and what came before luneta first heard from a machine says nothing.
-`Alt r`, in any luneta of the machine, holds what plays until the dictation box
-closes, or the microphone would write the agent's words into your prompt. One
-luneta of a machine reads, as with [notifications](#notifications), and `Alt u`
-in another has that one read. A luneta over ssh reads nothing: its speakers are
-not the ones you sit at.
+A pause holds what waits as well, and what `--now` gives, and what waited through
+it has its two minutes from when it goes on. It ends with the last of what it
+held, or with a stop. `Alt r`, in any luneta of the machine, holds what plays
+until the dictation box closes, or the microphone would write the agent's words
+into your prompt. One luneta of a machine reads, as with
+[notifications](#notifications), and `Alt u` and `Alt Shift u` in another have
+that one do so. A luneta over ssh reads nothing: its speakers are not the ones
+you sit at.
 
 What is read is turned into speech on your machine, and none of it leaves it, or
 is kept. It is Gradium's Phonon 31m, an English model, that does it, on the CPU,
@@ -1359,8 +1365,8 @@ plays, on two threads, with the first sound in about 160 ms. The model is 65 MB,
 and the first thing to read fetches it from Hugging Face, once, as
 [dictation's](#dictate) is, into `luneta/models`. The speakers are the system's
 default output: ALSA's on Linux, which PipeWire and PulseAudio serve, and
-CoreAudio's on macOS, open only while something plays. A machine with none says
-so on the sidebar, and fetches nothing.
+CoreAudio's on macOS, open only while something plays or is paused. A machine
+with none says so on the sidebar, and fetches nothing.
 
 ### Notifications
 
