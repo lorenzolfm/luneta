@@ -26,10 +26,15 @@ const AGAIN: Duration = Duration::from_secs(1);
 /// How long luneta leaves the folder to whoever stopped the daemon it lost,
 /// before it reaches for one again. A newer luneta stops an older daemon and
 /// looks again a `daemon::LOOK` later: reached for at once, a sidebar of the
-/// upgrade before it would start another older one first, which that luneta
-/// would stop in turn, and the sidebar would then wait for `AGAIN`. Longer than
-/// that look and the moments its lunetad takes to hold the folder.
+/// upgrade before it would start another older one first, for that luneta to
+/// stop in turn. Longer than that look and the moments its lunetad takes to
+/// hold the folder.
 const MAKING_WAY: Duration = Duration::from_millis(50);
+
+// The look it waits out has to fit in it, and it has to leave `AGAIN` something
+// to limit. These hold within one build alone: that look is the newer luneta's.
+const _: () = assert!(daemon::LOOK.as_millis() < MAKING_WAY.as_millis());
+const _: () = assert!(MAKING_WAY.as_millis() < AGAIN.as_millis());
 
 /// Watches the daemon in `folder`, or says why it cannot, until luneta ends.
 pub fn start(folder: PathBuf, events: Sender<Event>) {

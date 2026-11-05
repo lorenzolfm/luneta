@@ -35,6 +35,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -59,7 +60,7 @@ const LUNETAD: &str = "lunetad";
 pub const START: Duration = Duration::from_secs(5);
 
 /// How often luneta looks again while it waits.
-const LOOK: Duration = Duration::from_millis(20);
+pub const LOOK: Duration = Duration::from_millis(20);
 
 /// How large the log grows before luneta empties it: each daemon it starts
 /// writes on at its end.
@@ -102,7 +103,7 @@ pub async fn reached(
     };
     let socket = folder.socket();
     let deadline = Instant::now() + START;
-    let mut started: Option<Started> = None;
+    let mut started = Starting::NotYet;
     // The daemon luneta has stopped, by its pid, and waits to end.
     let mut stopped: Option<u32> = None;
     // The daemon, by the pid it said, that the kernel said another listens in
@@ -176,27 +177,38 @@ pub async fn reached(
         match &mut started {
             // One that holds the folder is starting, or ending: luneta waits
             // for it to answer, or to let the folder go.
-            None => {
+            Starting::NotYet => {
                 if !held()? {
-                    started = Some(start(&folder)?);
+                    started = Starting::Started(start(&folder)?);
                 }
             },
-            Some(daemon) => match daemon.child.try_wait() {
+            Starting::Started(daemon) => match daemon.child.try_wait() {
                 Ok(None) => {},
                 // Another holds the folder, and luneta waits on it as above.
-                Ok(Some(ended)) if ended.code() == Some(ANOTHER_RUNS.into()) => started = None,
+                Ok(Some(ended)) if ended.code() == Some(ANOTHER_RUNS.into()) => {
+                    started = Starting::NotYet;
+                },
+                Ok(Some(ended)) if ended.signal() == Some(Signal::TERM.as_raw()) => {
+                    started = Starting::Stopped;
+                },
                 Ok(Some(ended)) => return Err(daemon.failed(ended)),
                 Err(error) => return Err(format!("{LUNETAD}: {error}")),
             },
+            Starting::Stopped => {},
         }
         if Instant::now() >= deadline {
+            let secs = START.as_secs();
             let why = match &started {
-                Some(daemon) => format!(
-                    "the lunetad luneta started did not answer in {}s, and {} may say why: {why}",
-                    START.as_secs(),
+                Starting::Started(daemon) => format!(
+                    "the lunetad luneta started did not answer in {secs}s, and {} may say why: \
+                     {why}",
                     daemon.log.display()
                 ),
-                None => format!("no lunetad answered in {}s: {why}", START.as_secs()),
+                Starting::NotYet => format!("no lunetad answered in {secs}s: {why}"),
+                Starting::Stopped => format!(
+                    "the lunetad luneta started was stopped, and no other answered in {secs}s: \
+                     {why}"
+                ),
             };
             reap(started);
             return Err(why);
@@ -219,10 +231,22 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 /// Waits for whatever luneta `started` as it ends, so that one that ends
 /// while luneta runs on is not left a zombie. A thread that does not start
 /// leaves it one.
-fn reap(started: Option<Started>) {
-    if let Some(Started { mut child, .. }) = started {
+fn reap(started: Starting) {
+    if let Starting::Started(Started { mut child, .. }) = started {
         let _ = thread::Builder::new().name(LUNETAD.to_owned()).spawn(move || child.wait());
     }
+}
+
+/// How luneta's own part in starting a daemon stands, as it reaches for one.
+enum Starting {
+    /// It starts one once nothing holds the folder.
+    NotYet,
+    /// It started this one, which has yet to answer, or to end.
+    Started(Started),
+    /// What it started was stopped as it started, as a newer luneta stops an
+    /// older daemon, and starts the next itself. So this one starts no other,
+    /// which that luneta would stop in turn, and only looks for that one.
+    Stopped,
 }
 
 /// A lunetad that luneta started, and how long its log was as it did.
