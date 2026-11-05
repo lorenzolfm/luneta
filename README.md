@@ -706,14 +706,18 @@ only the remote-tracking ref moves, no local branch of it. A worktree at the hea
 stays as it is. Any other goes to its upstream branch, as
 [`wt follow`](https://github.com/lorenzolfm/wt) takes it, with wt's own code: one
 behind fast-forwards, if it has no uncommitted changes, and one the author rewrote
-moves on the same terms, where its tip is what its remote-tracking ref said before
-the fetch, as its old commits were only ever the remote's. Uncommitted changes,
-commits the remote does not have, no upstream branch, a branch that does not come
-to the head or a failed fetch start no review, and the note names the worktree and
-says why. Untracked files do not count, as git will not overwrite one, and says so
-if the head has a file of its name. An agent already working there does not stop
-it: the key is yours to press. A machine whose `lunetad` is too old to sync starts
-no review either. `w` goes to a worktree as it is, and never moves it.
+moves on the same terms, where its tip is at its remote-tracking ref, as its old
+commits were only ever the remote's. Uncommitted changes, a git operation not
+finished, commits the remote does not have, no upstream branch, a branch that does
+not come to the head or a failed fetch start no review, and the note names the
+worktree and says why. A refusal keeps the worktree's place: put right what it
+says, press `r` again, and a rewrite still moves. Another fetch of the branch, as a
+`git fetch` or a `wt prune`, moves that ref first, and wt can then not tell the old
+commits from yours, so the note gives the command that moves the branch. Untracked
+and ignored files do not count, as git will not overwrite one, and says so if the
+head has a file of its name. An agent already working there does not stop it: the
+key is yours to press. A machine whose `lunetad` is too old to sync starts no review
+either. `w` goes to a worktree as it is, and never moves it.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named

@@ -1831,6 +1831,89 @@ fn r_on_a_pane_gone_to_another_branch_starts_no_review() {
     assert_eq!(git_said(&main, &["rev-parse", "HEAD"]), up_main);
 }
 
+#[test]
+fn r_from_a_directory_the_head_leaves_out_says_so() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, work, feat) = (scratch.join("up"), scratch.join("work"), clone.join("feat"));
+    git(&up, &["worktree", "add", "-q", "--detach", &work.display().to_string(), "feat"]);
+    let pushed_from_work = || {
+        let head = git_said(&work, &["rev-parse", "HEAD"]);
+        git(&up, &["update-ref", "refs/heads/feat", &head]);
+        git(&up, &["update-ref", "refs/pull/7/head", &head]);
+        host.gh.pull(7, "main", &head);
+        head
+    };
+    fs::create_dir(work.join("sub")).unwrap();
+    fs::write(work.join("sub/file"), "file").unwrap();
+    git(&work, &["add", "sub"]);
+    git(&work, &["commit", "-q", "-m", "sub"]);
+    pushed_from_work();
+    let _daemon = start(host.vars()).unwrap();
+    pasted_here(&host, &reviewing_pull_7(vec![pane_in(&clone.join("main"))])).unwrap();
+    assert!(feat.join("sub/file").is_file());
+
+    git(&work, &["rm", "-rq", "sub"]);
+    git(&work, &["commit", "-q", "-m", "no sub"]);
+    let head = pushed_from_work();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat.join("sub")) };
+    let refused = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    let why = "the worktree moved, and where it went has no such directory";
+    assert!(refused.message().ends_with(why), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/feat"]), head);
+}
+
+#[test]
+fn r_refused_on_a_rewrite_follows_it_once_the_change_is_gone() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, feat) = (scratch.join("up"), clone.join("feat"));
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+
+    let head = pushed(&host, &up, "main", "rewritten");
+    fs::write(feat.join("mine"), "mine").unwrap();
+    git(&feat, &["add", "mine"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("changes that are not committed"), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+
+    git(&feat, &["rm", "-qf", "mine"]);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn r_on_a_rewrite_another_fetch_saw_first_says_what_moves_the_branch() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, feat) = (scratch.join("up"), clone.join("feat"));
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+
+    let head = pushed(&host, &up, "main", "rewritten");
+    git(&clone.join(".bare"), &["fetch", "-q", "origin"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    let command = format!("run git switch --no-overwrite-ignore -C feat {head}");
+    assert!(refused.message().ends_with(&command), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+}
+
 /// wt names the branch `f-main`, as the clone has a `main` of its own.
 #[test]
 fn r_syncs_a_pull_request_from_a_fork_s_main() {

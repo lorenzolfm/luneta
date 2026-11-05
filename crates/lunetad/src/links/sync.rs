@@ -2,6 +2,7 @@
 //! it. wt moves it, as `wt follow` does, and never one that holds work of its
 //! own. wt follows the branch's upstream, so this checks it came to the head.
 
+use std::path::Path;
 use std::process::Command;
 
 use serde::Deserialize;
@@ -25,13 +26,18 @@ pub(super) fn to_head(dir: &str, link: &Link) -> Result<(), String> {
     if here(dir)? == head {
         return Ok(());
     }
-    follow(dir)?;
-    let here = here(dir)?;
-    if here == head {
-        Ok(())
-    } else {
-        Err(format!("it followed its upstream branch to {here}, and the head of {link} is {head}"))
+    let top = top(dir)?;
+    follow(&top)?;
+    let here = here(&top)?;
+    if here != head {
+        return Err(format!(
+            "it followed its upstream branch to {here}, and the head of {link} is {head}"
+        ));
     }
+    if !Path::new(dir).is_dir() {
+        return Err("the worktree moved, and where it went has no such directory".to_owned());
+    }
+    Ok(())
 }
 
 /// Asks GitHub, as git cannot tell a pull request's base.
@@ -50,6 +56,12 @@ fn here(dir: &str) -> Result<String, String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "rev-parse", "--verify", "HEAD"]));
     said(&mut git).ok_or_else(|| "git did not say what HEAD is".to_owned())
+}
+
+fn top(dir: &str) -> Result<String, String> {
+    let mut git = Command::new("git");
+    git::local(git.args(["-C", dir, "rev-parse", "--show-toplevel"]));
+    said(&mut git).ok_or_else(|| "git did not say where the worktree's top is".to_owned())
 }
 
 /// A program of its own, alone, as `worktree` runs one: wt says how it goes on
