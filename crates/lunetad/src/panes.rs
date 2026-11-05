@@ -317,6 +317,10 @@ fn ask(
     }
     let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
     if let Ok(clients) = clients::list(Command::new("zellij"), name).inspect_err(said) {
+        for client in clients.set_aside() {
+            let (client, pane) = (client.id, client.pane);
+            troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));
+        }
         core.send(core::Command::Clients { session: *id, name: name.clone(), clients }).ok()?;
     }
     Some(())

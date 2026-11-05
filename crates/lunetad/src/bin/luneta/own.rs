@@ -121,9 +121,9 @@ pub enum Unplaced {
     /// luneta has yet to follow its client to a session, or zellij has yet
     /// to answer the look for it there.
     Waiting,
-    /// zellij answered, and luneta cannot tell its client from the others of
-    /// the session: until the daemon lists them again, or luneta sends it to
-    /// a pane, which it is then on.
+    /// luneta cannot tell its client from the others of the session: until the
+    /// daemon lists them again, or luneta sends it to a pane, which it is then
+    /// on.
     Unsure,
     /// It has the focus on a plugin's pane, which zellij lists no terminal
     /// for.
@@ -231,6 +231,10 @@ impl OwnClient {
             self.left = left;
         }
         self.look(went)
+    }
+
+    pub fn unfound(&mut self) {
+        self.looked = Some(Vec::new());
     }
 
     /// luneta's client is another from now on, which takes the place of the

@@ -236,18 +236,28 @@ impl Listed {
 /// goes to: a client that comes to a tab whose title went to another, or to
 /// it before, gets none, and its terminal keeps the last session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Sent {
-    session: String,
-    /// The session the client leaves for this one, which it may be in still
-    /// until it is there. None for one that starts there, as luneta's first
-    /// does, and one that takes the place of a client that ended.
-    from: Option<Leaving>,
-    /// Whether the client is there. Until it is, a title of another session
-    /// is of the one it is leaving.
-    landed: bool,
-    /// The number of the look that finds the client there, by which what
-    /// comes back of a go luneta sent it on before is told from this one's.
-    look: Option<u64>,
+enum Sent {
+    /// Until the client is there, a title of another session is of the one it
+    /// is leaving.
+    Going {
+        session: String,
+        /// The session the client leaves for this one, which it may be in still
+        /// until it is there. None for one that starts there, as luneta's first
+        /// does, and one that takes the place of a client that ended.
+        from: Option<Leaving>,
+        /// The number of the look that finds the client there, by which what
+        /// comes back of a go luneta sent it on before is told from this one's.
+        look: Option<u64>,
+    },
+    Landed { session: String },
+}
+
+impl Sent {
+    fn session(&self) -> &str {
+        match self {
+            Sent::Going { session, .. } | Sent::Landed { session } => session,
+        }
+    }
 }
 
 /// The session luneta's zellij leaves for the one it was sent to.
@@ -1460,8 +1470,8 @@ impl Sidebar {
         }
         // Of the session luneta sent its zellij to, which unfolded as it was
         // sent.
-        let sent_there = self.sent.as_ref().is_some_and(|sent| in_session(&title, &sent.session));
-        if sent_there || self.sent.as_ref().is_none_or(|sent| sent.landed) {
+        let sent_there = self.sent.as_ref().is_some_and(|sent| in_session(&title, sent.session()));
+        if sent_there || !matches!(self.sent, Some(Sent::Going { .. })) {
             self.sent = None;
         }
         self.title = Some(title);
@@ -1490,10 +1500,10 @@ impl Sidebar {
         let session = session.as_str();
         let from = self.here().filter(|here| *here != session);
         let from = from.map(|here| Leaving { session: here.to_owned(), ends });
-        self.sent = Some(Sent { session: session.to_owned(), from, landed: false, look: None });
+        self.sent = Some(Sent::Going { session: session.to_owned(), from, look: None });
         let look = self.arrived();
-        if let Some(sent) = &mut self.sent {
-            sent.look = look.as_ref().map(|look| look.number);
+        if let Some(Sent::Going { look: number, .. }) = &mut self.sent {
+            *number = look.as_ref().map(|look| look.number);
         }
         self.rebuild();
         look
@@ -1509,7 +1519,7 @@ impl Sidebar {
         let session = session.as_str();
         let look = self.came(session);
         let number = Some(look.number);
-        self.sent = Some(Sent { session: session.to_owned(), from: None, landed: false, look: number });
+        self.sent = Some(Sent::Going { session: session.to_owned(), from: None, look: number });
         self.rebuild();
         look
     }
@@ -1517,15 +1527,36 @@ impl Sidebar {
     /// The session luneta sent its zellij to, while zellij has yet to take
     /// its client there.
     pub fn going(&self) -> Option<&str> {
-        let sent = self.sent.as_ref().filter(|sent| !sent.landed)?;
-        Some(&sent.session)
+        match self.sent.as_ref()? {
+            Sent::Going { session, .. } => Some(session),
+            Sent::Landed { .. } => None,
+        }
+    }
+
+    fn sent_on(&self, number: u64) -> bool {
+        matches!(&self.sent, Some(Sent::Going { look, .. }) if *look == Some(number))
+    }
+
+    fn land(&mut self, number: u64) -> bool {
+        let (true, Some(sent)) = (self.sent_on(number), &self.sent) else {
+            return false;
+        };
+        self.sent = Some(Sent::Landed { session: sent.session().to_owned() });
+        true
+    }
+
+    pub fn unfound(&mut self, look: u64) {
+        if self.land(look) {
+            self.own.unfound();
+            self.rebuild();
+        }
     }
 
     /// zellij did not take luneta's zellij to the session it was sent to on
     /// the go that `look` was to find it there. A look at the one it is in
     /// still.
     pub fn stayed(&mut self, look: u64) -> Option<Look> {
-        if self.sent.as_ref().is_none_or(|sent| sent.landed || sent.look != Some(look)) {
+        if !self.sent_on(look) {
             return None;
         }
         self.sent = None;
@@ -1541,13 +1572,7 @@ impl Sidebar {
     /// session, or none. Whether it found luneta's zellij in the session it
     /// was sent to, as zellij listed it there just now.
     pub fn looked(&mut self, looked: Looked) -> bool {
-        let landed = match &mut self.sent {
-            Some(sent) if looked.before.is_some() && sent.look == Some(looked.number) => {
-                sent.landed = true;
-                true
-            },
-            Some(_) | None => false,
-        };
+        let landed = looked.before.is_some() && self.land(looked.number);
         let listed = self.own.session().and_then(|session| clients(self.on_sessions(), session));
         let listed = listed.map(<[Client]>::to_vec);
         if self.own.looked(looked, listed.as_deref(), Instant::now()) {
@@ -1701,7 +1726,7 @@ impl Sidebar {
     /// Until the daemon says, what comes before the first.
     pub fn here(&self) -> Option<&str> {
         if let Some(sent) = &self.sent {
-            return Some(&sent.session);
+            return Some(sent.session());
         }
         let title = self.title.as_deref()?;
         let named = |name: &&str| in_session(title, name);
@@ -1738,7 +1763,7 @@ impl Sidebar {
     /// names none, is of none it is in.
     pub fn seats(&self) -> Vec<SessionName> {
         let seats: Vec<&str> = match &self.sent {
-            Some(Sent { session, from, landed: false, .. }) => {
+            Some(Sent::Going { session, from, .. }) => {
                 from.iter().map(|from| &from.session).chain([session]).map(String::as_str).collect()
             },
             _ => self.here().into_iter().collect(),
@@ -4169,7 +4194,7 @@ impl Sidebar {
             let going = format!("image on its way to {to}");
             notes.say(&going, width, Style::new().fg(NAME));
         }
-        if let Some(Sent { session, from: Some(Leaving { ends: true, .. }), landed: false, .. }) =
+        if let Some(Sent::Going { session, from: Some(Leaving { ends: true, .. }), .. }) =
             &self.sent
         {
             let going = format!("Going to {session}; this session ends once you are there");
@@ -6188,6 +6213,44 @@ mod tests {
         assert_eq!(sidebar.stayed(first.number), None);
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), Some("older")));
         sidebar.looked(came(&last));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
+    }
+
+    #[test]
+    fn a_client_luneta_did_not_find_where_it_started_it_lands_there_all_the_same() {
+        let mut sidebar = two_sessions();
+        let look = sidebar.rejoining(&session_name("older"));
+        sidebar.unfound(look.number + 1);
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), Some("older")));
+        sidebar.unfound(look.number);
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
+        assert_eq!(sidebar.stayed(look.number), None);
+        assert_eq!(sidebar.here(), Some("older"));
+    }
+
+    #[test]
+    fn the_menu_sends_you_to_a_pane_once_luneta_stops_looking_for_its_client() {
+        let mut sidebar = two_sessions();
+        let look = sidebar.rejoining(&session_name("older"));
+        sidebar.unfound(look.number + 1);
+        assert_eq!(sidebar.float_menu(), Err(NO_HERE_PANE));
+        sidebar.unfound(look.number);
+        assert_eq!(sidebar.float_menu(), Err(UNSURE_PANE));
+        let went = sidebar.went(&pane_of("older", 10, 1)).unwrap();
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: went.number, went: went.went, clients, before: None });
+        assert_eq!(sidebar.float_menu(), Ok(()));
+    }
+
+    #[test]
+    fn a_go_luneta_could_not_follow_lands_until_a_title_says_otherwise() {
+        let mut sidebar = two_sessions();
+        sidebar.titled("older | fish".to_owned());
+        let look = sidebar.went(&pane_of("newer", 20, 1)).unwrap();
+        assert_eq!(sidebar.going(), Some("newer"));
+        sidebar.unfound(look.number);
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
+        sidebar.titled("older | vim".to_owned());
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 

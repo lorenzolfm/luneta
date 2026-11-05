@@ -452,8 +452,8 @@ pub fn nudge(mode: TermMode) -> Option<&'static [u8]> {
 pub const NUDGED: Duration = Duration::from_millis(30);
 
 /// How long luneta waits for its client to come to a session it sent it to
-/// from another, after zellij took the action, before it takes the client
-/// for one that stayed. It comes within milliseconds.
+/// from another, from zellij's first answer after it took the action, before it
+/// takes the client for one that stayed. It comes within milliseconds.
 const ARRIVAL: Duration = Duration::from_secs(2);
 
 /// How long luneta waits for its client to come to the session it attaches
@@ -596,7 +596,8 @@ pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
     command.args(pane_id.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
     done(command)?;
     let new = |client: &clients::Client| before.iter().all(|was| was.id != client.id);
-    let came = seen(to, |clients| clients.into_iter().find(new)).ok_or_else(|| UNMOVED.to_owned())?;
+    let came = seen(to, |clients| clients.iter().copied().find(new));
+    let came = came.ok_or_else(|| UNMOVED.to_owned())?;
     match pane {
         Some(pane) if came.pane != PaneId::Terminal(pane) => {
             Err(format!("zellij took the client to {to}, but not to pane {pane}"))
@@ -617,7 +618,7 @@ pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
         Err(said) if !said.contains("is already focused") => return Err(said),
         _ => {},
     }
-    let on = |clients: Vec<clients::Client>| clients.iter().any(|client| client.pane == pane);
+    let on = |clients: &[clients::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
 
@@ -655,10 +656,10 @@ fn made_since(session: &str, asked: SystemTime, patience: Duration) -> Option<bo
 /// What `seen` makes of the clients of `session`, once it makes anything of
 /// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
 /// takes an action a moment after it answers it.
-fn seen<T>(session: &str, seen: impl Fn(Vec<clients::Client>) -> Option<T>) -> Option<T> {
+fn seen<T>(session: &str, seen: impl Fn(&[clients::Client]) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + ARRIVAL;
     loop {
-        if let Some(seen) = clients_on_panes(session).ok().and_then(&seen) {
+        if let Some(seen) = clients_on_panes(session).ok().and_then(|clients| seen(&clients)) {
             return Some(seen);
         }
         if Instant::now() >= deadline {
@@ -986,17 +987,29 @@ pub fn arrive(arrival: Arrival, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
         let Arrival { look, before, on, after } = arrival;
-        let mut there = There::on(&on)
-            .inspect_err(|why| {
-                // luneta is on its way out.
-                let _ = events.send(Event::Notice(why.clone()));
-            })
-            .ok();
-        let came = there.as_mut().is_some_and(|there| {
-            arriving(there, &look, before, START, &events)
-        });
-        match (after, there.filter(|_| came)) {
-            (Some(after), Some(mut there)) => after.came(&mut there, &events),
+        let failure = match There::on(&on) {
+            Ok(mut there) => {
+                let list = || there.clients(&look.session);
+                match arriving(list, &look, before, START, START, &events) {
+                    Arrived::Came => {
+                        if let Some(after) = after {
+                            after.came(&mut there, &events);
+                        }
+                        return;
+                    },
+                    Arrived::Stayed => None,
+                    Arrived::Untold(why) => Some(why),
+                }
+            },
+            Err(why) => Some(why),
+        };
+        let _ = events.send(Event::Unfound(look.number));
+        if let Some(why) = &failure {
+            // luneta is on its way out.
+            let _ = events.send(Event::Notice(why.clone()));
+        }
+        match (after, failure) {
+            (Some(after), Some(why)) => after.failed(why, &events),
             (Some(after), None) => after.stayed(&events),
             (None, _) => {},
         }
@@ -1115,12 +1128,12 @@ pub fn makes_away(
 /// up for good.
 pub fn clients(session: &str) -> Result<Vec<Client>, String> {
     let clients = clients_on_panes(session)?;
-    Ok(clients.into_iter().map(clients::Client::to_api).collect())
+    Ok(clients.iter().copied().map(clients::Client::to_api).collect())
 }
 
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
-pub fn clients_on_panes(session: &str) -> Result<Vec<clients::Client>, String> {
+pub fn clients_on_panes(session: &str) -> Result<clients::Listed, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
     clients::list(command, session)
@@ -1356,19 +1369,30 @@ fn run(action: Action, then: Option<Then>, when: Instant, events: &Sender<Event>
             },
             Some(Then::Arrive(look, after)) => {
                 let before = there.before(&look.session);
-                let acted = act(&mut there, action, when, &events);
-                let came = acted && arriving(&mut there, &look, before, ARRIVAL, &events);
-                if acted && !came {
-                    let said = "zellij did not take its client there".to_owned();
-                    let _ = events.send(Event::Notice(said));
+                if !act(&mut there, action, when, &events) {
+                    Then::Arrive(look, after).undone(&events);
+                    return;
                 }
-                if !came {
-                    let _ = events.send(Event::Stayed(look.number));
-                }
-                match after {
-                    Some(after) if came => after.came(&mut there, &events),
-                    Some(after) => after.stayed(&events),
-                    None => {},
+                let list = || there.clients(&look.session);
+                match arriving(list, &look, before, ARRIVAL, START, &events) {
+                    Arrived::Came => {
+                        if let Some(after) = after {
+                            after.came(&mut there, &events);
+                        }
+                    },
+                    Arrived::Stayed => {
+                        let said = "zellij did not take its client there".to_owned();
+                        let _ = events.send(Event::Notice(said));
+                        Then::Arrive(look, after).undone(&events);
+                    },
+                    Arrived::Untold(why) => {
+                        let said = format!("zellij did not say if it took its client there: {why}");
+                        let _ = events.send(Event::Notice(said));
+                        let _ = events.send(Event::Unfound(look.number));
+                        if let Some(after) = after {
+                            after.failed(why, &events);
+                        }
+                    },
                 }
             },
             Some(Then::Made(look)) => {
@@ -1405,42 +1429,109 @@ fn looking(there: &mut There, look: &Look, events: &Sender<Event>) {
     });
 }
 
-/// Asks zellij `there` for the clients of the session `look` is of until it
-/// lists one that was not there `before`, for as long as `patience`, and
-/// hands back what it answers then. Whether it did. Of a session zellij
-/// makes, the first it lists is luneta's; of one it did not list the clients
-/// of, any it lists is taken for luneta's coming, though it may be another's.
+#[derive(Debug, PartialEq, Eq)]
+enum Arrived {
+    Came,
+    Stayed,
+    Untold(String),
+}
+
+/// Has `list` ask zellij for the clients of the session `look` is of until it
+/// lists one that was not there `before`, for `patience` from its first answer,
+/// or `untold` while it does not answer, and hands back what it answers then. Of
+/// a session zellij makes, the first it lists is luneta's; of one it did not
+/// list the clients of, any it lists is taken for luneta's coming, though it
+/// may be another's.
 fn arriving(
-    there: &mut There,
+    mut list: impl FnMut() -> Result<Vec<Client>, String>,
     look: &Look,
     before: Before,
     patience: Duration,
+    untold: Duration,
     events: &Sender<Event>,
-) -> bool {
-    let deadline = Instant::now() + patience;
+) -> Arrived {
+    let started = Instant::now();
+    let mut answered = None;
     loop {
-        let came = there.clients(&look.session).ok().filter(|clients| {
-            let was = before.clients();
-            clients.iter().any(|client| was.iter().all(|was| was.id != client.id))
-        });
-        if let Some(clients) = came {
-            let (number, went, before) = (look.number, look.went, Some(before));
-            // luneta is on its way out.
-            let _ = events.send(Event::Looked(Looked { number, went, clients, before }));
-            return true;
+        let was = before.clients();
+        let is_new = |client: &Client| was.iter().all(|was| was.id != client.id);
+        match list() {
+            Ok(clients) if clients.iter().any(is_new) => {
+                let (number, went, before) = (look.number, look.went, Some(before));
+                // luneta is on its way out.
+                let _ = events.send(Event::Looked(Looked { number, went, clients, before }));
+                return Arrived::Came;
+            },
+            Ok(_) if answered.get_or_insert_with(Instant::now).elapsed() >= patience => {
+                return Arrived::Stayed;
+            },
+            Err(why) if started.elapsed() >= untold => return Arrived::Untold(why),
+            Ok(_) | Err(_) => thread::sleep(ARRIVING),
         }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(ARRIVING);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::sync::mpsc;
 
     use super::*;
+
+    const AGES: Duration = Duration::from_secs(600);
+
+    fn look() -> Look {
+        Look { session: "work".to_owned(), number: 7, went: None }
+    }
+
+    fn on_a_pane(id: u32) -> Client {
+        Client { id, pane: Some(1) }
+    }
+
+    #[test]
+    fn a_list_that_fails_uses_up_no_patience_for_a_client_on_its_way() {
+        const PATIENCE: Duration = Duration::from_millis(100);
+        let (events, heard) = mpsc::channel();
+        let mut lists = vec![
+            Ok(vec![on_a_pane(1), on_a_pane(2)]),
+            Ok(vec![on_a_pane(1)]),
+            Err("stuck".to_owned()),
+        ];
+        let list = || {
+            let listed = lists.pop().unwrap();
+            if listed.is_err() {
+                thread::sleep(PATIENCE);
+            }
+            listed
+        };
+        let before = Before::Listed(vec![on_a_pane(1)]);
+        let arrived = arriving(list, &look(), before, PATIENCE, AGES, &events);
+        assert_eq!(arrived, Arrived::Came);
+        let Ok(Event::Looked(looked)) = heard.try_recv() else {
+            panic!("zellij's answer was not handed back");
+        };
+        assert_eq!((looked.number, looked.clients), (7, vec![on_a_pane(1), on_a_pane(2)]));
+    }
+
+    #[test]
+    fn a_list_with_no_new_client_for_the_patience_is_a_client_that_stayed() {
+        let (events, heard) = mpsc::channel();
+        let list = || Ok(vec![on_a_pane(1)]);
+        let before = Before::Listed(vec![on_a_pane(1)]);
+        let arrived = arriving(list, &look(), before, Duration::ZERO, AGES, &events);
+        assert_eq!(arrived, Arrived::Stayed);
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn no_list_for_as_long_as_luneta_waits_says_nothing_of_where_the_client_is() {
+        let (events, heard) = mpsc::channel();
+        let list = || Err("stuck".to_owned());
+        let before = Before::Listed(Vec::new());
+        let arrived = arriving(list, &look(), before, AGES, Duration::ZERO, &events);
+        assert_eq!(arrived, Arrived::Untold("stuck".to_owned()));
+        assert!(heard.try_recv().is_err());
+    }
 
     /// What zellij's client writes as its server drops it reads however its
     /// terminal cuts it: one as narrow as luneta's zellij's can be wraps its
