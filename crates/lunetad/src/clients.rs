@@ -7,7 +7,6 @@
 //! (`list_clients_metadata` in zellij-server 0.45.1's
 //! `session_layout_metadata.rs`).
 
-use std::collections::HashSet;
 use std::process::Command;
 use std::time::Duration;
 
@@ -40,35 +39,40 @@ impl Client {
 }
 
 /// The clients in what zellij listed, by their ids, or why it does not read.
-/// After the line that names the columns, zellij writes one for each client:
-/// its id, the pane it has the focus on, as `terminal_3` or `plugin_2`, and
-/// what runs there, which can hold spaces. zellij lists each client once.
+/// After the line that names the columns, zellij writes one for each client,
+/// by its id: that id, the pane it has the focus on, as `terminal_3` or
+/// `plugin_2`, and what runs there, which can hold spaces and lines of its own.
 pub fn parse(said: &str) -> Result<Vec<Client>, String> {
     let mut lines = said.lines().filter(|line| !line.trim().is_empty());
     if lines.next().map(str::trim_end) != Some(HEADER) {
         return Err(format!("it did not start with {HEADER:?}"));
     }
-    let mut clients = Vec::new();
+    let mut clients: Vec<Client> = Vec::new();
     for line in lines {
-        let mut words = line.split_whitespace();
-        let (Some(id), Some(pane)) = (words.next(), words.next()) else {
-            return Err(format!("a line with no pane: {line:?}"));
-        };
-        let id = id.parse().map_err(|_| format!("no client's id: {id:?}"))?;
-        let number = |prefix| pane.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok());
-        let pane = match (number("terminal_"), number("plugin_")) {
-            (Some(terminal), _) => PaneId::Terminal(terminal),
-            (None, Some(plugin)) => PaneId::Plugin(plugin),
-            (None, None) => return Err(format!("no pane's id: {pane:?}")),
-        };
-        clients.push(Client { id, pane });
+        match client(line) {
+            Ok(client) if clients.last().is_none_or(|last| last.id < client.id) => {
+                clients.push(client);
+            },
+            Err(why) if clients.is_empty() => return Err(why),
+            Ok(_) | Err(_) => {},
+        }
     }
-    let mut ids = HashSet::new();
-    if let Some(twice) = clients.iter().find(|client| !ids.insert(client.id)) {
-        return Err(format!("client {} comes twice", twice.id));
-    }
-    clients.sort_unstable_by_key(|client| client.id);
     Ok(clients)
+}
+
+fn client(line: &str) -> Result<Client, String> {
+    let mut words = line.split_whitespace();
+    let (Some(id), Some(pane)) = (words.next(), words.next()) else {
+        return Err(format!("a line with no pane: {line:?}"));
+    };
+    let id = id.parse().map_err(|_| format!("no client's id: {id:?}"))?;
+    let number = |prefix| pane.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok());
+    let pane = match (number("terminal_"), number("plugin_")) {
+        (Some(terminal), _) => PaneId::Terminal(terminal),
+        (None, Some(plugin)) => PaneId::Plugin(plugin),
+        (None, None) => return Err(format!("no pane's id: {pane:?}")),
+    };
+    Ok(Client { id, pane })
 }
 
 /// The clients of `session`, as `zellij` lists them, or why it did not in
@@ -97,13 +101,39 @@ mod tests {
     #[test]
     fn each_client_is_read_by_its_id_and_its_terminal() {
         let said = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
-                    2         plugin_4       file:/x/luneta.wasm\n\
                     1         terminal_3     tail -f /dev/null\n\
+                    2         plugin_4       file:/x/luneta.wasm\n\
                     3         terminal_0     N/A            \n";
         let client = |id, pane| Client { id, pane };
         let (on, plugin) = (PaneId::Terminal, PaneId::Plugin);
         assert_eq!(parse(said), Ok(vec![client(1, on(3)), client(2, plugin(4)), client(3, on(0))]));
         assert_eq!(parse("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_command_with_lines_of_its_own_leaves_the_clients_as_zellij_listed_them() {
+        let (client, on) = (|id, pane| Client { id, pane }, PaneId::Terminal);
+        let header = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n";
+        let one = format!(
+            "{header}1         terminal_0     claude --name x Fix this.\n\
+             \n\
+             Where things stand: it merged.\n\
+             7 lines down\n"
+        );
+        assert_eq!(parse(&one), Ok(vec![client(1, on(0))]));
+        let two = format!("{one}2         plugin_4       N/A            \n");
+        assert_eq!(parse(&two), Ok(vec![client(1, on(0)), client(2, PaneId::Plugin(4))]));
+    }
+
+    #[test]
+    fn a_command_that_quotes_a_client_no_higher_than_its_own_adds_none() {
+        let header = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n";
+        let said = format!(
+            "{header}5         terminal_0     claude Why does this read so?\n\
+             1         terminal_3     fish\n\
+             5         terminal_4     fish\n"
+        );
+        assert_eq!(parse(&said), Ok(vec![Client { id: 5, pane: PaneId::Terminal(0) }]));
     }
 
     /// lunetad says no plugin's pane to what reads it, which goes by terminals.
@@ -122,7 +152,5 @@ mod tests {
         assert!(parse(&format!("{header}one terminal_3 fish\n")).is_err());
         assert!(parse(&format!("{header}1 window_3 fish\n")).is_err());
         assert!(parse(&format!("{header}1\n")).is_err());
-        let twice = parse(&format!("{header}1 terminal_3 fish\n1 terminal_4 fish\n"));
-        assert_eq!(twice, Err("client 1 comes twice".to_owned()));
     }
 }

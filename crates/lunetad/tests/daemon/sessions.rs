@@ -215,7 +215,7 @@ fn a_session_has_its_clients_once_zellij_lists_them() {
     });
     assert_eq!(none.clients, []);
 
-    host.zellij.clients("work", &[(2, "plugin_4"), (1, "terminal_1")]);
+    host.zellij.clients("work", &[(1, "terminal_1"), (2, "plugin_4")]);
     let (two, version) = eventually("zellij lists two clients of work", || {
         let now = host.host();
         let clients = session(&now, "work")?.clients.clone()?;
