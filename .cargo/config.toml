@@ -1,0 +1,12 @@
+# How every cargo in this tree runs rustc: in the devshell, in the flake's
+# derivations, and on a machine with rustup and not nix.
+#
+# rustc's parallel frontend, which runs on one thread without this. Eight jobs,
+# the number its developers test most and recommend: more give diminishing returns.
+# It is unstable, and its known bugs are hangs: a compile that hangs or panics
+# here should be tried without these flags first.
+#
+# Only a nightly takes them, so going back to a stable rust in rust-toolchain.toml
+# takes this file with it.
+[build]
+rustflags = ["-Zunstable-options", "--jobs-frontend=8"]
