@@ -267,6 +267,27 @@ pub fn ended(seats: &[SessionName]) -> Ended {
     moves::refuge(&folder, seats, current.as_deref(), clients_of_refuge)
 }
 
+/// What zellij's client writes as its server drops it, with no white space: on
+/// a terminal as narrow as luneta's zellij's, a line wraps at any character.
+/// One of its first lines, and one of its last, for a terminal too short to
+/// hold them all, which scrolls the first away.
+const DROPPED: [&str; 2] = ["lostconnectiontothezellijserver", "Reattachtoyourprevioussession"];
+
+/// Whether `said`, what zellij's client left on its terminal as it ended well,
+/// is what it writes as its server drops it, as the server does one that falls
+/// behind, and the session runs on. Nothing else tells that from a client that
+/// detached: zellij 0.45.1's ends well for both, measured, and takes its screen
+/// down. Where a later zellij words it otherwise, the client counts as one that
+/// detached, and ends luneta, whose log has what it said: better that than that
+/// luneta takes back a client you detached. It can still err that way, by a
+/// hair: zellij's own word to a client goes unsent where its queue is full, so
+/// that one you detach, or whose session is killed, just as that fills hears
+/// this. A second detach then ends luneta.
+pub fn dropped(said: &str) -> bool {
+    let said: String = said.split_whitespace().collect();
+    DROPPED.iter().any(|words| said.contains(words))
+}
+
 /// What zellij lists of the clients of `session`, where luneta's zellij may go
 /// on in it: none of one that may hold luneta's terminal, as
 /// `may_hold_terminal` says, which `lunetad::moves` passes over as it does one
@@ -1420,6 +1441,58 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    /// What zellij's client writes as its server drops it reads however its
+    /// terminal cuts it: one as narrow as luneta's zellij's can be wraps its
+    /// lines at any character, and one too short to hold them scrolls the first
+    /// away. Nothing else a client of zellij's says as it ends well does, with
+    /// a session running on.
+    #[test]
+    fn a_dropped_client_is_told_by_what_it_says_however_its_terminal_cuts_it() {
+        const DROPPED_SAYS: &str = "
+Your zellij client lost connection to the zellij server.
+
+As a safety measure, you have been disconnected from the current zellij session.
+However, the session should still exist and none of your data should be lost.
+
+This usually means that your terminal didn't process server messages quick
+enough. Maybe your system is currently under high load, or your terminal
+isn't performant enough.
+
+There are a few things you can try now:
+    - Reattach to your previous session and see if it works out better this
+      time: `zellij attach luneta`
+    - Try using a faster (maybe GPU-accelerated) terminal emulator
+    ";
+        let on_terminal = |columns: usize, rows: usize| {
+            let chars = |line: &str| line.chars().collect::<Vec<_>>();
+            let cut: Vec<String> = DROPPED_SAYS
+                .lines()
+                .flat_map(|line| {
+                    let line = chars(line);
+                    if line.is_empty() {
+                        return vec![String::new()];
+                    }
+                    line.chunks(columns).map(|row| row.iter().collect()).collect()
+                })
+                .collect();
+            cut[cut.len().saturating_sub(rows)..].join("\n")
+        };
+        for (columns, rows) in [(120, 40), (90, 40), (50, 24), (20, 40), (90, 8), (40, 8)] {
+            let said = on_terminal(columns, rows);
+            assert!(dropped(&said), "not told on {columns}x{rows}: {said}");
+        }
+        let others = [
+            "Bye from Zellij!",
+            "Session detached",
+            "Session was detached from this client (possibly because another client connected)",
+            "Disconnected by host",
+            "",
+        ];
+        for said in others {
+            assert!(!dropped(said), "told of {said}");
+        }
+    }
 
     /// A command runs in the pane zellij's variables name, by the name its
     /// session had as the pane opened, and the agent of luneta's ask box, in

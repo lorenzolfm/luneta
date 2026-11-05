@@ -67,6 +67,7 @@ use crate::browser::Browser;
 use crate::close::Act;
 use crate::desktop::{self, Desktop, Reader};
 use crate::dictation::{self, Dictated, Dictation};
+use crate::drops::{Dropped, Drops, SOON, TOO_MANY};
 use crate::due::Due;
 use crate::fails::{Back, Failed, Fails};
 use crate::folds::{self, Folds};
@@ -452,6 +453,8 @@ struct Client {
     /// The last key it typed, and where, as far as luneta knows. It makes the
     /// client the one zellij moves only in a session it is in still.
     typed: Option<Typed>,
+    /// When it started, for how long it lasted, where zellij drops it.
+    started: Instant,
 }
 
 /// How a client luneta starts comes to its session.
@@ -537,10 +540,27 @@ impl Client {
         arrival: Option<Arrival>,
         then_pane: Option<Place>,
     ) -> Self {
-        let until = Instant::now() + WAITING_MAX;
+        let started = Instant::now();
+        let until = started + WAITING_MAX;
         let coming = Some(Coming::Held(Waiting { input: Vec::new(), arrival, until }));
         let (exited, making, typed) = (None, None, None);
-        Client { hosted, fails, then_pane, exited, coming, making, typed }
+        Client { hosted, fails, then_pane, exited, coming, making, typed, started }
+    }
+
+    /// What it said as it ended on `on`, and how it ended.
+    fn said(&self, on: &Machine) -> String {
+        let status = self.exited.map_or_else(|| "its end unread".to_owned(), |it| it.to_string());
+        let said = ended_saying(&self.hosted, self.exited, on);
+        of_machine(on, &format!("{said} ({status})"))
+    }
+
+    /// Whether zellij dropped it, as what it wrote as it ended well says, with
+    /// zellij's screen down, as zellij takes it down as it ends: on a screen
+    /// still up, the words could be a pane's.
+    fn dropped(&self) -> bool {
+        self.exited.is_some_and(|status| status.success())
+            && !self.hosted.mode().contains(TermMode::ALT_SCREEN)
+            && zellij::dropped(&self.hosted.text())
     }
 
     /// Whether it may be on its way into a server zellij makes, which has yet
@@ -715,6 +735,11 @@ struct App {
     /// The directory luneta started in, which zellij's client runs in.
     dir: PathBuf,
     ended: bool,
+    /// How many clients in a row zellij dropped as soon as they came.
+    drops: Drops,
+    /// Why luneta gave up on the clients zellij drops, where it did, to be said
+    /// again once luneta's screen is gone.
+    gave_up: Option<String>,
     /// What kills and deletes the sessions luneta's keys delete, which
     /// luneta waits for as it ends: it ends with the last session of every
     /// machine, which zellij lets go of only once the session's server has
@@ -731,15 +756,16 @@ struct App {
 /// `starts` finds where none is named, until zellij ends: its client detaches
 /// or fails, or its session ends and no other runs, on any machine lunetad
 /// reaches. Where another does, a client of the newest takes the place of the
-/// one that ended, of its machine's first. The sidebar is of what the daemon
-/// in `folder` says, which is started if none runs.
+/// one that ended, of its machine's first. One that zellij drops is taken back.
+/// The sidebar is of what the daemon in `folder` says, which is started if none
+/// runs. However luneta ends, the log says why.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
+    // Before all else, for the log to say why luneta ended however early. Why
+    // there is none is for the sidebar to say, once it has its notes.
+    let unkept = log::start(Process::Luneta).err();
     let dir = match env::current_dir() {
         Ok(dir) => dir,
-        Err(error) => {
-            eprintln!("luneta: no directory to start in: {error}");
-            return ExitCode::FAILURE;
-        },
+        Err(error) => return did_not_start(&format!("no directory to start in: {error}")),
     };
     // Kept beside the daemon, which lists the sessions it is kept of.
     let news = match &folder {
@@ -752,26 +778,17 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
     };
     let start = match start {
         Ok(start) => start,
-        Err(refusal) => {
-            eprintln!("luneta: {refusal}");
-            return ExitCode::FAILURE;
-        },
+        Err(refusal) => return did_not_start(&refusal),
     };
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
-        Err(error) => {
-            eprintln!("luneta: no terminal: {error}");
-            return ExitCode::FAILURE;
-        },
+        Err(error) => return did_not_start(&format!("no terminal: {error}")),
     };
     // The cursor shows where a frame puts it, and nowhere before the first,
     // as luneta waits for its terminal's answers. ratatui's own, for it to
     // know the cursor is hidden: the first frame shows it at zellij's, and
     // ratatui shows it again as luneta ends.
     let hidden = terminal.hide_cursor();
-    // Before the hook, so that no panic of the sidebar's goes by the log. Why
-    // there is none is for the sidebar to say, once it has its notes.
-    let unkept = log::start(Process::Luneta).err();
     // ratatui's hook puts the terminal back as it found it before a panic is
     // printed, all but the modes luneta turns on itself. The panic goes in
     // the log first, which no terminal can hold up.
@@ -823,16 +840,26 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             &mut inbox,
         )
     });
+    // Why it ended where zellij did not end it, as a signal or a terminal that
+    // hung up. Before the terminal is put back, which one that reads nothing
+    // can hold up for good.
+    if let Err(error) = &ran {
+        say_ends(&error.to_string());
+    }
     // Each mode is put back however the rest went, and the first error is the
     // one said.
     let popped =
         if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
     let restored = put_back(&mut io::stdout());
     let left = ratatui::try_restore();
+    let put = popped.and(restored).and(left);
+    if let Err(error) = &put {
+        log::say(&format!("its terminal was not put back: {error}"));
+    }
     // A terminal that hung up, as one whose window closed, is told nothing:
     // `eprintln!` would panic on it.
     let mut said = io::stderr();
-    match hidden.and(ran).and_then(|failed| popped.and(restored).and(left).map(|()| failed)) {
+    match hidden.and(ran).and_then(|failed| put.map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
         // What zellij said as it failed went with luneta's screen.
         Ok(Some(failed)) => {
@@ -844,6 +871,20 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
             ExitCode::FAILURE
         },
     }
+}
+
+/// Says why luneta did not start, in the log and on its terminal, as luneta
+/// ends so.
+fn did_not_start(why: &str) -> ExitCode {
+    say_ends(why);
+    eprintln!("luneta: {why}");
+    ExitCode::FAILURE
+}
+
+/// Says in the log why luneta ends: its screen goes with it, and no one may be
+/// there to read what it says last.
+fn say_ends(why: &str) {
+    log::say(&format!("ends: {why}"));
 }
 
 /// Puts luneta's `terminal` back as luneta found it, all but the kitty
@@ -930,7 +971,10 @@ fn run_in(
             }
             match starts::heard(named, &sidebar) {
                 Ok(first) => first,
-                Err(refusal) => return Ok(Some(format!("luneta: {refusal}"))),
+                Err(refusal) => {
+                    say_ends(&refusal);
+                    return Ok(Some(format!("luneta: {refusal}")));
+                },
             }
         },
     };
@@ -978,6 +1022,8 @@ fn run_in(
         _watching: watching,
         dir: dir.to_owned(),
         ended: false,
+        drops: Drops::default(),
+        gave_up: None,
         deleting: Vec::new(),
         alerts: Alerts::default(),
         desktop,
@@ -2872,8 +2918,13 @@ impl App {
     /// client detached, or failed, as where zellij cannot attach; but one
     /// that took the place of a client on another machine goes back there
     /// where it failed, and the notes say what it said. A client on another
-    /// machine ends as `ended_away` says.
+    /// machine ends as `ended_away` says. One that zellij dropped, here or
+    /// there, is taken back to its session, as `take_back` says. The log says
+    /// why, of each that ends luneta.
     fn client_ended(&mut self) -> io::Result<()> {
+        if self.client.dropped() {
+            return self.take_back();
+        }
         if let Machine::Remote(destination) = self.sidebar.on() {
             let destination = destination.clone();
             return self.ended_away(&destination);
@@ -2885,10 +2936,10 @@ impl App {
             return match self.client.fails.clone().failed(&Machine::Local) {
                 Failed::Back(back) => {
                     self.failed(&Machine::Local);
-                    self.go_back(&Machine::Local, back)
+                    self.go_back(&Machine::Local, back, Fails::End)
                 },
                 Failed::End | Failed::Onward(_) => {
-                    self.ended = true;
+                    self.end_with_client(FAILED, &Machine::Local);
                     Ok(())
                 },
             };
@@ -2897,8 +2948,12 @@ impl App {
         let seats = self.sidebar.seats();
         let refuge = match (!seats.is_empty()).then(|| zellij::ended(&seats)) {
             Some(Ended::Went(refuge)) => refuge,
-            Some(Ended::Kept) | None => {
-                self.ended = true;
+            Some(Ended::Kept) => {
+                self.end_with_client(KEPT, &Machine::Local);
+                return Ok(());
+            },
+            None => {
+                self.end_with_client(UNSEATED, &Machine::Local);
                 return Ok(());
             },
         };
@@ -2928,12 +2983,12 @@ impl App {
         if self.client.exited.is_none_or(|status| !status.success()) {
             return match fails.failed(&on) {
                 Failed::End => {
-                    self.ended = true;
+                    self.end_with_client(FAILED, &on);
                     Ok(())
                 },
                 Failed::Back(back) => {
                     self.failed(&on);
-                    self.go_back(&on, back)
+                    self.go_back(&on, back, Fails::End)
                 },
                 Failed::Onward(tried) => {
                     self.failed(&on);
@@ -2945,12 +3000,12 @@ impl App {
         // this machine.
         let seats = self.sidebar.seats();
         if seats.is_empty() {
-            self.ended = true;
+            self.end_with_client(UNSEATED, &on);
             return Ok(());
         }
         let refuge = match zellij::ended_away(destination, &seats) {
             Ok(Ended::Kept) => {
-                self.ended = true;
+                self.end_with_client(KEPT, &on);
                 return Ok(());
             },
             Ok(Ended::Went(refuge)) => refuge,
@@ -2975,13 +3030,7 @@ impl App {
     /// machine, or of one whose session ended, failed: the notes say what it
     /// said, and how it ended, and so does what waits on its arrival.
     fn failed(&mut self, on: &Machine) {
-        let exited = self.client.exited;
-        let status = exited.map_or_else(|| "its end unread".to_owned(), |it| it.to_string());
-        let said = failed_saying(&self.client.hosted, exited, on);
-        let note = match on {
-            Machine::Local => format!("{said} ({status})"),
-            Machine::Remote(destination) => format!("{destination}: {said} ({status})"),
-        };
+        let note = self.client.said(on);
         // What waits on its arrival, as a menu waits on a session made for
         // it, hears why it did not come, not that it ended with no answer.
         let coming = self.client.coming.take().and_then(Coming::arrival);
@@ -2992,11 +3041,61 @@ impl App {
         self.sidebar.notify(note);
     }
 
-    /// Has a client of `back` take the place of zellij's client, which failed
-    /// on `on`, another machine: of this machine's newest session where it
-    /// was of this machine's and is gone, or of another machine's but `on`,
-    /// as `newest_here` says.
-    fn go_back(&mut self, on: &Machine, back: Back) -> io::Result<()> {
+    /// zellij dropped its client, as it does one that falls behind, as load on
+    /// its machine or a slow terminal can make it, and the session runs on:
+    /// another of that session takes its place, the notes say so, and it goes
+    /// where this one would have, where it fails. luneta waits on no daemon to
+    /// say what became of the session, as one under that load may answer late,
+    /// and zellij said: it asks only for the session's clients, as `go_back`
+    /// does, for a moment at the most. luneta ends where clients keep being
+    /// dropped as they come, as `Drops` counts them, and where it knows of no
+    /// session to take it to.
+    fn take_back(&mut self) -> io::Result<()> {
+        let on = self.sidebar.on().clone();
+        let who = of_machine(&on, "zellij");
+        let seats = self.sidebar.seats();
+        let Some(session) = seats.last().cloned() else {
+            self.end(&format!("{who} dropped its client, in no session luneta knows of"));
+            return Ok(());
+        };
+        match self.drops.dropped(self.client.started.elapsed()) {
+            Dropped::TakeBack => {
+                let note = format!("{who} dropped its client: taking it back to {session}");
+                self.sidebar.notify(note);
+                let mut fails = self.client.fails.clone();
+                fails.came_in();
+                self.go_back(&on, Back { machine: on.clone(), session }, fails)
+            },
+            Dropped::GiveUp => {
+                let why = format!(
+                    "{who} dropped its client {TOO_MANY} times, each within {SOON:?} of its \
+                     start, and {session} runs on"
+                );
+                self.end(&why);
+                self.gave_up = Some(why);
+                Ok(())
+            },
+        }
+    }
+
+    /// luneta ends, and the log says `why`.
+    fn end(&mut self, why: &str) {
+        say_ends(why);
+        self.ended = true;
+    }
+
+    /// luneta ends, as `how` says of zellij's client on `on`, with what that
+    /// said as it ended.
+    fn end_with_client(&mut self, how: &str, on: &Machine) {
+        let said = self.client.said(on);
+        self.end(&format!("{how}: {said}"));
+    }
+
+    /// Has a client of `back` take the place of zellij's client, which ended
+    /// on `on`, going where it `fails`: or of this machine's newest session
+    /// where it was of this machine's and is gone, or of another machine's but
+    /// `on`, as `newest_here` says.
+    fn go_back(&mut self, on: &Machine, back: Back, fails: Fails) -> io::Result<()> {
         let Back { machine, session } = back;
         let before = match &machine {
             Machine::Local => match zellij::before(session.as_str()) {
@@ -3011,7 +3110,7 @@ impl App {
             },
             Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
         };
-        self.restart(&machine, Joins::Attach(&session), before, Fails::End, None)
+        self.restart(&machine, Joins::Attach(&session), before, fails, None)
     }
 
     /// Has a client of this machine's newest session that answers take the
@@ -3038,7 +3137,7 @@ impl App {
         let Sought::Found(destination, Refuge { session, before }) =
             starts::away(&self.sidebar, tried, away::QUICK)
         else {
-            self.ended = true;
+            self.end("no machine has a session to go on in");
             return Ok(());
         };
         let (machine, joins) = (Machine::Remote(destination), Joins::Attach(&session));
@@ -3075,10 +3174,13 @@ impl App {
     /// What zellij said as it failed, to be said again once luneta's screen is
     /// gone: the text on its terminal, and how it ended, and where luneta took
     /// it to a session by itself, with none left to go on in, how to start in
-    /// one all the same: a bare luneta would look for the same again. None for
-    /// a zellij that detached or quit, or that ended in a way its terminal
-    /// could not tell.
+    /// one all the same: a bare luneta would look for the same again. Or why
+    /// luneta gave up on the clients zellij drops. None for a zellij that
+    /// detached or quit, or that ended in a way its terminal could not tell.
     fn failure(&self) -> Option<String> {
+        if let Some(why) = &self.gave_up {
+            return Some(format!("luneta: {why}"));
+        }
         let status = self.client.exited.filter(|status| !status.success())?;
         let ended = match self.sidebar.on() {
             Machine::Local => format!("luneta: zellij ended ({status})"),
@@ -3221,13 +3323,33 @@ fn pastes(written: &named::Written, mode: TermMode) -> Vec<Vec<u8>> {
     command.chain(text).map(|paste| keys::paste(&paste, mode)).collect()
 }
 
-/// What a client of zellij's on `on` said as it failed, ending `exited`: the
-/// last line on its screen, as an ssh that reached no machine, or a zellij
-/// that could not attach, or make a session of a name taken, writes it as it
-/// ends. One that ended with zellij's screen up still, which zellij takes
-/// down as it ends, ended under zellij, as an ssh that lost its connection
-/// does: the screen shows what zellij drew, not what went wrong.
-fn failed_saying(hosted: &Hosted, exited: Option<ExitStatus>, on: &Machine) -> String {
+/// Why luneta ends where zellij's client failed with nowhere to go.
+const FAILED: &str = "zellij's client failed";
+
+/// Why luneta ends where zellij's client ended well and its session runs on, as
+/// where it detached.
+const KEPT: &str = "zellij's client ended, and its session runs on";
+
+/// Why luneta ends where zellij's client ended well in no session it knows of.
+const UNSEATED: &str = "zellij's client ended, in no session luneta knows of";
+
+/// `what`, for the notes and the log, led by the machine `on` where that is
+/// another.
+fn of_machine(on: &Machine, what: &str) -> String {
+    match on {
+        Machine::Local => what.to_owned(),
+        Machine::Remote(destination) => format!("{destination}: {what}"),
+    }
+}
+
+/// What a client of zellij's on `on` said as it ended, `exited`: the last line
+/// on its screen, as an ssh that reached no machine, or a zellij that could not
+/// attach, or make a session of a name taken, writes it as it ends, and a
+/// zellij that detached says goodbye. One that ended with zellij's screen up
+/// still, which zellij takes down as it ends, ended under zellij, as an ssh that
+/// lost its connection does: the screen shows what zellij drew, not what went
+/// wrong.
+fn ended_saying(hosted: &Hosted, exited: Option<ExitStatus>, on: &Machine) -> String {
     if hosted.mode().contains(TermMode::ALT_SCREEN) {
         return match (on, exited.and_then(|status| status.code())) {
             (Machine::Remote(_), Some(SSH_FAILED)) => "ssh lost the connection".to_owned(),
