@@ -4745,7 +4745,8 @@ struct CutAt {
     /// Which of them it is on.
     line: usize,
     column: usize,
-    /// What the cut took of the text.
+    /// What the cut took of the text, with no control character, as a row draws
+    /// none: one that shows nowhere is not to hide in a paste.
     took: String,
 }
 
@@ -4757,7 +4758,7 @@ fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> 
         return None;
     }
     let kept = shown.strip_suffix('…')?;
-    let took = text.strip_prefix(kept)?.to_owned();
+    let took = text.strip_prefix(kept)?.chars().filter(|c| !c.is_control()).collect();
     Some(CutAt { line, column: column + cells(kept), took })
 }
 
@@ -9125,6 +9126,20 @@ mod tests {
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
         assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(long));
+    }
+
+    /// What a cut took shows nowhere, so that a control character in it would go
+    /// unseen on the clipboard, as a line break that a paste into a shell runs.
+    /// It comes out as a row would draw it, with none.
+    #[test]
+    fn a_sweep_has_no_control_character_of_what_a_cut_took() {
+        let cwd = "/w/a-directory-too-long-for-the-sidebar\necho hidden\x1b[201~\tend";
+        let mut sidebar = fresh();
+        sidebar.heard(host(vec![session("s", 10, vec![pane(1, 1, cwd, "fish")])], Vec::new()));
+        let area = Rect::new(0, 0, 24, 14);
+        framed(&mut sidebar, area);
+        let whole = "w/a-directory-too-long-for-the-sidebarecho hidden[201~end";
+        assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(whole));
     }
 
     /// A session lifted and held on the last line of the rows scrolls them a

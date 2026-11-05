@@ -345,6 +345,14 @@ enum Where {
     Ask(Ask),
 }
 
+/// Where the last button to go down went down: what a button does after one that
+/// went down elsewhere is none of zellij's, which did not hear it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LastPress {
+    Zellij,
+    Elsewhere,
+}
+
 /// What a button held down holds, wherever the mouse goes, until it is let
 /// go: zellij, the sidebar's edge, its last column, or the press luneta took
 /// for itself, and never two of them.
@@ -633,6 +641,7 @@ struct App {
     /// How wide the sidebar opens.
     width: Width,
     held: Held,
+    last_press: LastPress,
     focus: Focus,
     /// Whether the window luneta's terminal is in has the focus. The sidebar
     /// sees you in a pane only while it does.
@@ -938,6 +947,7 @@ fn run_in(
         areas,
         width,
         held: Held::Nothing,
+        last_press: LastPress::Elsewhere,
         focus: Focus::on(Side::Zellij),
         // Until the terminal says otherwise. One that never tells a program
         // of its window's focus has you in it all along.
@@ -1780,6 +1790,7 @@ impl App {
         // the key of the entry that took its place in turn; and on zellij,
         // where a click closed the box over it, it would click there.
         if down {
+            self.last_press = LastPress::Elsewhere;
             // Any click ends what a sweep left showing, wherever it is.
             self.sidebar.unsweep();
             if self.burst.as_mut().is_some_and(|burst| burst.takes(at, Instant::now())) {
@@ -1888,9 +1899,18 @@ impl App {
         }
         let over_zellij = mouse.column >= zellij.x;
         if self.held == Held::Zellij || (over_zellij && !self.sidebar.pressed()) {
+            // A button zellij did not hear go down is none of its own: it takes
+            // the first drag of one for a press, and would click, focus or
+            // select there. A press the sidebar let go of as the button stays
+            // down, with `Esc`, ends so.
+            let of_a_press = matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
+            if of_a_press && self.last_press != LastPress::Zellij {
+                return;
+            }
             match mouse.kind {
                 MouseEventKind::Down(_) => {
                     self.held = Held::Zellij;
+                    self.last_press = LastPress::Zellij;
                     self.leave();
                 },
                 MouseEventKind::Up(_) => self.held = Held::Nothing,
@@ -2785,9 +2805,12 @@ impl App {
             dictation.unfocused();
         }
         // The pointer has gone elsewhere, as far as luneta knows, and lights
-        // nothing until it moves over luneta again.
+        // nothing until it moves over luneta again. The release of a press on
+        // the sidebar may go there too, and the press would keep every key from
+        // zellij with the pointer still.
         if !focused {
             self.pointer = None;
+            self.sidebar.let_go();
         }
         if self.focus.zellij_told()
             && let Some(bytes) = keys::focus(focused, self.client.hosted.mode())
