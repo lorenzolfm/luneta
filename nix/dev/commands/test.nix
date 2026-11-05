@@ -9,7 +9,7 @@
 {
   name = "test";
   usage = "[args...]";
-  help = "the tests, on nextest; -P quick leaves out those that wait 30s";
+  help = "the tests on nextest, then the doctests; -P quick leaves out those that wait 30s";
   tools =
     buildTools
     ++ testTools
@@ -20,6 +20,10 @@
     ];
   text = ''
     ${compileEnv}
+    case "''${TERM:-dumb}" in
+      dumb) export NEXTEST_SHOW_PROGRESS="''${NEXTEST_SHOW_PROGRESS:-counter}" ;;
+    esac
     cargo nextest run --locked ${testRun} "$@"
+    cargo test --doc --locked ${testRun}
   '';
 }

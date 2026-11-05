@@ -187,6 +187,7 @@
               checkPhaseCargoCommand = ''
                 cargo nextest run --cargo-profile "$CARGO_PROFILE" --profile ci \
                   --test-threads "$NIX_BUILD_CORES" --locked ${testRun}
+                cargoWithProfile test --doc --locked ${testRun}
               '';
 
               # fish's hook, where fish looks for a package's: NixOS and nix-darwin
@@ -288,6 +289,7 @@
             ];
             buildInputs = speechLibs;
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
+            LUNETA_TEST_RUN = testRun;
 
             shellHook = ''
               echo "luneta — rust $(rustc --version | cut -d' ' -f2); run 'dev help' for the command set"

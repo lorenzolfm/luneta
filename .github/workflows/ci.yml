@@ -169,7 +169,11 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CARGO_INCREMENTAL: 0
-        run: nix develop --profile devshell -c cargo nextest run --locked --profile ci -p lunetad -p luneta-protocol
+        run: |
+          nix develop --profile devshell -c sh -ec '
+            cargo nextest run --locked --profile ci $LUNETA_TEST_RUN
+            cargo test --doc --locked $LUNETA_TEST_RUN
+          '
 
       # The daemon with the features its build turns on, which are not the tests':
       # a test build turns on what the dev-dependencies ask of a crate for the daemon
