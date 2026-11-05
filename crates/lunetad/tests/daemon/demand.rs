@@ -79,7 +79,7 @@ fn pid(host: &api::Host) -> u32 {
 }
 
 /// The pid of the daemon that answers in the host's folder, if one does.
-fn answering(host: &Host) -> Option<u32> {
+pub fn answering(host: &Host) -> Option<u32> {
     told(host).map(|info| info.pid)
 }
 
@@ -111,7 +111,7 @@ fn log(host: &Host) -> String {
 }
 
 /// A copy of `luneta` in a folder of its own, where nothing is beside it.
-fn moved() -> tempfile::TempDir {
+pub fn moved() -> tempfile::TempDir {
     let elsewhere = tempfile::tempdir().unwrap();
     install(Path::new(LUNETA), &elsewhere.path().join("luneta"));
     elsewhere

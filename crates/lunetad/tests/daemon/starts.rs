@@ -17,7 +17,8 @@ use rustix::termios::{self, Winsize};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::host::{eventually, start, Host, Running, Vars, LUNETA};
+use crate::demand::{answering, moved, Detached};
+use crate::host::{eventually, script, start, Host, Running, Vars, LUNETA};
 use crate::remote::{hosts, FakeSsh};
 use crate::sessions::listed;
 
@@ -80,7 +81,12 @@ fn directory(name: &str) -> Directory {
 
 /// A luneta of `vars`, started in `dir`, in no ssh session.
 fn luneta(vars: Vars, dir: &Path) -> Command {
-    let mut command = vars.command(LUNETA);
+    luneta_at(LUNETA, vars, dir)
+}
+
+/// `luneta`, by the program at `program`.
+fn luneta_at(program: &str, vars: Vars, dir: &Path) -> Command {
+    let mut command = vars.command(program);
     command.current_dir(dir).env_remove("SSH_CONNECTION").env_remove("SSH_TTY");
     command
 }
@@ -401,6 +407,60 @@ fn a_daemon_that_goes_away_does_not_cut_the_wait_short() {
     assert!(ended.status.success(), "{}", ended.said);
     assert!(took >= HEARING, "it took {took:?}");
     assert_eq!(here.zellij.attached(), ["attach --create project"]);
+}
+
+/// A daemon that goes away after it has answered a while, luneta starts again
+/// in moments, and does not wait the second it gives one that fails as it is
+/// reached.
+#[test]
+fn a_daemon_that_goes_away_is_started_again_in_moments() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.waits_on("silent");
+    hosts(&here, "silent\n");
+    let daemon = start(here.vars()).unwrap();
+    let was = daemon.pid();
+    let dir = directory("project");
+    thread::scope(|scope| {
+        let waiting = scope.spawn(|| on_terminal(luneta(here.vars(), &dir.path)));
+        // Well into the wait, which starts once luneta gave up on its terminal's
+        // answers, about a second in, and with it luneta watches the daemon.
+        thread::sleep(Duration::from_secs(3));
+        let went = Instant::now();
+        drop(daemon);
+        let pid = eventually("a daemon answers again", || {
+            answering(&here).filter(|answers| *answers != was)
+        });
+        let took = went.elapsed();
+        let _daemon = Detached { host: &here, pid };
+        assert!(took < Duration::from_secs(1), "it took {took:?}");
+        let ended = waiting.join().unwrap();
+        assert!(ended.status.success(), "{}", ended.said);
+    });
+}
+
+/// A lunetad that does not start, luneta starts again no more than once a
+/// second, however long it waits: it would otherwise start one each time it
+/// looks.
+#[test]
+fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
+    let here = Host::new();
+    hosts(&here, "silent\n");
+    let elsewhere = moved();
+    let started = elsewhere.path().join("started");
+    let note = format!("echo started >> '{}'\nexit 1\n", started.display());
+    script(&elsewhere.path().join("lunetad"), &note);
+    let program = elsewhere.path().join("luneta").display().to_string();
+
+    let began = Instant::now();
+    let dir = directory("project");
+    let ended = on_terminal(luneta_at(&program, here.vars(), &dir.path));
+    let took = began.elapsed();
+    assert!(ended.status.success(), "{}", ended.said);
+    let starts = fs::read_to_string(&started).unwrap().lines().count();
+    assert!(starts >= 2, "it was started {starts} times in {took:?}");
+    let most = usize::try_from(took.as_secs()).unwrap() + 1;
+    assert!(starts <= most, "it was started {starts} times in {took:?}");
 }
 
 /// The one pane of a session, as zellij lists it, that runs `command`.
