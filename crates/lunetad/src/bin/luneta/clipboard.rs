@@ -139,7 +139,8 @@ fn printed(said: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let digit = |digit: u8| char::from(digit).to_digit(16).and_then(|it| u8::try_from(it).ok());
-    digits.chunks_exact(2).map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?)).collect()
+    let (pairs, _) = digits.as_chunks::<2>();
+    pairs.iter().map(|[high, low]| Some(digit(*high)? << 4 | digit(*low)?)).collect()
 }
 
 #[cfg(test)]

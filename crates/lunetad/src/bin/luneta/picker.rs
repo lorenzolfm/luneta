@@ -566,7 +566,7 @@ impl Refused {
     /// as the search's line says it: of no machine by name where it is the
     /// only one listed, nor as you rename a session of it.
     fn why(self, name: &SessionName, machine: Option<&str>) -> String {
-        let on = machine.map(|machine| format!(" on {machine}")).unwrap_or_default();
+        let on = machine.map_or_default(|machine| format!(" on {machine}"));
         match self {
             Refused::Here => format!("you are in {name}{on}"),
             Refused::Runs => format!("{name} runs{on} already"),
@@ -1939,7 +1939,7 @@ impl Picker {
                 } else {
                     Style::new()
                 };
-                let age = seated.since.map(|since| sidebar::age(since, now)).unwrap_or_default();
+                let age = seated.since.map_or_default(|since| sidebar::age(since, now));
                 let mut right = Vec::new();
                 // The directory goes first, where the row is short of room.
                 if width >= row.name.width() + seated.dir.width() + age.width() + 10 {
@@ -3131,7 +3131,7 @@ mod tests {
         assert_eq!(picker.asks(), vec![delete(SessionName::running("x").unwrap())]);
         assert_eq!(names(&picker), ["+"]);
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
 
         // The row that comes over the rest as the name is let go of takes no
         // row's place: the highlight goes on to the row after all the same.
@@ -3167,13 +3167,13 @@ mod tests {
             ..Listing::default()
         };
         picker.listed(a_ended);
-        assert!(exited_asks(&mut picker).is_empty());
+        assert_eq!(exited_asks(&mut picker), [] as [Ask; 0]);
         let let_go = |picker: &mut Picker, name: &str| {
             let session = SessionName::running(name).unwrap();
             picker.heard(Heard::Deleted { on: Machine::Local, session, deleted: Ok(()) });
             exited_asks(picker)
         };
-        assert!(let_go(&mut picker, "y").is_empty());
+        assert_eq!(let_go(&mut picker, "y"), [] as [Ask; 0]);
         assert_eq!(names(&picker), ["b", "c"]);
         assert_eq!(let_go(&mut picker, "x"), [Ask::Exited { on: Machine::Local, ask: 2 }]);
         picker.heard(Heard::Exited { on: Machine::Local, ask: 2, exited: Ok(vec![ended("a", 5)]) });
@@ -3245,15 +3245,15 @@ mod tests {
         control(&mut picker, 'r');
         typed(&mut picker, "d");
         press(&mut picker, KeyCode::Enter);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         let before_d = vec![ended("x", 100), ended("y", 10)];
         picker.heard(Heard::Exited { on: Machine::Local, ask: 2, exited: Ok(before_d.clone()) });
         press(&mut picker, KeyCode::Enter);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         let since_d = [vec![ended("d", 1)], before_d].concat();
         picker.heard(Heard::Exited { on: Machine::Local, ask: 3, exited: Ok(since_d) });
         press(&mut picker, KeyCode::Enter);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         press(&mut picker, KeyCode::Backspace);
         typed(&mut picker, "a");
         press(&mut picker, KeyCode::Enter);
@@ -3340,7 +3340,7 @@ mod tests {
         picker.asks();
         let due = picker.due().unwrap();
         picker.ticked(due.checked_sub(Duration::from_millis(1)).unwrap());
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         picker.ticked(due);
         let peek = |session, asked| Ask::Peek { on: Machine::Local, session, asked };
         assert_eq!(picker.asks(), vec![peek(listed("c", 30), None)]);
@@ -3412,7 +3412,7 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.asks();
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
     }
 
     /// The session luneta's zellij is on its way to, which zellij has yet to
@@ -3435,7 +3435,7 @@ mod tests {
         control(&mut picker, 'r');
         typed(&mut picker, "notes");
         press(&mut picker, KeyCode::Enter);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         assert!(said(&picker).contains("you are in notes"), "{}", said(&picker));
     }
 
@@ -3639,7 +3639,7 @@ mod tests {
         picker.listed(two_machines());
         assert_eq!(dirs_asks(&mut picker), [Ask::Dirs { on: nixos(), ask: 2 }]);
         picker.listed(two_machines());
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         assert_eq!(list(&picker).0, ["asking zoxide…"]);
         picker.heard(heard_here(Ok(vec![visited("/home/you/notes", "notes")])));
         let older = "nixos: its lunetad, or this one, is older than what luneta asked of it";
@@ -3908,7 +3908,7 @@ mod tests {
             press(picker, KeyCode::Enter);
             picker.asks()
         };
-        assert!(rename(&mut picker, "here").is_empty());
+        assert_eq!(rename(&mut picker, "here"), [] as [Ask; 0]);
         let why = "zellij has yet to say which sessions ended";
         assert!(said(&picker).contains(why), "{}", said(&picker));
         picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(vec![ended("old", 10)]) });
@@ -3959,7 +3959,7 @@ mod tests {
         picker.listed(Listing { remotes: Vec::new(), ..listing() });
         picker.asks();
         press(&mut picker, KeyCode::Enter);
-        assert!(picker.asks().is_empty());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
         let why = "the machine is listed no more";
         assert!(said(&picker).contains(why), "{}", said(&picker));
     }

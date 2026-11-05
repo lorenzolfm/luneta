@@ -362,7 +362,7 @@ fn highlighted(target: &Target) -> String {
         Target::Pane(_, PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
-    let cwd = target.cwd().map(|cwd| format!(", in {cwd}")).unwrap_or_default();
+    let cwd = target.cwd().map_or_default(|cwd| format!(", in {cwd}"));
     let branch = target.branch().map(|branch| format!(", on branch {branch}"));
     let row = format!("{row}{cwd}{}", branch.unwrap_or_default());
     format!(

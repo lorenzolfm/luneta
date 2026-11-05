@@ -176,7 +176,7 @@ fn a_bare_luneta_never_joins_the_session_its_terminal_is_a_pane_of() {
     assert_eq!(output.status.code(), Some(1));
     let refusal = String::from_utf8(output.stderr).unwrap();
     assert!(refusal.starts_with("luneta: this terminal is a pane of \"project\""), "{refusal}");
-    assert!(host.zellij.attached().is_empty());
+    assert_eq!(host.zellij.attached(), [] as [String; 0]);
 
     let _other = runs(&host, "other");
     let mut other = luneta(host.vars(), &dir.path);
@@ -211,7 +211,7 @@ fn a_bare_luneta_never_joins_its_own_session_once_that_is_renamed() {
     let refusal = String::from_utf8(output.stderr).unwrap();
     assert!(refusal.contains("this terminal is a pane of"), "{refusal}");
     assert!(refusal.contains("\"renamed\"") && refusal.contains("\"untold\""), "{refusal}");
-    assert!(host.zellij.attached().is_empty());
+    assert_eq!(host.zellij.attached(), [] as [String; 0]);
 
     let _other = host.serve("other");
     host.zellij.list("other", &pane_running("fish"));
@@ -280,8 +280,8 @@ fn a_bare_luneta_with_no_session_here_joins_another_machine_s() {
     let ended = on_terminal(luneta(here.vars(), &directory("project").path));
     assert!(ended.status.success(), "{}", ended.said);
     assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
-    assert!(ssh.clients("next").is_empty());
-    assert!(here.zellij.attached().is_empty());
+    assert_eq!(ssh.clients("next"), [] as [String; 0]);
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
     assert!(far.host.zellij.attached().is_empty() && next.host.zellij.attached().is_empty());
 }
 
@@ -301,7 +301,7 @@ fn a_bare_luneta_goes_on_to_the_next_machine_where_a_client_fails() {
     assert!(ended.status.success(), "{}", ended.said);
     assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
     assert_eq!(ssh.clients("next"), ["zellij attach 'later'"]);
-    assert!(here.zellij.attached().is_empty());
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
 }
 
 /// Where every machine's client fails, a bare luneta makes nothing, as sessions
@@ -319,7 +319,7 @@ fn a_bare_luneta_says_to_name_a_session_where_every_client_fails() {
     assert!(ended.said.contains("Connection refused"), "{}", ended.said);
     assert!(ended.said.contains("luneta <name>"), "{}", ended.said);
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
-    assert!(here.zellij.attached().is_empty());
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
 }
 
 /// Where a client of another machine's session fails, a bare luneta goes on in
@@ -428,8 +428,8 @@ fn run_through_ssh_a_bare_luneta_passes_over_what_may_hold_it() {
     let ended = on_terminal(held);
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
     assert!(ended.said.contains("each session of far may hold this terminal"), "{}", ended.said);
-    assert!(ssh.clients("far").is_empty());
-    assert!(here.zellij.attached().is_empty());
+    assert_eq!(ssh.clients("far"), [] as [String; 0]);
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
 
     let _free = machine(&ssh, "free", "free", &pane_running("fish"));
     hosts(&here, "far\nfree\n");

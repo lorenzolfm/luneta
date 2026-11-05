@@ -55,12 +55,12 @@ unwrap_used = { level = "warn", priority = 2 }
 panic = { level = "warn", priority = 2 }
 
 # `Pedantic` lints that are too pedantic
-cast-possible-wrap = { level = "allow", priority = 3 }
-cast-precision-loss = { level = "allow", priority = 3 }
+cast_possible_wrap = { level = "allow", priority = 3 }
+cast_precision_loss = { level = "allow", priority = 3 }
 cast_possible_truncation = { level = "allow", priority = 3 }
 cast_sign_loss = { level = "allow", priority = 3 }
 inconsistent_digit_grouping = { level = "allow", priority = 3 }
-missing-errors-doc = { level = "allow", priority = 3 }
+missing_errors_doc = { level = "allow", priority = 3 }
 missing_panics_doc = { level = "allow", priority = 3 }
 result_large_err = { level = "allow", priority = 3 }
 too_many_arguments = {  level = "allow", priority = 3 }
@@ -69,3 +69,6 @@ unreadable_literal = { level = "allow", priority = 3 }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+# A nightly builds luneta, for the newest of what is stable. `#![feature]` would
+# tie the code to one, where without it a stable rust can build it again.
+unstable_features = "deny"

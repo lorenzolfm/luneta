@@ -213,7 +213,7 @@ pub fn make_away(
     session: &str,
     cwd: Option<&str>,
 ) -> (String, Vec<String>) {
-    let cd = cwd.map(|cwd| format!("cd {} && ", quoted(cwd))).unwrap_or_default();
+    let cd = cwd.map_or_default(|cwd| format!("cd {} && ", quoted(cwd)));
     away(destination, format!("{cd}zellij --session {}", quoted(session)))
 }
 

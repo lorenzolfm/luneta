@@ -1859,7 +1859,7 @@ impl Menu {
     /// what luneta waits on for it, after the spinner at `frame`.
     fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
-        let right = self.target.cwd().map(sidebar::short_cwd).unwrap_or_default();
+        let right = self.target.cwd().map_or_default(sidebar::short_cwd);
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { work, step } => {

@@ -72,7 +72,7 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     );
     assert_eq!(said, plan);
     assert!(String::from_utf8_lossy(&asked.stderr).contains("closed nothing"));
-    assert!(host.lists.closed().is_empty());
+    assert_eq!(host.lists.closed(), [] as [String; 0]);
 
     let told = luneta(&host, ("work", 2), &["close", "work:2", "play", "--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
@@ -194,7 +194,7 @@ fn a_close_closes_only_the_plan_it_was_told_yes_to() {
     let _work = UnixListener::bind(&socket).unwrap();
     let (again, _) = planned(&close(&["--yes", &agreed]));
     assert_eq!(again, said);
-    assert!(host.lists.closed().is_empty());
+    assert_eq!(host.lists.closed(), [] as [String; 0]);
 }
 
 /// zellij makes a tab as big as a client of its session, and one with no room
@@ -534,7 +534,7 @@ fn a_pane_that_cannot_turn_into_a_tab_fails_and_says_why() {
     let _work = pane_to_turn(&host);
     let turned = luneta(&host, ("elsewhere", 7), &["turn", "pane", "work:1"]);
     assert!(why(&turned).contains("no client is in work"), "{turned:?}");
-    assert!(host.lists.opened().is_empty());
+    assert_eq!(host.lists.opened(), [] as [String; 0]);
 
     let host = Host::new();
     let _work = UnixListener::bind(host.contract().join("work")).unwrap();
@@ -542,7 +542,7 @@ fn a_pane_that_cannot_turn_into_a_tab_fails_and_says_why() {
     host.lists.clients("work", &[(1, "terminal_2")]);
     let turned = luneta(&host, ("work", 2), &["turn", "pane", "work:1"]);
     assert!(why(&turned).contains("pane 1 is alone in its tab"), "{turned:?}");
-    assert!(host.lists.opened().is_empty());
+    assert_eq!(host.lists.opened(), [] as [String; 0]);
 }
 
 /// `--into` names a tab by a pane of it. A pane of another session is refused
@@ -562,8 +562,8 @@ fn a_tab_turns_into_panes_only_of_another_tab_of_its_session() {
     let turned = luneta(&host, ("work", 1), &beside);
     assert!(why(&turned).contains("in the tab of pane 2 already"), "{turned:?}");
 
-    assert!(host.lists.opened().is_empty());
-    assert!(host.lists.turned().is_empty());
+    assert_eq!(host.lists.opened(), [] as [String; 0]);
+    assert_eq!(host.lists.turned(), [] as [String; 0]);
 }
 
 /// A tab turns into panes with no client in its session too, as the tab they go
@@ -635,7 +635,7 @@ fn what_goes_by_the_session_it_runs_in_refuses_where_none_runs_by_its_name() {
         assert_eq!(asked.status.code(), Some(1), "{args:?}: {why}");
         assert!(why.contains("no session runs by that name now"), "{args:?}: {why}");
     }
-    assert!(host.lists.closed().is_empty());
+    assert_eq!(host.lists.closed(), [] as [String; 0]);
 }
 
 /// The CLI, run with `args` by the agent of luneta's ask box, with `vars`:
@@ -711,8 +711,8 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
         assert_eq!(refused.status.code(), Some(1), "{args:?}: {why}");
         assert!(why.contains("cannot tell which pane the user asked from"), "{args:?}: {why}");
     }
-    assert!(host.lists.went().is_empty());
-    assert!(host.lists.opened().is_empty());
+    assert_eq!(host.lists.went(), [] as [String; 0]);
+    assert_eq!(host.lists.opened(), [] as [String; 0]);
 }
 
 /// Asked from another machine, where luneta's zellij is, the ask box's
@@ -772,8 +772,8 @@ fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
         assert!(why.contains(said), "{why}");
     }
     assert_eq!(host.lists.closed(), closed);
-    assert!(host.lists.went().is_empty());
-    assert!(host.lists.opened().is_empty());
+    assert_eq!(host.lists.went(), [] as [String; 0]);
+    assert_eq!(host.lists.opened(), [] as [String; 0]);
 }
 
 /// The ask box's agent runs what it may without anyone asking you, and a
@@ -893,7 +893,7 @@ fn a_close_in_the_ask_box_takes_a_yes_only_in_the_turn_after_its_plan() {
     let (_, out_of_the_box) = planned(&close(&[], &[]));
     assert_ne!(out_of_the_box, agreed);
     planned(&close(&second, &["--yes", &out_of_the_box]));
-    assert!(host.lists.closed().is_empty());
+    assert_eq!(host.lists.closed(), [] as [String; 0]);
 
     let told = close(&second, &["--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
@@ -963,7 +963,7 @@ fn a_close_leaves_what_holds_its_pane_where_anything_before_it_failed() {
     assert_eq!(told.status.code(), Some(1), "{why}");
     assert!(why.contains("zellij refused to close anything of play"), "{why}");
     assert!(why.contains("did not close pane work:2"), "{why}");
-    assert!(host.lists.closed().is_empty());
+    assert_eq!(host.lists.closed(), [] as [String; 0]);
 }
 
 /// zellij keeps nothing of a session in its first second, and fails to
