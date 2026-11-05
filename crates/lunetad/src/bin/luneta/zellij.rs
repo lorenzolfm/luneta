@@ -452,8 +452,8 @@ pub fn nudge(mode: TermMode) -> Option<&'static [u8]> {
 pub const NUDGED: Duration = Duration::from_millis(30);
 
 /// How long luneta waits for its client to come to a session it sent it to
-/// from another, after zellij took the action, before it takes the client
-/// for one that stayed. It comes within milliseconds.
+/// from another, from zellij's first answer after it took the action, before it
+/// takes the client for one that stayed. It comes within milliseconds.
 const ARRIVAL: Duration = Duration::from_secs(2);
 
 /// How long luneta waits for its client to come to the session it attaches
@@ -1437,8 +1437,8 @@ enum Arrived {
 }
 
 /// Has `list` ask zellij for the clients of the session `look` is of until it
-/// lists one that was not there `before`, for as long as `patience`, or
-/// `untold` while it does not answer, and hands back what it answers then. Of
+/// lists one that was not there `before`, for `patience` from its first answer,
+/// or `untold` while it does not answer, and hands back what it answers then. Of
 /// a session zellij makes, the first it lists is luneta's; of one it did not
 /// list the clients of, any it lists is taken for luneta's coming, though it
 /// may be another's.
@@ -1451,6 +1451,7 @@ fn arriving(
     events: &Sender<Event>,
 ) -> Arrived {
     let started = Instant::now();
+    let mut answered = None;
     loop {
         let was = before.clients();
         let is_new = |client: &Client| was.iter().all(|was| was.id != client.id);
@@ -1461,7 +1462,9 @@ fn arriving(
                 let _ = events.send(Event::Looked(Looked { number, went, clients, before }));
                 return Arrived::Came;
             },
-            Ok(_) if started.elapsed() >= patience => return Arrived::Stayed,
+            Ok(_) if answered.get_or_insert_with(Instant::now).elapsed() >= patience => {
+                return Arrived::Stayed;
+            },
             Err(why) if started.elapsed() >= untold => return Arrived::Untold(why),
             Ok(_) | Err(_) => thread::sleep(ARRIVING),
         }
@@ -1487,16 +1490,27 @@ mod tests {
 
     #[test]
     fn a_list_that_fails_uses_up_no_patience_for_a_client_on_its_way() {
+        const PATIENCE: Duration = Duration::from_millis(100);
         let (events, heard) = mpsc::channel();
-        let mut lists = vec![Ok(vec![on_a_pane(1)]), Err("stuck".to_owned())];
-        let list = || lists.pop().unwrap();
-        let before = Before::Listed(Vec::new());
-        let arrived = arriving(list, &look(), before, Duration::ZERO, AGES, &events);
+        let mut lists = vec![
+            Ok(vec![on_a_pane(1), on_a_pane(2)]),
+            Ok(vec![on_a_pane(1)]),
+            Err("stuck".to_owned()),
+        ];
+        let list = || {
+            let listed = lists.pop().unwrap();
+            if listed.is_err() {
+                thread::sleep(PATIENCE);
+            }
+            listed
+        };
+        let before = Before::Listed(vec![on_a_pane(1)]);
+        let arrived = arriving(list, &look(), before, PATIENCE, AGES, &events);
         assert_eq!(arrived, Arrived::Came);
         let Ok(Event::Looked(looked)) = heard.try_recv() else {
             panic!("zellij's answer was not handed back");
         };
-        assert_eq!((looked.number, looked.clients), (7, vec![on_a_pane(1)]));
+        assert_eq!((looked.number, looked.clients), (7, vec![on_a_pane(1), on_a_pane(2)]));
     }
 
     #[test]
