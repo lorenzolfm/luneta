@@ -57,7 +57,7 @@ jobs:
       # Without it each store would carry every build before it.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -125,7 +125,7 @@ jobs:
       # runner builds the daemon for a system of its own.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -136,11 +136,12 @@ jobs:
       # each run. As in `clippy`, main saves and a PR restores.
       #
       # Its key is what cargo builds the dependencies from: the lockfiles, which
-      # name them, the manifests, which turn on their features, and flake.nix and
-      # rust-toolchain.toml, which name the rust. main saves only on a miss, so a change the key left
-      # out would hit the `target/` from before it and never save another, and
-      # every run after would compile what changed again. A feature of rustix's,
-      # turned on in a manifest, leaves Cargo.lock as it was.
+      # name them, the manifests, which turn on their features, flake.nix and
+      # rust-toolchain.toml, which name the rust, and .cargo/config.toml, which says
+      # how it runs. main saves only on a miss, so a change the key left out would hit
+      # the `target/` from before it and never save another, and every run after would
+      # compile what changed again. A feature of rustix's, turned on in a manifest,
+      # leaves Cargo.lock as it was.
       #
       # A key that misses restores nothing. A PR that changes one of them compiles
       # everything, and so does the run on main that saves its `target/`: had it
@@ -154,7 +155,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             target/
-          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml') }}
+          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml', '.cargo/config.toml') }}
 
       # `--locked`, so that the tests build against what Cargo.lock names, as
       # the derivation does. Not incremental, which is for one tree's edits in a row:
@@ -187,13 +188,13 @@ jobs:
         run: nix develop -c cargo check --locked -p lunetad
 
       # On the Mac, only where the tests' `target/` missed: where the lockfiles, the
-      # manifests, flake.nix or rust-toolchain.toml changed. The check above has
-      # compiled luneta's code on the Mac with the features this build turns on, and
-      # the Linux runners build this derivation from the same source, so what a build
-      # here adds is what is the Mac's own in it: what nixpkgs gives it to build with
-      # on darwin, which only those files change. Built on each run, it compiled
-      # luneta's crates a second time, in release, for nothing the tests and the
-      # check had not said.
+      # manifests, flake.nix, rust-toolchain.toml or .cargo/config.toml changed. The
+      # check above has compiled luneta's code on the Mac with the features this build
+      # turns on, and the Linux runners build this derivation from the same source, so
+      # what a build here adds is what is the Mac's own in it: what nixpkgs gives it to
+      # build with on darwin, which only those files change. Built on each run, it
+      # compiled luneta's crates a second time, in release, for nothing the tests and
+      # the check had not said.
       #
       # A run on main that skips it saves a store without the daemon's
       # dependencies, so the next run to build it builds them too. Most such runs

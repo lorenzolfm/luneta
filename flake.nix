@@ -62,6 +62,7 @@
           # builds and tests again on each commit, whatever it changed. luneta's skill
           # is in it for the ask box, which tells its agent the skill.
           cargoFiles = pkgs.lib.fileset.unions [
+            ./.cargo/config.toml
             ./crates
             ./proto
             ./skills/luneta/SKILL.md
