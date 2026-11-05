@@ -57,7 +57,7 @@ jobs:
       # Without it each store would carry every build before it.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -125,7 +125,7 @@ jobs:
       # runner builds the daemon for a system of its own.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -169,10 +169,14 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CARGO_INCREMENTAL: 0
-        run: nix develop --profile devshell -c cargo test --locked -p lunetad -p luneta-protocol
+        run: |
+          nix develop --profile devshell -c sh -ec '
+            cargo nextest run --locked --profile ci $LUNETA_TEST_RUN
+            cargo test --doc --locked $LUNETA_TEST_RUN
+          '
 
       # The daemon with the features its build turns on, which are not the tests':
-      # `cargo test` turns on what the dev-dependencies ask of a crate for the daemon
+      # a test build turns on what the dev-dependencies ask of a crate for the daemon
       # too, rustix's `pty` among them. What is behind `cfg(target_os = "macos")`
       # compiles on the Mac alone, so a call there that needs such a feature would
       # pass the tests and fail the build below, which the Mac skips where the

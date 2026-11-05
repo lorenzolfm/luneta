@@ -5,12 +5,11 @@
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixListener;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::host::{eventually, Host, Running};
-use crate::starts::{directory, luneta, runs, terminal, Directory};
+use crate::starts::{directory, luneta, runs, spawn_on, terminal, Directory};
 
 /// Cells of the sidebar's title, `─ luneta ─`: its first letter and its last,
 /// further apart than a click's slack.
@@ -75,9 +74,8 @@ impl Window {
                 }
             }
         });
-        let stdio = || Stdio::from(tty.try_clone().unwrap());
         let mut command = luneta(host.vars(), &dir.path);
-        let running = Running::spawn(command.stdin(stdio()).stdout(stdio()).stderr(stdio()));
+        let running = spawn_on(&tty, &mut command);
         drop(tty);
         let mut window =
             Window { typed, said, _luneta: running, _session: session, _directory: dir };

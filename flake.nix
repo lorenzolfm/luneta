@@ -85,6 +85,14 @@
             ];
           };
 
+          testSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              cargoFiles
+              ./.config/nextest.toml
+            ];
+          };
+
           # What luneta's speech model is built with, but for what each system
           # brings: cmake, which builds transcribe.cpp and its ggml, and on Linux
           # ALSA, which the microphone is read through, found with pkg-config.
@@ -125,6 +133,8 @@
             export LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libiconv ]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
           '';
 
+          testRun = "-p lunetad -p luneta-protocol";
+
           # What the daemon's derivations share.
           daemon = {
             pname = "lunetad";
@@ -146,6 +156,7 @@
             # to a machine share one connection with. node runs luneta's extension for
             # pi, as pi would, for the daemon to read what it writes.
             nativeCheckInputs = [
+              pkgs.cargo-nextest
               pkgs.git
               pkgs.nodejs
               pkgs.openssh
@@ -169,11 +180,15 @@
           lunetad = craneLib.buildPackage (
             daemon
             // {
+              src = testSrc;
               cargoArtifacts = daemonDeps;
 
-              # The protocol's crate too: what the daemon reads of git is read there,
-              # and tested there.
-              cargoTestExtraArgs = "-p luneta-protocol";
+              NEXTEST_SHOW_PROGRESS = "counter";
+              checkPhaseCargoCommand = ''
+                cargo nextest run --cargo-profile "$CARGO_PROFILE" --profile ci \
+                  --test-threads "$NIX_BUILD_CORES" --locked ${testRun}
+                cargoWithProfile test --doc --locked ${testRun}
+              '';
 
               # fish's hook, where fish looks for a package's: NixOS and nix-darwin
               # link the folder of every system package into one that fish reads, so
@@ -249,7 +264,9 @@
               toolchain
               buildTools
               clippyRun
+              testRun
               ;
+            testTools = daemon.nativeCheckInputs;
             compileEnv = ''
               export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
               export PKG_CONFIG_PATH="${
@@ -267,10 +284,12 @@
           shell = pkgs.mkShell {
             packages = buildTools ++ [
               dev
+              pkgs.cargo-nextest
               pkgs.nodejs
             ];
             buildInputs = speechLibs;
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
+            LUNETA_TEST_RUN = testRun;
 
             shellHook = ''
               echo "luneta — rust $(rustc --version | cut -d' ' -f2); run 'dev help' for the command set"
