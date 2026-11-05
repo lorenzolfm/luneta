@@ -115,6 +115,7 @@
           ]
           ++ speechBuild
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.coreutils
             pkgs.gnused
             pkgs.stdenv.cc.bintools.bintools
           ];
@@ -237,113 +238,24 @@
           # graph over files for make to walk — cargo does that — so what was left was a
           # task runner, and this one carries its own pinned tools.
           #
-          # The recipes live in this file and nowhere else. A `scripts/dev.sh` on disk is
-          # a second way to run them — one that bypasses the pinned toolchain below and
-          # builds with whatever rustc the caller has — so there is no such file, and
-          # `nix develop` or `nix run .#dev` is the only way in. writeShellApplication
-          # still runs shellcheck over this text at build time.
-          dev = pkgs.writeShellApplication {
-            name = "dev";
-            meta.description = "luneta build recipes on the flake-pinned toolchain";
-            runtimeInputs = buildTools ++ [
-              pkgs.coreutils
-              pkgs.git
-              pkgs.cargo-deny
-            ];
-            text = ''
-              # luneta build recipes, as one command.
-              #
-              # Lives in the devshell and behind `nix run .#dev`, and nowhere else. The rust
-              # toolchain comes from runtimeInputs, so every subcommand builds with the version
-              # this flake pins whether or not the caller entered the shell first; see the
-              # toolchain comment above.
-              #
-              # writeShellApplication supplies the shebang and `set -euo pipefail`, and lints
-              # this text with shellcheck at build time.
-
-              usage() {
-                cat <<'HELP'
-              dev — luneta build recipes (pinned nix tooling)
-
-                dev clippy [args...]       cargo clippy over every target, warnings denied
-                dev clean                  cargo clean
-                dev deny                   check Cargo.lock against RustSec advisories
-                dev skills [dir]           check the menu's skill finder against what claude runs in dir
-              HELP
-              }
-
-              cmd="''${1:-help}"
-              shift || true
-
-              case "$cmd" in
-                help | -h | --help)
-                  usage
-                  exit 0
-                  ;;
-                clippy | clean | deny | skills) ;;
-                *)
-                  # Explicit failure, not a silent fall-through to help: `dev buidl` in a script
-                  # or a CI step must not exit 0.
-                  printf 'dev: unknown command %s\n\n' "$cmd" >&2
-                  usage >&2
-                  exit 2
-                  ;;
-              esac
-
-              # What the speech model's library is built with, as the package's is.
+          # The recipes live in nix/dev/commands, one file for each command, as nix strings.
+          # A `scripts/dev.sh` on disk is a second way to run them — one that bypasses the
+          # pinned toolchain and builds with whatever rustc the caller has — so there is no
+          # such file, and `nix develop` or `nix run .#dev` is the only way in.
+          # writeShellApplication still runs shellcheck over each command at build time.
+          dev = import ./nix/dev {
+            inherit
+              pkgs
+              toolchain
+              buildTools
+              clippyRun
+              ;
+            compileEnv = ''
               export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
               export PKG_CONFIG_PATH="${
                 pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
               }''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
               ${macBuildEnv}
-              if ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-                echo "dev: run this inside the luneta checkout (no git worktree here)" >&2
-                exit 2
-              fi
-              # Where `dev skills` looks when it is given no directory: where you ran it.
-              here="$PWD"
-              cd "$root"
-
-              case "$cmd" in
-                # The lint set lives in Cargo.toml and clippy.toml, so this is only the
-                # invocation: `clippyRun` in flake.nix, which the check CI builds makes too.
-                # `-D warnings`, as every lint in Cargo.toml is set to `warn`, so without it
-                # the command always exits 0 and gates nothing.
-                #
-                # Anything after `dev clippy` goes to cargo, ahead of the `--`, so
-                # `dev clippy --fix --allow-dirty` applies the machine-applicable ones.
-                clippy)
-                  cargo clippy --locked ${clippyRun} "$@" -- -D warnings
-                  ;;
-
-                clean)
-                  cargo clean
-                  ;;
-
-                # What advisories are known of what Cargo.lock locks. Fetched,
-                # and not a flake check: a derivation has no network, so one
-                # would check against the advisories of when the flake built
-                # it, as old as the cache's hit. The new ones are what the
-                # check is for. It reads the lock alone, builds nothing, and
-                # runs wherever `nix run .#dev deny` does, which CI does.
-                #
-                # `deny.toml` says what is checked and which advisories luneta
-                # is not affected by, with why.
-                deny)
-                  cargo deny check advisories
-                  ;;
-
-                # The menu's search finds skills where Claude Code looks for them, which
-                # Claude Code can change in any release. This asks Claude Code itself, by the
-                # `init` a headless start prints on a model that is none, and fails with the
-                # names only one side has. claude comes from the ambient PATH, and not from
-                # the flake: the check is against the claude you run.
-                skills)
-                  dir="$(cd "''${1:-$here}" && pwd -P)"
-                  LUNETA_SKILLS_DIR="$dir" cargo test --locked -p lunetad --lib \
-                    skills::tests::the_finder_finds_what_claude_code_runs -- --ignored --exact
-                  ;;
-              esac
             '';
           };
         in
