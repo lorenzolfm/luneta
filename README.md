@@ -1554,10 +1554,10 @@ nix develop               # or: direnv allow, once
 cargo build -p lunetad    # -> target/debug/luneta, target/debug/lunetad
 ```
 
-The flake pins the rust toolchain, and puts `protoc` on the `PATH` for the
-build scripts that write the protocol out. For what the flake ships — every
-dependency at the revision `Cargo.lock` names, built in a sandbox, no devshell
-and no checkout needed:
+The flake pins the rust toolchain, a nightly by date, and puts `protoc` on the
+`PATH` for the build scripts that write the protocol out. For what the flake
+ships — every dependency at the revision `Cargo.lock` names, built in a sandbox,
+no devshell and no checkout needed:
 
 ```sh
 nix build github:lorenzolfm/luneta   # -> result/bin/luneta, result/bin/lunetad

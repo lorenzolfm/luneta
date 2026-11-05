@@ -466,7 +466,7 @@ pub fn read(
     projects: Option<&Path>,
 ) -> Result<HashMap<SessionId, String>, String> {
     match on {
-        Machine::Local => Ok(projects.map(|projects| reading.ends(projects)).unwrap_or_default()),
+        Machine::Local => Ok(projects.map_or_default(|projects| reading.ends(projects))),
         Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.ends(reading),
     }
 }
@@ -1161,7 +1161,7 @@ Its transcript is unknown: Claude Code names none for it.
             let Told::Read(digest) = told else {
                 panic!("agent {n}: its transcript was not read");
             };
-            let last = digest.steps.last().map(String::as_str).unwrap_or_default();
+            let last = digest.steps.last().map_or_default(String::as_str);
             assert!(last.starts_with(&format!("said: agent {n}, step 63: ")), "{last}");
         }
     }

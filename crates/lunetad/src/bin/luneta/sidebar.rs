@@ -2710,8 +2710,8 @@ impl Sidebar {
             return Vec::new();
         };
         let mut starts: Vec<(usize, &str)> = Vec::new();
-        for at in span.start + 1..span.end {
-            if let Row::Session { session, .. } = &self.rows[at]
+        for (at, row) in self.rows.iter().enumerate().take(span.end).skip(span.start + 1) {
+            if let Row::Session { session, .. } = row
                 && starts.last().map(|(_, name)| *name) != Some(session.name.as_str())
             {
                 starts.push((at, session.name.as_str()));
@@ -4650,7 +4650,7 @@ fn row_lines(
             // Dimmed, with nothing under it: what stopped lunetad reaching
             // it, and since when.
             let (word, since) = away.said();
-            let age = since.map(|since| age(since, now)).unwrap_or_default();
+            let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let said = cut(&format!("{name} · {word}"), width.saturating_sub(5 + reserve + 1));
             let gap = width.saturating_sub(5 + said.width() + age.width() + 1);
@@ -4720,7 +4720,7 @@ fn row_lines(
         Row::Pane { here, unread, marked, icon, label, hits, checkout, bracket, speaks, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
-            let age = since.map(|since| age(since, now)).unwrap_or_default();
+            let age = since.map_or_default(|since| age(since, now));
             let speaker = if *speaks { aloud::MARK.width() + 1 } else { 0 };
             let reserve = speaker + if age.is_empty() { 0 } else { age.width() + 1 };
             // A pane with no mark, of an agent or of a command, is dimmed,
@@ -7382,7 +7382,7 @@ mod tests {
         sidebar.top = 0;
         sidebar.notify("something went wrong".to_owned());
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
-        assert!(number_spot(&drawn, 6).is_empty());
+        assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
         sidebar.notice = None;
 
         // Lifted, by the session's row.

@@ -3112,7 +3112,7 @@ impl App {
                 },
                 Some(Over::Menu) => {
                     let floating = self.sidebar.floating();
-                    floating.map(|menu| menu.draw(buffer, zellij, now)).unwrap_or_default()
+                    floating.map_or_default(|menu| menu.draw(buffer, zellij, now))
                 },
                 None => beside,
             };

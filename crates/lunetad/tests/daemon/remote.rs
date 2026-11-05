@@ -653,7 +653,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.go(go).await.unwrap();
         let went = ["--session work action switch-session play --pane-id terminal_2"];
         assert_eq!(far.zellij.went(), went);
-        assert!(here.zellij.went().is_empty());
+        assert_eq!(here.zellij.went(), [] as [String; 0]);
 
         let work = |on| ListClientsRequest { on, session: "work".to_owned() };
         let listed = daemon.list_clients(work(on("far"))).await.unwrap().into_inner();
@@ -713,7 +713,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
         assert!(idle.message().contains("no client is in idle"), "{idle:?}");
         assert_eq!(far.zellij.opened(), opened);
-        assert!(here.zellij.opened().is_empty());
+        assert_eq!(here.zellij.opened(), [] as [String; 0]);
 
         let skills = dir.path().to_str().unwrap().to_owned();
         let skills = ListSkillsRequest { on: on("far"), dir: skills };
@@ -769,7 +769,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.start(StartRequest { on: on("far"), at, to: named.name, cwd }).await.unwrap();
         let started = format!("--session work action switch-session work-2 --cwd {work}");
         assert_eq!(far.zellij.went().last(), Some(&started));
-        assert!(here.zellij.went().is_empty());
+        assert_eq!(here.zellij.went(), [] as [String; 0]);
 
         // A name is checked there: one a session there runs by is taken, and
         // another is free since the daemon there read the names, by its clock.
@@ -844,7 +844,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(came, Some(done));
         let stacked = "--session turning action stack-panes -- terminal_9 terminal_4";
         assert_eq!(far.zellij.turned(), [stacked]);
-        assert!(here.zellij.turned().is_empty());
+        assert_eq!(here.zellij.turned(), [] as [String; 0]);
         let stand_in = "--session turning action close-pane --pane-id terminal_9";
         assert_eq!(far.zellij.closed()[2], stand_in);
 
@@ -874,7 +874,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert!(stays.message().contains("a session made since"), "{stays:?}");
         daemon.kill(kill(work_started)).await.unwrap();
         assert_eq!(far.zellij.closed()[3..], ["delete-session --force work"]);
-        assert!(here.zellij.closed().is_empty());
+        assert_eq!(here.zellij.closed(), [] as [String; 0]);
 
         // The sessions that ended there are listed there, each by how long
         // before zellij listed it it was made, as zellij there says, and one
@@ -885,7 +885,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let ago = Some(prost_types::Duration { seconds: 3723, nanos: 0 });
         let old = list_exited_response::Exited { name: "old".to_owned(), ago };
         assert_eq!(listed.exited, [old]);
-        assert!(daemon.list_exited(exited(None)).await.unwrap().into_inner().exited.is_empty());
+        let listed = daemon.list_exited(exited(None)).await.unwrap().into_inner();
+        assert_eq!(listed.exited, [] as [list_exited_response::Exited; 0]);
         let kept = daemon.check_name(check(on("far"), "old")).await.unwrap_err();
         assert_eq!(kept.code(), Code::FailedPrecondition, "{kept:?}");
         assert!(kept.message().contains("zellij keeps old, which ended"), "{kept:?}");
@@ -895,7 +896,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.delete_exited(delete("old")).await.unwrap();
         assert_eq!(far.zellij.closed()[4..], ["delete-session old"]);
         let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
-        assert!(listed.exited.is_empty());
+        assert_eq!(listed.exited, [] as [list_exited_response::Exited; 0]);
         invalid(daemon.delete_exited(delete("")).await.unwrap_err());
         // A session there is renamed there, to a name zellij makes a session
         // of on any machine.
@@ -906,7 +907,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.rename_session(rename("rest")).await.unwrap();
         assert_eq!(far.zellij.renamed(), ["--session idle action rename-session rest"]);
         invalid(daemon.rename_session(rename(&"long".repeat(16))).await.unwrap_err());
-        assert!(here.zellij.renamed().is_empty());
+        assert_eq!(here.zellij.renamed(), [] as [String; 0]);
 
         // A transcript there is read there, and one not written yet has no
         // end.
@@ -1453,7 +1454,7 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         assert!(clone.join("issue-7").join(".git").is_file());
         let viewed = "issue view 7 --repo github.com/o/n --json url --jq .url";
         assert_eq!(far.gh.issues(), [viewed]);
-        assert!(here.gh.issues().is_empty());
+        assert_eq!(here.gh.issues(), [] as [String; 0]);
 
         let made = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), Vec::new())).await;
         let Ready { at: At::Clone { cwd, name }, worktree: again, .. } = made.unwrap() else {
@@ -1669,7 +1670,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         assert_eq!(ready, answer);
         assert!(clone.join("md-sync-rework").join(".git").is_file());
         assert_eq!(rev_parse(&clone.join("md-sync-rework"), "HEAD"), tip);
-        assert!(far.gh.issues().is_empty());
+        assert_eq!(far.gh.issues(), [] as [String; 0]);
 
         let mut in_it = panes.clone();
         in_it.push(worked(&worktree));
@@ -1828,7 +1829,7 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
         let notes = vec!["work ran already, and keeps its tabs".to_owned()];
         assert_eq!((kept.terminal, kept.notes), (12, notes));
         assert_eq!(far.zellij.closed(), closed);
-        assert!(here.zellij.closed().is_empty());
+        assert_eq!(here.zellij.closed(), [] as [String; 0]);
         let idle = daemon.open(alone_in("idle", SystemTime::UNIX_EPOCH)).await.unwrap_err();
         assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
         assert!(idle.message().contains("no client is in idle"), "{idle:?}");

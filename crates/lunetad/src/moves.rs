@@ -226,7 +226,7 @@ mod tests {
         let running = running.map(|(name, started)| (name.to_owned(), started)).to_vec();
         assert_eq!(refuges(running.clone(), None), ["b", "a", "c"]);
         assert_eq!(refuges(running, Some("b")), ["a", "c"]);
-        assert!(refuges(Vec::new(), None).is_empty());
+        assert_eq!(refuges(Vec::new(), None), [] as [String; 0]);
     }
 
     /// The refuge is the first session that answers for its clients, tried

@@ -509,7 +509,7 @@ impl Alert {
     /// The notification `due` is, by the end of its agent's transcript,
     /// `end`, where it was read.
     pub fn of(due: &Due, end: Option<&str>) -> Alert {
-        let turn = end.map(Turn::of).unwrap_or_default();
+        let turn = end.map_or_default(Turn::of);
         let tool = turn.tool.as_ref().map(|(name, input)| (name.as_str(), input));
         let (kind, body) = match (&due.want, tool) {
             (Want::Done, _) => {

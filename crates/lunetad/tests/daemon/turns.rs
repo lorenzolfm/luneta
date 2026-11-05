@@ -237,8 +237,8 @@ fn what_stays_opens_no_tab() {
         let host = Host::new();
         host.zellij.list("work", &panes);
         refused(&into_tab(&host, 1).unwrap_err(), why);
-        assert!(host.zellij.opened().is_empty());
-        assert!(host.zellij.turned().is_empty());
+        assert_eq!(host.zellij.opened(), [] as [String; 0]);
+        assert_eq!(host.zellij.turned(), [] as [String; 0]);
     }
 }
 
@@ -252,8 +252,8 @@ fn a_session_no_client_is_in_has_one_come_first() {
 
     assert_eq!(into_tab(&host, 1).unwrap(), Some(TabCame::NoClient(NoClient {})));
 
-    assert!(host.zellij.opened().is_empty());
-    assert!(host.zellij.turned().is_empty());
+    assert_eq!(host.zellij.opened(), [] as [String; 0]);
+    assert_eq!(host.zellij.turned(), [] as [String; 0]);
 }
 
 /// The panes of a tab go one at a time onto a stand-in opened for each in the
@@ -452,8 +452,8 @@ fn a_tab_picked_by_a_terminal_that_closed_since_moves_nothing() {
 
     refused(&into_panes(&host, 1, 3).unwrap_err(), "pane 3, which the tab goes by, is gone");
 
-    assert!(host.zellij.opened().is_empty());
-    assert!(host.zellij.turned().is_empty());
+    assert_eq!(host.zellij.opened(), [] as [String; 0]);
+    assert_eq!(host.zellij.turned(), [] as [String; 0]);
 }
 
 /// zellij numbers panes from 0 for each server, so a session that took the name
@@ -484,8 +484,8 @@ fn a_session_that_took_the_name_since_stays() {
         let unsaid = daemon.turn_into_panes(panes(None)).await.unwrap_err();
         assert_eq!(unsaid.code(), Code::InvalidArgument, "{unsaid:?}");
     });
-    assert!(host.zellij.opened().is_empty());
-    assert!(host.zellij.turned().is_empty());
+    assert_eq!(host.zellij.opened(), [] as [String; 0]);
+    assert_eq!(host.zellij.turned(), [] as [String; 0]);
 }
 
 /// The tabs a tab can turn into are told by a terminal in each and their names,

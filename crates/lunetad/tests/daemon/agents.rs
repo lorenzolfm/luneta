@@ -531,7 +531,7 @@ fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     assert!(about.iter().any(|line| line.ends_with("Permission denied (os error 13)")), "{said:?}");
     let once: HashSet<&&String> = about.iter().collect();
     assert_eq!(once.len(), about.len(), "{said:?}");
-    assert!(host.agents().is_empty());
+    assert_eq!(host.agents(), [] as [Agent; 0]);
 }
 
 /// zellij renames a session by moving its socket to the new name. The daemon

@@ -312,7 +312,7 @@ impl Sessions {
         });
         // Every session that holds a name runs, and holds the one it has now.
         for held in self.held.values() {
-            assert!(!held.is_empty());
+            assert_ne!(held.as_slice(), []);
             for id in held {
                 assert!(self.names.contains_key(id));
             }
