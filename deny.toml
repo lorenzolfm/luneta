@@ -1,0 +1,19 @@
+# What cargo-deny gates on, as `dev deny` runs it and CI does. Only
+# `advisories` is checked: `sources` would refuse the `wt` git pin in
+# crates/lunetad/Cargo.toml, which is deliberate, and `licenses` and `bans`
+# have yet to be triaged.
+
+[advisories]
+# Advisory IDs luneta is not affected by, each with why it is none.
+ignore = [
+  # paste is no longer maintained, which is not a vulnerability: it is a
+  # proc-macro macro, unchanged and correct, that xn-gemm and tokenizers
+  # still build with. No replacement needs to land before a real flaw does.
+  { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained proc-macro, not a vulnerability" },
+  # This flaw is in pulldown-cmark's wikilink parsing, reachable only with
+  # `Options::ENABLE_WIKILINKS` set. luneta has pulldown-cmark through
+  # prost-build's doc generation, which sets no wikilinks and runs at build
+  # time on luneta's own proto comments: the parser never sees input that
+  # the advisory's quadratic path requires.
+  { id = "RUSTSEC-2026-0433", reason = "pulldown-cmark wikilink flaw needs ENABLE_WIKILINKS, set only by prost-build on trusted input at build time" },
+]
