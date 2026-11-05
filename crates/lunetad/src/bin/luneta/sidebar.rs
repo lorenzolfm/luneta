@@ -87,7 +87,7 @@ use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
-use crate::pull::{Found, Kind, Link, Others, Work, Worked};
+use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
@@ -1008,7 +1008,7 @@ pub enum Asked {
     /// Find where a key of the menu numbered `menu`, for `work`, pasted on a
     /// row of `on`, goes among its panes `worked`, or else on the first of
     /// `others` that has what it is of, and have its worktree made there.
-    Pull { menu: u64, on: Machine, work: Work, worked: Vec<Worked>, others: Others },
+    Pull { menu: u64, on: Machine, work: Work, wanted: Wanted, worked: Vec<Worked>, others: Others },
     /// Find the skills that `cwd`, on `on`, can run, for the menu numbered
     /// `menu`.
     Find { menu: u64, on: Machine, cwd: String },
@@ -3104,10 +3104,10 @@ impl Sidebar {
             Wants::Turn { session, pane, turn } => {
                 Asked::Turn { menu: number, on, place: PanePlace { session, pane }, turn }
             },
-            Wants::Pull(work) => match self.worked(&on) {
+            Wants::Pull(work, wanted) => match self.worked(&on) {
                 Ok(worked) => {
                     let others = self.others(&on);
-                    Asked::Pull { menu: number, on, work, worked, others }
+                    Asked::Pull { menu: number, on, work, wanted, worked, others }
                 },
                 Err(why) => self.pulled(number, Err(why)),
             },
@@ -7935,7 +7935,9 @@ mod tests {
             worked(listed("newer", 20), 1, "/w/b", Some(link.clone()), false),
         ];
         let work = Work::Link(link.clone());
-        let pull = Asked::Pull { menu: 1, on: Machine::Local, work, worked, others: Vec::new() };
+        let wanted = Wanted::AsItIs;
+        let on = Machine::Local;
+        let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others: Vec::new() };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
@@ -9543,7 +9545,8 @@ mod tests {
         };
         let others = vec![(Machine::Local, Ok(local)), unreached("me@vps"), unreached("pi")];
         let asked = Work::Link(link.clone());
-        let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, worked, others };
+        let wanted = Wanted::AsItIs;
+        let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
         let worktree = "/w/n/feat".to_owned();
@@ -9579,10 +9582,11 @@ mod tests {
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
         let number = sidebar.menu.as_ref().map_or(0, Menu::number);
         let asked = sidebar.key(&char('r'), moment(160_000));
-        let Asked::Pull { on, others, .. } = asked else {
+        let Asked::Pull { on, wanted, others, .. } = asked else {
             panic!("no job for the key: {asked:?}");
         };
         assert_eq!(on, Machine::Local);
+        assert_eq!(wanted, Wanted::AtHead);
         let works = links::Worked { dir: "/w/b".to_owned(), pull: None, here: false };
         let work = Worked { session: listed("work", 20), pane: 3, works };
         let unreached = |name: &str| Err(format!("lunetad does not reach {name} now"));

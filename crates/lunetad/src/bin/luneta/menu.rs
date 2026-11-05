@@ -54,7 +54,7 @@ use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
-use crate::pull::{At, Found, Kind, Readied, Ready, Work};
+use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
@@ -479,6 +479,13 @@ impl Pull {
             (Pull::Worktree, _) => "worktree",
             (Pull::Agent, Asks::Review) => REVIEW,
             (Pull::Agent, Asks::Tackle) => "tackle",
+        }
+    }
+
+    const fn wanted(self, asks: Asks) -> Wanted {
+        match (self, asks) {
+            (Pull::Agent, Asks::Review) => Wanted::AtHead,
+            (Pull::Worktree, _) | (Pull::Agent, Asks::Tackle) => Wanted::AsItIs,
         }
     }
 
@@ -1197,7 +1204,7 @@ pub enum Wants {
     Turn { session: Listed, pane: u32, turn: Turn },
     /// luneta to find where a key of the menu for the pull request, the issue
     /// or the file goes, and to have its worktree made, for `pulled`.
-    Pull(Work),
+    Pull(Work, Wanted),
     /// luneta to keep what the shell in the pane `pane` of `session` printed
     /// after the line `ended` was typed on, for `printed`.
     Printed { session: Listed, pane: u32, ended: Ended },
@@ -1338,7 +1345,10 @@ impl Wait {
     /// What luneta waits on for `work`.
     fn doing(&self, work: &Work) -> String {
         match self {
-            Wait::Pulling(_) => format!("Making a worktree of {}…", work.tab()),
+            Wait::Pulling(pull) => match pull.wanted(Asks::of(work)) {
+                Wanted::AtHead => format!("Syncing {}…", work.tab()),
+                Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
+            },
             Wait::Opening(_) => format!("Opening {}…", work.tab()),
             Wait::Making(session) => format!("Making session {session}…"),
         }
@@ -1581,9 +1591,10 @@ impl Menu {
                 Did::Closed(Done::Nothing)
             },
             Stage::Pull { work, step: Step::Choosing } => {
-                match Pull::pressed(key, Asks::of(&work)) {
+                let asks = Asks::of(&work);
+                match Pull::pressed(key, asks) {
                     Some(pull) => {
-                        let wants = Wants::Pull(work.clone());
+                        let wants = Wants::Pull(work.clone(), pull.wanted(asks));
                         let step = Step::Waiting(Wait::Pulling(pull));
                         stays(Stage::Pull { work, step }, wants)
                     },
@@ -3351,7 +3362,8 @@ mod tests {
     /// waiting for luneta to find where it goes.
     fn pulling_on(row: Target, key: char) -> Menu {
         let (menu, wants) = stays(Menu::pull(1, row, link()).key(&char(key)));
-        assert_eq!(wants, Wants::Pull(link()));
+        let wanted = if key == 'r' { Wanted::AtHead } else { Wanted::AsItIs };
+        assert_eq!(wants, Wants::Pull(link(), wanted));
         assert!(menu.pulling());
         menu
     }
@@ -3386,8 +3398,11 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
         assert!(!menu.turning());
+        let (syncing, wants) = stays(Menu::pull(1, pane_row(), link()).key(&char('r')));
+        assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
+        assert_eq!(text(&syncing.lines(31, 9, 0).0)[1], " ⠋ Syncing #2736…");
         let (menu, wants) = stays(menu.key(&char('w')));
-        assert_eq!(wants, Wants::Pull(link()));
+        assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             ["─ #2736 ──────── cashubtc/cdk ─", " ⠋ Making a worktree of #2736…", " <ESC> - Close"]
@@ -3461,7 +3476,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Pull(issue));
+        assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
@@ -3503,7 +3518,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Pull(file()));
+        assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
         assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let (worktree, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");

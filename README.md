@@ -698,6 +698,22 @@ whose answer is cut short, so that no other makes a second. With none, it names
 the machines it asked, and why it could not ask any it did not. A paste while
 zellij has the keys stays zellij's.
 
+`r` reviews the pull request as GitHub has it, so a second review after a push
+or a force-push does not read the commits the first one did. Before the agent
+starts, the menu says `⠋ Syncing #123…`, and luneta asks `gh` for the pull
+request's branches and fetches its head and its base from the remote of its
+repository. Only the base's remote-tracking ref moves, no local branch of
+it. A worktree at the head stays as it is. One behind it fast-forwards, if it
+has no uncommitted changes. One the author rewrote moves to the head on the same
+terms, where its tip is what its remote-tracking ref said before the fetch: its
+old commits were only ever the remote's. Uncommitted changes, commits the pull
+request does not have, another branch checked out there or a failed fetch start
+no review, and the note names the worktree and says why. Untracked files do not
+count, as git will not overwrite one, and says so if the head has a file of its
+name. An agent already working there does not stop it: the key is yours to
+press. A machine whose `lunetad` is too old to sync starts no review either. `w`
+goes to a worktree as it is, and never moves it.
+
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named
 `#123`, in the session that works in its repository, found as for a pull

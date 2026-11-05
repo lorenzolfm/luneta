@@ -2161,8 +2161,8 @@ impl App {
                     self.sidebar.close_menu();
                 }
             },
-            Asked::Pull { menu, on, work, worked, others } => {
-                pull::prepare(menu, on, work, worked, others, &self.events);
+            Asked::Pull { menu, on, work, wanted, worked, others } => {
+                pull::prepare(menu, on, work, wanted, worked, others, &self.events);
             },
             Asked::Find { menu, on, cwd } => {
                 skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });

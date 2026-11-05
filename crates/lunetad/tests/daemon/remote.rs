@@ -33,7 +33,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
-use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Work};
+use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
 use lunetad::{Directory, SessionName};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
@@ -1613,6 +1613,205 @@ fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
     });
     let asked = fs::read_to_string(&runs).unwrap();
     assert!(!asked.contains("-oProxyCommand"), "{asked}");
+}
+
+fn git_said(dir: &Path, args: &[&str]) -> String {
+    let mut git = Command::new("git");
+    lunetad::local_git(&mut git);
+    let said = git
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(said.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&said.stderr));
+    String::from_utf8(said.stdout).unwrap().trim().to_owned()
+}
+
+/// A clone wt made, whose origin is spelled as GitHub's, as wt reads it, and
+/// reached through an ssh of its own: `up` is `o/n`, and `fork` is `f/n`. Of
+/// `feat`, the branch of `o/n#7`, it has only `origin/feat`.
+fn clone_with_pull_7(host: &Host, scratch: &Path) -> PathBuf {
+    host.gh.pull(7, "main", "feat");
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(scratch, &up, &clone);
+    pushed(&up, "feat", "first");
+    let bare = clone.join(".bare");
+    git(&bare, &["branch", "-q", "-D", "feat"]);
+    git(&bare, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    git(&bare, &["fetch", "-q", "origin"]);
+    git(&bare, &["remote", "set-url", "origin", "git@github.com:o/n.git"]);
+    let ssh = scratch.join("ssh-to-github");
+    let text = format!(
+        "case \"$*\" in\n    *\"'f/n.git'\"*) exec git upload-pack \"{0}/fork\" ;;\n    *) exec git \
+         upload-pack \"{0}/up\" ;;\nesac\n",
+        scratch.display()
+    );
+    script(&ssh, &text);
+    git(&bare, &["config", "core.sshCommand", &ssh.display().to_string()]);
+    git(&bare, &["config", "ssh.variant", "simple"]);
+    clone
+}
+
+fn pushed(up: &Path, parent: &str, name: &str) -> String {
+    let head = git_said(up, &["commit-tree", "-p", parent, "-m", name, "feat^{tree}"]);
+    git(up, &["update-ref", "refs/heads/feat", &head]);
+    git(up, &["update-ref", "refs/pull/7/head", &head]);
+    head
+}
+
+fn reviewing_pull_7(worked: Vec<links::Worked>) -> Pasted {
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    Pasted::new(Work::Link(link), worked).wanting(Wanted::AtHead)
+}
+
+fn pasted_here(host: &Host, pasted: &Pasted) -> Result<Ready<usize>, Status> {
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut answer = daemon.paste(pasted.asked(None)).await?.into_inner();
+        let ready = answer.message().await?.expect("an answer");
+        Ok(pasted.answered(ready).expect("an answer luneta reads"))
+    })
+}
+
+fn pane_in(dir: &Path) -> links::Worked {
+    links::Worked { dir: dir.display().to_string(), pull: None, here: false }
+}
+
+#[test]
+fn r_brings_the_worktree_wt_found_to_the_pull_request_s_head() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, bare, main) = (scratch.join("up"), clone.join(".bare"), clone.join("main"));
+    let feat = clone.join("feat");
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&main)]);
+    let at_head = |head: &str, how: &str| {
+        let ready = pasted_here(&host, &pasted).unwrap();
+        assert_eq!(ready.at, At::Session(0), "{how}");
+        assert_eq!(ready.worktree, feat.display().to_string(), "{how}");
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head, "{how}");
+    };
+
+    let local_main = git_said(&main, &["rev-parse", "main"]);
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+    at_head(&pushed(&up, "feat", "second"), "known only as last fetched");
+    let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
+    assert_eq!(tracked_main, git_said(&up, &["rev-parse", "main"]));
+    assert_eq!(git_said(&main, &["rev-parse", "main"]), local_main);
+    assert_eq!(host.gh.viewed(), ["pr view 7 --repo github.com/o/n --json baseRefName,headRefName"]);
+
+    at_head(&pushed(&up, "feat", "third"), "a worktree there already");
+    at_head(&pushed(&up, "main", "rewritten"), "rewritten");
+    git(&bare, &["worktree", "remove", "../feat"]);
+    at_head(&pushed(&up, "feat", "fourth"), "a local branch whose worktree went");
+}
+
+#[test]
+fn w_leaves_the_worktree_where_it_is() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let up = scratch.join("up");
+    let feat = clone.join("feat");
+    let _daemon = start(host.vars()).unwrap();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pasted = Pasted::new(Work::Link(link), vec![pane_in(&clone.join("main"))]);
+
+    pasted_here(&host, &pasted).unwrap();
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+    let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+    pushed(&up, "feat", "second");
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), tracked_main);
+    assert_eq!(host.gh.viewed(), [] as [String; 0]);
+}
+
+/// A pane on the branch runs no wt, and syncs all the same. `Code::Aborted` is
+/// what has no other machine make a second worktree.
+#[test]
+fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&far, &scratch);
+    let (up, feat) = (scratch.join("up"), clone.join("feat"));
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    let pasted = reviewing_pull_7(vec![pane]);
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let head = pushed(&up, "feat", "second");
+        let ready = pasted_on(&mut daemon, "far", &pasted).await.unwrap();
+        assert_eq!(ready.at, At::There(0));
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+
+        pushed(&up, "feat", "third");
+        fs::write(feat.join("mine"), "mine").unwrap();
+        git(&feat, &["add", "mine"]);
+        let refused = pasted_on(&mut daemon, "far", &pasted).await.unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        let why = format!("started no review in {}: it has uncommitted changes", feat.display());
+        assert_eq!(refused.message(), why);
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    });
+    assert_eq!(here.gh.viewed(), [] as [String; 0]);
+}
+
+/// wt names the branch `f-main`, as the clone has a `main` of its own.
+#[test]
+fn r_syncs_a_pull_request_from_a_fork_s_main() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, fork, main) = (scratch.join("up"), scratch.join("fork"), clone.join("main"));
+    git(&scratch, &["clone", "-q", "up", "fork"]);
+    let opened = |name: &str, amend: bool| {
+        let amended: &[&str] = if amend { &["--amend"] } else { &[] };
+        git(&fork, &[&["commit", "-q", "--allow-empty", "-m", name], amended].concat());
+        let spec = "+refs/heads/main:refs/pull/7/head";
+        git(&up, &["fetch", "-q", &fork.display().to_string(), spec]);
+        git_said(&fork, &["rev-parse", "main"])
+    };
+    host.gh.pull(7, "main", "main");
+    host.gh.api("f\thttps://github.com/f/n.git\tgit@github.com:f/n.git\tmain\n");
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&main)]);
+    let local_main = git_said(&main, &["rev-parse", "main"]);
+    let worktree = clone.join("f-main");
+
+    let head = opened("from the fork", false);
+    let ready = pasted_here(&host, &pasted).unwrap();
+    assert_eq!(ready.worktree, worktree.display().to_string());
+    assert_eq!(ready.branch.as_deref(), Some("f-main"));
+    assert_eq!(git_said(&worktree, &["rev-parse", "HEAD"]), head);
+
+    let head = opened("rewritten on the fork", true);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&worktree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&worktree, &["rev-parse", "refs/remotes/f/main"]), head);
+    assert_eq!(git_said(&main, &["rev-parse", "main"]), local_main);
 }
 
 /// A machine that made the worktree, and could not then say where the key goes,
